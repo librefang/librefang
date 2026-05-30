@@ -4209,9 +4209,25 @@
     "SidecarChannelConfig": {
       "description": "Configuration for a sidecar channel adapter (external process-based).\n\nSidecar adapters allow external processes written in any language to act as channel adapters. Communication uses newline-delimited JSON over stdin/stdout.\n\nConfigure in config.toml: ```toml [[sidecar_channels]] name = \"my-telegram\" command = \"python3\" args = [\"-m\", \"librefang.sidecar.adapters.telegram\"] env = { TELEGRAM_BOT_TOKEN = \"xxx\" } ```",
       "properties": {
+        "allowed_commands": {
+          "default": [],
+          "description": "Whitelist of built-in command names (without the leading `/`) consulted when `command_policy = \"allowlist\"`. Entries may be written with or without a leading slash.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "args": {
           "default": [],
           "description": "Arguments to pass to the command.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "blocked_commands": {
+          "default": [],
+          "description": "Blacklist of built-in command names (without the leading `/`) consulted when `command_policy = \"blocklist\"`. Entries may be written with or without a leading slash.",
           "items": {
             "type": "string"
           },
@@ -4228,6 +4244,15 @@
         "command": {
           "description": "Command to execute (e.g., \"python3\", \"/usr/local/bin/my-adapter\").",
           "type": "string"
+        },
+        "command_policy": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/SidecarCommandPolicy"
+            }
+          ],
+          "default": "allow",
+          "description": "Built-in slash-command policy for this channel (#5841). Ports the in-process `disable_commands` / `allowed_commands` / `blocked_commands` gating to sidecars. Defaults to `allow` so existing configs keep honouring every command. A rejected command is forwarded to the agent as plain text, never answered with an \"unknown command\" error."
         },
         "default_agent": {
           "default": null,
@@ -4249,6 +4274,13 @@
           "default": 256,
           "description": "Bounded inbound message buffer (also the backpressure point).",
           "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "message_coalesce_window_ms": {
+          "default": 0,
+          "description": "Inbound message-coalescing window in milliseconds (#5841 / #4441). When > 0, messages from the same sender arriving within the window are buffered and dispatched as a single batched context, so a user who forwards several messages in rapid succession produces one agent invocation instead of racing concurrent ones on the same session. Default `0` (disabled).",
+          "format": "uint64",
           "minimum": 0.0,
           "type": "integer"
         },
@@ -4318,6 +4350,39 @@
         "name"
       ],
       "type": "object"
+    },
+    "SidecarCommandPolicy": {
+      "description": "Built-in slash-command policy for a sidecar channel.\n\nPorts the in-process `[channels.<name>.overrides]` command gating (`disable_commands` / `allowed_commands` / `blocked_commands`, #2063) to the sidecar architecture (#5841). A command that the policy rejects is **not** answered with an error — it is forwarded to the agent as plain text, so public-facing bots never reveal the existence of an internal command system to end users.",
+      "oneOf": [
+        {
+          "description": "All built-in slash commands are honoured (current default behaviour — preserves backward compatibility).",
+          "enum": [
+            "allow"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "All built-in slash commands are disabled; any leading-slash text is forwarded to the agent as normal content. Use for public-facing bots where end users must not be able to switch agents or reset sessions.",
+          "enum": [
+            "disable"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Only the commands in `allowed_commands` are honoured; everything else is forwarded as plain text.",
+          "enum": [
+            "allowlist"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Every command except those in `blocked_commands` is honoured; the blocked ones are forwarded as plain text.",
+          "enum": [
+            "blocklist"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "SidecarOverflowPolicy": {
       "description": "Backpressure policy when the bounded inbound message buffer is full.\n\nSelected via [`SidecarChannelConfig::overflow`].",

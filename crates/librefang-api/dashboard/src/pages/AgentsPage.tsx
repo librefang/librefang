@@ -27,6 +27,7 @@ import { useUIStore } from "../lib/store";
 import { toastErr } from "../lib/errors";
 import { filterVisible } from "../lib/hiddenModels";
 import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, Check } from "lucide-react";
+import { buildModelConfigPatch, MODEL_MAX_TOKENS_DEFAULT, MODEL_TEMPERATURE_DEFAULT } from "../lib/agentModelPatch";
 import { truncateId } from "../lib/string";
 import { pickLatestSessionId } from "../lib/sessionSelector";
 import { getStatusVariant } from "../lib/status";
@@ -60,6 +61,7 @@ import {
   useAgentStats,
   useAgentTemplates,
   useAgentTools,
+  useAgentSkills,
   useTools,
 } from "../lib/queries/agents";
 import {
@@ -74,6 +76,7 @@ import {
   useSpawnAgent,
   useSuspendAgent,
   useUpdateAgentTools,
+  useSetAgentSkills,
 } from "../lib/mutations/agents";
 
 /**
@@ -286,8 +289,8 @@ export function AgentsPage() {
     setModelDraft({
       provider: detailAgent?.model?.provider ?? "",
       model: detailAgent?.model?.model ?? "",
-      max_tokens: String(detailAgent?.model?.max_tokens ?? 4096),
-      temperature: String(detailAgent?.model?.temperature ?? 0.7),
+      max_tokens: String(detailAgent?.model?.max_tokens ?? MODEL_MAX_TOKENS_DEFAULT),
+      temperature: String(detailAgent?.model?.temperature ?? MODEL_TEMPERATURE_DEFAULT),
     });
     setEditingModel(true);
   }
@@ -421,27 +424,13 @@ export function AgentsPage() {
 
   function saveModelEdit() {
     if (!detailAgent) return;
-    const current = detailAgent.model;
-    const patch: { max_tokens?: number; model?: string; provider?: string; temperature?: number } = {};
-
-    const trimmedProvider = modelDraft.provider.trim();
-    const trimmedModel = modelDraft.model.trim();
-    const parsedMaxTokens = parseInt(modelDraft.max_tokens, 10);
-    const parsedTemperature = parseFloat(modelDraft.temperature);
-
-    if (!trimmedProvider || !trimmedModel) return;
-    if (isNaN(parsedMaxTokens) || parsedMaxTokens <= 0) return;
-    if (isNaN(parsedTemperature) || parsedTemperature < 0 || parsedTemperature > 2) return;
-
-    const modelChanged = trimmedModel !== current?.model;
-    const providerChanged = trimmedProvider !== current?.provider;
-
-    if (modelChanged || providerChanged) {
-      patch.model = trimmedModel;
-      patch.provider = trimmedProvider;
-    }
-    if (parsedMaxTokens !== current?.max_tokens) patch.max_tokens = parsedMaxTokens;
-    if (parsedTemperature !== current?.temperature) patch.temperature = parsedTemperature;
+    // buildModelConfigPatch validates the draft and includes a field only when
+    // the user changed it from its persisted (nullish-defaulted) value, using
+    // the same 4096 / 0.7 baseline as the modelDirty gate so the two can't drift
+    // (the #5917 follow-up: a provider-only edit must not write back defaults
+    // for max_tokens / temperature the backend had omitted).
+    const { patch } = buildModelConfigPatch(modelDraft, detailAgent.model);
+    if (!patch) return;
 
     if (Object.keys(patch).length === 0) {
       setEditingModel(false);
@@ -503,6 +492,14 @@ export function AgentsPage() {
   const tabAgentToolsQuery = useAgentTools(detailAgent?.id ?? "", {
     enabled: !!detailAgent && agentTab === "tools",
   });
+  // Per-agent skill assignment (#4917) — backs the inline assign/unassign
+  // UI on the Skills tab. Returns { assigned, available, mode, disabled };
+  // gated on the tab being open so we don't fetch the registry pool at
+  // page load.
+  const tabAgentSkillsQuery = useAgentSkills(detailAgent?.id ?? "", {
+    enabled: !!detailAgent && agentTab === "skills",
+  });
+  const setAgentSkillsMutation = useSetAgentSkills();
 
   useEffect(() => {
     if (agentTab !== "tools") {
@@ -702,6 +699,22 @@ export function AgentsPage() {
     [modelsQuery.data?.models, hiddenSet],
   );
 
+  // Single-model providers (e.g. a self-hosted Unsloth Studio endpoint that
+  // serves exactly one model) used to leave the Save button stuck disabled:
+  // switching provider clears modelDraft.model, and with only one option the
+  // user has nothing else to pick to repopulate it, so the !model.trim()
+  // validity gate never released. Auto-select the sole model so changing the
+  // provider (or any other field) is enough to enable Save. See #5917.
+  useEffect(() => {
+    if (!editingModel) return;
+    if (!modelDraft.provider.trim()) return;
+    if (modelsQuery.isLoading || modelDraft.model.trim()) return;
+    if (visibleModels.length === 1) {
+      const only = visibleModels[0].id;
+      setModelDraft(d => (d.model ? d : { ...d, model: only }));
+    }
+  }, [editingModel, modelDraft.provider, modelDraft.model, modelsQuery.isLoading, visibleModels]);
+
   const agents = agentsQuery.data?.agents ?? [];
   const visibleAgents = useMemo(
     () => showHandAgents ? agents : agents.filter(a => !a.is_hand),
@@ -755,15 +768,30 @@ export function AgentsPage() {
   const activeConfigMutation = detailAgent?.is_hand
     ? patchHandAgentRuntimeConfigMutation
     : patchAgentConfigMutation;
+  // Save enables when the draft is both valid AND differs from the persisted
+  // model in any field — Provider, Model, Max tokens, or Temperature. Earlier
+  // this gate checked validity only; combined with the provider-switch model
+  // reset that produced the #5917 symptom where Max-token / Temperature edits
+  // never lit Save. draftMaxTokens / draftTemperature mirror saveModelEdit's
+  // coercion so the dirty comparison matches what would actually be PATCHed.
+  const draftMaxTokens = parseInt(modelDraft.max_tokens, 10);
+  const draftTemperature = parseFloat(modelDraft.temperature);
+  const modelValid =
+    !!modelDraft.provider.trim()
+    && !!modelDraft.model.trim()
+    && !isNaN(draftMaxTokens)
+    && draftMaxTokens > 0
+    && !isNaN(draftTemperature)
+    && draftTemperature >= 0
+    && draftTemperature <= 2;
+  const currentModel = detailAgent?.model;
+  const modelDirty =
+    modelDraft.provider.trim() !== (currentModel?.provider ?? "")
+    || modelDraft.model.trim() !== (currentModel?.model ?? "")
+    || draftMaxTokens !== (currentModel?.max_tokens ?? MODEL_MAX_TOKENS_DEFAULT)
+    || draftTemperature !== (currentModel?.temperature ?? MODEL_TEMPERATURE_DEFAULT);
   const saveModelDisabled =
-    activeConfigMutation.isPending
-    || !modelDraft.provider.trim()
-    || !modelDraft.model.trim()
-    || isNaN(parseInt(modelDraft.max_tokens, 10))
-    || parseInt(modelDraft.max_tokens, 10) <= 0
-    || isNaN(parseFloat(modelDraft.temperature))
-    || parseFloat(modelDraft.temperature) < 0
-    || parseFloat(modelDraft.temperature) > 2;
+    activeConfigMutation.isPending || !modelValid || !modelDirty;
 
   const selectAgent = async (agent: AgentItem) => {
     setAgentTab("conversation");
@@ -1259,29 +1287,98 @@ export function AgentsPage() {
     );
   };
 
-  // ---------- Skills tab — 2-col card grid per design canvas
+  // ---------- Skills tab — inline assign/unassign per agent (#4917)
   const renderSkillsTab = (agent: AgentDetail) => {
+    // Source of truth is GET /api/agents/{id}/skills (tabAgentSkillsQuery),
+    // which returns { assigned, available, mode, disabled }. While it loads
+    // we fall back to the manifest fields echoed on the detail payload so the
+    // header/empty-state don't flash. Skill names are slug-shape ASCII IDs,
+    // so plain codepoint sort is stable across locales (#4940).
     const view = agent as AgentView;
-    // Sort alphabetically (#4940) — the backend returns the manifest's
-    // allowlist order, which is meaningless to humans scanning the tab.
-    // Skill names are slug-shape ASCII IDs, so plain codepoint sort is
-    // stable across locales (localeCompare would flip in tr-TR etc).
-    const skills: string[] = (
-      Array.isArray(view.skills)
-        ? view.skills
-        : Array.isArray(view.capabilities?.skills)
-          ? view.capabilities!.skills!
-          : []
-    )
+    const skillsData = tabAgentSkillsQuery.data;
+    const manifestSkills: string[] = Array.isArray(view.skills)
+      ? view.skills
+      : Array.isArray(view.capabilities?.skills)
+        ? view.capabilities!.skills!
+        : [];
+    const assigned: string[] = (skillsData?.assigned ?? manifestSkills)
       .slice()
       .sort();
-    // skills_mode: 'none' (skills_disabled), 'all' (no allowlist — uses
-    // every skill in the registry, the default), or 'allowlist' (manifest
-    // pinned a list). Each needs a different empty-state copy; the
-    // previous code collapsed them all to "0 installed".
-    const skillsMode = (agent as AgentDetail).skills_mode;
-    const usesAllSkills = skillsMode === "all" && skills.length === 0;
-    const skillsDisabled = skillsMode === "none";
+    const available: string[] = (skillsData?.available ?? []).slice().sort();
+    // skills_mode: 'none' (skills_disabled), 'all' (no allowlist — every
+    // registry skill usable, the default), or 'allowlist' (manifest pins a
+    // set). Prefer the live query's mode; fall back to the detail payload.
+    const skillsMode =
+      skillsData?.mode ?? (agent as AgentDetail).skills_mode;
+    const usesAllSkills = skillsMode === "all";
+    const skillsDisabled =
+      skillsData?.disabled ?? skillsMode === "none";
+    // Available skills not yet on the allowlist — the add pool in allowlist
+    // mode. Built from the registry list minus what's already assigned.
+    const assignedSet = new Set(assigned);
+    const addable = available.filter((s) => !assignedSet.has(s));
+    const mutating = setAgentSkillsMutation.isPending;
+    const skillsLoading =
+      tabAgentSkillsQuery.isLoading && !skillsData;
+
+    // Apply a new allowlist. Empty array clears it back to "all" mode.
+    const applySkills = (next: string[], toast: string) => {
+      if (!agent.id) return;
+      setAgentSkillsMutation.mutate(
+        { agentId: agent.id, skills: next },
+        {
+          onSuccess: async () => {
+            await refreshDetailAgent(agent.id, agent.is_hand);
+            addToast(toast, "success");
+          },
+          onError: (e) => {
+            addToast(
+              toastErr(
+                e,
+                t("agents.detail.skill_update_failed", {
+                  defaultValue: "Failed to update skills",
+                }),
+              ),
+              "error",
+            );
+          },
+        },
+      );
+    };
+    const addSkill = (name: string) =>
+      applySkills(
+        [...assigned, name],
+        t("agents.detail.skill_added", {
+          defaultValue: "Skill assigned",
+        }),
+      );
+    const removeSkill = (name: string) =>
+      applySkills(
+        assigned.filter((s) => s !== name),
+        t("agents.detail.skill_removed", {
+          defaultValue: "Skill removed",
+        }),
+      );
+    // "Customize" from all-mode: seed the allowlist with every available
+    // skill so the operator gets a concrete list to prune (an empty PUT
+    // would just stay in all-mode). Done with the assign mutation so the
+    // skill-registry validation runs server-side.
+    const customizeFromAll = () =>
+      applySkills(
+        available,
+        t("agents.detail.skill_customized", {
+          defaultValue: "Switched to a per-agent allowlist",
+        }),
+      );
+    // "Reset to all": clear the allowlist (empty PUT → all-mode).
+    const resetToAll = () =>
+      applySkills(
+        [],
+        t("agents.detail.skill_reset_all", {
+          defaultValue: "Reset to all available skills",
+        }),
+      );
+
     const autoEvolve = agent.auto_evolve !== false;
     const handleToggleAutoEvolve = () => {
       if (!agent.id) return;
@@ -1307,7 +1404,7 @@ export function AgentsPage() {
             {" · "}
             {usesAllSkills
               ? t("agents.detail.skills_all", { defaultValue: "all" })
-              : skills.length}
+              : assigned.length}
           </div>
           <Button
             variant="ghost"
@@ -1345,7 +1442,12 @@ export function AgentsPage() {
           </button>
         </div>
 
-        {skillsDisabled ? (
+        {skillsLoading ? (
+          <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-center gap-2 text-[12px] text-text-dim">
+            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            {t("agents.detail.skills_loading", { defaultValue: "Loading skills…" })}
+          </div>
+        ) : skillsDisabled ? (
           <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-start gap-3">
             <X className="w-4 h-4 text-text-dim shrink-0 mt-0.5" />
             <div className="min-w-0 flex-1">
@@ -1360,36 +1462,103 @@ export function AgentsPage() {
             </div>
           </div>
         ) : usesAllSkills ? (
-          <div
-            onClick={() => navigate({ to: "/skills" })}
-            className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-start gap-3 cursor-pointer hover:border-brand/40 transition-colors"
-          >
-            <Sparkles className="w-4 h-4 text-brand/80 shrink-0 mt-0.5" />
-            <div className="min-w-0 flex-1">
-              <div className="font-mono text-[12.5px] font-medium text-text-main">
-                {t("agents.detail.skills_all_title", { defaultValue: "Using all available skills" })}
+          <div className="flex flex-col gap-2.5">
+            <div className="rounded-md border border-border-subtle bg-main/40 p-3 flex items-start justify-between gap-3">
+              <div className="flex items-start gap-3 min-w-0">
+                <Sparkles className="w-4 h-4 text-brand/80 shrink-0 mt-0.5" />
+                <div className="min-w-0 flex-1">
+                  <div className="font-mono text-[12.5px] font-medium text-text-main">
+                    {t("agents.detail.skills_all_title", { defaultValue: "Using all available skills" })}
+                  </div>
+                  <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5">
+                    {t("agents.detail.skills_all_desc", {
+                      defaultValue: "manifest doesn't pin an allowlist — every skill in the registry is available",
+                    })}
+                  </div>
+                </div>
               </div>
-              <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5">
-                {t("agents.detail.skills_all_desc", {
-                  defaultValue: "manifest doesn't pin an allowlist — every skill in the registry is available",
-                })}
-              </div>
+              {available.length > 0 && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={customizeFromAll}
+                  disabled={mutating}
+                  data-testid="skills-customize-btn"
+                >
+                  {t("agents.detail.skills_customize", { defaultValue: "Customize" })}
+                </Button>
+              )}
             </div>
-          </div>
-        ) : skills.length === 0 ? (
-          <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
-            {t("agents.detail.no_skills", { defaultValue: "No skills installed for this agent." })}
+            {available.length > 0 && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5" data-testid="skills-available-grid">
+                {available.map((s) => (
+                  <AgentSkillItem
+                    key={s}
+                    name={s}
+                    description={skillDescriptionByName.get(s)}
+                  />
+                ))}
+              </div>
+            )}
           </div>
         ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-            {skills.map((s) => (
-              <AgentSkillItem
-                key={s}
-                name={s}
-                description={skillDescriptionByName.get(s)}
-                onClick={() => navigate({ to: "/skills" })}
-              />
-            ))}
+          <div className="flex flex-col gap-3">
+            <div className="flex flex-col gap-1.5">
+              <div className="flex items-center justify-between">
+                <div className="text-[10px] uppercase font-semibold tracking-[0.08em] text-text-dim/80">
+                  {t("agents.detail.skills_assigned", { defaultValue: "Assigned" })}
+                </div>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={resetToAll}
+                  disabled={mutating}
+                  data-testid="skills-reset-all-btn"
+                >
+                  {t("agents.detail.skills_reset_all", { defaultValue: "Reset to all" })}
+                </Button>
+              </div>
+              {assigned.length === 0 ? (
+                <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
+                  {t("agents.detail.no_skills_assigned", {
+                    defaultValue: "No skills assigned — add from the list below, or reset to all.",
+                  })}
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5" data-testid="skills-assigned-grid">
+                  {assigned.map((s) => (
+                    <AgentSkillItem
+                      key={s}
+                      name={s}
+                      description={skillDescriptionByName.get(s)}
+                      action="remove"
+                      onRemove={() => removeSkill(s)}
+                      busy={mutating}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {addable.length > 0 && (
+              <div className="flex flex-col gap-1.5">
+                <div className="text-[10px] uppercase font-semibold tracking-[0.08em] text-text-dim/80">
+                  {t("agents.detail.skills_available", { defaultValue: "Available" })}
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5" data-testid="skills-addable-grid">
+                  {addable.map((s) => (
+                    <AgentSkillItem
+                      key={s}
+                      name={s}
+                      description={skillDescriptionByName.get(s)}
+                      action="add"
+                      onClick={() => addSkill(s)}
+                      busy={mutating}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>
