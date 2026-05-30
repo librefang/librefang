@@ -32,6 +32,10 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
             axum::routing::post(evolve_write_file).delete(evolve_remove_file),
         )
         .route("/skills/{name}/file", axum::routing::get(get_supporting_file))
+        .route(
+            "/skills/{name}/propose",
+            axum::routing::post(propose_skill_to_registry),
+        )
         // Skill workshop (#3328) — passive after-turn capture review.
         .route(
             "/skills/pending",
@@ -5079,6 +5083,106 @@ pub async fn get_skill_detail(
     )
 }
 
+/// Resolve a GitHub token for registry operations: prefer the process
+/// env (`GITHUB_TOKEN`, set by the dashboard GitHub OAuth flow and by
+/// operators), then fall back to the vault. Returns `None` when neither
+/// holds a non-empty token.
+fn resolve_github_token(state: &Arc<AppState>) -> Option<String> {
+    if let Ok(tok) = std::env::var("GITHUB_TOKEN") {
+        if !tok.trim().is_empty() {
+            return Some(tok);
+        }
+    }
+    state
+        .kernel
+        .vault_get("GITHUB_TOKEN")
+        .filter(|t| !t.trim().is_empty())
+}
+
+/// POST /api/skills/{name}/propose — open a PR contributing this skill
+/// to the configured public skill registry.
+///
+/// Forks the registry repo under the authenticated GitHub user, pushes
+/// the skill files to a fresh branch, and opens a pull request with an
+/// auto-generated description (metadata + evolution changelog). Requires
+/// a `GITHUB_TOKEN` (env or vault).
+#[utoipa::path(
+    post,
+    path = "/api/skills/{name}/propose",
+    tag = "skills",
+    params(("name" = String, Path, description = "Skill name")),
+    responses(
+        (status = 200, description = "PR opened against the registry", body = crate::types::JsonObject),
+        (status = 400, description = "Invalid request"),
+        (status = 401, description = "No GitHub token configured"),
+        (status = 404, description = "Skill not found"),
+        (status = 502, description = "GitHub request failed")
+    )
+)]
+pub async fn propose_skill_to_registry(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let skill = match clone_installed_skill(&state, &name) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+
+    let Some(token) = resolve_github_token(&state) else {
+        return ApiErrorResponse::unauthorized(
+            "No GitHub token configured. Connect GitHub in Settings or set GITHUB_TOKEN.",
+        )
+        .into_json_tuple();
+    };
+
+    let registry_repo = state
+        .kernel
+        .config_snapshot()
+        .skills
+        .registry_repo
+        .clone()
+        .filter(|r| !r.trim().is_empty())
+        .unwrap_or_else(|| librefang_skills::registry_pr::DEFAULT_REGISTRY_REPO.to_string());
+
+    let evolution = librefang_skills::evolution::get_evolution_info(&skill);
+
+    let result = librefang_skills::registry_pr::propose_skill_to_registry(
+        librefang_skills::registry_pr::ProposeRequest {
+            skill: &skill,
+            evolution: &evolution,
+            registry_repo: &registry_repo,
+            token: &token,
+        },
+    )
+    .await;
+
+    match result {
+        Ok(pr) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "pr_url": pr.pr_url,
+                "repo": pr.repo,
+                "branch": pr.branch,
+            })),
+        ),
+        Err(librefang_skills::SkillError::SecurityBlocked(msg)) => {
+            ApiErrorResponse::unauthorized(msg).into_json_tuple()
+        }
+        Err(librefang_skills::SkillError::InvalidManifest(msg)) => {
+            ApiErrorResponse::bad_request(msg).into_json_tuple()
+        }
+        Err(librefang_skills::SkillError::NotFound(msg)) => {
+            ApiErrorResponse::not_found(msg).into_json_tuple()
+        }
+        // Network / GitHub failures surface as 502 Bad Gateway — the
+        // request was well-formed but the upstream dependency failed.
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
 // ── Skill evolution handlers ───────────────────────────────────────────
 //
 // Each handler looks the skill up by name, clones the InstalledSkill
@@ -6609,6 +6713,56 @@ mod tests {
         assert!(
             !path.exists(),
             "secrets.env must not be created on validation error"
+        );
+    }
+
+    /// Regression for #5857: on Windows the dashboard "save provider key"
+    /// action failed with `unsafe path 'C:\Users\root\.librefang\secrets.env'`.
+    /// `validate_static_file_path` (the gate on every secrets.env / config.toml
+    /// write) used to reject `Component::Prefix(_)` alongside `ParentDir`, and a
+    /// Windows absolute path always carries a drive-letter prefix — so every
+    /// legitimate, server-constructed `home_dir().join("secrets.env")` tripped
+    /// the check. PR #1770 narrowed the rejection to `ParentDir` only; this
+    /// asserts the drive-letter prefix is accepted so the rejection cannot be
+    /// re-added without failing the Windows CI shard.
+    #[cfg(windows)]
+    #[test]
+    fn validate_static_file_path_accepts_windows_drive_prefix() {
+        let path = std::path::Path::new(r"C:\Users\root\.librefang\secrets.env");
+        // Sanity: the host parser really does emit a drive-letter prefix here,
+        // otherwise the assertion below would pass vacuously.
+        assert!(
+            path.components()
+                .any(|c| matches!(c, std::path::Component::Prefix(_))),
+            "test precondition: Windows path must carry a Component::Prefix",
+        );
+        assert!(
+            validate_static_file_path(path, "secrets.env").is_ok(),
+            "a server-constructed Windows absolute secrets.env path must validate; \
+             rejecting Component::Prefix re-introduces #5857",
+        );
+    }
+
+    /// Platform-independent companion to the #5857 guard above. The Windows
+    /// `Prefix` component is unreachable on a Unix test host, but the contract —
+    /// "reject `..`, accept everything else for the fixed filename" — is the
+    /// same on every platform and must hold for the boot-time path shape the
+    /// daemon actually constructs (`home_dir().join("secrets.env")`).
+    #[test]
+    fn validate_static_file_path_rejects_parent_dir_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let good = tmp.path().join("secrets.env");
+        assert!(
+            validate_static_file_path(&good, "secrets.env").is_ok(),
+            "an absolute, traversal-free secrets.env path must validate",
+        );
+
+        let traversal = tmp.path().join("..").join("secrets.env");
+        let err = validate_static_file_path(&traversal, "secrets.env")
+            .expect_err("a `..` component must be rejected");
+        assert!(
+            err.contains("unsafe path"),
+            "rejection message should flag the unsafe path, got: {err}",
         );
     }
 }

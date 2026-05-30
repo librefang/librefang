@@ -28,6 +28,7 @@ import {
   useEvolveDeleteSkill,
   useEvolveWriteFile,
   useEvolveRemoveFile,
+  useProposeSkillToRegistry,
 } from "../lib/mutations/skills";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -1084,6 +1085,7 @@ function SkillDetailModal({
   const updateSkillMutation = useEvolveUpdateSkill();
   const patchSkillMutation = useEvolvePatchSkill();
   const writeFileMutation = useEvolveWriteFile();
+  const proposeMutation = useProposeSkillToRegistry();
 
   const [pane, setPane] = useState<EvolvePane>("none");
   const [viewingFile, setViewingFile] = useState<string | null>(null);
@@ -1183,6 +1185,46 @@ function SkillDetailModal({
     });
   };
 
+  const handlePropose = () => {
+    if (!skillName) return;
+    setConfirmAction({
+      title: t("skills.propose_registry", { defaultValue: "Propose to Registry" }),
+      message: t("skills.propose_registry_confirm", {
+        defaultValue: `Open a pull request contributing ${skillName} to the public skill registry?`,
+        name: skillName,
+      }),
+      onConfirm: () => {
+        const name = skillName;
+        setConfirmAction(null);
+        (async () => {
+          setBusy(true);
+          try {
+            const result = await proposeMutation.mutateAsync({ name });
+            addToast(
+              t("skills.propose_registry_opened", {
+                defaultValue: `Pull request opened: ${result.pr_url}`,
+                pr_url: result.pr_url,
+              }),
+              "success",
+            );
+            window.open(result.pr_url, "_blank", "noopener,noreferrer");
+          } catch (e: unknown) {
+            addToast(
+              e instanceof Error
+                ? e.message
+                : t("skills.propose_registry_failed", {
+                    defaultValue: "Failed to propose skill to registry",
+                  }),
+              "error",
+            );
+          } finally {
+            setBusy(false);
+          }
+        })();
+      },
+    });
+  };
+
   return (
     <DrawerPanel
       isOpen={isOpen}
@@ -1259,7 +1301,21 @@ function SkillDetailModal({
             <Button
               variant="ghost"
               size="sm"
-              className="text-error hover:text-error ml-auto"
+              className="ml-auto"
+              onClick={handlePropose}
+              leftIcon={<GitBranch className="w-3.5 h-3.5" />}
+              disabled={busy}
+              title={t("skills.propose_registry_hint", {
+                defaultValue:
+                  "Open a PR contributing this skill to the public registry (requires GitHub token)",
+              })}
+            >
+              {t("skills.propose_registry", { defaultValue: "Propose to Registry" })}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-error hover:text-error"
               onClick={handleDelete}
               leftIcon={<Trash2 className="w-3.5 h-3.5" />}
               disabled={busy}

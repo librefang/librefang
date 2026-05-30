@@ -652,8 +652,15 @@ async fn read_artifact_nonexistent_returns_error() {
     let fake = "sha256:".to_string() + &"b".repeat(64);
     let input = serde_json::json!({ "handle": fake });
     let result = tool_read_artifact(&input, dir.path()).await;
-    assert!(result.is_err());
-    assert!(result.unwrap_err().contains("not found"));
+    // A well-formed but nonexistent handle: the lookup failure inside
+    // `artifact_store::read` is lifted verbatim onto the `Upstream` variant,
+    // carrying the original "artifact not found: …" message.
+    match result {
+        Err(crate::tool_runner::error::ToolError::Upstream { message, .. }) => {
+            assert!(message.contains("not found"), "got: {message}");
+        }
+        other => panic!("expected ToolError::Upstream, got: {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -661,8 +668,12 @@ async fn read_artifact_missing_handle_returns_error() {
     let dir = tempfile::TempDir::new().unwrap();
     let input = serde_json::json!({});
     let result = tool_read_artifact(&input, dir.path()).await;
-    assert!(result.is_err());
-    assert!(result.unwrap_err().contains("handle"));
+    assert!(matches!(
+        result,
+        Err(crate::tool_runner::error::ToolError::MissingParameter(
+            "handle"
+        ))
+    ));
 }
 
 #[tokio::test]

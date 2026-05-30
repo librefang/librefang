@@ -493,3 +493,67 @@ async fn skills_uninstall_unknown_returns_4xx() {
         "expected 4xx for unknown skill, got {status}: {body:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// POST /api/skills/{name}/propose
+// ---------------------------------------------------------------------------
+
+/// Proposing a skill that does not exist resolves the skill before any
+/// token / network concern, so it must 404 regardless of GitHub
+/// credentials. This is the network-free contract we can assert
+/// deterministically in CI (the fork/PR happy path needs a live GitHub
+/// token and is covered by the human Live-Integration checklist).
+#[tokio::test(flavor = "multi_thread")]
+async fn skills_propose_unknown_returns_404() {
+    let h = boot().await;
+    let (status, body) = json_request(&h, Method::POST, "/api/skills/ghost/propose", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
+    assert!(
+        body["error"]
+            .as_str()
+            .or_else(|| body["error"]["message"].as_str())
+            .unwrap_or("")
+            .to_lowercase()
+            .contains("not found"),
+        "error must mention 'not found': {body:?}"
+    );
+}
+
+/// When the skill exists but no GitHub token is configured (env or
+/// vault), proposing returns 401 — the dashboard surfaces this as a
+/// "connect GitHub" affordance. Guarded so it only runs when the test
+/// process genuinely has no `GITHUB_TOKEN`, since env state is shared
+/// across parallel test binaries and mutating it would be racy
+/// (CLAUDE.md env-var flakiness note).
+#[tokio::test(flavor = "multi_thread")]
+async fn skills_propose_without_token_returns_401() {
+    if std::env::var("GITHUB_TOKEN")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+    {
+        // A token is present in this environment — the 401 branch is
+        // unreachable. Skip rather than mutate shared env.
+        return;
+    }
+    let h = boot().await;
+    install_skill(h.home(), "proposable-skill", &["data"]);
+    h._state.kernel.reload_skills();
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/skills/proposable-skill/propose",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body:?}");
+    assert!(
+        body["error"]
+            .as_str()
+            .or_else(|| body["error"]["message"].as_str())
+            .unwrap_or("")
+            .to_lowercase()
+            .contains("github"),
+        "401 error should mention GitHub token: {body:?}"
+    );
+}
