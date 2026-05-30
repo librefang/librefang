@@ -970,7 +970,6 @@ fn apply_seccomp_allowlist(_allow_network: bool) -> bool {
         // it slipped past the locked-down round-trip test.
         libc::SYS_setpgid,
         libc::SYS_getpgid,
-        libc::SYS_getpgrp,
         libc::SYS_getsid,
         libc::SYS_setsid,
         // I/O multiplexing — universal variants
@@ -1049,6 +1048,10 @@ fn apply_seccomp_allowlist(_allow_network: bool) -> bool {
         libc::SYS_epoll_wait,
         libc::SYS_eventfd,
         libc::SYS_getdents,
+        // getpgrp is x86_64-only (aarch64 has no such syscall — glibc routes it
+        // through getpgid(0) there). dash reads the process group under job
+        // control when spawning external commands.
+        libc::SYS_getpgrp,
         libc::SYS_mkdir,
         libc::SYS_rmdir,
         libc::SYS_unlink,
