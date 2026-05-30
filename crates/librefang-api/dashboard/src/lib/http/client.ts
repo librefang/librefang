@@ -303,6 +303,7 @@ export {
   evolveDeleteSkill,
   evolveWriteFile,
   evolveRemoveFile,
+  proposeSkillToRegistry,
   installSkill,
   uninstallSkill,
   // skill workshop pending review (#3328)
@@ -368,6 +369,7 @@ export type {
   HandSessionMessage,
   HandSettingsResponse,
   HandStatsResponse,
+  ProposeSkillResult,
   McpAuthStartResponse,
   McpAuthStatusResponse,
   MemoryItem,

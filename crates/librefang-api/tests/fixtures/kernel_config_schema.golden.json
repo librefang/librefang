@@ -4388,6 +4388,14 @@
           "default": true,
           "description": "Whether user-installed skills from the skills directory are loaded. Default: true.",
           "type": "boolean"
+        },
+        "registry_repo": {
+          "default": null,
+          "description": "Upstream skill-registry repository, in GitHub `owner/name` form, targeted by the \"Propose to Registry\" action (`POST /api/skills/{name}/propose`). When unset the API falls back to the built-in default (`librefang/librefang-registry`). The proposal flow forks this repo under the authenticated GitHub user, pushes the evolved skill files to a branch, and opens a pull request back upstream.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "type": "object"
@@ -6806,7 +6814,8 @@
         ],
         "env_passthrough_per_skill": {},
         "extra_dirs": [],
-        "load_user": true
+        "load_user": true,
+        "registry_repo": null
       },
       "description": "Skills configuration (bundled + user-installed skills)."
     },

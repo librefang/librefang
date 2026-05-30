@@ -1569,6 +1569,15 @@ pub struct SkillsConfig {
     /// Example: `{ "gog" = ["GOG_KEYRING_PASSWORD"] }`.
     #[serde(default)]
     pub env_passthrough_per_skill: std::collections::HashMap<String, Vec<String>>,
+    /// Upstream skill-registry repository, in GitHub `owner/name` form,
+    /// targeted by the "Propose to Registry" action
+    /// (`POST /api/skills/{name}/propose`). When unset the API falls back
+    /// to the built-in default (`librefang/librefang-registry`). The
+    /// proposal flow forks this repo under the authenticated GitHub user,
+    /// pushes the evolved skill files to a branch, and opens a pull
+    /// request back upstream.
+    #[serde(default)]
+    pub registry_repo: Option<String>,
 }
 
 /// Operator-side gate over skill `env_passthrough` requests.
@@ -1639,6 +1648,7 @@ impl Default for SkillsConfig {
             disabled: Vec::new(),
             env_passthrough_denied_patterns: default_env_passthrough_denied_patterns(),
             env_passthrough_per_skill: std::collections::HashMap::new(),
+            registry_repo: None,
         }
     }
 }

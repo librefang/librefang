@@ -4717,6 +4717,7 @@ name = "librefang-skills"
 version = "2026.5.30-beta.15"
 dependencies = [
  "aho-corasick",
+ "base64 0.22.1",
  "chrono",
  "fs2",
  "hex",

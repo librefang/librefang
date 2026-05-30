@@ -1925,6 +1925,25 @@ export async function evolveRemoveFile(name: string, path: string): Promise<Evol
   return del<EvolutionResult>(`/api/skills/${encodeURIComponent(name)}/evolve/file?path=${encodeURIComponent(path)}`);
 }
 
+/** Result of proposing an evolved skill to the public registry as a PR. */
+export interface ProposeSkillResult {
+  /** HTML URL of the opened pull request. */
+  pr_url: string;
+  /** Upstream registry repo the PR targets (`owner/name`). */
+  repo: string;
+  /** Head branch created on the fork. */
+  branch: string;
+}
+
+/**
+ * Open a PR contributing this skill to the configured registry repo.
+ * Requires a GitHub token (env or vault) on the daemon side; a 401 is
+ * returned when none is configured.
+ */
+export async function proposeSkillToRegistry(name: string): Promise<ProposeSkillResult> {
+  return post<ProposeSkillResult>(`/api/skills/${encodeURIComponent(name)}/propose`, {});
+}
+
 export interface SupportingFileContents {
   name: string;
   path: string;
