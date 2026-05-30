@@ -6611,6 +6611,56 @@ mod tests {
             "secrets.env must not be created on validation error"
         );
     }
+
+    /// Regression for #5857: on Windows the dashboard "save provider key"
+    /// action failed with `unsafe path 'C:\Users\root\.librefang\secrets.env'`.
+    /// `validate_static_file_path` (the gate on every secrets.env / config.toml
+    /// write) used to reject `Component::Prefix(_)` alongside `ParentDir`, and a
+    /// Windows absolute path always carries a drive-letter prefix — so every
+    /// legitimate, server-constructed `home_dir().join("secrets.env")` tripped
+    /// the check. PR #1770 narrowed the rejection to `ParentDir` only; this
+    /// asserts the drive-letter prefix is accepted so the rejection cannot be
+    /// re-added without failing the Windows CI shard.
+    #[cfg(windows)]
+    #[test]
+    fn validate_static_file_path_accepts_windows_drive_prefix() {
+        let path = std::path::Path::new(r"C:\Users\root\.librefang\secrets.env");
+        // Sanity: the host parser really does emit a drive-letter prefix here,
+        // otherwise the assertion below would pass vacuously.
+        assert!(
+            path.components()
+                .any(|c| matches!(c, std::path::Component::Prefix(_))),
+            "test precondition: Windows path must carry a Component::Prefix",
+        );
+        assert!(
+            validate_static_file_path(path, "secrets.env").is_ok(),
+            "a server-constructed Windows absolute secrets.env path must validate; \
+             rejecting Component::Prefix re-introduces #5857",
+        );
+    }
+
+    /// Platform-independent companion to the #5857 guard above. The Windows
+    /// `Prefix` component is unreachable on a Unix test host, but the contract —
+    /// "reject `..`, accept everything else for the fixed filename" — is the
+    /// same on every platform and must hold for the boot-time path shape the
+    /// daemon actually constructs (`home_dir().join("secrets.env")`).
+    #[test]
+    fn validate_static_file_path_rejects_parent_dir_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let good = tmp.path().join("secrets.env");
+        assert!(
+            validate_static_file_path(&good, "secrets.env").is_ok(),
+            "an absolute, traversal-free secrets.env path must validate",
+        );
+
+        let traversal = tmp.path().join("..").join("secrets.env");
+        let err = validate_static_file_path(&traversal, "secrets.env")
+            .expect_err("a `..` component must be rejected");
+        assert!(
+            err.contains("unsafe path"),
+            "rejection message should flag the unsafe path, got: {err}",
+        );
+    }
 }
 
 #[cfg(test)]
