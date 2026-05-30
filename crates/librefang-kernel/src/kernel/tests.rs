@@ -5963,9 +5963,49 @@ fn mcp_disabled_false_preserves_mcp_tools() {
 // opted into any MCP server saw the union of all servers' tools, attempted to
 // call them, and the streaming loop exited after 3 consecutive tool failures.
 
-/// Register one tool each for two distinct global MCP servers, then assert the
-/// per-allowlist MCP tool set an agent with `mcp_servers = allowlist` resolves.
-fn mcp_tool_names_for_allowlist(test_name: &str, allowlist: Vec<String>) -> Vec<String> {
+/// Register a server name into the kernel's `effective_mcp_servers` snapshot
+/// so `resolve_mcp_server_from_known` can map a namespaced tool name back to
+/// its real owning server — the exact path `available_tools` and
+/// `render_mcp_summary` both take. Mirrors `seed_mcp_server` in
+/// `crates/librefang-api/tests/system_tools_sessions_test.rs`.
+fn register_mcp_server(kernel: &LibreFangKernel, server_name: &str) {
+    let entry = librefang_types::config::McpServerConfigEntry {
+        name: server_name.to_string(),
+        template_id: None,
+        transport: None,
+        timeout_secs: 30,
+        env: Vec::new(),
+        headers: Vec::new(),
+        oauth: None,
+        taint_scanning: true,
+        taint_policy: None,
+    };
+    kernel
+        .mcp
+        .effective_mcp_servers
+        .write()
+        .expect("effective_mcp_servers write lock not poisoned")
+        .push(entry);
+}
+
+/// Boot a kernel that has `servers` connected (registered in
+/// `effective_mcp_servers`) and `tools` in the global MCP tool map, spawn an
+/// agent with `mcp_servers = allowlist`, and return the agent's resolved MCP
+/// tool names.
+///
+/// Registering the servers — not just pushing tools — is load-bearing: the
+/// named-allowlist filter resolves each tool to its *real* owning server via
+/// `effective_mcp_servers`, then compares that server name to the allowlist by
+/// exact equality. An earlier revision resolved tools against the allowlist
+/// directly, which prefix-matched `mcp_server_x_*` under a `["server"]`
+/// allowlist; seeding the real servers here is what lets the test exercise the
+/// correct, summary-consistent algorithm.
+fn mcp_tool_names_for_servers(
+    test_name: &str,
+    servers: &[&str],
+    tools: &[&str],
+    allowlist: Vec<String>,
+) -> Vec<String> {
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().join(test_name);
     std::fs::create_dir_all(home.join("data")).unwrap();
@@ -5987,18 +6027,18 @@ fn mcp_tool_names_for_allowlist(test_name: &str, allowlist: Vec<String>) -> Vec<
     };
     let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
 
+    for server in servers {
+        register_mcp_server(&kernel, server);
+    }
     {
-        let mut tools = kernel.tools_ref().lock().unwrap();
-        tools.push(librefang_types::tool::ToolDefinition {
-            name: "mcp_server_x_do_thing".to_string(),
-            description: String::new(),
-            input_schema: serde_json::json!({}),
-        });
-        tools.push(librefang_types::tool::ToolDefinition {
-            name: "mcp_server_y_other_thing".to_string(),
-            description: String::new(),
-            input_schema: serde_json::json!({}),
-        });
+        let mut tool_guard = kernel.tools_ref().lock().unwrap();
+        for tool in tools {
+            tool_guard.push(librefang_types::tool::ToolDefinition {
+                name: (*tool).to_string(),
+                description: String::new(),
+                input_schema: serde_json::json!({}),
+            });
+        }
     }
     kernel
         .mcp
@@ -6013,6 +6053,17 @@ fn mcp_tool_names_for_allowlist(test_name: &str, allowlist: Vec<String>) -> Vec<
         .collect();
     kernel.shutdown();
     names
+}
+
+/// Register one tool each for two distinct global MCP servers, then assert the
+/// per-allowlist MCP tool set an agent with `mcp_servers = allowlist` resolves.
+fn mcp_tool_names_for_allowlist(test_name: &str, allowlist: Vec<String>) -> Vec<String> {
+    mcp_tool_names_for_servers(
+        test_name,
+        &["server_x", "server_y"],
+        &["mcp_server_x_do_thing", "mcp_server_y_other_thing"],
+        allowlist,
+    )
 }
 
 #[test]
@@ -6055,6 +6106,29 @@ fn explicit_mcp_servers_allowlist_filters_to_named_servers() {
         names,
         vec!["mcp_server_x_do_thing".to_string()],
         "mcp_servers = [\"server_x\"] must expose only server_x tools; got: {names:?}"
+    );
+}
+
+#[test]
+fn named_allowlist_does_not_leak_prefix_overlapping_server() {
+    // Prefix-collision regression: server `server` and server `server_x` share
+    // the `mcp_server_` namespace prefix. An agent allowlisting only `server`
+    // must NOT see `server_x`'s tools. Resolving each tool against the agent's
+    // allowlist directly (rather than the connected-server set) would make
+    // `mcp_server_x_bar` prefix-match `mcp_server_` and leak — a narrower
+    // recurrence of the #5855 cross-agent leak. `explicit_*` above uses
+    // server_x/server_y, whose prefixes do not overlap, so it cannot catch this.
+    let names = mcp_tool_names_for_servers(
+        "librefang-mcp-prefix-overlap-5855",
+        &["server", "server_x"],
+        &["mcp_server_foo", "mcp_server_x_bar"],
+        vec!["server".to_string()],
+    );
+    assert_eq!(
+        names,
+        vec!["mcp_server_foo".to_string()],
+        "mcp_servers = [\"server\"] must expose only server's tools, never the \
+         prefix-overlapping server_x; got: {names:?}"
     );
 }
 
