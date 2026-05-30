@@ -1282,9 +1282,31 @@ fn overrides_from_sidecar_config(
         SidecarCommandPolicy::Allow => {}
         SidecarCommandPolicy::Disable => ov.disable_commands = true,
         SidecarCommandPolicy::Allowlist => {
-            ov.allowed_commands = config.allowed_commands.clone();
+            // Fail closed: `allowlist` is an explicit default-deny intent. An
+            // empty list means "honour no commands", so it must deny all, not
+            // fall through to the allow-everything path `is_command_allowed`
+            // takes when `allowed_commands` is empty. Map empty-allowlist onto
+            // `disable_commands` (the highest-precedence deny) instead.
+            if config.allowed_commands.is_empty() {
+                warn!(
+                    channel = %config.name,
+                    "command_policy = \"allowlist\" with an empty allowed_commands list — denying all commands (fail-closed)"
+                );
+                ov.disable_commands = true;
+            } else {
+                ov.allowed_commands = config.allowed_commands.clone();
+            }
         }
         SidecarCommandPolicy::Blocklist => {
+            // An empty blocklist legitimately means "allow all, block nothing"
+            // — intuitive and harmless — but it usually signals a forgotten
+            // list, so surface it rather than silently allowing everything.
+            if config.blocked_commands.is_empty() {
+                warn!(
+                    channel = %config.name,
+                    "command_policy = \"blocklist\" with an empty blocked_commands list — all commands remain allowed"
+                );
+            }
             ov.blocked_commands = config.blocked_commands.clone();
         }
     }
@@ -2847,6 +2869,26 @@ mod tests {
         let ov = super::overrides_from_sidecar_config(&c).expect("override built");
         assert!(!ov.disable_commands);
         assert_eq!(ov.allowed_commands, vec!["start", "/help"]);
+        assert!(ov.blocked_commands.is_empty());
+    }
+
+    #[test]
+    fn overrides_allowlist_empty_fails_closed_5841() {
+        // Regression (#5931): `allowlist` with an empty / omitted list is an
+        // explicit default-deny intent and must deny ALL commands, not fall
+        // through to the allow-everything path. It maps to `disable_commands`,
+        // the highest-precedence deny `is_command_allowed` honours.
+        let c = cfg_json(serde_json::json!({
+            "name": "public-bot",
+            "command": "python3",
+            "command_policy": "allowlist",
+        }));
+        let ov = super::overrides_from_sidecar_config(&c).expect("override built");
+        assert!(
+            ov.disable_commands,
+            "empty allowlist must fail closed (deny all)"
+        );
+        assert!(ov.allowed_commands.is_empty());
         assert!(ov.blocked_commands.is_empty());
     }
 
