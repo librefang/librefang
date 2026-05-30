@@ -227,8 +227,10 @@ COPY --from=builder /usr/local/go /usr/local/go
 ENV PATH="/usr/local/go/bin:${PATH}"
 
 # ── TinyGo (copy from builder) ────────────────────────────────────────────────
-COPY --from=builder /usr/lib/tinygo /usr/lib/tinygo
-RUN ln -sf /usr/lib/tinygo/bin/tinygo /usr/local/bin/tinygo
+# The tinygo .deb installs to /usr/local/lib/tinygo (deb default), NOT /usr/lib/tinygo.
+# Builds since PR #56 have failed here because the COPY pointed at the wrong path.
+COPY --from=builder /usr/local/lib/tinygo /usr/local/lib/tinygo
+RUN ln -sf /usr/local/lib/tinygo/bin/tinygo /usr/local/bin/tinygo
 
 # ── WASI-SDK (copy from builder) ──────────────────────────────────────────────
 COPY --from=builder /opt/wasi-sdk /opt/wasi-sdk
