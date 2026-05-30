@@ -972,6 +972,15 @@ fn apply_seccomp_allowlist(_allow_network: bool) -> bool {
         libc::SYS_execveat,
         libc::SYS_wait4,
         libc::SYS_waitid,
+        // Job control: /bin/sh (dash) puts a spawned external command in its
+        // own process group via setpgid when a hook shells out (e.g. `sleep`).
+        // A hook that only uses shell builtins never trips this, which is why
+        // it slipped past the locked-down round-trip test.
+        libc::SYS_setpgid,
+        libc::SYS_getpgid,
+        libc::SYS_getpgrp,
+        libc::SYS_getsid,
+        libc::SYS_setsid,
         // I/O multiplexing — universal variants
         libc::SYS_pselect6,
         libc::SYS_ppoll,
