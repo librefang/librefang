@@ -89,4 +89,36 @@ describe("buildModelConfigPatch", () => {
 
     expect(patch).toEqual({ provider: "anthropic", model: "claude-sonnet" });
   });
+
+  // temperature === 0 is the `??` vs `||` tripwire: with `|| MODEL_TEMPERATURE_DEFAULT`
+  // a persisted/explicit 0 collapses to 0.7 and these two assertions go red.
+  it("keeps an unchanged persisted temperature of 0 out of the patch", () => {
+    const persisted = { provider: "anthropic", model: "claude-sonnet", max_tokens: 4096, temperature: 0 };
+    const draft = seededDraft({ provider: "anthropic", model: "claude-sonnet", temperature: "0" });
+
+    const { patch } = buildModelConfigPatch(draft, persisted);
+
+    expect(patch).toEqual({});
+    expect(patch).not.toHaveProperty("temperature");
+  });
+
+  it("sends temperature: 0 when the user lowers an omitted (default 0.7) temperature to an explicit 0", () => {
+    // Backend omitted temperature, so the baseline is the default 0.7; "0" is a real change.
+    const persisted = { provider: "anthropic", model: "claude-sonnet" };
+    const draft = seededDraft({ provider: "anthropic", model: "claude-sonnet", temperature: "0" });
+
+    const { patch } = buildModelConfigPatch(draft, persisted);
+
+    expect(patch).toEqual({ temperature: 0 });
+  });
+
+  it("does not flag max_tokens as changed when the persisted value equals the default 4096", () => {
+    const persisted = { provider: "anthropic", model: "claude-sonnet", max_tokens: 4096, temperature: 0.7 };
+    const draft = seededDraft({ provider: "anthropic", model: "claude-sonnet" });
+
+    const { patch } = buildModelConfigPatch(draft, persisted);
+
+    expect(patch).toEqual({});
+    expect(patch).not.toHaveProperty("max_tokens");
+  });
 });
