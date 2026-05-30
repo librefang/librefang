@@ -5,6 +5,101 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.5.30] - 2026-05-30
+
+_68 PRs from 5 contributors since v2026.5.28-beta.14._
+
+### Added
+
+- Add source attribution to GET /api/tools response (#5679) (@DaBlitzStein)
+- Tools tab in agent detail with grouped view (closes #5677) (#5680) (@DaBlitzStein)
+- Expose auto_evolve toggle in Skills tab (#5741) (@DaBlitzStein)
+- Kanban task board page (#5745) (#5805) (@houko)
+- Support custom-URL self-hosted STT/TTS providers (fixes #5740) (#5814) (@houko)
+- Rust Telegram sidecar adapter (parity with Python) (#5831) (@houko)
+- Just dev --docker + TELEGRAM_LOG tracing (#5833) (@houko)
+- Run WASM skill runtime via the runtime WasmSandbox (#5835) (@houko)
+- Autonomous long-horizon goal runner (#5840) (@houko)
+- Out-of-process `engine = "sidecar"` (#5849) (@houko)
+- Scan tool-result content for indirect prompt injection (#5859) (@houko)
+
+### Fixed
+
+- Strip ANTHROPIC_API_KEY when OAuth credentials present (#5292) (@f-liva)
+- Reconcile cascade-leak THEMATIC_HEADERS with post-#5053 prompt builder (#5351) (@f-liva)
+- Tool_runner sandbox — RAII cleanup, TOCTOU removed, container_id redacted (#5757) (@leszek3737)
+- Tool_runner workflow — artifact type check, deterministic sort, recursion limit (#5758) (@leszek3737)
+- Tool_runner schedule — AM/PM parsing, minute precision, owner verification, cron validation (#5759) (@leszek3737)
+- Tool_runner system — URL const, client reuse, error diagnostics (#5760) (@leszek3737)
+- Tool_runner media — size limits, async fs, UUID filenames, ffmpeg deadlock, extension allowlist (#5761) (@leszek3737)
+- Tool_runner web_legacy — SSRF protection, streaming body limit, unified UA, status check (#5764) (@leszek3737)
+- Tool_runner canvas — XSS escape, whitelist parser, data: URI block, size limit (#5766) (@leszek3737)
+- Tool_runner memory — truncation, pagination, key validation (#5770) (@leszek3737)
+- Tool_runner agent — taint all inputs, narrow capabilities, deny None, network strict (#5775) (@leszek3737)
+- Tool_runner process — output cap, strict caller_id, arg logging, serde_json (#5778) (@leszek3737)
+- Tool_runner fs — backslash rejection, canonicalize, TOCTOU fix, read limit, dir pagination, atomic write (#5783) (@leszek3737)
+- Route auto_evolve creates through skill_workshop pending queue (#5800) (@DaBlitzStein)
+- Reset taint editor state when server prop changes (#5803) (@houko)
+- Use catalog api_key_env for custom provider key resolution (#5807) (@houko)
+- Regenerate stale openapi schema baseline to repair main red (#5834) (@houko)
+- Make DAG-path step timeout error actionable (#5836) (@houko)
+- Finish Option::zip migration in kernel tests (clippy 1.96.0) (#5837) (@houko)
+- Keep custom providers across restarts, tolerate unknown tier (#5838) (@houko)
+- Audit sweep — 5 CRITICAL + 7 HIGH (split-brain, RBAC, decay, dedup, prompt budget, async consolidate) (#5839) (@houko)
+- Apply search filter to FangHub skills grid (#5843) (@DaBlitzStein)
+- Use Option::zip for hand timestamp pairing (clippy) (#5845) (@houko)
+- Close goal-run self-cleanup race + termination test coverage (follow-up #5840) (#5848) (@houko)
+- MEDIUM follow-ups — counter map sweep, hot-reload on PATCH, multi-keyword search, configurable UPDATE thresholds (#5850) (@houko)
+- Make extra_params / extra_body BTreeMap for deterministic wire-body key order (#5860) (@houko)
+- Close trusted_senders all-or-nothing approval bypass for high-risk tools (#5861) (@houko)
+- Make subprocess plugin sandbox secure-by-default (#2) (#5862) (@houko)
+- Scrub internal errors from 5xx responses to prevent detail leakage (#5863) (@houko)
+- Validate hand id as a safe path component to block traversal (#5865) (@houko)
+- Apply config hot-reload for read-live fields, not only hot actions (#5867) (@houko)
+- Reserve the global USD budget on the streaming dispatch path (#5869) (@houko)
+- Bound consolidation candidate load with a per-agent LIMIT (#5871) (@houko)
+- Stop logging API key, account cache tokens, keep stream tool ids (#5875) (@houko)
+- Cover all per-agent override keys with a drift-guarded detector (#6) (#5876) (@houko)
+- Guard agent_msg_locks GC with Arc::strong_count (symmetry with session_msg_locks) (#5877) (@houko)
+- Account prompt-cache tokens in usage normalization (#5879) (@houko)
+- Handle no-arg tool calls and UTF-8-safe thinking summary (#5882) (@houko)
+- Route attachment download through the redirect-revalidating client (#5884) (@houko)
+- Pin every redirect hop in web_fetch to close DNS-rebinding window (#5886) (@houko)
+- Clean up per-flow OAuth vault entries on all callback exits (#5895) (@houko)
+- Scan prompt context for injection at the load/reload boundary (#5897) (@houko)
+- Retry transport-layer errors and make retry count configurable (#10) (#5898) (@houko)
+- Detect re-entrant keyed agent_send to prevent session-lock deadlock (#5900) (@houko)
+- Delimit all fields in the Merkle entry hash to close ambiguity (#5903) (@houko)
+- Enforce RBAC on session auth path; offload workflow template write (#5906) (@houko)
+- Low-severity correctness — workshop cap race, token saturating, ephemeral comment (#5910) (@houko)
+- Keep anthropic stream block alignment; report effective claude_code timeout (#5913) (@houko)
+- Gate media link URLs through safeUrl; share urlTransform with streaming view (#5916) (@houko)
+- Allowlist glibc-startup syscalls for exec'd plugin binaries (fixes native_runtime_timeout CI failure) (#5920) (@houko)
+
+### Changed
+
+- Unify the three sidecar bridges onto a shared transport crate (#5852) (@houko)
+
+### Performance
+
+- Offload blocking filesystem/zip IO off the tokio runtime (#5892) (@houko)
+
+<details>
+<summary>Documentation, maintenance, and other internal changes</summary>
+
+### Documentation
+
+- Fix three agent-facing architecture drift points (#5901) (@houko)
+
+### Maintenance
+
+- Bump the docs-minor-patch group in /docs with 2 updates (#5847) (@app/dependabot)
+- Cargo fmt recently-merged code (repair main Quality fmt) (#5853) (@houko)
+- Fix Windows-only red in shell capability test (path-not-found wording) (#5854) (@houko)
+- Raise Test / Windows shard timeout 45 → 60 min to match macOS (#5856) (@houko)
+
+</details>
+
 ## [2026.5.28] - 2026-05-28
 
 _46 PRs from 5 contributors since v2026.5.25-beta.13._
@@ -516,6 +611,8 @@ _308 PRs from 7 contributors since v2026.5.17-beta.12._
 - **memory: audit-sweep on the proactive-memory subsystem — 5 CRITICAL + 7 HIGH findings (#5839)** — closes a split-brain in `list()` / `get()` (now read from the semantic store directly; the best-effort KV `memory:*` mirror is deleted entirely so future divergence is structurally impossible); drops the silent raw-transcript fallback in `ProactiveMemory::add` when extraction yields no structured signal; honors per-row `metadata["confidence"]` on insert (the LLM extractor prompt now requests it explicitly, so `extraction_threshold` is finally live); reworks decay as `rate / boost` (cap MAX_BOOST=4) so popular memories decay slower but strictly monotonically (the previous formula clamped the post-boost product back to 1.0, freezing every `access_count >= 2` memory at confidence 1.0 forever); stamps `deleted_at` on every `forget*` path so the retention sweep can finally hard-delete user-/API-initiated soft-deletes (previously only TTL decay stamped it, so manual deletes leaked their embedding BLOB forever); gates 12 memory write endpoints (`POST /api/memory`, `PUT /api/memory/items/{id}`, `DELETE`, bulk-delete, reset, clear-level, consolidate, cleanup, export, import, decay, relations) through the namespace guard with proper `AuthDenied → 403` plumbing. Also tightens `duplicate_threshold` default 0.5 → 0.85 (mem0's near-duplicate cut-off) and the `decide_action` UPDATE thresholds 0.5/0.6 → 0.7/0.8 so a topically-related but semantically-different memory no longer silently UPDATEs over an existing row; bounds `format_context` at the new configurable `ProactiveMemoryConfig::format_context_max_chars` (default 8000 chars / ~2000 tokens) with a "[+N omitted]" footer; detaches the every-10-calls auto-consolidate to `tokio::spawn` (inside a `tracing::Instrument` span tagged `task = "auto_consolidate"`) so the agent's hot path no longer waits on an O(n²) merge plus SQLite tx; threads the new `duplicate_threshold` into the periodic `ConsolidationEngine` via a new `set_duplicate_threshold` setter on `MemorySubstrate`, wired from both kernel boot and the `UpdateProactiveMemory` hot-reload op so the global sweep and the per-agent on-demand consolidate agree; tightens LLM-extraction validation (4-char minimum content, allowlist-fuzzy-matched category with case + plural tolerance, MAX_MEMORIES_PER_EXTRACTION = 20 cap). Drive-by: collapsed a clippy::manual_option_zip in `kernel/background_lifecycle.rs:88` (failed workspace clippy gate). **Operator-facing behaviour changes worth noting on upgrade:** (1) Audit-log shape: requests authenticated by the root `api_key` now carry a synthetic Owner-equivalent `AuthenticatedApiUser{name: "root", user_id: ROOT_API_KEY_USER_ID}` instead of the previous "trusted but anonymous" `None`, so every audit row written through `record_with_context(..., api_user.user_id, ...)` (`budget.rs`, `audit.rs`, memory-route denials, etc.) stamps a `user_id` for root-key callers where it previously stamped null. Queries grouped by `user_id` will see a new "root" bucket appear after upgrade. The synthetic id is a constant UUID (`00000000-0000-0000-0000-72006f0074a0`) outside the `LIBREFANG_USER_NAMESPACE` v5 hash space, so a real `[users] name = "root"` entry in `config.toml` cannot collide with it. (2) `POST /api/memory` with content the extractor cannot parse no longer creates a row — pre-fix it silently captured the whole concatenated message transcript as a session memory with no category, which was the dominant source of `category=null` rows on the dashboard. Operators that legitimately need raw-content capture should use `ProactiveMemoryStore::add_with_level` (the trait-impl path explicitly stores raw content) instead of the `add` trait method. (@houko)
 
 - **ci(discussion-to-issue): repair the daily backfill — `gh api --jq` does not accept `jq`'s `--arg`** — #5753. The follow-up commit on #3938 switched the backfill category filter to `gh api "repos/${REPO}/discussions" --paginate --jq --arg cat "$CAT" '.[] | select(...)'` to avoid shell-interpolating `${CAT}` into the jq source. `gh api --jq` only takes a single bare filter string — it does NOT proxy `--arg` through to jq — so `gh` parsed the call as `--jq=--arg` followed by three extra positional arguments and rejected it before any HTTP request, with `accepts 1 arg(s), received 4`. Every daily run since #3938 merged on 2026-04-28 has been red (27 consecutive failures). Fix is to drop `gh api`'s `--jq` flag and pipe the raw JSON to standalone `jq`, which does support `--arg` — preserving the original commit's shell-injection hardening intent (no `${CAT}` interpolated into the jq source) while restoring a working invocation. (@houko)
+
+- **xtask(changelog): take only the trailing `(#N)` from each `git log` subject** (@houko) — `extract_pr_numbers` grepped every `#N` on a oneline subject, so an in-title cross-reference (an issue `fixes #5740`, a prior PR `post-#5053`, or a "part N of M" marker `(#2)`) was treated as its own PR and fed to `gh pr view`, pulling unrelated ancient or unmerged PRs into the generated release notes — a beta.15 changelog run spuriously resolved `#2`, `#6`, `#10`, and `#5053`. A GitHub squash merge always appends the PR reference as the last `(#N)` of the subject line, so the parser now keeps only the trailing match per line. The line-parsing logic is split into a pure `parse_pr_numbers` helper with unit coverage for trailing-ref capture, in-title cross-reference rejection, merge-commit subjects, no-ref lines, dedup/sort, and empty input.
 
 ### Changed
 
