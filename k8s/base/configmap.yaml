@@ -32,6 +32,16 @@ data:
     trusted_proxies = ["0.0.0.0/0"]
     trust_forwarded_for = true
 
+    # External auth proxy posture. Envoy Gateway fronts this daemon with an
+    # HTTP Basic Auth SecurityPolicy (see k8s/base/security-policy.yaml) —
+    # every request is authenticated at the edge before it reaches port 4545.
+    # Setting this true records that a reverse proxy handles authentication,
+    # makes `require_auth_for_reads = false` honour-able, and silences the
+    # boot-time non-loopback posture warning. The daemon itself still runs
+    # without an in-tree api_key (LIBREFANG_ALLOW_NO_AUTH=1 on the Deployment);
+    # Envoy is the gate. See crates/librefang-api/src/server.rs (~L1471).
+    external_auth_proxy = true
+
     # Agent WebSocket origin allowlist. Prevents cross-site WebSocket
     # hijacking (#3731). Must include the dashboard hostname so the Chat
     # page can upgrade to wss://bossfang.prometheusags.ai/api/agents/*/ws.
@@ -59,8 +69,10 @@ data:
     log_level = "info"
 
     # Terminal WebSocket: allow remote connections from the dashboard origin.
-    # allow_unauthenticated_remote is required because no api_key is set —
-    # the operator accepted the risk via LIBREFANG_ALLOW_NO_AUTH=1.
+    # allow_unauthenticated_remote is required because the daemon has no
+    # in-tree api_key — authentication is enforced one layer out by the Envoy
+    # Gateway Basic Auth SecurityPolicy (k8s/base/security-policy.yaml), so any
+    # connection that reaches this listener has already passed the edge gate.
     [terminal]
     allow_remote = true
     allow_unauthenticated_remote = true

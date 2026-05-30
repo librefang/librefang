@@ -26,4 +26,7 @@ resources:
   - bossfang-deployment.yaml
   - bossfang-service.yaml
   - httproute.yaml
+  # Envoy Gateway Basic Auth in front of the HTTPS route. Requires the
+  # SecurityPolicy CRD (see security-policy.yaml header + k8s/README.md).
+  - security-policy.yaml
   - network-policies.yaml

@@ -86,11 +86,51 @@ kubectl apply -k k8s/overlays/production-gke
 kubectl -n bossfang rollout status statefulset/surrealdb --timeout=120s
 kubectl -n bossfang rollout status deployment/bossfang   --timeout=180s
 
-# 8. Smoke
+# 8. Smoke (the public route is behind Envoy Basic Auth — see "Edge auth")
 kubectl -n bossfang port-forward svc/bossfang 4545:4545 &
-curl -fsS http://127.0.0.1:4545/api/health
-curl -fsS https://bossfang.prometheusags.ai/api/health
+curl -fsS http://127.0.0.1:4545/api/health                       # in-cluster: no auth
+curl -fsS -u "$BASIC_AUTH_USER:$BASIC_AUTH_PASS" \
+     https://bossfang.prometheusags.ai/api/health                # public: 401 without creds
 ```
+
+## Edge auth (Envoy Gateway Basic Auth)
+
+`bossfang.prometheusags.ai` is intentionally public-facing (the WebChat
+dashboard is browser-accessible), so the daemon runs without an in-tree
+`api_key` (`LIBREFANG_ALLOW_NO_AUTH=1`). Authentication is enforced ONE
+LAYER OUT, at the Envoy Gateway edge, via an HTTP Basic Auth
+`SecurityPolicy` ([`base/security-policy.yaml`](base/security-policy.yaml)).
+The daemon's `config.toml` sets `external_auth_proxy = true` to record that
+posture.
+
+**Prerequisite — SecurityPolicy CRD.** Basic auth needs the Envoy Gateway
+`securitypolicies.gateway.envoyproxy.io` CRD. A complete Envoy Gateway
+install ships it, but if the cluster has a partial CRD set, install the
+matching-version CRD and restart the controller so it watches the resource:
+
+```bash
+EG_VER=$(kubectl get deploy envoy-gateway -n envoy-gateway-system \
+  -o jsonpath='{.spec.template.spec.containers[0].image}' | sed 's/.*://')
+curl -fsSL "https://github.com/envoyproxy/gateway/releases/download/${EG_VER}/install.yaml" \
+  | python3 -c "import sys,yaml; [print('---'); print(yaml.safe_dump(d)) for d in yaml.safe_load_all(sys.stdin) if d and d.get('kind')=='CustomResourceDefinition' and d['metadata']['name']=='securitypolicies.gateway.envoyproxy.io']" \
+  | kubectl apply -f -
+kubectl rollout restart deployment/envoy-gateway -n envoy-gateway-system
+```
+
+**Create the credential Secret** (out-of-band, never committed — see
+`base/secrets.template.yaml`):
+
+```bash
+HASH=$(printf '%s' "$BASIC_AUTH_PASS" | openssl sha1 -binary | openssl base64)
+printf '%s:{SHA}%s\n' "$BASIC_AUTH_USER" "$HASH" > /tmp/bossfang.htpasswd
+kubectl create secret generic bossfang-basic-auth -n bossfang \
+  --from-file=.htpasswd=/tmp/bossfang.htpasswd \
+  --dry-run=client -o yaml | kubectl apply -f -
+rm -f /tmp/bossfang.htpasswd
+```
+
+Verify: `curl -i https://bossfang.prometheusags.ai/api/health` → **401**;
+with `-u user:pass` → **200**.
 
 ## Secrets you must populate
 
@@ -103,6 +143,9 @@ canonical list. At minimum:
   alias `LIBREFANG_VAULT_KEY` also works as a fallback.
 - Provider keys: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GROQ_API_KEY`,
   `GEMINI_API_KEY`, etc. Only set the ones you actually need.
+- `bossfang-basic-auth` Secret (`.htpasswd` key) — the Envoy Gateway edge
+  Basic Auth credentials. Created separately from `bossfang-secrets`; see
+  the "Edge auth" section above for the generation recipe.
 
 ## What this does NOT cover
 
