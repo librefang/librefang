@@ -94,7 +94,28 @@ jobs:
             -f Dockerfile \
             .
 
-      - name: Update k8s deployment image tag
+      # Roll the running Deployment to the freshly-built image. The CI SA
+      # (github-actions@prometheus-461323) already holds roles/container.developer,
+      # which grants both `container.clusters.get` (for get-credentials) and the
+      # GKE RBAC to patch Deployments in any namespace — no extra IAM needed.
+      #
+      # This is a surgical `kubectl set image` (NOT `apply -k`): it rolls only the
+      # container image. Config / SecurityPolicy / StatefulSet changes are still
+      # applied manually via `kubectl apply -k k8s/overlays/production-gke` when
+      # they change (rare) — see k8s/README.md. Image rollout, the common case on
+      # every push to main, is now automatic.
+      #
+      # Guarded to main so a workflow_dispatch from a feature branch can build +
+      # push an image for testing without touching production.
+      - name: Deploy to GKE
+        if: github.ref == 'refs/heads/main'
+        env:
+          USE_GKE_GCLOUD_AUTH_PLUGIN: "True"
         run: |
-          echo "Image pushed: ${{ env.IMAGE }}:${{ github.sha }}"
-          echo "To deploy: kubectl set image deployment/bossfang bossfang=${{ env.IMAGE }}:${{ github.sha }} -n bossfang"
+          gcloud components install gke-gcloud-auth-plugin --quiet || true
+          gcloud container clusters get-credentials client-cluster \
+            --region us-central1 --project prometheus-461323
+          kubectl set image deployment/bossfang \
+            bossfang="${{ env.IMAGE }}:${{ github.sha }}" -n bossfang
+          kubectl rollout status deployment/bossfang -n bossfang --timeout=300s
+          echo "Deployed ${{ env.IMAGE }}:${{ github.sha }} to bossfang/bossfang"
