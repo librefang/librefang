@@ -1,0 +1,39 @@
+# Envoy Gateway HTTP Basic Auth for bossfang.prometheusags.ai.
+#
+# The daemon itself runs without an in-tree api_key (LIBREFANG_ALLOW_NO_AUTH=1
+# on the Deployment) so the WebChat dashboard stays browser-accessible. This
+# SecurityPolicy puts authentication ONE LAYER OUT, at the Envoy Gateway edge:
+# every request to the HTTPS route is challenged with HTTP Basic Auth before it
+# is proxied to the Service on port 4545.
+#
+# The credentials live in the `bossfang-basic-auth` Secret (key: `.htpasswd`),
+# created out-of-band exactly like `bossfang-secrets` — see
+# k8s/base/secrets.template.yaml for the template and generation recipe. The
+# real htpasswd line is NEVER committed.
+#
+# PREREQUISITE: the Envoy Gateway `SecurityPolicy` CRD
+# (securitypolicies.gateway.envoyproxy.io) must be installed in the cluster.
+# A complete Envoy Gateway install ships it; if it is missing (partial CRD
+# set), install the matching-version CRD and restart the envoy-gateway
+# controller so it starts watching the resource. See k8s/README.md.
+#
+# Targets ONLY the main HTTPS route `bossfang` — NOT `bossfang-http-redirect`,
+# so an http:// hit still gets its 301 to https:// without an auth challenge.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: bossfang-basic-auth
+  namespace: bossfang
+  labels:
+    app.kubernetes.io/name: bossfang
+    app.kubernetes.io/component: security
+    app.kubernetes.io/part-of: bossfang
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: bossfang
+  basicAuth:
+    users:
+      # Secret in the same namespace, with a `.htpasswd` data key.
+      name: bossfang-basic-auth

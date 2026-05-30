@@ -22,7 +22,10 @@ labels:
 images:
   - name: PLACEHOLDER_BOSSFANG_IMAGE
     newName: gcr.io/prometheus-461323/bossfang
-    newTag: 26fcfa51d56e432e6f7762e1d7457736be8a1394
+    # Phase 5-8 image (post-PR #63: Dockerfile TinyGo path + bun unzip fixes).
+    # Keep in sync with the live deployment so `kubectl apply -k` never
+    # reverts the cluster to an older image.
+    newTag: 04fd625f0958bffc6244244a4f3b181e5df6be12
 
 patches:
   - path: patches/deployment-resources.yaml
