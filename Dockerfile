@@ -196,6 +196,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gosu \
     # ncurses-term: provides xterm-256color terminfo for the terminal PTY
     ncurses-term \
+    # unzip: required by `bun.sh/install` (line ~285) — without this, the
+    # bun install script aborts with "error: unzip is required to install bun".
+    unzip \
     # Python 3.13 runtime system library dependencies
     libexpat1 \
     zlib1g \
