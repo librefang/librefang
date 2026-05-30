@@ -5148,7 +5148,13 @@ async fn download_file_to_blocks(
         }]);
     }
 
-    let client = crate::http_client::new_client();
+    // Use the redirect-revalidating client: `new_client()` follows up to 10
+    // redirects with NO per-hop SSRF check, so a forged attachment URL on a
+    // public host could `302` to `http://169.254.169.254/...` and bypass the
+    // entry-time `validate_url_scheme` guard. `safe_fetch_client()` re-runs
+    // `validate_url_for_fetch` on every redirect target (cap 5), matching the
+    // image path (`fetch_url_bytes`).
+    let client = crate::http_client::safe_fetch_client();
     let mut req = client.get(url).timeout(std::time::Duration::from_secs(60));
     for (name, value) in extra_headers {
         req = req.header(name.as_str(), value.as_str());
@@ -5363,8 +5369,22 @@ async fn download_file_to_blocks(
         // addition to the saved-path block. The path block is preserved
         // so tools that legitimately want raw bytes (media_transcribe,
         // custom file readers) still work.
-        let mut blocks =
-            crate::attachment_enrich::enrich_saved_file(&file_path, &media_type, filename);
+        // enrich_saved_file does blocking std::fs reads and CPU-bound PDF
+        // text extraction (pdf_extract), which can stall the tokio worker for
+        // a large/complex document — offload it (refs blocking-fs-on-executor).
+        let mut blocks = {
+            let file_path = file_path.clone();
+            let media_type = media_type.clone();
+            let filename = filename.to_string();
+            tokio::task::spawn_blocking(move || {
+                crate::attachment_enrich::enrich_saved_file(&file_path, &media_type, &filename)
+            })
+            .await
+            .unwrap_or_else(|e| {
+                warn!("attachment enrichment task failed to join: {e}");
+                Vec::new()
+            })
+        };
         blocks.push(ContentBlock::Text {
             text: format!("{FILE_SAVED_BLOCK_PREFIX}{filename}] saved to {path_str}"),
             provider_metadata: None,

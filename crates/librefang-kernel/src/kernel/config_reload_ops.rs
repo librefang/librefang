@@ -20,7 +20,7 @@ impl LibreFangKernel {
     /// apply hot-reloadable actions. Returns the reload plan for API response.
     pub async fn reload_config(&self) -> Result<crate::config_reload::ReloadPlan, String> {
         let old_cfg = self.config.load();
-        use crate::config_reload::{should_apply_hot, validate_config_for_reload};
+        use crate::config_reload::{should_store_config, validate_config_for_reload};
 
         // Read and parse the on-disk config via the strict loader (#4664).
         // Unlike `crate::config::load_config`, `try_load_config` returns `Err`
@@ -77,10 +77,17 @@ impl LibreFangKernel {
         // (cleared caches, updated overrides) while config_ref() still returns
         // the old config.
         //
-        // Only store the new config when hot-reload is active (Hot / Hybrid).
-        // In Off / Restart modes the user expects no runtime changes — they
-        // must restart to pick up the new config.
-        if should_apply_hot(old_cfg.reload.mode, &plan) {
+        // Store the new config in Hot / Hybrid modes whenever the plan carries
+        // any effective change — including `noop_changes`. Those "no-op" fields
+        // are read live from `config.load()` on each message/request and rely
+        // on this swap to take effect (e.g. `max_history_messages`,
+        // `agent_max_iterations`, `compaction`, `prompt_caching`); gating the
+        // swap on `hot_actions` alone made such edits silently no-op while the
+        // reload response still reported success. `apply_hot_actions_inner`
+        // iterates `plan.hot_actions`, so it is a harmless no-op when only
+        // `noop_changes` are present. In Off / Restart modes the user expects
+        // no runtime change until a full restart.
+        if should_store_config(old_cfg.reload.mode, &plan) {
             let _write_guard = self.config_reload_lock.write().await;
             self.apply_hot_actions_inner(&plan, &new_config);
             // Push the new `[[taint_rules]]` registry into the shared swap
@@ -93,7 +100,7 @@ impl LibreFangKernel {
             //
             // The reload-plan diff (`build_reload_plan`) emits
             // `HotAction::ReloadTaintRules` whenever `[[taint_rules]]`
-            // changes, so `should_apply_hot` reaches this branch on those
+            // changes, so `should_store_config` reaches this branch on those
             // edits even when no other hot action fires.
             self.taint_rules_swap
                 .store(std::sync::Arc::new(new_config.taint_rules.clone()));

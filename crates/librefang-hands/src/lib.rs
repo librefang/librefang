@@ -722,6 +722,36 @@ struct HandDefinitionRaw {
     i18n: HashMap<String, HandI18n>,
 }
 
+/// Maximum length of a hand `id` (it becomes a filesystem directory name).
+const MAX_HAND_ID_LEN: usize = 128;
+
+/// Validate a hand `id` before it is used as a filesystem path component.
+///
+/// The id flows into `home/workspaces/{id}/` on install, so a value like
+/// `../../../etc/cron.d/x` would let an authenticated caller create
+/// directories and write `HAND.toml` / `SKILL.md` outside the hands
+/// workspace. Restrict it to a single safe component: ASCII alphanumerics
+/// plus `-` / `_`, starting with an alphanumeric. This rejects `/`, `\`,
+/// `.` (hence `..`), NUL and control characters while accepting every
+/// existing kebab/snake-case id.
+fn validate_hand_id(id: &str) -> Result<(), String> {
+    if id.is_empty() || id.len() > MAX_HAND_ID_LEN {
+        return Err(format!(
+            "Hand id must be 1-{MAX_HAND_ID_LEN} characters, got {}",
+            id.len()
+        ));
+    }
+    let valid = id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if !valid || !id.chars().next().unwrap().is_ascii_alphanumeric() {
+        return Err(format!(
+            "Hand id '{id}' is invalid: must start with an alphanumeric and contain only [A-Za-z0-9_-]"
+        ));
+    }
+    Ok(())
+}
+
 /// Build a `HandDefinition` from the raw deserialized struct.
 ///
 /// Shared logic between `Deserialize` impl (no filesystem access, `agents_dir = None`)
@@ -730,6 +760,14 @@ fn build_hand_from_raw(
     raw: HandDefinitionRaw,
     agents_dir: Option<&Path>,
 ) -> Result<HandDefinition, String> {
+    // The `id` is used verbatim as a filesystem path component
+    // (`home/workspaces/{id}/`) by the install/uninstall paths, so it must be
+    // a single safe component — reject path separators, `..`, and other
+    // traversal vectors before it can reach `Path::join`. Validating here
+    // covers every parse path (the `Deserialize` impl and
+    // `parse_hand_definition`), so callers cannot bypass it.
+    validate_hand_id(&raw.id)?;
+
     let agents = if let Some(raw_agents) = raw.agents {
         // Multi-agent format: [agents.*] — parse each entry with legacy fallback
         if raw_agents.is_empty() {
@@ -1058,6 +1096,52 @@ mod tests {
 
         let err = HandError::AlreadyActive("clip".to_string());
         assert!(err.to_string().contains("already"));
+    }
+
+    #[test]
+    fn hand_id_rejects_path_traversal() {
+        // `id` becomes a `home/workspaces/{id}/` directory name, so a
+        // traversal id must be refused at parse time on every path.
+        let toml_for = |id: &str| {
+            format!(
+                r#"
+id = "{id}"
+name = "Evil Hand"
+description = "traversal"
+category = "content"
+
+[agent]
+name = "a"
+description = "a"
+system_prompt = "a"
+"#
+            )
+        };
+        for bad in [
+            "../../../../etc/cron.d/x",
+            "../evil",
+            "a/b",
+            "a\\b",
+            "..",
+            ".",
+            ".hidden",
+            "",
+            "with space",
+        ] {
+            let err = toml::from_str::<HandDefinition>(&toml_for(bad))
+                .expect_err(&format!("id {bad:?} should be rejected"));
+            assert!(
+                err.to_string().contains("Hand id"),
+                "id {bad:?} should fail id validation, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn hand_id_accepts_valid_ids() {
+        for ok in ["uptime-watcher", "research", "i18n_test", "Hand1", "a"] {
+            assert!(validate_hand_id(ok).is_ok(), "id {ok:?} should be valid");
+        }
     }
 
     #[test]

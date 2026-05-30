@@ -112,8 +112,22 @@ impl ConsolidationEngine {
         // Load active memories per-agent to prevent cross-tenant merges: memories
         // that belong to different agents must never be compared or merged, even
         // when the global consolidation sweep runs across the shared database.
-        // Cap at 100 merges per consolidation run to avoid O(n²) blowup on
-        // large memory stores.
+        //
+        // Two independent caps bound the cost of this phase:
+        //   - MAX_CANDIDATES_PER_AGENT bounds the *input* — the per-agent SELECT
+        //     is `LIMIT`ed, so the O(N²) similarity loop and the resident row
+        //     set (each row carries a multi-KB embedding BLOB) can never grow
+        //     past this regardless of how large the agent's store is. The
+        //     MAX_MERGES_PER_RUN cap alone does NOT bound this: when memories
+        //     are mostly distinct (the normal case) almost no pair crosses the
+        //     threshold, so the merge cap never trips and all ~N²/2 comparisons
+        //     run on the full table. Consolidate is idempotent and processes the
+        //     highest-confidence window each run, so the tail is picked up on
+        //     subsequent ticks.
+        //   - MAX_MERGES_PER_RUN bounds the *output* — at most this many merges
+        //     (and their writes) are applied per run, spreading large dedups
+        //     across ticks.
+        const MAX_CANDIDATES_PER_AGENT: i64 = 500;
         const MAX_MERGES_PER_RUN: u64 = 100;
         let mut memories_merged: u64 = 0;
 
@@ -155,22 +169,26 @@ impl ConsolidationEngine {
                     "SELECT id, content, confidence, metadata, access_count, embedding \
                      FROM memories \
                      WHERE deleted = 0 AND agent_id = ?1 \
-                     ORDER BY confidence DESC",
+                     ORDER BY confidence DESC \
+                     LIMIT ?2",
                 )
                 .map_err(LibreFangError::memory)?;
 
             #[allow(clippy::type_complexity)]
             let mut rows: Vec<(String, String, f64, String, i64, Option<Vec<u8>>)> = stmt
-                .query_map(rusqlite::params![agent_id], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, f64>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, i64>(4)?,
-                        row.get::<_, Option<Vec<u8>>>(5)?,
-                    ))
-                })
+                .query_map(
+                    rusqlite::params![agent_id, MAX_CANDIDATES_PER_AGENT],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, f64>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, i64>(4)?,
+                            row.get::<_, Option<Vec<u8>>>(5)?,
+                        ))
+                    },
+                )
                 .map_err(LibreFangError::memory)?
                 .filter_map(|r| r.ok())
                 .collect();
@@ -518,6 +536,45 @@ mod tests {
         // Higher-confidence memory (mem-a, 0.8) is kept; lower one is soft-deleted.
         assert!(!is_deleted(&conn, "mem-a"));
         assert!(is_deleted(&conn, "mem-b"));
+    }
+
+    #[test]
+    fn test_candidate_limit_excludes_low_confidence_tail() {
+        // Regression for the unbounded candidate load: the per-agent SELECT is
+        // `LIMIT`ed to the top-N highest-confidence memories. A duplicate pair
+        // that sorts *below* that window must not be loaded — hence not merged —
+        // in a single run. Mirrors `MAX_CANDIDATES_PER_AGENT` (500) in
+        // `consolidate`.
+        const CANDIDATE_LIMIT: usize = 500;
+        let engine = setup();
+        {
+            let conn = engine.pool.get().expect("consolidation pool get");
+            // Fill the entire top-N window with DISTINCT, high-confidence
+            // memories (no pair crosses the similarity threshold).
+            for i in 0..CANDIDATE_LIMIT {
+                insert_memory(
+                    &conn,
+                    &format!("distinct-{i}"),
+                    &format!("unique memory content number {i} token-{i}"),
+                    0.5 + (i as f64) / (CANDIDATE_LIMIT as f64) / 2.0, // 0.5..1.0
+                );
+            }
+            // An identical duplicate pair with the LOWEST confidence — sorts
+            // past the LIMIT window, so it is outside this run's candidate set.
+            insert_memory(&conn, "tail-dup-a", "the lazy dog sleeps here", 0.12);
+            insert_memory(&conn, "tail-dup-b", "the lazy dog sleeps here", 0.11);
+        }
+
+        let report = engine.consolidate().unwrap();
+
+        // The out-of-window duplicate pair must survive this run untouched.
+        assert_eq!(
+            report.memories_merged, 0,
+            "low-confidence duplicate tail beyond the candidate LIMIT must not be merged in one run"
+        );
+        let conn = engine.pool.get().expect("consolidation pool get");
+        assert!(!is_deleted(&conn, "tail-dup-a"));
+        assert!(!is_deleted(&conn, "tail-dup-b"));
     }
 
     #[test]
