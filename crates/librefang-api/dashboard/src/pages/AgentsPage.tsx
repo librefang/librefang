@@ -27,6 +27,7 @@ import { useUIStore } from "../lib/store";
 import { toastErr } from "../lib/errors";
 import { filterVisible } from "../lib/hiddenModels";
 import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, Check } from "lucide-react";
+import { buildModelConfigPatch, MODEL_MAX_TOKENS_DEFAULT, MODEL_TEMPERATURE_DEFAULT } from "../lib/agentModelPatch";
 import { truncateId } from "../lib/string";
 import { pickLatestSessionId } from "../lib/sessionSelector";
 import { getStatusVariant } from "../lib/status";
@@ -286,8 +287,8 @@ export function AgentsPage() {
     setModelDraft({
       provider: detailAgent?.model?.provider ?? "",
       model: detailAgent?.model?.model ?? "",
-      max_tokens: String(detailAgent?.model?.max_tokens ?? 4096),
-      temperature: String(detailAgent?.model?.temperature ?? 0.7),
+      max_tokens: String(detailAgent?.model?.max_tokens ?? MODEL_MAX_TOKENS_DEFAULT),
+      temperature: String(detailAgent?.model?.temperature ?? MODEL_TEMPERATURE_DEFAULT),
     });
     setEditingModel(true);
   }
@@ -421,27 +422,13 @@ export function AgentsPage() {
 
   function saveModelEdit() {
     if (!detailAgent) return;
-    const current = detailAgent.model;
-    const patch: { max_tokens?: number; model?: string; provider?: string; temperature?: number } = {};
-
-    const trimmedProvider = modelDraft.provider.trim();
-    const trimmedModel = modelDraft.model.trim();
-    const parsedMaxTokens = parseInt(modelDraft.max_tokens, 10);
-    const parsedTemperature = parseFloat(modelDraft.temperature);
-
-    if (!trimmedProvider || !trimmedModel) return;
-    if (isNaN(parsedMaxTokens) || parsedMaxTokens <= 0) return;
-    if (isNaN(parsedTemperature) || parsedTemperature < 0 || parsedTemperature > 2) return;
-
-    const modelChanged = trimmedModel !== current?.model;
-    const providerChanged = trimmedProvider !== current?.provider;
-
-    if (modelChanged || providerChanged) {
-      patch.model = trimmedModel;
-      patch.provider = trimmedProvider;
-    }
-    if (parsedMaxTokens !== current?.max_tokens) patch.max_tokens = parsedMaxTokens;
-    if (parsedTemperature !== current?.temperature) patch.temperature = parsedTemperature;
+    // buildModelConfigPatch validates the draft and includes a field only when
+    // the user changed it from its persisted (nullish-defaulted) value, using
+    // the same 4096 / 0.7 baseline as the modelDirty gate so the two can't drift
+    // (the #5917 follow-up: a provider-only edit must not write back defaults
+    // for max_tokens / temperature the backend had omitted).
+    const { patch } = buildModelConfigPatch(modelDraft, detailAgent.model);
+    if (!patch) return;
 
     if (Object.keys(patch).length === 0) {
       setEditingModel(false);
@@ -791,8 +778,8 @@ export function AgentsPage() {
   const modelDirty =
     modelDraft.provider.trim() !== (currentModel?.provider ?? "")
     || modelDraft.model.trim() !== (currentModel?.model ?? "")
-    || draftMaxTokens !== (currentModel?.max_tokens ?? 4096)
-    || draftTemperature !== (currentModel?.temperature ?? 0.7);
+    || draftMaxTokens !== (currentModel?.max_tokens ?? MODEL_MAX_TOKENS_DEFAULT)
+    || draftTemperature !== (currentModel?.temperature ?? MODEL_TEMPERATURE_DEFAULT);
   const saveModelDisabled =
     activeConfigMutation.isPending || !modelValid || !modelDirty;
 
