@@ -25,9 +25,10 @@ use tracing::{debug, info, warn};
 /// intact (so Node.js, NVM, SSL, proxies, etc. all work) and only remove
 /// secrets that belong to other LLM providers.
 ///
-/// Note: ANTHROPIC_API_KEY is intentionally absent — the Claude Code CLI
-/// is Anthropic's own tool and requires its own key to authenticate API
-/// calls (OAuth alone is insufficient in -p/--print mode).
+/// Note: ANTHROPIC_API_KEY is intentionally absent from this static list.
+/// It is conditionally stripped in `apply_env_filter` when OAuth credentials
+/// are detected — the static list is not the right place because the strip
+/// is conditional on file-system state (see `oauth_credentials_present`).
 const SENSITIVE_ENV_EXACT: &[&str] = &[
     "OPENAI_API_KEY",
     "GEMINI_API_KEY",
@@ -396,9 +397,33 @@ impl ClaudeCodeDriver {
     /// Instead of `env_clear()` (which breaks Node.js, NVM, SSL, proxies),
     /// we keep the full environment and only remove known sensitive API keys
     /// from other LLM providers.
-    fn apply_env_filter(cmd: &mut tokio::process::Command) {
+    ///
+    /// `ANTHROPIC_API_KEY` / `CLAUDE_CODE_API_KEY` are conditionally stripped:
+    /// when OAuth credentials exist (the file written by `claude auth`), they
+    /// must take precedence so the CLI bills against the user's subscription
+    /// instead of the pay-per-use API key. A daemon that has both will
+    /// otherwise route every spawn through the API key — and once that key
+    /// runs out of credits, the CLI exits with `Credit balance is too low`
+    /// (HTTP 400) on stdout and exit code 1, surfacing in our logs as
+    /// `Claude Code CLI streaming subprocess exited with error exit_code=1
+    /// stderr=` and stalling all inbound traffic for the agent
+    /// (live incident 2026-05-19).
+    fn apply_env_filter(&self, cmd: &mut tokio::process::Command) {
         for key in SENSITIVE_ENV_EXACT {
             cmd.env_remove(key);
+        }
+        if self.oauth_credentials_present(cmd) {
+            // Surface the strip so operators investigating "why is my
+            // API key not being honoured?" (the 2026-05-19 incident
+            // shape) can see, in daemon logs, that the OAuth file took
+            // precedence by design.
+            debug!(
+                stripped_keys = "ANTHROPIC_API_KEY,CLAUDE_CODE_API_KEY",
+                "claude-code: OAuth credentials present, stripping API-key env vars \
+                 so subscription billing wins",
+            );
+            cmd.env_remove("ANTHROPIC_API_KEY");
+            cmd.env_remove("CLAUDE_CODE_API_KEY");
         }
         // Remove any env var with a sensitive suffix, unless it's CLAUDE_*
         // or ANTHROPIC_*. The ANTHROPIC_ exception covers gateway / proxy
@@ -421,6 +446,91 @@ impl ClaudeCodeDriver {
                 }
             }
         }
+    }
+
+    /// Probe for a Claude Code OAuth credentials file.
+    ///
+    /// The CLI writes its credentials artefact after `claude auth`
+    /// (subscription / Max billing). Older CLI builds emit
+    /// `~/.claude/.credentials.json` (leading dot); newer / some
+    /// platform builds emit `~/.claude/credentials.json` (no dot).
+    /// Either variant is proof of OAuth — we delegate the filename
+    /// check to `claude_credentials_in_dir` so this probe stays in
+    /// lockstep with `claude_credentials_exist` and the
+    /// `credentials_json_variants_are_recognised` regression test.
+    ///
+    /// When `self.config_dir` is set (profile rotation), the probe
+    /// checks that directory exclusively — the CLI will read credentials
+    /// from `CLAUDE_CONFIG_DIR`, not `HOME/.claude/`. When unset, HOME
+    /// resolution mirrors `ensure_home_env`: `CLAUDE_CODE_HOME` (the
+    /// kernel-boot override) > platform `HOME` / `USERPROFILE`. Falls
+    /// back to "no" on any IO error — we strip only when we positively
+    /// know the credentials exist, so we never break the historical
+    /// API-key path for users who haven't authenticated.
+    ///
+    /// Note: on macOS, OAuth credentials may live in the Keychain rather
+    /// than a file, so this file-based probe is effectively
+    /// Linux/Windows-only. The 2026-05-19 incident was Linux; macOS
+    /// coverage is deferred.
+    fn oauth_credentials_present(&self, cmd: &tokio::process::Command) -> bool {
+        // CLI profile rotation (`librefang-kernel/src/kernel/boot.rs`)
+        // builds one driver per `cli_profile_dirs` entry via
+        // `.with_config_dir(dir)`, and each spawn sets
+        // `CLAUDE_CONFIG_DIR=<dir>` so the CLI reads credentials from
+        // `<dir>/.credentials.json` instead of `<HOME>/.claude/`. When
+        // that config dir is configured here, probe THAT location first
+        // — otherwise the strip never fires under profile rotation
+        // and the 2026-05-19 incident recurs (houko #5292 review).
+        if let Some(dir) = self.config_dir.as_deref() {
+            if claude_credentials_in_dir(dir) {
+                return true;
+            }
+            // No fall-through: an explicitly-configured config dir IS
+            // where the spawned CLI will read from. If its credentials
+            // aren't there, OAuth is not present for THIS spawn, even
+            // if the inherited HOME happens to have a stale file.
+            return false;
+        }
+
+        // No config_dir — resolve HOME the same way `ensure_home_env` does:
+        // 1. Explicit HOME override already on `cmd` (e.g. from ensure_home_env
+        //    on a prior spawn, or test harness).
+        // 2. `CLAUDE_CODE_HOME` — the documented kernel-boot override.
+        // 3. Platform home: `HOME` on Unix, `USERPROFILE` on Windows.
+        let home_override = cmd
+            .as_std()
+            .get_envs()
+            .find_map(|(k, v)| (k == std::ffi::OsStr::new("HOME")).then_some(v).flatten())
+            .map(std::ffi::OsString::from);
+
+        // Mirror ensure_home_env's validate closure: only accept dirs that
+        // actually exist on disk, so placeholder paths (/nonexistent,
+        // /var/empty, /dev/null, empty string) are rejected without
+        // enumerating them.
+        let validate = |raw: std::ffi::OsString| -> Option<std::ffi::OsString> {
+            if raw.is_empty() || !std::path::Path::new(&raw).is_dir() {
+                None
+            } else {
+                Some(raw)
+            }
+        };
+
+        #[cfg(unix)]
+        let platform_var = "HOME";
+        #[cfg(windows)]
+        let platform_var = "USERPROFILE";
+
+        let home = home_override
+            .and_then(validate)
+            .or_else(|| std::env::var_os("CLAUDE_CODE_HOME").and_then(validate))
+            .or_else(|| std::env::var_os(platform_var).and_then(validate));
+
+        let Some(home) = home else {
+            return false;
+        };
+        let mut dir = std::path::PathBuf::from(home);
+        dir.push(".claude");
+        claude_credentials_in_dir(&dir)
     }
 
     /// Force the spawned CLI's home directory to a path where it can
@@ -788,7 +898,7 @@ impl LlmDriver for ClaudeCodeDriver {
             cmd.arg("--add-dir").arg(dir);
         }
 
-        Self::apply_env_filter(&mut cmd);
+        self.apply_env_filter(&mut cmd);
         Self::ensure_home_env(&mut cmd);
         if let Some(ref dir) = self.config_dir {
             cmd.env("CLAUDE_CONFIG_DIR", dir);
@@ -1071,7 +1181,7 @@ impl LlmDriver for ClaudeCodeDriver {
             cmd.arg("--add-dir").arg(dir);
         }
 
-        Self::apply_env_filter(&mut cmd);
+        self.apply_env_filter(&mut cmd);
         Self::ensure_home_env(&mut cmd);
         if let Some(ref dir) = self.config_dir {
             cmd.env("CLAUDE_CONFIG_DIR", dir);
@@ -2517,7 +2627,8 @@ mod tests {
         }
 
         let mut cmd = tokio::process::Command::new("echo");
-        ClaudeCodeDriver::apply_env_filter(&mut cmd);
+        let driver = ClaudeCodeDriver::new(None, false);
+        driver.apply_env_filter(&mut cmd);
 
         // `env_remove` records `(key, None)` in the Command's env table.
         // Inspect it to learn which keys the filter targeted for removal.
@@ -2562,6 +2673,243 @@ mod tests {
             std::env::remove_var("GEMINI_API_KEY");
             std::env::remove_var("LIBREFANG_TEST_5006_OTHER_TOKEN");
         }
+    }
+
+    /// Regression for the 2026-05-19 live incident: the daemon's
+    /// container env exported `ANTHROPIC_API_KEY` (zero-credit
+    /// pay-per-use key, inherited from `secrets.env`) alongside an
+    /// already-authenticated OAuth Max subscription at
+    /// `$HOME/.claude/.credentials.json`. The CLI prefers the env-set
+    /// key, the key has no credits, every spawn exited code 1 with
+    /// "Credit balance is too low" on stdout, and Ambrogio stopped
+    /// replying to every inbound (WhatsApp DM, group, stranger).
+    ///
+    /// When OAuth credentials are present, the API-key env vars must be
+    /// stripped so the CLI falls back to subscription billing.
+    #[test]
+    fn test_apply_env_filter_strips_api_key_when_oauth_present() {
+        // Use a private HOME so test artefacts don't collide with the
+        // developer's real `~/.claude`.
+        let tmp_home = make_claude_tmp_dir("oauth-strip");
+        let creds_dir = tmp_home.join(".claude");
+        std::fs::create_dir_all(&creds_dir).unwrap();
+        std::fs::write(creds_dir.join(".credentials.json"), b"{}").unwrap();
+
+        // SAFETY: unique-suffix env vars; teardown below restores.
+        unsafe {
+            std::env::set_var("ANTHROPIC_API_KEY", "strip-when-oauth-19");
+            std::env::set_var("CLAUDE_CODE_API_KEY", "strip-when-oauth-19");
+        }
+
+        let mut cmd = tokio::process::Command::new("echo");
+        cmd.env("HOME", &tmp_home);
+        let driver = ClaudeCodeDriver::new(None, false);
+        driver.apply_env_filter(&mut cmd);
+
+        let removed: std::collections::HashSet<String> = cmd
+            .as_std()
+            .get_envs()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .collect();
+
+        assert!(
+            removed.contains("ANTHROPIC_API_KEY"),
+            "ANTHROPIC_API_KEY must be stripped when OAuth credentials are present"
+        );
+        assert!(
+            removed.contains("CLAUDE_CODE_API_KEY"),
+            "CLAUDE_CODE_API_KEY must be stripped when OAuth credentials are present"
+        );
+
+        unsafe {
+            std::env::remove_var("ANTHROPIC_API_KEY");
+            std::env::remove_var("CLAUDE_CODE_API_KEY");
+        }
+        let _ = std::fs::remove_dir_all(&tmp_home);
+    }
+
+    /// Inverse: when there's no OAuth credentials file the API key
+    /// must be preserved — this is the historical pay-per-use path
+    /// (gateway / proxy users with `ANTHROPIC_AUTH_TOKEN` style setups
+    /// or single-user installs that never ran `claude auth`).
+    #[test]
+    fn test_apply_env_filter_keeps_api_key_without_oauth() {
+        let tmp_home = make_claude_tmp_dir("oauth-keep");
+        // Deliberately do NOT create .claude/.credentials.json under tmp_home.
+
+        unsafe {
+            std::env::set_var("ANTHROPIC_API_KEY", "keep-when-no-oauth-19");
+        }
+
+        let mut cmd = tokio::process::Command::new("echo");
+        cmd.env("HOME", &tmp_home);
+        let driver = ClaudeCodeDriver::new(None, false);
+        driver.apply_env_filter(&mut cmd);
+
+        let removed: std::collections::HashSet<String> = cmd
+            .as_std()
+            .get_envs()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .collect();
+
+        assert!(
+            !removed.contains("ANTHROPIC_API_KEY"),
+            "ANTHROPIC_API_KEY must be preserved when no OAuth credentials exist (historical pay-per-use path)"
+        );
+
+        unsafe {
+            std::env::remove_var("ANTHROPIC_API_KEY");
+        }
+        let _ = std::fs::remove_dir_all(&tmp_home);
+    }
+
+    /// Regression: `credentials_json_variants_are_recognised` pins
+    /// both `.credentials.json` and `credentials.json` (no leading
+    /// dot) at the helper level. Mirror that at the env-filter level
+    /// so a legacy deployment using the no-dot variant also triggers
+    /// the API-key strip — otherwise the 2026-05-19 incident shape
+    /// reappears on hosts where the CLI wrote the no-dot file.
+    #[test]
+    fn test_apply_env_filter_strips_api_key_when_oauth_no_dot_variant_present() {
+        let tmp_home = make_claude_tmp_dir("oauth-strip-nodot");
+        let creds_dir = tmp_home.join(".claude");
+        std::fs::create_dir_all(&creds_dir).unwrap();
+        // No leading dot — the variant `claude_credentials_in_dir`
+        // also accepts.
+        std::fs::write(creds_dir.join("credentials.json"), b"{}").unwrap();
+
+        unsafe {
+            std::env::set_var("ANTHROPIC_API_KEY", "strip-when-oauth-nodot");
+            std::env::set_var("CLAUDE_CODE_API_KEY", "strip-when-oauth-nodot");
+        }
+
+        let mut cmd = tokio::process::Command::new("echo");
+        cmd.env("HOME", &tmp_home);
+        let driver = ClaudeCodeDriver::new(None, false);
+        driver.apply_env_filter(&mut cmd);
+
+        let removed: std::collections::HashSet<String> = cmd
+            .as_std()
+            .get_envs()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .collect();
+
+        assert!(
+            removed.contains("ANTHROPIC_API_KEY"),
+            "ANTHROPIC_API_KEY must be stripped when no-dot credentials.json is present"
+        );
+        assert!(
+            removed.contains("CLAUDE_CODE_API_KEY"),
+            "CLAUDE_CODE_API_KEY must be stripped when no-dot credentials.json is present"
+        );
+
+        unsafe {
+            std::env::remove_var("ANTHROPIC_API_KEY");
+            std::env::remove_var("CLAUDE_CODE_API_KEY");
+        }
+        let _ = std::fs::remove_dir_all(&tmp_home);
+    }
+
+    /// Regression for houko 2026-05-22 review of #5292. CLI profile
+    /// rotation (`kernel::boot::cli_profile_dirs`) sets
+    /// `CLAUDE_CONFIG_DIR=<profile_dir>` per spawn and the CLI then
+    /// reads its OAuth credentials from `<profile_dir>/.credentials.json`,
+    /// NOT `<HOME>/.claude/`. The probe must consult the configured
+    /// profile dir first; otherwise the strip never fires under
+    /// profile rotation and the 2026-05-19 zero-credit-key incident
+    /// recurs.
+    #[test]
+    fn test_apply_env_filter_strips_api_key_when_oauth_in_config_dir() {
+        let tmp_profile = make_claude_tmp_dir("oauth-config-dir");
+        std::fs::create_dir_all(&tmp_profile).unwrap();
+        std::fs::write(tmp_profile.join(".credentials.json"), b"{}").unwrap();
+
+        // HOME points elsewhere and has NO credentials — the legacy
+        // HOME-only probe would have returned false here.
+        let tmp_home = make_claude_tmp_dir("oauth-config-dir-home");
+        std::fs::create_dir_all(tmp_home.join(".claude")).unwrap();
+
+        unsafe {
+            std::env::set_var("ANTHROPIC_API_KEY", "strip-config-dir-22");
+            std::env::set_var("CLAUDE_CODE_API_KEY", "strip-config-dir-22");
+        }
+
+        let mut cmd = tokio::process::Command::new("echo");
+        cmd.env("HOME", &tmp_home);
+        let driver = ClaudeCodeDriver::new(None, false).with_config_dir(tmp_profile.clone());
+        driver.apply_env_filter(&mut cmd);
+
+        let removed: std::collections::HashSet<String> = cmd
+            .as_std()
+            .get_envs()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .collect();
+
+        assert!(
+            removed.contains("ANTHROPIC_API_KEY"),
+            "config_dir-based OAuth must trigger the API-key strip even when HOME has no credentials"
+        );
+        assert!(
+            removed.contains("CLAUDE_CODE_API_KEY"),
+            "config_dir-based OAuth must trigger the CLAUDE_CODE_API_KEY strip too"
+        );
+
+        unsafe {
+            std::env::remove_var("ANTHROPIC_API_KEY");
+            std::env::remove_var("CLAUDE_CODE_API_KEY");
+        }
+        let _ = std::fs::remove_dir_all(&tmp_profile);
+        let _ = std::fs::remove_dir_all(&tmp_home);
+    }
+
+    /// Companion: when `config_dir` is set but has NO credentials, the
+    /// probe must return false even if the inherited HOME happens to
+    /// have a stale `.claude/.credentials.json`. The CLI will read
+    /// from the config dir; that is the source of truth for THIS spawn.
+    #[test]
+    fn test_apply_env_filter_keeps_api_key_when_config_dir_lacks_credentials() {
+        let tmp_profile = make_claude_tmp_dir("oauth-config-dir-empty");
+        std::fs::create_dir_all(&tmp_profile).unwrap();
+        // NO credentials in the profile dir.
+
+        // HOME has a stale credentials file — it must NOT be consulted
+        // when config_dir is configured.
+        let tmp_home = make_claude_tmp_dir("oauth-config-dir-empty-home");
+        let creds_dir = tmp_home.join(".claude");
+        std::fs::create_dir_all(&creds_dir).unwrap();
+        std::fs::write(creds_dir.join(".credentials.json"), b"{}").unwrap();
+
+        unsafe {
+            std::env::set_var("ANTHROPIC_API_KEY", "keep-config-empty-22");
+        }
+
+        let mut cmd = tokio::process::Command::new("echo");
+        cmd.env("HOME", &tmp_home);
+        let driver = ClaudeCodeDriver::new(None, false).with_config_dir(tmp_profile.clone());
+        driver.apply_env_filter(&mut cmd);
+
+        let removed: std::collections::HashSet<String> = cmd
+            .as_std()
+            .get_envs()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .collect();
+
+        assert!(
+            !removed.contains("ANTHROPIC_API_KEY"),
+            "API key must be preserved when config_dir has no OAuth credentials, \
+             even if HOME has a stale file (config_dir is authoritative when set)"
+        );
+
+        unsafe {
+            std::env::remove_var("ANTHROPIC_API_KEY");
+        }
+        let _ = std::fs::remove_dir_all(&tmp_profile);
+        let _ = std::fs::remove_dir_all(&tmp_home);
     }
 
     #[test]

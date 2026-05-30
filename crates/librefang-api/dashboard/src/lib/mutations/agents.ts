@@ -150,6 +150,7 @@ export function usePatchAgent() {
         provider?: string;
         mcp_servers?: string[];
         schedule?: AgentSchedulePatch;
+        auto_evolve?: boolean;
       };
     }) => patchAgent(agentId, body),
     onSuccess: (_data, variables) => {

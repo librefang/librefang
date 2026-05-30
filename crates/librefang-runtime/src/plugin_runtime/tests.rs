@@ -350,7 +350,12 @@ async fn native_runtime_timeout_is_enforced() {
     )
     .await
     .expect_err("should time out");
-    assert!(matches!(err, PluginRuntimeError::Timeout(1)));
+    // A non-Timeout error here means the seccomp allowlist is missing a syscall
+    // the second exec (/usr/bin/sleep) needs at glibc startup.
+    assert!(
+        matches!(err, PluginRuntimeError::Timeout(1)),
+        "expected Timeout(1), got {err:?}"
+    );
 }
 
 /// #3534 follow-up: when one stream blows the cap we must kill the child
