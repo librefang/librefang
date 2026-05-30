@@ -702,6 +702,22 @@ export function AgentsPage() {
     [modelsQuery.data?.models, hiddenSet],
   );
 
+  // Single-model providers (e.g. a self-hosted Unsloth Studio endpoint that
+  // serves exactly one model) used to leave the Save button stuck disabled:
+  // switching provider clears modelDraft.model, and with only one option the
+  // user has nothing else to pick to repopulate it, so the !model.trim()
+  // validity gate never released. Auto-select the sole model so changing the
+  // provider (or any other field) is enough to enable Save. See #5917.
+  useEffect(() => {
+    if (!editingModel) return;
+    if (!modelDraft.provider.trim()) return;
+    if (modelsQuery.isLoading || modelDraft.model.trim()) return;
+    if (visibleModels.length === 1) {
+      const only = visibleModels[0].id;
+      setModelDraft(d => (d.model ? d : { ...d, model: only }));
+    }
+  }, [editingModel, modelDraft.provider, modelDraft.model, modelsQuery.isLoading, visibleModels]);
+
   const agents = agentsQuery.data?.agents ?? [];
   const visibleAgents = useMemo(
     () => showHandAgents ? agents : agents.filter(a => !a.is_hand),
@@ -755,15 +771,30 @@ export function AgentsPage() {
   const activeConfigMutation = detailAgent?.is_hand
     ? patchHandAgentRuntimeConfigMutation
     : patchAgentConfigMutation;
+  // Save enables when the draft is both valid AND differs from the persisted
+  // model in any field — Provider, Model, Max tokens, or Temperature. Earlier
+  // this gate checked validity only; combined with the provider-switch model
+  // reset that produced the #5917 symptom where Max-token / Temperature edits
+  // never lit Save. draftMaxTokens / draftTemperature mirror saveModelEdit's
+  // coercion so the dirty comparison matches what would actually be PATCHed.
+  const draftMaxTokens = parseInt(modelDraft.max_tokens, 10);
+  const draftTemperature = parseFloat(modelDraft.temperature);
+  const modelValid =
+    !!modelDraft.provider.trim()
+    && !!modelDraft.model.trim()
+    && !isNaN(draftMaxTokens)
+    && draftMaxTokens > 0
+    && !isNaN(draftTemperature)
+    && draftTemperature >= 0
+    && draftTemperature <= 2;
+  const currentModel = detailAgent?.model;
+  const modelDirty =
+    modelDraft.provider.trim() !== (currentModel?.provider ?? "")
+    || modelDraft.model.trim() !== (currentModel?.model ?? "")
+    || draftMaxTokens !== (currentModel?.max_tokens ?? 4096)
+    || draftTemperature !== (currentModel?.temperature ?? 0.7);
   const saveModelDisabled =
-    activeConfigMutation.isPending
-    || !modelDraft.provider.trim()
-    || !modelDraft.model.trim()
-    || isNaN(parseInt(modelDraft.max_tokens, 10))
-    || parseInt(modelDraft.max_tokens, 10) <= 0
-    || isNaN(parseFloat(modelDraft.temperature))
-    || parseFloat(modelDraft.temperature) < 0
-    || parseFloat(modelDraft.temperature) > 2;
+    activeConfigMutation.isPending || !modelValid || !modelDirty;
 
   const selectAgent = async (agent: AgentItem) => {
     setAgentTab("conversation");
