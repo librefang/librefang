@@ -864,10 +864,12 @@ impl LlmDriver for ClaudeCodeDriver {
             buf
         });
 
-        // Wait with timeout
-        let timeout_duration = std::time::Duration::from_secs(
-            request.timeout_secs.unwrap_or(self.message_timeout_secs),
-        );
+        // Wait with timeout. Resolve the effective value once so the kill
+        // log and the returned error report the timeout that was actually
+        // applied (a per-request `timeout_secs` override, when present),
+        // not the driver default.
+        let effective_timeout_secs = request.timeout_secs.unwrap_or(self.message_timeout_secs);
+        let timeout_duration = std::time::Duration::from_secs(effective_timeout_secs);
         let wait_result = tokio::time::timeout(timeout_duration, child.wait()).await;
 
         // Clear PID tracking regardless of outcome
@@ -885,15 +887,14 @@ impl LlmDriver for ClaudeCodeDriver {
             Err(_elapsed) => {
                 // Timeout — kill the process
                 warn!(
-                    timeout_secs = self.message_timeout_secs,
+                    timeout_secs = effective_timeout_secs,
                     model = %pid_label,
                     "Claude Code CLI subprocess timed out, killing process"
                 );
                 let _ = child.kill().await;
                 prepared.cleanup();
                 return Err(LlmError::Http(format!(
-                    "Claude Code CLI subprocess timed out after {}s — process killed",
-                    self.message_timeout_secs
+                    "Claude Code CLI subprocess timed out after {effective_timeout_secs}s — process killed"
                 )));
             }
         };

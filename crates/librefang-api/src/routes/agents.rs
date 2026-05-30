@@ -6497,7 +6497,7 @@ pub async fn upload_file(
         .config_ref()
         .channels
         .effective_file_download_dir();
-    if let Err(e) = std::fs::create_dir_all(&upload_dir) {
+    if let Err(e) = tokio::fs::create_dir_all(&upload_dir).await {
         tracing::warn!("Failed to create upload dir: {e}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -6506,7 +6506,7 @@ pub async fn upload_file(
     }
 
     let file_path = upload_dir.join(&file_id);
-    if let Err(e) = std::fs::write(&file_path, &body) {
+    if let Err(e) = tokio::fs::write(&file_path, &body).await {
         tracing::warn!("Failed to write upload: {e}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,

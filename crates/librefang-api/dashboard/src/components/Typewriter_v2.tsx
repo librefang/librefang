@@ -4,6 +4,7 @@ import { animate } from 'motion/react';
 import Markdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useMathPlugins } from '../lib/hooks/useMathPlugins';
+import { urlTransform } from './ui/MarkdownContent';
 
 const mdComponents: Components = {
   p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
@@ -77,6 +78,7 @@ export function Typewriter_v2({ text, speed = 20 }: { text: string; speed?: numb
       remarkPlugins={remarkPlugins}
       rehypePlugins={mathRehype}
       components={mdComponents}
+      urlTransform={urlTransform}
     >
       {displayed}
     </Markdown>
