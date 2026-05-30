@@ -551,7 +551,10 @@ async fn test_skills_set_valid_allowlist_round_trip() {
     // Before assignment the agent uses every registry skill → mode "all".
     let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}/skills"))).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["mode"], "all", "fresh agent should default to all: {body:?}");
+    assert_eq!(
+        body["mode"], "all",
+        "fresh agent should default to all: {body:?}"
+    );
     assert!(
         body["available"]
             .as_array()
@@ -567,7 +570,11 @@ async fn test_skills_set_valid_allowlist_round_trip() {
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "valid allowlist must succeed: {body:?}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "valid allowlist must succeed: {body:?}"
+    );
     assert_eq!(body["skills"], serde_json::json!(["round_trip_skill"]));
 
     let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}/skills"))).await;
@@ -593,7 +600,10 @@ async fn test_skills_set_valid_allowlist_round_trip() {
     .await;
     assert_eq!(status, StatusCode::OK);
     let (_status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}/skills"))).await;
-    assert_eq!(body["mode"], "all", "empty PUT returns to all-mode: {body:?}");
+    assert_eq!(
+        body["mode"], "all",
+        "empty PUT returns to all-mode: {body:?}"
+    );
     assert_eq!(body["assigned"], serde_json::json!([]));
 }
 
