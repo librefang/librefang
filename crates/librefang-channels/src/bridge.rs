@@ -1112,15 +1112,20 @@ fn flush_debounced(
                 }
             }
 
-            let overrides = channel_handle
-                .channel_overrides(
-                    ct_str,
-                    merged_msg
-                        .metadata
-                        .get("account_id")
-                        .and_then(|v| v.as_str()),
-                )
-                .await;
+            let overrides = match adapter.channel_overrides() {
+                Some(ov) => Some(ov),
+                None => {
+                    channel_handle
+                        .channel_overrides(
+                            ct_str,
+                            merged_msg
+                                .metadata
+                                .get("account_id")
+                                .and_then(|v| v.as_str()),
+                        )
+                        .await
+                }
+            };
             let channel_default_format = default_output_format_for_channel(ct_str);
             let output_format = overrides
                 .as_ref()
@@ -1337,7 +1342,14 @@ impl BridgeManager {
         let mut shutdown = self.shutdown_rx.clone();
 
         let ct_str = channel_type_str(&adapter.channel_type()).to_string();
-        let overrides = handle.channel_overrides(&ct_str, None).await;
+        // Per-instance overrides carried by the adapter (e.g. a sidecar's
+        // `[[sidecar_channels]]` command-policy / coalescing block, #5841)
+        // win over the kernel-level channel-type lookup, which cannot tell
+        // two same-`channel_type` sidecars apart.
+        let overrides = match adapter.channel_overrides() {
+            Some(ov) => Some(ov),
+            None => handle.channel_overrides(&ct_str, None).await,
+        };
         let debounce_ms = overrides
             .as_ref()
             .map(|o| o.message_debounce_ms)
@@ -3210,12 +3222,22 @@ async fn dispatch_message(
     let early_agent_id = resolve_or_fallback(message, handle, router).await;
 
     // Fetch overrides: agent-level (from agent.toml) wins, channel-level is fallback.
-    let channel_overrides = handle
-        .channel_overrides(
-            ct_str,
-            message.metadata.get("account_id").and_then(|v| v.as_str()),
-        )
-        .await;
+    // Per-instance adapter overrides (a sidecar's `[[sidecar_channels]]`
+    // command-policy / coalescing block, #5841) take the channel-level slot
+    // when present — they are keyed to this exact adapter, whereas the
+    // kernel lookup is keyed only by `channel_type` and cannot distinguish
+    // two sidecars sharing a `channel_type`.
+    let channel_overrides = match adapter.channel_overrides() {
+        Some(ov) => Some(ov),
+        None => {
+            handle
+                .channel_overrides(
+                    ct_str,
+                    message.metadata.get("account_id").and_then(|v| v.as_str()),
+                )
+                .await
+        }
+    };
     let overrides = if let Some(aid) = early_agent_id {
         handle
             .agent_channel_overrides(aid)
