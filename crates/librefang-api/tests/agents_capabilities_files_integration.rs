@@ -545,8 +545,8 @@ async fn test_skills_unknown_name_rejected_4xx() {
     );
 }
 
-/// MCP servers: setting an empty allowlist (= all servers) succeeds and reads
-/// back as empty with mode "all".
+/// MCP servers: setting an empty allowlist (= no servers, #5855) succeeds and
+/// reads back as empty with mode "none".
 #[tokio::test(flavor = "multi_thread")]
 async fn test_mcp_servers_set_empty_then_read_round_trip() {
     let h = boot().await;
@@ -576,8 +576,8 @@ async fn test_mcp_servers_set_empty_then_read_round_trip() {
         "GET must reflect the empty allowlist: {body:?}"
     );
     assert_eq!(
-        body["mode"], "all",
-        "empty allowlist means all servers: {body:?}"
+        body["mode"], "none",
+        "empty allowlist means no MCP servers (#5855): {body:?}"
     );
 }
 

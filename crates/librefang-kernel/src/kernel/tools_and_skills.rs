@@ -184,8 +184,10 @@ impl LibreFangKernel {
         }
 
         // Step 3: Add MCP tools (filtered by agent's MCP server allowlist,
-        // then by declared tools). Skip entirely when MCP is disabled.
-        if !mcp_disabled {
+        // then by declared tools). Skip entirely when MCP is disabled, or when
+        // the allowlist is empty — an empty list grants no servers (#5855), so
+        // there is nothing to add and no need to lock the global MCP tool map.
+        if !mcp_disabled && !mcp_allowlist.is_empty() {
             if let Ok(mcp_tools) = self.mcp.mcp_tools.lock() {
                 let configured_servers: Vec<String> = self
                     .mcp
@@ -193,7 +195,18 @@ impl LibreFangKernel {
                     .read()
                     .map(|servers| servers.iter().map(|s| s.name.clone()).collect())
                     .unwrap_or_default();
-                let mut mcp_candidates: Vec<ToolDefinition> = if mcp_allowlist.is_empty() {
+                // MCP allowlist semantics (#5855): the empty case is handled by
+                // the early `!mcp_allowlist.is_empty()` guard above (zero tools),
+                // so here the list is non-empty.
+                //   ["*"]        → all connected MCP servers (explicit opt-in).
+                //   ["a", "b"]   → only servers a and b.
+                // `mcp_tools` is a single global Vec populated by every connected
+                // server, so the previous "empty == wildcard" reading leaked one
+                // agent's servers into every other agent's prompt.
+                let mut mcp_candidates: Vec<ToolDefinition> = if mcp_allowlist
+                    .iter()
+                    .any(|s| s == "*")
+                {
                     mcp_tools.iter().cloned().collect()
                 } else {
                     let normalized: Vec<String> = mcp_allowlist
