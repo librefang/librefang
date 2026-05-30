@@ -22,6 +22,7 @@ use crate::{InstalledSkill, SkillError};
 use base64::Engine as _;
 use serde_json::{json, Value};
 use std::path::Path;
+use std::time::Duration;
 
 /// Default upstream registry repository in `owner/name` form.
 pub const DEFAULT_REGISTRY_REPO: &str = "librefang/librefang-registry";
@@ -64,6 +65,16 @@ pub struct ProposeRequest<'a> {
 /// Idempotent on the fork (a pre-existing fork is reused) but not on the
 /// branch: each call creates a uniquely-named branch so repeated proposals
 /// do not clobber each other.
+///
+/// **Not idempotent on failure.** The steps run in order — fork, create
+/// branch, push files, then open the PR — and there is no rollback. If a
+/// later step fails (network drop, or a 422 from `open_pull_request` when an
+/// identical PR already exists), the fork and the already-pushed
+/// `skill/<name>-<timestamp>` branch remain on the user's fork; the caller
+/// gets the error but the partial state is not cleaned up. Because the branch
+/// name is timestamped, each retry pushes a *new* branch, so repeated failures
+/// accumulate orphan `skill/*` branches on the fork. Pruning those is a remote
+/// GitHub housekeeping concern, out of scope for this crate.
 pub async fn propose_skill_to_registry(
     req: ProposeRequest<'_>,
 ) -> Result<ProposedSkillPr, SkillError> {
@@ -320,8 +331,14 @@ struct RegistryGithubClient {
 impl RegistryGithubClient {
     fn new(token: String) -> Self {
         Self {
+            // Local timeouts (not on the shared `client_builder` default, which
+            // four other callers rely on) so a hung TCP connection to GitHub
+            // can't pin the `POST /api/skills/{name}/propose` handler — and a
+            // Trigger lane slot — open indefinitely.
             http: crate::http_client::client_builder()
                 .user_agent("librefang-skills/registry-pr")
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(30))
                 .build()
                 .expect("Failed to build HTTP client"),
             token,
