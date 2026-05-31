@@ -17,6 +17,14 @@
 use super::error::{ToolError, ToolResult};
 use std::path::Path;
 
+fn resolve_timeout(
+    input: &serde_json::Value,
+    exec_policy: Option<&librefang_types::config::ExecPolicy>,
+) -> u64 {
+    let policy_timeout = exec_policy.map(|p| p.timeout_secs).unwrap_or(30);
+    input["timeout_seconds"].as_u64().unwrap_or(policy_timeout)
+}
+
 pub(super) async fn tool_shell_exec(
     input: &serde_json::Value,
     allowed_env: &[String],
@@ -29,29 +37,37 @@ pub(super) async fn tool_shell_exec(
     let command = input["command"]
         .as_str()
         .ok_or(ToolError::MissingParameter("command"))?;
-    // Use LLM-specified timeout, or fall back to exec policy timeout, or default 30s
-    let policy_timeout = exec_policy.map(|p| p.timeout_secs).unwrap_or(30);
-    let timeout_secs = input["timeout_seconds"].as_u64().unwrap_or(policy_timeout);
 
-    // SECURITY: Determine execution strategy based on exec policy.
-    //
-    // In Allowlist mode (default): Use direct execution via shlex argv splitting.
-    // This avoids invoking a shell interpreter, which eliminates an entire class
-    // of injection attacks (encoding tricks, $IFS, glob expansion, etc.).
-    //
-    // In Full mode: User explicitly opted into unrestricted shell access,
-    // so we use sh -c / cmd /C as before.
+    let timeout_secs = resolve_timeout(input, exec_policy);
+
+    let max_output = exec_policy.map(|p| p.max_output_bytes).unwrap_or(100_000);
+
     let use_direct_exec = exec_policy
         .map(|p| p.mode == librefang_types::config::ExecSecurityMode::Allowlist)
-        .unwrap_or(true); // Default to safe mode
+        .unwrap_or(true);
 
     let mut cmd = if use_direct_exec {
-        // SAFE PATH: Split command into argv using POSIX shell lexer rules,
-        // then execute the binary directly — no shell interpreter involved.
-        let argv = shlex::split(command).ok_or(ToolError::InvalidParameter {
-            name: "command",
-            reason: "Command contains unmatched quotes or invalid shell syntax".to_string(),
-        })?;
+        let argv = if cfg!(windows) {
+            #[cfg(windows)]
+            {
+                windows_argv_split(command).ok_or(ToolError::InvalidParameter {
+                    name: "command",
+                    reason: "Command contains unmatched quotes or invalid shell syntax".to_string(),
+                })?
+            }
+            #[cfg(not(windows))]
+            {
+                shlex::split(command).ok_or(ToolError::InvalidParameter {
+                    name: "command",
+                    reason: "Command contains unmatched quotes or invalid shell syntax".to_string(),
+                })?
+            }
+        } else {
+            shlex::split(command).ok_or(ToolError::InvalidParameter {
+                name: "command",
+                reason: "Command contains unmatched quotes or invalid shell syntax".to_string(),
+            })?
+        };
         if argv.is_empty() {
             return Err(ToolError::InvalidParameter {
                 name: "command",
@@ -64,8 +80,6 @@ pub(super) async fn tool_shell_exec(
         }
         c
     } else {
-        // UNSAFE PATH: Full mode — user explicitly opted in to shell interpretation.
-        // Shell resolution: prefer sh (Git Bash/MSYS2) on Windows.
         #[cfg(windows)]
         let git_sh: Option<&str> = {
             const SH_PATHS: &[&str] = &[
@@ -98,40 +112,29 @@ pub(super) async fn tool_shell_exec(
         c
     };
 
-    // Set working directory to agent workspace so files are created there
     if let Some(ws) = workspace_root {
         cmd.current_dir(ws);
     }
 
-    // SECURITY: Isolate environment to prevent credential leakage.
-    // Hand settings may grant access to specific provider API keys.
     crate::subprocess_sandbox::sandbox_command(&mut cmd, allowed_env);
 
-    // Ensure UTF-8 output on Windows
     #[cfg(windows)]
     cmd.env("PYTHONIOENCODING", "utf-8");
 
-    // Prevent child from inheriting stdin (avoids blocking on Windows)
     cmd.stdin(std::process::Stdio::null());
 
-    // Check for interrupt before we even launch the subprocess — the user may
-    // have hit /stop while approval was pending or while a prior tool was running.
     if interrupt.as_ref().is_some_and(|i| i.is_cancelled()) {
         return Err(ToolError::upstream_msg("[interrupted before execution]"));
     }
 
-    // Capture piped output so we can collect it after the process exits.
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
-    // Ensure the child is terminated when the Child handle is dropped (e.g.
-    // on timeout or session cancellation) rather than becoming an orphan.
     cmd.kill_on_drop(true);
 
-    // Spawn the child process so we hold a handle that can be killed if the
-    // session interrupt fires while the command is running.  Using `output()`
-    // instead would block until the process *completes*, meaning cancel() would
-    // never be observed mid-execution — the whole point of this feature.
+    #[cfg(unix)]
+    cmd.process_group(0);
+
     let child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
@@ -142,28 +145,15 @@ pub(super) async fn tool_shell_exec(
         }
     };
 
-    // Register the spawned child in the process registry so external
-    // consumers (e.g. `ps`-style tooling, session cleanup) can track it.
     let child_pid = child.id();
     if let (Some(reg), Some(pid)) = (process_registry, child_pid) {
         reg.register(pid, command.to_string(), session_id);
     }
 
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let deadline = tokio::time::Instant::now()
+        .checked_add(std::time::Duration::from_secs(timeout_secs))
+        .unwrap_or_else(|| tokio::time::Instant::now() + std::time::Duration::from_secs(3600));
 
-    // Drive `wait_with_output()` directly: it owns the stdout/stderr pipes and
-    // drains them concurrently with reaping the child. The previous
-    // `try_wait`-with-50 ms-sleep poll loop did NOT drain pipes — so any child
-    // that wrote more than the OS pipe buffer (often 8–16 KB on container
-    // kernels) would deadlock on `write()`, never reach `try_wait → Some`, and
-    // the loop would burn the full timeout. Confirmed reproducer:
-    // `yes hello | head -c 30000` deadlocks at the 8 KB pipe boundary on this
-    // box.
-    //
-    // Cancel-cascade preserved by select-ing the wait future against a 100 ms
-    // periodic interrupt poll. If interrupt fires (or the deadline lapses),
-    // dropping the wait future cancels the underlying child handle —
-    // `kill_on_drop(true)` set above ensures the OS process is reaped.
     let interrupt_clone = interrupt.clone();
     let mut interrupt_tick = tokio::time::interval(std::time::Duration::from_millis(100));
     interrupt_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -173,18 +163,21 @@ pub(super) async fn tool_shell_exec(
     let output = loop {
         tokio::select! {
             biased;
-            // Process exited (with pipes drained — that's the bug fix). Take the result.
             res = &mut wait_fut => break res.map_err(|e| ToolError::Upstream {
                 message: format!("Failed to collect output: {e}"),
                 source: Some(Box::new(e)),
             }),
-            // Periodic interrupt + deadline check. We drop wait_fut on either,
-            // which kills the child via kill_on_drop.
             _ = interrupt_tick.tick() => {
                 if interrupt_clone.as_ref().is_some_and(|i| i.is_cancelled()) {
+                    if let Some(pid) = child_pid {
+                        let _ = crate::subprocess_sandbox::kill_process_tree(pid, 0).await;
+                    }
                     return Err(ToolError::upstream_msg("[interrupted]"));
                 }
                 if tokio::time::Instant::now() >= deadline {
+                    if let Some(pid) = child_pid {
+                        let _ = crate::subprocess_sandbox::kill_process_tree(pid, 0).await;
+                    }
                     return Err(ToolError::upstream_msg(format!(
                         "Command timed out after {timeout_secs}s"
                     )));
@@ -199,13 +192,10 @@ pub(super) async fn tool_shell_exec(
             let stderr = String::from_utf8_lossy(&output.stderr);
             let exit_code = output.status.code().unwrap_or(-1);
 
-            // Mark the process as finished in the registry.
             if let (Some(reg), Some(pid)) = (process_registry, child_pid) {
                 reg.mark_finished(pid, exit_code);
             }
 
-            // Truncate very long outputs to prevent memory issues
-            let max_output = 100_000;
             let stdout_str = if stdout.len() > max_output {
                 format!(
                     "{}...\n[truncated, {} total bytes]",
@@ -233,6 +223,80 @@ pub(super) async fn tool_shell_exec(
     }
 }
 
+/// Split a command string into argv following Windows CRT rules.
+///
+/// Handles `\"` (escaped quote), `\\` (escaped backslash), and empty
+/// quoted strings (`""` produces an empty arg). Returns `None` on
+/// unterminated quotes.
+#[cfg(any(windows, test))]
+fn windows_argv_split(s: &str) -> Option<Vec<String>> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+
+    enum State {
+        LeadingWhitespace,
+        Token,
+        Delimited,
+    }
+    let mut state = State::LeadingWhitespace;
+    let mut chars = s.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                let mut count = 1;
+                while chars.peek() == Some(&'\\') {
+                    chars.next();
+                    count += 1;
+                }
+                if chars.peek() == Some(&'"') {
+                    chars.next();
+                    let slashes = count / 2;
+                    for _ in 0..slashes {
+                        current.push('\\');
+                    }
+                    if count % 2 == 1 {
+                        current.push('"');
+                    } else {
+                        in_quotes = !in_quotes;
+                    }
+                } else {
+                    for _ in 0..count {
+                        current.push('\\');
+                    }
+                }
+                state = State::Token;
+            }
+            '"' => {
+                in_quotes = !in_quotes;
+                state = State::Token;
+            }
+            ' ' | '\t' if !in_quotes => {
+                if let State::Token = state {
+                    args.push(std::mem::take(&mut current));
+                    state = State::Delimited;
+                }
+            }
+            _ => {
+                current.push(c);
+                state = State::Token;
+            }
+        }
+    }
+
+    if in_quotes {
+        return None;
+    }
+    if let State::Token = state {
+        args.push(current);
+    }
+    if args.is_empty() {
+        return None;
+    }
+    Some(args)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,8 +310,6 @@ mod tests {
 
     #[tokio::test]
     async fn shell_exec_unmatched_quotes_is_invalid_parameter() {
-        // Default policy (None) uses the safe argv path, which rejects bad
-        // shell syntax before spawning anything.
         let r = tool_shell_exec(
             &json!({"command": "echo \"unterminated"}),
             &[],
@@ -265,5 +327,123 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn argv_simple_space_separated() {
+        assert_eq!(
+            windows_argv_split("cmd a b").unwrap(),
+            vec!["cmd", "a", "b"],
+        );
+    }
+
+    #[test]
+    fn argv_quoted_arg_preserves_spaces() {
+        assert_eq!(
+            windows_argv_split(r#"cmd "a b""#).unwrap(),
+            vec!["cmd", "a b"],
+        );
+    }
+
+    #[test]
+    fn argv_escaped_quote_inside_quoted() {
+        assert_eq!(
+            windows_argv_split(r#"cmd "a\"b""#).unwrap(),
+            vec!["cmd", r#"a"b"#],
+        );
+    }
+
+    #[test]
+    fn argv_escaped_quote_outside_quotes() {
+        assert_eq!(
+            windows_argv_split(r#"cmd \"escaped\""#).unwrap(),
+            vec!["cmd", r#""escaped""#],
+        );
+    }
+
+    #[test]
+    fn argv_escaped_quote_with_space_splits() {
+        assert_eq!(
+            windows_argv_split(r#"cmd \"a\" \"b\""#).unwrap(),
+            vec!["cmd", r#""a""#, r#""b""#],
+        );
+    }
+
+    #[test]
+    fn argv_empty_quoted_string() {
+        assert_eq!(
+            windows_argv_split(r#"cmd "" arg"#).unwrap(),
+            vec!["cmd", "", "arg"],
+        );
+    }
+
+    #[test]
+    fn argv_double_backslash_before_quote() {
+        assert_eq!(
+            windows_argv_split(r#"cmd "a\\" b"#).unwrap(),
+            vec!["cmd", r#"a\"#, "b"],
+        );
+    }
+
+    #[test]
+    fn argv_triple_backslash_before_quote() {
+        assert_eq!(
+            windows_argv_split(r#"cmd "a\\\" b""#).unwrap(),
+            vec!["cmd", r#"a\" b"#],
+        );
+    }
+
+    #[test]
+    fn argv_unterminated_quote_is_none() {
+        assert!(windows_argv_split(r#"cmd "unterminated"#).is_none());
+    }
+
+    #[test]
+    fn argv_empty_input_is_none() {
+        assert!(windows_argv_split("").is_none());
+    }
+
+    #[test]
+    fn argv_whitespace_only_is_none() {
+        assert!(windows_argv_split("   ").is_none());
+    }
+
+    #[test]
+    fn argv_multiple_spaces_no_empty_args() {
+        assert_eq!(windows_argv_split("cmd   a").unwrap(), vec!["cmd", "a"],);
+    }
+
+    #[test]
+    fn timeout_default_uses_policy_value() {
+        let policy = librefang_types::config::ExecPolicy::default();
+        assert_eq!(resolve_timeout(&json!({}), Some(&policy)), 30);
+    }
+
+    #[test]
+    fn timeout_override_up_is_not_clamped() {
+        let policy = librefang_types::config::ExecPolicy::default();
+        assert_eq!(
+            resolve_timeout(&json!({"timeout_seconds": 300}), Some(&policy)),
+            300,
+        );
+    }
+
+    #[test]
+    fn timeout_override_down_is_honored() {
+        let policy = librefang_types::config::ExecPolicy::default();
+        assert_eq!(
+            resolve_timeout(&json!({"timeout_seconds": 5}), Some(&policy)),
+            5,
+        );
+    }
+
+    #[test]
+    fn timeout_no_policy_uses_hardcoded_default() {
+        assert_eq!(resolve_timeout(&json!({}), None), 30);
+    }
+
+    #[test]
+    fn timeout_no_policy_with_input_override() {
+        assert_eq!(resolve_timeout(&json!({"timeout_seconds": 120}), None), 120,);
     }
 }

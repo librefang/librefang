@@ -17,6 +17,25 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::warn;
 
+const DEFAULT_MAX_READ_BYTES: u64 = 10 * 1024 * 1024;
+const HARD_MAX_READ_BYTES: u64 = 128 * 1024 * 1024;
+const DEFAULT_DIR_LIMIT: usize = 1000;
+const DEFAULT_DIR_OFFSET: usize = 0;
+
+fn reject_backslash_on_unix(raw_path: &str) -> Result<(), String> {
+    #[cfg(not(windows))]
+    {
+        if raw_path.contains('\\') {
+            return Err(format!(
+                "path '{}' contains backslash separators which are forbidden on this platform",
+                raw_path
+            ));
+        }
+    }
+    let _ = raw_path;
+    Ok(())
+}
+
 /// Resolve a file path through the workspace sandbox, with optional
 /// additional canonical roots that should also be considered "inside the
 /// sandbox" — used to honor named workspaces declared in the agent's
@@ -31,6 +50,7 @@ pub(super) fn resolve_file_path_ext(
     workspace_root: Option<&Path>,
     additional_roots: &[&Path],
 ) -> Result<PathBuf, String> {
+    reject_backslash_on_unix(raw_path)?;
     let root = workspace_root.ok_or(
         "Workspace sandbox not configured: file operations are disabled. \
          Set a workspace_root in the agent manifest or kernel config to enable file tools.",
@@ -136,6 +156,9 @@ pub(super) fn check_absolute_path_inside_workspace(
     allowed_prefixes: &[PathBuf],
 ) -> Option<String> {
     let raw = raw_path?;
+    if let Err(e) = reject_backslash_on_unix(raw) {
+        return Some(e);
+    }
     let p = Path::new(raw);
     if p.components()
         .any(|c| matches!(c, std::path::Component::ParentDir))
@@ -220,12 +243,50 @@ pub(super) async fn tool_file_read(
         .as_str()
         .ok_or(ToolError::MissingParameter("path"))?;
     let resolved = resolve_path(raw_path, workspace_root, additional_roots)?;
-    tokio::fs::read_to_string(&resolved)
+    let max_bytes = input["max_bytes"]
+        .as_u64()
+        .unwrap_or(DEFAULT_MAX_READ_BYTES)
+        .min(HARD_MAX_READ_BYTES);
+    let file = tokio::fs::File::open(&resolved)
         .await
         .map_err(|e| ToolError::Upstream {
-            message: format!("Failed to read file: {e}"),
+            message: format!("Failed to open file '{}': {e}", resolved.display()),
             source: Some(Box::new(e)),
-        })
+        })?;
+    let metadata = file.metadata().await.map_err(|e| ToolError::Upstream {
+        message: format!("Failed to read metadata for '{}': {e}", resolved.display()),
+        source: Some(Box::new(e)),
+    })?;
+    let file_size = metadata.len();
+    if file_size > max_bytes {
+        return Err(ToolError::InvalidParameter {
+            name: "max_bytes",
+            reason: format!(
+                "File '{}' is {} bytes, exceeding the read limit of {} bytes",
+                resolved.display(),
+                file_size,
+                max_bytes
+            ),
+        });
+    }
+    use tokio::io::AsyncReadExt;
+    let alloc = (file_size.min(HARD_MAX_READ_BYTES)) as usize;
+    let mut buf = Vec::with_capacity(alloc);
+    let mut reader = tokio::io::BufReader::new(file);
+    reader
+        .read_to_end(&mut buf)
+        .await
+        .map_err(|e| ToolError::Upstream {
+            message: format!("Failed to read file '{}': {e}", resolved.display()),
+            source: Some(Box::new(e)),
+        })?;
+    String::from_utf8(buf).map_err(|e| ToolError::InvalidParameter {
+        name: "path",
+        reason: format!(
+            "File '{}' contains non-UTF-8 content: {e}",
+            resolved.display()
+        ),
+    })
 }
 
 /// `file_read` deduplication shim (#4971).
@@ -282,14 +343,28 @@ pub(super) async fn tool_file_write(
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(|e| ToolError::Upstream {
-                message: format!("Failed to create directories: {e}"),
+                message: format!(
+                    "Failed to create directories for '{}': {e}",
+                    resolved.display()
+                ),
                 source: Some(Box::new(e)),
             })?;
     }
-    tokio::fs::write(&resolved, content)
+    let tmp = resolved.with_extension(format!("{}.tmp", rand::random::<u64>()));
+    tokio::fs::write(&tmp, content)
         .await
         .map_err(|e| ToolError::Upstream {
-            message: format!("Failed to write file: {e}"),
+            message: format!("Failed to write file '{}': {e}", resolved.display()),
+            source: Some(Box::new(e)),
+        })?;
+    tokio::fs::rename(&tmp, &resolved)
+        .await
+        .map_err(|e| ToolError::Upstream {
+            message: format!(
+                "Failed to atomically rename '{}' -> '{}': {e}",
+                tmp.display(),
+                resolved.display()
+            ),
             source: Some(Box::new(e)),
         })?;
     Ok(format!(
@@ -313,10 +388,15 @@ pub(super) async fn tool_file_list(
         reason: "retry with {\"path\": \".\"} to list the workspace root".to_string(),
     })?;
     let resolved = resolve_path(raw_path, workspace_root, additional_roots)?;
+    let limit = input["limit"].as_u64().map(|l| l as usize);
+    let offset = input["offset"]
+        .as_u64()
+        .map(|o| o as usize)
+        .unwrap_or(DEFAULT_DIR_OFFSET);
     let mut entries = tokio::fs::read_dir(&resolved)
         .await
         .map_err(|e| ToolError::Upstream {
-            message: format!("Failed to list directory: {e}"),
+            message: format!("Failed to list directory '{}': {e}", resolved.display()),
             source: Some(Box::new(e)),
         })?;
     let mut files = Vec::new();
@@ -324,7 +404,7 @@ pub(super) async fn tool_file_list(
         .next_entry()
         .await
         .map_err(|e| ToolError::Upstream {
-            message: format!("Failed to read entry: {e}"),
+            message: format!("Failed to read entry in '{}': {e}", resolved.display()),
             source: Some(Box::new(e)),
         })?
     {
@@ -337,7 +417,23 @@ pub(super) async fn tool_file_list(
         files.push(format!("{name}{suffix}"));
     }
     files.sort();
-    Ok(files.join("\n"))
+    let total = files.len();
+    let skipped = offset.min(files.len());
+    let limited: Vec<String> = files
+        .into_iter()
+        .skip(skipped)
+        .take(limit.unwrap_or(DEFAULT_DIR_LIMIT))
+        .collect();
+    let mut out = limited.join("\n");
+    if limit.is_some() && skipped + limited.len() < total {
+        out.push_str(&format!(
+            "\n--- showing {} of {} entries (offset: {}) ---",
+            limited.len(),
+            total,
+            skipped
+        ));
+    }
+    Ok(out)
 }
 
 pub(super) async fn tool_apply_patch(
@@ -469,6 +565,26 @@ mod path_check_tests {
         let err = check_absolute_path_inside_workspace(Some("../../etc/shadow"), Some(&root), &[])
             .expect("relative `..` must be blocked");
         assert!(err.contains("'..'"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn backslash_rejected_on_unix() {
+        let root = PathBuf::from("/ws");
+        let err = check_absolute_path_inside_workspace(Some("/ws/sub\\dir"), Some(&root), &[])
+            .expect("backslash must be blocked on Unix");
+        assert!(
+            err.contains("backslash"),
+            "error must mention backslash, got: {err}"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn resolve_rejects_backslash_on_unix() {
+        let root = PathBuf::from("/ws");
+        let err = resolve_file_path_ext("sub\\dir", Some(&root), &[]).unwrap_err();
+        assert!(err.contains("backslash"));
     }
 }
 

@@ -2,23 +2,28 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { GoalsPage } from "./GoalsPage";
-import { useGoals, useGoalTemplates } from "../lib/queries/goals";
+import { useGoals, useGoalTemplates, useGoalRun } from "../lib/queries/goals";
 import {
   useCreateGoal,
   useUpdateGoal,
   useDeleteGoal,
+  useStartGoalRun,
+  useStopGoalRun,
 } from "../lib/mutations/goals";
 import type { GoalItem, GoalTemplate } from "../api";
 
 vi.mock("../lib/queries/goals", () => ({
   useGoals: vi.fn(),
   useGoalTemplates: vi.fn(),
+  useGoalRun: vi.fn(),
 }));
 
 vi.mock("../lib/mutations/goals", () => ({
   useCreateGoal: vi.fn(),
   useUpdateGoal: vi.fn(),
   useDeleteGoal: vi.fn(),
+  useStartGoalRun: vi.fn(),
+  useStopGoalRun: vi.fn(),
 }));
 
 vi.mock("react-i18next", async () => {
@@ -36,9 +41,12 @@ vi.mock("react-i18next", async () => {
 
 const useGoalsMock = useGoals as unknown as ReturnType<typeof vi.fn>;
 const useGoalTemplatesMock = useGoalTemplates as unknown as ReturnType<typeof vi.fn>;
+const useGoalRunMock = useGoalRun as unknown as ReturnType<typeof vi.fn>;
 const useCreateGoalMock = useCreateGoal as unknown as ReturnType<typeof vi.fn>;
 const useUpdateGoalMock = useUpdateGoal as unknown as ReturnType<typeof vi.fn>;
 const useDeleteGoalMock = useDeleteGoal as unknown as ReturnType<typeof vi.fn>;
+const useStartGoalRunMock = useStartGoalRun as unknown as ReturnType<typeof vi.fn>;
+const useStopGoalRunMock = useStopGoalRun as unknown as ReturnType<typeof vi.fn>;
 
 interface QueryShape<T> {
   data: T;
@@ -81,6 +89,8 @@ function setMutations(opts: {
   });
   useUpdateGoalMock.mockReturnValue({ mutateAsync: update, isPending: false });
   useDeleteGoalMock.mockReturnValue({ mutateAsync: del, isPending: false });
+  useStartGoalRunMock.mockReturnValue({ mutateAsync: vi.fn(), isPending: false });
+  useStopGoalRunMock.mockReturnValue({ mutateAsync: vi.fn(), isPending: false });
   return { create, update, del };
 }
 
@@ -133,6 +143,9 @@ describe("GoalsPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     setMutations();
+    // GoalRunControl calls useGoalRun for every rendered goal; default to an
+    // idle (no active run) query so the control renders its start button.
+    useGoalRunMock.mockReturnValue(makeQuery({ running: false }));
   });
 
   it("renders the loading skeleton while goals are fetching", () => {

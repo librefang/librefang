@@ -23,6 +23,31 @@
 use std::path::{Path, PathBuf};
 use tracing::warn;
 
+async fn atomic_write(target: &Path, content: &str) -> std::io::Result<()> {
+    let parent = target.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "no parent directory")
+    })?;
+    tokio::fs::create_dir_all(parent).await?;
+    let tmp_name = format!(
+        ".librefang-tmp-{}-{}",
+        target
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "patch".to_string()),
+        rand::random::<u64>()
+    );
+    let tmp_path = parent.join(tmp_name);
+    if let Err(e) = tokio::fs::write(&tmp_path, content).await {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(e);
+    }
+    let rename_result = tokio::fs::rename(&tmp_path, target).await;
+    if rename_result.is_err() {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+    }
+    rename_result
+}
+
 /// A single operation in a patch.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PatchOp {
@@ -402,14 +427,9 @@ pub async fn apply_patch_ext(
                             resolved.clone()
                         };
 
-                        if let Some(parent) = target.parent() {
-                            let _ = tokio::fs::create_dir_all(parent).await;
-                        }
-
-                        match tokio::fs::write(&target, patched).await {
+                        match atomic_write(&target, &patched).await {
                             Ok(()) => {
                                 result.files_updated += 1;
-                                // If moved, delete original
                                 if move_to.is_some() && target != resolved {
                                     let _ = tokio::fs::remove_file(&resolved).await;
                                 }

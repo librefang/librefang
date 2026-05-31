@@ -516,16 +516,27 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: cli-${{ matrix.target }}-${{ env.RELEASE_TAG }}
+          # Cache the kernel workspace AND the sidecar's separate target/.
+          workspaces: |
+            .
+            sdk/rust/librefang-sidecar-telegram
       - name: Build CLI
         run: cargo build --release --target ${{ matrix.target }} --bin bossfang
+      - name: Build Telegram sidecar
+        # Separate cargo workspace → separate target/ under the manifest dir.
+        run: cargo build --release --target ${{ matrix.target }} --manifest-path sdk/rust/librefang-sidecar-telegram/Cargo.toml
       - name: Ad-hoc codesign
         run: |
           xattr -cr target/${{ matrix.target }}/release/bossfang || true
           codesign --force --sign - target/${{ matrix.target }}/release/bossfang
+          SIDECAR=sdk/rust/librefang-sidecar-telegram/target/${{ matrix.target }}/release/librefang-sidecar-telegram
+          xattr -cr "$SIDECAR" || true
+          codesign --force --sign - "$SIDECAR"
       - name: Package
         run: |
+          cp sdk/rust/librefang-sidecar-telegram/target/${{ matrix.target }}/release/librefang-sidecar-telegram target/${{ matrix.target }}/release/librefang-sidecar-telegram
           cd target/${{ matrix.target }}/release
-          tar czf ../../../bossfang-${{ matrix.target }}.tar.gz bossfang
+          tar czf ../../../bossfang-${{ matrix.target }}.tar.gz bossfang librefang-sidecar-telegram
           cd ../../..
           shasum -a 256 bossfang-${{ matrix.target }}.tar.gz > bossfang-${{ matrix.target }}.tar.gz.sha256
       - name: Upload to GitHub Release
@@ -582,6 +593,10 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: cli-${{ matrix.target }}-${{ env.RELEASE_TAG }}
+          # Cache the kernel workspace AND the sidecar's separate target/.
+          workspaces: |
+            .
+            sdk/rust/librefang-sidecar-telegram
       - name: Build CLI
         run: |
           if [ "${{ matrix.use_cross }}" = "true" ]; then
@@ -589,10 +604,19 @@ jobs:
           else
             cargo build --release --target ${{ matrix.target }} --bin bossfang
           fi
+      - name: Build Telegram sidecar
+        # Separate cargo workspace → separate target/ under the manifest dir.
+        run: |
+          if [ "${{ matrix.use_cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }} --manifest-path sdk/rust/librefang-sidecar-telegram/Cargo.toml
+          else
+            cargo build --release --target ${{ matrix.target }} --manifest-path sdk/rust/librefang-sidecar-telegram/Cargo.toml
+          fi
       - name: Package
         run: |
+          cp sdk/rust/librefang-sidecar-telegram/target/${{ matrix.target }}/release/librefang-sidecar-telegram target/${{ matrix.target }}/release/librefang-sidecar-telegram
           cd target/${{ matrix.target }}/release
-          tar czf ../../../bossfang-${{ matrix.target }}.tar.gz bossfang
+          tar czf ../../../bossfang-${{ matrix.target }}.tar.gz bossfang librefang-sidecar-telegram
           cd ../../..
           sha256sum bossfang-${{ matrix.target }}.tar.gz > bossfang-${{ matrix.target }}.tar.gz.sha256
       - name: Upload to GitHub Release
@@ -744,8 +768,15 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: cli-${{ matrix.target }}-${{ env.RELEASE_TAG }}
+          # Cache the kernel workspace AND the sidecar's separate target/.
+          workspaces: |
+            .
+            sdk/rust/librefang-sidecar-telegram
       - name: Build static CLI
         run: cross build --release --target ${{ matrix.target }} --bin bossfang
+      - name: Build Telegram sidecar
+        # Separate cargo workspace → separate target/ under the manifest dir.
+        run: cross build --release --target ${{ matrix.target }} --manifest-path sdk/rust/librefang-sidecar-telegram/Cargo.toml
       - name: Verify static linking
         run: |
           FILE_OUT=$(file target/${{ matrix.target }}/release/bossfang)
@@ -754,10 +785,17 @@ jobs:
             echo "::error::Binary is not statically linked!"
             exit 1
           fi
+          SIDECAR_OUT=$(file sdk/rust/librefang-sidecar-telegram/target/${{ matrix.target }}/release/librefang-sidecar-telegram)
+          echo "$SIDECAR_OUT"
+          if ! echo "$SIDECAR_OUT" | grep -qE "statically linked|static-pie linked"; then
+            echo "::error::Sidecar binary is not statically linked!"
+            exit 1
+          fi
       - name: Package
         run: |
+          cp sdk/rust/librefang-sidecar-telegram/target/${{ matrix.target }}/release/librefang-sidecar-telegram target/${{ matrix.target }}/release/librefang-sidecar-telegram
           cd target/${{ matrix.target }}/release
-          tar czf ../../../bossfang-${{ matrix.target }}.tar.gz bossfang
+          tar czf ../../../bossfang-${{ matrix.target }}.tar.gz bossfang librefang-sidecar-telegram
           cd ../../..
           sha256sum bossfang-${{ matrix.target }}.tar.gz > bossfang-${{ matrix.target }}.tar.gz.sha256
       - name: Upload to GitHub Release
@@ -804,12 +842,19 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: cli-${{ matrix.target }}-${{ env.RELEASE_TAG }}
+          # Cache the kernel workspace AND the sidecar's separate target/.
+          workspaces: |
+            .
+            sdk/rust/librefang-sidecar-telegram
       - name: Build CLI
         run: cargo build --release --target ${{ matrix.target }} --bin bossfang
+      - name: Build Telegram sidecar
+        # Separate cargo workspace → separate target/ under the manifest dir.
+        run: cargo build --release --target ${{ matrix.target }} --manifest-path sdk/rust/librefang-sidecar-telegram/Cargo.toml
       - name: Package
         shell: pwsh
         run: |
-          Compress-Archive -Path "target/${{ matrix.target }}/release/bossfang.exe" -DestinationPath "bossfang-${{ matrix.target }}.zip"
+          Compress-Archive -Path "target/${{ matrix.target }}/release/bossfang.exe", "sdk/rust/librefang-sidecar-telegram/target/${{ matrix.target }}/release/librefang-sidecar-telegram.exe" -DestinationPath "bossfang-${{ matrix.target }}.zip"
           $hash = (Get-FileHash "bossfang-${{ matrix.target }}.zip" -Algorithm SHA256).Hash.ToLower()
           "$hash  bossfang-${{ matrix.target }}.zip" | Out-File -Encoding ASCII "bossfang-${{ matrix.target }}.zip.sha256"
       - name: Upload to GitHub Release

@@ -774,7 +774,7 @@ The channel system (`librefang-channels`) provides 44 adapters for messaging pla
 | **Wave 3 (6)** | Guilded, Keybase, Threema, Pumble, Flock, Twist (Nextcloud Talk, Webex migrated to sidecars) |
 | **Wave 4 (9)** | Mumble, Gitter, Ntfy, Gotify, Webhook, Sidecar (DingTalk, QQ, WeCom (WeChat Work) migrated to sidecars) |
 
-> The Sidecar adapter enables external processes written in any language to act as channel adapters via JSON-RPC over stdin/stdout. Telegram / ntfy / Gotify / Mastodon / Bluesky / Reddit / Twitch / Rocket.Chat / Nextcloud Talk / Discord / Slack / Webex / LINE / Zulip / Mattermost / Signal / QQ / Matrix / WeCom / Feishu / Email / DingTalk ship as first-party Python sidecars in `librefang-sdk`.
+> The Sidecar adapter enables external processes written in any language to act as channel adapters via JSON-RPC over stdin/stdout. Telegram / ntfy / Gotify / Mastodon / Bluesky / Reddit / Twitch / Rocket.Chat / Nextcloud Talk / Discord / Slack / Webex / LINE / Zulip / Mattermost / Signal / QQ / Matrix / WeCom / Feishu / Email / DingTalk ship as first-party Python sidecars in `librefang-sdk`. Telegram additionally has a first-party Rust sidecar at `sdk/rust/librefang-sidecar-telegram/` — see the [Rust Telegram sidecar adapter](/architecture/rust-telegram-sidecar) page; the Rust sidecar SDK underneath it ([reference](/architecture/rust-sidecar-sdk)) is available for writing adapters in Rust when binary footprint, startup latency, or the Rust transport ecosystem outweigh Python's lower-friction substrate.
 
 ### Channel Features
 

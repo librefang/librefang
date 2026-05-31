@@ -43,6 +43,7 @@ import {
   Sparkles,
   Terminal,
   Plug,
+  Kanban,
 } from "lucide-react";
 import { useUIStore } from "./lib/store";
 import { toastErr } from "./lib/errors";
@@ -75,6 +76,7 @@ type DashboardRoute =
   | "/skills"
   | "/workflows"
   | "/scheduler"
+  | "/tasks"
   | "/mcp-servers"
   | "/channels"
   | "/providers"
@@ -968,6 +970,7 @@ export function App() {
           { to: "/skills", label: t("nav.skills"), icon: Sparkles },
           { to: "/workflows", label: t("nav.workflows"), icon: Layers },
           { to: "/scheduler", label: t("nav.scheduler"), icon: Calendar },
+          { to: "/tasks", label: t("nav.tasks", { defaultValue: "Tasks" }), icon: Kanban },
           { to: "/approvals", label: t("nav.approvals"), icon: CheckCircle },
         ],
       },

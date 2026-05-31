@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/librefang-types",
+    "crates/librefang-subprocess",
     "crates/librefang-memory",
     "crates/librefang-memory-wiki",
     "crates/librefang-runtime",
@@ -33,7 +34,7 @@ members = [
 ]
 
 [workspace.package]
-version = "2026.5.25-beta.13"
+version = "2026.5.30-beta.15"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/librefang/librefang"

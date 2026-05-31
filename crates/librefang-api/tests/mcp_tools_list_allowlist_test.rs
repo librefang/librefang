@@ -96,6 +96,13 @@ fn register_agent_with_filters(
         description: "agent for /mcp tools/list filter regression".to_string(),
         author: "test".to_string(),
         module: "builtin:chat".to_string(),
+        // Opt into every connected MCP server. Since #5855, `mcp_servers = []`
+        // (the manifest default) means "no MCP servers", so the seeded MCP
+        // tools would be hidden before `tool_allowlist`/`tool_blocklist` ever
+        // ran. `["*"]` is the explicit "all servers" opt-in — this test
+        // exercises the tool-level filters, not the server allowlist, so the
+        // agent must see the full MCP catalogue first.
+        mcp_servers: vec!["*".to_string()],
         tool_allowlist: allowlist.iter().map(|s| s.to_string()).collect(),
         tool_blocklist: blocklist.iter().map(|s| s.to_string()).collect(),
         ..Default::default()

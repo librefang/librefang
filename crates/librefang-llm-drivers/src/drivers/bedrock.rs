@@ -36,6 +36,10 @@ pub struct BedrockDriver {
     /// When set, replaces `https://bedrock-runtime.{region}.amazonaws.com` as
     /// the URL base. Used only in tests to redirect requests to a mock server.
     base_url_override: Option<String>,
+    /// Max in-driver retries for a single API call (#10). Counts re-attempts
+    /// after the first try, so the request is issued at most `max_retries + 1`
+    /// times. Sourced from `DriverConfig.max_retries` (default 3).
+    max_retries: u32,
 }
 
 impl BedrockDriver {
@@ -64,6 +68,7 @@ impl BedrockDriver {
             client: librefang_http::proxied_client(),
             emit_caller_trace_headers: true,
             base_url_override: None,
+            max_retries: 3,
         })
     }
 
@@ -74,6 +79,14 @@ impl BedrockDriver {
     /// to suppress them entirely.
     pub fn with_emit_caller_trace_headers(mut self, emit: bool) -> Self {
         self.emit_caller_trace_headers = emit;
+        self
+    }
+
+    /// Override the max in-driver retry count (#10). Default is 3 (four total
+    /// attempts). Pass 0 to disable in-driver retries and rely on the outer
+    /// `FallbackChain`. Sourced from `DriverConfig.max_retries`.
+    pub fn with_max_retries(mut self, max_retries: u32) -> Self {
+        self.max_retries = max_retries;
         self
     }
 
@@ -99,6 +112,7 @@ impl BedrockDriver {
             client: librefang_http::proxied_client(),
             emit_caller_trace_headers: true,
             base_url_override: Some(base_url),
+            max_retries: 3,
         }
     }
 }
@@ -244,6 +258,13 @@ struct BedrockResponseToolUse {
 struct BedrockUsage {
     input_tokens: u64,
     output_tokens: u64,
+    // Prompt-cache counters from the Converse API. Like Anthropic native,
+    // `input_tokens` reports NEW input only with these as separate buckets;
+    // absent for models / requests without caching, so default to 0.
+    #[serde(default)]
+    cache_read_input_tokens: u64,
+    #[serde(default)]
+    cache_write_input_tokens: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -707,13 +728,16 @@ fn convert_response(resp: ConverseResponse) -> Result<CompletionResponse, LlmErr
         stop_reason,
         tool_calls,
         usage: TokenUsage {
-            input_tokens: resp.usage.input_tokens,
+            // Normalize to the workspace convention (see TokenUsage docs and
+            // anthropic.rs): `input_tokens` = TOTAL prompt including cached.
+            // Bedrock Converse reports `inputTokens` as NEW input only with
+            // cacheRead / cacheWrite as separate buckets, so fold them in.
+            input_tokens: resp.usage.input_tokens
+                + resp.usage.cache_read_input_tokens
+                + resp.usage.cache_write_input_tokens,
             output_tokens: resp.usage.output_tokens,
-            // Bedrock Converse API does not yet expose prompt-cache token
-            // counters separately, so report zero — the agent loop treats
-            // missing cache stats the same as no caching.
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: resp.usage.cache_write_input_tokens,
+            cache_read_input_tokens: resp.usage.cache_read_input_tokens,
         },
         actual_provider: None,
     })
@@ -777,7 +801,8 @@ impl LlmDriver for BedrockDriver {
         let url = self.build_endpoint(&request.model);
         debug!(url = %url, "Sending Bedrock Converse request");
 
-        let max_retries = 3u32;
+        // Configurable in-driver retry cap (#10); default 3.
+        let max_retries = self.max_retries;
         for attempt in 0..=max_retries {
             let request_builder = self
                 .client
@@ -795,10 +820,26 @@ impl LlmDriver for BedrockDriver {
                 ))
                 .body(body.clone());
 
-            let resp = request_builder
-                .send()
-                .await
-                .map_err(|e| LlmError::Http(e.to_string()))?;
+            // #10: route transport-layer errors (connection refused, TLS,
+            // read timeout) through the same attempt/backoff decision as the
+            // server-side transient statuses instead of returning via `?`.
+            let resp = match request_builder.send().await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    if attempt < max_retries && crate::backoff::transport_error_is_retryable(&e) {
+                        let wait_ms = (attempt + 1) as u64 * 2000;
+                        warn!(
+                            error = %e,
+                            wait_ms,
+                            attempt,
+                            "Bedrock transport error, retrying"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                        continue;
+                    }
+                    return Err(LlmError::Http(e.to_string()));
+                }
+            };
 
             let status = resp.status().as_u16();
 
@@ -980,6 +1021,8 @@ mod tests {
             usage: BedrockUsage {
                 input_tokens: 10,
                 output_tokens: 5,
+                cache_read_input_tokens: 0,
+                cache_write_input_tokens: 0,
             },
         };
         let result = convert_response(resp).unwrap();
@@ -987,6 +1030,35 @@ mod tests {
         assert_eq!(result.usage.input_tokens, 10);
         assert_eq!(result.usage.output_tokens, 5);
         assert!(matches!(result.stop_reason, StopReason::EndTurn));
+    }
+
+    #[test]
+    fn test_convert_response_folds_cache_tokens_into_input() {
+        // Converse reports inputTokens as NEW input only; cacheRead/cacheWrite
+        // are separate. Normalize input_tokens to the total prompt and surface
+        // the buckets so metering applies cache pricing.
+        let resp = ConverseResponse {
+            output: ConverseOutput {
+                message: BedrockResponseMessage {
+                    role: "assistant".to_string(),
+                    content: vec![BedrockResponseContent::Text {
+                        text: "Hi".to_string(),
+                    }],
+                },
+            },
+            stop_reason: "end_turn".to_string(),
+            usage: BedrockUsage {
+                input_tokens: 20,
+                output_tokens: 5,
+                cache_read_input_tokens: 70,
+                cache_write_input_tokens: 10,
+            },
+        };
+        let result = convert_response(resp).unwrap();
+        // 20 new + 70 read + 10 write = 100 total prompt.
+        assert_eq!(result.usage.input_tokens, 100);
+        assert_eq!(result.usage.cache_read_input_tokens, 70);
+        assert_eq!(result.usage.cache_creation_input_tokens, 10);
     }
 
     #[test]
@@ -1008,6 +1080,8 @@ mod tests {
             usage: BedrockUsage {
                 input_tokens: 15,
                 output_tokens: 8,
+                cache_read_input_tokens: 0,
+                cache_write_input_tokens: 0,
             },
         };
         let result = convert_response(resp).unwrap();

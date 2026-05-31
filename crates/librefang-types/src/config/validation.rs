@@ -45,6 +45,40 @@ const MANUAL_NESTED_ALIASES: &[(&str, &str)] = &[
     ("terminal", "trust_proxy_headers"),
 ];
 
+/// `[agents.<name>.<key>]` keys that a `config.toml` operator might write
+/// expecting a per-agent override, but which `KernelConfig` silently
+/// ignores because it has no `agents` field (#5476, #6). Each key here is
+/// a section that *is* honoured when placed in the agent's own `agent.toml`
+/// (or the `[agents.<name>]` table of a `HAND.toml`); the detector turns a
+/// silent no-op into a targeted "move this to agent.toml" warning.
+///
+/// These are the **config.toml-facing** names — what the operator types
+/// under `[agents.<name>.…]`. For most overrides that is also the
+/// `AgentManifest` field name, but two diverge:
+///   - `tool_exec` mirrors the global `[tool_exec]` section, while the
+///     manifest field is the scalar `tool_exec_backend`; both spellings
+///     are flagged so the operator is caught regardless of which one they
+///     copied.
+///   - `skill_workshop` has no global `KernelConfig` section at all — it is
+///     an agent-only feature whose documented surface is `[skill_workshop]`
+///     in `agent.toml`.
+///
+/// Do not hand-edit this list to track new `AgentManifest` fields: the
+/// `per_agent_override_keys_cover_manifest_overrides` test in
+/// `config/mod.rs` exhaustively destructures `AgentManifest` and fails the
+/// build if a newly-added field that overrides a global `KernelConfig`
+/// section is missing here (or if a stale key no longer maps to anything).
+pub(super) const PER_AGENT_OVERRIDE_KEYS: &[&str] = &[
+    "compaction",
+    "exec_policy",
+    "max_history_messages",
+    "proactive_memory",
+    "skill_workshop",
+    "thinking",
+    "tool_exec",
+    "tool_exec_backend",
+];
+
 /// Cached allowlists derived once from the schemars-emitted JSON Schema
 /// for `KernelConfig`. Built on first use and reused for the rest of the
 /// process.
@@ -252,12 +286,14 @@ impl KernelConfig {
     }
 
     /// Detect `[agents.<name>.<override_key>]` blocks placed in
-    /// `config.toml` (#5476).
+    /// `config.toml` (#5476, #6).
     ///
-    /// `KernelConfig` has no `agents` field — per-agent overrides for
-    /// `proactive_memory`, `skill_workshop`, and `compaction` live in
-    /// each agent's own `agent.toml` (or the `[agents.<name>]` section
-    /// of a `HAND.toml`), not in `config.toml`. The original #4870
+    /// `KernelConfig` has no `agents` field — per-agent overrides
+    /// (`proactive_memory`, `skill_workshop`, `compaction`, `thinking`,
+    /// `exec_policy`, `max_history_messages`, and the tool-exec backend;
+    /// the full set lives in [`PER_AGENT_OVERRIDE_KEYS`]) live in each
+    /// agent's own `agent.toml` (or the `[agents.<name>]` section of a
+    /// `HAND.toml`), not in `config.toml`. The original #4870
     /// issue body proposed the `config.toml` syntax in error, and the
     /// kernel silently accepted-and-ignored the block (the unknown
     /// top-level `agents` key was warned about generically, but the
@@ -272,13 +308,6 @@ impl KernelConfig {
     /// flagged — generic typos under `[agents]` fall through to the
     /// existing unknown-top-level warning.
     pub fn detect_misplaced_per_agent_overrides(raw: &toml::Value) -> Vec<(String, String)> {
-        // Keep this list in sync with the fields on `AgentManifest`
-        // that the kernel honours as per-agent overrides of a global
-        // `KernelConfig` section. Adding a new override here is a
-        // one-line update — the warning text below auto-includes it.
-        const PER_AGENT_OVERRIDE_KEYS: &[&str] =
-            &["proactive_memory", "skill_workshop", "compaction"];
-
         let Some(agents_tbl) = raw
             .as_table()
             .and_then(|t| t.get("agents"))
