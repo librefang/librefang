@@ -405,7 +405,7 @@ async fn allowed_user_memory_store_succeeds_and_lands() {
 }
 
 #[tokio::test]
-async fn no_acl_means_no_restriction_store_still_lands() {
+async fn no_acl_memory_store_is_denied() {
     let (kernel, probes) = AclKernel::new(None);
     let kernel: Arc<dyn KernelHandle> = Arc::new(kernel);
 
@@ -414,11 +414,14 @@ async fn no_acl_means_no_restriction_store_still_lands() {
     let result = execute_tool_raw("t1", "memory_store", &input, &ctx).await;
 
     assert!(
-        !result.is_error,
-        "no ACL (RBAC off) => store succeeds: {}",
+        result.is_error,
+        "no ACL (None) => store must be denied (fail-closed): {}",
         result.content
     );
-    assert_eq!(probes.store.lock().unwrap().len(), 1);
+    assert!(
+        probes.store.lock().unwrap().is_empty(),
+        "denied memory_store must never reach the substrate"
+    );
 }
 
 // ── memory_recall / memory_list ──────────────────────────────────────────
@@ -490,7 +493,7 @@ async fn allowed_user_memory_recall_runs() {
 }
 
 #[tokio::test]
-async fn no_acl_memory_list_and_recall_both_succeed() {
+async fn no_acl_memory_list_and_recall_both_denied() {
     let (kernel, probes) = AclKernel::new(None);
     let kernel: Arc<dyn KernelHandle> = Arc::new(kernel);
 
@@ -498,19 +501,25 @@ async fn no_acl_memory_list_and_recall_both_succeed() {
 
     let list_res = execute_tool_raw("t3", "memory_list", &json!({}), &ctx).await;
     assert!(
-        !list_res.is_error,
-        "no ACL (RBAC off) => memory_list succeeds: {}",
+        list_res.is_error,
+        "no ACL (None) => memory_list must be denied (fail-closed): {}",
         list_res.content
     );
-    assert_eq!(probes.list.lock().unwrap().len(), 1);
+    assert!(
+        probes.list.lock().unwrap().is_empty(),
+        "denied memory_list must never enumerate the substrate"
+    );
 
     let recall_res = execute_tool_raw("t3b", "memory_recall", &json!({"key": "k"}), &ctx).await;
     assert!(
-        !recall_res.is_error,
-        "no ACL (RBAC off) => memory_recall succeeds: {}",
+        recall_res.is_error,
+        "no ACL (None) => memory_recall must be denied (fail-closed): {}",
         recall_res.content
     );
-    assert_eq!(probes.recall.lock().unwrap().len(), 1);
+    assert!(
+        probes.recall.lock().unwrap().is_empty(),
+        "denied memory_recall must never reach the substrate"
+    );
 }
 
 // ── wiki_get / wiki_search / wiki_write ──────────────────────────────────

@@ -192,9 +192,10 @@ pub(super) enum MemoryAclOp {
 /// so the underlying substrate call never runs) when the requested op is
 /// denied for the requested namespace.
 ///
-/// `Ok(())` when the kernel reports `None` (RBAC disabled or sender not
-/// attributed to a registered user) — that preserves the existing
-/// single-user / RBAC-off behaviour, exactly as the proactive path does.
+/// Fail-closed: returns `PermissionDenied` when the kernel reports `None`
+/// (RBAC disabled or sender not attributed to a registered user). Kernels
+/// that run in single-user / RBAC-off mode MUST return an explicit allow-all
+/// ACL from `memory_acl_for_sender` rather than `None`.
 pub(super) fn enforce_memory_acl(
     kernel: Option<&Arc<dyn KernelHandle>>,
     sender_id: Option<&str>,
@@ -205,10 +206,13 @@ pub(super) fn enforce_memory_acl(
     let kh = kernel.ok_or_else(|| {
         ToolError::PermissionDenied("Kernel handle required for ACL enforcement".into())
     })?;
-    let acl = match kh.memory_acl_for_sender(sender_id, channel) {
-        Some(acl) => acl,
-        None => return Ok(()),
-    };
+    let acl = kh
+        .memory_acl_for_sender(sender_id, channel)
+        .ok_or_else(|| {
+            ToolError::PermissionDenied(
+                "Access denied: no ACL policy found for this sender.".into(),
+            )
+        })?;
     let guard = librefang_memory::namespace_acl::MemoryNamespaceGuard::new(acl);
     let gate = match op {
         MemoryAclOp::Read => guard.check_read(namespace),
