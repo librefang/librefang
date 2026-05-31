@@ -1473,6 +1473,7 @@ async fn test_incognito_skips_proactive_memory_auto_memorize() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(NormalDriver);
@@ -1554,6 +1555,7 @@ async fn test_normal_turn_auto_memorizes_proactive_memory_control() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(NormalDriver);

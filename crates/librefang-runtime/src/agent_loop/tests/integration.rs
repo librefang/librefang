@@ -362,6 +362,7 @@ fn fresh_session() -> librefang_memory::session::Session {
         model_override: None,
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     }
 }
 
