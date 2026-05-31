@@ -539,10 +539,30 @@ impl AgentRegistry {
         Ok(())
     }
 
+    /// Update an agent's channel allowlist.
+    pub fn update_channels(&self, id: AgentId, channels: Vec<String>) -> LibreFangResult<()> {
+        self.with_entry_mut(id, |entry| {
+            entry.manifest.channels = channels;
+            entry.last_active = chrono::Utc::now();
+        })?;
+        self.notify_changed();
+        Ok(())
+    }
+
     /// Update an agent's MCP server allowlist.
     pub fn update_mcp_servers(&self, id: AgentId, servers: Vec<String>) -> LibreFangResult<()> {
         self.with_entry_mut(id, |entry| {
             entry.manifest.mcp_servers = servers;
+            entry.last_active = chrono::Utc::now();
+        })?;
+        self.notify_changed();
+        Ok(())
+    }
+
+    /// Update an agent's `auto_evolve` flag.
+    pub fn update_auto_evolve(&self, id: AgentId, auto_evolve: bool) -> LibreFangResult<()> {
+        self.with_entry_mut(id, |entry| {
+            entry.manifest.auto_evolve = auto_evolve;
             entry.last_active = chrono::Utc::now();
         })?;
         self.notify_changed();

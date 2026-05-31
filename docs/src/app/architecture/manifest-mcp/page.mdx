@@ -13,7 +13,7 @@ and which crate is allowed to mutate which side.
 
 | Where | Type | What it holds |
 |---|---|---|
-| `AgentManifest.mcp_servers` | `Vec<String>` (server **names**) | Per-agent **allowlist**. Empty = "every configured server is visible to this agent". Lives in `agent.toml`. |
+| `AgentManifest.mcp_servers` | `Vec<String>` (server **names**) | Per-agent **allowlist**. Empty = "no servers visible to this agent"; `["*"]` = every configured server; a named list scopes to those servers (#5855). Lives in `agent.toml`. |
 | `KernelConfig.mcp_servers` | `Vec<McpServerConfigEntry>` (full configs) | Global **registry** of installed servers — transport, env, OAuth, taint policy, headers. Lives in `~/.librefang/config.toml`. |
 | `kernel.mcp.effective_mcp_servers` | `RwLock<Vec<McpServerConfigEntry>>` | Hot-reloadable runtime mirror of `KernelConfig.mcp_servers`. Bumped together with `mcp_generation` so cached prompt summaries invalidate atomically. |
 
@@ -36,13 +36,14 @@ render_mcp_summary(tool_names, configured_servers, mcp_allowlist)
 — `crates/librefang-kernel/src/kernel/prompt_context.rs:281`. The
 `configured_servers` argument is the registry snapshot
 (`effective_mcp_servers`); the `mcp_allowlist` argument is the agent's
-manifest field. An empty allowlist means every configured server is
-visible to this agent.
+manifest field. An empty allowlist means **no** server is visible to
+this agent; `["*"]` opts into every configured server (#5855).
 
 The same pattern is used elsewhere any time a per-agent view of MCP is
 needed (tool list rendering, route handlers): pull the registry
 snapshot, then filter through the manifest allowlist. **Never store the
-intersection.**
+intersection.** Since #5855 an empty allowlist resolves to **no** servers
+(not all); `["*"]` is the explicit opt-in to every configured server.
 
 ## Why the split is intentional
 

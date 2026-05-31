@@ -85,9 +85,7 @@ impl LibreFangKernel {
                         }
                     }
                 }
-                let timestamps = saved_hand
-                    .activated_at
-                    .and_then(|a| saved_hand.updated_at.map(|u| (a, u)));
+                let timestamps = saved_hand.activated_at.zip(saved_hand.updated_at);
                 match self.activate_hand_with_id(
                     &hand_id,
                     config,

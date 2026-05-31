@@ -21,6 +21,31 @@ use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
 use tracing::{debug, error, info, warn};
 
+/// Cap on a single inbound event line from a sidecar adapter. The inbound
+/// stream was previously read with the unbounded `lines()`, so a runaway
+/// adapter emitting bytes without a newline could grow the reader's buffer
+/// without bound and OOM the daemon. 64 MiB is far above any real platform
+/// event (media is referenced, not inlined); an over-cap line drops the
+/// connection and the supervisor restarts the adapter.
+const MAX_EVENT_LINE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Read one event line via the shared bounded reader, mapped back to the
+/// `AsyncBufReadExt::next_line()` shape the reader's `select!` already matches
+/// on (`Ok(Some)` / `Ok(None)` / `Err`). An over-cap line surfaces as an error
+/// so the existing error arm tears the connection down and respawns.
+async fn read_event_line<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+) -> std::io::Result<Option<String>> {
+    match librefang_subprocess::read_capped_line(reader, buf, MAX_EVENT_LINE_BYTES).await? {
+        librefang_subprocess::Line::Data(s) => Ok(Some(s)),
+        librefang_subprocess::Line::Eof => Ok(None),
+        librefang_subprocess::Line::TooLong => Err(std::io::Error::other(
+            "sidecar event line exceeded the 64 MiB cap",
+        )),
+    }
+}
+
 /// Deserialize `T`, mapping an explicit JSON `null` to `T::default()`.
 ///
 /// `#[serde(default)]` alone only covers an *omitted* field; a present
@@ -631,6 +656,70 @@ fn build_spawn_env(home_dir: &Path, ctx_env: &HashMap<String, String>) -> Vec<(S
     merged.into_iter().collect()
 }
 
+/// Bare program name of the bundled Rust Telegram sidecar binary, without
+/// any platform extension.
+const TELEGRAM_SIDECAR_STEM: &str = "librefang-sidecar-telegram";
+
+/// Platform-correct file name of the bundled Telegram sidecar binary
+/// (`.exe` suffix on Windows).
+fn telegram_sidecar_file_name() -> &'static str {
+    if cfg!(windows) {
+        "librefang-sidecar-telegram.exe"
+    } else {
+        "librefang-sidecar-telegram"
+    }
+}
+
+/// Resolve a sidecar channel's configured `command` to the bundled Rust
+/// Telegram sidecar binary when the operator left it implicit.
+///
+/// The binary ships inside the release tarballs (#5936) and lands in
+/// `~/.librefang/bin/` via `librefang update`, so the common case is a bare
+/// program name that the daemon can locate without a PATH entry. Resolution
+/// only kicks in when `command` is empty or the bare stem
+/// `librefang-sidecar-telegram` — an absolute / relative path, or any other
+/// program (`python3`, `uv`, …), is returned unchanged so explicit operator
+/// intent always wins.
+///
+/// Search order, first hit wins:
+///   1. the daemon's own executable directory (binaries shipped side by side
+///      in the same tarball land here);
+///   2. `<home_dir>/bin/` (the `librefang update` install location);
+///   3. the original command, leaving PATH lookup to `Command::new` (the
+///      historical behaviour).
+fn resolve_sidecar_command(command: &str, home_dir: &Path) -> String {
+    let trimmed = command.trim();
+
+    // Only the implicit forms are eligible: empty, or the bare stem with no
+    // path component. Anything path-shaped or any other program is explicit.
+    let is_bare_stem = trimmed == TELEGRAM_SIDECAR_STEM;
+    let is_implicit = trimmed.is_empty() || is_bare_stem;
+    if !is_implicit {
+        return command.to_string();
+    }
+
+    let file_name = telegram_sidecar_file_name();
+
+    let exe_dir_candidate = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join(file_name)));
+    if let Some(path) = exe_dir_candidate {
+        if path.is_file() {
+            return path.to_string_lossy().into_owned();
+        }
+    }
+
+    let home_candidate = home_dir.join("bin").join(file_name);
+    if home_candidate.is_file() {
+        return home_candidate.to_string_lossy().into_owned();
+    }
+
+    // No bundled binary found — fall back to the original command so PATH
+    // lookup still works for an operator who placed it there manually. An
+    // empty command stays empty and surfaces the existing spawn error.
+    command.to_string()
+}
+
 /// Cheap, dependency-free jitter: 0..=20% of `base`, seeded off the
 /// wall clock. Backoff jitter does not need a CSPRNG.
 fn backoff_with_jitter(attempt: u32, initial_ms: u64, max_ms: u64) -> std::time::Duration {
@@ -757,12 +846,12 @@ async fn spawn_once(
     let handle = tokio::spawn(async move {
         let mut ready_tx = Some(ready_tx);
         let mut dropped: u64 = 0;
-        let reader = BufReader::new(child_stdout);
-        let mut lines = reader.lines();
+        let mut reader = BufReader::new(child_stdout);
+        let mut event_buf: Vec<u8> = Vec::new();
         let exit;
         loop {
             tokio::select! {
-                result = lines.next_line() => {
+                result = read_event_line(&mut reader, &mut event_buf) => {
                     match result {
                         Ok(Some(line)) => {
                             let line = line.trim().to_string();
@@ -1223,6 +1312,73 @@ pub struct SidecarAdapter {
     typing_rx: Arc<std::sync::Mutex<Option<mpsc::Receiver<TypingEvent>>>>,
     /// Supervision tunables snapshotted from config at construction.
     sup: SupCfg,
+    /// Per-instance channel behaviour overrides built from the
+    /// `[[sidecar_channels]]` block — command policy + message
+    /// coalescing (#5841). `None` when the block carries no such
+    /// settings, so the bridge falls back to kernel-resolved overrides.
+    overrides: Option<librefang_types::config::ChannelOverrides>,
+}
+
+/// Translate the command-policy + coalescing fields of a
+/// `[[sidecar_channels]]` block into the `ChannelOverrides` the bridge
+/// already understands (#5841). Returns `None` when every field is at
+/// its default, so a plain sidecar config produces no override and the
+/// bridge keeps falling back to the kernel-level lookup.
+fn overrides_from_sidecar_config(
+    config: &librefang_types::config::SidecarChannelConfig,
+) -> Option<librefang_types::config::ChannelOverrides> {
+    use librefang_types::config::SidecarCommandPolicy;
+
+    let policy = config.command_policy;
+    let coalesce_ms = config.message_coalesce_window_ms;
+
+    let has_command_policy = policy != SidecarCommandPolicy::Allow;
+    if !has_command_policy && coalesce_ms == 0 {
+        return None;
+    }
+
+    let mut ov = librefang_types::config::ChannelOverrides::default();
+    // Map the sidecar policy enum onto the existing boolean / list
+    // fields `is_command_allowed` consults. Precedence inside the bridge
+    // is `disable_commands` > `allowed_commands` > `blocked_commands`, so
+    // exactly one of the three is populated per policy variant.
+    match policy {
+        SidecarCommandPolicy::Allow => {}
+        SidecarCommandPolicy::Disable => ov.disable_commands = true,
+        SidecarCommandPolicy::Allowlist => {
+            // Fail closed: `allowlist` is an explicit default-deny intent. An
+            // empty list means "honour no commands", so it must deny all, not
+            // fall through to the allow-everything path `is_command_allowed`
+            // takes when `allowed_commands` is empty. Map empty-allowlist onto
+            // `disable_commands` (the highest-precedence deny) instead.
+            if config.allowed_commands.is_empty() {
+                warn!(
+                    channel = %config.name,
+                    "command_policy = \"allowlist\" with an empty allowed_commands list — denying all commands (fail-closed)"
+                );
+                ov.disable_commands = true;
+            } else {
+                ov.allowed_commands = config.allowed_commands.clone();
+            }
+        }
+        SidecarCommandPolicy::Blocklist => {
+            // An empty blocklist legitimately means "allow all, block nothing"
+            // — intuitive and harmless — but it usually signals a forgotten
+            // list, so surface it rather than silently allowing everything.
+            if config.blocked_commands.is_empty() {
+                warn!(
+                    channel = %config.name,
+                    "command_policy = \"blocklist\" with an empty blocked_commands list — all commands remain allowed"
+                );
+            }
+            ov.blocked_commands = config.blocked_commands.clone();
+        }
+    }
+    // The bridge's debouncer keys off `message_debounce_ms`; the
+    // sidecar-facing name is `message_coalesce_window_ms`, matching the
+    // pre-migration `[[channels.telegram]]` field operators knew (#4441).
+    ov.message_debounce_ms = coalesce_ms;
+    Some(ov)
 }
 
 impl SidecarAdapter {
@@ -1242,9 +1398,14 @@ impl SidecarAdapter {
             .unwrap_or_else(|| ChannelType::Custom(config.name.clone()));
         let (typing_tx, typing_rx) = mpsc::channel::<TypingEvent>(64);
 
+        // Resolve an implicit `librefang-sidecar-telegram` command to the
+        // binary bundled in the release tarball (#5936) before it reaches
+        // the spawn path; explicit paths and other programs pass through.
+        let command = resolve_sidecar_command(&config.command, &home_dir);
+
         Self {
             name: config.name.clone(),
-            command: config.command.clone(),
+            command,
             args: config.args.clone(),
             env: config.env.clone(),
             home_dir,
@@ -1259,6 +1420,7 @@ impl SidecarAdapter {
             typing_tx,
             typing_rx: Arc::new(std::sync::Mutex::new(Some(typing_rx))),
             sup: SupCfg::from_config(config),
+            overrides: overrides_from_sidecar_config(config),
         }
     }
 
@@ -1287,6 +1449,10 @@ impl ChannelAdapter for SidecarAdapter {
 
     fn channel_type(&self) -> ChannelType {
         self.channel_type.clone()
+    }
+
+    fn channel_overrides(&self) -> Option<librefang_types::config::ChannelOverrides> {
+        self.overrides.clone()
     }
 
     async fn start(
@@ -1670,6 +1836,10 @@ impl ChannelAdapter for SidecarAdapter {
         .await
     }
 
+    fn owns_formatting(&self) -> bool {
+        true
+    }
+
     fn supports_streaming(&self) -> bool {
         self.has_cap("streaming")
     }
@@ -1777,6 +1947,62 @@ fn derive_sidecar_sender_identity(
 mod tests {
     use super::*;
     use crate::types::{InteractiveButton, MediaGroupItem};
+
+    #[test]
+    fn resolve_sidecar_command_prefers_home_bin_when_bundled_binary_present() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let bin_dir = home.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("mkdir bin");
+        let bundled = bin_dir.join(telegram_sidecar_file_name());
+        std::fs::write(&bundled, b"#!/bin/sh\n").expect("write bundled binary");
+
+        // The bare stem resolves to the bundled binary under <home>/bin.
+        let resolved = resolve_sidecar_command(TELEGRAM_SIDECAR_STEM, home.path());
+        assert_eq!(resolved, bundled.to_string_lossy());
+
+        // An empty command resolves the same way.
+        let resolved_empty = resolve_sidecar_command("", home.path());
+        assert_eq!(resolved_empty, bundled.to_string_lossy());
+    }
+
+    #[test]
+    fn resolve_sidecar_command_falls_through_when_no_bundled_binary() {
+        // No bin dir created → the home-dir candidate does not exist.
+        // current_exe() (the test runner) won't sit next to a
+        // librefang-sidecar-telegram binary either, so the bare stem must
+        // pass through unchanged for the historical PATH-lookup behaviour.
+        let home = tempfile::tempdir().expect("tempdir");
+        let resolved = resolve_sidecar_command(TELEGRAM_SIDECAR_STEM, home.path());
+        assert_eq!(resolved, TELEGRAM_SIDECAR_STEM);
+
+        // Empty stays empty (surfaces the existing spawn error later).
+        assert_eq!(resolve_sidecar_command("", home.path()), "");
+    }
+
+    #[test]
+    fn resolve_sidecar_command_leaves_explicit_commands_untouched() {
+        // Even with a bundled binary on disk, an absolute path, a
+        // relative path, or any other program is explicit operator intent
+        // and must pass through verbatim.
+        let home = tempfile::tempdir().expect("tempdir");
+        let bin_dir = home.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("mkdir bin");
+        std::fs::write(bin_dir.join(telegram_sidecar_file_name()), b"x").expect("write");
+
+        for explicit in [
+            "python3",
+            "uv",
+            "/usr/local/bin/librefang-sidecar-telegram",
+            "./librefang-sidecar-telegram",
+            "../bin/librefang-sidecar-telegram",
+        ] {
+            assert_eq!(
+                resolve_sidecar_command(explicit, home.path()),
+                explicit,
+                "explicit command must pass through: {explicit}"
+            );
+        }
+    }
 
     #[test]
     fn looks_like_librefang_sdk_missing_matches_canonical_traceback_lines() {
@@ -2725,6 +2951,118 @@ mod tests {
             }))
             .unwrap();
         assert_eq!(c.default_agent.as_deref(), Some("fandangorodelo"));
+    }
+
+    // #5841 — command-policy + message-coalescing ported to sidecars.
+    // `overrides_from_sidecar_config` projects the sidecar-facing fields
+    // onto the `ChannelOverrides` the bridge already consults
+    // (`is_command_allowed`, debouncer setup).
+    fn cfg_json(value: serde_json::Value) -> librefang_types::config::SidecarChannelConfig {
+        serde_json::from_value(value).expect("SidecarChannelConfig from json")
+    }
+
+    #[test]
+    fn overrides_none_for_plain_sidecar_config_5841() {
+        // A default sidecar (allow-all, no coalescing) carries no
+        // override, so the bridge keeps falling back to the kernel lookup.
+        let c = cfg("telegram", "python3", vec![]);
+        assert!(super::overrides_from_sidecar_config(&c).is_none());
+    }
+
+    #[test]
+    fn overrides_disable_maps_to_disable_commands_5841() {
+        let c = cfg_json(serde_json::json!({
+            "name": "afina-sales-bot",
+            "command": "python3",
+            "command_policy": "disable",
+        }));
+        let ov = super::overrides_from_sidecar_config(&c).expect("override built");
+        assert!(ov.disable_commands);
+        assert!(ov.allowed_commands.is_empty());
+        assert!(ov.blocked_commands.is_empty());
+        assert_eq!(ov.message_debounce_ms, 0);
+    }
+
+    #[test]
+    fn overrides_allowlist_maps_to_allowed_commands_5841() {
+        let c = cfg_json(serde_json::json!({
+            "name": "bot",
+            "command": "python3",
+            "command_policy": "allowlist",
+            "allowed_commands": ["start", "/help"],
+        }));
+        let ov = super::overrides_from_sidecar_config(&c).expect("override built");
+        assert!(!ov.disable_commands);
+        assert_eq!(ov.allowed_commands, vec!["start", "/help"]);
+        assert!(ov.blocked_commands.is_empty());
+    }
+
+    #[test]
+    fn overrides_allowlist_empty_fails_closed_5841() {
+        // Regression (#5931): `allowlist` with an empty / omitted list is an
+        // explicit default-deny intent and must deny ALL commands, not fall
+        // through to the allow-everything path. It maps to `disable_commands`,
+        // the highest-precedence deny `is_command_allowed` honours.
+        let c = cfg_json(serde_json::json!({
+            "name": "public-bot",
+            "command": "python3",
+            "command_policy": "allowlist",
+        }));
+        let ov = super::overrides_from_sidecar_config(&c).expect("override built");
+        assert!(
+            ov.disable_commands,
+            "empty allowlist must fail closed (deny all)"
+        );
+        assert!(ov.allowed_commands.is_empty());
+        assert!(ov.blocked_commands.is_empty());
+    }
+
+    #[test]
+    fn overrides_blocklist_maps_to_blocked_commands_5841() {
+        let c = cfg_json(serde_json::json!({
+            "name": "bot",
+            "command": "python3",
+            "command_policy": "blocklist",
+            "blocked_commands": ["new", "reboot", "agent"],
+        }));
+        let ov = super::overrides_from_sidecar_config(&c).expect("override built");
+        assert!(!ov.disable_commands);
+        assert!(ov.allowed_commands.is_empty());
+        assert_eq!(ov.blocked_commands, vec!["new", "reboot", "agent"]);
+    }
+
+    #[test]
+    fn overrides_coalesce_window_maps_to_debounce_ms_5841() {
+        // Coalescing alone (policy left at the allow default) still yields
+        // an override so the bridge's debouncer turns on.
+        let c = cfg_json(serde_json::json!({
+            "name": "bot",
+            "command": "python3",
+            "message_coalesce_window_ms": 3000,
+        }));
+        let ov = super::overrides_from_sidecar_config(&c).expect("override built");
+        // Allow policy leaves every command-gating field untouched.
+        assert!(!ov.disable_commands);
+        assert!(ov.allowed_commands.is_empty());
+        assert!(ov.blocked_commands.is_empty());
+        assert_eq!(ov.message_debounce_ms, 3000);
+    }
+
+    #[test]
+    fn adapter_exposes_built_overrides_5841() {
+        // The trait method the bridge calls returns the built overrides.
+        let c = cfg_json(serde_json::json!({
+            "name": "bot",
+            "command": "python3",
+            "command_policy": "disable",
+            "message_coalesce_window_ms": 1500,
+        }));
+        let adapter = SidecarAdapter::new(&c, std::path::PathBuf::from("/tmp"));
+        let ov = adapter
+            .channel_overrides()
+            .expect("adapter carries overrides");
+        assert!(ov.disable_commands);
+        assert_eq!(ov.message_debounce_ms, 1500);
     }
 
     #[test]

@@ -60,6 +60,9 @@ pub use self::scriptable::{
 
 use self::scriptable::{load_plugin, TRACE_BUFFER_CAPACITY};
 
+mod sidecar;
+pub use self::sidecar::SidecarContextEngine;
+
 /// Return the state file path scoped to a specific agent.
 ///
 /// If `agent_id` is `None` or empty, returns the shared (plugin-level) path.
@@ -1301,14 +1304,26 @@ pub fn build_context_engine(
             }
             return no_compact_engine;
         }
+        "sidecar" => {
+            if let Some(sidecar_cfg) = &toml_config.sidecar {
+                // The built-in `inner` is both the LLM-bearing `compact` path
+                // and the fallback for every bridged hook, so the sidecar
+                // engine fully replaces the rest of the wiring below.
+                return Box::new(SidecarContextEngine::spawn(Box::new(inner), sidecar_cfg));
+            }
+            warn!(
+                "context engine config: `engine = \"sidecar\"` but no \
+                 [context_engine.sidecar] block is configured; falling back to 'default'"
+            );
+        }
         "default" => {
             // Plain default engine — no additional wrapping.
         }
         other => {
             warn!(
                 engine = other,
-                "Unknown context engine '{}' — only 'default', 'summary', and \
-                 'no_compact' are built-in; falling back to 'default'",
+                "Unknown context engine '{}' — only 'default', 'summary', \
+                 'no_compact', and 'sidecar' are built-in; falling back to 'default'",
                 other
             );
         }

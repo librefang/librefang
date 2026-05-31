@@ -79,6 +79,15 @@ EVENT_BUILDERS = {
     "message_minimal.json": lambda: protocol.message("1", "Bob", text="hi"),
     "error.json": lambda: protocol.error("boom"),
     "typing.json": lambda: protocol.typing_event("u", "n", True),
+    "qr_ready.json": lambda: protocol.qr_ready(
+        "wxp://f2f0YGcQ-xxxxxxxxxxxxxxxxxxxx",
+        qr_url="https://login.example/qr?code=abc",
+        message="Scan within 5 minutes",
+        expires_at="2026-05-28T20:00:00Z",
+    ),
+    "qr_status.json": lambda: protocol.qr_status(
+        "confirmed", message="Login confirmed",
+    ),
 }
 
 

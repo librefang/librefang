@@ -60,46 +60,25 @@ pub async fn tool_web_fetch_to_file(
     let resolved =
         crate::workspace_sandbox::resolve_sandbox_path_ext(dest_path, root, additional_roots)?;
 
-    // SSRF check + DNS pinning. Same pipeline as web_fetch; redirect targets
-    // are re-validated by the custom redirect policy on the pinned client.
-    let resolution = check_ssrf(url, &cfg.ssrf_allowed_hosts)?;
-    let client = engine.pinned_client(resolution);
-
+    // SSRF check + DNS pinning. Same pipeline as web_fetch: redirects are
+    // followed manually with a fresh SSRF check + DNS pin on every hop
+    // (`send_with_pinned_redirects`), closing the rebind window that a
+    // re-validating-but-not-re-pinning redirect policy left open.
     let method_upper = method.to_uppercase();
-    let mut req = match method_upper.as_str() {
-        "GET" => client.get(url),
-        "POST" => client.post(url),
-        "PUT" => client.put(url),
-        "PATCH" => client.patch(url),
-        "DELETE" => client.delete(url),
-        other => {
-            return Err(format!(
-                "Unsupported HTTP method '{other}'. Allowed: GET, POST, PUT, PATCH, DELETE."
-            ));
-        }
-    };
-    req = req.header(
-        "User-Agent",
-        format!("Mozilla/5.0 (compatible; {})", crate::USER_AGENT),
-    );
-    if let Some(hdrs) = headers {
-        for (k, v) in hdrs {
-            if let Some(val) = v.as_str() {
-                req = req.header(k.as_str(), val);
-            }
-        }
+    if !matches!(
+        method_upper.as_str(),
+        "GET" | "POST" | "PUT" | "PATCH" | "DELETE"
+    ) {
+        return Err(format!(
+            "Unsupported HTTP method '{method}'. Allowed: GET, POST, PUT, PATCH, DELETE."
+        ));
     }
-    if let Some(b) = body {
-        if b.trim_start().starts_with('{') || b.trim_start().starts_with('[') {
-            req = req.header("Content-Type", "application/json");
-        }
-        req = req.body(b.to_string());
-    }
+    // Early fail-fast with a consistent error before the redirect loop.
+    check_ssrf(url, &cfg.ssrf_allowed_hosts)?;
 
-    let mut resp = req
-        .send()
-        .await
-        .map_err(|e| format!("HTTP request failed: {e}"))?;
+    let mut resp = engine
+        .send_with_pinned_redirects(&method_upper, url, headers, body)
+        .await?;
     let status = resp.status();
     if !status.is_success() {
         // Surface up to 256 bytes of the response body so the agent can see

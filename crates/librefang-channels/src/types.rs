@@ -880,6 +880,15 @@ pub trait ChannelAdapter: Send + Sync {
         self.send(user, content).await
     }
 
+    /// Whether this adapter owns message formatting (Markdown → platform-native).
+    ///
+    /// Sidecar adapters return `true` because the Python sidecar process
+    /// applies its own `markdown_to_*` conversion. The Rust bridge must
+    /// send raw Markdown to avoid double-formatting.
+    fn owns_formatting(&self) -> bool {
+        false
+    }
+
     /// Whether this adapter supports streaming output (progressive message updates).
     ///
     /// When true, the bridge will use `send_streaming()` instead of `send()` for
@@ -939,6 +948,22 @@ pub trait ChannelAdapter: Send + Sync {
     /// has no multi-account concept. Adapters that accept per-account
     /// configuration MUST override this to return the configured value.
     fn account_id(&self) -> Option<&str> {
+        None
+    }
+
+    /// Per-instance channel behaviour overrides carried by the adapter
+    /// itself, rather than resolved kernel-side by channel type (#5841).
+    ///
+    /// Sidecar adapters build this from their `[[sidecar_channels]]`
+    /// block so that two adapters sharing the same `channel_type`
+    /// (e.g. two Telegram bots) can carry distinct command-policy and
+    /// message-coalescing settings — a channel-type-keyed lookup cannot
+    /// tell them apart. The bridge prefers this over the kernel-level
+    /// `channel_overrides(channel_type, …)` lookup when present.
+    ///
+    /// Default `None`: adapters with no per-instance overrides fall back
+    /// to the kernel-resolved overrides.
+    fn channel_overrides(&self) -> Option<librefang_types::config::ChannelOverrides> {
         None
     }
 }

@@ -1515,4 +1515,176 @@ admin_role = "admin"
         .expect("toml parse");
         assert!(KernelConfig::detect_misplaced_per_agent_overrides(&raw).is_empty());
     }
+
+    #[test]
+    fn detect_misplaced_per_agent_overrides_flags_section_overrides_6() {
+        // The four section-overrides that #5476 originally missed:
+        // `thinking`, `exec_policy`, `max_history_messages`, and the
+        // tool-exec backend (both the `tool_exec` global-section spelling
+        // and the `tool_exec_backend` agent.toml spelling).
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [agents.a.thinking]
+            enabled = true
+
+            [agents.a.exec_policy]
+            mode = "allowlist"
+
+            [agents.b]
+            max_history_messages = 80
+            tool_exec_backend = "ssh"
+
+            [agents.b.tool_exec]
+            kind = "ssh"
+            "#,
+        )
+        .expect("toml parse");
+        let found = KernelConfig::detect_misplaced_per_agent_overrides(&raw);
+        assert_eq!(
+            found,
+            vec![
+                ("a".to_string(), "exec_policy".to_string()),
+                ("a".to_string(), "thinking".to_string()),
+                ("b".to_string(), "max_history_messages".to_string()),
+                ("b".to_string(), "tool_exec".to_string()),
+                ("b".to_string(), "tool_exec_backend".to_string()),
+            ]
+        );
+    }
+
+    /// Drift guard (#6): every `AgentManifest` field that acts as a
+    /// per-agent override of a global `KernelConfig` section must be listed
+    /// in `PER_AGENT_OVERRIDE_KEYS`, so `detect_misplaced_per_agent_overrides`
+    /// emits the targeted "move this to agent.toml" warning for it.
+    ///
+    /// The original #5476 list was hand-maintained and silently drifted —
+    /// it covered only `proactive_memory` / `skill_workshop` / `compaction`
+    /// and missed `thinking`, `exec_policy`, `max_history_messages`, and the
+    /// tool-exec backend. This test makes that class of omission a compile
+    /// error: it exhaustively **destructures** `AgentManifest`, so adding a
+    /// field to the struct fails to compile here until the contributor
+    /// classifies it as either an override (→ add the config.toml-facing key
+    /// to `PER_AGENT_OVERRIDE_KEYS`) or non-override (→ list it in `OTHER`
+    /// below with the reason).
+    ///
+    /// We destructure rather than read a schema because `AgentManifest` does
+    /// not derive `JsonSchema` (it would cascade the derive onto ~15 nested
+    /// types) and a `serde_json::to_value(&default)` field walk would drop
+    /// every `skip_serializing_if = "Option::is_none"` field that defaults to
+    /// `None` — exactly the override fields we care about (`compaction`,
+    /// `tool_exec_backend`). The exhaustive pattern sees every field
+    /// regardless of serde attributes.
+    #[test]
+    fn per_agent_override_keys_cover_manifest_overrides_6() {
+        use super::validation::PER_AGENT_OVERRIDE_KEYS;
+        use crate::agent::AgentManifest;
+        use std::collections::BTreeSet;
+
+        // Exhaustive destructure: if a field is added to `AgentManifest`,
+        // this stops compiling until the new binding is added to exactly one
+        // of the two arms below. The bindings are otherwise unused.
+        #[allow(unused_variables)]
+        let AgentManifest {
+            // --- Per-agent overrides of a global KernelConfig section. ---
+            // Each maps to its config.toml-facing key in `expected_override_keys`.
+            proactive_memory,
+            skill_workshop,
+            compaction,
+            thinking,
+            exec_policy,
+            max_history_messages,
+            tool_exec_backend,
+
+            // --- OTHER: not a global-section override. -------------------
+            // These are agent-only settings with no matching global
+            // KernelConfig section to override (or are pure identity /
+            // wiring), so placing them under `[agents.x.…]` in config.toml
+            // is still a no-op but is intentionally NOT given the targeted
+            // #5476 warning — it falls through to the generic unknown-key
+            // pass instead. The detector is deliberately scoped to the
+            // overrides operators actually try to relocate.
+            name,
+            version,
+            description,
+            author,
+            module,
+            schedule,
+            session_mode,
+            model,
+            fallback_models,
+            resources,
+            priority,
+            capabilities,
+            profile,
+            tools,
+            skills,
+            skills_disabled,
+            mcp_servers,
+            channels,
+            mcp_disabled,
+            metadata,
+            tags,
+            routing,
+            autonomous,
+            pinned_model,
+            workspace,
+            generate_identity_files,
+            workspaces,
+            tool_allowlist,
+            tool_blocklist,
+            tools_disabled,
+            response_format,
+            enabled,
+            allowed_plugins,
+            inherit_parent_context,
+            context_injection,
+            is_hand,
+            web_search_augmentation,
+            auto_dream_enabled,
+            auto_dream_min_hours,
+            auto_dream_min_sessions,
+            show_progress,
+            auto_evolve,
+            channel_overrides,
+            max_concurrent_invocations,
+            cache_context,
+            triggers,
+            reconcile_orphans,
+            async_tasks,
+        } = AgentManifest::default();
+
+        // The config.toml-facing keys each override field should be flagged
+        // under. Most equal the manifest field name; `tool_exec_backend`
+        // also surfaces under the global section spelling `tool_exec`
+        // because that is what an operator copies from `[tool_exec]`.
+        let expected: BTreeSet<&str> = [
+            "proactive_memory",
+            "skill_workshop",
+            "compaction",
+            "thinking",
+            "exec_policy",
+            "max_history_messages",
+            "tool_exec",
+            "tool_exec_backend",
+        ]
+        .into_iter()
+        .collect();
+
+        let actual: BTreeSet<&str> = PER_AGENT_OVERRIDE_KEYS.iter().copied().collect();
+
+        let missing: Vec<&str> = expected.difference(&actual).copied().collect();
+        assert!(
+            missing.is_empty(),
+            "PER_AGENT_OVERRIDE_KEYS is missing override keys {missing:?}; \
+             an AgentManifest section-override field is not flagged by \
+             detect_misplaced_per_agent_overrides (#6)"
+        );
+
+        let stale: Vec<&str> = actual.difference(&expected).copied().collect();
+        assert!(
+            stale.is_empty(),
+            "PER_AGENT_OVERRIDE_KEYS lists keys {stale:?} that no longer map \
+             to an AgentManifest section-override field (renamed/removed?)"
+        );
+    }
 }

@@ -152,10 +152,72 @@ pub struct AuditEntry {
 // Argument count exceeds clippy's default; folding the inputs into a
 // struct would either require building a temporary on every record/verify
 // call or change the on-disk hash inputs, both of which are strictly worse
-// than the readability cost of nine plain arguments. This is private and
-// purely additive — the previous six fields hash identically.
+// than the readability cost of nine plain arguments. As of the delimiter
+// fix this writes the v2 layout (all fields tagged); pre-fix entries are
+// verified via `compute_entry_hash_legacy`.
 #[allow(clippy::too_many_arguments)]
 fn compute_entry_hash(
+    seq: u64,
+    timestamp: &str,
+    agent_id: &str,
+    action: &AuditAction,
+    detail: &str,
+    outcome: &str,
+    user_id: Option<&UserId>,
+    channel: Option<&str>,
+    prev_hash: &str,
+) -> String {
+    // Every field is prefixed with a `\x1f`-delimited tag so byte content
+    // cannot be shifted across a field boundary without changing the digest.
+    // Without this, the free-form `agent_id` / `detail` / `outcome` strings
+    // were hashed back-to-back: `agent_id="a", detail="bc"` and
+    // `agent_id="ab", detail="c"` produced identical hashes, letting an
+    // attacker with `audit_entries` write access rewrite the field
+    // decomposition (e.g. reattribute an action to another agent) while
+    // keeping the stored hash — and thus the Merkle link — valid. The
+    // `user_id` / `channel` fields already used this scheme; this extends it
+    // to the original six. New entries are written with this (v2) layout;
+    // [`compute_entry_hash_legacy`] verifies entries written before the
+    // change (see `verify_integrity`).
+    let mut hasher = Sha256::new();
+    hasher.update(b"\x1fseq=");
+    hasher.update(seq.to_string().as_bytes());
+    hasher.update(b"\x1ftimestamp=");
+    hasher.update(timestamp.as_bytes());
+    hasher.update(b"\x1fagent_id=");
+    hasher.update(agent_id.as_bytes());
+    hasher.update(b"\x1faction=");
+    hasher.update(action.to_string().as_bytes());
+    hasher.update(b"\x1fdetail=");
+    hasher.update(detail.as_bytes());
+    hasher.update(b"\x1foutcome=");
+    hasher.update(outcome.as_bytes());
+    if let Some(uid) = user_id {
+        hasher.update(b"\x1fuser_id=");
+        hasher.update(uid.0.as_bytes());
+    }
+    if let Some(ch) = channel {
+        hasher.update(b"\x1fchannel=");
+        hasher.update(ch.as_bytes());
+    }
+    hasher.update(b"\x1fprev_hash=");
+    hasher.update(prev_hash.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// Pre-delimiter (v1) hash layout: the original six fields concatenated with
+/// no separators, then the optionally-tagged `user_id` / `channel`, then a
+/// bare `prev_hash`. Retained only so `verify_integrity` can still validate
+/// entries written before the delimiter fix — never used to *write* new
+/// entries.
+///
+/// Falling back to this on verify does not weaken tamper-evidence: any edit
+/// that changes a stored hash still breaks the linked-list `prev_hash` chain
+/// (and, recomputed forward, the external anchor tip). The delimiter fix
+/// closes the one residual gap — a field reshuffle that left the hash
+/// unchanged — for every entry written under the v2 layout.
+#[allow(clippy::too_many_arguments)]
+fn compute_entry_hash_legacy(
     seq: u64,
     timestamp: &str,
     agent_id: &str,
@@ -832,7 +894,23 @@ impl AuditLog {
                 &entry.prev_hash,
             );
 
-            if recomputed != entry.hash {
+            // Accept the current (delimited, v2) layout, falling back to the
+            // pre-delimiter (v1) layout for entries written before the fix so
+            // an upgrade does not raise false tamper alarms on existing logs.
+            let matches = recomputed == entry.hash
+                || compute_entry_hash_legacy(
+                    entry.seq,
+                    &entry.timestamp,
+                    &entry.agent_id,
+                    &entry.action,
+                    &entry.detail,
+                    &entry.outcome,
+                    entry.user_id.as_ref(),
+                    entry.channel.as_deref(),
+                    &entry.prev_hash,
+                ) == entry.hash;
+
+            if !matches {
                 return Err(format!(
                     "hash mismatch at seq {}: expected {} but found {}",
                     entry.seq, recomputed, entry.hash
