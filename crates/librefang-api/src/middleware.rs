@@ -210,6 +210,44 @@ fn user_role_allows_request(role: UserRole, method: &axum::http::Method, path: &
     false
 }
 
+/// Build the 403 response for an RBAC denial and record it in the audit log.
+///
+/// Shared by the session-token and per-user-API-key auth branches so both
+/// enforce `user_role_allows_request` identically — previously only the
+/// per-user-key branch gated, while a session token was trusted with no
+/// role check (latent: all sessions are Owner today, but a future
+/// SSO-mapped non-Owner session would have bypassed Owner-only writes).
+fn rbac_denied_response(
+    auth_state: &AuthState,
+    method: &axum::http::Method,
+    path: &str,
+    role: UserRole,
+    user_id: UserId,
+    lang: &'static str,
+) -> Response<Body> {
+    if let Some(ref audit) = auth_state.audit_log {
+        audit.record_with_context(
+            "system",
+            librefang_kernel::audit::AuditAction::PermissionDenied,
+            format!("{method} {path}"),
+            format!("role={role}"),
+            Some(user_id),
+            Some("api".to_string()),
+        );
+    }
+    Response::builder()
+        .status(StatusCode::FORBIDDEN)
+        .header("content-type", "application/json")
+        .header("content-language", lang)
+        .body(Body::from(
+            serde_json::json!({
+                "error": format!("Role '{role}' is not allowed to access this endpoint")
+            })
+            .to_string(),
+        ))
+        .unwrap_or_default()
+}
+
 /// Pull a caller-provided token from the standard locations the auth path
 /// understands. Precedence (matches the non-loopback flow at `auth(...)`):
 ///   1. `Authorization: Bearer <x>`
@@ -262,6 +300,22 @@ fn extract_request_token(request: &Request<Body>) -> Option<String> {
 
 /// Request ID header name (standard).
 pub const REQUEST_ID_HEADER: &str = "x-request-id";
+
+/// Sentinel `user_id` for the synthetic Owner attribution applied when
+/// the request authenticated only via the root `api_key` (operator's
+/// master credential).
+///
+/// Chosen as a fixed UUID outside the `LIBREFANG_USER_NAMESPACE` v5
+/// hash space so it cannot collide with a real `[users] name = "..."`
+/// entry — even if an operator registers a user literally named `root`,
+/// `UserId::from_name("root")` resolves to a *different* UUID and stays
+/// isolated. Without this guarantee the master credential would silently
+/// inherit any ACL / per-user budget cap configured for that user.
+///
+/// The specific bytes are arbitrary — what matters is that they're
+/// stable across restarts (so audit-log queries can group by this id)
+/// and unmistakable in `git log` / log output (`r00t…`).
+pub const ROOT_API_KEY_USER_ID: uuid::Uuid = uuid::uuid!("00000000-0000-0000-0000-72006f0074a0");
 
 /// Resolved language code extracted from the `Accept-Language` header.
 ///
@@ -1272,6 +1326,21 @@ pub async fn auth(
             .map(|ci| ci.0.ip().is_loopback())
             .unwrap_or(false);
         if is_loopback || auth_state.allow_no_auth {
+            // No auth configured + trusted origin (loopback, or explicit
+            // LIBREFANG_ALLOW_NO_AUTH opt-in) means a fully-trusted local
+            // operator — the same trust level as the root master credential.
+            // Attribute an Owner-equivalent user so RBAC-gated handlers (memory
+            // write ACL, KV owner checks, …) treat the caller as privileged.
+            // Without this, guard_for_user(None) downgrades to the anonymous
+            // Viewer fallback and every POST/PUT/DELETE /api/memory* returns
+            // 403 — breaking the default `librefang start` → `curl POST
+            // /api/memory` workflow. Uses the same sentinel as the root-key
+            // path below (ROOT_API_KEY_USER_ID → fail-open Owner-default ACL).
+            request.extensions_mut().insert(AuthenticatedApiUser {
+                name: "root".to_string(),
+                role: UserRole::Owner,
+                user_id: UserId(ROOT_API_KEY_USER_ID),
+            });
             return next.run(request).await;
         }
         return Response::builder()
@@ -1363,8 +1432,31 @@ pub async fn auth(
     // cannot set custom headers on WebSocket connections); they authenticate
     // via crate::ws::ws_auth_token, which never passes through this middleware.
 
-    // Accept if header auth matches a static API key or legacy token
+    // Accept if header auth matches a static API key or legacy token.
+    //
+    // The root `api_key` is the operator's master credential — attribute
+    // the request as an Owner-equivalent `AuthenticatedApiUser` so RBAC-
+    // gated handlers (memory write ACL, `assert_kv_owner_or_admin`, etc.)
+    // treat root-key callers as fully-privileged. Without this attribution
+    // root-key callers fall through as "trusted but anonymous", which the
+    // memory namespace guard correctly downgrades to Viewer-equivalent
+    // (no writes / no deletes / no exports) and breaks the obvious
+    // `librefang start` → `curl POST /api/memory` workflow.
+    //
+    // The synthetic user_id is a fixed sentinel UUID (`ROOT_API_KEY_USER_ID`),
+    // NOT `UserId::from_name("root")` — the latter would collide with a
+    // real `[users] name = "root"` entry in `config.toml`, silently
+    // granting the master credential whatever ACL / per-user budget cap
+    // that user has configured. The sentinel falls outside the
+    // `LIBREFANG_USER_NAMESPACE` v5 hash space, so `AuthManager.users.get`
+    // returns None and the fail-open Owner-default ACL applies (matching
+    // the documented "master credential" contract).
     if header_auth == Some(true) {
+        request.extensions_mut().insert(AuthenticatedApiUser {
+            name: "root".to_string(),
+            role: UserRole::Owner,
+            user_id: UserId(ROOT_API_KEY_USER_ID),
+        });
         return next.run(request).await;
     }
 
@@ -1395,6 +1487,16 @@ pub async fn auth(
             if let (Some(name), Some(role_str)) = (session.user_name, session.user_role) {
                 let role = UserRole::from_str_role(&role_str);
                 let user_id = UserId::from_name(&name);
+                // Enforce the same RBAC gate as the per-user-API-key branch:
+                // a session's role must be allowed to reach this endpoint.
+                if !user_role_allows_request(role, &method, path) {
+                    let lang = request
+                        .extensions()
+                        .get::<RequestLanguage>()
+                        .map(|rl| rl.0)
+                        .unwrap_or(i18n::DEFAULT_LANGUAGE);
+                    return rbac_denied_response(&auth_state, &method, path, role, user_id, lang);
+                }
                 request.extensions_mut().insert(AuthenticatedApiUser {
                     name,
                     role,
@@ -1411,41 +1513,23 @@ pub async fn auth(
             .cloned()
         {
             if !user_role_allows_request(user.role, &method, path) {
-                // RBAC M5: surface the denial in the hash-chained audit
-                // log so an operator can correlate 403s with the user
-                // who tripped them. Best-effort — we do not have a
-                // direct kernel handle in the middleware extension so
-                // we read it back via the `audit_log_handle` injected
-                // into AuthState at server build time.
-                if let Some(ref audit) = auth_state.audit_log {
-                    audit.record_with_context(
-                        "system",
-                        librefang_kernel::audit::AuditAction::PermissionDenied,
-                        format!("{} {}", method, path),
-                        format!("role={}", user.role),
-                        Some(user.user_id),
-                        Some("api".to_string()),
-                    );
-                }
+                // RBAC M5: `rbac_denied_response` surfaces the denial in the
+                // hash-chained audit log (best-effort via the `audit_log`
+                // handle injected into AuthState at server build time) and
+                // returns the localized 403. Shared with the session branch.
                 let lang = request
                     .extensions()
                     .get::<RequestLanguage>()
                     .map(|rl| rl.0)
                     .unwrap_or(i18n::DEFAULT_LANGUAGE);
-                return Response::builder()
-                    .status(StatusCode::FORBIDDEN)
-                    .header("content-type", "application/json")
-                    .header("content-language", lang)
-                    .body(Body::from(
-                        serde_json::json!({
-                            "error": format!(
-                                "Role '{}' is not allowed to access this endpoint",
-                                user.role
-                            )
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap_or_default();
+                return rbac_denied_response(
+                    &auth_state,
+                    &method,
+                    path,
+                    user.role,
+                    user.user_id,
+                    lang,
+                );
             }
 
             request.extensions_mut().insert(AuthenticatedApiUser {
@@ -1577,6 +1661,24 @@ mod tests {
         // Empty / nonsense paths don't match.
         assert!(!is_noisy_metrics_unauth(401, ""));
         assert!(!is_noisy_metrics_unauth(401, "/"));
+    }
+
+    /// Review-followup #1: the synthetic root user_id used for root-api_key
+    /// callers MUST live outside `LIBREFANG_USER_NAMESPACE` so it can't
+    /// collide with a real `[users] name = "..."` registration that happens
+    /// to be called "root", "admin", "system", etc.
+    #[test]
+    fn root_api_key_user_id_does_not_collide_with_any_named_user() {
+        use librefang_types::agent::UserId;
+        // Any name an operator might plausibly use for the master account.
+        for candidate in ["root", "admin", "owner", "system", "operator", "user"] {
+            let from_name = UserId::from_name(candidate);
+            assert_ne!(
+                from_name.0, ROOT_API_KEY_USER_ID,
+                "synthetic root id collides with UserId::from_name({candidate:?}) — \
+                 operator with a {candidate} user would silently inherit master ACL"
+            );
+        }
     }
 
     #[test]

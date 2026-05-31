@@ -1088,18 +1088,39 @@ impl LibreFangKernel {
             }
         }
 
-        // 3. agent_msg_locks — remove locks for dead agents
+        // 3. agent_msg_locks — remove locks for dead agents, but only when the
+        // map slot is the sole remaining holder of the Arc (`Arc::strong_count
+        // == 1`). This mirrors the session_msg_locks pass below. The dead-agent
+        // filter alone is insufficient: an inbound turn clones the Arc out via
+        // `entry().or_insert().clone()` and holds it (plus the live `MutexGuard`)
+        // across its `.await`, so an agent can be evicted from the registry
+        // while one of its turns is still in flight. Removing the slot then lets
+        // a subsequent turn `or_insert_with` a brand-new Mutex that no longer
+        // serializes against the in-flight one — the two turns silently lose
+        // mutual exclusion and can interleave writes to the agent's history.
+        // Requiring strong_count == 1 (no live acquirer) closes that window; a
+        // still-referenced lock is left in place and reclaimed on a later sweep
+        // once its last turn drops. A reused agent id gets a fresh Mutex on next
+        // access, which is correct precisely because the old lock had no holders.
         {
-            let stale: Vec<AgentId> = self
+            let candidates: Vec<AgentId> = self
                 .agents
                 .agent_msg_locks
                 .iter()
-                .filter(|e| !live_agents.contains(e.key()))
+                .filter(|e| !live_agents.contains(e.key()) && Arc::strong_count(e.value()) == 1)
                 .map(|e| *e.key())
                 .collect();
-            total_removed += stale.len();
-            for id in stale {
-                self.agents.agent_msg_locks.remove(&id);
+            for id in candidates {
+                // Re-check under the shard lock so a turn that grabbed the Arc
+                // between iter() and remove() doesn't lose its mutex slot.
+                if self
+                    .agents
+                    .agent_msg_locks
+                    .remove_if(&id, |_, arc| Arc::strong_count(arc) == 1)
+                    .is_some()
+                {
+                    total_removed += 1;
+                }
             }
         }
 

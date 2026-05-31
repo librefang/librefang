@@ -209,7 +209,14 @@ pub struct ProactiveMemoryConfig {
     /// Similarity threshold for duplicate detection (0.0 - 1.0).
     /// When stored embeddings are available, uses vector cosine similarity
     /// (mem0-quality); otherwise falls back to Jaccard word overlap.
-    /// Default: 0.5.
+    /// Default: 0.85.
+    ///
+    /// Pre-fix this defaulted to 0.5, which is far too permissive for both
+    /// metrics: cosine 0.5 matches "topically related" pairs (including
+    /// opposite-meaning sentences that share keywords), and Jaccard 0.5
+    /// matches anything with 50% word overlap. 0.85 is the threshold mem0
+    /// recommends for "near-duplicate" detection and matches the
+    /// industry-standard cosine cut-off for embedding-based dedup.
     pub duplicate_threshold: f32,
     /// Confidence decay rate per day. Memories lose confidence over time when
     /// not accessed, following exponential decay: `conf * e^(-rate * days)`.
@@ -220,6 +227,93 @@ pub struct ProactiveMemoryConfig {
     /// first. Default: 1000. Set to 0 to disable the cap.
     #[serde(default = "default_max_memories_per_agent")]
     pub max_memories_per_agent: usize,
+    /// Maximum number of characters that `format_context` (the prompt
+    /// injection for `auto_retrieve` memories) may emit, including the
+    /// header template (H4 review-followup #8). At ~4 chars per token
+    /// this is roughly a token budget; the default 8000 (~2000 tokens)
+    /// suits an 8k–32k context window. Operators on larger windows can
+    /// raise this without recompiling. Excess memories are dropped and
+    /// reported via a footer; the cap is a hard ceiling on the section.
+    #[serde(default = "default_format_context_max_chars")]
+    pub format_context_max_chars: usize,
+    /// Similarity threshold above which `decide_action` returns UPDATE
+    /// instead of ADD when the new and existing memory share a
+    /// category (M14). Lower than `update_threshold_cross_category`
+    /// because same-category memories share semantic context, so a
+    /// modest similarity bump is enough evidence to fold them
+    /// together. Default 0.7 — empirically the cut-off where
+    /// embedding cosine starts catching genuine paraphrases without
+    /// merging unrelated facts.
+    ///
+    /// Conceptually distinct from `duplicate_threshold` (which gates
+    /// the post-hoc consolidation sweep — "should two existing
+    /// memories be merged into one?"). The two serve different
+    /// purposes: UPDATE is per-insertion conflict resolution; dedup
+    /// is batch cleanup. Pre-fix both used the same hardcoded
+    /// values, which conflated the contracts.
+    #[serde(default = "default_update_threshold_same_category")]
+    pub update_threshold_same_category: f32,
+    /// Same as `update_threshold_same_category` but for memories with
+    /// *different* categories. Higher (default 0.8) because
+    /// cross-category merges require stronger evidence — the
+    /// categories themselves carry semantic distinction that a
+    /// purely-text similarity score might miss.
+    #[serde(default = "default_update_threshold_cross_category")]
+    pub update_threshold_cross_category: f32,
+    /// Out-of-process memory extractor. When set, extraction is delegated to
+    /// the configured subprocess (which may use its own LLM, a local model,
+    /// embeddings, etc.) instead of the built-in LLM/rule-based extractor; the
+    /// store and the dedup decision stay in Rust. Takes precedence over
+    /// `extraction_model`.
+    #[serde(default)]
+    pub extractor_sidecar: Option<MemoryExtractorSidecarConfig>,
+}
+
+/// Configuration for an out-of-process memory extractor (see
+/// [`ProactiveMemoryConfig::extractor_sidecar`]).
+///
+/// **Precedence (review-followup G).** When this table is present
+/// AND `command` is non-empty, the sidecar handles every
+/// `auto_memorize` call — the kernel's built-in `LlmMemoryExtractor`
+/// is **not constructed at all**, and any per-agent
+/// [`ProactiveMemoryOverrides::extraction_model`] is silently
+/// shadowed. The kernel emits a `WARN` at boot in that case so an
+/// operator who set both isn't surprised which wins. A
+/// configured-but-empty `command` is treated as a no-op (the kernel
+/// falls back to the LLM/rule-based path with a separate `WARN`).
+///
+/// The sidecar only handles **extraction**. The store, the dedup
+/// `decide_action` decision, and the prompt-context formatting all
+/// stay in Rust, so the sidecar's output cannot influence retrieval
+/// ranking or storage layout — only what gets *proposed* to remember.
+///
+/// ```toml
+/// [proactive_memory.extractor_sidecar]
+/// command = "python3"
+/// args = ["/home/me/.librefang/memory/extract.py"]
+/// request_timeout_secs = 30
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct MemoryExtractorSidecarConfig {
+    /// Executable to launch (resolved via `PATH`). Empty string disables
+    /// the sidecar (operator typo or commented-out args field) — see
+    /// the precedence note on the struct.
+    pub command: String,
+    /// Arguments passed to the command.
+    pub args: Vec<String>,
+    /// Per-extraction wall-clock timeout. `0` means the compiled default (30s).
+    pub request_timeout_secs: u64,
+}
+
+impl Default for MemoryExtractorSidecarConfig {
+    fn default() -> Self {
+        Self {
+            command: String::new(),
+            args: Vec::new(),
+            request_timeout_secs: 30,
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -228,6 +322,18 @@ fn default_true() -> bool {
 
 fn default_max_memories_per_agent() -> usize {
     1000
+}
+
+fn default_format_context_max_chars() -> usize {
+    8000
+}
+
+fn default_update_threshold_same_category() -> f32 {
+    0.7
+}
+
+fn default_update_threshold_cross_category() -> f32 {
+    0.8
 }
 
 impl Default for ProactiveMemoryConfig {
@@ -249,9 +355,13 @@ impl Default for ProactiveMemoryConfig {
                 "frustration".to_string(),
             ],
             session_ttl_hours: 24,
-            duplicate_threshold: 0.5,
+            duplicate_threshold: 0.85,
             confidence_decay_rate: 0.01,
             max_memories_per_agent: 1000,
+            format_context_max_chars: default_format_context_max_chars(),
+            update_threshold_same_category: default_update_threshold_same_category(),
+            update_threshold_cross_category: default_update_threshold_cross_category(),
+            extractor_sidecar: None,
         }
     }
 }
@@ -618,7 +728,24 @@ pub trait MemoryExtractor: Send + Sync {
                 return Ok(MemoryAction::Noop);
             }
 
-            // High similarity or same category → candidate for UPDATE
+            // High similarity or same category → candidate for UPDATE.
+            //
+            // Thresholds raised from the original 0.5 / 0.6, which were far
+            // too permissive in both metrics: cosine 0.5 matches topically
+            // related but semantically distinct sentences (incl. opposite
+            // meanings sharing keywords), so an UPDATE there silently
+            // replaced unrelated memories. The numbers now align with
+            // mem0's recommended cut-offs (≈ 0.7 same-category, ≈ 0.8
+            // cross-category) and keep the 0.95 NOOP gate for near-exact
+            // duplicates.
+            //
+            // M14: the per-call threshold pair is read from the new
+            // memory's metadata, where `add_with_decision` stashes
+            // `update_threshold_same_category` /
+            // `update_threshold_cross_category` from
+            // `ProactiveMemoryConfig`. Falls back to the const defaults
+            // for callers that invoke `decide_action` directly
+            // (without going through the store).
             let new_cat = new_memory.category.as_deref().unwrap_or("");
             let old_cat = existing
                 .metadata
@@ -626,10 +753,22 @@ pub trait MemoryExtractor: Send + Sync {
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
 
+            let same_cat_threshold = new_memory
+                .metadata
+                .get("_update_threshold_same_cat")
+                .and_then(|v| v.as_f64())
+                .map(|f| f as f32)
+                .unwrap_or(default_update_threshold_same_category());
+            let cross_cat_threshold = new_memory
+                .metadata
+                .get("_update_threshold_cross_cat")
+                .and_then(|v| v.as_f64())
+                .map(|f| f as f32)
+                .unwrap_or(default_update_threshold_cross_category());
             let update_threshold = if !new_cat.is_empty() && new_cat == old_cat {
-                0.5 // Lower threshold for same-category memories
+                same_cat_threshold
             } else {
-                0.6
+                cross_cat_threshold
             };
 
             if similarity > update_threshold
@@ -935,30 +1074,96 @@ impl MemoryExtractor for DefaultMemoryExtractor {
     }
 
     fn format_context(&self, memories: &[MemoryItem]) -> String {
-        if memories.is_empty() {
-            return String::new();
-        }
-
-        let mut context = String::from(
-            "You have the following understanding of this person from previous conversations. \
-             This is knowledge you have — not a list to recite. Let it naturally shape how you \
-             respond:\n\
-             \n\
-             - Reference relevant context when it helps (\"since you're working in Rust...\", \
-             \"keeping it concise like you prefer...\") but only when it genuinely adds value.\n\
-             - Let remembered preferences silently guide your style, format, and depth — you \
-             don't need to announce that you're doing so.\n\
-             - NEVER say \"based on my memory\", \"according to my records\", \"I recall that you...\", \
-             or mechanically list what you know. A friend doesn't preface every remark with \
-             \"I remember you told me...\".\n\
-             - If a memory is clearly outdated or the user contradicts it, trust the current \
-             conversation over stored context.\n\n",
-        );
-        for mem in memories {
-            context.push_str(&format!("- {}\n", mem.content));
-        }
-        context
+        // The trait method has no config access; fall back to the const
+        // default budget. Callers that have a `ProactiveMemoryConfig`
+        // (the store, not the bare trait) should go through
+        // `ProactiveMemoryStore::format_context*` which uses the
+        // configured `format_context_max_chars`.
+        format_memories_with_budget(memories, FORMAT_CONTEXT_MAX_CHARS)
     }
+}
+
+/// Default maximum number of characters spent on memory-content
+/// bullets in a single prompt injection (H4). At ~4 chars per token
+/// this caps the memory section at roughly 2000 tokens, which is a
+/// reasonable share of a typical 8k-32k context window.
+///
+/// Pre-fix `format_context` had no cap at all: 10 memories × 2000
+/// chars (`MAX_MEMORY_CONTENT_LENGTH`) could pump 20 KB into every
+/// request. The bullet header counts against this budget too so the
+/// cap is a true ceiling on prompt-section growth, not just per-bullet
+/// content.
+///
+/// Operators on larger context windows can override via
+/// `ProactiveMemoryConfig::format_context_max_chars`
+/// (review-followup #8). The const value is the trait-level fallback
+/// used by callers that don't have access to a `ProactiveMemoryConfig`
+/// (e.g. `DefaultMemoryExtractor` invoked directly from tests).
+pub const FORMAT_CONTEXT_MAX_CHARS: usize = 8000;
+
+/// Shared formatter used by both [`DefaultMemoryExtractor::format_context`]
+/// and the LLM-backed extractor — keeps the H4 budget logic centralized
+/// instead of duplicated.
+///
+/// `max_chars` is the hard ceiling on the returned string length. Pass
+/// `FORMAT_CONTEXT_MAX_CHARS` when no per-call config is available.
+pub fn format_memories_with_budget(memories: &[MemoryItem], max_chars: usize) -> String {
+    if memories.is_empty() {
+        return String::new();
+    }
+
+    let mut context = String::from(
+        "You have the following understanding of this person from previous conversations. \
+         This is knowledge you have — not a list to recite. Let it naturally shape how you \
+         respond:\n\
+         \n\
+         - Reference relevant context when it helps (\"since you're working in Rust...\", \
+         \"keeping it concise like you prefer...\") but only when it genuinely adds value.\n\
+         - Let remembered preferences silently guide your style, format, and depth — you \
+         don't need to announce that you're doing so.\n\
+         - NEVER say \"based on my memory\", \"according to my records\", \"I recall that you...\", \
+         or mechanically list what you know. A friend doesn't preface every remark with \
+         \"I remember you told me...\".\n\
+         - If a memory is clearly outdated or the user contradicts it, trust the current \
+         conversation over stored context.\n\n",
+    );
+
+    let header_len = context.len();
+    let mut included = 0usize;
+    let total = memories.len();
+    for mem in memories {
+        let bullet = format!("- {}\n", mem.content);
+        // Reserve ~64 chars for the truncation footer so we never emit a
+        // bullet that pushes us past the cap and then has no room for the
+        // "[+N more]" note.
+        if context.len() + bullet.len() > max_chars.saturating_sub(64) {
+            break;
+        }
+        context.push_str(&bullet);
+        included += 1;
+    }
+
+    if included < total {
+        let dropped = total - included;
+        context.push_str(&format!(
+            "- [+{dropped} additional memor{plural} omitted to keep the prompt within budget]\n",
+            plural = if dropped == 1 { "y" } else { "ies" }
+        ));
+    }
+
+    // Defense-in-depth: if even the header alone exceeded the cap (unlikely
+    // — header is ~700 chars), at least guarantee the returned string never
+    // exceeds the budget by trimming on a char boundary.
+    if context.len() > max_chars {
+        let mut cutoff = max_chars;
+        while cutoff > 0 && !context.is_char_boundary(cutoff) {
+            cutoff -= 1;
+        }
+        context.truncate(cutoff);
+    }
+    debug_assert!(context.len() <= max_chars);
+    let _ = header_len;
+    context
 }
 
 /// Unique identifier for a memory fragment.

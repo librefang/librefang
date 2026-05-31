@@ -1937,6 +1937,14 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .and_then(|entry| entry.manifest.channel_overrides.clone())
     }
 
+    async fn agent_channel_allowlist(&self, agent_id: AgentId) -> Vec<String> {
+        self.kernel
+            .agent_registry()
+            .get(agent_id)
+            .map(|entry| entry.manifest.channels.clone())
+            .unwrap_or_default()
+    }
+
     async fn authorize_channel_user(
         &self,
         channel_type: &str,
@@ -2178,16 +2186,18 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         }
     }
 
-    /// Auto-describe inbound channel image. Mirror of `transcribe_inbound_audio`.
+    /// Auto-describe inbound channel images when `[media] image_description` is
+    /// enabled (#5739).
     ///
-    /// Honors `[media] image_description` (default OFF — opt-in once a
-    /// vision provider has been configured explicitly)
-    /// and dispatches to `MediaEngine::describe_image`, which routes to the
-    /// configured `image_provider` (default `gemini-2.5-flash`). Returns the
-    /// description text on success so the bridge can prepend it as a
-    /// `<image_description>` block before the inline `ImageFile`, anchoring
-    /// the primary LLM on Gemini's OCR/visual output and suppressing
-    /// fabricated weekdays / dates / prices on small in-image text.
+    /// Honors the kernel `[media] image_description` flag (default ON) —
+    /// returns `Ok(None)` when disabled so the bridge delivers the raw
+    /// `ImageFile` block to the agent unchanged. When enabled, materializes a
+    /// `MediaAttachment` over the already-downloaded file and dispatches to
+    /// `MediaEngine::describe_image`, which routes to the configured
+    /// `image_provider`. Returns the description text so the bridge can prepend
+    /// it as an `<image_description>` block before the inline `ImageFile`,
+    /// anchoring text-only and vision models alike on the OCR/visual output and
+    /// suppressing fabricated weekdays / dates / prices on small in-image text.
     async fn describe_inbound_image(
         &self,
         path: &std::path::Path,

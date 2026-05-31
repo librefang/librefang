@@ -127,6 +127,38 @@ cargo nextest run --workspace -E 'kind(lib) | kind(bin)' --no-fail-fast
 cargo nextest run --workspace --no-fail-fast
 ```
 
+### Verifying without a native toolchain (Docker)
+
+When the host has no native `cargo` (e.g. a macOS box where Rust was never
+installed), do **not** declare a change unverified — run the build inside the
+repo's sanctioned dev image (`Dockerfile.rust-dev`, kept in sync with CI's
+Linux package set). It compiles into a **named volume**, never the host's
+shared `target/`, so it does not contend with the user's sessions and the
+"don't run cargo locally" rule still holds.
+
+```bash
+# 1. Build the dev image once (cached afterwards):
+docker build -t librefang-rust-dev:latest -f Dockerfile.rust-dev .
+
+# 2. Run any scoped cargo command through it. CARGO_HOME / CARGO_TARGET_DIR
+#    point at named volumes (isolated from the host); reuse them across runs
+#    so deps compile once. Set PATH explicitly — a login shell ('bash -l')
+#    drops the image's /usr/local/cargo/bin from PATH.
+docker run --rm \
+  -v "$(git rev-parse --show-toplevel)":/work \
+  -v librefang-cargo:/cargo -v librefang-target:/target \
+  -e CARGO_HOME=/cargo -e CARGO_TARGET_DIR=/target -w /work \
+  librefang-rust-dev:latest \
+  sh -c 'export PATH=/usr/local/cargo/bin:$PATH; cargo test -p librefang-api --lib'
+```
+
+Scope is still mandatory: `-p <crate>` (or the `kind(lib)|kind(bin)` nextest
+filter), never the unscoped workspace form. The container runs **Linux only**
+— it cannot reproduce a Windows/macOS-specific failure, so for a
+platform-divergent bug write a platform-independent regression test (resolve a
+nonexistent path rather than relying on a host path like `/etc` existing — see
+#5716) or hand the exact command to the human for the missing OS.
+
 ## MANDATORY: Integration Testing (refs #3721)
 
 **Primary verification is automated.** The repo has comprehensive
@@ -200,7 +232,7 @@ The daemon command is `start` (not `daemon`).
 - **Named workspaces** (`[workspaces]` in agent.toml): declare shared directories with `path` (relative to `workspaces_dir`) and `mode` (`rw` / `r`). Multiple agents sharing the same path never collide — identity files stay in their private `.identity/`. Resolved absolute paths are injected into TOOLS.md as `@name → /abs/path (mode)`. See `workspace_setup.rs: ensure_named_workspaces()`.
 - `KernelHandle` trait avoids circular deps between runtime and kernel
 - `AppState` in `server.rs` bridges kernel to API routes
-- New routes must be registered in `server.rs` router AND implemented in `routes.rs`
+- New routes: there is no single `routes.rs` — route handlers live in `crates/librefang-api/src/routes/`, split into per-domain modules (e.g. `agents.rs`, `memory.rs`, `system.rs`), each exporting its own `router()`. `server.rs::api_v1_routes()` composes them with `.merge()`; some domains nest a second level (`routes/system.rs::router()` itself merges `agent_templates`, `approvals`, `pairing`, etc.). To add an endpoint, implement the handler in the matching domain module and merge its `router()` (or add the merge if the module is new). Reflection tests guard against drift: `crates/librefang-api/tests/dead_route_audit_test.rs` and `crates/librefang-api/tests/openapi_path_coverage_test.rs`.
 - Dashboard is React+TanStack Query SPA (not Alpine.js) in `crates/librefang-api/dashboard/`
 - **Dashboard data layer rule**: all API access in pages/components MUST go through hooks in `src/lib/queries/` and `src/lib/mutations/`. No `fetch()` or `api.*` calls inline in pages/components. Adding a new endpoint = add a query/mutation hook in the matching domain file, then import it. See `crates/librefang-api/dashboard/AGENTS.md` for details
 - **Dashboard query keys**: always use the factories in `src/lib/queries/keys.ts`. Never inline `["foo","bar"]` arrays. Every factory must be hierarchical (`all` / `lists()` / `list(filters)` / `details()` / `detail(id)`) so `invalidateQueries({ queryKey: xxxKeys.all })` invalidates the whole domain
@@ -311,6 +343,31 @@ The daemon command is `start` (not `daemon`).
   too).
 - **Worktree**: Use `git worktree add` on an external disk for new features; fall back to `/tmp/librefang-<feature>` only if no external disk is available. Never develop on the main worktree
 - **Worktree continuation = drive to PR**: When asked to continue half-done work in an existing worktree (uncommitted changes or unmerged commits), the workflow is **commit → push → open or update PR**. Don't stop at "local commits only". A new branch needs a fresh PR; an existing branch with an open PR gets a follow-up push to update it. Anything left in the worktree counts as real work — including a regenerated `Cargo.lock` after rebase. Commit it together with the rest of the change; do not `git checkout` it away.
+
+## Prose wrapping: no column limit; break only at sentence boundaries
+
+LibreFang has no column-width rule for prose.
+Do not hard-wrap at 72, 80, 100, or any other character count.
+
+The only legitimate line break inside a paragraph is at a complete sentence boundary (after `.`, `?`, `!`, or other terminal punctuation).
+One sentence = one line, regardless of length.
+Editors soft-wrap, viewers reflow, and the diff stays clean when a single word changes inside a sentence.
+
+This rule applies universally:
+
+- Markdown documentation anywhere in the repo (`docs/**`, crate / project READMEs, `AGENTS.md`, `CLAUDE.md`, this file, all the rest).
+- `CHANGELOG.md` bullets — one sentence per line within a bullet.
+- PR titles, PR bodies, and issue / PR comments posted via `gh pr create`, `gh pr edit`, `gh issue comment`, etc.
+- Source code doc-comments (`//!`, `///`, `#`-style docstrings, JSDoc, …) and any multi-line free-form prose comment block.
+  The doc renderer joins consecutive prose lines anyway; splitting mid-sentence just fragments `git blame` and obscures intent.
+- Commit message bodies.
+  Subject lines still follow git's own ~72-char display-truncation convention — that is a tooling limit, not prose wrapping.
+
+Hand-tuned column wraps split noun phrases and subject-verb pairs at awkward points, force a single-word edit to re-flow the whole paragraph (which pollutes `git blame` and review diffs), and carry no semantic information.
+Break where the writer *meant* to break — at sentence ends — and let viewers reflow.
+
+Pre-existing files in the repo that were written under the old column-wrap convention are not retroactively rewrapped; the rule applies to *new* prose and to any paragraph an agent is already touching.
+Do not rewrap an untouched paragraph just to enforce the rule.
 
 ## GitHub Collaboration & Wait Policy
 

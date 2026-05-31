@@ -71,7 +71,7 @@ pub enum ToolError {
     /// failed. The upstream error is preserved on the `source()` chain so
     /// callers walking it can downcast back to `LibreFangError`,
     /// `KernelError`, etc.
-    #[error("{message}")]
+    #[error("Upstream error: {message}")]
     Upstream {
         message: String,
         #[source]
@@ -167,12 +167,9 @@ impl From<serde_json::Error> for ToolError {
 /// - `MissingParameter` / `InvalidParameter` → `InvalidInput` (caller bug,
 ///   400-class on the HTTP boundary).
 /// - `Unavailable` → `Unavailable` (missing subsystem, 503-class).
-/// - `NotFound` → `InvalidInput` (no generic `NotFound { kind }` in the app
-///   enum yet — `AgentNotFound` / `SessionNotFound` are the only typed
-///   not-found variants. `InvalidInput` keeps the rendered `Display` and
-///   maps to 400, which is friendlier than the 500 `Internal` would give if
-///   a future caller bubbles a `ToolError::NotFound` through to an HTTP
-///   handler).
+/// - `NotFound` → `ResourceNotFound` (404-class — the app enum now carries a
+///   generic `ResourceNotFound { kind, id }` variant for tool-level resources
+///   that don't have a dedicated typed variant like `AgentNotFound`).
 /// - `PermissionDenied` → `CapabilityDenied` (403-class).
 /// - `Upstream` → if the boxed source IS itself a `LibreFangError`
 ///   (the kernel-handle round-trip case where `KernelOpError == LibreFangError`),
@@ -190,9 +187,13 @@ impl From<serde_json::Error> for ToolError {
 impl From<ToolError> for LibreFangError {
     fn from(e: ToolError) -> Self {
         match e {
-            ToolError::MissingParameter(_)
-            | ToolError::InvalidParameter { .. }
-            | ToolError::NotFound { .. } => LibreFangError::InvalidInput(e.to_string()),
+            ToolError::MissingParameter(_) | ToolError::InvalidParameter { .. } => {
+                LibreFangError::InvalidInput(e.to_string())
+            }
+            ToolError::NotFound { kind, id } => LibreFangError::ResourceNotFound {
+                kind: kind.to_string(),
+                id,
+            },
             ToolError::Unavailable(cap) => LibreFangError::unavailable(cap),
             ToolError::PermissionDenied(_) => LibreFangError::CapabilityDenied(e.to_string()),
             ToolError::Upstream { message, source } => match source {
@@ -287,7 +288,7 @@ mod tests {
     fn upstream_msg_has_no_source() {
         let e = ToolError::upstream_msg("kernel call failed");
         assert!(e.source().is_none());
-        assert_eq!(e.to_string(), "kernel call failed");
+        assert_eq!(e.to_string(), "Upstream error: kernel call failed");
     }
 
     /// Bridge to the shared application enum. Each variant must land on the
@@ -311,24 +312,23 @@ mod tests {
         assert!(matches!(e, LibreFangError::Internal(_)));
     }
 
-    /// `NotFound` lifts to `InvalidInput` (400), not `Internal` (500). The app
-    /// enum does not yet carry a generic `NotFound{kind}` variant — only
-    /// `AgentNotFound` / `SessionNotFound` — and falling through to `Internal`
-    /// would surface as HTTP 500 on the api boundary, which is wrong for a
-    /// "you asked for a thing that does not exist or is not yours" failure.
-    /// The rendered `Display` is preserved either way.
+    /// `NotFound` lifts to `ResourceNotFound` (404), not `InvalidInput` (400).
+    /// The app enum now carries a generic `ResourceNotFound { kind, id }`
+    /// variant so tool-level not-found errors surface with the correct HTTP
+    /// status instead of collapsing to 400.
     #[test]
-    fn not_found_lifts_to_invalid_input_with_display_preserved() {
+    fn not_found_lifts_to_resource_not_found() {
         let e: LibreFangError = ToolError::NotFound {
             kind: "Cron job",
             id: "abc-123".to_string(),
         }
         .into();
         match e {
-            LibreFangError::InvalidInput(msg) => {
-                assert_eq!(msg, "Cron job 'abc-123' not found");
+            LibreFangError::ResourceNotFound { kind, id } => {
+                assert_eq!(kind, "Cron job");
+                assert_eq!(id, "abc-123");
             }
-            other => panic!("expected InvalidInput, got {other:?}"),
+            other => panic!("expected ResourceNotFound, got {other:?}"),
         }
     }
 

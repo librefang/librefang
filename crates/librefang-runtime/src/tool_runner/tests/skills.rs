@@ -128,7 +128,7 @@ async fn skill_read_file_rejects_unknown_skill() {
 
     let input = serde_json::json!({ "skill": "nope", "path": "f.txt" });
     let result = tool_skill_read_file(&input, Some(&registry), None).await;
-    assert!(result.unwrap_err().contains("not found"));
+    assert!(result.unwrap_err().to_string().contains("not found"));
 }
 
 #[tokio::test]
@@ -143,7 +143,7 @@ async fn skill_read_file_rejects_absolute_path() {
         .into_owned();
     let input = serde_json::json!({ "skill": "abs", "path": abs_path });
     let result = tool_skill_read_file(&input, Some(&registry), None).await;
-    assert!(result.unwrap_err().contains("absolute paths"));
+    assert!(result.unwrap_err().to_string().contains("absolute paths"));
 }
 
 #[tokio::test]
@@ -155,7 +155,7 @@ async fn skill_read_file_enforces_allowlist() {
     let allowed = vec!["other-skill".to_string()];
     let input = serde_json::json!({ "skill": "secret", "path": "data.txt" });
     let result = tool_skill_read_file(&input, Some(&registry), Some(&allowed)).await;
-    assert!(result.unwrap_err().contains("not allowed"));
+    assert!(result.unwrap_err().to_string().contains("not allowed"));
 
     // Empty allowlist means all skills are accessible
     let empty: Vec<String> = vec![];
@@ -446,6 +446,8 @@ async fn run_file_read_for_dedup(
         Some(session_id),
         None,
         None,
+        0,
+        0,
     )
     .await
 }
@@ -582,7 +584,8 @@ async fn test_evolve_tools_rejected_when_registry_frozen() {
     });
     let err = tool_skill_evolve_create(&input, Some(&registry), None)
         .await
-        .expect_err("must reject under freeze");
+        .expect_err("must reject under freeze")
+        .to_string();
     assert!(
         err.contains("frozen") || err.contains("Stable"),
         "error must mention Stable/frozen, got: {err}"
@@ -590,7 +593,8 @@ async fn test_evolve_tools_rejected_when_registry_frozen() {
 
     let err = tool_skill_evolve_delete(&serde_json::json!({ "name": "gated" }), Some(&registry))
         .await
-        .expect_err("delete must reject under freeze");
+        .expect_err("delete must reject under freeze")
+        .to_string();
     assert!(err.contains("frozen") || err.contains("Stable"));
 
     let err = tool_skill_evolve_write_file(
@@ -602,7 +606,8 @@ async fn test_evolve_tools_rejected_when_registry_frozen() {
         Some(&registry),
     )
     .await
-    .expect_err("write_file must reject under freeze");
+    .expect_err("write_file must reject under freeze")
+    .to_string();
     assert!(err.contains("frozen") || err.contains("Stable"));
 }
 
@@ -647,8 +652,15 @@ async fn read_artifact_nonexistent_returns_error() {
     let fake = "sha256:".to_string() + &"b".repeat(64);
     let input = serde_json::json!({ "handle": fake });
     let result = tool_read_artifact(&input, dir.path()).await;
-    assert!(result.is_err());
-    assert!(result.unwrap_err().contains("not found"));
+    // A well-formed but nonexistent handle: the lookup failure inside
+    // `artifact_store::read` is lifted verbatim onto the `Upstream` variant,
+    // carrying the original "artifact not found: …" message.
+    match result {
+        Err(crate::tool_runner::error::ToolError::Upstream { message, .. }) => {
+            assert!(message.contains("not found"), "got: {message}");
+        }
+        other => panic!("expected ToolError::Upstream, got: {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -656,8 +668,12 @@ async fn read_artifact_missing_handle_returns_error() {
     let dir = tempfile::TempDir::new().unwrap();
     let input = serde_json::json!({});
     let result = tool_read_artifact(&input, dir.path()).await;
-    assert!(result.is_err());
-    assert!(result.unwrap_err().contains("handle"));
+    assert!(matches!(
+        result,
+        Err(crate::tool_runner::error::ToolError::MissingParameter(
+            "handle"
+        ))
+    ));
 }
 
 #[tokio::test]

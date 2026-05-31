@@ -1007,7 +1007,13 @@ async fn handle_text_message(
                 }
             }
 
-            // Resolve file attachments into image content blocks
+            // Resolve file attachments into image content blocks. The
+            // WebUI chat uses `use_canonical_session: true`, so the
+            // kernel session resolver falls back to `entry.session_id`
+            // — passing the same shape to
+            // `inject_attachments_into_session` keeps the attachment
+            // and the text dispatch on the same session. `explicit_session`
+            // (per-tab `?session_id=`) wins as override when present.
             let mut has_images = false;
             if let Some(attachments) = parsed["attachments"].as_array() {
                 let refs: Vec<crate::types::AttachmentRef> = attachments
@@ -1023,9 +1029,25 @@ async fn handle_text_message(
                         .await;
                     if !image_blocks.is_empty() {
                         has_images = true;
+                        let webui_sender = librefang_channels::types::SenderContext {
+                            channel: librefang_kernel::SYSTEM_CHANNEL_WEBUI.to_string(),
+                            user_id: client_ip.to_string(),
+                            display_name: "Web UI".to_string(),
+                            use_canonical_session: true,
+                            ..Default::default()
+                        };
+                        let fallback_session_id = state
+                            .kernel
+                            .agent_registry()
+                            .get(agent_id)
+                            .map(|e| e.session_id)
+                            .unwrap_or_default();
                         crate::routes::inject_attachments_into_session(
                             state.kernel.as_ref(),
                             agent_id,
+                            Some(&webui_sender),
+                            explicit_session,
+                            fallback_session_id,
                             image_blocks,
                         );
                     }

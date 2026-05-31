@@ -5,7 +5,7 @@
 //! retry behaviour. Here we lock in the provider wire contract:
 //!
 //! 1. Request body & URL (model embedded in path, `contents` / `generationConfig`,
-//!    api key in query string).
+//!    api key in the `x-goog-api-key` header — never in the query string).
 //! 2. A non-streaming response with a `functionCall` part is parsed into
 //!    `CompletionResponse.tool_calls` with `StopReason::ToolUse`.
 //! 3. A streaming SSE response yields `TextDelta` events whose concatenation
@@ -23,8 +23,9 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// The driver POSTs to `/v1beta/models/<model>:generateContent` with the
-/// API key as a query-string parameter and the request body carries the
-/// caller-supplied messages, tools, and generationConfig.
+/// API key in the `x-goog-api-key` header (never in the query string) and
+/// the request body carries the caller-supplied messages, tools, and
+/// generationConfig.
 #[tokio::test]
 #[serial_test::serial]
 async fn request_shape_targets_model_path_and_carries_contents_tools() {
@@ -53,11 +54,21 @@ async fn request_shape_targets_model_path_and_carries_contents_tools() {
 
     let received = &server.received_requests().await.expect("requests")[0];
 
-    // Gemini puts the API key in `?key=…`, not in a header.
+    // Gemini auth goes in the `x-goog-api-key` header, never in the URL.
+    let api_key = received
+        .headers
+        .get("x-goog-api-key")
+        .expect("x-goog-api-key header must be set")
+        .to_str()
+        .expect("api key header must be valid UTF-8");
+    assert!(
+        api_key.starts_with("test-key-"),
+        "x-goog-api-key must carry the configured key, got {api_key}"
+    );
     let url = received.url.to_string();
     assert!(
-        url.contains("key=test-key-"),
-        "url must include `key=` query param, got {url}"
+        !url.contains("key="),
+        "api key must not leak into the URL query string, got {url}"
     );
 
     let body = request_json(received);

@@ -4,9 +4,13 @@
 //! it without instantiating a full kernel.
 
 /// Build a deterministic cache key for the per-agent MCP allowlist; sorts and joins with `\x1f` so insertion-order variants share one entry.
+///
+/// An empty allowlist means "no MCP servers" (#5855), not "all"; it gets its
+/// own sentinel key so it never shares a cache slot with the explicit `["*"]`
+/// wildcard (which keys to `*`).
 pub(super) fn mcp_summary_cache_key(mcp_allowlist: &[String]) -> String {
     if mcp_allowlist.is_empty() {
-        return String::from("*");
+        return String::from("\x1fnone\x1f");
     }
     let mut sorted = mcp_allowlist.to_vec();
     sorted.sort();
@@ -36,6 +40,13 @@ pub(super) fn render_mcp_summary(
         return String::new();
     }
 
+    // #5855: an empty allowlist means "no MCP servers", so the agent's prompt
+    // must not advertise any. `["*"]` is the explicit "all servers" opt-in.
+    if mcp_allowlist.is_empty() {
+        return String::new();
+    }
+    let wildcard = mcp_allowlist.iter().any(|s| s == "*");
+
     let normalized: Vec<String> = mcp_allowlist
         .iter()
         .map(|s| librefang_runtime::mcp::normalize_name(s))
@@ -50,7 +61,7 @@ pub(super) fn render_mcp_summary(
             configured_servers.iter().map(String::as_str),
         ) {
             let normalized_server = librefang_runtime::mcp::normalize_name(server_name);
-            if !mcp_allowlist.is_empty() && !normalized.iter().any(|n| n == &normalized_server) {
+            if !wildcard && !normalized.iter().any(|n| n == &normalized_server) {
                 continue;
             }
             if let Some(raw_tool_name) =

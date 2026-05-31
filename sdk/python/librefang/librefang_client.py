@@ -184,6 +184,12 @@ class _AgentsResource(_Resource):
     def patch_agent(self, id: str, **data):
         return self._c._request("PATCH", f"/api/agents/{id}", data)
 
+    def get_agent_channels(self, id: str):
+        return self._c._request("GET", f"/api/agents/{id}/channels")
+
+    def set_agent_channels(self, id: str, **data):
+        return self._c._request("PUT", f"/api/agents/{id}/channels", data)
+
     def clone_agent(self, id: str, **data):
         return self._c._request("POST", f"/api/agents/{id}/clone", data)
 
@@ -443,6 +449,12 @@ class _BudgetResource(_Resource):
 
     def update_agent_budget(self, id: str, **data):
         return self._c._request("PUT", f"/api/budget/agents/{id}", data)
+
+    def provider_budget_list(self):
+        return self._c._request("GET", "/api/budget/providers")
+
+    def update_provider_budget(self, provider_id: str, **data):
+        return self._c._request("PUT", f"/api/budget/providers/{provider_id}", data)
 
     def user_budget_ranking(self, limit: Any = None):
         return self._c._request("GET", "/api/budget/users", None, query={"limit": limit})
@@ -1038,6 +1050,9 @@ class _SkillsResource(_Resource):
 
     def get_supporting_file(self, name: str, path: Any = None):
         return self._c._request("GET", f"/api/skills/{name}/file", None, query={"path": path})
+
+    def propose_skill_to_registry(self, name: str):
+        return self._c._request("POST", f"/api/skills/{name}/propose")
 
     def list_tools(self):
         return self._c._request("GET", "/api/tools")

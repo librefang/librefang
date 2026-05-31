@@ -50,6 +50,8 @@ async fn test_shell_exec_blocked_for_readonly_workspace_path() {
         None,
         None,
         None,
+        0,
+        0,
     )
     .await;
     assert!(
@@ -111,6 +113,8 @@ async fn test_shell_exec_allowed_when_not_targeting_readonly_workspace() {
         None,
         None,
         None,
+        0,
+        0,
     )
     .await;
     // Must NOT be blocked by read-only check. It may be blocked by exec policy
@@ -684,6 +688,8 @@ async fn test_web_search() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     // web_search now attempts a real fetch; may succeed or fail depending on network
@@ -721,6 +727,8 @@ async fn test_unknown_tool() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(result.is_error);
@@ -758,10 +766,15 @@ async fn test_agent_tools_without_kernel() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(result.is_error);
-    assert!(result.content.contains("Kernel handle not available"));
+    // #3576: require_kernel_typed renders as "Kernel handle unavailable"
+    // (ToolError::Unavailable) rather than the old "Kernel handle not
+    // available" string.
+    assert!(result.content.contains("Kernel handle unavailable"));
 }
 
 #[tokio::test]
@@ -796,6 +809,8 @@ async fn test_capability_enforcement_denied() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(result.is_error);
@@ -835,6 +850,8 @@ async fn test_capability_enforcement_allowed() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     // Should fail for path resolution, NOT for permission denied
@@ -853,7 +870,11 @@ async fn test_capability_enforcement_allowed() {
             || result.content.contains("Failed to resolve")
             || result.content.contains("not found")
             || result.content.contains("No such file")
-            || result.content.contains("does not exist"),
+            || result.content.contains("does not exist")
+            // Windows: a missing intermediate dir yields ERROR_PATH_NOT_FOUND
+            // (os error 3) and the file form yields ERROR_FILE_NOT_FOUND (os
+            // error 2); both render as "cannot find the path/file specified".
+            || result.content.contains("cannot find"),
         "Expected file-not-found error, got: {}",
         result.content
     );
@@ -900,6 +921,8 @@ async fn test_capability_enforcement_aliased_tool_name() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(
@@ -943,6 +966,8 @@ async fn test_capability_enforcement_aliased_denied() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(result.is_error);
@@ -994,6 +1019,8 @@ async fn test_shell_exec_full_policy_skips_approval_gate() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
 
@@ -1046,6 +1073,8 @@ async fn test_shell_exec_non_full_policy_still_requires_approval() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
 
@@ -1119,6 +1148,8 @@ async fn test_shell_exec_drains_pipe_above_buffer_size() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     let elapsed = started.elapsed();

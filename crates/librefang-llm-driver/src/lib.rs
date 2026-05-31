@@ -2,7 +2,7 @@
 //!
 //! Abstracts over multiple LLM providers (Anthropic, OpenAI, Ollama, etc.).
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -322,7 +322,11 @@ pub struct CompletionRequest {
     ///
     /// When keys conflict with standard parameters (temperature, max_tokens, etc.),
     /// values from `extra_body` take precedence (last-wins in JSON serialization).
-    pub extra_body: Option<HashMap<String, serde_json::Value>>,
+    ///
+    /// `BTreeMap` (not `HashMap`) so the merged key order is deterministic
+    /// across processes — this map is flattened into the LLM wire request, and
+    /// unstable key order silently invalidates provider prompt caches (#3298).
+    pub extra_body: Option<BTreeMap<String, serde_json::Value>>,
     /// Caller agent identity.
     ///
     /// When a CLI driver re-exposes LibreFang tools to the model through an
@@ -625,6 +629,23 @@ pub struct DriverConfig {
     /// today and so are unaffected by this flag.
     #[serde(default = "default_emit_caller_trace_headers")]
     pub emit_caller_trace_headers: bool,
+    /// Maximum number of in-driver retries for a single LLM API call.
+    ///
+    /// Each HTTP-API driver runs an internal retry loop that re-issues the
+    /// request on retryable failures — server-side throttling (429 / 529 /
+    /// 503), transient overloads, and (since #10) transport-layer errors such
+    /// as connection-refused / TLS / read-timeout that fail before the
+    /// provider ever responds. `max_retries` is the count of *re-attempts*
+    /// after the first try, so the request is issued at most
+    /// `max_retries + 1` times.
+    ///
+    /// Default is `3` (four total attempts), preserving the value previously
+    /// hard-coded in every driver. Set to `0` to disable in-driver retries
+    /// and rely solely on the outer `FallbackChain` for recovery. CLI-based
+    /// providers (Claude Code, Gemini CLI, …) do not run this loop and ignore
+    /// the field.
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
 }
 
 /// Configuration for bridging LibreFang tools into a CLI-based driver via MCP.
@@ -656,12 +677,17 @@ impl Default for DriverConfig {
             proxy_url: None,
             request_timeout_secs: None,
             emit_caller_trace_headers: default_emit_caller_trace_headers(),
+            max_retries: default_max_retries(),
         }
     }
 }
 
 fn default_skip_permissions() -> bool {
     true
+}
+
+fn default_max_retries() -> u32 {
+    3
 }
 
 fn default_message_timeout_secs() -> u64 {
@@ -698,6 +724,7 @@ impl std::fmt::Debug for DriverConfig {
             .field("proxy_url", &self.proxy_url.as_ref().map(|_| "<redacted>"))
             .field("request_timeout_secs", &self.request_timeout_secs)
             .field("emit_caller_trace_headers", &self.emit_caller_trace_headers)
+            .field("max_retries", &self.max_retries)
             .finish()
     }
 }
@@ -1119,6 +1146,32 @@ mod tests {
             .expect("DriverConfig deserialize must still populate secrets");
         assert_eq!(parsed.api_key.as_deref(), Some(sentinel_api_key));
         assert_eq!(parsed.proxy_url.as_deref(), Some(proxy_url.as_str()));
+    }
+
+    // #10: `max_retries` is configurable but defaults to 3 so existing
+    // behaviour is unchanged. The compiled default, the `Default` impl, and
+    // serde's `#[serde(default)]` (field omitted from the config TOML/JSON)
+    // must all agree on 3 — a drift here would either silently change retry
+    // behaviour or make a config that omits the field deserialize to 0
+    // (retries disabled).
+    #[test]
+    fn driver_config_max_retries_defaults_to_three() {
+        assert_eq!(default_max_retries(), 3);
+        assert_eq!(DriverConfig::default().max_retries, 3);
+
+        // Field omitted from the payload → serde default applies (3).
+        let omitted: DriverConfig = serde_json::from_str(
+            r#"{"provider":"openai","skip_permissions":true,"message_timeout_secs":300,"emit_caller_trace_headers":true}"#,
+        )
+        .expect("DriverConfig with max_retries omitted must deserialize");
+        assert_eq!(omitted.max_retries, 3);
+
+        // Explicit value is honoured (incl. 0 = disable in-driver retries).
+        let explicit: DriverConfig = serde_json::from_str(
+            r#"{"provider":"openai","max_retries":0,"skip_permissions":true,"message_timeout_secs":300,"emit_caller_trace_headers":true}"#,
+        )
+        .expect("DriverConfig with explicit max_retries must deserialize");
+        assert_eq!(explicit.max_retries, 0);
     }
 }
 

@@ -500,6 +500,37 @@ pub fn needs_sync(home_dir: &Path) -> bool {
     !home_dir.join("registry").join("providers").exists()
 }
 
+/// Name of the per-directory manifest recording which `.toml` files the
+/// registry sync installed. Pruning is gated on this set so user-created
+/// files (e.g. a custom provider added via the dashboard, #5823) are never
+/// deleted on restart — only files we previously synced *and* that upstream
+/// has since removed get cleaned up. The leading dot and lack of a `.toml`
+/// extension keep it out of both the sync and the catalog-load globs.
+const REGISTRY_MANAGED_MANIFEST: &str = ".registry-managed";
+
+/// Read the set of registry-managed `.toml` filenames recorded for `dest_dir`.
+///
+/// Returns an empty set when the manifest is absent (e.g. first run, or an
+/// install that predates the manifest) — which makes pruning a no-op until
+/// the next sync writes the manifest, erring on the side of keeping files.
+fn read_managed_manifest(dest_dir: &Path) -> std::collections::HashSet<String> {
+    std::fs::read_to_string(dest_dir.join(REGISTRY_MANAGED_MANIFEST))
+        .map(|s| {
+            s.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Persist the set of registry-managed filenames for `dest_dir`.
+fn write_managed_manifest(dest_dir: &Path, names: &std::collections::BTreeSet<String>) {
+    let body = names.iter().cloned().collect::<Vec<_>>().join("\n");
+    let _ = std::fs::write(dest_dir.join(REGISTRY_MANAGED_MANIFEST), body);
+}
+
 /// Sync flat .toml files (e.g. integrations/, providers/).
 fn sync_flat_files(src_dir: &Path, dest_dir: &Path, label: &str) {
     let entries = match std::fs::read_dir(src_dir) {
@@ -507,6 +538,8 @@ fn sync_flat_files(src_dir: &Path, dest_dir: &Path, label: &str) {
         Err(_) => return,
     };
 
+    // Filenames the registry currently ships — the new managed set.
+    let mut managed: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut synced = 0;
     let mut updated = 0;
     let mut skipped = 0;
@@ -519,6 +552,7 @@ fn sync_flat_files(src_dir: &Path, dest_dir: &Path, label: &str) {
             Some(n) if n.ends_with(".toml") => n.to_string(),
             _ => continue,
         };
+        managed.insert(name.clone());
 
         let dest_file = dest_dir.join(&name);
         if dest_file.exists() {
@@ -542,24 +576,25 @@ fn sync_flat_files(src_dir: &Path, dest_dir: &Path, label: &str) {
         }
     }
 
-    // Remove local files that no longer exist in the registry source.
-    // This cleans up defunct providers/integrations after upstream pruning.
+    // Clean up defunct registry files after upstream pruning — but ONLY files
+    // we previously installed ourselves. A file that was registry-managed last
+    // sync (recorded in the manifest) and is gone from the source now is
+    // safe to delete; a file we never installed (a user's custom provider) is
+    // left untouched. This is the #5823 fix: the old logic deleted every local
+    // `.toml` absent from the source, wiping dashboard-created providers on
+    // every restart.
+    let previously_managed = read_managed_manifest(dest_dir);
     let mut removed = 0usize;
-    if let Ok(dest_entries) = std::fs::read_dir(dest_dir) {
-        for entry in dest_entries.flatten() {
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            let name = match path.file_name().and_then(|n| n.to_str()) {
-                Some(n) if n.ends_with(".toml") => n.to_string(),
-                _ => continue,
-            };
-            if !src_dir.join(&name).exists() && std::fs::remove_file(&path).is_ok() {
+    for name in &previously_managed {
+        if !managed.contains(name) {
+            let path = dest_dir.join(name);
+            if path.is_file() && std::fs::remove_file(&path).is_ok() {
                 removed += 1;
             }
         }
     }
+
+    write_managed_manifest(dest_dir, &managed);
 
     if synced > 0 || updated > 0 || removed > 0 || skipped > 0 {
         tracing::info!("{label} synced ({synced} new, {updated} updated, {removed} removed, {skipped} unchanged)");
@@ -733,6 +768,72 @@ mod tests {
     fn test_needs_sync_when_registry_cache_missing() {
         let tmp = tempfile::tempdir().unwrap();
         assert!(needs_sync(tmp.path()));
+    }
+
+    /// #5823: a dashboard-created custom provider lives only in the dest dir
+    /// and is absent from the registry source. It MUST survive a sync — the
+    /// old logic deleted every dest `.toml` not present in the source, so the
+    /// provider vanished on every `librefang stop && start`.
+    #[test]
+    fn sync_flat_files_preserves_user_created_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+
+        // Registry ships one provider; user added their own.
+        std::fs::write(src.join("openai.toml"), "id = \"openai\"").unwrap();
+        std::fs::write(dest.join("openai.toml"), "id = \"openai\"").unwrap();
+        std::fs::write(dest.join("my-custom.toml"), "id = \"my-custom\"").unwrap();
+
+        sync_flat_files(&src, &dest, "providers");
+
+        assert!(
+            dest.join("my-custom.toml").exists(),
+            "user-created provider must survive sync"
+        );
+        assert!(dest.join("openai.toml").exists());
+        // A second sync (simulating a restart) must still keep it.
+        sync_flat_files(&src, &dest, "providers");
+        assert!(
+            dest.join("my-custom.toml").exists(),
+            "user-created provider must survive repeated restarts"
+        );
+    }
+
+    /// The upstream-pruning cleanup is preserved: a file we previously synced
+    /// from the registry and that the registry no longer ships is removed —
+    /// but only because it was recorded in the managed manifest.
+    #[test]
+    fn sync_flat_files_prunes_only_previously_managed_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+
+        // First sync: registry ships two providers.
+        std::fs::write(src.join("alpha.toml"), "id = \"alpha\"").unwrap();
+        std::fs::write(src.join("beta.toml"), "id = \"beta\"").unwrap();
+        sync_flat_files(&src, &dest, "providers");
+        assert!(dest.join("alpha.toml").exists());
+        assert!(dest.join("beta.toml").exists());
+
+        // Upstream prunes beta; user has meanwhile added their own provider.
+        std::fs::remove_file(src.join("beta.toml")).unwrap();
+        std::fs::write(dest.join("mine.toml"), "id = \"mine\"").unwrap();
+        sync_flat_files(&src, &dest, "providers");
+
+        assert!(dest.join("alpha.toml").exists(), "still-shipped file kept");
+        assert!(
+            !dest.join("beta.toml").exists(),
+            "previously-managed, upstream-removed file is pruned"
+        );
+        assert!(
+            dest.join("mine.toml").exists(),
+            "never-managed user file is never pruned"
+        );
     }
 
     #[test]

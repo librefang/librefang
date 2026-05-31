@@ -141,6 +141,10 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             axum::routing::get(get_agent_mcp_servers).put(set_agent_mcp_servers),
         )
         .route(
+            "/agents/{id}/channels",
+            axum::routing::get(get_agent_channels).put(set_agent_channels),
+        )
+        .route(
             "/agents/{id}/identity",
             axum::routing::patch(update_agent_identity),
         )
@@ -425,11 +429,17 @@ async fn spawn_agent_inner(
                 ) => (StatusCode::CONFLICT, "agent_already_exists"),
                 _ => (StatusCode::INTERNAL_SERVER_ERROR, "spawn_failed"),
             };
-            json_error(
-                status,
-                code,
-                t.t_args("api-error-agent-error", &[("error", &e.to_string())]),
-            )
+            // 409 (duplicate name) echoes the kernel message — useful
+            // to the caller and free of internal detail. The 500
+            // catch-all scrubs (audit: rusqlite-errors-leak): a spawn
+            // failure rooted in the memory substrate would otherwise
+            // leak SQL detail. Full error already logged above.
+            let body = if status == StatusCode::INTERNAL_SERVER_ERROR {
+                t.t("api-error-internal")
+            } else {
+                t.t_args("api-error-agent-error", &[("error", &e.to_string())])
+            };
+            json_error(status, code, body)
         }
     }
 }
@@ -613,7 +623,7 @@ pub async fn bulk_delete_agents(
                     agent_id: id_str.clone(),
                     success: false,
                     message: None,
-                    error: Some(t.t_args("api-error-generic", &[("error", &e.to_string())])),
+                    error: Some(scrub_500(&e, &t)),
                 });
             }
         }
@@ -764,7 +774,7 @@ pub async fn bulk_stop_agents(
                     agent_id: id_str.clone(),
                     success: false,
                     message: None,
-                    error: Some(t.t_args("api-error-generic", &[("error", &e.to_string())])),
+                    error: Some(scrub_500(&e, &t)),
                 });
             }
         }
@@ -1504,14 +1514,83 @@ pub fn resolve_attachments(
 /// `[..., User(attach_blocks), User(text)]`. session_repair will merge
 /// those two consecutive user-role messages into one for the wire format.
 ///
+/// **Cross-chat isolation (2026-05-20 incident).** This helper MUST land
+/// the attachment blocks in the SAME session the subsequent text-part
+/// dispatch will land in — otherwise images leak across chats. The
+/// session id is therefore resolved with the same priority as
+/// `send_message_streaming_with_incognito` /
+/// `send_message_with_incognito`:
+///
+/// 1. Explicit `session_id_override` from the caller (multi-tab UIs).
+/// 2. `SessionId::for_sender_scope(agent, channel, chat_id)` when a
+///    `sender_context` with a non-empty `channel` is present AND the
+///    sender isn't asking for the canonical session.
+/// 3. The agent's persistent `entry.session_id` as a last resort.
+///
+/// Falling back to "agent default session" without going through the
+/// resolver is the very bug this signature fixes — see
+/// `crates/librefang-kernel-handle/src/lib.rs` `SessionWriter` doc.
+///
 /// Delegates to [`SessionWriter::inject_attachment_blocks`] so this call
 /// site does not need to import the concrete `LibreFangKernel` type (#3744).
 pub fn inject_attachments_into_session(
     kernel: &dyn SessionWriter,
     agent_id: AgentId,
+    sender_context: Option<&librefang_channels::types::SenderContext>,
+    session_id_override: Option<librefang_types::agent::SessionId>,
+    fallback_session_id: librefang_types::agent::SessionId,
     attachment_blocks: Vec<librefang_types::message::ContentBlock>,
 ) {
-    kernel.inject_attachment_blocks(agent_id, attachment_blocks);
+    let session_id = resolve_attachment_session_id(
+        agent_id,
+        sender_context,
+        session_id_override,
+        fallback_session_id,
+    );
+    kernel.inject_attachment_blocks(agent_id, session_id, attachment_blocks);
+}
+
+/// Resolve the session id the attachment blocks should be written to,
+/// mirroring the resolver used by `send_message_*` in
+/// `kernel::messaging`. Pure function (no I/O, no kernel reads) so it can
+/// be unit-tested directly and so call sites can assert which session id
+/// the attachment landed in.
+///
+/// `fallback_session_id` is the agent's persistent registry session id
+/// (`entry.session_id`), used only when neither override nor channel
+/// context is available. Mirrors the
+/// `SessionMode::Persistent => entry.session_id` branch of
+/// `kernel/messaging.rs`. The `SessionMode::New => SessionId::new()`
+/// branch is intentionally NOT mirrored here: attachment injection
+/// always precedes the kernel call that actually generates the fresh id,
+/// so there is no shared id to write into. In practice the
+/// only code paths that hit the resolver fallback today
+/// (skill/hand send-message + WebUI WS with `use_canonical_session`)
+/// both use `SessionMode::Persistent` agents; if a `New`-mode agent
+/// ever lands here, the attachment goes to `entry.session_id`, which is
+/// the *same* session a subsequent `Persistent`-fallback turn would
+/// write to, and the worst case is a no-channel-context REST caller
+/// seeing the image one turn later than expected — never a cross-chat
+/// leak. The text dispatch itself is unchanged.
+pub(crate) fn resolve_attachment_session_id(
+    agent_id: AgentId,
+    sender_context: Option<&librefang_channels::types::SenderContext>,
+    session_id_override: Option<librefang_types::agent::SessionId>,
+    fallback_session_id: librefang_types::agent::SessionId,
+) -> librefang_types::agent::SessionId {
+    if let Some(sid) = session_id_override {
+        return sid;
+    }
+    if let Some(ctx) = sender_context {
+        if !ctx.channel.is_empty() && !ctx.use_canonical_session {
+            return librefang_types::agent::SessionId::for_sender_scope(
+                agent_id,
+                &ctx.channel,
+                ctx.chat_id.as_deref(),
+            );
+        }
+    }
+    fallback_session_id
 }
 
 /// Post-process attachment content blocks: when `[media] image_description`
@@ -1944,6 +2023,30 @@ pub async fn send_message(
         }
     }
 
+    // Parse optional explicit session_id override from the request body.
+    // Hoisted above the attachment-injection block so it can be threaded
+    // into `inject_attachments_into_session` — attachments must land in
+    // the *same* session the text dispatch will land in.
+    let session_id_override = match req.session_id.as_deref() {
+        None => None,
+        Some(s) => match s.parse::<uuid::Uuid>() {
+            Ok(id) => Some(librefang_types::agent::SessionId(id)),
+            Err(_) => {
+                return ApiErrorResponse::bad_request("invalid session_id: must be a UUID")
+                    .with_code("invalid_session_id")
+                    .into_response();
+            }
+        },
+    };
+
+    // Build the sender context now (hoisted from the non-ephemeral
+    // branch) so the attachment pre-inject can derive the same session
+    // id `send_message_with_incognito` will. Without this, the DM
+    // attachment lands on the agent's most-recent registry session
+    // (typically a warm group session for chat agents) and leaks across
+    // chats — the 2026-05-20 incident this PR closes.
+    let sender_context = request_sender_context(&req);
+
     // Resolve file attachments into image content blocks
     if !req.attachments.is_empty() {
         let image_blocks = enrich_attachment_blocks_with_description(
@@ -1952,7 +2055,25 @@ pub async fn send_message(
         )
         .await;
         if !image_blocks.is_empty() {
-            inject_attachments_into_session(state.kernel.as_ref(), agent_id, image_blocks);
+            // Snapshot the agent's persistent (registry) session id as
+            // the last-resort fallback in
+            // `resolve_attachment_session_id`. Matches the
+            // `SessionMode::Persistent => entry.session_id` branch of
+            // the kernel resolver in `kernel/messaging.rs`.
+            let fallback_session_id = state
+                .kernel
+                .agent_registry()
+                .get(agent_id)
+                .map(|e| e.session_id)
+                .unwrap_or_else(librefang_types::agent::SessionId::new);
+            inject_attachments_into_session(
+                state.kernel.as_ref(),
+                agent_id,
+                sender_context.as_ref(),
+                session_id_override,
+                fallback_session_id,
+                image_blocks,
+            );
         }
     }
 
@@ -1967,19 +2088,6 @@ pub async fn send_message(
 
     let thinking_override = req.thinking;
     let show_thinking = req.show_thinking.unwrap_or(true);
-
-    // Parse optional explicit session_id override from the request body.
-    let session_id_override = match req.session_id.as_deref() {
-        None => None,
-        Some(s) => match s.parse::<uuid::Uuid>() {
-            Ok(id) => Some(librefang_types::agent::SessionId(id)),
-            Err(_) => {
-                return ApiErrorResponse::bad_request("invalid session_id: must be a UUID")
-                    .with_code("invalid_session_id")
-                    .into_response();
-            }
-        },
-    };
 
     let result = if is_ephemeral {
         // Ephemeral "side question" — use a temp session, no persistence
@@ -2002,11 +2110,14 @@ pub async fn send_message(
             )),
         }
     } else {
-        let sender_context = request_sender_context(&req);
+        // `sender_context` was hoisted above the attachment-injection
+        // block earlier in this handler; reuse the same value so the
+        // attachment session and the text-part session are guaranteed
+        // identical.
         let kernel = state.kernel.clone();
         let kernel_handle: Arc<dyn KernelHandle> = kernel.clone();
         let msg = effective_message.clone();
-        let sc = sender_context;
+        let sc = sender_context.clone();
         let incognito = req.incognito;
         match run_cancel_on_disconnect(async move {
             kernel
@@ -2165,11 +2276,21 @@ pub async fn send_message(
                 _ => (StatusCode::INTERNAL_SERVER_ERROR, "message_delivery_failed"),
             };
             let t = ErrorTranslator::new(l);
-            ApiErrorResponse {
-                error: t.t_args(
+            // 4xx / 429 echo the kernel reason (caller-useful: not
+            // found, budget exceeded, session mismatch). The 500
+            // catch-all scrubs the reason (audit: rusqlite-errors-leak)
+            // so a delivery failure rooted in the memory substrate does
+            // not leak SQL detail. Full error already logged above.
+            let error = if status == StatusCode::INTERNAL_SERVER_ERROR {
+                t.t("api-error-internal")
+            } else {
+                t.t_args(
                     "api-error-message-delivery-failed",
                     &[("reason", &e.to_string())],
-                ),
+                )
+            };
+            ApiErrorResponse {
+                error,
                 code: Some(code.to_string()),
                 r#type: Some(code.to_string()),
                 details: None,
@@ -2931,8 +3052,9 @@ pub async fn get_agent(
             "skills_disabled": entry.manifest.skills_disabled,
             "tools_disabled": entry.manifest.tools_disabled,
             "mcp_servers": entry.manifest.mcp_servers,
-            "mcp_servers_mode": if entry.manifest.mcp_servers.is_empty() { "all" } else { "allowlist" },
+            "mcp_servers_mode": mcp_servers_mode(&entry.manifest.mcp_servers),
             "fallback_models": entry.manifest.fallback_models,
+            "auto_evolve": entry.manifest.auto_evolve,
             "web_search_augmentation": entry.manifest.web_search_augmentation,
         })),
     )
@@ -2995,19 +3117,9 @@ pub async fn send_message_stream(
             .into_response();
     }
 
-    // Resolve file attachments into image content blocks (same as non-streaming)
-    if !req.attachments.is_empty() {
-        let image_blocks = enrich_attachment_blocks_with_description(
-            &state,
-            resolve_attachments(&state, &req.attachments),
-        )
-        .await;
-        if !image_blocks.is_empty() {
-            inject_attachments_into_session(state.kernel.as_ref(), agent_id, image_blocks);
-        }
-    }
-
     // Parse optional explicit session_id override from the request body.
+    // Hoisted above the attachment-injection block so it can be threaded
+    // into `inject_attachments_into_session`.
     let session_id_override = match req.session_id.as_deref() {
         None => None,
         Some(s) => match s.parse::<uuid::Uuid>() {
@@ -3020,21 +3132,32 @@ pub async fn send_message_stream(
         },
     };
 
-    // Build sender context from the request body BEFORE handing off to the
-    // kernel. The session resolver uses this to derive
-    // `SessionId::for_sender_scope(agent, channel, chat_id)` so per-chat
-    // isolation holds — without it, every inbound (DM, group, stranger)
-    // collapses onto the agent's global `Persistent` session pointer and
-    // contexts cross-pollinate. The non-streaming sibling `send_message`
-    // has always built this; the streaming variant historically did not,
-    // which is the bug fixed here.
-    //
-    // Use `build_streaming_kernel_args` so the test
-    // `test_streaming_handler_threads_sender_context_to_kernel_args`
-    // exercises the exact code path: if a future change silently drops
-    // sender_context (or any other field) here, the test breaks.
     let (sender_context, incognito, session_override) =
         build_streaming_kernel_args(&req, session_id_override);
+
+    if !req.attachments.is_empty() {
+        let image_blocks = enrich_attachment_blocks_with_description(
+            &state,
+            resolve_attachments(&state, &req.attachments),
+        )
+        .await;
+        if !image_blocks.is_empty() {
+            let fallback_session_id = state
+                .kernel
+                .agent_registry()
+                .get(agent_id)
+                .map(|e| e.session_id)
+                .unwrap_or_else(librefang_types::agent::SessionId::new);
+            inject_attachments_into_session(
+                state.kernel.as_ref(),
+                agent_id,
+                sender_context.as_ref(),
+                session_override,
+                fallback_session_id,
+                image_blocks,
+            );
+        }
+    }
     let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone();
     let (rx, handle) = match state
         .kernel
@@ -3235,11 +3358,14 @@ pub async fn attach_session_stream(
     };
     if !session_valid {
         if let Err(e) = session_lookup {
-            return ApiErrorResponse::internal(
-                t.t_args("api-error-generic", &[("error", &e.to_string())]),
-            )
-            .with_code("session_load_failed")
-            .into_response();
+            // Scrub the raw session-load error (audit:
+            // rusqlite-errors-leak) — the failure originates in the
+            // memory substrate, so the chain carries SQL detail. The
+            // full error reaches `error!`; the client sees the generic
+            // body plus the stable `session_load_failed` code.
+            return ApiErrorResponse::internal_scrub(&e)
+                .with_code("session_load_failed")
+                .into_response();
         }
         return ApiErrorResponse::not_found("session not found for this agent")
             .with_code("session_agent_mismatch")
@@ -3374,12 +3500,13 @@ pub async fn list_agent_sessions(
             StatusCode::OK,
             Json(serde_json::json!({"sessions": sessions})),
         ),
-        Err(e) => (
-            kernel_err_to_status(&e),
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
-        ),
+        Err(e) => {
+            let status = kernel_err_to_status(&e);
+            (
+                status,
+                Json(serde_json::json!({"error": kernel_err_body(status, &e, &t)})),
+            )
+        }
     }
 }
 
@@ -3413,12 +3540,13 @@ pub async fn create_agent_session(
     let label = req.get("label").and_then(|v| v.as_str());
     match state.kernel.create_agent_session(agent_id, label) {
         Ok(session) => (StatusCode::OK, Json(session)),
-        Err(e) => (
-            kernel_err_to_status(&e),
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
-        ),
+        Err(e) => {
+            let status = kernel_err_to_status(&e);
+            (
+                status,
+                Json(serde_json::json!({"error": kernel_err_body(status, &e, &t)})),
+            )
+        }
     }
 }
 
@@ -3464,12 +3592,13 @@ pub async fn switch_agent_session(
             StatusCode::OK,
             Json(serde_json::json!({"status": "ok", "message": "Session switched"})),
         ),
-        Err(e) => (
-            kernel_err_to_status(&e),
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
-        ),
+        Err(e) => {
+            let status = kernel_err_to_status(&e);
+            (
+                status,
+                Json(serde_json::json!({"error": kernel_err_body(status, &e, &t)})),
+            )
+        }
     }
 }
 
@@ -3517,12 +3646,13 @@ pub async fn export_session(
             StatusCode::OK,
             Json(serde_json::to_value(export).unwrap_or_default()),
         ),
-        Err(e) => (
-            kernel_err_to_status(&e),
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
-        ),
+        Err(e) => {
+            let status = kernel_err_to_status(&e);
+            (
+                status,
+                Json(serde_json::json!({"error": kernel_err_body(status, &e, &t)})),
+            )
+        }
     }
 }
 
@@ -3710,9 +3840,7 @@ pub async fn import_session(
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
+            Json(serde_json::json!({"error": scrub_500(&e, &t)})),
         ),
     }
 }
@@ -3775,9 +3903,7 @@ pub async fn reset_session(
             let t = ErrorTranslator::new(l);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-                ),
+                Json(serde_json::json!({"error": scrub_500(&e, &t)})),
             )
         }
     }
@@ -3839,9 +3965,7 @@ pub async fn reboot_session(
             let t = ErrorTranslator::new(l);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-                ),
+                Json(serde_json::json!({"error": scrub_500(&e, &t)})),
             )
         }
     }
@@ -3895,9 +4019,7 @@ pub async fn clear_agent_history(
             let t = ErrorTranslator::new(l);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-                ),
+                Json(serde_json::json!({"error": scrub_500(&e, &t)})),
             )
         }
     }
@@ -3941,9 +4063,7 @@ pub async fn compact_session(
             let t = ErrorTranslator::new(l);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-                ),
+                Json(serde_json::json!({"error": scrub_500(&e, &t)})),
             )
         }
     }
@@ -3985,9 +4105,7 @@ pub async fn stop_agent(
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
+            Json(serde_json::json!({"error": scrub_500(&e, &t)})),
         ),
     }
 }
@@ -4074,9 +4192,7 @@ pub async fn stop_session(
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
+            Json(serde_json::json!({"error": scrub_500(&e, &t)})),
         ),
     }
 }
@@ -4152,12 +4268,13 @@ pub async fn set_model(
                 ),
             )
         }
-        Err(e) => (
-            kernel_err_to_status(&e),
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
-        ),
+        Err(e) => {
+            let status = kernel_err_to_status(&e);
+            (
+                status,
+                Json(serde_json::json!({"error": kernel_err_body(status, &e, &t)})),
+            )
+        }
     }
 }
 
@@ -4343,9 +4460,7 @@ pub async fn set_agent_tools(
         },
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
+            Json(serde_json::json!({"error": scrub_500(&e, &t)})),
         ),
     }
 }
@@ -4507,11 +4622,7 @@ pub async fn get_agent_mcp_servers(
             }
         }
     }
-    let mode = if entry.manifest.mcp_servers.is_empty() {
-        "all"
-    } else {
-        "allowlist"
-    };
+    let mode = mcp_servers_mode(&entry.manifest.mcp_servers);
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -4564,6 +4675,111 @@ pub async fn set_agent_mcp_servers(
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({"status": "ok", "mcp_servers": servers})),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(
+                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+            ),
+        ),
+    }
+}
+
+/// GET /api/agents/{id}/channels — Get an agent's channel allowlist info.
+#[utoipa::path(
+    get,
+    path = "/api/agents/{id}/channels",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    responses(
+        (status = 200, description = "Get an agent's channel allowlist info", body = crate::types::JsonObject)
+    )
+)]
+pub async fn get_agent_channels(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let agent_id: AgentId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
+            )
+        }
+    };
+    let entry = match state.kernel.agent_registry().get(agent_id) {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+            )
+        }
+    };
+    let available: Vec<String> = state
+        .kernel
+        .config_ref()
+        .sidecar_channels
+        .iter()
+        .map(|sc| sc.channel_type.clone().unwrap_or_else(|| sc.name.clone()))
+        .collect();
+    let mode = if entry.manifest.channels.is_empty() {
+        "all"
+    } else {
+        "allowlist"
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "assigned": entry.manifest.channels,
+            "available": available,
+            "mode": mode,
+        })),
+    )
+}
+
+/// PUT /api/agents/{id}/channels — Update an agent's channel allowlist.
+#[utoipa::path(
+    put,
+    path = "/api/agents/{id}/channels",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    request_body(content = crate::types::JsonArray, description = "Array of channel_type strings"),
+    responses(
+        (status = 200, description = "Update an agent's channel allowlist", body = crate::types::JsonObject)
+    )
+)]
+pub async fn set_agent_channels(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let agent_id: AgentId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
+            )
+        }
+    };
+    let channels: Vec<String> = body["channels"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    match state.kernel.set_agent_channels(agent_id, channels.clone()) {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "ok", "channels": channels})),
         ),
         Err(e) => (
             StatusCode::BAD_REQUEST,
@@ -4784,6 +5000,13 @@ pub async fn patch_agent(
                 );
             }
         }
+    }
+
+    if let Some(auto_evolve) = body.get("auto_evolve").and_then(|v| v.as_bool()) {
+        let _ = state
+            .kernel
+            .agent_registry()
+            .update_auto_evolve(agent_id, auto_evolve);
     }
 
     // Persist updated entry to SQLite (skipped when the schedule branch
@@ -5176,9 +5399,7 @@ pub async fn patch_agent_config(
             {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(
-                        serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-                    ),
+                    Json(serde_json::json!({"error": scrub_500(&e, &t)})),
                 );
             }
         }
@@ -5324,6 +5545,42 @@ fn kernel_err_to_status(e: &crate::error::KernelError) -> StatusCode {
     }
 }
 
+/// Build the localized error-body string for a kernel error that has
+/// already been mapped to `status`.
+///
+/// 4xx statuses echo the kernel message back (caller-useful detail
+/// such as "agent not found" / "already exists"). A 500 status scrubs
+/// the raw error to the generic localized "Internal server error"
+/// *after* logging the full chain at `error!` (audit:
+/// rusqlite-errors-leak). `librefang-memory` wraps every rusqlite
+/// error in `LibreFangError::Internal(e.to_string())`, so echoing the
+/// raw text into a 500 body leaks SQL schema, column / constraint
+/// names, and lock state to any caller able to trigger an internal
+/// error. Operators keep forensics via the `error!` log.
+fn kernel_err_body(
+    status: StatusCode,
+    e: &crate::error::KernelError,
+    t: &ErrorTranslator,
+) -> String {
+    if status == StatusCode::INTERNAL_SERVER_ERROR {
+        tracing::error!(error = %e, "kernel error scrubbed before response");
+        t.t("api-error-internal")
+    } else {
+        t.t_args("api-error-generic", &[("error", &e.to_string())])
+    }
+}
+
+/// Scrub an unconditional 500-path error: log the full chain at
+/// `error!` for operators, return the generic localized "Internal
+/// server error" so the response body leaks no internal detail
+/// (audit: rusqlite-errors-leak). Use at sites whose status is always
+/// `INTERNAL_SERVER_ERROR`; for sites whose status varies with the
+/// error variant, prefer [`kernel_err_body`].
+fn scrub_500(e: &impl std::fmt::Display, t: &ErrorTranslator) -> String {
+    tracing::error!(error = %e, "internal error scrubbed before response");
+    t.t("api-error-internal")
+}
+
 /// Translate a kernel error from `update_hand_agent_runtime_override` or
 /// `clear_hand_agent_runtime_override` into a `(StatusCode, message)` pair.
 ///
@@ -5345,7 +5602,17 @@ fn map_hand_runtime_override_err(err: &crate::error::KernelError) -> (StatusCode
         {
             (StatusCode::CONFLICT, err.to_string())
         }
-        _ => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+        // Scrub the catch-all 500 (audit: rusqlite-errors-leak): the
+        // full chain reaches `error!` for operators, the client sees a
+        // generic body. The 404 / 409 arms above intentionally echo
+        // the kernel message (caller-useful, no internal detail).
+        _ => {
+            tracing::error!(error = %err, "hand runtime override error scrubbed before response");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal server error".to_string(),
+            )
+        }
     }
 }
 
@@ -5547,6 +5814,21 @@ fn skill_assignment_mode(manifest: &librefang_types::agent::AgentManifest) -> &'
     }
 }
 
+/// Classify an agent's MCP server allowlist for display (#5855).
+///
+/// Mirrors the kernel semantics in `available_tools`: an empty list grants
+/// **no** MCP servers, `["*"]` grants all connected servers, anything else is
+/// a literal allowlist.
+fn mcp_servers_mode(mcp_servers: &[String]) -> &'static str {
+    if mcp_servers.is_empty() {
+        "none"
+    } else if mcp_servers.iter().any(|s| s == "*") {
+        "all"
+    } else {
+        "allowlist"
+    }
+}
+
 /// Render a ScheduleMode as the short string the dashboard's Schedule
 /// tab displays (and what `enrich_agent_json` already exposes on the
 /// agent list). Both endpoints go through this helper so they can't
@@ -5630,15 +5912,17 @@ pub async fn clone_agent(
     let new_id = match state.kernel.spawn_agent_typed(cloned_manifest) {
         Ok(id) => id,
         Err(e) => {
+            // Map AgentAlreadyExists → 409 Conflict (audit:
+            // agent-not-found-returns-500). Pre-fix this branch
+            // returned 500 for every `spawn_agent_typed` error
+            // including the well-known duplicate-name case. The 500
+            // catch-all is scrubbed via `kernel_err_body` so a clone
+            // failure rooted in a kernel/SQL error never leaks the raw
+            // chain.
+            let status = kernel_err_to_status(&e);
             return (
-                // Map AgentAlreadyExists → 409 Conflict (audit:
-                // agent-not-found-returns-500). Pre-fix this branch
-                // returned 500 for every `spawn_agent_typed` error
-                // including the well-known duplicate-name case.
-                kernel_err_to_status(&e),
-                Json(
-                    serde_json::json!({"error": t.t_args("api-error-agent-clone-failed", &[("error", &e.to_string())])}),
-                ),
+                status,
+                Json(serde_json::json!({"error": kernel_err_body(status, &e, &t)})),
             );
         }
     };
@@ -5728,12 +6012,13 @@ pub async fn reload_agent_manifest(
         // (an unknown id is a missing resource, not a malformed request), and
         // on-disk config faults (missing/unreadable/invalid agent.toml) → 500
         // (the request is well-formed; the server-side state is the problem).
-        Err(e) => (
-            kernel_err_to_status(&e),
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
-        ),
+        Err(e) => {
+            let status = kernel_err_to_status(&e);
+            (
+                status,
+                Json(serde_json::json!({"error": kernel_err_body(status, &e, &t)})),
+            )
+        }
     }
 }
 
@@ -6037,9 +6322,7 @@ pub async fn set_agent_file(
     if let Err(e) = std::fs::create_dir_all(&identity_dir) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-file-write-failed", &[("error", &e.to_string())])}),
-            ),
+            Json(serde_json::json!({"error": scrub_500(&e, &t)})),
         );
     }
     let file_path = identity_dir.join(&filename);
@@ -6061,9 +6344,7 @@ pub async fn set_agent_file(
     if let Err(e) = std::fs::write(&tmp_path, &req.content) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-file-write-failed", &[("error", &e.to_string())])}),
-            ),
+            Json(serde_json::json!({"error": scrub_500(&e, &t)})),
         );
     }
     if let Err(e) = std::fs::rename(&tmp_path, &file_path) {
@@ -6072,9 +6353,7 @@ pub async fn set_agent_file(
         }
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-file-rename-failed", &[("error", &e.to_string())])}),
-            ),
+            Json(serde_json::json!({"error": scrub_500(&e, &t)})),
         );
     }
 
@@ -6182,9 +6461,7 @@ pub async fn delete_agent_file(
     if let Err(e) = std::fs::remove_file(&canonical) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-file-delete-failed", &[("error", &e.to_string())])}),
-            ),
+            Json(serde_json::json!({"error": scrub_500(&e, &t)})),
         );
     }
 
@@ -6404,7 +6681,7 @@ pub async fn upload_file(
         .config_ref()
         .channels
         .effective_file_download_dir();
-    if let Err(e) = std::fs::create_dir_all(&upload_dir) {
+    if let Err(e) = tokio::fs::create_dir_all(&upload_dir).await {
         tracing::warn!("Failed to create upload dir: {e}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -6413,7 +6690,7 @@ pub async fn upload_file(
     }
 
     let file_path = upload_dir.join(&file_id);
-    if let Err(e) = std::fs::write(&file_path, &body) {
+    if let Err(e) = tokio::fs::write(&file_path, &body).await {
         tracing::warn!("Failed to write upload: {e}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -6697,7 +6974,10 @@ pub async fn inject_message(
         Err(e) => if e.to_string().contains("not found") {
             ApiErrorResponse::not_found(e.to_string())
         } else {
-            ApiErrorResponse::internal(e.to_string())
+            // Scrub the catch-all 500 (audit: rusqlite-errors-leak):
+            // an inject failure rooted in the memory substrate would
+            // otherwise leak SQL detail. Full error logged in scrub.
+            ApiErrorResponse::internal_scrub(&e)
         }
         .into_response(),
     }
@@ -7106,6 +7386,22 @@ mod tests {
     }
 
     #[test]
+    fn test_mcp_servers_mode_classification() {
+        // #5855: empty allowlist is "none" (no servers), not "all".
+        assert_eq!(mcp_servers_mode(&[]), "none");
+        assert_eq!(mcp_servers_mode(&["*".to_string()]), "all");
+        assert_eq!(
+            mcp_servers_mode(&["server-a".to_string(), "*".to_string()]),
+            "all",
+            "a wildcard anywhere in the list means all servers"
+        );
+        assert_eq!(
+            mcp_servers_mode(&["server-a".to_string(), "server-b".to_string()]),
+            "allowlist"
+        );
+    }
+
+    #[test]
     fn test_clone_manifest_disables_tools_when_excluded() {
         let manifest = librefang_types::agent::AgentManifest {
             tools: {
@@ -7458,7 +7754,7 @@ mod tests {
             api_key_env: "OPENAI_API_KEY".to_string(),
             base_url: None,
             message_timeout_secs: 300,
-            extra_params: std::collections::HashMap::new(),
+            extra_params: std::collections::BTreeMap::new(),
             cli_profile_dirs: Vec::new(),
         };
         let override_dm = librefang_types::config::DefaultModelConfig {
@@ -7467,7 +7763,7 @@ mod tests {
             api_key_env: "DEEPSEEK_API_KEY".to_string(),
             base_url: None,
             message_timeout_secs: 300,
-            extra_params: std::collections::HashMap::new(),
+            extra_params: std::collections::BTreeMap::new(),
             cli_profile_dirs: Vec::new(),
         };
 
@@ -7486,7 +7782,7 @@ mod tests {
             api_key_env: "OPENAI_API_KEY".to_string(),
             base_url: None,
             message_timeout_secs: 300,
-            extra_params: std::collections::HashMap::new(),
+            extra_params: std::collections::BTreeMap::new(),
             cli_profile_dirs: Vec::new(),
         };
 
@@ -7708,6 +8004,106 @@ mod tests {
         // padding-aware shape returns 5. Document the delta inline so a
         // future refactor doesn't silently revert.
         assert_eq!(super::base64_decoded_len("AAAABBB="), 5);
+    }
+
+    /// Regression for the 2026-05-20 cross-chat image leak:
+    /// `resolve_attachment_session_id` MUST mirror `send_message_*`'s
+    /// resolver. When a non-empty `sender_context` is supplied (and the
+    /// caller hasn't asked for the canonical session), the attachment
+    /// session MUST be the per-chat `SessionId::for_sender_scope(...)`,
+    /// NOT the agent's registry-default `fallback_session_id`.
+    #[test]
+    fn resolve_attachment_session_id_uses_per_chat_session_for_channel_turn() {
+        use librefang_channels::types::SenderContext;
+        use librefang_types::agent::SessionId;
+        let agent_id = AgentId::new();
+        let registry_default = SessionId::new();
+        let sender = SenderContext {
+            channel: "whatsapp".to_string(),
+            user_id: "user-1".to_string(),
+            chat_id: Some("chat-XYZ".to_string()),
+            display_name: "Alice".to_string(),
+            use_canonical_session: false,
+            ..Default::default()
+        };
+        let expected =
+            SessionId::for_sender_scope(agent_id, &sender.channel, sender.chat_id.as_deref());
+        let resolved =
+            resolve_attachment_session_id(agent_id, Some(&sender), None, registry_default);
+        assert_eq!(
+            resolved, expected,
+            "channel-scoped attachment MUST land in the per-chat session, \
+             not the agent's registry-default session"
+        );
+        assert_ne!(
+            resolved, registry_default,
+            "registry default is the very bug being fixed — must not be used \
+             when sender_context has a non-empty channel"
+        );
+    }
+
+    /// Explicit `session_id_override` (multi-tab WebUI, REST callers that
+    /// already pinned a session) must win over channel-derived resolution
+    /// AND over the registry-default fallback. Mirrors priority #1 in the
+    /// helper's doc comment.
+    #[test]
+    fn resolve_attachment_session_id_honours_explicit_override() {
+        use librefang_channels::types::SenderContext;
+        use librefang_types::agent::SessionId;
+        let agent_id = AgentId::new();
+        let registry_default = SessionId::new();
+        let explicit = SessionId::new();
+        let sender = SenderContext {
+            channel: "whatsapp".to_string(),
+            user_id: "user-1".to_string(),
+            chat_id: Some("chat-XYZ".to_string()),
+            display_name: "Alice".to_string(),
+            use_canonical_session: false,
+            ..Default::default()
+        };
+        let resolved = resolve_attachment_session_id(
+            agent_id,
+            Some(&sender),
+            Some(explicit),
+            registry_default,
+        );
+        assert_eq!(resolved, explicit);
+        assert_ne!(resolved, registry_default);
+    }
+
+    /// Last-resort fallback: no override, no sender context — the registry
+    /// default is the only sane choice. Mirrors the
+    /// `SessionMode::Persistent => entry.session_id` branch of
+    /// `kernel/messaging.rs`.
+    #[test]
+    fn resolve_attachment_session_id_falls_back_to_registry_default_when_no_context() {
+        use librefang_types::agent::SessionId;
+        let agent_id = AgentId::new();
+        let registry_default = SessionId::new();
+        let resolved = resolve_attachment_session_id(agent_id, None, None, registry_default);
+        assert_eq!(resolved, registry_default);
+    }
+
+    /// WebUI sets `use_canonical_session: true` on its `SenderContext` so
+    /// the canonical (registry-default) session is reused across browser
+    /// reloads — the helper MUST honour that opt-in and not derive a
+    /// per-chat session from the WebUI channel name.
+    #[test]
+    fn resolve_attachment_session_id_honours_use_canonical_session() {
+        use librefang_channels::types::SenderContext;
+        use librefang_types::agent::SessionId;
+        let agent_id = AgentId::new();
+        let registry_default = SessionId::new();
+        let sender = SenderContext {
+            channel: "webui".to_string(),
+            user_id: "127.0.0.1".to_string(),
+            display_name: "Web UI".to_string(),
+            use_canonical_session: true,
+            ..Default::default()
+        };
+        let resolved =
+            resolve_attachment_session_id(agent_id, Some(&sender), None, registry_default);
+        assert_eq!(resolved, registry_default);
     }
 }
 
@@ -8191,6 +8587,185 @@ mod monitoring_tests {
                 .manifest
                 .mcp_servers,
             Vec::<String>::new()
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Attachment session-isolation regression tests (2026-05-20 incident).
+    //
+    // PR #5288 closed the streaming text-path leak by threading
+    // `SenderContext` through `send_message_stream`. The matching
+    // attachment-pre-inject path (`inject_attachments_into_session`) was
+    // missed: it called `SessionWriter::inject_attachment_blocks` with
+    // only `(kernel, agent_id, blocks)` and the kernel impl wrote into
+    // the agent's persistent registry session. For a warm group chat
+    // agent that meant a subsequent DM image landed in the most-recent
+    // group session — a hard cross-chat data leak (real production
+    // incident: owner DM Amazon order screenshot reached a public group
+    // 1 h later). The tests below pin the per-chat session derivation
+    // so the bug stays fixed.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn attachment_session_id_uses_explicit_override_when_set() {
+        use librefang_channels::types::SenderContext;
+        use librefang_types::agent::{AgentId, SessionId};
+
+        let agent_id = AgentId::new();
+        let override_sid = SessionId::new();
+        let entry_sid = SessionId::new();
+        let ctx = SenderContext {
+            channel: "whatsapp".to_string(),
+            chat_id: Some("121043@s.whatsapp.net".to_string()),
+            ..Default::default()
+        };
+
+        let resolved =
+            resolve_attachment_session_id(agent_id, Some(&ctx), Some(override_sid), entry_sid);
+
+        assert_eq!(
+            resolved, override_sid,
+            "explicit session_id_override must win over both channel derivation and fallback"
+        );
+    }
+
+    #[test]
+    fn attachment_session_id_derives_per_chat_scope_for_dm_vs_group() {
+        use librefang_channels::types::SenderContext;
+        use librefang_types::agent::{AgentId, SessionId};
+
+        let agent_id = AgentId::new();
+        let entry_sid = SessionId::new();
+
+        // Incident-shape DM: chat_id = 121043 (private), is_group = false.
+        let dm_ctx = SenderContext {
+            channel: "whatsapp".to_string(),
+            chat_id: Some("121043@s.whatsapp.net".to_string()),
+            is_group: false,
+            ..Default::default()
+        };
+
+        // Incident-shape group: chat_id = 120957 ("Non perdiamoci 💻").
+        let group_ctx = SenderContext {
+            channel: "whatsapp".to_string(),
+            chat_id: Some("120957@g.us".to_string()),
+            is_group: true,
+            ..Default::default()
+        };
+
+        let dm_sid = resolve_attachment_session_id(agent_id, Some(&dm_ctx), None, entry_sid);
+        let group_sid = resolve_attachment_session_id(agent_id, Some(&group_ctx), None, entry_sid);
+
+        let expected_dm =
+            SessionId::for_sender_scope(agent_id, "whatsapp", Some("121043@s.whatsapp.net"));
+        let expected_group = SessionId::for_sender_scope(agent_id, "whatsapp", Some("120957@g.us"));
+
+        assert_eq!(
+            dm_sid, expected_dm,
+            "DM attachment must land on the UUID-v5 chat-scoped session, not entry.session_id"
+        );
+        assert_eq!(
+            group_sid, expected_group,
+            "group session resolution mismatch"
+        );
+        assert_ne!(
+            dm_sid, group_sid,
+            "DM and group sessions must be distinct — this is the cross-chat leak guard"
+        );
+        assert_ne!(
+            dm_sid, entry_sid,
+            "DM attachment must NOT land on the agent's persistent registry session \
+             (that is the 2026-05-20 incident's exact failure mode)"
+        );
+        assert_ne!(
+            group_sid, entry_sid,
+            "group attachment must NOT land on the agent's persistent registry session"
+        );
+    }
+
+    #[test]
+    fn attachment_session_id_falls_back_to_entry_session_for_canonical_or_no_channel() {
+        use librefang_channels::types::SenderContext;
+        use librefang_types::agent::{AgentId, SessionId};
+
+        let agent_id = AgentId::new();
+        let entry_sid = SessionId::new();
+
+        // WebUI shape: non-empty channel BUT use_canonical_session=true.
+        let webui_ctx = SenderContext {
+            channel: "webui".to_string(),
+            user_id: "127.0.0.1".to_string(),
+            use_canonical_session: true,
+            ..Default::default()
+        };
+        let webui_resolved =
+            resolve_attachment_session_id(agent_id, Some(&webui_ctx), None, entry_sid);
+        assert_eq!(
+            webui_resolved, entry_sid,
+            "use_canonical_session=true must collapse onto entry.session_id"
+        );
+
+        // Direct REST caller with no sender_context — must fall back.
+        let none_resolved = resolve_attachment_session_id(agent_id, None, None, entry_sid);
+        assert_eq!(
+            none_resolved, entry_sid,
+            "no sender context + no override → entry.session_id fallback"
+        );
+
+        // Empty channel string is treated like no channel context.
+        let empty_chan = SenderContext {
+            channel: String::new(),
+            ..Default::default()
+        };
+        let empty_resolved =
+            resolve_attachment_session_id(agent_id, Some(&empty_chan), None, entry_sid);
+        assert_eq!(
+            empty_resolved, entry_sid,
+            "empty channel string must fall through to the persistent fallback, \
+             mirroring kernel/messaging.rs"
+        );
+    }
+
+    /// Direct regression for the 2026-05-20 incident shape: WhatsApp DM
+    /// chat 121043 arrives with an Amazon-order image; without the fix
+    /// the derived sid would be the agent's registry session (the warm
+    /// group session 120957). After the fix the DM attachment lands on
+    /// `SessionId::for_sender_scope(agent, "whatsapp", "121043@…")` — a
+    /// UUID v5 distinct from BOTH the group session and the registry
+    /// session.
+    #[test]
+    fn incident_20260520_dm_attachment_does_not_land_on_group_session() {
+        use librefang_channels::types::SenderContext;
+        use librefang_types::agent::{AgentId, SessionId};
+
+        let agent_id = AgentId::new();
+        // The warm group session that "won" in the production incident.
+        let warm_group_session =
+            SessionId::for_sender_scope(agent_id, "whatsapp", Some("120957@g.us"));
+        // The persistent registry session — what
+        // `inject_attachment_blocks` used to write to unconditionally.
+        let registry_session = warm_group_session;
+
+        let dm_ctx = SenderContext {
+            channel: "whatsapp".to_string(),
+            chat_id: Some("121043@s.whatsapp.net".to_string()),
+            is_group: false,
+            ..Default::default()
+        };
+
+        let resolved =
+            resolve_attachment_session_id(agent_id, Some(&dm_ctx), None, registry_session);
+
+        let expected_dm =
+            SessionId::for_sender_scope(agent_id, "whatsapp", Some("121043@s.whatsapp.net"));
+        assert_eq!(
+            resolved, expected_dm,
+            "DM image must land on its own UUID v5 session"
+        );
+        assert_ne!(
+            resolved, warm_group_session,
+            "CROSS-CHAT LEAK GUARD: DM attachment must not land on the group session — \
+             this assertion failing would mean the 2026-05-20 incident has regressed"
         );
     }
 }

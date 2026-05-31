@@ -6,6 +6,8 @@
 //! eager schema trim (#3044). When the slice is `None` they fall back to
 //! `super::builtin_tool_definitions()` to keep legacy callers working.
 
+use std::borrow::Cow;
+
 use super::builtin_tool_definitions;
 use librefang_types::tool::{ToolDefinition, ToolExecutionStatus, ToolResult};
 
@@ -19,10 +21,10 @@ use librefang_types::tool::{ToolDefinition, ToolExecutionStatus, ToolResult};
 /// - `None` — caller didn't thread the granted list through (legacy
 ///   `execute_tool` paths: REST/MCP bridges, approval resume, unit tests).
 ///   Fall back to the builtin catalog so these code paths keep working.
-fn meta_lookup_pool(available: Option<&[ToolDefinition]>) -> Vec<ToolDefinition> {
+fn meta_lookup_pool<'a>(available: Option<&'a [ToolDefinition]>) -> Cow<'a, [ToolDefinition]> {
     match available {
-        Some(list) => list.to_vec(),
-        None => builtin_tool_definitions(),
+        Some(list) => Cow::Borrowed(list),
+        None => Cow::Owned(builtin_tool_definitions()),
     }
 }
 
@@ -46,8 +48,12 @@ pub(super) fn tool_meta_load(
         );
     }
     let pool = meta_lookup_pool(available_tools);
-    match pool.into_iter().find(|t| t.name == name) {
+    match pool
+        .iter()
+        .find(|t| t.name.trim().eq_ignore_ascii_case(name))
+    {
         Some(def) => {
+            let def = def.clone();
             let schema = serde_json::json!({
                 "name": def.name,
                 "description": def.description,
@@ -105,10 +111,15 @@ pub(super) fn tool_meta_search(
     // Tokenize query — any token in the tool name, description, or hint makes a hit.
     let tokens: Vec<&str> = query.split_whitespace().collect();
     let mut matches: Vec<(usize, String, String)> = Vec::new();
-    for def in meta_lookup_pool(available_tools) {
-        let name_lc = def.name.to_lowercase();
+    for def in meta_lookup_pool(available_tools).iter() {
+        let name_lc = def.name.trim().to_lowercase();
         let desc_lc = def.description.to_lowercase();
-        let hint = crate::prompt_builder::tool_hint(&def.name);
+        let catalog_hint = crate::prompt_builder::tool_hint(&def.name);
+        let hint = if catalog_hint.is_empty() {
+            def.description.lines().next().unwrap_or("")
+        } else {
+            catalog_hint
+        };
         let hint_lc = hint.to_lowercase();
         let score = tokens.iter().fold(0usize, |acc, tok| {
             let tok = tok.trim();
@@ -120,10 +131,10 @@ pub(super) fn tool_meta_search(
                 + (desc_lc.contains(tok) as usize)
         });
         if score > 0 {
-            matches.push((score, def.name, hint.to_string()));
+            matches.push((score, def.name.trim().to_string(), hint.to_string()));
         }
     }
-    matches.sort_by_key(|m| std::cmp::Reverse(m.0));
+    matches.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
     matches.truncate(limit);
 
     if matches.is_empty() {

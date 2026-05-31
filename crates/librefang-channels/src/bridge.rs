@@ -292,6 +292,14 @@ pub trait ChannelBridgeHandle: Send + Sync {
         None
     }
 
+    /// Return the agent's channel allowlist (`manifest.channels`).
+    ///
+    /// Empty = all channels permitted (backward-compatible default).
+    /// Non-empty = only the listed `channel_type` strings are allowed.
+    async fn agent_channel_allowlist(&self, _agent_id: AgentId) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Already-escaped regex patterns from `channel_overrides.group_trigger_patterns`; callers must not re-escape.
     async fn get_agent_group_trigger_patterns(&self, _agent_id: AgentId) -> Vec<String> {
         Vec::new()
@@ -595,22 +603,24 @@ pub trait ChannelBridgeHandle: Send + Sync {
         Ok(None)
     }
 
-    /// Auto-describe an inbound channel image that has already been saved to
-    /// disk by the bridge. Mirror of `transcribe_inbound_audio` for vision:
-    /// when `[media] image_description = true`, the bridge calls this method
-    /// before dispatching the message so the inline `ImageFile` block is
-    /// accompanied by a `<image_description>` text block sourced from the
-    /// configured `image_provider` (default Gemini 2.5 Flash).
+    /// Describe an inbound channel image that has already been downloaded to disk.
     ///
-    /// Why this exists: vision-capable primary models (Sonnet, GPT-4o, …) do
-    /// their own OCR/visual reasoning when they see an inline image and tend
-    /// to hallucinate small text — fabricated dates, weekdays, prices.
-    /// Pre-describing via a cheap dedicated vision provider gives the primary
-    /// model an authoritative text anchor next to the image, suppressing the
-    /// fabrication.
+    /// Implementations should:
+    ///   1. Honor the `[media] image_description` kernel config (default ON) —
+    ///      return `Ok(None)` when description is disabled.
+    ///   2. On enabled, hand the attachment to the kernel `MediaEngine`
+    ///      (`describe_image`), returning `Ok(Some(text))` on success.
+    ///   3. On provider error / no credentials / oversize file, return
+    ///      `Err(reason)` so the bridge can surface an opaque
+    ///      `[Image description unavailable]` note next to the `ImageFile` block
+    ///      without dropping the message. The bridge sanitizes the reason out of
+    ///      the user-facing block — operator logs still carry the full error.
     ///
-    /// The default impl (used by mocks) is "feature off" — returns `Ok(None)`,
-    /// so the bridge passes the image through unannotated.
+    /// The default impl (used by mocks) is "feature off" — returns `Ok(None)`.
+    /// This preserves the existing default behaviour: `ImageFile` blocks are
+    /// passed as-is to vision-capable models, and text-only models receive them
+    /// without a description. Production callers (real `KernelBridgeAdapter`)
+    /// override this with the actual `MediaEngine::describe_image` call.
     async fn describe_inbound_image(
         &self,
         _path: &std::path::Path,
@@ -1102,15 +1112,20 @@ fn flush_debounced(
                 }
             }
 
-            let overrides = channel_handle
-                .channel_overrides(
-                    ct_str,
-                    merged_msg
-                        .metadata
-                        .get("account_id")
-                        .and_then(|v| v.as_str()),
-                )
-                .await;
+            let overrides = match adapter.channel_overrides() {
+                Some(ov) => Some(ov),
+                None => {
+                    channel_handle
+                        .channel_overrides(
+                            ct_str,
+                            merged_msg
+                                .metadata
+                                .get("account_id")
+                                .and_then(|v| v.as_str()),
+                        )
+                        .await
+                }
+            };
             let channel_default_format = default_output_format_for_channel(ct_str);
             let output_format = overrides
                 .as_ref()
@@ -1327,7 +1342,14 @@ impl BridgeManager {
         let mut shutdown = self.shutdown_rx.clone();
 
         let ct_str = channel_type_str(&adapter.channel_type()).to_string();
-        let overrides = handle.channel_overrides(&ct_str, None).await;
+        // Per-instance overrides carried by the adapter (e.g. a sidecar's
+        // `[[sidecar_channels]]` command-policy / coalescing block, #5841)
+        // win over the kernel-level channel-type lookup, which cannot tell
+        // two same-`channel_type` sidecars apart.
+        let overrides = match adapter.channel_overrides() {
+            Some(ov) => Some(ov),
+            None => handle.channel_overrides(&ct_str, None).await,
+        };
         let debounce_ms = overrides
             .as_ref()
             .map(|o| o.message_debounce_ms)
@@ -2766,7 +2788,11 @@ async fn send_response(
         text_len = text.len(),
         "Sending response to channel"
     );
-    let formatted = formatter::format_for_channel(&text, output_format);
+    let formatted = if adapter.owns_formatting() {
+        text
+    } else {
+        formatter::format_for_channel(&text, output_format)
+    };
     let content = ChannelContent::Text(formatted);
 
     let result = if let Some(tid) = thread_id {
@@ -3025,6 +3051,13 @@ async fn resolve_or_fallback(
     };
 
     if let Some(id) = agent_id {
+        let allowlist = handle.agent_channel_allowlist(id).await;
+        if !allowlist.is_empty() {
+            let ct = channel_type_str(&message.channel);
+            if !allowlist.iter().any(|c| c == ct) {
+                return None;
+            }
+        }
         return Some(id);
     }
 
@@ -3039,6 +3072,13 @@ async fn resolve_or_fallback(
             .and_then(|agents| agents.first().map(|(id, _)| *id)),
     };
     if let Some(id) = fallback {
+        let allowlist = handle.agent_channel_allowlist(id).await;
+        if !allowlist.is_empty() {
+            let ct = channel_type_str(&message.channel);
+            if !allowlist.iter().any(|c| c == ct) {
+                return None;
+            }
+        }
         // Auto-set this as the user's default so future messages route
         // directly. Scope the cache entry to (channel, account_id) when we
         // know the bot identity, otherwise we would re-introduce the #5672
@@ -3184,12 +3224,22 @@ async fn dispatch_message(
     let early_agent_id = resolve_or_fallback(message, handle, router).await;
 
     // Fetch overrides: agent-level (from agent.toml) wins, channel-level is fallback.
-    let channel_overrides = handle
-        .channel_overrides(
-            ct_str,
-            message.metadata.get("account_id").and_then(|v| v.as_str()),
-        )
-        .await;
+    // Per-instance adapter overrides (a sidecar's `[[sidecar_channels]]`
+    // command-policy / coalescing block, #5841) take the channel-level slot
+    // when present — they are keyed to this exact adapter, whereas the
+    // kernel lookup is keyed only by `channel_type` and cannot distinguish
+    // two sidecars sharing a `channel_type`.
+    let channel_overrides = match adapter.channel_overrides() {
+        Some(ov) => Some(ov),
+        None => {
+            handle
+                .channel_overrides(
+                    ct_str,
+                    message.metadata.get("account_id").and_then(|v| v.as_str()),
+                )
+                .await
+        }
+    };
     let overrides = if let Some(aid) = early_agent_id {
         handle
             .agent_channel_overrides(aid)
@@ -3441,10 +3491,36 @@ async fn dispatch_message(
                 ContentBlock::Image { .. } | ContentBlock::ImageFile { .. }
             )
         }) {
-            let blocks = enrich_image_blocks_with_description(raw, handle).await;
-            // We have actual image data — send as structured blocks for vision
+            // We have actual image data.
+            //
+            // Optionally run `describe_inbound_image` so that text-only
+            // models receive a natural-language description next to the
+            // `ImageFile` block.  Vision-capable models ignore the text
+            // block and use the raw image bytes directly.
+            //
+            // Extract the (path, media_type) from the first `ImageFile`
+            // block so `maybe_describe_inbound_image` can pass it to the
+            // kernel's `MediaEngine`.  Inline `Image` blocks (base64
+            // fallback when the save failed) have no on-disk path, so
+            // skip description for those.
+            let saved_image: Option<(std::path::PathBuf, String)> = raw.iter().find_map(|b| {
+                if let ContentBlock::ImageFile { path, media_type } = b {
+                    Some((std::path::PathBuf::from(path), media_type.clone()))
+                } else {
+                    None
+                }
+            });
+            let mut final_blocks = raw;
+            if let Some(ref saved) = saved_image {
+                if let Some(desc_block) = maybe_describe_inbound_image(handle, Some(saved)).await {
+                    // Prepend the description so the model reads context
+                    // before the raw image bytes.
+                    final_blocks.insert(0, desc_block);
+                }
+            }
+            // Send as structured blocks for vision
             dispatch_with_blocks(
-                blocks,
+                final_blocks,
                 message,
                 handle,
                 router,
@@ -4930,6 +5006,100 @@ const INBOUND_TRANSCRIPTION_TIMEOUT: std::time::Duration = std::time::Duration::
 /// request URLs) into the LLM prompt and downstream cache.
 const TRANSCRIPTION_UNAVAILABLE_BLOCK: &str = "[Transcription unavailable]";
 
+/// Auto-describe an inbound channel image when the kernel's
+/// `[media] image_description` flag is enabled.
+///
+/// Returns a `ContentBlock::Text` to insert alongside the `ImageFile` block:
+///   - `Some([Image description: …])` when description succeeded.
+///   - `Some([Image description unavailable])` when the kernel reported an
+///     error (no provider configured, oversize file, provider 5xx, …) or
+///     the vision call exceeded [`INBOUND_DESCRIPTION_TIMEOUT`]. The
+///     `ImageFile` block is still delivered so vision-capable models
+///     receive the raw image. The opaque text deliberately omits the
+///     provider reason — provider error envelopes can echo API keys / URLs.
+///     Operators see the full reason in logs.
+///   - `None` when description is disabled (the default) or there is no
+///     saved file (download failed earlier).
+///
+/// Non-image MIME types are skipped silently.
+async fn maybe_describe_inbound_image(
+    handle: &Arc<dyn ChannelBridgeHandle>,
+    saved: Option<&(std::path::PathBuf, String)>,
+) -> Option<ContentBlock> {
+    maybe_describe_inbound_image_with_timeout(handle, saved, INBOUND_DESCRIPTION_TIMEOUT).await
+}
+
+/// Inner variant of [`maybe_describe_inbound_image`] that takes the timeout
+/// explicitly. Production callers go through the wrapper above; tests use
+/// this entry point to exercise the timeout branch.
+async fn maybe_describe_inbound_image_with_timeout(
+    handle: &Arc<dyn ChannelBridgeHandle>,
+    saved: Option<&(std::path::PathBuf, String)>,
+    timeout_dur: std::time::Duration,
+) -> Option<ContentBlock> {
+    let (path, media_type) = saved?;
+    if !media_type
+        .as_bytes()
+        .get(..6)
+        .is_some_and(|p| p.eq_ignore_ascii_case(b"image/"))
+    {
+        return None;
+    }
+    let fut = handle.describe_inbound_image(path, media_type);
+    let result = match tokio::time::timeout(timeout_dur, fut).await {
+        Ok(inner) => inner,
+        Err(_elapsed) => {
+            warn!(
+                path = %path.display(),
+                mime = %media_type,
+                timeout_secs = timeout_dur.as_secs(),
+                "Inbound image description timed out; passing raw ImageFile to agent"
+            );
+            return Some(ContentBlock::Text {
+                text: IMAGE_DESCRIPTION_UNAVAILABLE_BLOCK.to_string(),
+                provider_metadata: None,
+            });
+        }
+    };
+    match result {
+        Ok(Some(text)) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            Some(ContentBlock::Text {
+                text: format!("[Image description: {trimmed}]"),
+                provider_metadata: None,
+            })
+        }
+        Ok(None) => None,
+        Err(reason) => {
+            warn!(
+                path = %path.display(),
+                mime = %media_type,
+                error = %reason,
+                "Inbound image description failed; passing raw ImageFile to agent"
+            );
+            Some(ContentBlock::Text {
+                text: IMAGE_DESCRIPTION_UNAVAILABLE_BLOCK.to_string(),
+                provider_metadata: None,
+            })
+        }
+    }
+}
+
+/// Hard deadline for the vision round-trip during channel image dispatch.
+///
+/// Vision APIs (Anthropic, OpenAI, Groq, Gemini) normally return in 2-8s;
+/// 30s is generous but short enough that a hung provider can't pin the
+/// per-(agent,channel) session indefinitely.
+const INBOUND_DESCRIPTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// User-facing text for an inbound image description that didn't produce a
+/// usable result. Deliberately opaque to avoid leaking provider error
+/// envelopes into the LLM prompt.
+const IMAGE_DESCRIPTION_UNAVAILABLE_BLOCK: &str = "[Image description unavailable]";
+
 /// Extract a basename-style filename from the path component of a URL.
 ///
 /// Returns `None` when the URL is unparseable, has no path basename, or the
@@ -5002,7 +5172,13 @@ async fn download_file_to_blocks(
         }]);
     }
 
-    let client = crate::http_client::new_client();
+    // Use the redirect-revalidating client: `new_client()` follows up to 10
+    // redirects with NO per-hop SSRF check, so a forged attachment URL on a
+    // public host could `302` to `http://169.254.169.254/...` and bypass the
+    // entry-time `validate_url_scheme` guard. `safe_fetch_client()` re-runs
+    // `validate_url_for_fetch` on every redirect target (cap 5), matching the
+    // image path (`fetch_url_bytes`).
+    let client = crate::http_client::safe_fetch_client();
     let mut req = client.get(url).timeout(std::time::Duration::from_secs(60));
     for (name, value) in extra_headers {
         req = req.header(name.as_str(), value.as_str());
@@ -5217,8 +5393,22 @@ async fn download_file_to_blocks(
         // addition to the saved-path block. The path block is preserved
         // so tools that legitimately want raw bytes (media_transcribe,
         // custom file readers) still work.
-        let mut blocks =
-            crate::attachment_enrich::enrich_saved_file(&file_path, &media_type, filename);
+        // enrich_saved_file does blocking std::fs reads and CPU-bound PDF
+        // text extraction (pdf_extract), which can stall the tokio worker for
+        // a large/complex document — offload it (refs blocking-fs-on-executor).
+        let mut blocks = {
+            let file_path = file_path.clone();
+            let media_type = media_type.clone();
+            let filename = filename.to_string();
+            tokio::task::spawn_blocking(move || {
+                crate::attachment_enrich::enrich_saved_file(&file_path, &media_type, &filename)
+            })
+            .await
+            .unwrap_or_else(|e| {
+                warn!("attachment enrichment task failed to join: {e}");
+                Vec::new()
+            })
+        };
         blocks.push(ContentBlock::Text {
             text: format!("{FILE_SAVED_BLOCK_PREFIX}{filename}] saved to {path_str}"),
             provider_metadata: None,
@@ -9239,6 +9429,213 @@ mod tests {
             match block {
                 Some(ContentBlock::Text { text, .. }) => {
                     assert_eq!(text, "[Transcription unavailable]");
+                }
+                other => panic!("timeout must produce the unavailable block, got {other:?}"),
+            }
+        }
+    }
+
+    /// Unit tests for `maybe_describe_inbound_image` (#5739).
+    ///
+    /// Mirrors the `inbound_audio_transcription` module above — same
+    /// helper/recording-handle pattern, analogous coverage.
+    mod inbound_image_description {
+        use super::*;
+        use std::path::PathBuf;
+        use std::sync::Arc;
+
+        /// Mock that captures every `describe_inbound_image` call.
+        struct DescribeHandle {
+            calls: Mutex<Vec<(PathBuf, String)>>,
+            response: Result<Option<String>, String>,
+        }
+
+        #[async_trait]
+        impl ChannelBridgeHandle for DescribeHandle {
+            async fn send_message(
+                &self,
+                _agent_id: AgentId,
+                _message: &str,
+            ) -> Result<String, String> {
+                Ok(String::new())
+            }
+            async fn find_agent_by_name(&self, _name: &str) -> Result<Option<AgentId>, String> {
+                Ok(None)
+            }
+            async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String> {
+                Ok(Vec::new())
+            }
+            async fn spawn_agent_by_name(&self, _manifest_name: &str) -> Result<AgentId, String> {
+                Err("unused in this test".into())
+            }
+            fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {}
+
+            async fn describe_inbound_image(
+                &self,
+                path: &std::path::Path,
+                mime_type: &str,
+            ) -> Result<Option<String>, String> {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push((path.to_path_buf(), mime_type.to_string()));
+                self.response.clone()
+            }
+        }
+
+        fn handle_with(
+            response: Result<Option<String>, String>,
+        ) -> (Arc<dyn ChannelBridgeHandle>, Arc<DescribeHandle>) {
+            let inner = Arc::new(DescribeHandle {
+                calls: Mutex::new(Vec::new()),
+                response,
+            });
+            let h: Arc<dyn ChannelBridgeHandle> = inner.clone();
+            (h, inner)
+        }
+
+        fn saved(path: &str, mime: &str) -> Option<(PathBuf, String)> {
+            Some((PathBuf::from(path), mime.to_string()))
+        }
+
+        #[tokio::test]
+        async fn enabled_success_returns_description_block() {
+            let (h, rec) = handle_with(Ok(Some("A cat sitting on a mat.".into())));
+            let s = saved("/tmp/photo.jpg", "image/jpeg");
+            let block = maybe_describe_inbound_image(&h, s.as_ref()).await;
+            match block {
+                Some(ContentBlock::Text { text, .. }) => {
+                    assert_eq!(text, "[Image description: A cat sitting on a mat.]");
+                }
+                other => panic!("expected description text block, got {other:?}"),
+            }
+            let calls = rec.calls.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].0, PathBuf::from("/tmp/photo.jpg"));
+            assert_eq!(calls[0].1, "image/jpeg");
+        }
+
+        #[tokio::test]
+        async fn disabled_returns_none() {
+            // When the kernel returns `Ok(None)` (feature off), the ImageFile
+            // block is delivered as-is without a sibling description block.
+            let (h, rec) = handle_with(Ok(None));
+            let s = saved("/tmp/photo.jpg", "image/jpeg");
+            let block = maybe_describe_inbound_image(&h, s.as_ref()).await;
+            assert!(block.is_none(), "disabled-config must produce no block");
+            assert_eq!(rec.calls.lock().unwrap().len(), 1);
+        }
+
+        #[tokio::test]
+        async fn provider_failure_surfaces_opaque_block_not_drop() {
+            // API key absent / provider 5xx → `Err(reason)`.
+            // The raw ImageFile block must still reach the agent; we insert an
+            // opaque `[Image description unavailable]` note. The raw reason
+            // (which may contain API keys / request URLs) must never surface.
+            let leak = "Anthropic API error (401): x-api-key: sk-ant-SECRET_DO_NOT_LEAK";
+            let (h, _rec) = handle_with(Err(leak.into()));
+            let s = saved("/tmp/photo.jpg", "image/jpeg");
+            let block = maybe_describe_inbound_image(&h, s.as_ref()).await;
+            match block {
+                Some(ContentBlock::Text { text, .. }) => {
+                    assert_eq!(
+                        text, "[Image description unavailable]",
+                        "failure block must be the opaque sentinel"
+                    );
+                    assert!(
+                        !text.contains("SECRET_DO_NOT_LEAK"),
+                        "provider reason must not leak into the block"
+                    );
+                }
+                other => panic!("expected failure text block, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn no_saved_file_skips_dispatch() {
+            let (h, rec) = handle_with(Ok(Some("should never be returned".into())));
+            let block = maybe_describe_inbound_image(&h, None).await;
+            assert!(block.is_none());
+            assert!(rec.calls.lock().unwrap().is_empty());
+        }
+
+        #[tokio::test]
+        async fn non_image_mime_is_silently_skipped() {
+            // Defense in depth: a non-image MIME in `saved` must not trigger
+            // a vision API call.
+            let (h, rec) = handle_with(Ok(Some("would have described".into())));
+            let s = saved("/tmp/clip.mp4", "video/mp4");
+            let block = maybe_describe_inbound_image(&h, s.as_ref()).await;
+            assert!(block.is_none());
+            assert!(
+                rec.calls.lock().unwrap().is_empty(),
+                "non-image MIME must never hit the vision path"
+            );
+        }
+
+        #[tokio::test]
+        async fn empty_description_is_discarded() {
+            // Empty/whitespace response must not produce `[Image description: ]`.
+            let (h, _rec) = handle_with(Ok(Some("   ".into())));
+            let s = saved("/tmp/photo.jpg", "image/jpeg");
+            let block = maybe_describe_inbound_image(&h, s.as_ref()).await;
+            assert!(block.is_none(), "empty description must be dropped");
+        }
+
+        #[tokio::test]
+        async fn provider_hang_times_out_and_returns_unavailable_block() {
+            struct HangHandle;
+            #[async_trait]
+            impl ChannelBridgeHandle for HangHandle {
+                async fn send_message(
+                    &self,
+                    _agent_id: AgentId,
+                    _message: &str,
+                ) -> Result<String, String> {
+                    Ok(String::new())
+                }
+                async fn find_agent_by_name(&self, _name: &str) -> Result<Option<AgentId>, String> {
+                    Ok(None)
+                }
+                async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String> {
+                    Ok(Vec::new())
+                }
+                async fn spawn_agent_by_name(
+                    &self,
+                    _manifest_name: &str,
+                ) -> Result<AgentId, String> {
+                    Err("unused".into())
+                }
+                fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {}
+
+                async fn describe_inbound_image(
+                    &self,
+                    _path: &std::path::Path,
+                    _mime_type: &str,
+                ) -> Result<Option<String>, String> {
+                    std::future::pending::<()>().await;
+                    unreachable!("pending future cannot resolve")
+                }
+            }
+
+            let h: Arc<dyn ChannelBridgeHandle> = Arc::new(HangHandle);
+            let s = saved("/tmp/photo.jpg", "image/jpeg");
+            let started = std::time::Instant::now();
+            let block = maybe_describe_inbound_image_with_timeout(
+                &h,
+                s.as_ref(),
+                std::time::Duration::from_millis(50),
+            )
+            .await;
+
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(5),
+                "helper waited too long; timeout did not fire"
+            );
+
+            match block {
+                Some(ContentBlock::Text { text, .. }) => {
+                    assert_eq!(text, "[Image description unavailable]");
                 }
                 other => panic!("timeout must produce the unavailable block, got {other:?}"),
             }
