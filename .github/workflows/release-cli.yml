@@ -92,6 +92,10 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: cli-${{ matrix.target }}-${{ inputs.tag }}
+          # Cache the kernel workspace AND the sidecar's separate target/.
+          workspaces: |
+            .
+            sdk/rust/librefang-sidecar-telegram
       - name: Build CLI
         run: cargo build --release --target ${{ matrix.target }} --bin librefang
       - name: Build Telegram sidecar
@@ -158,6 +162,10 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: cli-${{ matrix.target }}-${{ inputs.tag }}
+          # Cache the kernel workspace AND the sidecar's separate target/.
+          workspaces: |
+            .
+            sdk/rust/librefang-sidecar-telegram
       - name: Build CLI
         run: |
           if [ "${{ matrix.use_cross }}" = "true" ]; then
@@ -318,6 +326,10 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: cli-${{ matrix.target }}-${{ inputs.tag }}
+          # Cache the kernel workspace AND the sidecar's separate target/.
+          workspaces: |
+            .
+            sdk/rust/librefang-sidecar-telegram
       - name: Build static CLI
         run: cross build --release --target ${{ matrix.target }} --bin librefang
       - name: Build Telegram sidecar
@@ -384,6 +396,10 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: cli-${{ matrix.target }}-${{ inputs.tag }}
+          # Cache the kernel workspace AND the sidecar's separate target/.
+          workspaces: |
+            .
+            sdk/rust/librefang-sidecar-telegram
       - name: Build CLI
         run: cargo build --release --target ${{ matrix.target }} --bin librefang
       - name: Build Telegram sidecar
