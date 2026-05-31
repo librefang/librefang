@@ -3502,6 +3502,9 @@ pub struct KernelConfig {
     /// Auto-dream (background memory consolidation) configuration.
     #[serde(default)]
     pub auto_dream: AutoDreamConfig,
+    /// RL rollout trajectory export configuration (#3330 / #3331).
+    #[serde(default)]
+    pub rl_export: RlExportConfig,
     /// Pluggable context engine configuration.
     #[serde(default)]
     pub context_engine: ContextEngineTomlConfig,
@@ -5079,6 +5082,98 @@ impl Default for AutoDreamConfig {
     }
 }
 
+/// RL rollout trajectory export configuration (issues #3330 / #3331).
+///
+/// When `enabled`, a finished agent turn's session trajectory is serialized
+/// and uploaded to the configured upstream RL-tracking service via
+/// `librefang_rl_export::export`. Default disabled — opt-in. A per-agent
+/// override lives on the agent manifest (`agent.toml: [rl_export] enabled =
+/// …`), which supersedes this global toggle for that one agent.
+///
+/// The `target` shape mirrors `librefang_rl_export::ExportTarget`; the
+/// config carries env-var **names** for any secret (`api_key_env`), never
+/// the secret material, matching the rest of the workspace's `*_env`
+/// indirection convention. The kernel converts this config-side enum into
+/// the exporter's `ExportTarget` at upload time.
+///
+/// Configure in `config.toml`:
+/// ```toml
+/// [rl_export]
+/// enabled = true
+/// target = { type = "wandb", project = "my-rollouts", entity = "my-team", api_key_env = "WANDB_API_KEY" }
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct RlExportConfig {
+    /// Master toggle. Default: disabled — when false, no trajectory is
+    /// exported regardless of per-agent opt-in.
+    pub enabled: bool,
+    /// Upstream export destination. `None` means no destination is
+    /// configured; even with `enabled = true` the producer no-ops (and
+    /// logs a warning at boot) until a target is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<RlExportTarget>,
+}
+
+/// Config-side mirror of `librefang_rl_export::ExportTarget`.
+///
+/// Kept separate from the exporter's own enum because that one is
+/// `#[non_exhaustive]` and intentionally does not derive
+/// `Serialize`/`Deserialize` (it is an in-process call surface, not a
+/// config shape). This enum is the TOML-deserializable representation; the
+/// kernel maps it onto the exporter's `ExportTarget` at upload time. Secret
+/// material is never inlined — `api_key_env` holds the **name** of the
+/// environment variable holding the key, resolved by the exporter at upload
+/// time.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RlExportTarget {
+    /// Weights & Biases. See `librefang_rl_export::ExportTarget::WandB`.
+    Wandb {
+        /// W&B project name. The project must already exist.
+        project: String,
+        /// W&B entity (team or username). Required.
+        entity: String,
+        /// Optional client-supplied run id hint. When `None`, the
+        /// producer's run id is forwarded as the hint.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
+        /// Name of the environment variable holding the W&B API key.
+        api_key_env: String,
+    },
+    /// Tinker. See `librefang_rl_export::ExportTarget::Tinker`.
+    Tinker {
+        /// Name of the environment variable holding the Tinker API key.
+        api_key_env: String,
+        /// Project identifier sent on the create-session call. Required.
+        project: String,
+        /// Optional override for the Tinker REST base URL. `None` uses the
+        /// crate's documented prod default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base_url: Option<String>,
+    },
+    /// Atropos. See `librefang_rl_export::ExportTarget::Atropos`.
+    Atropos {
+        /// Producer name registered with Atropos. Required.
+        project: String,
+        /// Atropos `run-api` base URL. Required and SSRF-validated against
+        /// the loopback / RFC-1918 allowlist by the exporter.
+        base_url: String,
+        /// Maximum token length to report on `RegisterEnv`. `None` uses the
+        /// exporter's conservative default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_token_length: Option<u32>,
+        /// Group size to report on `RegisterEnv`. `None` uses the
+        /// exporter's default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group_size: Option<u32>,
+        /// Weight to report on `RegisterEnv`. `None` uses the exporter's
+        /// default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        weight: Option<f32>,
+    },
+}
+
 /// Background autonomous-loop executor configuration (issue #5168).
 ///
 /// Tunes the circuit breaker that stops a continuous / periodic background
@@ -6005,6 +6100,7 @@ impl Default for KernelConfig {
             tool_policy: crate::tool_policy::ToolPolicy::default(),
             proactive_memory: crate::memory::ProactiveMemoryConfig::default(),
             auto_dream: AutoDreamConfig::default(),
+            rl_export: RlExportConfig::default(),
             context_engine: ContextEngineTomlConfig::default(),
             audit: AuditConfig::default(),
             health_check: HealthCheckConfig::default(),
