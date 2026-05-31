@@ -47,10 +47,27 @@ fn extract_pr_numbers(root: &Path, git_range: &str) -> Vec<u64> {
         Some(o) => String::from_utf8_lossy(&o.stdout).to_string(),
         None => return vec![],
     };
+    parse_pr_numbers(&stdout)
+}
+
+/// Pull the PR number out of each `git log --oneline` subject.
+///
+/// A GitHub squash merge appends the PR reference as the *trailing* `(#N)` of
+/// the subject line. Any earlier `#N` on the same line is an in-title
+/// cross-reference — an issue (`fixes #5740`), a prior PR (`post-#5053`), or a
+/// "part N of M" marker (`(#2)`) — not the PR that introduced the commit.
+/// Taking only the last `#N` per line keeps those unrelated references out of
+/// the release notes; the old "every `#N` in the whole log" approach pulled
+/// them in and resolved them to ancient or unmerged PRs.
+fn parse_pr_numbers(log: &str) -> Vec<u64> {
     let re = Regex::new(r"#(\d+)").unwrap();
-    let mut nums: Vec<u64> = re
-        .captures_iter(&stdout)
-        .filter_map(|cap| cap.get(1)?.as_str().parse().ok())
+    let mut nums: Vec<u64> = log
+        .lines()
+        .filter_map(|line| {
+            re.captures_iter(line)
+                .last()
+                .and_then(|cap| cap.get(1)?.as_str().parse().ok())
+        })
         .collect();
     nums.sort_unstable();
     nums.dedup();
@@ -464,4 +481,53 @@ pub fn run(args: ChangelogArgs) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_pr_numbers;
+
+    #[test]
+    fn takes_trailing_pr_number_per_line() {
+        let log = "abc1234 fix(api): scrub internal errors (#5863)\n\
+                   def5678 feat(dashboard): kanban board (#5805)\n";
+        assert_eq!(parse_pr_numbers(log), vec![5805, 5863]);
+    }
+
+    #[test]
+    fn ignores_in_title_cross_references() {
+        // Each line carries an earlier `#N` that is NOT the merge PR: a
+        // "part N" marker, an issue ref, and a prior-PR ref. Only the trailing
+        // `(#N)` is the real squash-merge PR number.
+        let log = "a1 fix(runtime): make subprocess sandbox secure-by-default (#2) (#5862)\n\
+                   b2 feat: support custom-URL STT/TTS (fixes #5740) (#5814)\n\
+                   c3 fix: reconcile cascade-leak THEMATIC_HEADERS with post-#5053 builder (#5351)\n";
+        assert_eq!(parse_pr_numbers(log), vec![5351, 5814, 5862]);
+    }
+
+    #[test]
+    fn handles_merge_commit_subjects() {
+        let log = "e5f6a7b Merge pull request #1234 from contributor/branch\n";
+        assert_eq!(parse_pr_numbers(log), vec![1234]);
+    }
+
+    #[test]
+    fn skips_lines_without_a_pr_reference() {
+        let log = "deadbeef chore: tidy up\n\
+                   cafef00d fix: real change (#4242)\n";
+        assert_eq!(parse_pr_numbers(log), vec![4242]);
+    }
+
+    #[test]
+    fn sorts_and_dedupes() {
+        // Duplicate trailing refs (e.g. a follow-up that re-states a number)
+        // collapse; output is ascending.
+        let log = "1 c (#30)\n2 b (#10)\n3 a (#30)\n";
+        assert_eq!(parse_pr_numbers(log), vec![10, 30]);
+    }
+
+    #[test]
+    fn empty_log_yields_no_numbers() {
+        assert!(parse_pr_numbers("").is_empty());
+    }
 }

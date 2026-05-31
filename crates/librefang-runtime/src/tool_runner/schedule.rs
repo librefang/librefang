@@ -2,10 +2,87 @@
 //!
 //! Accept natural language schedules ("daily at 9am") and delegate to
 //! `kh.cron_create/list/cancel`, which use the real kernel tick loop (#2024).
+//!
+//! Migrated from `Result<String, String>` to `Result<String, ToolError>`
+//! (#3576) — second slice after `tool_runner::cron`. The internal
+//! `parse_schedule_to_cron` / `parse_time_to_hour` helpers keep their
+//! `Result<_, String>` shape (a pure sub-layer with no kernel contact) and
+//! are mapped to `ToolError::InvalidParameter` at the tool boundary.
 
-use super::require_kernel;
+use super::error::{ToolError, ToolResult};
+use super::{caller_agent_id_missing, require_kernel_typed};
 use crate::kernel_handle::prelude::*;
 use std::sync::Arc;
+
+fn validate_cron_field(field: &str, name: &str, min: u32, max: u32) -> Result<(), String> {
+    if field == "*" {
+        return Ok(());
+    }
+    for part in field.split(',') {
+        // Strip optional `/step` suffix first — applies to wildcards, ranges,
+        // and single values alike (e.g. `*/5`, `10-20/2`, `1/2`).
+        let (base, step) = match part.split_once('/') {
+            Some((base, step_str)) => {
+                let s: u32 = step_str
+                    .parse()
+                    .map_err(|_| format!("Invalid {name} step in cron: '{part}'"))?;
+                if s == 0 {
+                    return Err(format!("{name} step must be >= 1, got 0"));
+                }
+                (base, Some(s))
+            }
+            None => (part, None),
+        };
+
+        if base == "*" {
+            // `*/step` — step already validated above
+            if step.is_none() {
+                return Err(format!("Invalid {name} value in cron: '{part}'"));
+            }
+            continue;
+        }
+
+        // Try parsing as range `start-end`
+        if let Some((start_str, end_str)) = base.split_once('-') {
+            let start: u32 = start_str
+                .parse()
+                .map_err(|_| format!("Invalid {name} range start in cron: '{base}'"))?;
+            let end: u32 = end_str
+                .parse()
+                .map_err(|_| format!("Invalid {name} range end in cron: '{base}'"))?;
+            if start < min || start > max {
+                return Err(format!("{name} must be {min}-{max}, got {start}"));
+            }
+            if end < min || end > max {
+                return Err(format!("{name} must be {min}-{max}, got {end}"));
+            }
+            if start > end {
+                return Err(format!("{name} range start {start} > end {end}"));
+            }
+            // step validated above
+            continue;
+        }
+
+        // Single value (optionally with step, e.g. `1/2`)
+        let val: u32 = base
+            .parse()
+            .map_err(|_| format!("Invalid {name} value in cron: '{part}'"))?;
+        if val < min || val > max {
+            return Err(format!("{name} must be {min}-{max}, got {val}"));
+        }
+        // step validated above
+    }
+    Ok(())
+}
+
+fn validate_cron_fields(parts: &[&str]) -> Result<(), String> {
+    validate_cron_field(parts[0], "minute", 0, 59)?;
+    validate_cron_field(parts[1], "hour", 0, 23)?;
+    validate_cron_field(parts[2], "day of month", 1, 31)?;
+    validate_cron_field(parts[3], "month", 1, 12)?;
+    validate_cron_field(parts[4], "day of week", 0, 7)?;
+    Ok(())
+}
 
 /// Parse a natural language schedule into a cron expression.
 pub(super) fn parse_schedule_to_cron(input: &str) -> Result<String, String> {
@@ -18,6 +95,7 @@ pub(super) fn parse_schedule_to_cron(input: &str) -> Result<String, String> {
             .iter()
             .all(|p| p.chars().all(|c| c.is_ascii_digit() || "*/,-".contains(c)))
     {
+        validate_cron_fields(&parts)?;
         return Ok(input);
     }
 
@@ -59,20 +137,18 @@ pub(super) fn parse_schedule_to_cron(input: &str) -> Result<String, String> {
 
     // "daily at Xam/pm"
     if let Some(time_str) = input.strip_prefix("daily at ") {
-        let hour = parse_time_to_hour(time_str)?;
-        return Ok(format!("0 {hour} * * *"));
+        let (hour, minute) = parse_time_to_hour_minute(time_str)?;
+        return Ok(format!("{minute} {hour} * * *"));
     }
 
-    // "weekdays at Xam/pm"
     if let Some(time_str) = input.strip_prefix("weekdays at ") {
-        let hour = parse_time_to_hour(time_str)?;
-        return Ok(format!("0 {hour} * * 1-5"));
+        let (hour, minute) = parse_time_to_hour_minute(time_str)?;
+        return Ok(format!("{minute} {hour} * * 1-5"));
     }
 
-    // "weekends at Xam/pm"
     if let Some(time_str) = input.strip_prefix("weekends at ") {
-        let hour = parse_time_to_hour(time_str)?;
-        return Ok(format!("0 {hour} * * 0,6"));
+        let (hour, minute) = parse_time_to_hour_minute(time_str)?;
+        return Ok(format!("{minute} {hour} * * 0,6"));
     }
 
     // "hourly" / "daily" / "weekly" / "monthly"
@@ -89,43 +165,79 @@ pub(super) fn parse_schedule_to_cron(input: &str) -> Result<String, String> {
     ))
 }
 
-/// Parse a time string like "9am", "6pm", "14:00", "9:30am" into an hour (0-23).
-pub(super) fn parse_time_to_hour(s: &str) -> Result<u32, String> {
+pub(super) fn parse_time_to_hour_minute(s: &str) -> Result<(u32, u32), String> {
     let s = s.trim().to_lowercase();
 
-    // Handle "9am", "6pm", "12pm", "12am"
     if let Some(h) = s.strip_suffix("am") {
+        if let Some((hh, mm)) = h.trim().split_once(':') {
+            let hour: u32 = hh
+                .trim()
+                .parse()
+                .map_err(|_| format!("Invalid time: {s}"))?;
+            let minute: u32 = mm
+                .trim()
+                .parse()
+                .map_err(|_| format!("Invalid time: {s}"))?;
+            if minute > 59 {
+                return Err(format!("Minute must be 0-59, got {minute}"));
+            }
+            return match hour {
+                12 => Ok((0, minute)),
+                1..=11 => Ok((hour, minute)),
+                _ => Err(format!("Invalid hour: {hour}")),
+            };
+        }
         let hour: u32 = h.trim().parse().map_err(|_| format!("Invalid time: {s}"))?;
         return match hour {
-            12 => Ok(0),
-            1..=11 => Ok(hour),
+            12 => Ok((0, 0)),
+            1..=11 => Ok((hour, 0)),
             _ => Err(format!("Invalid hour: {hour}")),
         };
     }
     if let Some(h) = s.strip_suffix("pm") {
+        if let Some((hh, mm)) = h.trim().split_once(':') {
+            let hour: u32 = hh
+                .trim()
+                .parse()
+                .map_err(|_| format!("Invalid time: {s}"))?;
+            let minute: u32 = mm
+                .trim()
+                .parse()
+                .map_err(|_| format!("Invalid time: {s}"))?;
+            if minute > 59 {
+                return Err(format!("Minute must be 0-59, got {minute}"));
+            }
+            return match hour {
+                12 => Ok((12, minute)),
+                1..=11 => Ok((hour + 12, minute)),
+                _ => Err(format!("Invalid hour: {hour}")),
+            };
+        }
         let hour: u32 = h.trim().parse().map_err(|_| format!("Invalid time: {s}"))?;
         return match hour {
-            12 => Ok(12),
-            1..=11 => Ok(hour + 12),
+            12 => Ok((12, 0)),
+            1..=11 => Ok((hour + 12, 0)),
             _ => Err(format!("Invalid hour: {hour}")),
         };
     }
 
-    // Handle "14:00" or "9:30"
-    if let Some((h, _m)) = s.split_once(':') {
+    if let Some((h, m)) = s.split_once(':') {
         let hour: u32 = h.trim().parse().map_err(|_| format!("Invalid time: {s}"))?;
+        let minute: u32 = m.trim().parse().map_err(|_| format!("Invalid time: {s}"))?;
         if hour > 23 {
             return Err(format!("Hour must be 0-23, got {hour}"));
         }
-        return Ok(hour);
+        if minute > 59 {
+            return Err(format!("Minute must be 0-59, got {minute}"));
+        }
+        return Ok((hour, minute));
     }
 
-    // Plain number
     let hour: u32 = s.parse().map_err(|_| format!("Invalid time: {s}"))?;
     if hour > 23 {
         return Err(format!("Hour must be 0-23, got {hour}"));
     }
-    Ok(hour)
+    Ok((hour, 0))
 }
 
 pub(super) async fn tool_schedule_create(
@@ -133,18 +245,22 @@ pub(super) async fn tool_schedule_create(
     kernel: Option<&Arc<dyn KernelHandle>>,
     caller_agent_id: Option<&str>,
     sender_id: Option<&str>,
-) -> Result<String, String> {
-    let kh = require_kernel(kernel)?;
-    let agent_id = caller_agent_id.ok_or("Agent ID required for schedule_create")?;
+) -> ToolResult {
+    let kh = require_kernel_typed(kernel)?;
+    let agent_id = caller_agent_id.ok_or_else(|| caller_agent_id_missing("schedule_create"))?;
     let description = input["description"]
         .as_str()
-        .ok_or("Missing 'description' parameter")?;
+        .ok_or(ToolError::MissingParameter("description"))?;
     let schedule_str = input["schedule"]
         .as_str()
-        .ok_or("Missing 'schedule' parameter")?;
+        .ok_or(ToolError::MissingParameter("schedule"))?;
     let message = input["message"].as_str().unwrap_or(description);
 
-    let cron_expr = parse_schedule_to_cron(schedule_str)?;
+    let cron_expr =
+        parse_schedule_to_cron(schedule_str).map_err(|reason| ToolError::InvalidParameter {
+            name: "schedule",
+            reason,
+        })?;
 
     // CronJob name only allows alphanumeric + space/hyphen/underscore (max 128 chars).
     // Sanitize the user-provided description to fit these constraints.
@@ -188,7 +304,7 @@ pub(super) async fn tool_schedule_create(
     let result = kh
         .cron_create(agent_id, job_json)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(ToolError::upstream)?;
     Ok(format!(
         "Schedule created and will execute automatically.\n  Cron: {cron_expr}\n  Original: {schedule_str}\n  {result}"
     ))
@@ -197,10 +313,10 @@ pub(super) async fn tool_schedule_create(
 pub(super) async fn tool_schedule_list(
     kernel: Option<&Arc<dyn KernelHandle>>,
     caller_agent_id: Option<&str>,
-) -> Result<String, String> {
-    let kh = require_kernel(kernel)?;
-    let agent_id = caller_agent_id.ok_or("Agent ID required for schedule_list")?;
-    let jobs = kh.cron_list(agent_id).await.map_err(|e| e.to_string())?;
+) -> ToolResult {
+    let kh = require_kernel_typed(kernel)?;
+    let agent_id = caller_agent_id.ok_or_else(|| caller_agent_id_missing("schedule_list"))?;
+    let jobs = kh.cron_list(agent_id).await.map_err(ToolError::upstream)?;
 
     if jobs.is_empty() {
         return Ok("No scheduled tasks.".to_string());
@@ -229,13 +345,76 @@ pub(super) async fn tool_schedule_list(
 pub(super) async fn tool_schedule_delete(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
-) -> Result<String, String> {
-    let kh = require_kernel(kernel)?;
+    caller_agent_id: Option<&str>,
+) -> ToolResult {
+    let kh = require_kernel_typed(kernel)?;
     // Accept either "id" or "job_id" for backward compatibility
     let id = input["id"]
         .as_str()
         .or_else(|| input["job_id"].as_str())
-        .ok_or("Missing 'id' parameter")?;
-    kh.cron_cancel(id).await.map_err(|e| e.to_string())?;
+        .ok_or(ToolError::MissingParameter("id"))?;
+    let agent_id = caller_agent_id.ok_or_else(|| caller_agent_id_missing("schedule_delete"))?;
+    // Authorize: the caller may only delete jobs that belong to them.
+    // `KernelHandle::cron_cancel` removes by UUID with no ownership check
+    // (see `kernel/handles/cron_control.rs`), and the sibling `cron_cancel`
+    // tool already enforces this guard at the tool layer — `schedule_delete`
+    // must too, or it is a trivial bypass: any agent with this tool could
+    // cancel another agent's job by learning its UUID.
+    let owned = kh.cron_list(agent_id).await.map_err(ToolError::upstream)?;
+    let owns_job = owned.iter().any(|job| {
+        job.get("id")
+            .and_then(|v| v.as_str())
+            .is_some_and(|jid| jid == id)
+    });
+    if !owns_job {
+        // Collapse "not owned" and "doesn't exist" into one NotFound — see
+        // the variant doc on `ToolError::NotFound` for the side-channel
+        // rationale (mirrors `cron_cancel`).
+        return Err(ToolError::NotFound {
+            kind: "Schedule",
+            id: id.to_string(),
+        });
+    }
+    kh.cron_cancel(id).await.map_err(ToolError::upstream)?;
     Ok(format!("Schedule '{id}' deleted."))
+}
+
+#[cfg(test)]
+mod tests {
+    //! Pure validation / wiring-boundary tests that run BEFORE any kernel
+    //! call. The ownership-check path in `tool_schedule_delete` (which needs
+    //! `cron_list` to return jobs) lives in the integration test file
+    //! `tests/tool_runner_forwarding_task_cron.rs` alongside the cron
+    //! equivalents, where the `CapturingKernel` stub is available — same split
+    //! as `tool_runner::cron`.
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn schedule_create_without_kernel_returns_unavailable() {
+        let r = tool_schedule_create(&json!({}), None, Some("agent-a"), None).await;
+        assert!(matches!(r, Err(ToolError::Unavailable("Kernel handle"))));
+    }
+
+    #[tokio::test]
+    async fn schedule_list_without_kernel_returns_unavailable() {
+        let r = tool_schedule_list(None, Some("agent-a")).await;
+        assert!(matches!(r, Err(ToolError::Unavailable("Kernel handle"))));
+    }
+
+    #[tokio::test]
+    async fn schedule_delete_without_kernel_returns_unavailable() {
+        let r = tool_schedule_delete(&json!({"id": "x"}), None, Some("agent-a")).await;
+        assert!(matches!(r, Err(ToolError::Unavailable("Kernel handle"))));
+    }
+
+    #[test]
+    fn caller_agent_id_missing_surfaces_as_missing_parameter() {
+        let e = caller_agent_id_missing("schedule_delete");
+        assert!(
+            matches!(e, ToolError::MissingParameter("agent_id")),
+            "expected MissingParameter(\"agent_id\"), got {e:?}"
+        );
+        assert!(e.to_string().contains("agent_id"));
+    }
 }

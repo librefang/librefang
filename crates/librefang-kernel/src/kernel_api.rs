@@ -111,6 +111,27 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     fn web_tools(&self) -> &librefang_runtime::web_search::WebToolsContext;
     fn workflow_engine(&self) -> &WorkflowEngine;
 
+    // ====================================================================
+    // Autonomous goal runner (#5744)
+    // ====================================================================
+
+    /// Start a long-horizon autonomous run driving `agent_id` toward
+    /// `goal_id`. `max_iterations` bounds the run (default
+    /// [`librefang_types::goal::DEFAULT_GOAL_MAX_ITERATIONS`]).
+    fn start_goal_run(
+        &self,
+        goal_id: librefang_types::goal::GoalId,
+        agent_id: AgentId,
+        max_iterations: Option<u32>,
+    );
+    /// Stop an active goal run. Returns whether a run was stopped.
+    fn stop_goal_run(&self, goal_id: librefang_types::goal::GoalId) -> bool;
+    /// Snapshot the observable state of a goal's run, if one is active.
+    fn goal_run_state(
+        &self,
+        goal_id: librefang_types::goal::GoalId,
+    ) -> Option<librefang_types::goal::GoalRunState>;
+
     // `*_ref` accessors that expose internal state for mutation. These are
     // necessary for routes that need to read or mutate live kernel state
     // (model catalog, MCP wiring, event bus, …).
@@ -279,6 +300,7 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     fn update_manifest(&self, agent_id: AgentId, new_manifest: AgentManifest) -> KernelResult<()>;
     fn set_agent_skills(&self, agent_id: AgentId, skills: Vec<String>) -> KernelResult<()>;
     fn set_agent_mcp_servers(&self, agent_id: AgentId, servers: Vec<String>) -> KernelResult<()>;
+    fn set_agent_channels(&self, agent_id: AgentId, channels: Vec<String>) -> KernelResult<()>;
     /// Update an agent's schedule mode and restart its background loop so
     /// the change takes effect immediately, without a daemon restart.
     /// See [`LibreFangKernel::set_agent_schedule`] for the full contract.
@@ -789,6 +811,24 @@ impl KernelApi for LibreFangKernel {
         <Self as crate::WorkflowSubsystemApi>::engine_ref(self)
     }
 
+    fn start_goal_run(
+        &self,
+        goal_id: librefang_types::goal::GoalId,
+        agent_id: AgentId,
+        max_iterations: Option<u32>,
+    ) {
+        self.goal_run_start(goal_id, agent_id, max_iterations);
+    }
+    fn stop_goal_run(&self, goal_id: librefang_types::goal::GoalId) -> bool {
+        self.goal_run_stop(goal_id)
+    }
+    fn goal_run_state(
+        &self,
+        goal_id: librefang_types::goal::GoalId,
+    ) -> Option<librefang_types::goal::GoalRunState> {
+        self.goal_run_status(goal_id)
+    }
+
     fn command_queue_ref(&self) -> &librefang_runtime::command_lane::CommandQueue {
         <Self as crate::WorkflowSubsystemApi>::command_queue_ref(self)
     }
@@ -1004,6 +1044,9 @@ impl KernelApi for LibreFangKernel {
     }
     fn set_agent_mcp_servers(&self, agent_id: AgentId, servers: Vec<String>) -> KernelResult<()> {
         Self::set_agent_mcp_servers(self, agent_id, servers)
+    }
+    fn set_agent_channels(&self, agent_id: AgentId, channels: Vec<String>) -> KernelResult<()> {
+        Self::set_agent_channels(self, agent_id, channels)
     }
     fn set_agent_schedule(
         self: Arc<Self>,

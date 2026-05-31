@@ -96,6 +96,7 @@ mod cron_script;
 // this file (#4683 landing zone). Extracted as `pub(super) async fn`
 // so the body can be edited and reviewed in isolation.
 mod cron_tick;
+mod goal_lifecycle;
 mod hands_lifecycle;
 mod llm_drivers;
 mod mcp_setup;

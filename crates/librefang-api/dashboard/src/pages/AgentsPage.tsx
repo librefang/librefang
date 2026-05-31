@@ -26,7 +26,8 @@ import { PromptsExperimentsModal } from "../components/PromptsExperimentsModal";
 import { useUIStore } from "../lib/store";
 import { toastErr } from "../lib/errors";
 import { filterVisible } from "../lib/hiddenModels";
-import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles } from "lucide-react";
+import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, Check } from "lucide-react";
+import { buildModelConfigPatch, MODEL_MAX_TOKENS_DEFAULT, MODEL_TEMPERATURE_DEFAULT } from "../lib/agentModelPatch";
 import { truncateId } from "../lib/string";
 import { pickLatestSessionId } from "../lib/sessionSelector";
 import { getStatusVariant } from "../lib/status";
@@ -60,6 +61,7 @@ import {
   useAgentStats,
   useAgentTemplates,
   useAgentTools,
+  useAgentSkills,
   useTools,
 } from "../lib/queries/agents";
 import {
@@ -74,6 +76,7 @@ import {
   useSpawnAgent,
   useSuspendAgent,
   useUpdateAgentTools,
+  useSetAgentSkills,
 } from "../lib/mutations/agents";
 
 /**
@@ -215,8 +218,10 @@ export function AgentsPage() {
   const [sortBy, setSortBy] = useState<"name" | "last_active" | "created_at">("name");
   // Tab switcher inside the inline detail panel.  Mirrors the design's
   // five sections (Conversation / Memory / Skills / Schedule / Logs).
+  const [toolsDraft, setToolsDraft] = useState<string[] | null>(null);
+  const [expandedToolGroup, setExpandedToolGroup] = useState<string | null>(null);
   const [agentTab, setAgentTab] = useState<
-    "conversation" | "memory" | "skills" | "schedule" | "logs"
+    "conversation" | "memory" | "skills" | "tools" | "schedule" | "logs"
   >("conversation");
   // Whether the deep-edit drawer is open. Decoupled from `detailAgent` so
   // selecting an agent in the list shows the inline detail panel without
@@ -284,8 +289,8 @@ export function AgentsPage() {
     setModelDraft({
       provider: detailAgent?.model?.provider ?? "",
       model: detailAgent?.model?.model ?? "",
-      max_tokens: String(detailAgent?.model?.max_tokens ?? 4096),
-      temperature: String(detailAgent?.model?.temperature ?? 0.7),
+      max_tokens: String(detailAgent?.model?.max_tokens ?? MODEL_MAX_TOKENS_DEFAULT),
+      temperature: String(detailAgent?.model?.temperature ?? MODEL_TEMPERATURE_DEFAULT),
     });
     setEditingModel(true);
   }
@@ -383,7 +388,8 @@ export function AgentsPage() {
   const toolsListQuery = useTools({
     enabled:
       (showToolsEditor && !!toolsEditorAgentId) ||
-      (showCreate && createMode === "form"),
+      (showCreate && createMode === "form") ||
+      (!!detailAgent && agentTab === "tools"),
   });
   const agentToolsQuery = useAgentTools(toolsEditorAgentId ?? "", { enabled: showToolsEditor && !!toolsEditorAgentId });
   const toolsEditorLoading = showToolsEditor && !!toolsEditorAgentId && (toolsListQuery.isLoading || agentToolsQuery.isLoading);
@@ -418,27 +424,13 @@ export function AgentsPage() {
 
   function saveModelEdit() {
     if (!detailAgent) return;
-    const current = detailAgent.model;
-    const patch: { max_tokens?: number; model?: string; provider?: string; temperature?: number } = {};
-
-    const trimmedProvider = modelDraft.provider.trim();
-    const trimmedModel = modelDraft.model.trim();
-    const parsedMaxTokens = parseInt(modelDraft.max_tokens, 10);
-    const parsedTemperature = parseFloat(modelDraft.temperature);
-
-    if (!trimmedProvider || !trimmedModel) return;
-    if (isNaN(parsedMaxTokens) || parsedMaxTokens <= 0) return;
-    if (isNaN(parsedTemperature) || parsedTemperature < 0 || parsedTemperature > 2) return;
-
-    const modelChanged = trimmedModel !== current?.model;
-    const providerChanged = trimmedProvider !== current?.provider;
-
-    if (modelChanged || providerChanged) {
-      patch.model = trimmedModel;
-      patch.provider = trimmedProvider;
-    }
-    if (parsedMaxTokens !== current?.max_tokens) patch.max_tokens = parsedMaxTokens;
-    if (parsedTemperature !== current?.temperature) patch.temperature = parsedTemperature;
+    // buildModelConfigPatch validates the draft and includes a field only when
+    // the user changed it from its persisted (nullish-defaulted) value, using
+    // the same 4096 / 0.7 baseline as the modelDirty gate so the two can't drift
+    // (the #5917 follow-up: a provider-only edit must not write back defaults
+    // for max_tokens / temperature the backend had omitted).
+    const { patch } = buildModelConfigPatch(modelDraft, detailAgent.model);
+    if (!patch) return;
 
     if (Object.keys(patch).length === 0) {
       setEditingModel(false);
@@ -497,6 +489,32 @@ export function AgentsPage() {
   // (global audit) only had admin lifecycle entries, leaving the tab
   // blank for almost every agent.
   const agentEventsQuery = useAgentEvents(detailAgent?.id ?? "", 30);
+  const tabAgentToolsQuery = useAgentTools(detailAgent?.id ?? "", {
+    enabled: !!detailAgent && agentTab === "tools",
+  });
+  // Per-agent skill assignment (#4917) — backs the inline assign/unassign
+  // UI on the Skills tab. Returns { assigned, available, mode, disabled };
+  // gated on the tab being open so we don't fetch the registry pool at
+  // page load.
+  const tabAgentSkillsQuery = useAgentSkills(detailAgent?.id ?? "", {
+    enabled: !!detailAgent && agentTab === "skills",
+  });
+  const setAgentSkillsMutation = useSetAgentSkills();
+
+  useEffect(() => {
+    if (agentTab !== "tools") {
+      setToolsDraft(null);
+      setExpandedToolGroup(null);
+      return;
+    }
+    const cfg = tabAgentToolsQuery.data;
+    if (!cfg) return;
+    const declared = cfg.capabilities_tools ?? [];
+    if (declared.length > 0 && toolsDraft === null) {
+      setToolsDraft([...declared]);
+    }
+  }, [agentTab, tabAgentToolsQuery.data]);
+
   // Per-agent session list — Conversation tab uses this directly. The
   // global /api/sessions used previously was paginated to 50, so the
   // agent's latest session was often not in the page.
@@ -681,6 +699,22 @@ export function AgentsPage() {
     [modelsQuery.data?.models, hiddenSet],
   );
 
+  // Single-model providers (e.g. a self-hosted Unsloth Studio endpoint that
+  // serves exactly one model) used to leave the Save button stuck disabled:
+  // switching provider clears modelDraft.model, and with only one option the
+  // user has nothing else to pick to repopulate it, so the !model.trim()
+  // validity gate never released. Auto-select the sole model so changing the
+  // provider (or any other field) is enough to enable Save. See #5917.
+  useEffect(() => {
+    if (!editingModel) return;
+    if (!modelDraft.provider.trim()) return;
+    if (modelsQuery.isLoading || modelDraft.model.trim()) return;
+    if (visibleModels.length === 1) {
+      const only = visibleModels[0].id;
+      setModelDraft(d => (d.model ? d : { ...d, model: only }));
+    }
+  }, [editingModel, modelDraft.provider, modelDraft.model, modelsQuery.isLoading, visibleModels]);
+
   const agents = agentsQuery.data?.agents ?? [];
   const visibleAgents = useMemo(
     () => showHandAgents ? agents : agents.filter(a => !a.is_hand),
@@ -734,15 +768,30 @@ export function AgentsPage() {
   const activeConfigMutation = detailAgent?.is_hand
     ? patchHandAgentRuntimeConfigMutation
     : patchAgentConfigMutation;
+  // Save enables when the draft is both valid AND differs from the persisted
+  // model in any field — Provider, Model, Max tokens, or Temperature. Earlier
+  // this gate checked validity only; combined with the provider-switch model
+  // reset that produced the #5917 symptom where Max-token / Temperature edits
+  // never lit Save. draftMaxTokens / draftTemperature mirror saveModelEdit's
+  // coercion so the dirty comparison matches what would actually be PATCHed.
+  const draftMaxTokens = parseInt(modelDraft.max_tokens, 10);
+  const draftTemperature = parseFloat(modelDraft.temperature);
+  const modelValid =
+    !!modelDraft.provider.trim()
+    && !!modelDraft.model.trim()
+    && !isNaN(draftMaxTokens)
+    && draftMaxTokens > 0
+    && !isNaN(draftTemperature)
+    && draftTemperature >= 0
+    && draftTemperature <= 2;
+  const currentModel = detailAgent?.model;
+  const modelDirty =
+    modelDraft.provider.trim() !== (currentModel?.provider ?? "")
+    || modelDraft.model.trim() !== (currentModel?.model ?? "")
+    || draftMaxTokens !== (currentModel?.max_tokens ?? MODEL_MAX_TOKENS_DEFAULT)
+    || draftTemperature !== (currentModel?.temperature ?? MODEL_TEMPERATURE_DEFAULT);
   const saveModelDisabled =
-    activeConfigMutation.isPending
-    || !modelDraft.provider.trim()
-    || !modelDraft.model.trim()
-    || isNaN(parseInt(modelDraft.max_tokens, 10))
-    || parseInt(modelDraft.max_tokens, 10) <= 0
-    || isNaN(parseFloat(modelDraft.temperature))
-    || parseFloat(modelDraft.temperature) < 0
-    || parseFloat(modelDraft.temperature) > 2;
+    activeConfigMutation.isPending || !modelValid || !modelDirty;
 
   const selectAgent = async (agent: AgentItem) => {
     setAgentTab("conversation");
@@ -830,6 +879,7 @@ export function AgentsPage() {
       { id: "conversation", label: t("agents.tab.conversation", { defaultValue: "Conversation" }), Icon: MessageCircle },
       { id: "memory",       label: t("agents.tab.memory",       { defaultValue: "Memory" }),       Icon: Database },
       { id: "skills",       label: t("agents.tab.skills",       { defaultValue: "Skills" }),       Icon: Sparkles },
+      { id: "tools",        label: t("agents.tab.tools",        { defaultValue: "Tools" }),        Icon: Wrench },
       { id: "schedule",     label: t("agents.tab.schedule",     { defaultValue: "Schedule" }),     Icon: Clock },
       { id: "logs",         label: t("agents.tab.logs",         { defaultValue: "Logs" }),         Icon: FileText },
     ];
@@ -1074,6 +1124,7 @@ export function AgentsPage() {
       case "conversation":      return renderConversationTab(agent);
       case "memory":            return renderMemoryTab(agent);
       case "skills":            return renderSkillsTab(agent);
+      case "tools":             return renderToolsTab(agent);
       case "schedule":          return renderScheduleTab(agent);
       case "logs":              return renderLogsTab(agent);
     }
@@ -1236,29 +1287,115 @@ export function AgentsPage() {
     );
   };
 
-  // ---------- Skills tab — 2-col card grid per design canvas
+  // ---------- Skills tab — inline assign/unassign per agent (#4917)
   const renderSkillsTab = (agent: AgentDetail) => {
+    // Source of truth is GET /api/agents/{id}/skills (tabAgentSkillsQuery),
+    // which returns { assigned, available, mode, disabled }. While it loads
+    // we fall back to the manifest fields echoed on the detail payload so the
+    // header/empty-state don't flash. Skill names are slug-shape ASCII IDs,
+    // so plain codepoint sort is stable across locales (#4940).
     const view = agent as AgentView;
-    // Sort alphabetically (#4940) — the backend returns the manifest's
-    // allowlist order, which is meaningless to humans scanning the tab.
-    // Skill names are slug-shape ASCII IDs, so plain codepoint sort is
-    // stable across locales (localeCompare would flip in tr-TR etc).
-    const skills: string[] = (
-      Array.isArray(view.skills)
-        ? view.skills
-        : Array.isArray(view.capabilities?.skills)
-          ? view.capabilities!.skills!
-          : []
-    )
+    const skillsData = tabAgentSkillsQuery.data;
+    const manifestSkills: string[] = Array.isArray(view.skills)
+      ? view.skills
+      : Array.isArray(view.capabilities?.skills)
+        ? view.capabilities!.skills!
+        : [];
+    const assigned: string[] = (skillsData?.assigned ?? manifestSkills)
       .slice()
       .sort();
-    // skills_mode: 'none' (skills_disabled), 'all' (no allowlist — uses
-    // every skill in the registry, the default), or 'allowlist' (manifest
-    // pinned a list). Each needs a different empty-state copy; the
-    // previous code collapsed them all to "0 installed".
-    const skillsMode = (agent as AgentDetail).skills_mode;
-    const usesAllSkills = skillsMode === "all" && skills.length === 0;
-    const skillsDisabled = skillsMode === "none";
+    const available: string[] = (skillsData?.available ?? []).slice().sort();
+    // skills_mode: 'none' (skills_disabled), 'all' (no allowlist — every
+    // registry skill usable, the default), or 'allowlist' (manifest pins a
+    // set). Prefer the live query's mode; fall back to the detail payload.
+    const skillsMode =
+      skillsData?.mode ?? (agent as AgentDetail).skills_mode;
+    const usesAllSkills = skillsMode === "all";
+    const skillsDisabled =
+      skillsData?.disabled ?? skillsMode === "none";
+    // Available skills not yet on the allowlist — the add pool in allowlist
+    // mode. Built from the registry list minus what's already assigned.
+    const assignedSet = new Set(assigned);
+    const addable = available.filter((s) => !assignedSet.has(s));
+    const mutating = setAgentSkillsMutation.isPending;
+    const skillsLoading =
+      tabAgentSkillsQuery.isLoading && !skillsData;
+
+    // Apply a new allowlist. Empty array clears it back to "all" mode.
+    const applySkills = (next: string[], toast: string) => {
+      if (!agent.id) return;
+      setAgentSkillsMutation.mutate(
+        { agentId: agent.id, skills: next },
+        {
+          onSuccess: async () => {
+            await refreshDetailAgent(agent.id, agent.is_hand);
+            addToast(toast, "success");
+          },
+          onError: (e) => {
+            addToast(
+              toastErr(
+                e,
+                t("agents.detail.skill_update_failed", {
+                  defaultValue: "Failed to update skills",
+                }),
+              ),
+              "error",
+            );
+          },
+        },
+      );
+    };
+    const addSkill = (name: string) =>
+      applySkills(
+        [...assigned, name],
+        t("agents.detail.skill_added", {
+          defaultValue: "Skill assigned",
+        }),
+      );
+    const removeSkill = (name: string) =>
+      applySkills(
+        assigned.filter((s) => s !== name),
+        t("agents.detail.skill_removed", {
+          defaultValue: "Skill removed",
+        }),
+      );
+    // "Customize" from all-mode: seed the allowlist with every available
+    // skill so the operator gets a concrete list to prune (an empty PUT
+    // would just stay in all-mode). Done with the assign mutation so the
+    // skill-registry validation runs server-side.
+    const customizeFromAll = () =>
+      applySkills(
+        available,
+        t("agents.detail.skill_customized", {
+          defaultValue: "Switched to a per-agent allowlist",
+        }),
+      );
+    // "Reset to all": clear the allowlist (empty PUT → all-mode).
+    const resetToAll = () =>
+      applySkills(
+        [],
+        t("agents.detail.skill_reset_all", {
+          defaultValue: "Reset to all available skills",
+        }),
+      );
+
+    const autoEvolve = agent.auto_evolve !== false;
+    const handleToggleAutoEvolve = () => {
+      if (!agent.id) return;
+      patchAgentMutation.mutate(
+        { agentId: agent.id, body: { auto_evolve: !autoEvolve } },
+        {
+          onSuccess: () => {
+            addToast(
+              !autoEvolve
+                ? t("agents.detail.auto_evolve_enabled", { defaultValue: "Auto-evolve enabled" })
+                : t("agents.detail.auto_evolve_disabled", { defaultValue: "Auto-evolve disabled" }),
+              "success",
+            );
+          },
+        },
+      );
+    };
     return (
       <div className="flex flex-col gap-3">
         <div className="flex items-center justify-between">
@@ -1267,7 +1404,7 @@ export function AgentsPage() {
             {" · "}
             {usesAllSkills
               ? t("agents.detail.skills_all", { defaultValue: "all" })
-              : skills.length}
+              : assigned.length}
           </div>
           <Button
             variant="ghost"
@@ -1278,7 +1415,39 @@ export function AgentsPage() {
             {t("agents.detail.install_skill", { defaultValue: "Install" })}
           </Button>
         </div>
-        {skillsDisabled ? (
+
+        <div className="flex items-center justify-between px-3 py-2 rounded-md border border-border-subtle bg-main/40">
+          <div className="min-w-0 flex-1">
+            <div className="font-mono text-[12px] font-medium text-text-main">
+              {t("agents.detail.auto_evolve_label", { defaultValue: "Auto-evolve" })}
+            </div>
+            <div className="font-mono text-[10px] text-text-dim/70 mt-0.5">
+              {t("agents.detail.auto_evolve_desc", {
+                defaultValue: "Background skill evolution review after each turn",
+              })}
+            </div>
+          </div>
+          <button
+            onClick={handleToggleAutoEvolve}
+            disabled={patchAgentMutation.isPending}
+            className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus:outline-none ${
+              autoEvolve ? "bg-brand" : "bg-text-dim/30"
+            } ${patchAgentMutation.isPending ? "opacity-50" : ""}`}
+          >
+            <span
+              className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${
+                autoEvolve ? "translate-x-4" : "translate-x-0"
+              }`}
+            />
+          </button>
+        </div>
+
+        {skillsLoading ? (
+          <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-center gap-2 text-[12px] text-text-dim">
+            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            {t("agents.detail.skills_loading", { defaultValue: "Loading skills…" })}
+          </div>
+        ) : skillsDisabled ? (
           <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-start gap-3">
             <X className="w-4 h-4 text-text-dim shrink-0 mt-0.5" />
             <div className="min-w-0 flex-1">
@@ -1293,38 +1462,420 @@ export function AgentsPage() {
             </div>
           </div>
         ) : usesAllSkills ? (
-          <div
-            onClick={() => navigate({ to: "/skills" })}
-            className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-start gap-3 cursor-pointer hover:border-brand/40 transition-colors"
-          >
-            <Sparkles className="w-4 h-4 text-brand/80 shrink-0 mt-0.5" />
-            <div className="min-w-0 flex-1">
-              <div className="font-mono text-[12.5px] font-medium text-text-main">
-                {t("agents.detail.skills_all_title", { defaultValue: "Using all available skills" })}
+          <div className="flex flex-col gap-2.5">
+            <div className="rounded-md border border-border-subtle bg-main/40 p-3 flex items-start justify-between gap-3">
+              <div className="flex items-start gap-3 min-w-0">
+                <Sparkles className="w-4 h-4 text-brand/80 shrink-0 mt-0.5" />
+                <div className="min-w-0 flex-1">
+                  <div className="font-mono text-[12.5px] font-medium text-text-main">
+                    {t("agents.detail.skills_all_title", { defaultValue: "Using all available skills" })}
+                  </div>
+                  <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5">
+                    {t("agents.detail.skills_all_desc", {
+                      defaultValue: "manifest doesn't pin an allowlist — every skill in the registry is available",
+                    })}
+                  </div>
+                </div>
               </div>
-              <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5">
-                {t("agents.detail.skills_all_desc", {
-                  defaultValue: "manifest doesn't pin an allowlist — every skill in the registry is available",
-                })}
-              </div>
+              {available.length > 0 && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={customizeFromAll}
+                  disabled={mutating}
+                  data-testid="skills-customize-btn"
+                >
+                  {t("agents.detail.skills_customize", { defaultValue: "Customize" })}
+                </Button>
+              )}
             </div>
-          </div>
-        ) : skills.length === 0 ? (
-          <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
-            {t("agents.detail.no_skills", { defaultValue: "No skills installed for this agent." })}
+            {available.length > 0 && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5" data-testid="skills-available-grid">
+                {available.map((s) => (
+                  <AgentSkillItem
+                    key={s}
+                    name={s}
+                    description={skillDescriptionByName.get(s)}
+                  />
+                ))}
+              </div>
+            )}
           </div>
         ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-            {skills.map((s) => (
-              <AgentSkillItem
-                key={s}
-                name={s}
-                description={skillDescriptionByName.get(s)}
-                onClick={() => navigate({ to: "/skills" })}
-              />
-            ))}
+          <div className="flex flex-col gap-3">
+            <div className="flex flex-col gap-1.5">
+              <div className="flex items-center justify-between">
+                <div className="text-[10px] uppercase font-semibold tracking-[0.08em] text-text-dim/80">
+                  {t("agents.detail.skills_assigned", { defaultValue: "Assigned" })}
+                </div>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={resetToAll}
+                  disabled={mutating}
+                  data-testid="skills-reset-all-btn"
+                >
+                  {t("agents.detail.skills_reset_all", { defaultValue: "Reset to all" })}
+                </Button>
+              </div>
+              {assigned.length === 0 ? (
+                <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
+                  {t("agents.detail.no_skills_assigned", {
+                    defaultValue: "No skills assigned — add from the list below, or reset to all.",
+                  })}
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5" data-testid="skills-assigned-grid">
+                  {assigned.map((s) => (
+                    <AgentSkillItem
+                      key={s}
+                      name={s}
+                      description={skillDescriptionByName.get(s)}
+                      action="remove"
+                      onRemove={() => removeSkill(s)}
+                      busy={mutating}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {addable.length > 0 && (
+              <div className="flex flex-col gap-1.5">
+                <div className="text-[10px] uppercase font-semibold tracking-[0.08em] text-text-dim/80">
+                  {t("agents.detail.skills_available", { defaultValue: "Available" })}
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5" data-testid="skills-addable-grid">
+                  {addable.map((s) => (
+                    <AgentSkillItem
+                      key={s}
+                      name={s}
+                      description={skillDescriptionByName.get(s)}
+                      action="add"
+                      onClick={() => addSkill(s)}
+                      busy={mutating}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
+      </div>
+    );
+  };
+
+  // ---------- Tools tab — group-level management (like Skills) + fine-grain per group
+  const renderToolsTab = (agent: AgentDetail) => {
+    const allTools = toolsListQuery.data ?? [];
+    const agentToolCfg = tabAgentToolsQuery.data;
+    const isLoading = toolsListQuery.isLoading || tabAgentToolsQuery.isLoading;
+
+    const grouped = new Map<string, ToolDefinition[]>();
+    for (const tool of allTools) {
+      let group: string;
+      if (tool.source === "builtin" || (!tool.source && !tool.name.startsWith("mcp_"))) {
+        group = "Builtin";
+      } else {
+        const server = tool.mcp_server
+          ?? tool.name.replace(/^mcp_/, "").split("_")[0];
+        group = `MCP: ${server}`;
+      }
+      if (!grouped.has(group)) grouped.set(group, []);
+      grouped.get(group)!.push(tool);
+    }
+    const sortedGroups = [...grouped.entries()].sort(([a], [b]) => {
+      if (a === "Builtin") return -1;
+      if (b === "Builtin") return 1;
+      return a.localeCompare(b);
+    });
+
+    const declared = agentToolCfg?.capabilities_tools ?? [];
+    const usesAll = declared.length === 0;
+    const draft = toolsDraft ?? [];
+    const draftSet = new Set(draft);
+    const isDirty = toolsDraft !== null &&
+      (draft.length !== declared.length || draft.some((n) => !declared.includes(n)));
+
+    const getGroupStatus = (groupTools: ToolDefinition[]): "full" | "partial" | "none" => {
+      const count = groupTools.filter((t) => draftSet.has(t.name)).length;
+      if (count === groupTools.length) return "full";
+      if (count > 0) return "partial";
+      return "none";
+    };
+
+    const handleCustomize = () => {
+      setToolsDraft(allTools.map((t) => t.name));
+    };
+
+    const handleUseAll = () => {
+      setToolsDraft([]);
+    };
+
+    const handleToggleGroup = (groupName: string) => {
+      const groupTools = grouped.get(groupName) ?? [];
+      const names = groupTools.map((t) => t.name);
+      const status = getGroupStatus(groupTools);
+      if (status !== "none") {
+        setToolsDraft((prev) => (prev ?? []).filter((n) => !names.includes(n)));
+        if (expandedToolGroup === groupName) setExpandedToolGroup(null);
+      } else {
+        setToolsDraft((prev) => {
+          const s = new Set(prev ?? []);
+          for (const n of names) s.add(n);
+          return [...s];
+        });
+      }
+    };
+
+    const handleToggleTool = (toolName: string) => {
+      setToolsDraft((prev) => {
+        const s = new Set(prev ?? []);
+        if (s.has(toolName)) s.delete(toolName);
+        else s.add(toolName);
+        return [...s];
+      });
+    };
+
+    const handleSave = () => {
+      if (!agent.id) return;
+      updateToolsMutation.mutate(
+        {
+          agentId: agent.id,
+          payload: {
+            capabilities_tools: draft,
+            tool_allowlist: agentToolCfg?.tool_allowlist ?? [],
+            tool_blocklist: agentToolCfg?.tool_blocklist ?? [],
+          },
+        },
+        {
+          onSuccess: () => {
+            addToast(t("agents.detail.tools_saved", { defaultValue: "Saved to agent.toml" }), "success");
+            setToolsDraft(null);
+            setExpandedToolGroup(null);
+          },
+          onError: (e) => {
+            addToast(
+              toastErr(e, t("agents.tools_save_failed", { defaultValue: "Failed to save tool configuration" })),
+              "error",
+            );
+          },
+        },
+      );
+    };
+
+    const assignedGroups = sortedGroups.filter(([, tools]) => getGroupStatus(tools) !== "none");
+    const availableGroups = sortedGroups.filter(([, tools]) => getGroupStatus(tools) === "none");
+
+    return (
+      <div className="flex flex-col gap-3">
+        <div className="flex items-center justify-between">
+          <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim">
+            {t("agents.detail.tools_label", { defaultValue: "Tools" })}
+            {" · "}
+            {isLoading
+              ? "…"
+              : usesAll && !isDirty
+                ? t("agents.detail.tools_all", { defaultValue: "all" })
+                : draft.length}
+          </div>
+        </div>
+
+        {isLoading ? (
+          <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-center justify-center">
+            <Loader2 className="w-4 h-4 animate-spin text-text-dim" />
+          </div>
+        ) : usesAll && !isDirty ? (
+          sortedGroups.length > 0 ? (
+            <>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                {sortedGroups.map(([groupName, groupTools]) => (
+                  <div
+                    key={groupName}
+                    className="px-3 py-2.5 rounded-md border border-border-subtle bg-main/40 flex items-start justify-between gap-2"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="font-mono text-[12.5px] font-medium text-text-main truncate flex items-center gap-1.5">
+                        {groupName.startsWith("MCP:") ? (
+                          <Cpu className="w-3.5 h-3.5 text-brand/70 shrink-0" />
+                        ) : (
+                          <Wrench className="w-3.5 h-3.5 text-text-dim/70 shrink-0" />
+                        )}
+                        {groupName}
+                      </div>
+                      <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
+                        {groupTools.length} tool{groupTools.length !== 1 ? "s" : ""}
+                        {" · "}{t("agents.detail.tools_included", { defaultValue: "included" })}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <button
+                onClick={handleCustomize}
+                className="text-[11px] text-brand hover:underline font-medium self-start mt-1"
+              >
+                {t("agents.detail.tools_customize", { defaultValue: "Customize — switch to allowlist" })}
+              </button>
+            </>
+          ) : (
+            <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-start gap-3">
+              <Wrench className="w-4 h-4 text-brand/80 shrink-0 mt-0.5" />
+              <div className="min-w-0 flex-1">
+                <div className="font-mono text-[12.5px] font-medium text-text-main">
+                  {t("agents.detail.tools_all_title", { defaultValue: "Using all available tools" })}
+                </div>
+                <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5">
+                  {t("agents.detail.tools_all_desc", { defaultValue: "no tools registered in the system yet" })}
+                </div>
+              </div>
+            </div>
+          )
+        ) : (
+          <>
+            {assignedGroups.length > 0 && (
+              <div className="flex flex-col gap-2.5">
+                {assignedGroups.map(([groupName, groupTools]) => {
+                  const status = getGroupStatus(groupTools);
+                  const activeCount = groupTools.filter((t) => draftSet.has(t.name)).length;
+                  const isExpanded = expandedToolGroup === groupName;
+                  return (
+                    <div key={groupName} className="flex flex-col">
+                      <div
+                        className={`px-3 py-2.5 rounded-md border flex items-start justify-between gap-2 ${
+                          status === "full"
+                            ? "border-brand/30 bg-main/40"
+                            : "border-amber-500/30 bg-amber-500/5"
+                        }`}
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="font-mono text-[12.5px] font-medium text-text-main truncate flex items-center gap-1.5">
+                            {groupName.startsWith("MCP:") ? (
+                              <Cpu className="w-3.5 h-3.5 text-brand/70 shrink-0" />
+                            ) : (
+                              <Wrench className="w-3.5 h-3.5 text-text-dim/70 shrink-0" />
+                            )}
+                            {groupName}
+                          </div>
+                          <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
+                            {status === "full"
+                              ? `${groupTools.length} tool${groupTools.length !== 1 ? "s" : ""}`
+                              : `${activeCount}/${groupTools.length} tools`}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1 shrink-0 mt-0.5">
+                          <button
+                            onClick={() => setExpandedToolGroup(isExpanded ? null : groupName)}
+                            className="text-text-dim hover:text-brand transition-colors p-0.5"
+                            title={t("agents.detail.tools_fine_grain", { defaultValue: "Configure individual tools" })}
+                          >
+                            <ChevronDown
+                              className={`w-3.5 h-3.5 transition-transform ${isExpanded ? "" : "-rotate-90"}`}
+                            />
+                          </button>
+                          <button
+                            onClick={() => handleToggleGroup(groupName)}
+                            className="text-text-dim hover:text-red-400 transition-colors p-0.5"
+                            title={t("agents.detail.tools_remove_group", { defaultValue: "Remove entire group" })}
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                      {isExpanded && (
+                        <div className="ml-4 mt-1.5 flex flex-col gap-1">
+                          {groupTools.map((tool) => {
+                            const isActive = draftSet.has(tool.name);
+                            return (
+                              <div
+                                key={tool.name}
+                                onClick={() => handleToggleTool(tool.name)}
+                                className={`flex items-center gap-2 px-2.5 py-1.5 rounded border cursor-pointer transition-colors ${
+                                  isActive
+                                    ? "border-brand/20 bg-main/40 hover:border-red-400/30"
+                                    : "border-border-subtle bg-main/20 opacity-60 hover:border-brand/30 hover:opacity-100"
+                                }`}
+                              >
+                                <div
+                                  className={`w-3 h-3 rounded-sm border flex items-center justify-center shrink-0 ${
+                                    isActive ? "border-brand bg-brand/20" : "border-text-dim/30"
+                                  }`}
+                                >
+                                  {isActive && <Check className="w-2 h-2 text-brand" />}
+                                </div>
+                                <span className="font-mono text-[11px] text-text-main truncate flex-1 min-w-0">
+                                  {tool.name}
+                                </span>
+                                {tool.description && (
+                                  <span className="font-mono text-[9.5px] text-text-dim/60 truncate max-w-[50%] hidden sm:inline">
+                                    {tool.description}
+                                  </span>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {availableGroups.length > 0 && (
+              <>
+                <div className="text-[10px] uppercase font-semibold tracking-[0.08em] text-text-dim mt-1">
+                  {t("agents.detail.tools_available", { defaultValue: "Available" })}
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  {availableGroups.map(([groupName, groupTools]) => (
+                    <div
+                      key={groupName}
+                      onClick={() => handleToggleGroup(groupName)}
+                      className="px-3 py-2.5 rounded-md border border-border-subtle bg-main/40 cursor-pointer hover:border-brand/40 transition-colors flex items-start justify-between gap-2"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="font-mono text-[12.5px] font-medium text-text-main truncate flex items-center gap-1.5">
+                          {groupName.startsWith("MCP:") ? (
+                            <Cpu className="w-3.5 h-3.5 text-brand/70 shrink-0" />
+                          ) : (
+                            <Wrench className="w-3.5 h-3.5 text-text-dim/70 shrink-0" />
+                          )}
+                          {groupName}
+                        </div>
+                        <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
+                          {groupTools.length} tool{groupTools.length !== 1 ? "s" : ""}
+                          {" · "}{t("agents.detail.tools_click_assign", { defaultValue: "click to assign" })}
+                        </div>
+                      </div>
+                      <Plus className="w-3.5 h-3.5 text-brand/70 shrink-0 mt-0.5" />
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+
+            <button
+              onClick={handleUseAll}
+              className="text-[11px] text-brand hover:underline font-medium self-start mt-1"
+            >
+              {t("agents.detail.tools_reset_to_all", { defaultValue: "Reset to use all tools" })}
+            </button>
+          </>
+        )}
+
+        <div className="flex justify-end mt-2">
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={handleSave}
+            disabled={!isDirty || updateToolsMutation.isPending}
+          >
+            {updateToolsMutation.isPending
+              ? t("common.saving", { defaultValue: "Saving..." })
+              : t("common.save", { defaultValue: "Save" })}
+          </Button>
+        </div>
       </div>
     );
   };

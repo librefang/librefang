@@ -1,0 +1,26 @@
+[workspace]
+# Independent of the kernel workspace and of the other SDK crates: a WASM
+# skill is built for `wasm32-unknown-unknown` and must not transitively pull
+# in any host-only crate. A separate workspace root also isolates its
+# `target/` from the kernel's shared one.
+
+[package]
+name = "librefang-skill"
+version = "0.1.0"
+edition = "2021"
+description = "SDK for writing LibreFang WASM skills in Rust (sandbox guest ABI)"
+license = "MIT"
+repository = "https://github.com/librefang/librefang"
+homepage = "https://librefang.ai"
+keywords = ["librefang", "skill", "wasm", "agent", "ai"]
+categories = ["api-bindings", "wasm"]
+readme = "README.md"
+rust-version = "1.80"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[[example]]
+name = "echo"
+path = "examples/echo.rs"

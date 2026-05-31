@@ -136,6 +136,85 @@ impl Goal {
 }
 
 // ---------------------------------------------------------------------------
+// Shared storage location
+// ---------------------------------------------------------------------------
+
+/// Well-known shared-memory key under which all goals are persisted as a
+/// single JSON array. Shared by the API CRUD routes and the kernel-side goal
+/// runner so both read and write the same store.
+pub const GOALS_STORAGE_KEY: &str = "__librefang_goals";
+
+/// The reserved sentinel agent ID that owns the goals KV entry. Goals are a
+/// global, cross-agent resource, so they live under a fixed ID rather than any
+/// real agent's namespace.
+pub fn goals_storage_agent_id() -> AgentId {
+    AgentId(Uuid::from_bytes([
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x01,
+    ]))
+}
+
+// ---------------------------------------------------------------------------
+// GoalRunState — long-horizon autonomous execution (#5744)
+// ---------------------------------------------------------------------------
+
+/// Lifecycle phase of an autonomous goal run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalRunPhase {
+    /// The runner loop is active and driving the assigned agent.
+    Running,
+    /// The goal reached `Completed`/`Cancelled` (or 100% progress); loop ended.
+    Finished,
+    /// The iteration cap was hit before the goal completed.
+    MaxIterationsReached,
+    /// The loop stopped on the provider rate-limit circuit breaker.
+    RateLimited,
+    /// An operator stopped the run.
+    Stopped,
+}
+
+impl std::fmt::Display for GoalRunPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GoalRunPhase::Running => write!(f, "running"),
+            GoalRunPhase::Finished => write!(f, "finished"),
+            GoalRunPhase::MaxIterationsReached => write!(f, "max_iterations_reached"),
+            GoalRunPhase::RateLimited => write!(f, "rate_limited"),
+            GoalRunPhase::Stopped => write!(f, "stopped"),
+        }
+    }
+}
+
+/// Default per-run iteration cap when a start request omits one. Bounds a
+/// long-horizon run so a goal the agent never marks done cannot loop forever.
+pub const DEFAULT_GOAL_MAX_ITERATIONS: u32 = 25;
+
+/// Observable state of a goal's autonomous run, surfaced via the API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoalRunState {
+    /// The goal being pursued.
+    pub goal_id: GoalId,
+    /// The agent driving the goal.
+    pub agent_id: AgentId,
+    /// Current lifecycle phase.
+    pub phase: GoalRunPhase,
+    /// Number of completed iterations (agent turns) so far.
+    pub iteration: u32,
+    /// Iteration cap for this run.
+    pub max_iterations: u32,
+    /// Last progress value (0-100) observed from the agent.
+    pub last_progress: u8,
+    /// Last error message, if the most recent tick failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    /// When the run started.
+    pub started_at: DateTime<Utc>,
+    /// When the most recent tick completed.
+    pub updated_at: DateTime<Utc>,
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

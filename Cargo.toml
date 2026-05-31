@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/librefang-types",
+    "crates/librefang-subprocess",
     "crates/librefang-memory",
     "crates/librefang-memory-wiki",
     "crates/librefang-runtime",
@@ -33,7 +34,7 @@ members = [
 ]
 
 [workspace.package]
-version = "2026.5.25-beta.13"
+version = "2026.5.31-beta.16"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/librefang/librefang"
@@ -179,7 +180,7 @@ psl = "2"
 tera = { version = "1", default-features = false }
 
 # WASM sandbox
-wasmtime = "44"
+wasmtime = "45"
 
 # HTTP server (for API daemon)
 axum = { version = "0.8", features = ["ws"] }
@@ -285,7 +286,10 @@ smallvec = "1"
 # Build-script helpers — used by `crates/librefang-api/build.rs` and
 # `crates/librefang-cli/build.rs` to resolve `git` via PATH instead of
 # invoking it by bare name (refs #5667). Lightweight, well-maintained.
-which = { version = "7", default-features = false }
+# `real-sys` is which 8.0's default feature gating the free `which()` helper
+# against the real filesystem; keep it explicit since we drop the rest of the
+# defaults to avoid pulling the optional `regex` dependency.
+which = { version = "8", default-features = false, features = ["real-sys"] }
 
 [profile.dev]
 split-debuginfo = "unpacked" # Speeds up incremental linking on macOS

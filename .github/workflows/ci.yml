@@ -50,6 +50,8 @@ jobs:
       full_run: ${{ steps.diff.outputs.full_run }}
       full_test: ${{ steps.diff.outputs.full_test }}
       crates: ${{ steps.diff.outputs.crates }}
+      skill_sdk: ${{ steps.diff.outputs.skill_sdk }}
+      sidecar_rust: ${{ steps.diff.outputs.sidecar_rust }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -88,6 +90,23 @@ jobs:
           DOCS=false;    has '^(docs/|.*\.md$)'                                       && DOCS=true
           CI=false;      has '^\.github/workflows/'                                   && CI=true
           INSTALL=false; has '^web/public/install\.(sh|ps1)$|^scripts/tests/install_sh_test\.sh$' && INSTALL=true
+          # The WASM-skill guest SDK and its example are independent
+          # workspaces (own `[workspace]` roots), so the main RUST lane —
+          # which only builds the kernel workspace — never compiles them.
+          # Route their changes to a dedicated job that builds/tests the SDK
+          # and compiles the example for wasm32, guarding against drift from
+          # the sandbox guest ABI.
+          SKILL_SDK=false; has '^(sdk/rust/librefang-skill/|examples/custom-skill-wasm/)' && SKILL_SDK=true
+          # The Rust Telegram sidecar and the sidecar SDK it depends on are
+          # independent workspaces (own `[workspace]` roots, NOT members of
+          # the kernel workspace), so the main RUST lane never compiles them —
+          # only the release pipeline does, which means a break surfaces at
+          # tag time. Route their changes (and the release workflows that
+          # build them) to a dedicated job that fmt/clippy/test/builds the
+          # sidecar natively AND runs the cross-musl build that the release
+          # pipeline relies on, catching cross / sibling-path-dep breakage at
+          # PR time. See #5936.
+          SIDECAR_RUST=false; has '^(sdk/rust/librefang-sidecar/|sdk/rust/librefang-sidecar-telegram/|\.github/workflows/release(-cli)?\.yml$)' && SIDECAR_RUST=true
           # Workspace-level Cargo manifest ≠ xtask source. A workspace
           # `Cargo.toml` change can shift dep versions, profile flags,
           # workspace lints, or membership — anything in the tree may
@@ -145,6 +164,8 @@ jobs:
             echo "install=$INSTALL"
             echo "full_run=$FULL"
             echo "full_test=$FULL_TEST"
+            echo "skill_sdk=$SKILL_SDK"
+            echo "sidecar_rust=$SIDECAR_RUST"
           } >> "$GITHUB_OUTPUT"
           echo "Route: full_run=$FULL ($REASON), full_test=$FULL_TEST ($TREASON)"
 
@@ -269,6 +290,78 @@ jobs:
       # flipped to --strict. See docs/architecture/api-conventions.md.
       - name: Sentinel-pattern lint (warn-only)
         run: scripts/check-no-empty-string-sentinels.sh
+
+  # ── WASM skill guest SDK + example ──────────────────────────────────────────────
+  # `sdk/rust/librefang-skill` and `examples/custom-skill-wasm` are independent
+  # Cargo workspaces (own `[workspace]` roots) so the kernel-workspace lanes
+  # never touch them. This job fmt/clippy/tests the SDK and compiles the example
+  # for wasm32-unknown-unknown — the target the sandbox actually loads — so the
+  # SDK can't silently drift from the sandbox guest ABI. Gated to the relevant
+  # paths so unrelated PRs don't pay for it.
+  skills-wasm-sdk:
+    name: WASM Skill SDK
+    needs: changes
+    if: needs.changes.outputs.skill_sdk == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: clippy, rustfmt
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: |
+            sdk/rust/librefang-skill
+            examples/custom-skill-wasm
+      - name: SDK — fmt, clippy, test
+        working-directory: sdk/rust/librefang-skill
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+      - name: Example — build for wasm32
+        working-directory: examples/custom-skill-wasm
+        run: cargo build --release --target wasm32-unknown-unknown
+
+  # ── Rust Telegram sidecar (independent workspace) ──────────────────────────────
+  # The sidecar binary the release pipeline ships (#5936) is its own workspace
+  # and depends on the sibling `sdk/rust/librefang-sidecar` workspace by path,
+  # so the kernel RUST lane never compiles it. This job builds/tests it at PR
+  # time AND runs the cross-musl build the release jobs depend on — proving up
+  # front that `cross` can resolve the out-of-workspace `../librefang-sidecar`
+  # path dependency, the one risk the release pipeline can't otherwise surface
+  # before a tag.
+  rust-telegram-sidecar:
+    name: Rust Telegram Sidecar
+    needs: changes
+    if: needs.changes.outputs.sidecar_rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: clippy, rustfmt
+          targets: aarch64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # Both workspaces — the adapter and the sibling SDK it depends on.
+          workspaces: |
+            sdk/rust/librefang-sidecar-telegram
+            sdk/rust/librefang-sidecar
+      - name: Sidecar — fmt, clippy, test, build
+        working-directory: sdk/rust/librefang-sidecar-telegram
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+          cargo build --release
+      - name: Install cross
+        run: cargo install cross --locked
+      - name: Sidecar — cross build (aarch64-musl, sibling path dep)
+        # Mirrors the release pipeline's cross step. Proves `cross` can mount
+        # and resolve the out-of-workspace `../librefang-sidecar` path dep.
+        run: cross build --release --target aarch64-unknown-linux-musl --manifest-path sdk/rust/librefang-sidecar-telegram/Cargo.toml
 
   # ── CHANGELOG attribution check ────────────────────────────────────────────────
   # Enforces the `(@username)` suffix on bullets *added* to the [Unreleased]
@@ -726,14 +819,19 @@ jobs:
   # Windows runner I/O + cargo build cost roughly doubles Linux/macOS for the
   # same workspace, so a single full job sits at ~55min and tipped past the
   # 60min ceiling once the runtime crate-split (#3710) added new compile units.
-  # Two shards keep each fire well under budget while staying cheaper than
-  # mirroring Ubuntu's 4 (Windows runner minutes cost 2× Linux).
+  # Two shards keep each fire cheaper than mirroring Ubuntu's 4 (Windows runner
+  # minutes cost 2× Linux). The per-shard budget is still tight, though: a cold
+  # cache (any Cargo.lock change busts `test-windows-${hashFiles(Cargo.lock)}`)
+  # pays a ~22min full compile on top of ~22min of test execution per shard, so
+  # a warm run lands at ~45min and a cold one overran the old 45min cap. Match
+  # macOS at 60min — the headroom absorbs a cold compile without inflating the
+  # green-run cost (the job ends when nextest finishes, not at the ceiling).
   test-windows:
     name: Test / Windows (shard ${{ matrix.shard }}/2)
     needs: changes
     if: github.event_name == 'push' && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true')
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:

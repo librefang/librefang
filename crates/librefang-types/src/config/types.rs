@@ -1231,13 +1231,87 @@ pub struct LlmConfig {
     pub auxiliary: AuxiliaryConfig,
 }
 
+/// Configuration for a self-hosted / custom-URL text-to-speech provider.
+///
+/// Points TTS at any OpenAI-compatible `/v1/audio/speech` endpoint — e.g. a
+/// local `openedai-speech` server, a Piper HTTP wrapper, or any other service
+/// that accepts the same JSON request shape. No new dependencies are needed.
+///
+/// ## Example (`config.toml`)
+/// ```toml
+/// [tts]
+/// enabled = true
+/// provider = "local-piper"
+///
+/// [tts.custom]
+/// base_url = "http://localhost:5000/v1/audio/speech"
+/// # api_key_env = "MY_LOCAL_TTS_KEY"  # omit for keyless servers  # pragma: allowlist secret
+/// key_required = false
+/// model = "tts-1"
+/// voice = "en_US-lessac-medium"
+/// format = "mp3"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct CustomTtsConfig {
+    /// Full URL of the OpenAI-compatible TTS endpoint.
+    /// E.g. `"http://localhost:5000/v1/audio/speech"`.
+    pub base_url: String,
+    /// Environment variable that holds the API key for this endpoint.
+    /// When empty (default), no `Authorization` header is sent.
+    #[serde(default)]
+    pub api_key_env: String,
+    /// When `true`, the request is rejected immediately if the env var named
+    /// by `api_key_env` is not set. When `false` (default), a missing key
+    /// simply means no auth header is added — suitable for keyless local
+    /// servers.
+    #[serde(default)]
+    pub key_required: bool,
+    /// Model identifier forwarded to the endpoint. Default: `"tts-1"`.
+    #[serde(default = "default_custom_tts_model")]
+    pub model: String,
+    /// Voice identifier forwarded to the endpoint. Default: `"alloy"`.
+    #[serde(default = "default_custom_tts_voice")]
+    pub voice: String,
+    /// Audio format: "mp3", "opus", "aac", "flac", "wav". Default: `"mp3"`.
+    #[serde(default = "default_custom_tts_format")]
+    pub format: String,
+}
+
+fn default_custom_tts_model() -> String {
+    "tts-1".to_string()
+}
+
+fn default_custom_tts_voice() -> String {
+    "alloy".to_string()
+}
+
+fn default_custom_tts_format() -> String {
+    "mp3".to_string()
+}
+
+impl Default for CustomTtsConfig {
+    fn default() -> Self {
+        Self {
+            base_url: String::new(),
+            api_key_env: String::new(),
+            key_required: false,
+            model: default_custom_tts_model(),
+            voice: default_custom_tts_voice(),
+            format: default_custom_tts_format(),
+        }
+    }
+}
+
 /// Text-to-speech configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct TtsConfig {
     /// Enable TTS. Default: false.
     pub enabled: bool,
-    /// Default provider: "openai", "elevenlabs", or "google_tts".
+    /// Default provider: "openai", "elevenlabs", "google_tts", or any custom
+    /// name. When set to a name other than the three built-in ones, the
+    /// `[tts.custom]` block must supply the endpoint URL.
     pub provider: Option<String>,
     /// OpenAI TTS settings.
     pub openai: TtsOpenAiConfig,
@@ -1245,6 +1319,13 @@ pub struct TtsConfig {
     pub elevenlabs: TtsElevenLabsConfig,
     /// Google Cloud TTS settings.
     pub google: TtsGoogleConfig,
+    /// Custom / self-hosted TTS endpoint configuration.
+    ///
+    /// Used when `provider` is set to a name that is not one of the built-in
+    /// providers (`openai`, `elevenlabs`, `google_tts`). The request is
+    /// forwarded to an OpenAI-compatible `/v1/audio/speech` endpoint.
+    #[serde(default)]
+    pub custom: CustomTtsConfig,
     /// Max text length for TTS (chars). Default: 4096.
     pub max_text_length: usize,
     /// Timeout per TTS request in seconds. Default: 30.
@@ -1259,6 +1340,7 @@ impl Default for TtsConfig {
             openai: TtsOpenAiConfig::default(),
             elevenlabs: TtsElevenLabsConfig::default(),
             google: TtsGoogleConfig::default(),
+            custom: CustomTtsConfig::default(),
             max_text_length: 4096,
             timeout_secs: 30,
         }
@@ -1498,6 +1580,15 @@ pub struct SkillsConfig {
     /// Example: `{ "gog" = ["GOG_KEYRING_PASSWORD"] }`.
     #[serde(default)]
     pub env_passthrough_per_skill: std::collections::HashMap<String, Vec<String>>,
+    /// Upstream skill-registry repository, in GitHub `owner/name` form,
+    /// targeted by the "Propose to Registry" action
+    /// (`POST /api/skills/{name}/propose`). When unset the API falls back
+    /// to the built-in default (`librefang/librefang-registry`). The
+    /// proposal flow forks this repo under the authenticated GitHub user,
+    /// pushes the evolved skill files to a branch, and opens a pull
+    /// request back upstream.
+    #[serde(default)]
+    pub registry_repo: Option<String>,
 }
 
 /// Operator-side gate over skill `env_passthrough` requests.
@@ -1568,6 +1659,7 @@ impl Default for SkillsConfig {
             disabled: Vec::new(),
             env_passthrough_denied_patterns: default_env_passthrough_denied_patterns(),
             env_passthrough_per_skill: std::collections::HashMap::new(),
+            registry_repo: None,
         }
     }
 }
@@ -2151,6 +2243,36 @@ pub enum SidecarOverflowPolicy {
     DropNewest,
 }
 
+/// Built-in slash-command policy for a sidecar channel.
+///
+/// Ports the in-process `[channels.<name>.overrides]` command gating
+/// (`disable_commands` / `allowed_commands` / `blocked_commands`, #2063)
+/// to the sidecar architecture (#5841). A command that the policy
+/// rejects is **not** answered with an error — it is forwarded to the
+/// agent as plain text, so public-facing bots never reveal the
+/// existence of an internal command system to end users.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SidecarCommandPolicy {
+    /// All built-in slash commands are honoured (current default
+    /// behaviour — preserves backward compatibility).
+    #[default]
+    Allow,
+    /// All built-in slash commands are disabled; any leading-slash text
+    /// is forwarded to the agent as normal content. Use for
+    /// public-facing bots where end users must not be able to switch
+    /// agents or reset sessions.
+    Disable,
+    /// Only the commands in `allowed_commands` are honoured; everything
+    /// else is forwarded as plain text.
+    Allowlist,
+    /// Every command except those in `blocked_commands` is honoured; the
+    /// blocked ones are forwarded as plain text.
+    Blocklist,
+}
+
 /// Configuration for a sidecar channel adapter (external process-based).
 ///
 /// Sidecar adapters allow external processes written in any language to act as
@@ -2219,6 +2341,32 @@ pub struct SidecarChannelConfig {
     /// What to do when `message_buffer` is full.
     #[serde(default)]
     pub overflow: SidecarOverflowPolicy,
+    /// Built-in slash-command policy for this channel (#5841). Ports the
+    /// in-process `disable_commands` / `allowed_commands` /
+    /// `blocked_commands` gating to sidecars. Defaults to `allow` so
+    /// existing configs keep honouring every command. A rejected command
+    /// is forwarded to the agent as plain text, never answered with an
+    /// "unknown command" error.
+    #[serde(default)]
+    pub command_policy: SidecarCommandPolicy,
+    /// Whitelist of built-in command names (without the leading `/`)
+    /// consulted when `command_policy = "allowlist"`. Entries may be
+    /// written with or without a leading slash.
+    #[serde(default)]
+    pub allowed_commands: Vec<String>,
+    /// Blacklist of built-in command names (without the leading `/`)
+    /// consulted when `command_policy = "blocklist"`. Entries may be
+    /// written with or without a leading slash.
+    #[serde(default)]
+    pub blocked_commands: Vec<String>,
+    /// Inbound message-coalescing window in milliseconds (#5841 / #4441).
+    /// When > 0, messages from the same sender arriving within the window
+    /// are buffered and dispatched as a single batched context, so a user
+    /// who forwards several messages in rapid succession produces one
+    /// agent invocation instead of racing concurrent ones on the same
+    /// session. Default `0` (disabled).
+    #[serde(default)]
+    pub message_coalesce_window_ms: u64,
 }
 
 fn default_sidecar_restart() -> bool {
@@ -3248,6 +3396,21 @@ pub struct KernelConfig {
     /// Uses `BTreeMap` for deterministic serialisation order (see #3757).
     #[serde(default)]
     pub provider_request_timeout_secs: BTreeMap<String, u64>,
+    /// Per-provider in-driver retry-count overrides (provider ID → retries).
+    ///
+    /// Caps the number of re-attempts the HTTP-API driver makes for a single
+    /// LLM call on retryable failures — server throttling (429 / 529 / 503),
+    /// transient overloads, and transport-layer errors (connection refused /
+    /// TLS / read timeout, #10). The request is issued at most `retries + 1`
+    /// times. Absent providers use the compiled default of 3 (four total
+    /// attempts); set `0` to disable in-driver retries for a provider and rely
+    /// solely on the `FallbackChain`. e.g. `openai = 5`, `ollama = 0`.
+    ///
+    /// Only applies to HTTP API drivers (OpenAI-compatible, Anthropic, Gemini,
+    /// Vertex AI, Bedrock). CLI-based providers do not run the retry loop and
+    /// ignore this. Uses `BTreeMap` for deterministic serialisation (see #3757).
+    #[serde(default)]
+    pub provider_max_retries: BTreeMap<String, u32>,
     /// Provider region selection (provider ID → region name).
     /// Selects a regional endpoint from the provider's `[provider.regions]` map.
     /// e.g. `qwen = "us"` to use the US endpoint instead of China mainland.
@@ -3730,11 +3893,54 @@ pub struct ContextEngineTomlConfig {
     /// content is no longer present in the history (#4971).
     #[serde(default = "default_deduplicate_file_reads")]
     pub deduplicate_file_reads: bool,
+    /// Out-of-process context engine, selected with `engine = "sidecar"`.
+    ///
+    /// The daemon spawns the configured command and delegates the async
+    /// lifecycle hooks (`ingest`, `assemble`, `after_turn`, `bootstrap`) to it
+    /// over a newline-delimited JSON request/reply protocol; LLM-bearing
+    /// compaction and the cheap synchronous hooks stay in Rust. Any sidecar
+    /// failure falls back to the built-in engine, so a flaky context process
+    /// never breaks a turn. See `docs/architecture/sidecar-context-engine.md`.
+    #[serde(default)]
+    pub sidecar: Option<ContextEngineSidecarConfig>,
 }
 
 /// Default for [`ContextEngineTomlConfig::deduplicate_file_reads`]: enabled.
 fn default_deduplicate_file_reads() -> bool {
     true
+}
+
+/// Configuration for an out-of-process context engine (`engine = "sidecar"`).
+///
+/// ```toml
+/// [context_engine]
+/// engine = "sidecar"
+///
+/// [context_engine.sidecar]
+/// command = "python3"
+/// args = ["/home/me/.librefang/context_engines/recall.py"]
+/// request_timeout_secs = 30
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct ContextEngineSidecarConfig {
+    /// Executable to launch (resolved via `PATH`).
+    pub command: String,
+    /// Arguments passed to the command.
+    pub args: Vec<String>,
+    /// Per-request wall-clock timeout. A request that exceeds it falls back to
+    /// the built-in engine for that call. `0` means the compiled default (30s).
+    pub request_timeout_secs: u64,
+}
+
+impl Default for ContextEngineSidecarConfig {
+    fn default() -> Self {
+        Self {
+            command: String::new(),
+            args: Vec::new(),
+            request_timeout_secs: 30,
+        }
+    }
 }
 
 impl Default for ContextEngineTomlConfig {
@@ -3747,6 +3953,7 @@ impl Default for ContextEngineTomlConfig {
             hooks: ContextEngineHooks::default(),
             plugin_registries: default_plugin_registries(),
             deduplicate_file_reads: default_deduplicate_file_reads(),
+            sidecar: None,
         }
     }
 }
@@ -3877,8 +4084,9 @@ pub struct ContextEngineHooks {
     /// When `false` the runtime attempts soft network isolation: on Linux it
     /// wraps the hook with `unshare --net` (if available); on other platforms
     /// it injects `no_proxy=*` / `NO_PROXY=*` into the subprocess environment.
-    /// Defaults to `true`.
-    #[serde(default = "default_true_bool")]
+    /// Defaults to `false` (secure-by-default — a plugin that needs outbound
+    /// network must declare `allow_network = true` in its `plugin.toml`).
+    #[serde(default)]
     pub allow_network: bool,
     /// Restrict the `ingest`/`after_turn`/`assemble` hooks to specific agent IDs.
     ///
@@ -4001,8 +4209,10 @@ pub struct ContextEngineHooks {
     #[serde(default)]
     pub prewarm_subprocesses: bool,
     /// Restrict hook filesystem access: sets `HOME=/dev/null`, per-call `TMPDIR`,
-    /// and `LIBREFANG_READONLY_FS=1`. Defaults to `true` (no restriction).
-    #[serde(default = "default_true_bool")]
+    /// and `LIBREFANG_READONLY_FS=1`. Defaults to `false` (secure-by-default —
+    /// a plugin that needs filesystem write access must declare
+    /// `allow_filesystem = true` in its `plugin.toml`).
+    #[serde(default)]
     pub allow_filesystem: bool,
     /// OTel OTLP gRPC endpoint for hook span export (overrides global setting).
     #[serde(default)]
@@ -4046,10 +4256,6 @@ fn default_cb_reset_secs() -> u64 {
 }
 fn default_after_turn_queue_depth() -> u32 {
     16
-}
-
-fn default_true_bool() -> bool {
-    true
 }
 
 /// Per-hook input/output JSON Schema definition.
@@ -5790,6 +5996,7 @@ impl Default for KernelConfig {
             provider_urls: BTreeMap::new(),
             provider_proxy_urls: BTreeMap::new(),
             provider_request_timeout_secs: BTreeMap::new(),
+            provider_max_retries: BTreeMap::new(),
             provider_regions: BTreeMap::new(),
             provider_api_keys: BTreeMap::new(),
             local_probe_interval_secs: default_local_probe_interval_secs(),
@@ -6032,9 +6239,10 @@ pub struct DefaultModelConfig {
     #[serde(default = "default_message_timeout_secs")]
     pub message_timeout_secs: u64,
     /// Provider-specific extension parameters that are flattened directly
-    /// into the API request body.
+    /// into the API request body. `BTreeMap` keeps the flattened key order
+    /// deterministic for prompt-cache stability (#3298).
     #[serde(default, flatten)]
-    pub extra_params: HashMap<String, serde_json::Value>,
+    pub extra_params: BTreeMap<String, serde_json::Value>,
     /// Claude Code CLI profile directories for token rotation.
     /// Each entry is a path to a `.claude/` config dir (e.g. `~/.claude-profiles/account-2`).
     /// When multiple profiles are configured, a TokenRotationDriver wraps them
@@ -6055,7 +6263,7 @@ impl Default for DefaultModelConfig {
             api_key_env: String::new(),
             base_url: None,
             message_timeout_secs: default_message_timeout_secs(),
-            extra_params: HashMap::new(),
+            extra_params: BTreeMap::new(),
             cli_profile_dirs: Vec::new(),
         }
     }
@@ -6879,6 +7087,58 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sidecar_command_policy_and_coalesce_defaults_are_backward_compatible() {
+        // A minimal sidecar block (no command-policy / coalescing keys)
+        // must deserialize to the permissive defaults so existing configs
+        // keep honouring every command and run with coalescing off.
+        let toml_str = r#"
+            name = "telegram"
+            command = "python3"
+        "#;
+        let cfg: SidecarChannelConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.command_policy, SidecarCommandPolicy::Allow);
+        assert!(cfg.allowed_commands.is_empty());
+        assert!(cfg.blocked_commands.is_empty());
+        assert_eq!(cfg.message_coalesce_window_ms, 0);
+    }
+
+    #[test]
+    fn sidecar_command_policy_disable_parses() {
+        let toml_str = r#"
+            name = "afina-sales-bot"
+            command = "python3"
+            command_policy = "disable"
+            message_coalesce_window_ms = 3000
+        "#;
+        let cfg: SidecarChannelConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.command_policy, SidecarCommandPolicy::Disable);
+        assert_eq!(cfg.message_coalesce_window_ms, 3000);
+    }
+
+    #[test]
+    fn sidecar_command_policy_allowlist_and_blocklist_parse() {
+        let allow = r#"
+            name = "bot"
+            command = "python3"
+            command_policy = "allowlist"
+            allowed_commands = ["start", "/help"]
+        "#;
+        let cfg: SidecarChannelConfig = toml::from_str(allow).unwrap();
+        assert_eq!(cfg.command_policy, SidecarCommandPolicy::Allowlist);
+        assert_eq!(cfg.allowed_commands, vec!["start", "/help"]);
+
+        let block = r#"
+            name = "bot"
+            command = "python3"
+            command_policy = "blocklist"
+            blocked_commands = ["new", "reboot", "agent"]
+        "#;
+        let cfg: SidecarChannelConfig = toml::from_str(block).unwrap();
+        assert_eq!(cfg.command_policy, SidecarCommandPolicy::Blocklist);
+        assert_eq!(cfg.blocked_commands, vec!["new", "reboot", "agent"]);
+    }
+
+    #[test]
     fn test_session_config_defaults_backward_compatible() {
         let sc = SessionConfig::default();
         assert!(sc.reset_prompt.is_none());
@@ -7640,5 +7900,48 @@ owner_notify_triage = ["anthropic:claude-haiku-4.5", "groq:llama-3.3-70b-versati
             cfg.chain_for(AuxTask::SessionSummary).unwrap(),
             &["a:b".to_string()]
         );
+    }
+
+    // -------- Plugin sandbox secure-by-default (#2) --------
+
+    /// A `plugin.toml` `[hooks]` table that omits `allow_network` /
+    /// `allow_filesystem` must deserialize to the deny-by-default values.
+    /// This is the serde path; it must agree with the derived `Default`.
+    #[test]
+    fn context_engine_hooks_omitted_sandbox_flags_default_to_deny() {
+        let hooks: ContextEngineHooks = toml::from_str(
+            r#"
+            ingest = "hooks/ingest.py"
+        "#,
+        )
+        .unwrap();
+        assert!(
+            !hooks.allow_network,
+            "allow_network must default to false (secure-by-default)"
+        );
+        assert!(
+            !hooks.allow_filesystem,
+            "allow_filesystem must default to false (secure-by-default)"
+        );
+
+        // Derived `Default` must match the serde-omitted default.
+        let d = ContextEngineHooks::default();
+        assert_eq!(d.allow_network, hooks.allow_network);
+        assert_eq!(d.allow_filesystem, hooks.allow_filesystem);
+    }
+
+    /// Explicit opt-in still works — a plugin that needs network / filesystem
+    /// declares it in `plugin.toml`.
+    #[test]
+    fn context_engine_hooks_explicit_opt_in_is_honoured() {
+        let hooks: ContextEngineHooks = toml::from_str(
+            r#"
+            allow_network = true
+            allow_filesystem = true
+        "#,
+        )
+        .unwrap();
+        assert!(hooks.allow_network);
+        assert!(hooks.allow_filesystem);
     }
 }
