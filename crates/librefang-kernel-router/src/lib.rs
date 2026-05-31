@@ -5,7 +5,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 const ROUTING_EXCLUDED_TEMPLATES: &[&str] = &["assistant"];
 const GENERIC_ENGLISH_WORDS: &[&str] = &[
@@ -333,7 +333,10 @@ fn hand_route_candidate_from_definition(
 #[derive(Debug, Clone)]
 struct TemplateRuleCacheEntry {
     home_dir: Option<String>,
-    rules: Vec<RouteRule>,
+    // `Arc` so the per-message `template_rules()` hands out a cheap refcount
+    // bump instead of deep-cloning ~30 rules (each with several owned Strings)
+    // on every inbound routing call.
+    rules: Arc<Vec<RouteRule>>,
 }
 
 static TEMPLATE_RULE_CACHE: OnceLock<Mutex<Option<TemplateRuleCacheEntry>>> = OnceLock::new();
@@ -352,7 +355,7 @@ pub fn invalidate_template_rule_cache() {
 /// with any operator override at
 /// `$LIBREFANG_HOME/registry/templates/routing.toml`. Cached per home dir;
 /// rebuilt on hot-reload via [`invalidate_template_rule_cache`].
-fn template_rules() -> Vec<RouteRule> {
+fn template_rules() -> Arc<Vec<RouteRule>> {
     // Template rules share the router home dir with hand routing.
     let home_dir = resolve_hand_route_home_dir();
     let home_dir_key = Some(home_dir.to_string_lossy().to_string());
@@ -360,13 +363,13 @@ fn template_rules() -> Vec<RouteRule> {
     let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref cached) = *guard {
         if cached.home_dir == home_dir_key {
-            return cached.rules.clone();
+            return Arc::clone(&cached.rules);
         }
     }
-    let rules = build_template_rules(Some(&home_dir));
+    let rules = Arc::new(build_template_rules(Some(&home_dir)));
     *guard = Some(TemplateRuleCacheEntry {
         home_dir: home_dir_key,
-        rules: rules.clone(),
+        rules: Arc::clone(&rules),
     });
     rules
 }
@@ -387,6 +390,9 @@ fn build_template_rules(home_dir: Option<&Path>) -> Vec<RouteRule> {
             Vec::new()
         })
         .into_iter()
+        // Honor `enabled = false` in the bundled default too, so the field has
+        // one consistent meaning ("drop this rule") on both load paths.
+        .filter(|entry| entry.enabled)
         .map(RouteRuleToml::into_rule)
         .collect();
 
@@ -515,7 +521,7 @@ pub fn auto_select_template(
     let rules = template_rules();
     let mut scored: Vec<(usize, String, Vec<String>)> = Vec::new();
 
-    for rule in &rules {
+    for rule in rules.iter() {
         let strong_hits = matched_labels(message, &rule.strong);
         let weak_hits = matched_labels(message, &rule.weak);
         // Template rules are hand-curated (equivalent to explicit aliases)
@@ -540,7 +546,7 @@ pub fn auto_select_template(
     // When keyword matching found nothing, try semantic-only candidates from the rule set
     if scored.is_empty() {
         if let Some(scores) = semantic_scores {
-            for rule in &rules {
+            for rule in rules.iter() {
                 if let Some(&sim) = scores.get(&rule.target) {
                     if sim >= SEMANTIC_ONLY_THRESHOLD {
                         let bonus = (sim * MAX_SEMANTIC_BONUS).round() as usize;
@@ -1910,5 +1916,20 @@ strong = [{ label = "bad", regex = "(unclosed" }]
         assert_eq!(rules.len(), 30);
         let coder = rules.iter().find(|r| r.target == "coder").unwrap();
         assert_eq!(coder.strong[0].0, "bad");
+    }
+
+    #[test]
+    fn default_targets_are_unique() {
+        // A duplicate target in the bundled default would make the second copy
+        // un-overridable — the merge loop only ever finds the first by position.
+        let rules = build_template_rules(None);
+        let mut seen = HashSet::new();
+        for r in &rules {
+            assert!(
+                seen.insert(r.target.clone()),
+                "duplicate default target: {}",
+                r.target
+            );
+        }
     }
 }

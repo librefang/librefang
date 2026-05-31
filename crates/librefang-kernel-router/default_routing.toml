@@ -9,6 +9,9 @@
 #   - same target  → overrides the default rule
 #   - new target   → appends a new rule
 #   - enabled=false → removes the default rule from routing
+# Edits to the override file take effect on `POST /api/config/reload` or a
+# daemon restart; the rule set is cached and not hot-reloaded on file change
+# alone.
 # A rule with an invalid regex (or an unparseable file) is skipped with a WARN;
 # routing never fails closed on a bad pattern.
 #
