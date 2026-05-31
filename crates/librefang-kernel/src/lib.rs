@@ -20,6 +20,7 @@ pub mod cron;
 pub mod cron_delivery;
 pub mod error;
 pub mod event_bus;
+pub mod goal_runner;
 pub mod heartbeat;
 pub mod hooks;
 pub mod inbox;

@@ -26,10 +26,10 @@ All channel credentials can be stored using any of the four methods (highest pri
 The examples below show all four methods. In production, use the vault.
 </Note>
 
-Most channel configurations live in `~/.librefang/config.toml` under the `[channels]` section. Each in-process channel is a subsection. Telegram is now sidecar-only and uses `[[sidecar_channels]]` instead:
+Most channel configurations live in `~/.librefang/config.toml` under the `[channels]` section. Each in-process channel is a subsection. Telegram is now sidecar-only and uses `[[sidecar_channels]]` instead — Python (default) or Rust (since #5831; see [Rust Telegram sidecar adapter](/architecture/rust-telegram-sidecar)):
 
 ```toml
-# Telegram (sidecar-only since #5241)
+# Telegram via Python sidecar (default)
 [[sidecar_channels]]
 name = "telegram"
 command = "python3"
@@ -38,6 +38,14 @@ channel_type = "telegram"
 [sidecar_channels.env]
 TELEGRAM_BOT_TOKEN = "..."
 # ALLOWED_USERS = "123456789,@alice"
+
+# Telegram via Rust sidecar (since #5831 — no Python runtime required)
+# [[sidecar_channels]]
+# name = "telegram"
+# command = "/abs/path/to/target/release/librefang-sidecar-telegram"
+# channel_type = "telegram"
+# [sidecar_channels.env]
+# TELEGRAM_BOT_TOKEN = "..."
 
 # Discord (sidecar)
 [[sidecar_channels]]

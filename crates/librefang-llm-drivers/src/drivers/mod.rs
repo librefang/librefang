@@ -734,7 +734,8 @@ fn create_driver_from_entry(
                 proxy_url,
                 request_timeout_secs,
             )
-            .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
+            .with_emit_caller_trace_headers(config.emit_caller_trace_headers)
+            .with_max_retries(config.max_retries),
         )),
         ApiFormat::Anthropic => Ok(Arc::new(
             anthropic::AnthropicDriver::with_proxy_and_timeout(
@@ -743,7 +744,8 @@ fn create_driver_from_entry(
                 proxy_url,
                 request_timeout_secs,
             )
-            .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
+            .with_emit_caller_trace_headers(config.emit_caller_trace_headers)
+            .with_max_retries(config.max_retries),
         )),
         ApiFormat::Gemini => Ok(Arc::new(
             gemini::GeminiDriver::with_proxy_and_timeout(
@@ -752,7 +754,8 @@ fn create_driver_from_entry(
                 proxy_url,
                 request_timeout_secs,
             )
-            .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
+            .with_emit_caller_trace_headers(config.emit_caller_trace_headers)
+            .with_max_retries(config.max_retries),
         )),
         ApiFormat::ClaudeCode => {
             let mut d = claude_code::ClaudeCodeDriver::with_timeout(
@@ -822,7 +825,8 @@ fn create_driver_from_entry(
                     api_version,
                     proxy_url,
                 )
-                .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
+                .with_emit_caller_trace_headers(config.emit_caller_trace_headers)
+                .with_max_retries(config.max_retries),
             ))
         }
         ApiFormat::Bedrock => {
@@ -833,7 +837,8 @@ fn create_driver_from_entry(
                 .ok();
             Ok(Arc::new(
                 bedrock::BedrockDriver::new_with_credentials(Some(api_key), region)?
-                    .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
+                    .with_emit_caller_trace_headers(config.emit_caller_trace_headers)
+                    .with_max_retries(config.max_retries),
             ))
         }
         ApiFormat::Ollama => Ok(Arc::new(
@@ -1252,6 +1257,7 @@ mod tests {
             proxy_url: None,
             request_timeout_secs: None,
             emit_caller_trace_headers: true,
+            max_retries: 3,
         };
         let driver = create_driver(&config);
         assert!(driver.is_ok());
@@ -1271,6 +1277,7 @@ mod tests {
             proxy_url: None,
             request_timeout_secs: None,
             emit_caller_trace_headers: true,
+            max_retries: 3,
         };
         let driver = create_driver(&config);
         assert!(driver.is_err());
@@ -1459,6 +1466,7 @@ mod tests {
             proxy_url: None,
             request_timeout_secs: None,
             emit_caller_trace_headers: true,
+            max_retries: 3,
         };
         let driver = create_driver(&config);
         assert!(
@@ -1486,6 +1494,7 @@ mod tests {
             proxy_url: None,
             request_timeout_secs: None,
             emit_caller_trace_headers: true,
+            max_retries: 3,
         };
         let driver = create_driver(&config);
         assert!(
@@ -1513,6 +1522,7 @@ mod tests {
             proxy_url: None,
             request_timeout_secs: None,
             emit_caller_trace_headers: true,
+            max_retries: 3,
         };
         let driver = create_driver(&config);
         assert!(driver.is_err());
@@ -1540,6 +1550,7 @@ mod tests {
             proxy_url: None,
             request_timeout_secs: None,
             emit_caller_trace_headers: true,
+            max_retries: 3,
         };
         let result = create_driver(&config);
         assert!(result.is_err());
@@ -1576,6 +1587,7 @@ mod tests {
             proxy_url: None,
             request_timeout_secs: None,
             emit_caller_trace_headers: true,
+            max_retries: 3,
         };
         let driver = create_driver(&config);
         assert!(driver.is_ok());
@@ -1605,6 +1617,7 @@ mod tests {
             proxy_url: None,
             request_timeout_secs: None,
             emit_caller_trace_headers: true,
+            max_retries: 3,
         };
 
         let driver = create_driver(&config);
@@ -1646,6 +1659,7 @@ mod tests {
             proxy_url: None,
             request_timeout_secs: None,
             emit_caller_trace_headers: true,
+            max_retries: 3,
         };
         let driver = create_driver(&config);
         assert!(
@@ -1668,6 +1682,7 @@ mod tests {
             proxy_url: None,
             request_timeout_secs: None,
             emit_caller_trace_headers: true,
+            max_retries: 3,
         };
         // Clear any env var that might interfere
         std::env::remove_var("AZURE_OPENAI_ENDPOINT");
@@ -1699,6 +1714,7 @@ mod tests {
             proxy_url: None,
             request_timeout_secs: None,
             emit_caller_trace_headers: true,
+            max_retries: 3,
         };
         let d1 = cache.get_or_create(&config).unwrap();
         let d2 = cache.get_or_create(&config).unwrap();
@@ -1721,6 +1737,7 @@ mod tests {
             proxy_url: None,
             request_timeout_secs: None,
             emit_caller_trace_headers: true,
+            max_retries: 3,
         };
         let config_b = DriverConfig {
             provider: "ollama".to_string(),
@@ -1734,6 +1751,7 @@ mod tests {
             proxy_url: None,
             request_timeout_secs: None,
             emit_caller_trace_headers: true,
+            max_retries: 3,
         };
         let d_a = cache.get_or_create(&config_a).unwrap();
         let d_b = cache.get_or_create(&config_b).unwrap();
@@ -1759,6 +1777,7 @@ mod tests {
             proxy_url: None,
             request_timeout_secs: None,
             emit_caller_trace_headers: true,
+            max_retries: 3,
         };
         cache.get_or_create(&config).unwrap();
         assert_eq!(cache.len(), 1);

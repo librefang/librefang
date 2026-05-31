@@ -1,5 +1,11 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { createGoal, updateGoal, deleteGoal } from "../http/client";
+import {
+  createGoal,
+  updateGoal,
+  deleteGoal,
+  startGoalRun,
+  stopGoalRun,
+} from "../http/client";
 import type { GoalItem } from "../../api";
 import { goalKeys } from "../queries/keys";
 
@@ -33,5 +39,30 @@ export function useDeleteGoal() {
   return useMutation({
     mutationFn: deleteGoal,
     onSuccess: () => qc.invalidateQueries({ queryKey: goalKeys.lists() }),
+  });
+}
+
+// Long-horizon autonomous runs (#5744).
+
+export function useStartGoalRun() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, maxIterations }: { id: string; maxIterations?: number }) =>
+      startGoalRun(id, maxIterations !== undefined ? { max_iterations: maxIterations } : undefined),
+    onSuccess: (_data, { id }) => {
+      qc.invalidateQueries({ queryKey: goalKeys.run(id) });
+      qc.invalidateQueries({ queryKey: goalKeys.lists() });
+    },
+  });
+}
+
+export function useStopGoalRun() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => stopGoalRun(id),
+    onSuccess: (_data, id) => {
+      qc.invalidateQueries({ queryKey: goalKeys.run(id) });
+      qc.invalidateQueries({ queryKey: goalKeys.lists() });
+    },
   });
 }

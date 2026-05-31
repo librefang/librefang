@@ -905,7 +905,7 @@ pub async fn execute_tool_raw(
         "memory_recall" => {
             tool_memory_recall(input, *kernel, *caller_agent_id, *sender_id, *channel)
         }
-        "memory_list" => tool_memory_list(*kernel, *caller_agent_id, *sender_id, *channel),
+        "memory_list" => tool_memory_list(input, *kernel, *caller_agent_id, *sender_id, *channel),
 
         // Memory wiki tools (issue #3329) — same #5139 per-user ACL gate.
         // #3576: submodule returns Result<String, ToolError>; narrow here.
@@ -1320,9 +1320,12 @@ pub async fn execute_tool_raw(
 
         // Artifact retrieval tool — recovers content spilled to disk by the
         // artifact store when a tool result exceeded `spill_threshold_bytes`.
+        // (#3576: returns Result<String, ToolError>)
         "read_artifact" => {
             let artifact_dir = crate::artifact_store::default_artifact_storage_dir();
-            tool_read_artifact(input, &artifact_dir).await
+            tool_read_artifact(input, &artifact_dir)
+                .await
+                .map_err(|e| e.to_string())
         }
 
         // Canvas / A2UI tool (#3576: returns Result<String, ToolError>)
@@ -1401,16 +1404,36 @@ pub async fn execute_tool_raw(
                     }
                     debug!(tool = other, skill = %skill.manifest.skill.name, "Dispatching to skill");
                     let skill_dir = skill.path.clone();
-                    let env_policy = kernel.and_then(|k| k.skill_env_passthrough_policy());
-                    match librefang_skills::loader::execute_skill_tool(
-                        &skill.manifest,
-                        &skill.path,
-                        other,
-                        input,
-                        env_policy.as_ref(),
-                    )
-                    .await
+                    // WASM skills execute in the in-process WasmSandbox
+                    // (capability-gated, fuel/memory/wall-clock bounded). They
+                    // are routed here rather than in the skills loader because
+                    // the sandbox lives in this crate and its host calls need
+                    // the KernelHandle — librefang-skills must not depend on
+                    // librefang-runtime (circular).
+                    let exec_result = if skill.manifest.runtime.runtime_type
+                        == librefang_skills::SkillRuntime::Wasm
                     {
+                        super::wasm_skill::execute_wasm_skill(
+                            &skill.manifest,
+                            &skill.path,
+                            other,
+                            input,
+                            kernel.map(Arc::clone),
+                            caller_agent_id.unwrap_or("unknown"),
+                        )
+                        .await
+                    } else {
+                        let env_policy = kernel.and_then(|k| k.skill_env_passthrough_policy());
+                        librefang_skills::loader::execute_skill_tool(
+                            &skill.manifest,
+                            &skill.path,
+                            other,
+                            input,
+                            env_policy.as_ref(),
+                        )
+                        .await
+                    };
+                    match exec_result {
                         Ok(skill_result) => {
                             let content = serde_json::to_string(&skill_result.output)
                                 .unwrap_or_else(|_| skill_result.output.to_string());

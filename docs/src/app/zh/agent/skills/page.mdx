@@ -343,60 +343,101 @@ if __name__ == "__main__":
 
 ## WASM 技能
 
-WASM 技能在沙箱化的 Wasmtime 环境中运行。它们非常适合安全敏感的操作，因为沙箱强制执行资源限制和能力约束。
+WASM 技能在 BossFang 进程内的 `WasmSandbox` 中运行：受能力门控，并对每次调用施加燃料、线性内存和墙钟时间限制。
+它们非常适合安全敏感的工具，因为除已授予的能力外无法触及任何东西。
 
-### 构建 WASM 技能
+用 Rust 编写时，最简单的方式是 `librefang-skill` SDK，它把底层 guest ABI 收敛到一个宏后面。
 
-1. 用 Rust（或任何可以编译为 WASM 的语言）编写技能：
+### 构建 WASM 技能（Rust）
+
+1. 创建一个依赖 `librefang-skill` 的 `cdylib` crate：
+
+```toml
+# Cargo.toml
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+librefang-skill = "0.1"
+serde_json = "1"
+
+[profile.release]
+panic = "abort"   # guest 不做栈展开；同时减小模块体积
+```
+
+2. 编写 handler 并用 `skill!` 宏注册：
 
 ```rust
 // src/lib.rs
-use std::io::{self, Read};
+use librefang_skill::{skill, Request};
+use serde_json::{json, Value};
 
-#[no_mangle]
-pub extern "C" fn _start() {
-    let mut input = String::new();
-    io::stdin().read_to_string(&mut input).unwrap();
-
-    let payload: serde_json::Value = serde_json::from_str(&input).unwrap();
-    let tool = payload["tool"].as_str().unwrap_or("");
-    let input_data = &payload["input"];
-
-    let result = match tool {
+fn handle(req: Request) -> Result<Value, String> {
+    match req.tool.as_str() {
         "my_tool" => {
-            let param = input_data["param"].as_str().unwrap_or("");
-            format!("Processed: {param}")
+            let param = req.input.get("param").and_then(Value::as_str).unwrap_or("");
+            Ok(json!({ "result": format!("Processed: {param}") }))
         }
-        _ => format!("Unknown tool: {tool}"),
-    };
-
-    println!("{}", serde_json::json!({"result": result}));
+        other => Err(format!("unknown tool: {other}")),
+    }
 }
+
+skill!(handle);
 ```
 
-2. 编译为 WASM：
+handler 收到的是所有 runtime 都用的同一份 `{tool, input, config}` envelope。
+返回 `Err` 会以 `{"error": ...}` 的形式呈现给 agent，与子进程 runtime 非零退出的语义一致。
+
+3. 以 `wasm32-unknown-unknown` 为目标构建，并把产物复制到技能根目录：
 
 ```bash
-cargo build --target wasm32-wasi --release
+rustup target add wasm32-unknown-unknown
+cargo build --release --target wasm32-unknown-unknown
+cp target/wasm32-unknown-unknown/release/skill.wasm skill.wasm
 ```
 
-3. 在清单文件中引用 `.wasm` 文件：
+<Note>
+  目标是 `wasm32-unknown-unknown`，**不是** `wasm32-wasi`。
+  沙箱只提供 `librefang` 这组 host import（`host_call`、`host_log`）；WASI 模块会导入 `wasi_snapshot_preview1`，从而实例化失败。
+  把产物复制出 `target/`，是因为技能打包器会排除构建目录。
+</Note>
+
+4. 在 `skill.toml` 中引用：
 
 ```toml
 [runtime]
 type = "wasm"
-entry = "target/wasm32-wasi/release/my_skill.wasm"
+entry = "skill.wasm"
 ```
+
+`librefang skill create`（选 `wasm` runtime）会生成以上全部脚手架，`librefang skill test <dir>` 会通过真实沙箱在本地运行 WASM 技能。
+
+### Host 调用
+
+WASM 技能通过 `librefang_skill::host` 访问 host 功能。
+每个方法都需要 `[requirements] capabilities` 中对应的能力，其中若干会消耗燃料（denial-of-wallet 防护）：
+
+| 函数 | 能力 | 燃料 |
+| --- | --- | --- |
+| `time_now`、`kv_get`、`kv_set` | — | 免费 |
+| `env_read` | `EnvRead(<glob>)` | 免费 |
+| `fs_read`、`fs_list` | `FileRead(<glob>)` | 免费 |
+| `fs_write` | `FileWrite(<glob>)` | 免费 |
+| `net_fetch` | `NetConnect(<host:port>)` | 计费 |
+| `shell_exec` | `ShellExec(<glob>)` | 计费 |
+| `agent_send` | `AgentMessage(<glob>)` | 计费 |
+| `agent_spawn` | `AgentSpawn` | 计费 |
+
+无法解析的能力字符串会被丢弃（默认拒绝），所以拼写错误意味着"未授予"，而不是悄悄放大权限。
 
 ### 沙箱限制
 
-WASM 沙箱强制执行以下限制：
+WASM 沙箱对每次调用强制执行：
 
-- **燃料限制**：最大计算步数（防止无限循环）。
-- **内存限制**：最大内存分配量。
-- **能力限制**：仅授予 Agent 的能力生效。
-
-这些限制来源于 Agent 清单中 `[resources]` 节的配置。
+- **燃料限制** —— CPU 指令预算，同时限制 host 调用的扇出（防止无限循环和 denial-of-wallet）。默认 1,000,000。
+- **内存限制** —— 线性内存的最大增长。默认 16 MiB。
+- **墙钟超时** —— 取自 `[requirements] timeout_secs`，否则为 30 秒。
+- **能力** —— 仅授予技能声明（且能解析）的能力，其余一律拒绝。
 
 ---
 

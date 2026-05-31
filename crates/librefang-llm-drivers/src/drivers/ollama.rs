@@ -73,7 +73,7 @@ use futures::StreamExt;
 use librefang_types::message::{ContentBlock, MessageContent, Role, StopReason, TokenUsage};
 use librefang_types::tool::ToolCall;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -489,15 +489,14 @@ struct OllamaRequest {
     /// so callers can override standard fields (`keep_alive`, custom sampler
     /// options, …) without driver changes.
     ///
-    /// `HashMap` iteration order is non-deterministic, but the merge below
-    /// goes through `serde_json::Value::Object`, which (without the
-    /// `preserve_order` feature — the workspace does NOT enable it) is
-    /// `BTreeMap`-backed and re-sorts keys alphabetically on serialise.
-    /// The final wire body is therefore deterministic regardless of
-    /// HashMap iteration, so prompt-cache stability (#3298) is preserved.
-    /// If we ever turn on `preserve_order`, swap this to `BTreeMap`.
+    /// `BTreeMap` so the merge into the wire body iterates in a stable,
+    /// sorted key order regardless of how the map was populated. This makes
+    /// prompt-cache stability (#3298) a type-level guarantee rather than a
+    /// property that only holds while `serde_json`'s `preserve_order` feature
+    /// stays off — if that feature were ever enabled, a `HashMap` source here
+    /// would leak its non-deterministic iteration order straight to the wire.
     #[serde(skip_serializing)]
-    extra_body: Option<HashMap<String, serde_json::Value>>,
+    extra_body: Option<BTreeMap<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1303,6 +1302,63 @@ mod tests {
             LlmError::Api { message, .. } => assert!(message.contains("no messages")),
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    // #3298 — `extra_body` is merged into the Ollama wire body, which is part
+    // of the provider prompt-cache key. Before this driver's `extra_body` was
+    // a `BTreeMap`, the merge loop in `complete()` / `stream()` iterated the
+    // source map directly, so a `HashMap` source could leak its
+    // non-deterministic iteration order into the body and silently bust the
+    // cache. `BTreeMap` makes the sorted order a type-level guarantee; this
+    // test pins byte equality of the merged body across two different
+    // insertion orders so the property cannot regress. Mirrors openai.rs's
+    // `extra_body_merge_is_byte_identical_across_insertion_orders`.
+    #[test]
+    fn extra_body_merge_is_byte_identical_across_insertion_orders() {
+        let driver = OllamaDriver::new(String::new(), "http://x".to_string());
+
+        // Reproduce the exact merge `complete()` / `stream()` perform:
+        // serialize the wire request to a Value, then insert each extra_body
+        // entry on top so it overrides any standard field with the same name.
+        fn merged_body(driver: &OllamaDriver, order: &[(&str, serde_json::Value)]) -> String {
+            let mut extra = BTreeMap::new();
+            for (k, v) in order {
+                extra.insert((*k).to_string(), v.clone());
+            }
+            let mut r = req("llama3.2");
+            r.extra_body = Some(extra);
+
+            let wire = driver.build_request(&r).expect("build_request");
+            let mut body = serde_json::to_value(&wire).expect("serialize wire");
+            if let (Some(extra), Some(obj)) = (&wire.extra_body, body.as_object_mut()) {
+                for (k, v) in extra {
+                    obj.insert(k.clone(), v.clone());
+                }
+            }
+            serde_json::to_string(&body).expect("serialize body")
+        }
+
+        // Same three keys, two different insertion orders.
+        let a = merged_body(
+            &driver,
+            &[
+                ("aaa_param", serde_json::json!(1)),
+                ("mmm_param", serde_json::json!("two")),
+                ("zzz_param", serde_json::json!([3, 4])),
+            ],
+        );
+        let b = merged_body(
+            &driver,
+            &[
+                ("zzz_param", serde_json::json!([3, 4])),
+                ("aaa_param", serde_json::json!(1)),
+                ("mmm_param", serde_json::json!("two")),
+            ],
+        );
+        assert_eq!(
+            a, b,
+            "Ollama extra_body merge must yield a byte-identical request body across insertion orders (#3298)"
+        );
     }
 
     #[test]

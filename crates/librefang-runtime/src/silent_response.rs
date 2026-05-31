@@ -80,11 +80,50 @@ fn has_envelope_marker_as_line_leader(text: &str) -> bool {
 /// Prompt section headers that, when paired with a structural marker,
 /// indicate cascade scaffolding regurgitation.
 ///
-/// `## Today` / `## Calendar` / `## Tasks` are *ambiguous* — a legitimate
-/// "what does my day look like" help reply produces these freely, so 2+ of
-/// them alone is intentionally NOT a leak (houko-flagged false positive,
-/// guarded by `thematic_headers_alone_are_legitimate`).
+/// **Drift-pin reconciliation** (post-#5053 / #5073 prompt-builder layout):
+/// before this reconciliation the list contained five legacy strings
+/// (`## Sender`, `## Today`, `## Calendar`, `## Tasks`, `## Response Style`)
+/// none of which the current builder emits — the `1 structural + 1
+/// thematic` branch of [`is_cascade_leak`] was therefore dead, and the
+/// detector silently degraded to a `2+ structural` rule (drift exposed by
+/// the `silent_response::tests::thematic_and_scaffold_headers_match_prompt_builder_output`
+/// drift-pin in PR #5344). This list now mirrors the actual headers
+/// enumerated by `crates/librefang-runtime/src/prompt_builder/*.rs` plus
+/// the legacy five kept as belt-and-suspenders for any deployment still
+/// on the older builder (cheap to leave; same false-positive risk as
+/// before).
+///
+/// **Ambiguous subset** — `## Today`, `## Calendar`, `## Tasks`, and
+/// `## Current Date` are not promoted into [`SCAFFOLD_ONLY_HEADERS`]:
+/// a legitimate "what does my day look like" / "what's today's date"
+/// reply may produce these. The houko-flagged false-positive guard
+/// `cascade_leak_ambiguous_thematic_headers_alone_are_legitimate` keeps
+/// that invariant locked.
 const THEMATIC_HEADERS: &[&str] = &[
+    // -- Current builder (post-#5053 / #5073) -------------------------------
+    "## Active Goals",
+    "## Channel",
+    "## Connected Tool Servers (MCP)",
+    "## Current Date",
+    "## First-Run Protocol",
+    "## Heartbeat Checklist",
+    "## Identity",
+    "## Live Context",
+    "## Long-Term Memory",
+    "## Memory",
+    "## Operational Guidelines",
+    "## Output Channels",
+    "## Peer Agents",
+    "## Persona",
+    "## Provider-Supplied Context",
+    "## Safety",
+    "## Skills",
+    "## Tool Call Behavior",
+    "## User Context",
+    "## User Profile",
+    "## Workspace",
+    "## Your Tools",
+    // -- Legacy (pre-#5053) — kept defensively -------------------------------
     "## Sender",
     "## Today",
     "## Calendar",
@@ -93,17 +132,46 @@ const THEMATIC_HEADERS: &[&str] = &[
 ];
 
 /// Subset of [`THEMATIC_HEADERS`] that describe the *prompt frame itself*,
-/// not reply content. An agent never legitimately emits `## Sender`
-/// (it does not narrate who messaged it back to the user) or
-/// `## Response Style` (a meta-instruction block, never reply prose) in a
-/// genuine reply — these only appear when the model regurgitates the
-/// scaffolding verbatim. They are therefore as diagnostic as a structural
-/// turn-frame marker. This closes the all-thematic bypass
-/// (`## Sender\n…\n## Today\n…\n## Tasks` — three thematic, zero structural)
-/// flagged in issue #5141 without regressing the legitimate day-summary
-/// reply (which only ever uses the ambiguous `## Today`/`## Calendar`/
-/// `## Tasks` subset).
-const SCAFFOLD_ONLY_HEADERS: &[&str] = &["## Sender", "## Response Style"];
+/// not reply content. An agent never legitimately emits `## Persona`
+/// (it does not narrate its own meta-frame to the user) or `## Memory`,
+/// `## Skills`, `## Workspace`, `## Safety`, …  in a genuine reply — these
+/// only appear when the model regurgitates the scaffolding verbatim. They
+/// are therefore as diagnostic as a structural turn-frame marker. This
+/// closes the all-thematic bypass (`## Persona\n…\n## Memory\n…\n## Skills`
+/// — three thematic, zero structural in the legacy spelling — would have
+/// slipped through `2+ structural`) without regressing the legitimate
+/// "what does my day look like" reply (which uses the *ambiguous* subset
+/// — `## Today`, `## Calendar`, `## Tasks`, `## Current Date` — that
+/// remains in [`THEMATIC_HEADERS`] but is intentionally NOT in this list).
+const SCAFFOLD_ONLY_HEADERS: &[&str] = &[
+    // -- Current builder (post-#5053 / #5073) — all are pure prompt-frame ----
+    // (`## Current Date` is intentionally NOT here — see THEMATIC_HEADERS
+    // comment for the ambiguous-subset rationale.)
+    "## Active Goals",
+    "## Channel",
+    "## Connected Tool Servers (MCP)",
+    "## First-Run Protocol",
+    "## Heartbeat Checklist",
+    "## Identity",
+    "## Live Context",
+    "## Long-Term Memory",
+    "## Memory",
+    "## Operational Guidelines",
+    "## Output Channels",
+    "## Peer Agents",
+    "## Persona",
+    "## Provider-Supplied Context",
+    "## Safety",
+    "## Skills",
+    "## Tool Call Behavior",
+    "## User Context",
+    "## User Profile",
+    "## Workspace",
+    "## Your Tools",
+    // -- Legacy (pre-#5053) — kept defensively -------------------------------
+    "## Sender",
+    "## Response Style",
+];
 
 /// Structural turn-frame markers that almost never appear in legitimate
 /// agent replies.
@@ -575,6 +643,53 @@ mod tests {
         assert!(!is_cascade_leak("## Response Style\nBe brief."));
     }
 
+    // --- Post-#5053 / #5073 prompt-builder shapes (reconciliation) --------
+
+    #[test]
+    fn cascade_leak_current_builder_scaffold_only_pair_trips() {
+        // Two SCAFFOLD-ONLY headers from the current builder → 2
+        // structural-equivalent hits → leak. Pre-reconciliation this
+        // exact shape slipped through (legacy THEMATIC_HEADERS contained
+        // only the pre-#5053 strings).
+        assert!(is_cascade_leak(
+            "## Persona\nAmbrogio, butler.\n\n## Memory\n- prefers Italian\n- key=value"
+        ));
+        assert!(is_cascade_leak(
+            "## Skills\n- file_read\n- notify_owner\n\n## Workspace\n/tmp/ws"
+        ));
+        assert!(is_cascade_leak(
+            "## Identity\nAmbrogio v1\n\n## Channel\ntelegram"
+        ));
+    }
+
+    #[test]
+    fn cascade_leak_current_builder_scaffold_plus_envelope_trips() {
+        // 1 envelope prefix (structural) + 1 SCAFFOLD-ONLY (also
+        // structural-equivalent) → 2 structural hits → leak.
+        assert!(is_cascade_leak(
+            "[Group message from Alice]\n## Persona\nAmbrogio"
+        ));
+    }
+
+    #[test]
+    fn cascade_leak_current_builder_ambiguous_alone_legitimate() {
+        // `## Current Date` is the only AMBIGUOUS header in today's
+        // builder set — a legitimate "what's today?" reply may produce
+        // it. Pinned NOT a leak when standalone.
+        assert!(!is_cascade_leak(
+            "## Current Date\nFriday, 2026-05-16\n\nYour day looks clear."
+        ));
+    }
+
+    #[test]
+    fn cascade_leak_current_builder_ambiguous_plus_structural_trips() {
+        // 1 ambiguous thematic + 1 structural → leak (the canonical
+        // "1+1" branch that was dead pre-reconciliation).
+        assert!(is_cascade_leak(
+            "[Past exchange]\nYou said hello.\n\n## Current Date\n2026-05-16"
+        ));
+    }
+
     #[test]
     fn cascade_leak_envelope_prefix_counts_as_structural() {
         // Envelope prefix ([Group message from …]) is structural; pairing
@@ -746,7 +861,11 @@ mod tests {
             current_date: Some("Friday, 2026-05-16".to_string()),
             active_goals: vec![("goal".to_string(), "in_progress".to_string(), 50)],
             context_md: Some("ctx-md".to_string()),
-            dynamic_sections: Vec::new(),
+            dynamic_sections: vec![crate::hooks::DynamicSection {
+                provider: "test".to_string(),
+                heading: "Recent Activity".to_string(),
+                body: "User logged in at 09:00.".to_string(),
+            }],
         }
     }
 
@@ -834,25 +953,45 @@ mod tests {
         // Snapshot: (marker, whether it is currently emitted as a
         // `## <header>` line by `build_system_prompt`). MUST be kept in
         // lock-step with `THEMATIC_HEADERS` + `SCAFFOLD_ONLY_HEADERS`.
+        //
+        // Post-reconciliation (this PR — fix/silent-response-reconcile-thematic-headers):
+        // the legacy five (`## Sender`, `## Today`, `## Calendar`,
+        // `## Tasks`, `## Response Style`) stay tagged `false` — they are
+        // kept in THEMATIC_HEADERS as a defensive belt-and-suspenders
+        // layer for any deployment still on the pre-#5053 builder. The
+        // current-builder strings (`## Persona`, `## Memory`, …) are now
+        // tagged `true` and the detector's "1 structural + 1 thematic"
+        // branch is finally able to trip on the post-#5053 leak shape.
         const EXPECTED_EMISSION: &[(&str, bool)] = &[
-            // THEMATIC_HEADERS — all currently absent: the prompt builder
-            // does not emit `## Sender`, `## Today`, `## Calendar`,
-            // `## Tasks`, or `## Response Style` under those exact names
-            // in the post-#5053 layout. Sender identity is now folded
-            // into `## Channel`; daily summary headers don't exist;
-            // response-style guidance lives in `## Channel` and
-            // `## Operational Guidelines`. See PR thread for the
-            // reconciliation discussion.
+            // -- Current builder (post-#5053 / #5073) — all emitted by
+            // `build_system_prompt(fully_populated_prompt_context())` ---------
+            ("## Active Goals", true),
+            ("## Channel", true),
+            ("## Connected Tool Servers (MCP)", true),
+            ("## Current Date", true),
+            ("## First-Run Protocol", true),
+            ("## Heartbeat Checklist", true),
+            ("## Identity", true),
+            ("## Live Context", true),
+            ("## Long-Term Memory", true),
+            ("## Memory", true),
+            ("## Operational Guidelines", true),
+            ("## Output Channels", true),
+            ("## Peer Agents", true),
+            ("## Persona", true),
+            ("## Provider-Supplied Context", true),
+            ("## Safety", true),
+            ("## Skills", true),
+            ("## Tool Call Behavior", true),
+            ("## User Context", true),
+            ("## User Profile", true),
+            ("## Workspace", true),
+            ("## Your Tools", true),
+            // -- Legacy (pre-#5053) — defensively retained, not emitted ------
             ("## Sender", false),
             ("## Today", false),
             ("## Calendar", false),
             ("## Tasks", false),
-            ("## Response Style", false),
-            // SCAFFOLD_ONLY_HEADERS subset — same story, re-asserted
-            // explicitly so deleting an entry from `SCAFFOLD_ONLY_HEADERS`
-            // without updating this snapshot is also a compile/test
-            // mismatch flagged here.
-            ("## Sender", false),
             ("## Response Style", false),
         ];
 

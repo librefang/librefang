@@ -61,6 +61,46 @@ pub struct MediaUnderstanding {
     pub model: String,
 }
 
+/// Configuration for a self-hosted / custom-URL speech-to-text provider.
+///
+/// Points STT at any OpenAI-compatible `/v1/audio/transcriptions` endpoint —
+/// e.g. a local `faster-whisper-server`, `whisper.cpp` HTTP server, or any
+/// other Whisper-API-compatible service. No new dependencies are needed: the
+/// same multipart HTTP path used for cloud providers is reused here.
+///
+/// ## Example (`config.toml`)
+/// ```toml
+/// [media]
+/// audio_provider = "local-whisper"
+///
+/// [media.custom_stt]
+/// base_url = "http://localhost:8080/v1/audio/transcriptions"
+/// # api_key_env = "MY_LOCAL_WHISPER_KEY"  # omit for keyless servers  # pragma: allowlist secret
+/// key_required = false
+/// model = "large-v3"
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct CustomSttConfig {
+    /// Full URL of the OpenAI-compatible transcription endpoint.
+    /// E.g. `"http://localhost:8080/v1/audio/transcriptions"`.
+    pub base_url: String,
+    /// Environment variable that holds the API key for this endpoint.
+    /// When empty (default), no `Authorization` header is sent.
+    #[serde(default)]
+    pub api_key_env: String,
+    /// When `true`, the request is rejected immediately if the env var named
+    /// by `api_key_env` is not set. When `false` (default), a missing key
+    /// simply means no auth header is added — suitable for keyless local
+    /// servers.
+    #[serde(default)]
+    pub key_required: bool,
+    /// Model identifier forwarded to the endpoint. When unset the endpoint
+    /// default (typically `whisper-1` for OpenAI-compatible servers) is used.
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
 /// Configuration for media understanding.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
@@ -78,9 +118,21 @@ pub struct MediaConfig {
     /// Preferred image description model (provider default if None).
     pub image_model: Option<String>,
     /// Preferred audio transcription provider (auto-detect if None).
+    ///
+    /// Set to any string (e.g. `"local-whisper"`) to use the custom STT
+    /// endpoint defined in `[media.custom_stt]`.
     pub audio_provider: Option<String>,
     /// Preferred audio transcription model (provider default if None).
     pub audio_model: Option<String>,
+    /// Custom / self-hosted STT endpoint configuration.
+    ///
+    /// When `audio_provider` is set to a name that is not one of the
+    /// built-in providers (`groq`, `openai`, `minimax`, `fireworks`,
+    /// `together`, `siliconflow`, `gemini`, `elevenlabs`), this block is
+    /// consulted and the request is forwarded to an OpenAI-compatible
+    /// Whisper endpoint at `custom_stt.base_url`.
+    #[serde(default)]
+    pub custom_stt: CustomSttConfig,
 }
 
 impl Default for MediaConfig {
@@ -94,6 +146,7 @@ impl Default for MediaConfig {
             image_model: None,
             audio_provider: None,
             audio_model: None,
+            custom_stt: CustomSttConfig::default(),
         }
     }
 }

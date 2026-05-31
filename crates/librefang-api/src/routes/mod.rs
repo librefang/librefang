@@ -127,12 +127,20 @@ pub(crate) fn resolve_lang(lang: Option<&axum::Extension<RequestLanguage>>) -> &
 
 /// Shared application state.
 ///
-/// `kernel` is `Arc<dyn KernelApi>` (#3566) — routes interact with the
-/// kernel exclusively through the [`KernelApi`] trait surface, not via
-/// the concrete `LibreFangKernel` struct. This is the single explicit
-/// contract between the HTTP layer and the kernel; widening it is an
-/// explicit choice rather than a side-effect of adding a new inherent
-/// method on the kernel struct.
+/// `kernel` is `Arc<dyn KernelApi>` (#3566) — method calls into the kernel
+/// go through the [`KernelApi`] trait rather than the concrete
+/// `LibreFangKernel` struct, so adding a method to that struct does not
+/// silently widen what the HTTP layer can reach.
+///
+/// The boundary is narrower than "single contract", though: several
+/// `KernelApi` accessors hand back concrete runtime types by reference
+/// (e.g. `browser()`, `media()`, `processes()`, `tts()`, `web_tools()`
+/// return `&librefang_runtime::*`), and other modules in this crate import
+/// `librefang_kernel::*` module-level types directly (triggers, trajectory,
+/// errors, auth, config, agent_loop, …). So the trait governs kernel method
+/// dispatch, but the API crate still depends on runtime / kernel concrete
+/// types in places — the contract is not a hermetic seal over the whole
+/// kernel surface.
 pub struct AppState {
     pub kernel: Arc<dyn KernelApi>,
     pub started_at: Instant,

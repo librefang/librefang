@@ -79,7 +79,7 @@ pub fn artifact_to_manifest(artifact: &AgentArtifact) -> Result<AgentManifest> {
         system_prompt,
         api_key_env: None,
         base_url: None,
-        extra_params: HashMap::new(),
+        extra_params: std::collections::BTreeMap::new(),
         context_window: None,
         max_output_tokens: None,
     };

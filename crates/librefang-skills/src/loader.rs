@@ -54,7 +54,15 @@ const KERNEL_RESERVED_ENV: &[&str] = &[
 
 /// Validate that a resolved script path stays within the skill directory.
 /// Prevents path traversal attacks via `../` in entry names.
-fn validate_script_path(skill_dir: &Path, entry: &str) -> Result<std::path::PathBuf, SkillError> {
+///
+/// Public so the WASM-skill path in `librefang-runtime` can reuse the exact
+/// same containment guard — WASM execution lives in the runtime crate (it
+/// needs the sandbox), but the entry-path safety check must stay identical
+/// across every runtime kind.
+pub fn validate_script_path(
+    skill_dir: &Path,
+    entry: &str,
+) -> Result<std::path::PathBuf, SkillError> {
     let script_path = skill_dir.join(entry);
 
     // Canonicalize both paths to resolve symlinks and `..` components.
@@ -524,8 +532,14 @@ pub async fn execute_skill_tool(
             )
             .await
         }
+        // WASM skills are NOT executed here: the sandbox lives in
+        // `librefang-runtime` and its host calls need a `KernelHandle`, which
+        // this crate must not depend on (circular). The live agent path routes
+        // `Wasm` skills to `librefang_runtime::tool_runner` before reaching the
+        // loader; this arm only fires if some other caller invokes a WASM skill
+        // directly, which has no sandbox to run in.
         SkillRuntime::Wasm => Err(SkillError::RuntimeNotAvailable(
-            "WASM skill runtime not yet implemented".to_string(),
+            "WASM skills run via the runtime sandbox, not the skills loader".to_string(),
         )),
         SkillRuntime::Builtin => Err(SkillError::RuntimeNotAvailable(
             "Builtin skills are handled by the kernel directly".to_string(),

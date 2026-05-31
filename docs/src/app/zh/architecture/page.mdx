@@ -774,7 +774,7 @@ Wire 协议认证在握手双方使用 `hmac_sign(secret, nonce + node_id)`。No
 | **第三批 (6)** | Guilded、Keybase、Threema、Pumble、Flock、Twist（Nextcloud Talk、Webex 已迁移为 sidecar）|
 | **第四批 (9)** | Mumble、Gitter、Ntfy、Gotify、Webhook、Sidecar（DingTalk、QQ、WeCom（企业微信）已迁移为 sidecar）|
 
-> Sidecar 适配器允许使用任何语言编写的外部进程通过 stdin/stdout 上的 JSON-RPC 充当通道适配器。Telegram / ntfy / Gotify / Mastodon / Bluesky / Reddit / Twitch / Rocket.Chat / Nextcloud Talk / Discord / Slack / Webex / LINE / Zulip / Mattermost / Signal / QQ / Matrix / WeCom / Feishu / Email / DingTalk 作为一等公民 Python sidecar 在 `librefang-sdk` 中提供。
+> Sidecar 适配器允许使用任何语言编写的外部进程通过 stdin/stdout 上的 JSON-RPC 充当通道适配器。Telegram / ntfy / Gotify / Mastodon / Bluesky / Reddit / Twitch / Rocket.Chat / Nextcloud Talk / Discord / Slack / Webex / LINE / Zulip / Mattermost / Signal / QQ / Matrix / WeCom / Feishu / Email / DingTalk 作为一等公民 Python sidecar 在 `librefang-sdk` 中提供。Telegram 另外有一份一等公民的 Rust sidecar 在 `sdk/rust/librefang-sidecar-telegram/`，详见 [Rust Telegram sidecar 适配器](/zh/architecture/rust-telegram-sidecar)；其下的 Rust sidecar SDK（[参考](/zh/architecture/rust-sidecar-sdk)）可用于在二进制体积、启动延迟或 Rust 传输生态比 Python 的低门槛更重要时用 Rust 写适配器。
 
 ### 通道功能
 
