@@ -416,25 +416,15 @@ jobs:
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # Same-repo PRs need write to push the auto-codegen commit back to the
-    # PR branch. Fork PRs run with read-only GITHUB_TOKEN regardless of
-    # what we declare here — they fall through to the fail-with-instructions
-    # path below.
-    permissions:
-      contents: write
+    # Read-only: this job verifies the committed generated artifacts match
+    # what the source produces. It no longer pushes regenerated files back to
+    # the PR branch (the old internal-PR auto-commit used [skip ci], which
+    # leaves the head with no CI run and deadlocks required-status-checks), so
+    # it inherits the workflow-level `contents: read` and needs no write scope.
+    # Drift is the author's to regenerate + commit — identically for internal
+    # and fork PRs.
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          # Internal PRs only: check out the PR head branch (not the merge
-          # commit) so the auto-codegen step below can `git push` back. Fork
-          # PRs and push events leave `ref` empty so `actions/checkout` falls
-          # back to its default ref — that path never reaches the push branch
-          # and would otherwise fail at fetch (the fork's branch does not
-          # exist in this repo's `origin`).
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref || '' }}
-          # `persist-credentials: true` is the default; we re-state it for
-          # readability. Required for the auto-commit step below.
-          persist-credentials: true
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
@@ -461,38 +451,19 @@ jobs:
       # PRs no longer need a manual `cargo xtask schema-check gen` round.
       - name: Regenerate schema baselines
         run: cargo xtask schema-check gen
-      - name: Verify no drift (auto-commit on internal PRs)
-        env:
-          # Same-repo PR: GITHUB_TOKEN has write scope -> we can push the
-          # regenerated artifacts back to the PR branch.
-          # Fork PR or push event: GITHUB_TOKEN is read-only -> fall back
-          # to the original "fail with reproduce instructions" behaviour.
-          IS_INTERNAL_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
+      - name: Verify no drift
         run: |
           if git diff --quiet -- openapi.json sdk/ xtask/baselines/; then
             echo "openapi.json, SDKs, and schema baselines are in sync."
             exit 0
           fi
-          if [ "$IS_INTERNAL_PR" = "true" ]; then
-            git config user.name  "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add openapi.json sdk/ xtask/baselines/
-            git commit -m "chore(codegen): auto-regenerate openapi.json + sdk + schema baselines [skip ci]"
-            git push
-            echo "::notice::Auto-committed regenerated openapi.json + sdk/ + xtask/baselines/ to the PR branch."
-            echo "::notice::The [skip ci] marker prevents an immediate re-run; if you want full CI"
-            echo "::notice::on the post-codegen tip, push an empty commit or close+reopen the PR."
-            exit 0
-          fi
-          # Fork PR or push to main — fail loudly.
           echo "::error::openapi.json, generated SDKs, or schema baselines are out of sync with the source code."
-          echo "Reproduce locally:"
+          echo "Regenerate locally and commit the result:"
           echo "  cargo xtask codegen --openapi"
           echo "  python3 scripts/codegen-sdks.py"
           echo "  cargo xtask schema-check gen"
-          echo "Then commit the regenerated openapi.json, sdk/*, and xtask/baselines/* files."
-          echo "(Fork PRs cannot use the auto-commit path because GITHUB_TOKEN"
-          echo "is read-only on cross-repository pull requests.)"
+          echo "Then commit the updated openapi.json, sdk/*, and xtask/baselines/* files."
+          git --no-pager diff --stat -- openapi.json sdk/ xtask/baselines/
           exit 1
       # Sanity verify that `schema-check gen` produced baselines that
       # match the on-disk schema artifacts — catches a bug in `gen`
