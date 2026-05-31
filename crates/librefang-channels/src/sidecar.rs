@@ -656,6 +656,70 @@ fn build_spawn_env(home_dir: &Path, ctx_env: &HashMap<String, String>) -> Vec<(S
     merged.into_iter().collect()
 }
 
+/// Bare program name of the bundled Rust Telegram sidecar binary, without
+/// any platform extension.
+const TELEGRAM_SIDECAR_STEM: &str = "librefang-sidecar-telegram";
+
+/// Platform-correct file name of the bundled Telegram sidecar binary
+/// (`.exe` suffix on Windows).
+fn telegram_sidecar_file_name() -> &'static str {
+    if cfg!(windows) {
+        "librefang-sidecar-telegram.exe"
+    } else {
+        "librefang-sidecar-telegram"
+    }
+}
+
+/// Resolve a sidecar channel's configured `command` to the bundled Rust
+/// Telegram sidecar binary when the operator left it implicit.
+///
+/// The binary ships inside the release tarballs (#5936) and lands in
+/// `~/.librefang/bin/` via `librefang update`, so the common case is a bare
+/// program name that the daemon can locate without a PATH entry. Resolution
+/// only kicks in when `command` is empty or the bare stem
+/// `librefang-sidecar-telegram` — an absolute / relative path, or any other
+/// program (`python3`, `uv`, …), is returned unchanged so explicit operator
+/// intent always wins.
+///
+/// Search order, first hit wins:
+///   1. the daemon's own executable directory (binaries shipped side by side
+///      in the same tarball land here);
+///   2. `<home_dir>/bin/` (the `librefang update` install location);
+///   3. the original command, leaving PATH lookup to `Command::new` (the
+///      historical behaviour).
+fn resolve_sidecar_command(command: &str, home_dir: &Path) -> String {
+    let trimmed = command.trim();
+
+    // Only the implicit forms are eligible: empty, or the bare stem with no
+    // path component. Anything path-shaped or any other program is explicit.
+    let is_bare_stem = trimmed == TELEGRAM_SIDECAR_STEM;
+    let is_implicit = trimmed.is_empty() || is_bare_stem;
+    if !is_implicit {
+        return command.to_string();
+    }
+
+    let file_name = telegram_sidecar_file_name();
+
+    let exe_dir_candidate = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join(file_name)));
+    if let Some(path) = exe_dir_candidate {
+        if path.is_file() {
+            return path.to_string_lossy().into_owned();
+        }
+    }
+
+    let home_candidate = home_dir.join("bin").join(file_name);
+    if home_candidate.is_file() {
+        return home_candidate.to_string_lossy().into_owned();
+    }
+
+    // No bundled binary found — fall back to the original command so PATH
+    // lookup still works for an operator who placed it there manually. An
+    // empty command stays empty and surfaces the existing spawn error.
+    command.to_string()
+}
+
 /// Cheap, dependency-free jitter: 0..=20% of `base`, seeded off the
 /// wall clock. Backoff jitter does not need a CSPRNG.
 fn backoff_with_jitter(attempt: u32, initial_ms: u64, max_ms: u64) -> std::time::Duration {
@@ -1334,9 +1398,14 @@ impl SidecarAdapter {
             .unwrap_or_else(|| ChannelType::Custom(config.name.clone()));
         let (typing_tx, typing_rx) = mpsc::channel::<TypingEvent>(64);
 
+        // Resolve an implicit `librefang-sidecar-telegram` command to the
+        // binary bundled in the release tarball (#5936) before it reaches
+        // the spawn path; explicit paths and other programs pass through.
+        let command = resolve_sidecar_command(&config.command, &home_dir);
+
         Self {
             name: config.name.clone(),
-            command: config.command.clone(),
+            command,
             args: config.args.clone(),
             env: config.env.clone(),
             home_dir,
@@ -1878,6 +1947,62 @@ fn derive_sidecar_sender_identity(
 mod tests {
     use super::*;
     use crate::types::{InteractiveButton, MediaGroupItem};
+
+    #[test]
+    fn resolve_sidecar_command_prefers_home_bin_when_bundled_binary_present() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let bin_dir = home.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("mkdir bin");
+        let bundled = bin_dir.join(telegram_sidecar_file_name());
+        std::fs::write(&bundled, b"#!/bin/sh\n").expect("write bundled binary");
+
+        // The bare stem resolves to the bundled binary under <home>/bin.
+        let resolved = resolve_sidecar_command(TELEGRAM_SIDECAR_STEM, home.path());
+        assert_eq!(resolved, bundled.to_string_lossy());
+
+        // An empty command resolves the same way.
+        let resolved_empty = resolve_sidecar_command("", home.path());
+        assert_eq!(resolved_empty, bundled.to_string_lossy());
+    }
+
+    #[test]
+    fn resolve_sidecar_command_falls_through_when_no_bundled_binary() {
+        // No bin dir created → the home-dir candidate does not exist.
+        // current_exe() (the test runner) won't sit next to a
+        // librefang-sidecar-telegram binary either, so the bare stem must
+        // pass through unchanged for the historical PATH-lookup behaviour.
+        let home = tempfile::tempdir().expect("tempdir");
+        let resolved = resolve_sidecar_command(TELEGRAM_SIDECAR_STEM, home.path());
+        assert_eq!(resolved, TELEGRAM_SIDECAR_STEM);
+
+        // Empty stays empty (surfaces the existing spawn error later).
+        assert_eq!(resolve_sidecar_command("", home.path()), "");
+    }
+
+    #[test]
+    fn resolve_sidecar_command_leaves_explicit_commands_untouched() {
+        // Even with a bundled binary on disk, an absolute path, a
+        // relative path, or any other program is explicit operator intent
+        // and must pass through verbatim.
+        let home = tempfile::tempdir().expect("tempdir");
+        let bin_dir = home.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("mkdir bin");
+        std::fs::write(bin_dir.join(telegram_sidecar_file_name()), b"x").expect("write");
+
+        for explicit in [
+            "python3",
+            "uv",
+            "/usr/local/bin/librefang-sidecar-telegram",
+            "./librefang-sidecar-telegram",
+            "../bin/librefang-sidecar-telegram",
+        ] {
+            assert_eq!(
+                resolve_sidecar_command(explicit, home.path()),
+                explicit,
+                "explicit command must pass through: {explicit}"
+            );
+        }
+    }
 
     #[test]
     fn looks_like_librefang_sdk_missing_matches_canonical_traceback_lines() {
