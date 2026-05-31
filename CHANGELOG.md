@@ -5,6 +5,43 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.5.31] - 2026-05-31
+
+_15 PRs from 2 contributors since v2026.5.30-beta.15._
+
+### Added
+
+- Inline skill assignment on the agent Skills tab (#4917) (#5930) (@houko)
+- Port command-policy and message coalescing to sidecar channels (#5931) (@houko)
+- Propose evolved skill as PR to registry (#5932) (@houko)
+- Ship librefang-sidecar-telegram binary in release tarballs (#5937) (@houko)
+
+### Fixed
+
+- Tool_runner knowledge — confidence clamp, input validation, result limits, property bounds (#5767) (@leszek3737)
+- Tool_runner image — extension whitelist, 50MB limit, BMP i32, JPEG markers, PNG sig (#5768) (@leszek3737)
+- Enable agent model Save on any field change (#5917) (#5925) (@houko)
+- Empty mcp_servers = [] grants no MCP tools, not all (#5855) (#5928) (@houko)
+- Move getpgrp to the x86_64-only seccomp block to unbreak aarch64 (#5929) (@houko)
+- Patch rand (0.8.6/0.9.3) and link-preview-js (4.0.1) security advisories (#5934) (@houko)
+- Migrate ssh-backend to russh 0.61.1 (clears 5 RustSec advisories) (#5935) (@houko)
+
+### Changed
+
+- Migrate read_artifact to ToolError (error-contracts slice 2) (#5926) (@houko)
+
+<details>
+<summary>Documentation, maintenance, and other internal changes</summary>
+
+### Maintenance
+
+- Regression test for #5857 Windows provider-key path validation (#5927) (@houko)
+- Skip deleted (410 Gone) issues in auto-close reconciler (#5933) (@houko)
+- Rustfmt knowledge.rs to unbreak main Quality (post #5767) (#5938) (@houko)
+
+</details>
+
+
 ## [2026.5.30] - 2026-05-30
 
 _68 PRs from 5 contributors since v2026.5.28-beta.14._
