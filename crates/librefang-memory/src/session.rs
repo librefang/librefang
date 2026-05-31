@@ -373,18 +373,17 @@ impl SessionStore {
     /// This cap exists to bound worst-case DB blob size and cold-reload RAM
     /// (introduced in #2929 to keep the 256 MB fly.io deployment from OOMing
     /// when a long-running session is loaded back in). It is intentionally
-    /// set well above the runtime trim cap so it is normally inert.
+    /// set well above the runtime trim hard ceiling so it is normally inert.
     ///
-    /// The runtime trim cap (`agent_loop::DEFAULT_MAX_HISTORY_MESSAGES`,
+    /// The runtime trim cap (`agent_loop::history::DEFAULT_MAX_HISTORY_MESSAGES`,
     /// configurable per-agent via `AgentManifest.max_history_messages` and
-    /// globally via `KernelConfig.max_history_messages`) is what actually
-    /// shapes persisted history under normal operation. Pre-#5121 this cap
-    /// was 200, low enough that a deliberately configured
-    /// `max_history_messages > 200` would silently lose context across
-    /// daemon restarts — `clamp_max_history` only enforces a floor, not a
-    /// ceiling. 2000 leaves room for unusually long cron-driven sessions
-    /// while still bounding the worst case at ~2 MB per blob assuming a
-    /// ~1 KB average message.
+    /// globally via `KernelConfig.max_history_messages`, then clamped to the
+    /// `agent_loop::history::MAX_HISTORY_MESSAGES` ceiling) is what actually
+    /// shapes persisted history under normal operation. Pre-#5121 this
+    /// persistence cap was 200, low enough that a deliberately configured
+    /// `max_history_messages > 200` would silently lose context across daemon
+    /// restarts. 2000 stays well above the runtime ceiling while still bounding
+    /// the worst case at ~2 MB per blob assuming a ~1 KB average message.
     ///
     /// When truncation does fire, `save_session` emits a `warn!` log with
     /// `agent_id`, `session_id`, `requested_count`, and `cap` so operators

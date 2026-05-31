@@ -28,7 +28,7 @@
     "flexsearch": "^0.8.205",
     "focus-visible": "^5.2.1",
     "hast-util-from-html": "^2.0.3",
-    "lucide-react": "^1.16.0",
+    "lucide-react": "^1.17.0",
     "marked": "18.0.4",
     "mdast-util-to-string": "^4.0.0",
     "mdx-annotations": "^0.1.4",
@@ -46,7 +46,7 @@
     "tailwind-merge": "^3.6.0",
     "unist-util-filter": "^5.0.1",
     "unist-util-visit": "^5.0.0",
-    "zustand": "5.0.13"
+    "zustand": "5.0.14"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.0",

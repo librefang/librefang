@@ -255,35 +255,40 @@ pub(super) fn select_running_experiment(
     let mut running_experiment: Option<librefang_types::agent::PromptExperiment> = None;
     if let Some(kernel) = kernel {
         let agent_id = session.agent_id.to_string();
-        if let Ok(Some(exp)) = kernel.get_running_experiment(&agent_id) {
-            running_experiment = Some(exp.clone());
-            if !exp.variants.is_empty() {
-                let hash_val = (session.id.0.as_u128() % 100) as u8;
-                let mut cumulative = 0u8;
-                let mut variant_index = 0;
-                for (i, &weight) in exp.traffic_split.iter().enumerate() {
-                    cumulative = cumulative.saturating_add(weight);
-                    if hash_val < cumulative {
-                        variant_index = i;
-                        break;
+        match kernel.get_running_experiment(&agent_id) {
+            Ok(Some(exp)) => {
+                running_experiment = Some(exp.clone());
+                if !exp.variants.is_empty() {
+                    let hash_val = (session.id.0.as_u128() % 100) as u8;
+                    let mut cumulative = 0u8;
+                    let mut variant_index = 0;
+                    for (i, &weight) in exp.traffic_split.iter().enumerate() {
+                        cumulative = cumulative.saturating_add(weight);
+                        if hash_val < cumulative {
+                            variant_index = i;
+                            break;
+                        }
                     }
+                    variant_index = variant_index.min(exp.variants.len() - 1);
+                    let variant = &exp.variants[variant_index];
+                    info!(
+                        agent = %manifest.name,
+                        experiment = %exp.name,
+                        variant = %variant.name,
+                        index = variant_index,
+                        "A/B experiment active - using variant{}",
+                        if streaming { " (streaming)" } else { "" }
+                    );
+                    experiment_context = Some(ExperimentContext::new(
+                        exp.id,
+                        variant.id,
+                        variant.name.clone(),
+                    ));
                 }
-                variant_index = variant_index.min(exp.variants.len() - 1);
-                let variant = &exp.variants[variant_index];
-                info!(
-                    agent = %manifest.name,
-                    experiment = %exp.name,
-                    variant = %variant.name,
-                    index = variant_index,
-                    "A/B experiment active - using variant{}",
-                    if streaming { " (streaming)" } else { "" }
-                );
-                experiment_context = Some(ExperimentContext {
-                    experiment_id: exp.id,
-                    variant_id: variant.id,
-                    variant_name: variant.name.clone(),
-                    request_start: std::time::Instant::now(),
-                });
+            }
+            Ok(None) => {}
+            Err(e) => {
+                warn!(error = %e, "get_running_experiment failed");
             }
         }
     }
@@ -602,7 +607,9 @@ pub(super) fn build_prompt_setup(ctx: PromptSetupContext<'_>) -> PromptSetup {
     let mut system_prompt = ctx.manifest.model.system_prompt.clone();
 
     if let Some(kernel) = ctx.kernel {
-        let _ = kernel.auto_track_prompt_version(ctx.session.agent_id, &system_prompt);
+        if let Err(e) = kernel.auto_track_prompt_version(ctx.session.agent_id, &system_prompt) {
+            warn!(error = %e, "auto_track_prompt_version failed");
+        }
     }
 
     if let Some(experiment_context) = ctx.experiment_context {

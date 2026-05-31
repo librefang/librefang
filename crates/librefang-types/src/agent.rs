@@ -857,8 +857,12 @@ pub struct ModelConfig {
     /// API request body via `#[serde(flatten)]`. If a key conflicts with a
     /// standard field (e.g. `temperature`), the `extra_params` value takes
     /// precedence because it is serialized last.
+    ///
+    /// `BTreeMap` (not `HashMap`) so the flattened key order is deterministic
+    /// across processes — this map reaches the LLM wire request, and unstable
+    /// key order silently invalidates provider prompt caches (#3298).
     #[serde(default, flatten)]
-    pub extra_params: std::collections::HashMap<String, serde_json::Value>,
+    pub extra_params: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 impl Default for ModelConfig {
@@ -873,7 +877,7 @@ impl Default for ModelConfig {
             base_url: None,
             context_window: None,
             max_output_tokens: None,
-            extra_params: std::collections::HashMap::new(),
+            extra_params: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -889,9 +893,10 @@ pub struct FallbackModel {
     #[serde(default)]
     pub base_url: Option<String>,
     /// Provider-specific extension parameters that are flattened directly
-    /// into the API request body.
+    /// into the API request body. `BTreeMap` keeps the flattened key order
+    /// deterministic for prompt-cache stability (#3298).
     #[serde(default, flatten)]
-    pub extra_params: std::collections::HashMap<String, serde_json::Value>,
+    pub extra_params: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 /// Tool configuration within an agent manifest.
@@ -1086,11 +1091,28 @@ pub struct AgentManifest {
     /// Explicitly disable all skills, overriding the empty-list = all-skills default.
     #[serde(default)]
     pub skills_disabled: bool,
-    /// MCP server allowlist (empty = all connected MCP servers available).
+    /// MCP server allowlist.
+    ///
+    /// - `[]` (empty / unset) → **no** MCP servers. The agent sees zero MCP
+    ///   tools and the MCP server summary is omitted from its prompt. This is
+    ///   a real allowlist, not a wildcard — an unconfigured agent must not
+    ///   silently inherit every globally-connected server's tools (#5855).
+    /// - `["*"]` → all connected MCP servers (explicit opt-in).
+    /// - `["a", "b"]` → only servers `a` and `b`.
+    ///
+    /// Use [`Self::mcp_disabled`] to additionally guarantee no MCP tools even
+    /// if `["*"]` or a non-empty list is set.
     #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
     pub mcp_servers: Vec<String>,
+    /// Channel allowlist — restricts which configured channels this agent can
+    /// receive messages from. Uses the `channel_type` string (e.g. `"telegram"`,
+    /// `"discord"`, `"slack"`). Empty = all channels (backward-compatible default).
+    #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
+    pub channels: Vec<String>,
     /// Explicitly disable all MCP server tools for this agent. Mirrors
-    /// `skills_disabled` — `mcp_servers = []` means "all", this means "none".
+    /// `skills_disabled`. Since #5855, `mcp_servers = []` already means "no
+    /// servers", so this flag is the belt-and-braces guarantee: it forces zero
+    /// MCP tools even when `mcp_servers = ["*"]` or a non-empty allowlist is set.
     ///
     /// **Scope**: this flag hides MCP tools and the MCP server summary from
     /// *this agent's* LLM prompt only. MCP servers defined in `KernelConfig`
@@ -1230,9 +1252,10 @@ pub struct AgentManifest {
     pub channel_overrides: Option<crate::config::ChannelOverrides>,
     /// Per-agent override for the message-history trim cap. When set,
     /// takes precedence over `KernelConfig.max_history_messages` and the
-    /// compiled-in default (`agent_loop::DEFAULT_MAX_HISTORY_MESSAGES`).
-    /// `None` means inherit from kernel config / default. Values below 4
-    /// are silently clamped at runtime with a warning log.
+    /// compiled-in default (`agent_loop::history::DEFAULT_MAX_HISTORY_MESSAGES`).
+    /// `None` means inherit from kernel config / default. Runtime clamps values
+    /// below 4 up to the safe-trim floor and values above 500 down to the hard
+    /// ceiling, emitting a `warn!` log with `agent`, `requested`, and `applied`.
     #[serde(default)]
     pub max_history_messages: Option<usize>,
     /// Trigger-dispatch-only: cap on concurrent invocations from the
@@ -1512,6 +1535,7 @@ impl Default for AgentManifest {
             skills: Vec::new(),
             skills_disabled: false,
             mcp_servers: Vec::new(),
+            channels: Vec::new(),
             mcp_disabled: false,
             metadata: HashMap::new(),
             tags: Vec::new(),
@@ -2420,7 +2444,7 @@ mod tests {
             model: "llama-3.3-70b".to_string(),
             api_key_env: Some("GROQ_API_KEY".to_string()),
             base_url: None,
-            extra_params: std::collections::HashMap::new(),
+            extra_params: std::collections::BTreeMap::new(),
         };
         let json = serde_json::to_string(&fb).unwrap();
         let back: FallbackModel = serde_json::from_str(&json).unwrap();
@@ -2438,7 +2462,7 @@ mod tests {
                 model: "llama-3.3-70b".to_string(),
                 api_key_env: None,
                 base_url: None,
-                extra_params: std::collections::HashMap::new(),
+                extra_params: std::collections::BTreeMap::new(),
             }]),
             ..Default::default()
         };
@@ -2913,7 +2937,7 @@ model = "llama-3.3-70b-versatile"
 
     #[test]
     fn test_model_config_extra_params_roundtrip() {
-        let mut extra = std::collections::HashMap::new();
+        let mut extra = std::collections::BTreeMap::new();
         extra.insert("enable_memory".to_string(), serde_json::json!(true));
         extra.insert("memory_max_window".to_string(), serde_json::json!(50));
 

@@ -85,6 +85,8 @@ use crate::types;
         routes::set_agent_skills,
         routes::get_agent_mcp_servers,
         routes::set_agent_mcp_servers,
+        routes::get_agent_channels,
+        routes::set_agent_channels,
         routes::update_agent_identity,
         routes::patch_agent_config,
         routes::patch_hand_agent_runtime_config,
@@ -127,6 +129,8 @@ use crate::types;
         routes::evolve_patch_skill,
         routes::evolve_delete_skill,
         routes::evolve_rollback_skill,
+        // Propose an evolved skill back to the public registry as a PR (#5842)
+        routes::propose_skill_to_registry,
         // Skill workshop pending review (#3328)
         routes::list_pending_candidates,
         routes::show_pending_candidate,
@@ -277,6 +281,8 @@ use crate::types;
         // ── Budget / Usage ──
         routes::budget_status,
         routes::update_budget,
+        routes::provider_budget_list,
+        routes::update_provider_budget,
         routes::agent_budget_status,
         routes::agent_budget_ranking,
         routes::update_agent_budget,

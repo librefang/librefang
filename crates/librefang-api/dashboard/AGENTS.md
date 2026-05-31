@@ -116,12 +116,24 @@ Streaming / SSE, imperative fire-and-forget control channels (e.g. `src/componen
 ## Build & verify
 
 ```bash
+pnpm lint                     # eslint — must be green (errors fail; warnings allowed)
 pnpm typecheck                # tsc --noEmit — must be green
 pnpm test --run               # vitest — all tests pass
 pnpm build                    # vite build — must succeed
 ```
 
-Run all three after any change to `src/lib/queries/`, `src/lib/mutations/`, or `src/api.ts`. A passing typecheck alone is not enough — the key-factory tests catch anchoring regressions that the compiler does not.
+Run all four after any change to `src/lib/queries/`, `src/lib/mutations/`, or `src/api.ts`. A passing typecheck alone is not enough — the key-factory tests catch anchoring regressions that the compiler does not.
+
+### Lint policy (refs #5561)
+
+`eslint.config.js` uses ESLint 9 flat config. The load-bearing rules
+are `react/jsx-no-target-blank` and `react/no-danger-with-children` —
+both `error`. Noisy or pre-existing baseline violations
+(`react-hooks/rules-of-hooks`, `no-unused-expressions`,
+`no-irregular-whitespace`, `no-control-regex`) are demoted to `warn`
+for the initial bootstrap; clean them up incrementally rather than
+adding `eslint-disable` comments. When adding a new rule, prefer
+flipping it to `error` only after the existing violations are zero.
 
 ## Conventions
 

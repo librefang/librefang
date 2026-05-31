@@ -42,6 +42,12 @@ async fn test_kernel_boot_with_retention_config_starts_trim_task() {
     // Seed 50 audit entries — well over the cap of 10. Use RoleChange
     // so no per-action retention rule could kick in (we want the cap
     // path to be the sole reason rows are dropped).
+    //
+    // Since #5683, `record()` enforces a synchronous soft cap at
+    // `1.5 × max_in_memory_entries` (= 15 here), so the in-memory
+    // buffer never grows past ~15 entries during the seed loop. That
+    // still leaves the buffer above the hard cap (10), which is all
+    // the periodic trim task needs to have work to do.
     let audit = kernel.audit_log().clone();
     for i in 0..50 {
         audit.record(
@@ -51,7 +57,11 @@ async fn test_kernel_boot_with_retention_config_starts_trim_task() {
             "ok",
         );
     }
-    assert!(audit.len() >= 50);
+    assert!(
+        audit.len() > 10,
+        "seed should leave the buffer above the hard cap so the periodic trim has rows to drop, got len={}",
+        audit.len()
+    );
 
     // Boot the periodic tasks.
     kernel.start_background_agents().await;

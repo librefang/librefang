@@ -5,24 +5,657 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
-## [Unreleased]
+## [2026.5.31] - 2026-05-31
+
+_16 PRs from 2 contributors since v2026.5.30-beta.15._
+
+### Added
+
+- Inline skill assignment on the agent Skills tab (#4917) (#5930) (@houko)
+- Port command-policy and message coalescing to sidecar channels (#5931) (@houko)
+- Propose evolved skill as PR to registry (#5932) (@houko)
+- Ship librefang-sidecar-telegram binary in release tarballs (#5937) (@houko)
+
+### Fixed
+
+- Tool_runner shell — timeout clamp, streaming output, process group kill, Windows compat (#5763) (@leszek3737)
+- Tool_runner knowledge — confidence clamp, input validation, result limits, property bounds (#5767) (@leszek3737)
+- Tool_runner image — extension whitelist, 50MB limit, BMP i32, JPEG markers, PNG sig (#5768) (@leszek3737)
+- Enable agent model Save on any field change (#5917) (#5925) (@houko)
+- Empty mcp_servers = [] grants no MCP tools, not all (#5855) (#5928) (@houko)
+- Move getpgrp to the x86_64-only seccomp block to unbreak aarch64 (#5929) (@houko)
+- Patch rand (0.8.6/0.9.3) and link-preview-js (4.0.1) security advisories (#5934) (@houko)
+- Migrate ssh-backend to russh 0.61.1 (clears 5 RustSec advisories) (#5935) (@houko)
 
 ### Changed
 
+- Migrate read_artifact to ToolError (error-contracts slice 2) (#5926) (@houko)
+
+<details>
+<summary>Documentation, maintenance, and other internal changes</summary>
+
+### Maintenance
+
+- Regression test for #5857 Windows provider-key path validation (#5927) (@houko)
+- Skip deleted (410 Gone) issues in auto-close reconciler (#5933) (@houko)
+- Rustfmt knowledge.rs to unbreak main Quality (post #5767) (#5938) (@houko)
+
+</details>
+
+
+## [2026.5.30] - 2026-05-30
+
+_68 PRs from 5 contributors since v2026.5.28-beta.14._
+
+### Added
+
+- Add source attribution to GET /api/tools response (#5679) (@DaBlitzStein)
+- Tools tab in agent detail with grouped view (closes #5677) (#5680) (@DaBlitzStein)
+- Expose auto_evolve toggle in Skills tab (#5741) (@DaBlitzStein)
+- Kanban task board page (#5745) (#5805) (@houko)
+- Support custom-URL self-hosted STT/TTS providers (fixes #5740) (#5814) (@houko)
+- Rust Telegram sidecar adapter (parity with Python) (#5831) (@houko)
+- Just dev --docker + TELEGRAM_LOG tracing (#5833) (@houko)
+- Run WASM skill runtime via the runtime WasmSandbox (#5835) (@houko)
+- Autonomous long-horizon goal runner (#5840) (@houko)
+- Out-of-process `engine = "sidecar"` (#5849) (@houko)
+- Scan tool-result content for indirect prompt injection (#5859) (@houko)
+
+### Fixed
+
+- Strip ANTHROPIC_API_KEY when OAuth credentials present (#5292) (@f-liva)
+- Reconcile cascade-leak THEMATIC_HEADERS with post-#5053 prompt builder (#5351) (@f-liva)
+- Tool_runner sandbox — RAII cleanup, TOCTOU removed, container_id redacted (#5757) (@leszek3737)
+- Tool_runner workflow — artifact type check, deterministic sort, recursion limit (#5758) (@leszek3737)
+- Tool_runner schedule — AM/PM parsing, minute precision, owner verification, cron validation (#5759) (@leszek3737)
+- Tool_runner system — URL const, client reuse, error diagnostics (#5760) (@leszek3737)
+- Tool_runner media — size limits, async fs, UUID filenames, ffmpeg deadlock, extension allowlist (#5761) (@leszek3737)
+- Tool_runner web_legacy — SSRF protection, streaming body limit, unified UA, status check (#5764) (@leszek3737)
+- Tool_runner canvas — XSS escape, whitelist parser, data: URI block, size limit (#5766) (@leszek3737)
+- Tool_runner memory — truncation, pagination, key validation (#5770) (@leszek3737)
+- Tool_runner agent — taint all inputs, narrow capabilities, deny None, network strict (#5775) (@leszek3737)
+- Tool_runner process — output cap, strict caller_id, arg logging, serde_json (#5778) (@leszek3737)
+- Tool_runner fs — backslash rejection, canonicalize, TOCTOU fix, read limit, dir pagination, atomic write (#5783) (@leszek3737)
+- Route auto_evolve creates through skill_workshop pending queue (#5800) (@DaBlitzStein)
+- Reset taint editor state when server prop changes (#5803) (@houko)
+- Use catalog api_key_env for custom provider key resolution (#5807) (@houko)
+- Regenerate stale openapi schema baseline to repair main red (#5834) (@houko)
+- Make DAG-path step timeout error actionable (#5836) (@houko)
+- Finish Option::zip migration in kernel tests (clippy 1.96.0) (#5837) (@houko)
+- Keep custom providers across restarts, tolerate unknown tier (#5838) (@houko)
+- Audit sweep — 5 CRITICAL + 7 HIGH (split-brain, RBAC, decay, dedup, prompt budget, async consolidate) (#5839) (@houko)
+- Apply search filter to FangHub skills grid (#5843) (@DaBlitzStein)
+- Use Option::zip for hand timestamp pairing (clippy) (#5845) (@houko)
+- Close goal-run self-cleanup race + termination test coverage (follow-up #5840) (#5848) (@houko)
+- MEDIUM follow-ups — counter map sweep, hot-reload on PATCH, multi-keyword search, configurable UPDATE thresholds (#5850) (@houko)
+- Make extra_params / extra_body BTreeMap for deterministic wire-body key order (#5860) (@houko)
+- Close trusted_senders all-or-nothing approval bypass for high-risk tools (#5861) (@houko)
+- Make subprocess plugin sandbox secure-by-default (#2) (#5862) (@houko)
+- Scrub internal errors from 5xx responses to prevent detail leakage (#5863) (@houko)
+- Validate hand id as a safe path component to block traversal (#5865) (@houko)
+- Apply config hot-reload for read-live fields, not only hot actions (#5867) (@houko)
+- Reserve the global USD budget on the streaming dispatch path (#5869) (@houko)
+- Bound consolidation candidate load with a per-agent LIMIT (#5871) (@houko)
+- Stop logging API key, account cache tokens, keep stream tool ids (#5875) (@houko)
+- Cover all per-agent override keys with a drift-guarded detector (#6) (#5876) (@houko)
+- Guard agent_msg_locks GC with Arc::strong_count (symmetry with session_msg_locks) (#5877) (@houko)
+- Account prompt-cache tokens in usage normalization (#5879) (@houko)
+- Handle no-arg tool calls and UTF-8-safe thinking summary (#5882) (@houko)
+- Route attachment download through the redirect-revalidating client (#5884) (@houko)
+- Pin every redirect hop in web_fetch to close DNS-rebinding window (#5886) (@houko)
+- Clean up per-flow OAuth vault entries on all callback exits (#5895) (@houko)
+- Scan prompt context for injection at the load/reload boundary (#5897) (@houko)
+- Retry transport-layer errors and make retry count configurable (#10) (#5898) (@houko)
+- Detect re-entrant keyed agent_send to prevent session-lock deadlock (#5900) (@houko)
+- Delimit all fields in the Merkle entry hash to close ambiguity (#5903) (@houko)
+- Enforce RBAC on session auth path; offload workflow template write (#5906) (@houko)
+- Low-severity correctness — workshop cap race, token saturating, ephemeral comment (#5910) (@houko)
+- Keep anthropic stream block alignment; report effective claude_code timeout (#5913) (@houko)
+- Gate media link URLs through safeUrl; share urlTransform with streaming view (#5916) (@houko)
+- Allowlist glibc-startup syscalls for exec'd plugin binaries (fixes native_runtime_timeout CI failure) (#5920) (@houko)
+
+### Changed
+
+- Unify the three sidecar bridges onto a shared transport crate (#5852) (@houko)
+
+### Performance
+
+- Offload blocking filesystem/zip IO off the tokio runtime (#5892) (@houko)
+
+<details>
+<summary>Documentation, maintenance, and other internal changes</summary>
+
+### Documentation
+
+- Fix three agent-facing architecture drift points (#5901) (@houko)
+
+### Maintenance
+
+- Bump the docs-minor-patch group in /docs with 2 updates (#5847) (@app/dependabot)
+- Cargo fmt recently-merged code (repair main Quality fmt) (#5853) (@houko)
+- Fix Windows-only red in shell capability test (path-not-found wording) (#5854) (@houko)
+- Raise Test / Windows shard timeout 45 → 60 min to match macOS (#5856) (@houko)
+
+</details>
+
+## [2026.5.28] - 2026-05-28
+
+_46 PRs from 5 contributors since v2026.5.25-beta.13._
+
+### Breaking Changes
+
+- Rust sidecar adapter SDK + AI-codegen-era rationale rewrite (#5821) (@houko)
+
+### Added
+
+- Per-agent channel allowlist (#5738) (@DaBlitzStein)
+- Implement describe_image() and wire ImageFile description through channel adapters (#5815) (@houko)
+- Rust sidecar adapter SDK + AI-codegen-era rationale rewrite (#5821) (@houko)
+
+### Fixed
+
+- Isolate attachment pre-inject per chat session — close cross-chat image leak (#5334) (@f-liva)
+- Make migrate path containment existence-independent (fixes #5716) (#5719) (@houko)
+- Repair discussion-to-issue backfill — gh api --jq doesn't take --arg (#5754) (@houko)
+- Tool_runner taint — unified SECRET_KEYS, substring match, header trim, single-pass normalization (#5762) (@leszek3737)
+- Tool_runner shell_safety — command injection hardening, quote-aware tokenizer (#5765) (@leszek3737)
+- Tool_runner definitions — ALWAYS_NATIVE complete, OnceLock caches, schema fixes, tool_name constants (#5771) (@leszek3737)
+- Tool_runner error — Upstream message preserved, MissingParameter String, ResourceNotFound 404 (#5772) (@leszek3737)
+- Tool_runner cron — sender_id override, TOCTOU reduction, HashSet lookup, empty job_id rejected (#5773) (@leszek3737)
+- Tool_runner dispatch — mutex split, fallback ACL, ACP args, spill wiring, snapshot ordering (#5774) (@leszek3737)
+- Tool_runner spill — config-based threshold, validation, fast-path (#5776) (@leszek3737)
+- Tool_runner wiki — limit cap, input validation, safe usize, caller_agent_id required (#5777) (@leszek3737)
+- Tool_runner meta — case-insensitive lookup, Cow optimization, deterministic sort (#5779) (@leszek3737)
+- Tool_runner task — typed deserialization, contextual errors, empty validation, status default (#5780) (@leszek3737)
+- Tool_runner notify — length limit, control char sanitization, PII removal (#5782) (@leszek3737)
+- Tool_runner hand — deterministic sort, empty id reject, config whitelist, output sanitization (#5784) (@leszek3737)
+- Tool_runner goal — progress type fix, range validation (#5785) (@leszek3737)
+- Tool_runner event — event_type validation, caller identity, reserved prefix guard (#5786) (@leszek3737)
+- Tool_runner a2a — session_id taint, SSRF diagnostics, zero-alloc agent check (#5787) (@leszek3737)
+- Tool_runner artifact — spawn_blocking, explicit errors, usize safe, zero-length reject (#5788) (@leszek3737)
+- Tool_runner channel — poll u8 safe, file size limit, email regex, mirror dedup, thread_id routing (#5789) (@leszek3737)
+- Skip bridge-side formatting for sidecar adapters (fixes #5795) (#5796) (@DaBlitzStein)
+- Return forward-slash relative path from registry/content on Windows (#5801) (@houko)
+- Make step timeout errors actionable with remediation guidance (#5806) (@houko)
+- Eliminate Instant subtraction that panics on Windows CI (fixes #5726) (#5808) (@houko)
+- Seed Feishu/Lark configure form when Python SDK is absent (#5809) (@houko)
+- Unbreak coverage build — thread session_id into two SessionWriter test stubs (#5816) (@houko)
+- Wiki.rs lifetime + shell.rs test arity after #5774/#5777 (#5818) (@houko)
+- Unbreak main — agent channels in ApiDoc + fmt + secrets baseline (#5820) (@houko)
+- Install gh CLI for release flow (#5826) (@houko)
+- Run `gh auth setup-git` to unblock git push from container (#5827) (@houko)
+- Override host-absolute credential helper path inside container (#5829) (@houko)
+
+### Changed
+
+- Migrate tool_runner tools to ToolError (#3576) (#5737) (@houko)
+
+<details>
+<summary>Documentation, maintenance, and other internal changes</summary>
+
+### Maintenance
+
+- Bump the cargo-minor-patch group with 4 updates (#5748) (@app/dependabot)
+- Bump wasmtime from 44.0.1 to 45.0.0 (#5749) (@app/dependabot)
+- Bump sysinfo from 0.38.4 to 0.39.2 (#5750) (@app/dependabot)
+- Bump which from 7.0.3 to 8.0.2 (#5751) (@app/dependabot)
+- Bump tikv-jemallocator from 0.6.1 to 0.7.0 (#5752) (@app/dependabot)
+- Bump the actions-minor-patch group with 4 updates (#5790) (@app/dependabot)
+- Bump actions/setup-python from 5 to 6 (#5791) (@app/dependabot)
+- Bump the web-minor-patch group in /web with 3 updates (#5810) (@app/dependabot)
+- Bump the dashboard-minor-patch group in /crates/librefang-api/dashboard with 7 updates (#5811) (@app/dependabot)
+- Bump globals from 15.15.0 to 17.6.0 in /crates/librefang-api/dashboard (#5812) (@app/dependabot)
+- Docker fallback for `just release` when cargo is missing (#5825) (@houko)
+
+</details>
+
+
+## [2026.5.25] - 2026-05-25
+
+_308 PRs from 7 contributors since v2026.5.17-beta.12._
+
+### Breaking Changes
+
+- Migrate ntfy from in-process adapter to sidecar (P7) (#5224) (@houko)
+- Remove in-process telegram adapter (now sidecar-only) (#5241) (@houko)
+- Migrate gotify from in-process adapter to sidecar (#5263) (@houko)
+- Migrate mastodon from in-process adapter to sidecar (#5264) (@houko)
+- Remove 6 low-value channel adapters (#5265) (@houko)
+- Drop 12 unmaintained adapters (#5267) (@houko)
+- Migrate bluesky from in-process adapter to sidecar (#5277) (@houko)
+- Migrate reddit from in-process adapter to sidecar (#5281) (@houko)
+- Migrate twitch from in-process adapter to sidecar (#5297) (@houko)
+- Migrate rocketchat from in-process adapter to sidecar (#5298) (@houko)
+- Migrate discord from in-process adapter to sidecar (#5299) (@houko)
+- Migrate nextcloud from in-process adapter to sidecar (#5301) (@houko)
+- Migrate slack from in-process adapter to sidecar (#5302) (@houko)
+- Migrate webex from in-process adapter to sidecar (#5309) (@houko)
+- Migrate zulip from in-process adapter to sidecar (#5310) (@houko)
+- Migrate line from in-process adapter to sidecar (#5312) (@houko)
+- Migrate mattermost from in-process adapter to sidecar (#5315) (@houko)
+- Migrate signal from in-process adapter to sidecar (#5317) (@houko)
+- Migrate qq from in-process adapter to sidecar (#5325) (@houko)
+- Migrate matrix from in-process adapter to sidecar (#5368) (@houko)
+- Migrate feishu from in-process adapter to sidecar (#5380) (@houko)
+- Migrate wecom from in-process adapter to sidecar (WebSocket-only) (#5392) (@houko)
+- Migrate email from in-process adapter to sidecar (#5408) (@houko)
+- Migrate dingtalk from in-process adapter to sidecar (Stream mode only) (#5417) (@houko)
+- Migrate wechat from in-process adapter to sidecar (#5421) (@houko)
+- Migrate teams from in-process adapter to sidecar (#5433) (@houko)
+- Migrate whatsapp from in-process adapter to sidecar (dual-mode) (#5445) (@houko)
+- Migrate webhook from in-process adapter to sidecar (#5455) (@houko)
+- Migrate google_chat from in-process adapter to sidecar (#5459) (@houko)
+- Delete dead per-channel REST endpoints + their helpers (#5463) (@houko)
+
+### Highlights
+
+- **Channel adapter sidecar migration** — all 27 messaging integrations (Slack, Discord, Telegram, WhatsApp, Signal, Teams, and more) are now isolated sidecar processes instead of in-process adapters; 18 unmaintained adapters were removed. Sidecar adapters can be configured directly from the dashboard.
+- **Human-in-the-loop (HITL) approval step** — agents can now pause and request operator approval mid-run; approvals route back to the originating chat with inline keyboard buttons on supported adapters, and the same tool only prompts once per session.
+- **Credential pools** — configure multiple API keys per LLM provider for automatic round-robin rotation and instant failover on rate limits.
+- **Schedule tab & budget visibility** — the dashboard now has an editable Schedule tab for managing triggers, cron jobs, and continuous mode; a new per-provider budget caps surface shows spend and limits per provider.
+- **Security hardening** — session tokens are now hashed at rest, SSRF validation added to URL inputs, path-traversal guards tightened across asset and file routes, SQL bindings replace string concatenation in session cleanup, and request bodies are size-capped against pre-allocation DoS.
+
+### Added
+
+- Credential pools — multi-key rotation per provider with… (#5063) (@Chukwuebuka-2003)
+- Add per-agent memory isolation via agent_id parameter (#5071) (@leszek3737)
+- Propagate W3C traceparent to outbound LLM HTTP requests (#5190) (@neo-wanderer)
+- Implement HITL operator-step — notify dispatch, timeout watchdog, HTTP actions→resume (#5133, #5134, #5135) (#5191) (@houko)
+- Caller-controlled conversation_key for agent_send (#5212) (@houko)
+- Forced /compact with async spawn, ack+event, summary banner (#5213) (@houko)
+- Sidecar channel parity — protocol, supervision, config (P0–P3) (#5219) (@houko)
+- Python sidecar channel adapter framework (P4) (#5220) (@houko)
+- Hard-block new in-process channel adapters (P5) (#5221) (@houko)
+- Migrate ntfy from in-process adapter to sidecar (P7) (#5224) (@houko)
+- Compute wasMentioned from group_trigger_patterns when mentionedJids is empty (#5230) (@f-liva)
+- Telegram full sidecar parity (formatter + full inbound/outbound), stdlib-only (#5232) (@houko)
+- Remove in-process telegram adapter (now sidecar-only) (#5241) (@houko)
+- Configure sidecar adapters (telegram/ntfy) from dashboard (#5252) (@houko)
+- Editable Schedule tab — triggers, cron, continuous mode (#4924) (#5256) (@houko)
+- HITL operator-step dashboard surfaces (#4977) (#5257) (@houko)
+- Credential pools for multi-key per-provider rotation (#4965) (#5260) (@houko)
+- Migrate gotify from in-process adapter to sidecar (#5263) (@houko)
+- Migrate mastodon from in-process adapter to sidecar (#5264) (@houko)
+- Migrate bluesky from in-process adapter to sidecar (#5277) (@houko)
+- Migrate reddit from in-process adapter to sidecar (#5281) (@houko)
+- Migrate twitch from in-process adapter to sidecar (#5297) (@houko)
+- Migrate rocketchat from in-process adapter to sidecar (#5298) (@houko)
+- Migrate discord from in-process adapter to sidecar (#5299) (@houko)
+- Migrate nextcloud from in-process adapter to sidecar (#5301) (@houko)
+- Migrate slack from in-process adapter to sidecar (#5302) (@houko)
+- Migrate webex from in-process adapter to sidecar (#5309) (@houko)
+- Migrate zulip from in-process adapter to sidecar (#5310) (@houko)
+- Migrate line from in-process adapter to sidecar (#5312) (@houko)
+- Migrate mattermost from in-process adapter to sidecar (#5315) (@houko)
+- Migrate signal from in-process adapter to sidecar (#5317) (@houko)
+- Migrate qq from in-process adapter to sidecar (#5325) (@houko)
+- Migrate matrix from in-process adapter to sidecar (#5368) (@houko)
+- Migrate feishu from in-process adapter to sidecar (#5380) (@houko)
+- Migrate wecom from in-process adapter to sidecar (WebSocket-only) (#5392) (@houko)
+- Migrate email from in-process adapter to sidecar (#5408) (@houko)
+- Migrate dingtalk from in-process adapter to sidecar (Stream mode only) (#5417) (@houko)
+- Migrate wechat from in-process adapter to sidecar (#5421) (@houko)
+- Migrate teams from in-process adapter to sidecar (#5433) (@houko)
+- Migrate whatsapp from in-process adapter to sidecar (dual-mode) (#5445) (@houko)
+- Migrate webhook from in-process adapter to sidecar (#5455) (@houko)
+- Migrate google_chat from in-process adapter to sidecar (#5459) (@houko)
+- Restore ChannelsPage as a sidecar-only page (#5470) (@houko)
+- Embed librefang-sdk + reconnect WeChat QR flow (#5472) (@houko)
+- Approval notifications use inline keyboard on interactive-capable adapters (#5483) (@houko)
+- Route approval popup to originating chat (follow-up to #5483) (#5484) (@houko)
+- Thread chat_id through approval flow for group-chat support (#5489) (@houko)
+- Cache per-session approvals so the same tool only prompts once (#5663) (@houko)
+- Per-agent [proactive_memory] extraction_model override (#5475) (#5690) (@houko)
+- Bootstrap ESLint with jsx-no-target-blank guard (fixes #5561) (#5701) (@houko)
+- Propagate kernel-attested caller context to MCP servers (fixes #5699) (#5704) (@houko)
+- Expose per-provider budget caps surface (#5705) (@houko)
+
+### Fixed
+
+- Force HOME so spawned CLI can find its credentials (#4997) (@f-liva)
+- Distinguish JoinError cancellation from panic in streaming bridge (#5058) (#5064) (@leszek3737)
+- Spill oversized MCP/tool results to artifact store before truncation (#5149) (@neo-wanderer)
+- Deny unknown fields in request DTOs to catch body typos (#5131) (#5151) (@houko)
+- Validate expression at insert and auto-disable on repeated fallback (#5160) (@houko)
+- Unwedge cooldown on wall-clock backstep (#5162) (@houko)
+- Respect per-agent fallback_models override — None inherits global, Some([]) opts out (#5167) (@DaBlitzStein)
+- Serde/config polish (#5145) (#5172) (@houko)
+- AuxClient inherits agent fallback chain when [llm.auxiliary] unset (#5169) (#5173) (@houko)
+- Cap rate-limited autonomous loop re-fires (#5168) (#5174) (@houko)
+- Time/clock/scheduling robustness (#5136) (#5175) (@houko)
+- Surface swallowed errors on persistence/IO paths (#5137) (#5176) (@houko)
+- Enforce prompt-cache key determinism (#5143) (#5177) (@houko)
+- Security defense-in-depth — symlink/archive/header/IP edge cases (#5141) (#5178) (@houko)
+- Enforce per-user memory/wiki ACL at tool dispatch (#5139) (#5179) (@houko)
+- Concurrency hazard follow-ups — kill_agent run/abort lifecycle (#5142) (#5180) (@houko)
+- Memory substrate data integrity (#5138) (#5181) (@houko)
+- Data-layer invalidation + a11y + dead code (#5140) (#5182) (@houko)
+- Task lifecycle / resource-leak follow-ups (#5144) (#5184) (@houko)
+- Reject same-task re-entrant agent_msg_lock acquisition (#5125, #5126) (#5187) (@houko)
+- Show full agent name on hover in chat sidebar (#5188) (@neo-wanderer)
+- Regenerate OpenAPI/SDK/schema baselines for #5151 DTO changes (#5165) (#5189) (@houko)
+- Prevent history_fold mid-string truncation on verbose-JSON models (#5206) (@houko)
+- Re-enable send button on typing:stop (#5207) (@houko)
+- /context reports real model context window (#5208) (@houko)
+- Surface config deserialize errors and fail closed on hard parse failure (#5209) (@houko)
+- Honor token-trigger in inner compaction gate (#5210) (@houko)
+- Canonical session pointer recovery on restart (#5198, #5199) (#5211) (@houko)
+- Cover ChainExhausted in PooledDriver match (unblock main) (#5215) (@houko)
+- Restore rustfmt-clean main after #5209 (#5214) (#5216) (@houko)
+- Expose background section + drop stale /api/cron/list allowlist row (#5217) (@houko)
+- Sidecar protocol/SDK follow-ups from #5219/#5220 review (#5223) (@houko)
+- Move first-party channel adapters out of examples into librefang-sdk (#5228) (@houko)
+- Unwrap ephemeral/viewOnce/edited wrappers before reading contextInfo (closes #48) (#5229) (@f-liva)
+- Surface producer crash via ProducerCrashed, not SystemExit (#5231) (@houko)
+- Handle inbound poll_answer in telegram adapter (sidecar parity) (#5242) (@houko)
+- Close kill_agent/dispatch race + break HITL self-cycle (#5244 follow-ups) (#5244) (@houko)
+- Unblock main — pass force=false in compact gate test (#5210/#5213 collision) (#5245) (@houko)
+- Sidecar channels visible AND read-only on the dashboard (no 404 actions) (#5249) (@houko)
+- Surface telegram/ntfy discovery rows on the channels page (#5250) (@houko)
+- Auto-pin agentId-only sessions + bind dropdown active to live connection (#5199) (#5253) (@houko)
+- Cron picker click no longer closes schedule form (#5247) (#5254) (@houko)
+- Agent wizard tools/skills selectable + MCP servers dropdown (#5246) (#5255) (@houko)
+- Follow-ups from third sidecar-configure review (#5261) (@houko)
+- Block cross-chat memory bleed via chat-scoped recall (#5227) (#5262) (@houko)
+- Patch Baileys executeInitQueries to non-blocking allSettled (#5268) (@f-liva)
+- Align opentelemetry stack on 0.32 to fix main build break (#5279) (@houko)
+- Include kernel Bearer token on all REST forwards (#5285) (@f-liva)
+- Thread sender context through streaming message handler (#5288) (@f-liva)
+- Skip file-upload OCR for image/* mime types (closes #5290) (#5291) (@DaBlitzStein)
+- Add default_agent to SidecarChannelConfig — restore inbound routing pin (closes #5294) (#5295) (@DaBlitzStein)
+- Restore main — fmt drift, MCP caller_agent_id semantics, openapi baseline (#5300) (@houko)
+- Honour Retry-After across sidecar polling adapters (#5303) (@houko)
+- Emit poll bursts in chronological order across sidecar adapters (#5305) (@houko)
+- Restore main — fmt drift + stale config schema baseline (#5307) (@houko)
+- Detect chat-template `[User]` line-leader as cascade leak (#5308) (@f-liva)
+- Update openclaw test fixtures after mattermost sidecar (closes #5316) (#5318) (@houko)
+- Wrap config sub-tabs + hide number-input spinner buttons (closes #5293) (#5319) (@houko)
+- Pin response_format = Json on history_fold + web_augment aux calls (closes #5287) (#5320) (@houko)
+- Observability + regression coverage on sidecar reconnect loop (closes #5111) (#5321) (@houko)
+- Define api-error-generic across all 6 locales (audit: api-error-generic-missing-fluent-key) (#5322) (@houko)
+- Use canonical getStoredApiKey for export download (audit: audit-export-401) (#5324) (@houko)
+- Purge pending_approvals on agent cascade-delete + schema-walking guard (audit: agent-cascade-delete-missing-tables) (#5328) (@houko)
+- Refuse to boot without LIBREFANG_STATE_SECRET when external_auth.enabled (closes #5336) (#5337) (@houko)
+- Validate skill name + hand against path traversal (closes #5338) (#5339) (@houko)
+- Wrap upload_routes in route-local RequestBodyLimitLayer (closes #5342) (#5343) (@houko)
+- Cap triggers per agent at MAX_TRIGGERS_PER_AGENT = 50 (closes #5345) (#5346) (@houko)
+- Verify caller owns from_agent_id before comms_send (closes #5349) (#5350) (@houko)
+- SSRF-validate URLs at create + update (closes #5352) (#5353) (@houko)
+- Gate require_auth_for_reads=false bypass behind external_auth_proxy (closes #5356) (#5357) (@houko)
+- Add /api/auth/callback to rate-limit allowlist (closes #5358) (#5359) (@houko)
+- Expect() on serde_json::to_writer in stream_json (closes #5360) (#5361) (@houko)
+- Write Argon2id upgrade-hint to 0600 file instead of log (closes #5364) (#5365) (@houko)
+- Kernel_err_to_status helper for 404/409 mapping (closes #5366) (#5367) (@houko)
+- Require auth on GitHub Copilot OAuth endpoints (closes #5369) (#5370) (@houko)
+- Atomic-rename write for secrets.env eliminates 0644 TOCTOU (closes #5371) (#5372) (@houko)
+- Scrub raw rusqlite errors before responding (#5378) (@houko)
+- Split /api/auth/login allowlist into exact + slash-prefix (#5382) (@houko)
+- Always emit Secure on logout cookie clear (#5384) (@houko)
+- Anchor [SILENT] cron marker to message prefix (#5386) (@houko)
+- Clamp listing endpoints — no more limit=None → full collection (#5388) (@houko)
+- Rel=noopener noreferrer + safeUrl on MCP catalog get_url (#5390) (@houko)
+- Hand-write Debug to redact OAuthTokens secrets (#5395) (@houko)
+- Warn on serde(other) Unknown variants with raw tag (#5397) (@houko)
+- Bind cleanup_orphan_sessions IN-clause instead of string-concat (#5401) (@houko)
+- Hotfix dangling refs from #5368 + #5380 sidecar migrations (FeishuConfig + pulldown-cmark) (#5402) (@houko)
+- Drop dangling channels.feishu access in openclaw roundtrip test (#5404) (@houko)
+- Bound regex cache at 4096 entries with FIFO eviction (#5406) (@houko)
+- Per-process random anonymous fingerprint (#5410) (@houko)
+- Wire check_json_depth into global request middleware (#5412) (@houko)
+- Use SHA-256 (128-bit truncated) for DriverCache::cache_key (#5414) (@houko)
+- Persist trimmed active_sessions after periodic GC (#5419) (@houko)
+- Tighten SQLite database files to 0o600 + data dir to 0o700 (#5422) (@houko)
+- Recover sessionWebhook via ChannelUser.librefang_user (#5423) (@houko)
+- Sanitize Custom channel names that collide with kernel-internal cron/autonomous/webui (#5425) (@houko)
+- Byte + char dual cap on chat-message size (#5427) (@houko)
+- Saturating_add inner cache-token sum (#5430) (@houko)
+- Recover passive-reply msg_id via ChannelUser.librefang_user (#5431) (@houko)
+- Apply foreign_keys=ON + full PRAGMA set to PromptStore second pool (#5434) (@houko)
+- Scan raw string for command substitution — close double-quote bypass (#5436) (@houko)
+- Recover per-message reply correlation via ChannelUser.librefang_user across 6 sidecars (#5439) (@houko)
+- Size-bounded PII regex compilation (#5444) (@houko)
+- Repair persisted session after trim+pinned-rescue (#5447) (@houko)
+- Recover context_token via librefang_user across sidecar restart (#5448) (@houko)
+- Recover req_id via librefang_user across sidecar restart (#5449) (@houko)
+- Include traceback + cmd_type when on_command bare-except logs (#5450) (@houko)
+- WARN on env-vs-keyring master-key divergence (#5453) (@houko)
+- Recover main build from sidecar fallout (missing default + orphans + test drift) (#5456) (@houko)
+- Repair test build after #5455 (write_service_account_env removed) (#5460) (@houko)
+- Cross-audit follow-ups (Retry-After x4, dedupe x2, LINE reply API) (#5462) (@houko)
+- Rewrite ModuleNotFoundError into actionable install hint (#5465) (@houko)
+- Preserve specific cause in last_error after circuit-breaker trip (#5468) (@houko)
+- Redact WhatsApp JIDs atomically (no partial-redact via phone regex) (#5469) (@f-liva)
+- Recover reply context via XRPC on cache miss (closes #5452) (#5471) (@houko)
+- Demote /api/metrics 401 from WARN to DEBUG (#5482) (@houko)
+- Repair 3 pre-existing main CI breakers inherited by all open PRs (#5486) (@houko)
+- Ack duplicate `/approve <id>` instead of error-shaped not-found (#5487) (@houko)
+- Wake idle agent after approval resolve so the chat gets the result (#5488) (@houko)
+- Suppress redundant /approve|/reject ack on inline-keyboard tap (#5490) (@houko)
+- Route agent reply through channel after wake — fixes "tap Approve → silence" (#5491) (@houko)
+- Cargo fmt + regenerate sdk/ to repair main CI (Quality, OpenAPI Drift) (#5494) (@houko)
+- Log only email domain at INFO in OIDC auth_callback (#5504) (@houko)
+- Sanitize reserved channel names at every SenderContext ingress (#5506) (@houko)
+- Return path relative to home_dir, not absolute (#5509) (@houko)
+- Keyboard nav for NotificationCenter (WAI-ARIA Menu Button) (#5510) (@houko)
+- Record comms_send in hash-chained audit log (#5512) (@houko)
+- Reject empty code in OAuth callback before token exchange (#5515) (@houko)
+- SSRF-validate attachment URLs + DNS-rebind pin (#5517) (@houko)
+- Cap bulk-handler Vec::with_capacity to prevent DoS pre-allocation (#5520) (@houko)
+- Bound buckets map with hard cap + periodic sweep (#5522) (@houko)
+- Never log raw IdP token-endpoint response bodies (#5526) (@houko)
+- Detect partial-upgrade drift between migrations table and user_version pragma (#5528) (@houko)
+- Never silently default or fabricate from corrupt JSON-in-TEXT columns (#5532) (@houko)
+- Reclaim per-session bucket on session delete (#5534) (@houko)
+- Bound RoundRobin cursor with cycle-aware iteration (#5536) (@houko)
+- Restore main — rustfmt drift + 2 PR-only test failures (#5538) (@houko)
+- Release prune lock across try_summarize_trim().await; CAS on messages_generation (#5541) (@houko)
+- Validate provider name shape before deriving env var (#5542) (@houko)
+- Bijective SHA-256 agent_id suffix to stop container-name collisions (#5545) (@houko)
+- Hold ledger mutex across check + add (#5548) (@houko)
+- Validate tool args at boundary before forwarding to MCP server (#5550) (@houko)
+- Acquire per-agent semaphore in workflow send_message closure (#5554) (@houko)
+- Cap system_prompt size and lock down create-handler invariants (#5558) (@houko)
+- Allow zero spaces in attribution regex (#5560) (@houko)
+- Swap RefCell for parking_lot::Mutex to remove async borrow-panic footgun (#5563) (@houko)
+- Reject `..` per-segment in react_asset, not by substring (#5565) (@houko)
+- Switch useSessionStream to authenticated WebSocket (#5567) (@houko)
+- Make agent_concurrency_for entry construction atomic (#5569) (@houko)
+- Hash session tokens at rest in sessions.json — backup-snapshot replay resistance (#5571) (@houko)
+- #[serde(skip_serializing)] api_key + proxy_url (#5573) (@houko)
+- Escape translator HTML, route via <Trans> (#5576) (@houko)
+- Canonicalize + containment-check source/target_dir (#5577) (@houko)
+- Warn at boot when declared provider API-key env vars are unset or empty (#5579) (@houko)
+- Gate X-Forwarded-Proto on trusted_proxies for session cookie Secure flag (#5581) (@houko)
+- Allowlist --network and --cap-add to prevent sandbox collapse (#5583) (@houko)
+- Install-deps program allowlist + flag denylist + Owner-only role (#5588) (@houko)
+- Warn on manifest swap when session_mode or max_concurrent_invocations changes (#5590) (@houko)
+- Remove partial identity files on write failure (#5592) (@houko)
+- Evict JWKS + discovery caches on external_auth hot-reload (#5594) (@houko)
+- Fail-closed when guard-bash-safety lib is missing (#5596) (@houko)
+- Rephrase strip_images placeholder so LLM does not deny image reception (#5597) (@DaBlitzStein)
+- Wrap connect_mcp_servers spawns in spawn_supervised (#5599) (@houko)
+- Hold Lane::Trigger permit across run_workflow spawn (#5602) (@houko)
+- Derive deterministic SessionId for New-mode fires (#5604) (@houko)
+- Align missed-fire log with single-catchup behaviour (#5606) (@houko)
+- Classify refresh failures, single-flight refresh, drop unwrap (#5609) (@houko)
+- Allow known framework source dirs, not just the librefang home (#5614) (@houko)
+- Backfill missing #[utoipa::path] handlers + regenerate openapi.json (#5620) (@houko)
+- API-surface hygiene — SPA route allowlist, registry id validation, auth/providers gating (#5638) (@houko)
+- Non-IdP external_auth edits are a no-op, not a restart (#5646) (@houko)
+- Propagate sender peer_id through remember_interaction_b… (#5647) (@Chukwuebuka-2003)
+- Persist /sync since_token across restarts (#5651) (@neo-wanderer)
+- External_auth IdP change is hot-reload, not restart (restore main) (#5652) (@houko)
+- Clear clippy Quality lane (needless borrow, doc indentation, manual char comparison, await-holding-lock) (#5654) (@houko)
+- Downgrade boot integrity-check failure to WARN (#5659) (@houko)
+- Migrate legacy shared-namespace row on fallback hit (#5660) (@houko)
+- Bound graceful shutdown so daemon.lock release isn't blocked by a hung phase (#5662) (@houko)
+- Plug data leaks, restore lost state, harden parsing (#5674) (@leszek3737)
+- Harden pre-commit + add detect-secrets CI workflow (#5681) (@houko)
+- CommsKeys hierarchy + TerminalTabs storage helper + Modal autoFocus (#5682) (@houko)
+- Soft-cap in-memory entries between trims at 1.5x max_in_memory_entries (#5683) (@houko)
+- Harden build.rs git/date invocation; document pnpm audit ignores (#5684) (@houko)
+- WARN when [agents.<name>.proactive_memory] appears in config.toml (real path is agent.toml) (#5687) (@houko)
+- Filter /commands dispatch by account_id (multi-bot isolation) (#5688) (@houko)
+- Widen exclusions, regenerate baseline, ignore generated_at drift (#5691) (@houko)
+- Update audit_retention_test for #5683 soft-cap drain (#5693) (@houko)
+- Strip line_number drift from detect-secrets baseline diff (#5695) (@houko)
+- Log bot_token fingerprint instead of full token (fixes #5543) (#5700) (@houko)
+- Replace removed `all-channels` feature with `telemetry` (#5702) (@houko)
+- Add provider_budget_routes_test to detect-secrets baseline (#5707) (@houko)
+- Regenerate SDKs for /api/budget/providers to repair main CI drift (#5709) (@houko)
+- Include sdk/python/librefang in flake source filter (#5714) (@houko)
+
+### Changed
+
+- Unify error contracts — RFC + ToolError + first migration (#3576) (#5258) (@houko)
+- Extract shared helpers + WS client + test fakes (#5335) (@houko)
+- Return librefang-types IntegrationError from install_integration (stop leaking ExtensionResult) (#5622) (@houko)
+- Return types-owned outcome from install_integration (stop leaking InstallResult) (#5644) (@houko)
+- Widen ApiErrorResponse::internal_scrub sweep across routes (#5661) (@houko)
+
+### Performance
+
+- Use count_sessions() on status + snapshot (audit: list-sessions-decode-on-poll) (#5326) (@houko)
+- Use list_arcs() in agent_budget_ranking (closes #5347) (#5348) (@houko)
+- Evict stale tool-call timestamps on push (closes #5362) (#5363) (@houko)
+- Rotate to next key on first RateLimit (closes #5373) (#5374) (@houko)
+- Tx-wrap recall access bump + batched IN hydrate (closes #5375) (#5376) (@houko)
+- Composite sessions(agent_id, updated_at) + audit_entries(agent_id, timestamp) indexes (#5399) (@houko)
+- Stream extract_text_content into a single String to avoid per-save Vec<String> allocation (#5501) (@houko)
+- Offload SQLite insert+prune via spawn_blocking, counter-gate prune (#5524) (@houko)
+- Block_in_place for ImageFile reads (4 sites) (#5530) (@houko)
+- Memoize dashboard_snapshot_inner with 900ms TTL cache (#5552) (@houko)
+- Unblock axum executor on create_backup + persist_budget (spawn_blocking) (#5556) (@houko)
+
+<details>
+<summary>Documentation, maintenance, and other internal changes</summary>
+
+### Documentation
+
+- Sidecar-first channel documentation (P6) (#5225) (@houko)
+- Import audit backlog (120 tracking items) (#5240) (@houko)
+- Fix stale telegram.rs reference in custom-channel example (#5248) (@houko)
+- Fill in [[sidecar_channels]] samples for all 27 adapters (#5464) (@houko)
+- Canonical config-reload field table derived from build_reload_plan (#5642) (@houko)
+
+### Maintenance
+
+- Restore rustfmt-clean main (Quality CI gate) (#5222) (@houko)
+- Add Dockerfile.rust-dev with Tauri Linux GTK deps (#5233) (@houko)
+- Cross-impl protocol conformance corpus + versioned spec (v1) (#5237) (@houko)
+- Remove 6 low-value channel adapters (#5265) (@houko)
+- Drop per-merge auto-update trigger from auto-update-branches (#5266) (@houko)
+- Drop 12 unmaintained adapters (#5267) (@houko)
+- Bump the cargo-minor-patch group with 8 updates (#5269) (@app/dependabot)
+- Bump opentelemetry-otlp from 0.31.1 to 0.32.0 (#5270) (@app/dependabot)
+- Bump russh-keys from 0.45.0 to 0.49.2 (#5271) (@app/dependabot)
+- Bump shlex from 1.3.0 to 2.0.1 (#5272) (@app/dependabot)
+- Bump tracing-opentelemetry from 0.32.1 to 0.33.0 (#5273) (@app/dependabot)
+- Cargo fmt — fix rustfmt drift on main after channel-removal merges (#5274) (@houko)
+- Bump Apple-Actions/upload-testflight-build from 5.1.0 to 5.2.1 in the actions-minor-patch group (#5304) (@app/dependabot)
+- Pin silent_response markers against prompt-builder output (#5344) (@f-liva)
+- Drop pulldown-cmark workspace dep, orphaned by matrix sidecar #5368 (#5407) (@houko)
+- Pin SessionMode strict-variant deserialization (audit-disputed) (#5416) (@houko)
+- Bump the web-minor-patch group in /web with 9 updates (#5438) (@app/dependabot)
+- Bump the dashboard-minor-patch group in /crates/librefang-api/dashboard with 12 updates (#5440) (@app/dependabot)
+- 3 nits from post-merge audit (#5454) (@houko)
+- Remove dead in-process channel scaffolding (#5461) (@houko)
+- Delete dead per-channel REST endpoints + their helpers (#5463) (@houko)
+- Rephrase docstring "stub" mentions to stop bot false positives (#5467) (@houko)
+- Prune unused dependencies across the workspace (#5473) (@houko)
+- Clean up sidecar migration tails (#5479) (@houko)
+- Bump the docs-minor-patch group in /docs with 10 updates (#5493) (@app/dependabot)
+- Skip Cloudflare Pages deploy on Dependabot PRs (#5495) (@houko)
+- Run Coverage workflow on push:main only, not per-PR (#5496) (@houko)
+- Make the per-PR test lane Linux-only (#5498) (@houko)
+- Cover LIBREFANG_VAULT_KEY 32-ASCII-vs-32-bytes pitfall (#5611) (@houko)
+- Replace fixed 150ms sleeps with condition-based polling (#5613) (@houko)
+- Parallel semaphore-contention coverage for trigger concurrency caps (#5616) (@houko)
+- Assert every KernelConfig field is reload-classified + backfill (#5619) (@houko)
+- Replace unmaintained serde_yaml with serde_yaml_ng (RUSTSEC-2024-0320) (#5626) (@houko)
+- Full-router semantic tests for lifecycle routes (suspend/resume/mode) (#5628) (@houko)
+- Convert tools integration tests from mock to full router (#5630) (@houko)
+- Convert load_test from mock to full router (exercise real middleware) (#5632) (@houko)
+- Full-router semantic tests for files (path-traversal) + capabilities routes (#5634) (@houko)
+- Convert agent_identity_registry tests from mock to full router (#5636) (@houko)
+- Full-router semantic tests for clone/reload/push + bulk routes (#5640) (@houko)
+- Delete 65 audit docs whose GitHub issue is closed (#5670) (@houko)
+- Rename librefang-migrate → librefang-import + reconcile stale CLAUDE.md + justfile policy (#5668) (#5685) (@houko)
+
+### Reverted
+
+- Roll back v2026.5.25-beta.13 / beta.14 version bumps to 2026.5.17-beta.12 (#5717) (@houko)
+
+### Other
+
+- [Medium] Per-trigger `session_mode_override = New` is throttled by the manifest's `Persistent` clamp (#5624) (@houko)
+
+</details>
+
+
+## [Unreleased]
+
+### Breaking Changes
+
+- **Subprocess plugin sandbox is now secure-by-default** (#2) (@houko).
+  Hook subprocesses no longer get network or filesystem access unless the plugin opts in.
+  `allow_network` and `allow_filesystem` in a plugin's `[hooks]` table now default to `false` (previously `true`); a plugin that needs outbound network or filesystem writes must declare `allow_network = true` / `allow_filesystem = true` in its `plugin.toml`.
+  Existing plugins that relied on the old open-by-default behaviour will stop reaching the network / writing files after upgrade until they add these declarations.
+  The `seccomp-sandbox` and `landlock-sandbox` features (Linux syscall + LSM filtering) are now enabled in the default feature set; they are no-ops on macOS / Windows.
+
+### Changed
+
+- **refactor(subprocess): extract a shared `librefang-subprocess` transport; migrate the context-engine sidecar onto it** (@houko) — first step of unifying the three hand-rolled "persistent JSON-over-stdio subprocess" bridges (channels `SidecarAdapter`, `plugin_runtime::HookProcessPool`, `context_engine::SidecarContextEngine`), each of which re-implemented spawn + a background reply reader + id-matching + stderr draining + lifecycle, and had drifted apart (inconsistent reply-line caps, a missing write timeout in one, no exit signal in another). New low-level crate `crates/librefang-subprocess` owns that mechanism: `SubprocessTransport::spawn(TransportConfig)` + `request(json) -> Result<Value, TransportError>`, with a bounded reply-line read (default 16 MiB), a timeout that bounds the write as well as the reply wait, stderr → log, a `subprocess_transport_exited` metric, and `kill_on_drop` reaping. It depends on no `librefang-*` crate so both `librefang-channels` and `librefang-runtime` can sit above it. `SidecarContextEngine` is migrated to it, shedding ~220 lines of duplicated transport for a thin policy wrapper; behaviour is unchanged (5 engine tests still pass through the new transport). The extraction also fixed a latent semantic bug carried over from the inline code: a dead child now surfaces as `TransportError::Dead`, distinct from a `{"error": …}` reply (`TransportError::Remote`), instead of conflating the two. `read_capped_line` and `write_line_timeout` are exposed as low-level primitives for the consumers whose protocol isn't id-matched request/reply. `plugin_runtime::HookProcessPool` is migrated onto them: its persistent `do_call` now reads through the bounded-line primitive and writes through the timeout-bounded one, gaining the reply-line cap and the per-call timeout it previously lacked (it accepted `timeout_secs` but never enforced it — 20 plugin-runtime tests still pass). The channels `SidecarAdapter` — event-stream rather than request/reply — reuses the bounded-line primitive for its inbound reader (previously read with an unbounded `lines()`), keeping its own event protocol and supervision/respawn loop; its 472 unit + 27 bridge-integration + 4 conformance-corpus tests pass. All three bridges now share the crate's line handling, so a transport-layer fix lands once: consistent reply-line caps, a write timeout on every consumer, and no unbounded inbound reads.
+- **context engine: the sidecar now auto-respawns instead of degrading until restart** (@houko) — builds on the shared transport above. `librefang-subprocess` gains `SupervisedTransport`, a lazy, self-respawning wrapper around `SubprocessTransport`: it spawns the child on first use and re-spawns it on the first call after a crash, rate-limited by a cooldown (default 5s) so a persistently-broken command can't spawn-storm. `SidecarContextEngine` uses it, so a crashed context sidecar degrades only the in-flight call to the built-in engine and recovers on a later turn — removing the documented v1 "dead until the daemon restarts" limitation. Construction is now infallible (lazy), so the engine no longer carries an `Option<transport>`. Covered by `supervised_respawns_after_child_exits` and `supervised_cooldown_blocks_respawn_storm`.
+- **memory: out-of-process extractor via the shared transport** (@houko) — a fourth consumer of `librefang-subprocess`, and the second "policy in a subprocess" extraction point. The `MemoryExtractor` trait already existed (the store holds `Arc<dyn MemoryExtractor>`), so this adds `SidecarMemoryExtractor`, which implements it over `SupervisedTransport`. Unlike the context engine's `compact` (which must reuse the daemon's configured driver for cost/streaming/cache and so stays in Rust), memory extraction is a background, non-streaming, fire-and-forget task, so a sidecar is free to do it with its own LLM key, a cheap local model, embeddings, or heuristics. The sidecar returns *simple* memory items (`{content, category?, level?, metadata?}`) and the daemon assigns each a UUID + `created_at` and stamps `source = "sidecar"`; the SQLite store and the dedup decision (`decide_action`'s heuristic) stay in Rust. Selected via `[proactive_memory.extractor_sidecar]` (`command` / `args` / `request_timeout_secs`), which takes precedence over `extraction_model`; a down sidecar degrades to "nothing memorized this turn" and auto-respawns. A commandless `[extractor_sidecar]` table is treated as a misconfiguration — it is logged and ignored rather than spawning `""` on every turn, so extraction falls back to the built-in path; and because the sidecar bypasses the LLM extractor wholesale (including any per-agent `extraction_model` override), configuring both now emits a WARN naming which one wins. Ships a dependency-free Python reference (`docs/examples/memory_extractor_sidecar.py`). Covered by `extracts_via_sidecar`, `missing_sidecar_memorizes_nothing`, `empty_sidecar_command_is_ignored_and_falls_through_to_llm`, and `configured_sidecar_command_takes_precedence_over_llm`.
 - **BREAKING: rename crate `librefang-migrate` → `librefang-import`** (@houko) — the framework-import tool shared the word "migration" with `librefang-memory/src/migration.rs` (SQLite schema migrations), so grepping for "migration" returned the wrong file and forced every reader to disambiguate. The crate is renamed to `librefang-import`, which is what it actually does: import agents / memory / sessions / skills / channel configs from other frameworks (OpenClaw, OpenFang, LangChain, AutoGPT). Directory moved `crates/librefang-migrate/` → `crates/librefang-import/`; package name in `Cargo.toml` flipped; the three consumers (`librefang-api`, `librefang-cli`, `xtask`) updated to depend on `librefang-import` and reference `librefang_import::` in source. Public API (`MigrateSource`, `MigrateOptions`, `run_migration`, `report::MigrationReport`, `openclaw::*`, `openfang::*`) is preserved verbatim — only the crate name and import path change. The user-facing CLI command (`librefang migrate ...`) is unchanged. Workspace `members = [...]` and the doc references in `CLAUDE.md` / `AGENTS.md` / `CONTRIBUTING.md` / `README.md` + the 7 i18n READMEs (zh / es / fr / ko / de / ja / pl) also updated. **Operator action required**: out-of-tree consumers that declared `librefang-migrate = { path = "...", ... }` in their `Cargo.toml` must update both the dep name and any `use librefang_migrate::...` paths to `librefang_import`. Closes #5668.
 - **docs(claude-md): reconcile `crates/librefang-extensions/CLAUDE.md` and `crates/librefang-channels/CLAUDE.md` with current code** (@houko) — both files had drifted away from the live source; replaced with concise pointers to the top-level `CLAUDE.md` crate index so the stale prose can't mislead readers further. Closes #5668.
 - **build(justfile): make `justfile` the canonical developer entry point; delegate to `cargo xtask`** (@houko) — the `justfile` and `xtask/` overlapped on `setup` and several other recipes, with docs alternating between `just setup` and `cargo xtask setup` interchangeably. The rule is now documented at the top of `justfile`: `just` is the developer-facing surface, `xtask` is the underlying logic; recipes that duplicated logic now call `cargo xtask <subcmd>`. Closes #5668.
+- **docs(architecture): strengthen the sidecar-channels rationale against AI-codegen-era critique** (@houko) — the "Why" paragraph in `docs/architecture/sidecar-channels.md` had been leading with the contributor-ergonomics argument ("writable in ~40 lines of Python against a documented protocol"), which is a real benefit but no longer load-bearing on its own now that LLM-assisted Rust authoring has narrowed the practical gap between writing Python and writing Rust. Rewrote the top-of-doc rationale to lead with the three properties that survive when the language gap closes — crash isolation (an in-process panic ends the daemon, a sidecar crash is a `waitpid` event the supervisor restarts), supply-chain confinement (each of ~28 platform SDKs is its own sealed dependency tree, not part of the kernel binary's `cargo audit` surface), and the iteration loop (subprocess restart in seconds vs. `cargo build` + daemon restart that drops every active agent session) — and demoted the contributor-ergonomics benefit to a secondary effect. Added a new "Why subprocess, not in-process Rust?" section that addresses the AI-codegen counterargument head-on, plus an inline note that the wire protocol (see `sidecar-protocol.md`) is language-agnostic — a Rust sidecar SDK against the existing `conformance/sidecar/corpus/` is unblocked future work — so Python is the current first-party SDK out of migration friction, not architectural necessity. Also corrected the stale "~46 in-process Rust adapters that predate the policy are grandfathered and frozen" claim — `crates/librefang-channels/src/channels-allowlist.txt` now permits only the `sidecar` trampoline itself, the in-process set has been fully drained. No code changes; pure documentation.
 
 - **kernel(config-reload): non-IdP `external_auth` edits are a no-op, not a restart** — follow-up to #5652. #5652 cleared the main-CI red by gating #5619's backfill restart on `!external_auth_idp_changed(...)`, which left a non-IdP `external_auth` change (`session_ttl_secs`, `allowed_domains`, `redirect_url`, scopes, audience, `require_email_verified`) still classified as restart-required. But the OAuth layer reads every one of those live from the ArcSwap config on each request (`oauth.rs`: `config_ref()` / `config_snapshot()`), so the bare config swap already applies them on the next request — a restart was never needed, only over-conservative classification inherited from #5619's "RESTART when the live-read path can't be verified" default. The planner now records a no-op (`"external_auth config changed (effective on next request via config swap)"`) for those edits instead of telling the operator to restart; IdP-identity changes still queue `ReloadExternalAuth` (#5594) to evict the JWKS/discovery caches. Removed the now-dead `restart_if_changed(external_auth)` branch and moved the `classified_reload_fields()` entry into the hot-reload group. `test_external_auth_unrelated_field_does_not_evict_caches` extended to assert `!restart_required` + the no-op entry. `cargo test -p librefang-kernel --lib config_reload::` 40/40 (with the strengthened assertions), `cargo clippy -p librefang-kernel --lib -- -D warnings` + `cargo fmt --check` clean. Also refreshed the canonical ops table in `docs/operations/config-reload.md` — the `external_auth` row now reads **H/N** (was **R/H**), and the non-IdP prose reflects the live-read ArcSwap path instead of "no hot reapply path is wired, planner conservatively flags a restart". (@houko)
 
 ### Added
 
+- **context engine: out-of-process `engine = "sidecar"`** — run the per-turn context **policy** (recall, window assembly, after-turn bookkeeping) in a subprocess of any language, keeping the **mechanism** it needs in Rust. The `ContextEngine` trait was already the right seam (`ingest` / `assemble` / `after_turn` / `bootstrap`); `SidecarContextEngine` implements it by delegating those async, non-LLM hooks to a child process over a newline-delimited JSON request/reply protocol, and wraps a built-in engine for the rest. LLM-bearing `compact` (its `Arc<dyn LlmDriver>` can't cross a process boundary) and the cheap synchronous hooks (`truncate_tool_result`, `should_compress`, `update_model`, metrics) stay on the inner engine. Robustness is the headline: the context engine is on the per-turn critical path, so **every bridged call falls back to the built-in engine on any failure** — spawn failure, write error, request timeout, malformed reply, or a crashed process — and a flaky sidecar never breaks a turn. Configured via `[context_engine] engine = "sidecar"` + a `[context_engine.sidecar]` block (`command`, `args`, `request_timeout_secs`); the command is trusted operator config so its environment is inherited. Ships a dependency-free Python reference (`docs/examples/context_engine_sidecar.py`) and a protocol/design doc (`docs/architecture/sidecar-context-engine.md`). Tests cover an end-to-end `assemble` round-trip through a real subprocess and spawn-failure fallback. (@houko)
+- **skills: WASM skill runtime now executes in the existing `WasmSandbox`** — `SkillRuntime::Wasm` was a dead stub that returned `RuntimeNotAvailable("WASM skill runtime not yet implemented")`, even though the runtime already shipped a hardened `WasmSandbox` (capability gating, fuel/memory/wall-clock metering, denial-of-wallet host-call reservations from #3532 / #3864 / #3866). Wired the two together so a `[runtime] type = "wasm"` skill actually runs. Routing lives in `librefang-runtime` (`tool_runner/wasm_skill.rs`), not the skills loader: the sandbox and its `host_call` ABI need a `KernelHandle`, and `librefang-skills` must not depend on `librefang-runtime` (circular). The dispatcher branches on `runtime_type == Wasm` and calls `execute_wasm_skill`, which resolves the module path through the same `validate_script_path` containment guard the subprocess runtimes use (now `pub`), reads the `.wasm`/`.wat` bytes, maps the skill's declared `[requirements] capabilities` strings to `Capability` grants (fail-closed: an unrecognised string is logged and dropped, never granted), applies `requirements.timeout_secs`, and feeds the guest the same `{"tool", "input"[, "config"]}` envelope the Python/Node/Shell runtimes use so guest tool-dispatch is runtime-agnostic. Tests cover capability parsing (arg / no-arg / numeric variants and fail-closed garbage), an end-to-end echo module run through the sandbox, and path-traversal rejection. (@houko)
+- **skills: `librefang-skill` Rust SDK for authoring WASM skills** — new crate at `sdk/rust/librefang-skill` (its own workspace root, like the sidecar SDKs) that hides the raw sandbox guest ABI behind one `skill!(handler)` macro plus typed host-call wrappers, so a skill author writes a `fn(Request) -> Result<Value, String>` and nothing else. The macro emits the `alloc` / `execute` exports; `memory` is exported by the `wasm32-unknown-unknown` cdylib automatically. `Request` carries the `{tool, input, config}` envelope; a handler `Err` or malformed envelope surfaces to the agent as `{"error": ...}`. Host functions are exposed under `host::` (`time_now`, `fs_read`/`fs_write`/`fs_list`, `env_read`, `kv_get`/`kv_set`, `net_fetch`, `shell_exec`, `agent_send`, `agent_spawn`) with the capability and fuel cost of each documented; `host_call` / `log` are the escape hatches. The pointer marshaling is gated to `wasm32` while the envelope/pack/dispatch logic is target-agnostic and host-unit-tested (7 tests). Verified end-to-end: a real `cargo build --target wasm32-unknown-unknown` of an SDK-based skill emits a module importing exactly `librefang.host_call` / `librefang.host_log` (no WASI) and exporting `memory` / `alloc` / `execute` — the precise surface `WasmSandbox` instantiates. Ships with an `examples/echo.rs` and a README covering the `Cargo.toml` (`crate-type = ["cdylib"]`, `panic = "abort"`), build command, and matching `skill.toml`. (@houko)
+- **skills: WASM authoring is now first-class end to end (docs, CLI, example)** — supporting pieces so the WASM runtime is actually usable, not just present. (1) **Docs** (`docs/src/app/agent/skills/page.mdx` + zh): the WASM section described a `wasm32-wasi` + `_start` + stdin model that never matched the sandbox and would fail to instantiate (the sandbox provides only the `librefang` host imports, no WASI); rewritten to the real `librefang-skill` SDK flow — `wasm32-unknown-unknown`, the `skill!` macro, the `{tool, input, config}` envelope, the host-call capability/fuel table, and accurate sandbox limits. (2) **`librefang skill create`**: the scaffold hard-coded `entry = "src/main.py"` for every runtime and emitted a `// TODO` stub for anything non-Python; it now generates a correct per-runtime scaffold — for `wasm` a `cdylib` `Cargo.toml` (`librefang-skill` dep, `panic = "abort"`), a `src/lib.rs` with the `skill!` handler, the right `entry`, and the build/copy steps (the Node entry-path bug is fixed in passing). (3) **`librefang skill test`**: WASM skills now run in the real sandbox with no kernel (`execute_wasm_skill` is now `pub` and re-exported from `tool_runner`) — pure-compute tools run locally, capability-bearing host calls report an error rather than the previous "execution skipped". (4) **`publish.rs`**: a `.wasm` entry is now validated to start with the `\0asm` magic, catching an unbuilt placeholder or wrong path before publish; the manifest convention is `entry = "skill.wasm"` at the skill root (the packager excludes `target/`). (5) **Example**: new `examples/custom-skill-wasm/` (the WASM twin of `custom-skill-python`) — builds to a valid `wasm32-unknown-unknown` module verified to carry the `\0asm` magic. (6) **CI**: a path-gated `WASM Skill SDK` job fmt/clippy/tests the SDK and compiles the example for `wasm32-unknown-unknown`, so the SDK (an independent workspace the kernel lanes never build) can't silently drift from the sandbox guest ABI. (@houko)
+- **memory: per-agent `[proactive_memory] extraction_model` override** — #5475. `ProactiveMemoryOverrides` (per-agent override block in `agent.toml`) previously exposed only the three boolean knobs (`enabled`, `auto_memorize`, `auto_retrieve`) that #4870/#4892 added; the LLM extraction model was global-only, so multi-provider deployments had to pick one extractor that may not be reachable from every agent's provider keys. Added `extraction_model: Option<String>` to `ProactiveMemoryOverrides` with the same `provider/model` / `provider:model` / bare-name surface as the global field, plus a `resolve_extraction_model(global)` resolver. Plumbed through a new `CatalogQuery::proactive_memory_extraction_model_for(agent_id)` role-trait method (default returns `None`, real impl in `LibreFangKernel` looks up the agent registry then resolves agent-override → kernel-global → `None`) that `LlmMemoryExtractor::extract_memories_with_agent_id` consults at request-build time to swap the wire-level model name. Driver itself is reused from the boot-time extraction driver — full per-agent driver switching (cross-provider) is a follow-up, documented inline on the new field. Integration test (`crates/librefang-runtime/tests/proactive_memory_extraction_model_override.rs`) builds a stub `KernelHandle` + recording `LlmDriver` to assert: agent override wins over the boot-time model, missing override falls back, and the `provider/` / `provider:` prefix is stripped before the API request. `Copy` removed from `ProactiveMemoryOverrides` (now owns a `String`). Docs updated in `docs/src/app/configuration/page.mdx` under `[proactive_memory]` with a new "Per-agent overrides" subsection. (@houko)
+
+- **sdk(rust): first-party Rust sidecar adapter SDK at `sdk/rust/librefang-sidecar/`** (@houko) — pairs with `sdk/python/librefang/sidecar/`, both implementing the post-#5219 sidecar wire protocol. Same surface on both sides: `Content::*` builders for every `ChannelContent` variant; event builders (`events::ready`, `events::message` + `MessageBuilder`, `events::error`, `events::typing`, `events::qr_ready`, `events::qr_status`); typed inbound `Command` enum with `parse_command(&str)` parsing every variant (`send`, `ready_ack`, `shutdown`, `heartbeat`, `typing`, `reaction`, `interactive`, `stream_start` / `_delta` / `_end`, plus a `Command::Unknown` forward-compat envelope); `SidecarAdapter` async trait with `on_send` (required) and `on_command` / `produce` / `on_shutdown` defaults; `run_stdio(adapter)` driver that owns the stdin reader, stdout writer, `ready` re-announce handshake (bounded by `ready_max_attempts` so a pre-#5219 daemon without `ready_ack` doesn't get spammed), graceful shutdown, and routing; `run_stdio_main(schema_fn, build_fn)` one-stop `main` helper that serves the daemon's `--describe` discovery contract before constructing the adapter (builder returns `Result<A, DynError>` so adapters whose `new()` validates required env vars can fail with a structured error instead of panicking before discovery can respond); `with_backoff` helper for platform reconnect (independent of daemon-managed process lifecycle); `Schema` / `Field` for `--describe` self-description payloads. Wire-equivalent with the Python SDK and the Rust supervisor's `SidecarEvent` / `SidecarCommand` — pinned by the shared `conformance/sidecar/corpus/` via `sdk/rust/librefang-sidecar/tests/conformance.rs` (13 tests: producer-side asserts every event builder reproduces its corpus frame, consumer-side asserts every command corpus parses into the expected typed `Command`; coverage guards refuse a corpus entry with no assertion on either side, mirroring the Python suite's `EVENT_PRODUCER_SKIP` discipline). Lives as its own independent cargo workspace at `sdk/rust/librefang-sidecar/` so it doesn't pull `librefang-channels` / `librefang-kernel` into adapter authors' dep trees and doesn't contend with the kernel's shared `target/`. `cargo test` → 16 unit + 13 conformance + 3 doc-tests pass; `cargo clippy --all-targets -- -D warnings` clean; `cargo fmt --check` clean (Linux container build via `Dockerfile.rust-dev`). Includes `examples/echo.rs` — minimal `SidecarAdapter` that echoes every `send` back as a synthetic inbound `message` (no platform integration, suitable as a smoke-test against the supervisor and as a template for new adapters). `docs/architecture/sidecar-protocol.md` lifted from "two independent implementations" to "three" (Rust supervisor + Python SDK + Rust SDK), with the conformance-pair table updated. `docs/architecture/sidecar-channels.md` "polyglot by design" paragraph dropped its "unblocked future work" hedge and now lists the two SDKs side-by-side with their respective trade-offs.
+- **docs(architecture): canonical references for the Rust sidecar SDK and the Rust Telegram adapter** (@houko) — the Rust sidecar SDK (#5821) and the Rust Telegram adapter (#5831) both shipped with crate-level READMEs but no entry under `docs/architecture/`, so a reader following the project's documentation convention (the same place `sidecar-channels.md` and `sidecar-protocol.md` live) had no landing page. Added `docs/architecture/rust-sidecar-sdk.md` covering the SDK's trait + type surface (`SidecarAdapter`, `Command`, `Content`, `MessageBuilder`, `Schema`), the `run_stdio_main(schema_fn, build_fn)` lazy-build pattern that lets `--describe` discovery succeed before required env vars are set, panic isolation, `with_backoff`, the conformance-corpus pinning, and the common pitfalls (spawned-future-outliving-produce, mutex-across-await, stdout-must-be-reserved, recoverable-vs-fatal-errors-in-produce). Added `docs/architecture/rust-telegram-sidecar.md` covering the adapter's five-layer architecture (`api/` → `format/` → `translator.rs` → `dispatcher.rs` → `adapter.rs`), the inbound/outbound dataflow, the Markdown → HTML → sanitised → UTF-16-chunked text-rendering pipeline (including the Private-Use-Area sentinel scheme that prevents inline-code placeholder collision and the tag-aware chunker that preserves `<a href="…">` attributes across chunk boundaries), the security model (`BotClient::redact`, allowlist-on-every-event-kind, MediaGroup-recursion-cap, strict FileData byte decode), the 429 retry shape with `MAX_RETRY_AFTER_SECS = 300` cap, and the three deliberate Python-parity divergences (`parse_command` UTF-16 vs whitespace split, MediaGroup > 10 chunked vs `ValueError`, `channel`-chat-type not treated as group). Updated `docs/architecture/sidecar-channels.md` and `docs/architecture/sidecar-protocol.md` to link to both new pages so the existing SDK-bullet readers can find them. Updated `sdk/rust/librefang-sidecar/README.md` and `sdk/rust/librefang-sidecar-telegram/README.md` to point at their respective canonical reference pages.
+- **channels(rust): first-party Rust Telegram sidecar adapter at `sdk/rust/librefang-sidecar-telegram/`** (@houko) — feature-parity port of `sdk/python/librefang/sidecar/adapters/telegram.py` written against the Rust `librefang-sidecar` SDK that merged in #5821. Capabilities declared: `typing`, `reaction`, `interactive`, `thread`, `streaming`. Bot API surface covered: `getUpdates` long-poll with exponential backoff + cancel-safe yields, `sendMessage` (Markdown → Telegram-HTML via a sanitiser that allowlist-checks tags / href schemes and balances unclosed tags + 4096-UTF-16-unit chunker), `editMessageText` (with plain-text fallback on "can't parse entities"), `deleteMessage`, `sendChatAction(typing)`, `setMessageReaction` (same emoji-translation map as Python — ⏳ → 👀, ⚙️ → ⚡, ✅ → 🎉 or cleared depending on `TELEGRAM_CLEAR_DONE_REACTION`, ❌ → 👎), `sendPhoto` / `sendDocument` / `sendVoice` / `sendAudio` / `sendVideo` / `sendAnimation` / `sendSticker` / `sendLocation` / `sendMediaGroup` (2–10 photos/videos) / `sendPoll` (quiz / regular with explanation) — all via Bot API URL pass-through. Inline file bytes (`Content::FileData`) detect Ogg/Opus magic and route to `sendVoice` else `sendDocument` via multi-part upload. Inbound translation: `text`, leading `bot_command` entity becomes `Content::Command{name,args}` (with `@botname` suffix stripped), photo → `Content::Image` (resolved via `getFile`), document → `Content::File` (with voice-extension auto-routing), audio / voice / animation / video / video_note → respective rich-content variants, location → `Content::Location`, sticker → `Content::Sticker{file_id}`, contact → text label, `callback_query` → `Content::ButtonCallback` with the originating `message_id` / `chat_id` in metadata, `poll_answer` → `Content::PollAnswer{poll_id, option_ids}`. Reply context: `[Replying to <sender>: "<truncated>"]` prefixed onto text or image caption. Streaming: `StreamStart` sends a placeholder, `StreamDelta` accumulates and edits the same message debounced at 1 second, `StreamEnd` flushes. Access control via `ALLOWED_USERS` CSV of numeric user IDs or `@usernames` (case-insensitive, leading `@` optional; empty list ⇒ open). Schema served via `--describe`: `TELEGRAM_BOT_TOKEN` (secret, required), `ALLOWED_USERS` (list, advanced), `TELEGRAM_CLEAR_DONE_REACTION` (bool, advanced). HTTP via `reqwest` with `rustls-tls` (no system OpenSSL). Independent cargo workspace; no transitive into the kernel binary. `cargo test` → 19 unit tests pass (UTF-16 chunking, Markdown → HTML, sanitiser tag-allowlist + href safety + unclosed-tag balancing); `cargo clippy --all-targets -- -D warnings` clean; `cargo fmt --check` clean. Configure via a `[[sidecar_channels]]` block: `command = "/abs/path/to/target/release/librefang-sidecar-telegram"`, `[sidecar_channels.secrets] TELEGRAM_BOT_TOKEN = "<botfather-token>"`.
 - **cli: restore `librefang channel` subcommand as a sidecar-only group** — #5463 deleted the entire `Commands::Channel(ChannelCommands)` group on the same "everything was broken anyway" theory that took out `ChannelsPage.tsx`. Same wrong call. Restored as four sidecar-aware subcommands driving the surviving daemon endpoints: (@houko)
   - `librefang channel list` → `GET /api/channels` → table (NAME, KIND, CONFIGURED, TOKEN, 24H MSGS). (@houko)
   - `librefang channel reload` → `POST /api/channels/reload` → hot-reload `[[sidecar_channels]]` from disk without a daemon restart. (@houko)
   - `librefang channel setup [<NAME>]` → schema-driven prompt against `GET /api/channels` (consumes the per-row `fields[]` describe schema); non-secret fields pre-fill from `f.value`, secret fields with `has_value=true` render `(set — leave blank to keep)` so an empty submission preserves the stored secret. POSTs to `POST /api/channels/sidecar/{name}/configure` and shows `restart_required` / `shadowed_secrets_warning` from the response. Without `<NAME>` it shows an interactive picker over unconfigured rows. (@houko)
   - `librefang channel rm <NAME>` → strips the matching `[[sidecar_channels]]` entry from `~/.librefang/config.toml` via `toml_edit`, then best-effort hot-reload (warns + continues if no daemon is running, so the change still applies on next start). (@houko)
   Five `clap`-parse `assert!(matches!(...))` tests added covering `list`, `setup`, `setup <name>`, `reload`, `rm <name>`. The pre-#5463 `test` / `enable` / `disable` arms are **not** restored — sidecars surface their own health via stdout logs (no in-band `/test` endpoint), and the presence of the `[[sidecar_channels]]` block is the only on/off signal (`rm` is the replacement). (@houko)
+- **channels(rust): ship the `librefang-sidecar-telegram` binary in the platform release tarballs** (@houko) — #5936 follow-up to #5831, which shipped the adapter source but left operators to install a Rust toolchain and `cargo build` it themselves.
+  The release pipeline (`release.yml` + its manual mirror `release-cli.yml`) now builds the sidecar for each channel-capable native target (macOS x86_64 / aarch64, linux-gnu x86_64 / aarch64, musl x86_64 / aarch64, Windows x86_64 / aarch64) and bundles the binary **inside** the existing per-target archive next to `librefang` — no new release assets, so the cosign `SHA256SUMS` manifest and `EXPECTED_PLATFORMS` count are unchanged.
+  The Android and `mini` variants are deliberately skipped (neither carries channels).
+  `librefang update` therefore lands the binary at `~/.librefang/bin/librefang-sidecar-telegram` (`.exe` on Windows), and the daemon auto-resolves it: a sidecar channel whose `command` is empty or the bare stem `librefang-sidecar-telegram` is resolved against the daemon's own executable directory, then `~/.librefang/bin/`, then PATH; an absolute / relative path or any other program (`python3 -m …`) is treated as explicit operator intent and passed through unchanged.
+  `install.sh` / `install.ps1` install the bundled binary when present and stay silent on older tarballs that lack it.
+
+### Fixed
+
+- **runtime(web_fetch): strip credential headers across redirect-origin boundaries** — the manual per-hop redirect loop (`send_with_pinned_redirects`, introduced to close the DNS-rebinding TOCTOU window by re-pinning every hop) re-attached the caller's headers verbatim on every hop, including cross-origin 3xx targets. reqwest's built-in redirect machinery removes `Authorization` / `Cookie` / `Proxy-Authorization` when a redirect leaves the origin, but the hand-written loop bypassed that, so an attacker-controlled public host could `302 Location: https://attacker.example/` and harvest the caller's bearer token or session cookie. The loop now mirrors reqwest's `remove_sensitive_headers`: a `crosses_origin` check (scheme / host / port) latches a `credentials_stripped` flag the first time any hop leaves the original origin, after which the sensitive headers (`authorization`, `cookie`, `cookie2`, `proxy-authorization`, `www-authenticate`, case-insensitive) are never re-attached for the rest of the chain — same-origin hops keep them, non-sensitive caller headers always pass through. The fix lands in the shared helper, so both `web_fetch` and `web_fetch_to_file` are covered. New tests: `test_cross_host_redirect_strips_credentials`, `test_same_host_redirect_preserves_credentials`, `test_redirect_to_metadata_ip_blocked_on_later_hop`, plus unit coverage for the two helpers. (@houko)
+
+- **llm: retry transport-layer errors and make the retry count configurable (#10)** — the HTTP-API drivers' retry loop only covered server-side throttling (429 / 529 / 503); transport failures from `reqwest::send()` — connection refused, TLS record-layer alerts, read timeouts — returned immediately via `?` and never entered the loop, so a single network hiccup on the only configured provider failed the whole turn instead of being retried (the outer `FallbackChain` was the only safety net, useless in single-provider setups). Transport errors now go through the same attempt/backoff decision as a 429, via a new `backoff::transport_error_is_retryable` that classifies a `reqwest::Error` by its structured predicates (`is_timeout` / `is_connect` / `is_request`) with a substring fallback to the shared transient classifier; applied across anthropic, openai, gemini, bedrock, and vertex_ai (complete + stream). The retry cap, previously hard-coded to 3 in six hand-copied loops, is now configurable through `DriverConfig.max_retries` (serde default 3 — behaviour unchanged; 0 disables in-driver retries) and a per-provider `provider_max_retries` map in `config.toml` mirroring `provider_request_timeout_secs`, readable/writable via the API config surface and classified restart-required in the config-reload plan. (@houko)
+
+- **Plugin seccomp allowlist was missing glibc / language-runtime start-up syscalls** (`rseq`, `set_robust_list`, `rt_sigtimedwait`, `statx`, `sched_getaffinity`, …) (#2) (@houko).
+  With `seccomp-sandbox` off by default the gap was never exercised; enabling it by default exposed that every hook subprocess was `SIGSYS`-killed before reading stdin (observed as "Broken pipe"). The allowlist now covers the universal start-up set on both x86_64 and aarch64.
+- **Plugin `unshare` namespace probe checked only `unshare --help`, not whether the kernel actually grants the namespace** (#2) (@houko).
+  In unprivileged containers / hardened CI the binary exists but `CLONE_NEWNET` / `CLONE_NEWNS` returns EPERM, so wrapping a deny-network / deny-filesystem hook with `unshare` killed the child instead of failing open to the env-var / Landlock isolation. The probe now runs `unshare --<ns> -- true` and only wraps when the namespace can be created — important now that deny-by-default is the default posture.
+- **security(approval): `trusted_senders` no longer waives approval for high-risk tools** — the trusted-sender escape hatch was all-or-nothing: any `user_id` in `trusted_senders` made `requires_approval_with_context` return `false` for *every* tool — including `shell_exec`, `file_write`, `agent_spawn`, and the rest — and made `is_tool_denied_with_context` bypass channel deny rules for all of them too, so a single trusted id silently disabled the entire approval gate. The trust bypass now applies only to tools below `High` risk (`ApprovalManager::classify_risk`): for high-risk and Critical tools the bypass is skipped, so a gate the operator already configured (via `require_approval` or a channel deny rule) stays in force even for a trusted sender. `classify_risk` is extended to classify the control-plane tools (`agent_spawn`, `agent_kill`, `config_set`, `kernel_reload`) as `Critical` alongside `shell_exec`, matching their blast radius; `RiskLevel` derives `Ord` so the gate can compare severities. Tests: `test_context_trusted_sender_bypasses_low_risk_only` (trusted + Critical/High still gated, trusted + low-risk still exempt, untrusted unaffected) and `test_context_trusted_sender_channel_deny_high_risk_still_enforced` (channel deny on a high-risk tool survives trust, deny on a low-risk tool is still bypassed). (@houko)
+- **test(runtime): fix a Windows-only failure in `tool_runner::tests::shell::test_capability_enforcement_allowed`** — the test resolves a path under a nonexistent intermediate directory and asserts the error reads as file-not-found rather than permission-denied, but its accepted-phrase OR-chain only covered the Unix wordings ("No such file", "does not exist", …). On Windows a missing intermediate directory surfaces as `ERROR_PATH_NOT_FOUND` (os error 3) — "The system cannot find the path specified" — which matched none of them, so the `Test / Windows` shard went red on `main` independent of any feature change. Added `cannot find` to the OR-chain, which covers both the path form (os error 3) and the file form `ERROR_FILE_NOT_FOUND` (os error 2, "cannot find the file specified"). Test-only; no production behaviour change. (@houko)
+
+- **memory: audit-sweep on the proactive-memory subsystem — 5 CRITICAL + 7 HIGH findings (#5839)** — closes a split-brain in `list()` / `get()` (now read from the semantic store directly; the best-effort KV `memory:*` mirror is deleted entirely so future divergence is structurally impossible); drops the silent raw-transcript fallback in `ProactiveMemory::add` when extraction yields no structured signal; honors per-row `metadata["confidence"]` on insert (the LLM extractor prompt now requests it explicitly, so `extraction_threshold` is finally live); reworks decay as `rate / boost` (cap MAX_BOOST=4) so popular memories decay slower but strictly monotonically (the previous formula clamped the post-boost product back to 1.0, freezing every `access_count >= 2` memory at confidence 1.0 forever); stamps `deleted_at` on every `forget*` path so the retention sweep can finally hard-delete user-/API-initiated soft-deletes (previously only TTL decay stamped it, so manual deletes leaked their embedding BLOB forever); gates 12 memory write endpoints (`POST /api/memory`, `PUT /api/memory/items/{id}`, `DELETE`, bulk-delete, reset, clear-level, consolidate, cleanup, export, import, decay, relations) through the namespace guard with proper `AuthDenied → 403` plumbing. Also tightens `duplicate_threshold` default 0.5 → 0.85 (mem0's near-duplicate cut-off) and the `decide_action` UPDATE thresholds 0.5/0.6 → 0.7/0.8 so a topically-related but semantically-different memory no longer silently UPDATEs over an existing row; bounds `format_context` at the new configurable `ProactiveMemoryConfig::format_context_max_chars` (default 8000 chars / ~2000 tokens) with a "[+N omitted]" footer; detaches the every-10-calls auto-consolidate to `tokio::spawn` (inside a `tracing::Instrument` span tagged `task = "auto_consolidate"`) so the agent's hot path no longer waits on an O(n²) merge plus SQLite tx; threads the new `duplicate_threshold` into the periodic `ConsolidationEngine` via a new `set_duplicate_threshold` setter on `MemorySubstrate`, wired from both kernel boot and the `UpdateProactiveMemory` hot-reload op so the global sweep and the per-agent on-demand consolidate agree; tightens LLM-extraction validation (4-char minimum content, allowlist-fuzzy-matched category with case + plural tolerance, MAX_MEMORIES_PER_EXTRACTION = 20 cap). Drive-by: collapsed a clippy::manual_option_zip in `kernel/background_lifecycle.rs:88` (failed workspace clippy gate). **Operator-facing behaviour changes worth noting on upgrade:** (1) Audit-log shape: requests authenticated by the root `api_key` now carry a synthetic Owner-equivalent `AuthenticatedApiUser{name: "root", user_id: ROOT_API_KEY_USER_ID}` instead of the previous "trusted but anonymous" `None`, so every audit row written through `record_with_context(..., api_user.user_id, ...)` (`budget.rs`, `audit.rs`, memory-route denials, etc.) stamps a `user_id` for root-key callers where it previously stamped null. Queries grouped by `user_id` will see a new "root" bucket appear after upgrade. The synthetic id is a constant UUID (`00000000-0000-0000-0000-72006f0074a0`) outside the `LIBREFANG_USER_NAMESPACE` v5 hash space, so a real `[users] name = "root"` entry in `config.toml` cannot collide with it. (2) `POST /api/memory` with content the extractor cannot parse no longer creates a row — pre-fix it silently captured the whole concatenated message transcript as a session memory with no category, which was the dominant source of `category=null` rows on the dashboard. Operators that legitimately need raw-content capture should use `ProactiveMemoryStore::add_with_level` (the trait-impl path explicitly stores raw content) instead of the `add` trait method. (@houko)
+
+- **ci(discussion-to-issue): repair the daily backfill — `gh api --jq` does not accept `jq`'s `--arg`** — #5753. The follow-up commit on #3938 switched the backfill category filter to `gh api "repos/${REPO}/discussions" --paginate --jq --arg cat "$CAT" '.[] | select(...)'` to avoid shell-interpolating `${CAT}` into the jq source. `gh api --jq` only takes a single bare filter string — it does NOT proxy `--arg` through to jq — so `gh` parsed the call as `--jq=--arg` followed by three extra positional arguments and rejected it before any HTTP request, with `accepts 1 arg(s), received 4`. Every daily run since #3938 merged on 2026-04-28 has been red (27 consecutive failures). Fix is to drop `gh api`'s `--jq` flag and pipe the raw JSON to standalone `jq`, which does support `--arg` — preserving the original commit's shell-injection hardening intent (no `${CAT}` interpolated into the jq source) while restoring a working invocation. (@houko)
+
+- **xtask(changelog): take only the trailing `(#N)` from each `git log` subject** (@houko) — `extract_pr_numbers` grepped every `#N` on a oneline subject, so an in-title cross-reference (an issue `fixes #5740`, a prior PR `post-#5053`, or a "part N of M" marker `(#2)`) was treated as its own PR and fed to `gh pr view`, pulling unrelated ancient or unmerged PRs into the generated release notes — a beta.15 changelog run spuriously resolved `#2`, `#6`, `#10`, and `#5053`. A GitHub squash merge always appends the PR reference as the last `(#N)` of the subject line, so the parser now keeps only the trailing match per line. The line-parsing logic is split into a pure `parse_pr_numbers` helper with unit coverage for trailing-ref capture, in-title cross-reference rejection, merge-commit subjects, no-ref lines, dedup/sort, and empty input.
 
 ### Changed
 
@@ -81,6 +714,8 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ### Fixed
 
+- **Cascade leak: chat-template tokenizer bleed via `[User]` line-leader** — `is_cascade_leak` now detects a single envelope-standalone marker (`[User]`/`[Stranger]`/`[Forwarded]`) as a line-leader when preceded by a silent sentinel (`NO_REPLY`, `[no reply needed]`, etc.). Incident 2026-05-20: model emitted `NO_REPLY\n\n[User]\nEhi puoi dirmi…` — the sentinel led, the chat template continued into the next-turn header, and the hallucinated question was dispatched verbatim. The new `has_envelope_marker_as_line_leader` gates on `is_silent_response(before)` so explanatory replies quoting the markers are not silenced. (@f-liva)
+- **`channels`: channel-side `/commands` filter by `account_id` so multi-bot deployments stop collapsing to the first-registered agent, and `/agent` no longer leaks user-defaults across bots** (closes #5672). Every command match arm in `handle_command` (`/btw`, `/new`, `/reboot`, `/compact`, `/model`, `/stop`, `/usage`, `/think`) plus the `model:` interactive-button callback in `dispatch_message` called the context-less `AgentRouter::resolve(channel_type, platform_id, user_key)` to pick the target agent. `resolve` has no `account_id` parameter — it probes only the plain `channel_key` (`"telegram"`) for the per-channel default — but the per-bot defaults registered by `bridge.rs` are stored under the qualified `"telegram:<account_id>"` key (see #2183 / #4861). With no plain-`"telegram"` entry to match, the lookup fell through to the system default, which the first-registered telegram bot also set (`channel_bridge.rs` "if !system_default_set" branch), so `/model` (and every other command) in `bot-b` / `bot-c` always reported `bot-a`'s agent. The non-command message dispatcher at `dispatch_message` already routed correctly because it built a `BindingContext` and called `resolve_with_context`; the regression was strictly in the command arms. Layer B: `/agent <name>` wrote the user's selection via `router.set_user_default(sender.platform_id, agent_id)`, keyed by `platform_id` only (no channel scope). The same lookup is then probed at step 2 of every resolver before the per-channel default, so a `/agent agent-C` issued in `bot-a` silently overrode every other bot's `default_agent` for that user — and stayed leaked until daemon restart (`user_defaults` is in-memory `DashMap`, never persisted). Fix is a single architectural change applied in two places: (1) `AgentRouter.user_defaults` is now keyed by `(Option<channel_account_key>, user_key)` where `channel_account_key = Some("<channel>:<account_id>")` for per-bot scope or `None` for legacy channel-agnostic global scope; `resolve_with_context` probes the per-channel-account entry first and falls back to the global. `set_user_default(user_key, agent)` keeps its legacy global semantics (relied on by `tests/bridge_integration_test.rs` and `benches/dispatch.rs`); a new `set_user_default_for_channel(channel_account_key, user_key, agent)` is the production-path helper. (2) `handle_command` gains an `account_id: Option<&str>` parameter, the two dispatch-site callers in `dispatch_message` thread `message.metadata["account_id"]` through, and the internal `resolve_for_command` closure builds a `BindingContext` per call and routes through `resolve_with_context`; `/agent` writes via `set_user_default_for_channel` when an `account_id` is known and falls back to the legacy global write for CLI / single-bot channels. `resolve_or_fallback`'s auto-bind on first-message (`bridge.rs` line 3017) is migrated the same way — otherwise the fallback path would silently re-introduce the cross-bot leak. Four new regression tests pin the fix: `router::tests::user_default_does_not_leak_across_bots`, `router::tests::channel_scoped_user_default_overrides_global`, `router::tests::legacy_set_user_default_is_channel_agnostic` (existing tests + benches continue to compile), `bridge::tests::command_resolution_respects_account_id` (records the `set_model(agent_id, _)` call sequence via a recording mock and asserts `[agent_b, agent_c]` for `/model` issued in `bot-b` then `bot-c` — pre-fix this would be `[agent_a, agent_a]`), `bridge::tests::agent_command_does_not_leak_across_bots` (asserts the post-`/agent` `resolve_with_context` for `bot-b` returns `bot-b`'s default, not `bot-a`'s override). `cargo test -p librefang-channels --lib` 465/465 green (including the 6 new + the pre-existing `test_multi_bot_account_id_routing` from #2183), `cargo clippy -p librefang-channels --all-targets -- -D warnings` clean, `cargo check --workspace --lib` clean. Same architectural class as #4868 / #4905 (which scoped `/new`'s session reset to the calling channel but left the agent resolution itself context-less) and #2183 / #4861 (which added the account-qualified `channel_defaults` lookup but never migrated the command-side callers to use `resolve_with_context`). (@houko)
 - **`channels/matrix-sidecar`: persist `/sync` `since_token` across restarts so respawned adapters don't replay the recent timeline as fresh inbound** — `MatrixAdapter.since_token` (`sdk/python/librefang/sidecar/adapters/matrix.py:766`) was an instance attribute with no disk backing. Every supervisor respawn (`SidecarAdapter` restart loop in `crates/librefang-channels/src/sidecar.rs`) re-instantiated the adapter with `since_token = None`, so the first `/sync` returned the most-recent ~10 timeline events per joined room (the limit baked into `_build_sync_url`'s filter), each one emitted as a fresh inbound `message` event because the in-memory `_seen` dedupe set is also blown away on respawn. The daemon then routed every one to its bound or default agent, and the bot re-responded to every old DM. Symptom on a single-bot setup: every `docker compose restart` produced N duplicate replies, N = sum of recent events across all joined rooms. Fix persists the cursor to `$LIBREFANG_HOME/sidecar-state/matrix-<safe-user>-since.txt` (atomic `tmp + os.replace`) after every successful `/sync` and reloads it in `__init__`; the file is keyed by `user_id` with `[^\w\-_.@]` swapped for `_` so multi-bot setups (different `MATRIX_ACCOUNT_ID` values pointing at different `MATRIX_USER_ID`s) don't collide. Graceful degradation: load-time `OSError` logs `WARN` and falls back to `since_token = None`, persist-time `OSError` logs `WARN` and lets the next `/sync` retry; `$LIBREFANG_HOME` unset or empty disables persistence entirely (test confirms `_persist_since_token()` is a no-op rather than a crash). The in-memory `_seen` set is unchanged — it remains the second-level dedupe for the `/sync delayed-success-then-retry` case the module header already documents. Seven new tests in `sdk/python/tests/test_matrix_adapter.py`: state-path derivation from `$LIBREFANG_HOME`, user_id sanitisation (`:` → `_`), cross-instance persistence (`Adapter#1.process_sync_body → Adapter#2.__init__ reads cursor`), missing-file cold start, unreadable-file fallback to `None`, atomic-replace (no leftover `.tmp`), no-home-defensive no-crash. All 80 matrix-adapter tests green (`cd sdk/python && python3 -m pytest tests/test_matrix_adapter.py -k "since or process_sync"` → 16/16; the broader suite's pre-existing `test_on_send_text_path` asyncio failure is unrelated — missing `pytest-asyncio` in this dev env). No protocol change, no Rust-side touch. (@neo-wanderer)
 - **`api-error-generic` Fluent key defined across all 6 locales — 41+ HTTP 500 handlers stop returning the literal key as the response body** (audit `docs/issues/api-error-generic-missing-fluent-key.md`, Severity: Critical). 41 call sites in `crates/librefang-api/src/routes/{agents,tools_sessions}.rs` (and elsewhere — `rg -c 'api-error-generic'` across `crates/librefang-api/src/routes/`) build their 500 response body as `t_args("api-error-generic", &[("error", &e.to_string())])`, but the key was never defined in any of `crates/librefang-types/locales/{en,ja,zh-CN,de,fr,es}/errors.ftl`. The fallback at `i18n.rs:163-164` returns `key.to_string()` on a missing-key lookup, so the `{$error}` interpolation never ran — every one of those 5xx responses surfaced the literal `"api-error-generic"` to the client with the actual `e.to_string()` silently dropped. This swallowed the diagnostic context behind every 500 in `agents` + `tools_sessions` routes (including the bug classes `agent-not-found-returns-500`, `rusqlite-errors-leak`, and the `agent_clone` 500-on-`AgentAlreadyExists` case). Stopgap fix per the audit doc: define the key in every locale. English uses bare `{ $error }` (the underlying error string is already in English for now); the five other locales prefix with a localized `Error / エラー / 错误 / Fehler / Erreur / Error: ` so the localized prefix differs across bundles (the per-locale assertion in `all_languages_have_same_keys` requires non-English bundles emit a distinct rendered string). The long-term remediation is to route every 500 through a typed `MemoryRouteError`-style helper (per `routes/memory.rs:198-215`), audited separately. Two regression guards land alongside: `api-error-generic` is appended to the key list in `all_languages_have_same_keys` so a new locale or a stale `errors.ftl` cannot silently regress this, and the new dedicated `api_error_generic_interpolates_underlying_error` test exercises every supported locale with a sample `$error` and asserts (a) the rendered body is not the literal key and (b) the underlying error string is contained verbatim. All 22 `i18n::tests` green; `cargo test -p librefang-types --lib i18n`. (@houko)
 - **`history_fold` + web-augment search-query generation: aux-LLM requests pin `response_format = Some(ResponseFormat::Json)`** (closes #5287). Two aux-LLM call sites in `librefang-runtime` were building `CompletionRequest` with `response_format: None` even though their system prompts explicitly asked for a JSON response — strict-output providers (DeepSeek `json_object` mode, OpenAI, Mistral, Gemini) require the request flag set in lockstep with the prompt, and without it they emit free-form prose that the downstream JSON parser silently rejects. (1) `crates/librefang-runtime/src/history_fold.rs:603` (the `summarise_batch` aux call): system prompt asks for "summaries of tool outputs as a JSON array, echoing the supplied ids verbatim", `parse_labeled_summaries` then failed with `JSON parse failed: invalid number at line 1 column 3`, and the fold degraded to "applying raw response as bulk summary" — losing per-`tool_use_id` granularity (`tool_use_id` / `tool_name` / `is_error` / `status`) every few turns on long sessions. Most visible on DeepSeek-only setups (`deepseek-v4-flash` + `deepseek-v4-pro`) where the WARN log spammed. (2) `crates/librefang-runtime/src/agent_loop/web_augment.rs:98` (the `generate_search_queries` aux call): system prompt (`SEARCH_QUERY_GEN_PROMPT`) says `"Respond ONLY with a JSON object: {"queries": ["query1", "query2"]}"`, parser uses `text.find('{')? ... rfind('}')?` so a prose response with no braces returns `None`, `generate_search_queries` returns `None`, and `web_search_augment` falls back to running the raw user message verbatim as a search query. The failure was completely silent — no log, just degraded retrieval relevance. The same precedent already exists in sibling aux paths — `crates/librefang-runtime/src/proactive_memory.rs:449,608` pin `Some(ResponseFormat::Json)` for the same class of structured-output aux call. Providers that don't honour the flag (Anthropic on non-tool-call shapes) ignore it without error; existing parser tolerances (`parse_labeled_summaries`'s `strip_code_fence` + single-object lift; web_augment's outermost-brace extraction) are preserved. Regression guards: `fold_request_pins_response_format_json_for_aux_llm` (history_fold) and `search_query_request_pins_response_format_json` (web_augment) each record the aux request's `response_format` via a `ResponseFormatRecordingDriver` mock and assert `Some(ResponseFormat::Json)` — wired alongside the existing `MaxTokensRecordingDriver` so future aux-budget edits don't accidentally drop the flag at either site. Other `response_format: None` occurrences in the runtime crate were audited and confirmed correct: `compactor.rs:715,847` are free-text summary prompts (no JSON expected); `aux_client.rs:397,535` and `routing.rs:199` are all inside `#[cfg(test)] mod tests`. **Cross-crate audit follow-up**: the same defect class also lived in `crates/librefang-kernel/src/skill_workshop/llm_review.rs:126` — `SYSTEM_PROMPT` requires `{"accept": bool, "reason": "..."}` JSON verbatim, but `response_format: None` let DeepSeek / Qwen / older Mistral append a prose preamble and silently stall every workshop candidate as `ReviewDecision::Indeterminate` behind a parse error nobody triages (default `approval_policy = "pending"` makes the queue grow without surfacing). Fixed inline with a third regression guard, `pins_response_format_json`, alongside the existing two; `librefang-kernel::skill_workshop::llm_review` tests pass (11/11). Also: `web_augment.rs` fallback path (LLM query generation returns no parseable queries → fall back to verbatim user message as the single search query) now emits a `debug!` log so operators can spot a degraded provider — the fix prevents the failure mode for well-behaved providers, but a misbehaving Ollama / older Anthropic that still ignores the flag was previously fully silent. (@houko)
@@ -89,13 +724,16 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 - **`/api/status` + `/api/dashboard/snapshot` session-count uses indexed `COUNT(*)` instead of decoding every session blob** (audit `docs/issues/list-sessions-decode-on-poll.md`, Severity: Critical, Performance). Two call sites in `crates/librefang-api/src/routes/config.rs` (lines 235 and 3009 — the `/api/status` health probe and the dashboard 5 s snapshot poll respectively) computed `session_count` via `substrate.list_sessions().map(|s| s.len())`. `list_sessions()` returns `Vec<serde_json::Value>` — each row's full rmp-encoded message history is decoded just to compute `.len()`, for what is morphologically a `SELECT COUNT(*)`. The dashboard polls `/api/dashboard/snapshot` every 5 s with `refetchIntervalInBackground: false`, so every foreground operator hits it continuously. At 100 sessions × 200 KB each the daemon decoded ~20 MB of message bodies per poll (≈ 4 MB/s on a 5 s cadence, doubled if both `/api/status` and `/api/dashboard/snapshot` are polled concurrently) — needless rmp deserializer allocation pressure on the hot path. `MemorySubstrate::count_sessions()` (an indexed `SELECT COUNT(*)` over `sessions`) already exists in `crates/librefang-memory/src/substrate.rs:391` and is what the route should have been calling. Both sites now use it; regression test in `crates/librefang-api/tests/config_status_session_count_test.rs` pins that the wire `session_count` actually responds to substrate state (catches a future `.unwrap_or(0)` silent-pin regression on either route). (@houko)
 - **Dashboard `AuditPage` Export downloads no longer 401 for every user** (audit `docs/issues/audit-export-401.md`, Severity: Critical). `AuditPage.tsx:110` 's `downloadExport` helper read the bearer token via the bare `safeStorageGet("librefang-api-key")` accessor, which **only checks `localStorage`**. The current credential layer (`api.ts:1038-1047 getStoredApiKey()`) prefers `sessionStorage` and #3620 explicitly wipes `localStorage` on save (`api.ts:3595-3596`) so the token has been in `sessionStorage` for every signed-in user since that release. Result: every "Export audit log" click read an empty token, sent `Authorization: Bearer ` (one trailing space, no value), the server replied 401, and the `ApiError` surfaced to the user with no actionable hint. Broken for every user since #3620. Fix: drop the inline `safeStorageGet` and use the canonical `getStoredApiKey` accessor from `api.ts` (the same one `authHeader()` and every other token consumer goes through). The other `safeStorageGet` call sites in `pages/` were audited and are correctly scoped (`TerminalPage.tsx`'s `terminal.fontSize` + hint keys, `ChatPage.tsx`'s `librefang.chat.show_hand_agents`) — none of them target `librefang-api-key`. (@houko)
 - **CI: repair three pre-existing `[Unreleased]`/main breakers inherited by every open PR.** Three checks were red on `main` itself (and therefore on every PR that merged it), unrelated to the PR contents: (1) `CHANGELOG Attribution (full [Unreleased])` failed because the `cli: restore librefang channel` entry carried its `(@houko)` only on the trailing continuation line, while `--all-unreleased` requires `(@user)` on every bullet incl. the four nested sub-command bullets — each now suffixed. (2) Dashboard `build` (vitest) failed 9 `ProvidersPage.test.tsx` cases with `No "useCredentialPools" export is defined on the "../lib/queries/providers" mock` — `ProvidersPage.tsx` calls `useCredentialPools()` (CredentialPoolsSection, #5459 era) but the test's `vi.mock` never stubbed it; added a default `vi.fn(() => ({ data: undefined, isLoading: false, error: null }))` so the section renders its hidden/empty state. (3) `Workspace coverage (llvm-cov)` failed 4 `librefang-migrate::openclaw` tests (`test_full_migration`, `test_json5_full_migration`, `test_json5_channel_extraction`, `test_policy_migration`) which still used `google_chat` as an in-process "witness" channel; #5459 migrated it to a sidecar, so `migrate_channels_from_json` now returns `None` and every channel surfaces as a `report.skipped` `ItemKind::Channel` rather than an import — assertions updated to the all-sidecar contract already pinned by `test_google_chat_channel_records_skipped_after_sidecar_migration`. (@houko)
+- **CI: raise the `Test / Windows` shard timeout 45 → 60 min (match macOS) so a cold cache stops cancelling `main`.** The Windows test job (`ci.yml` `test-windows`, 2 shards) was the dominant red on `main` — nearly every recent push showed `The job has exceeded the maximum execution time of 45m0s` on both shards. The tests themselves pass; the job simply doesn't fit in 45 min when the `rust-cache` is cold. Each shard pays a ~22 min full workspace compile (any `Cargo.lock` change busts the `test-windows-${hashFiles(Cargo.lock)}` key, and recent crate churn — #5852 subprocess transport extraction et al. — busts it often) on top of ~22 min of test execution, landing a warm run at ~45 min (run 26617513861 shard 1 finished at 44m56s) and overrunning on any cold compile. Windows runner I/O + cargo build is ~2× Linux, so adding shards would multiply the 2×-cost compile rather than help; raising the per-shard ceiling to 60 min (the value macOS already uses for the same full-workspace run) absorbs a cold compile and costs nothing on green runs, which end when nextest finishes rather than at the ceiling. Test failure mode only — no production change. (@houko)
 - **`bluesky` sidecar: reply context survives sidecar restart via on-demand XRPC re-fetch** (closes #5452). `parse_notification` stashed the AT Protocol `{root: {uri, cid}, parent: {uri, cid}}` reply struct in an in-process `_thread_cache` LRU (capacity 200) keyed by notification URI, then `_post_status` looked it up on the outbound. After ANY sidecar restart between the inbound mention and the bot's reply (operator restart, supervisor crash-recovery, container redeploy, etc.) the cache was empty, the lookup returned `None`, and the reply posted as a top-level skeet — visible to every follower's feed instead of staying in the thread. The single-string `cmd.user.librefang_user` carrier added in #5439 only round-tripped the URI; AT Protocol needs 4 fields (`root.uri`, `root.cid`, `parent.uri`, `parent.cid`) which don't fit. Fix: `_post_status` on cache-miss now issues one `app.bsky.feed.getPosts?uris=<uri>` XRPC call to re-fetch the post's cid AND its existing `record.reply` chain, reconstructs the `{root, parent}` struct using the exact same root-resolution rules `_compute_reply_ref` uses on the inbound path (post-with-reply → keep its `record.reply.root`; top-level post → `root == parent`), re-populates `_thread_cache` so subsequent chunks in the same `_post_status` call don't re-fetch, and uses the recovered ref. Recovery failure (post deleted, instance unreachable, auth still bad after caller's refresh) emits a WARN naming the URI and falls through to a top-level skeet — same degradation as pre-fix but with operator visibility instead of silent mis-threading. `_recover_reply_ref` rejects non-`at://`-prefixed values up-front so a misrouted `librefang_user` from another channel (dingtalk sessionWebhook URL, telegram `@username`) never reaches bsky's XRPC. Cost: one extra XRPC round-trip per cache-miss reply (post-restart, post-eviction). Verification: `cd sdk/python && pytest tests/test_bluesky_adapter.py` — **49 passed** (was 44; +5 regression guards: recovery happy-path, deep-thread root preservation, multi-chunk re-uses recovered ref without re-fetching, recovery-failure degrades-to-unthreaded WARN, cross-channel garbage rejection). Pre-existing cold-cache test (`test_post_status_cold_cache_falls_back_to_unthreaded`) renamed to `test_post_status_cold_cache_recovery_failure_falls_back_to_unthreaded` and updated to assert the getPosts re-fetch fires + 404s + then degrades — the renamed assertion shape pins the recovery path is actually attempted, not bypassed. **Not addressed in this PR** (deliberately scoped): the structural option-3 fix from the issue (widen `SidecarSendParams` with a `metadata: HashMap<String, Value>` bytewise-round-tripped field that would close this class for bluesky, wechat, wecom, and any future sidecar needing > 1 field of correlation state) is a separate protocol change spanning Rust + Python SDK; this PR is option-1 (narrowest blast radius, bluesky-only). (@houko)
 - **`librefang-runtime::pii_filter` partial-redacts WhatsApp JIDs** — the `phone` built-in pattern (`(?:\+\d{1,3}[\s\-]?)?\(?\d{2,4}\)?[\s.\-]?\d{3,4}[\s.\-]?\d{3,4}`) greedily consumed the leading digits of a WhatsApp JID (`<digits>@lid`, `<digits>@s.whatsapp.net`, `<digits>@c.us`, `<digits>@g.us`, `<digits>@broadcast`, `<digits>@newsletter`), leaving the trailing digits and the `@<domain>` suffix in the output (e.g. `393511083257@lid` → `[REDACTED]257@lid`). This is both an information leak (tail digits + suffix) and a correctness bug for downstream consumers that parse the redacted text expecting either a full JID or a full `[REDACTED]` placeholder. `regex_lite` has no lookahead so a negative `(?!@(?:lid|…))` anchor on `phone` isn't available; the fix instead adds a `whatsapp_jid` pattern (`\b\d{5,20}@(?:lid|s\.whatsapp\.net|c\.us|g\.us|broadcast|newsletter)\b`) as the FIRST entry of `BUILTIN_PATTERNS` so the full JID is consumed as a single unit before `phone` ever sees it. In `Pseudonymize` mode the JID gets a stable `[Whatsapp_jid-A]` mapping (same `get_or_create_pseudonym` machinery as `[Email-A]` / `[User-A]`). Six new tests in `pii_filter::tests` pin the contract: full LID redact, full phone-JID redact, full group-JID redact, atomic-not-partial regression (no digits or `@<domain>` survive in the output), pseudonym stability across calls, and a negative-control pair asserting the new pattern does not regress the `email` / `phone` paths. `cargo test -p librefang-runtime pii_filter --lib` — 22/22 passed. (@f-liva)
+- **Cascade-leak detector reconciled with post-#5053 / #5073 prompt builder** — the drift-pin test in #5344 (`silent_response::tests::thematic_and_scaffold_headers_match_prompt_builder_output`) surfaced that the detector's `THEMATIC_HEADERS` constant in `crates/librefang-runtime/src/silent_response.rs` was calibrated against five legacy strings (`## Sender`, `## Today`, `## Calendar`, `## Tasks`, `## Response Style`) — **none** of which the post-#5053 prompt builder emits. The `1 structural + 1 thematic` branch of `is_cascade_leak` was therefore dead, and the detector silently degraded to a `2+ structural` rule (the canonical chat-template-leak shape from the current builder — e.g. `## Persona\n…\n## Memory\n…\n## Skills` — went undetected on its own). `THEMATIC_HEADERS` and `SCAFFOLD_ONLY_HEADERS` now mirror the actual headers enumerated by today's `prompt_builder.rs` (22 headers: `## Active Goals`, `## Channel`, `## Connected Tool Servers (MCP)`, `## Current Date`, `## First-Run Protocol`, `## Heartbeat Checklist`, `## Identity`, `## Live Context`, `## Long-Term Memory`, `## Memory`, `## Operational Guidelines`, `## Output Channels`, `## Peer Agents`, `## Persona`, `## Safety`, `## Skills`, `## Tool Call Behavior`, `## User Context`, `## User Profile`, `## Workspace`, `## Your Tools`, with `## Current Date` retained as the lone ambiguous-subset entry — a legitimate "what's today?" reply may produce it). The legacy five stay in `THEMATIC_HEADERS` as a defensive belt-and-suspenders layer for any deployment still on the pre-#5053 builder (cheap to leave; same false-positive risk as before). The drift-pin snapshot is flipped from `(marker, false)` for the legacy five to `(marker, true)` for the 21 emitted current-builder strings; the legacy five remain `(marker, false)`. New regression tests in `silent_response::tests` pin: scaffold-only pair from current builder trips (`cascade_leak_current_builder_scaffold_only_pair_trips`), scaffold-plus-envelope trips (`cascade_leak_current_builder_scaffold_plus_envelope_trips`), `## Current Date` alone is legitimate (`cascade_leak_current_builder_ambiguous_alone_legitimate`), `## Current Date` paired with a structural marker trips (`cascade_leak_current_builder_ambiguous_plus_structural_trips`). (@f-liva)
 - **Cross-sidecar audit follow-ups: `Retry-After` on 429 for `slack` / `feishu` / `gotify` / `google_chat`; inbound dedupe for `gotify` / `google_chat`; LINE reply-API path now used inside the 55 s freshness window.** Cross-cutting consistency audit across the 27 freshly-migrated sidecar adapters (everything from `ntfy` #5224 through `google_chat` #5459) caught four adapters that landed without 429 handling — Slack's `_post_message` / `_add_reaction` / `_remove_reaction` and Feishu's `_http_json` / Gotify's `_publish` / Google Chat's `_send_text` all routed 429 through the same `status >= 300` arm as 5xx, dropping the chunk and ignoring the `Retry-After` window so the next outbound burst extended the server-side rate-limit. The Slack 3-tuple `_http` helper (`_resp_hdrs` was deliberately stripped) is now a retry-aware wrapper that re-issues the call once with `parse_retry_after(default_secs=RETRY_AFTER_DEFAULT_SECS)` from the shared `librefang.sidecar.common`; `_post_message` / `_add_reaction` / `_remove_reaction` inherit the fix without touching the call sites, so the existing 3-tuple unpack contract is preserved. Feishu's `_http_json` (4-tuple, already exposed headers) gained the same `retry_429=True` once-shot before falling through to its `code != 0` arm. Gotify's `_publish` and Google Chat's `_send_text` factored their POST body into a `_publish_chunk` / `_send_chunk` helper so the 429 retry shares one code path with the original raise-on-non-2xx semantics. Also caught two adapters with missing inbound dedupe — Gotify's WebSocket can replay buffered frames on reconnect and Google Chat's webhook is at-least-once-delivery from Pub/Sub. Both now thread inbound messages through `librefang.sidecar.common.SeenSet` (10 000 / evict 5 000, identical policy to nextcloud / reddit / rocketchat / webex) keyed on `gotify-<id>` and the Google Chat `message.name`. Feishu was a false-positive in the audit — it already has Rust-parity `_EventDedup` (mirrors `feishu.rs:122-125`) used at `_dispatch_event` line 1485. LINE picked up an additional capability fix: the inbound `reply_token` was parsed and stashed in `metadata.reply_token` but `metadata` doesn't round-trip back to the sidecar's `on_send`, so every reply degraded to the push API (quota-charged, rate-limited) even within the LINE-server's ~60 s reply window where the free reply API was available. The token is now carried through `librefang_user` (the field the daemon's bridge round-trips bytewise) with a `linereply:<token>:<event_ts_ms>` shape; a `LINE_REPLY_TOKEN_TTL_SECS = 55.0` window plus a `linereply:` prefix guard (librefang_user is shared across channels — dingtalk stores a sessionWebhook URL, telegram stores an @username — and a misrouted value must not be fed to LINE's reply endpoint) decides between reply and push at send time, with automatic push-fallback if LINE rejects the reply call (the most common case being a token already burned between dispatch and the agent's wakeup). Image+caption sends stay on push regardless (the reply token is one-shot-locked on first acceptance and a follow-up caption would error). Verification: 17 new pytest cases (3 × slack-429 + 3 × feishu-429 + 3 × gotify-429-and-dedupe + 3 × google-chat-429-and-dedupe + 5 × line-reply) across `sdk/python/tests/test_{slack,feishu,gotify,google_chat,line}_adapter.py`; full `pytest tests/` — 1845 passed (was 1828). `cargo check --workspace --lib` + `cargo clippy --workspace --all-targets -- -D warnings` clean. **Audited but not changed (false-positives or out-of-scope)**: `feishu` already had Rust-parity dedup via `_EventDedup`; `runtime.py:246` bare-except on `on_command` is OPEN PR #5450 territory (not duplicated here to avoid conflict); `runtime.py:219` producer bare-except is the same class but would conflict with #5450 in the same file — deferred to land after #5450 merges; `mastodon` SSE+poll dual-flow dedupe is theoretical (since_id watermark already covers normal operation); long-lived SSE timeouts are by design. (@houko)
 - **`librefang-api` test build repaired after #5455 (webhook → sidecar).** #5455 folded `write_service_account_env` into the generic `write_secret_env` (identical newline-rejection contract) but left `routes/skills.rs`'s unit test calling the removed name, so the `librefang-api` test target failed to compile (`E0425`) and `main` was red again immediately after #5456. The test now calls `write_secret_env` (renamed `write_secret_env_value_with_newline_is_rejected`); same assertions. (@houko)
 - **CI on `main` restored — build break + `librefang-migrate` test drift from the wecom/teams/wechat/feishu/whatsapp sidecar merges.** `main` (HEAD `ff3f673`) did not compile and its migrate tests were red, so every open PR's Rust CI was failing on inherited breakage. Compile fixes: (1) `librefang-types` referenced `default_local_probe_interval_secs` from `local_probe_interval_secs`'s `#[serde(default)]` and the `Default` impl but the function was never defined (`E0425`) — added it returning 60 s per the field doc; (2) removed the orphaned `default_channel_max_backoff_secs` / `default_channel_initial_backoff_2s` (no `serde(default=)` consumers, `dead_code` under `-D warnings`); (3) `librefang-migrate::openclaw` — renamed the now-unused `ch` YAML-parse binding to `_ch` (every channel arm is a sidecar skip; the parse only keeps `LegacyYamlChannelConfig` referenced) and removed the orphaned `allow_from_to_toml_array`; (4) `librefang-api::openapi` — dropped the utoipa `paths(...)` refs to the removed `whatsapp_qr_*` / `wechat_qr_*` routes (`E0433`); (5) `librefang-cli` — removed the orphaned `maybe_write_channel_config` / `notify_daemon_restart` helpers (their in-process channel-onboarding callers were dropped). Test-fixture drift (only `google_chat` / `webhook` remain in-process channels): `test_roundtrip_migrate_output_into_real_structs`, `test_json5_channel_extraction`, and `test_full_migration` now use `google_chat` as the in-process witness instead of WhatsApp (asserting WhatsApp as a skipped sidecar); `test_json5_full_migration` / `test_secrets_migration` lower the secret-count floors `7 → 5` and flip the stale `FEISHU_APP_SECRET` extraction assertion to *absent* (the feishu sidecar-skip no longer extracts its secret — note Mattermost still does on skip, an intentional per-channel asymmetry flagged in-test); and the `openfang` `deny_unknown_fields` drift test drops the removed flat `command` field from its `[[mcp_servers]]` fixture so the intended `nickname` typo is what gets rejected. Verified locally: `cargo check --workspace --all-targets` clean, `cargo test -p librefang-migrate` 56 passed, `cargo test -p librefang-memory` 246 passed. (@houko)
 - **Telegram sidecar reconnect loop: cap aligned with siblings, recovery now logged, regression coverage added** (closes #5111). #5111 was filed against `v2026.5.12-beta.11`, when telegram was the in-process Rust `librefang-channels::telegram` adapter — that adapter exited its polling task on a DNS resolution / transient network failure and the bridge stayed dead until the daemon was restarted, exactly as the issue describes. The #5241 sidecar migration replaced it with the Python `sdk/python/librefang/sidecar/adapters/telegram.py`, which already wraps `_poll_once` in a `while True / except Exception → backoff` loop and so silently fixes the reported "bridge stays dead" symptom. **This PR is not the bug fix** (that was #5241); it is the observability + cap-alignment + regression coverage that should have shipped alongside #5241 so a future refactor can't re-introduce the original failure mode invisibly: (1) backoff cap moved from a hardcoded `120.0` to a new `MAX_BACKOFF_SECS = 60.0` module constant, matching the convention every sibling polling sidecar (`bluesky`, `discord`, `line`, `mastodon`, `mattermost`, `nextcloud`, `ntfy`, `reddit`, `rocketchat`, `twitch`) already settled on — behavioural change, persistent-outage retries now cap at one-minute intervals instead of two-minute ones; (2) the WARN line on each backoff now reports `retries=<consecutive-failure-count>` alongside `error` and `delay`, so operators can read "how long have we been degraded" off a single log line; (3) on the first successful poll after at least one retry the loop emits an INFO `telegram poll recovered retries=N last_backoff=…` — closes the issue's "restored DNS — bridge does NOT recover" symptom not by changing recovery (it already worked) but by making the recovery visible in the operator's log timeline; (4) `TimeoutError` (LONGPOLL_SERVER_SECS server-side block expiring with no updates — normal protocol behaviour) explicitly resets both `backoff` and `retries_in_a_row` and `continue`s without consuming the sleep budget, so an idle channel never accidentally drifts toward MAX. **Deliberately NOT done** per a deviation from the issue's suggestion of "ERROR only after N consecutive failures": every sibling polling sidecar reserves `log.error` for fatal startup-config issues (`{discord,line,mattermost}_required env vars missing`) — none of them escalate during steady-state backoff. The producer-crash path in `librefang.sidecar.runtime` already emits `log.error("producer crashed", …)` if an exception ESCAPES `produce()`; the backoff loop is precisely the layer that prevents that escape. Adding ERROR escalation here in telegram alone would diverge from the family, and the new WARN-with-retry-counter + INFO-on-recovery already provide the "how long degraded / when restored" signals an operator needs. Three new pytest cases assert the contract end-to-end: `test_produce_recovers_after_startup_network_failure` (URLError on first poll → warn + sleep + retry → success + INFO recovered), `test_produce_backoff_is_capped_at_max` (consecutive failures produce delays = `[1, 2, 4, 8, 16, 32, 60, 60, …]`, max never exceeds `MAX_BACKOFF_SECS`, the cap is actually reached), `test_produce_treats_longpoll_timeout_as_normal` (TimeoutError alternating with success → loop re-enters without sleeping, no backoff growth). All three monkeypatch `tg.asyncio.sleep` against a saved real-sleep closure to avoid the infinite-recursion footgun (`tg.asyncio` and the test file's `asyncio` import point at the same module object). (@houko)
 - **CI on `main` restored (post-mattermost-sidecar) — `librefang-migrate::openclaw::tests` test-fixture drift after #5315** (closes #5316). The mattermost sidecar migration converted `mattermost` from in-process to sidecar in the production code paths (both YAML `parse_legacy_channels` and JSON5 `migrate_channels_from_json` now push a `SkippedItem` with a sidecar reason instead of emitting `[channels.mattermost]`), but four `openclaw::tests` cases were not updated in lock-step and used `mattermost` as their only in-process channel witness — so on main the `migrate_channels_from_json` return became `None`, no `ItemKind::Channel` ever landed in `report.imported`, and the JSON5 full-migration imported-count dropped from 7 to 6: (1) `create_legacy_yaml_workspace` only emitted `messaging/{telegram,discord,slack,mattermost}.yaml` — all four now sidecar-skipped — so `test_full_migration` 's `report.imported.iter().any(|i| i.kind == ItemKind::Channel)` asserted against an empty channel-imports vector and panicked at `openclaw.rs:4526`; fixture now also writes `messaging/whatsapp.yaml` (in-process), `test_scan_workspace` 's `channels.len() == 4` updated to `5` with a `whatsapp` membership assert. (2) `test_json5_channel_extraction` 's inline JSON5 (telegram/discord/slack/mattermost-only) made `channels.is_some()` false at `openclaw.rs:4054`; fixture now includes `whatsapp: { dmPolicy: "open", allowFrom: ["phone1"] }`, the `!ch_table.contains_key` / `report.skipped` checks add `mattermost`, the in-process-witness assertion flips from `mattermost` to `whatsapp`, the imported-count stays at 1, the 5-secrets assertion is preserved (mattermost token still flows into `MATTERMOST_TOKEN` via the sidecar-skipped path at `openclaw.rs:1920`), and a `MATTERMOST_TOKEN=mm-token` secrets.env assertion is added so the secret-extraction-on-sidecar-skip behaviour is explicitly covered. (3) `test_json5_full_migration` 's `channel_items.len() == 7` failed; assertion updated to `5` after the rebase (signal also migrated to sidecar in #5317, so the in-process count is whatsapp, matrix, feishu, google_chat, msteams = 5) and the count-comment rewritten to enumerate the 8 skips (telegram, discord, slack, signal, irc, mattermost, imessage, bluebubbles). (4) `test_policy_migration` used `mattermost` for the `dmPolicy: "disabled"` → `dm_policy = "ignore"` happy-path mapping; replaced with `matrix` (still in-process, also accepts `dm_policy`), `mattermost` + `signal` added to the sidecar-skip loop alongside discord/slack, and the comment chain is updated to record the witness-rotation history (discord → slack → mattermost → signal → matrix). All 36 `openclaw::tests` + 51 `librefang-migrate` lib tests + 6 `tests/idempotency.rs` integration tests + `cargo clippy -p librefang-migrate --all-targets -- -D warnings` are green locally. (@houko)
+- **Cross-chat attachment leak: image/PDF/text attachments persisted into the wrong session** — `SessionWriter::inject_attachment_blocks` took only `(agent_id, blocks)` and wrote into the agent registry's `entry.session_id`, which is a single persistent slot per agent — NOT the per-chat session derived for the current turn. For a chat agent with `session_mode = "persistent"` whose group chat stays warm, any subsequent DM-inbound image landed in the *group* session instead of the DM. Real production incident 2026-05-20: at 08:43:13Z the owner sent a private Amazon-order screenshot ("metro laser, 27,98€") + caption "segna spesa in Shopping" via WhatsApp DM (chat 121043); at 09:44:04Z (1h later) the agent replied in a *public* WhatsApp group ("Non perdiamoci 💻", chat 120957) with those private order details verbatim. A msgpack dump of the group session showed the `[Image (image/jpeg) previously processed]` placeholder at the same second as the DM inbound — i.e. the DM image had been persisted into the group session's history. Root cause was on a code path PR #5288 (streaming sender-context fix) deliberately did not touch: the *attachment pre-inject* step that runs BEFORE the streaming/non-streaming handler proper. The trait now requires an explicit `session_id` parameter and the API call site (`inject_attachments_into_session` in `routes/agents.rs`) derives the same session id `send_message_*` would, from the per-request `SenderContext` and `session_id_override`. Both the streaming and the non-streaming attachment paths now route image / PDF / text content blocks into the *same* session as the text part of the same request. Regression coverage: `crates/librefang-kernel/tests/attachment_session_isolation_test.rs` pins the trait contract — passing `(agent_id, X, blocks)` writes into session `X`, never into `entry.session_id`; any future "fall back to entry.session_id" reintroduction trips the assertion. (@f-liva)
 - **Slack sidecar: reply threading + `:eyes:`→`:white_check_mark:` reaction targeting.** `parse_slack_event` set `thread_id = thread_ts` only, so a top-level message carried `thread_id = None`: (a) the bot's reply posted at the channel root instead of threading under the triggering message (the `force_flat_replies` knob exists precisely to opt *out* of threading, so threaded-by-default is the intended behaviour), and (b) `on_send`'s reaction finalization received `None` (always, and doubly so under `SLACK_FORCE_FLAT_REPLIES`) and fell back to "first pending reaction in the channel", so concurrent messages flipped the `:eyes:` on the wrong message and left the real request stuck. `thread_id` now falls back to the message's own `ts` (mirroring rocketchat / nextcloud's `thread_id = parent or own_id`), and `on_send` finalizes against the inbound thread id rather than the force-flattened posting `thread_ts`, so the reaction lands on the exact triggering message. In-thread replies remain best-effort (the `Send` protocol carries no inbound `message_id`). Tests: `test_parse_event_top_level_thread_id_falls_back_to_ts`, `test_on_send_force_flat_finalizes_correct_message`. (@houko)
 - **`channel_send` mirror (#4824) restored for sidecar channels** — `resolve_channel_owner` in `crates/librefang-kernel/src/kernel/handles/channel_sender.rs` only scanned the in-process `cfg.channels` (via `for_each_channel_field!`), so once a channel moved to a sidecar (`[[sidecar_channels]]`) it returned `None` and the agent's outbound `channel_send` was no longer mirrored back into the channel-owning agent's session. This silently affected every migrated sidecar channel (telegram #5241, discord #5299, nextcloud, rocketchat, reddit, bluesky, mastodon, and now slack). The resolver now also consults `cfg.sidecar_channels[*].default_agent` (the same field that seeds inbound routing via `AgentRouter.channel_defaults`), keyed by `channel_type` falling back to `name`, so the mirror works uniformly across in-process and sidecar channels. Unit tests: `sidecar_default_agent_matches_by_channel_type_then_name`, `sidecar_default_agent_skips_entries_without_agent_and_is_first_match`. (@houko)
 - **CI on `main` restored** — three regressions had main red since #3576: (1) `cargo fmt` drift across `librefang-cli`, `librefang-kernel`, and `librefang-api` workflow operator tests; (2) `test_mcp_http_rehydrates_caller_context_from_agent_header` panicking on the substring assertion because #3576 routed the no-`X-LibreFang-Agent-Id` path through `ToolError::Internal("caller agent id missing — dispatcher did not attribute …")` — but the MCP HTTP route legitimately allows that None path for external clients, so the user-recoverable mapping is `ToolError::MissingParameter("agent_id")` (lifts to `LibreFangError::InvalidInput` → HTTP 400, not `Internal` → 500). The operator-facing per-tool diagnostic is preserved via a `tracing::warn!` next to the constructor. The `cron.rs` unit test was updated in lock-step; the `error-contracts.md` migration note was corrected; (3) `xtask/baselines/openapi.sha256` was stale after a recent `openapi.json` regen — re-baselined via `cargo xtask schema-check gen`. No source-of-truth `openapi.json` / `sdk/` bytes changed; only the schema digest. (@houko)

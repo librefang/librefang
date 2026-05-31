@@ -12,7 +12,7 @@ use librefang_types::config::ResponseFormat;
 use librefang_types::message::{ContentBlock, MessageContent, Role, StopReason, TokenUsage};
 use librefang_types::tool::ToolCall;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use tracing::{debug, warn};
 use zeroize::Zeroizing;
 
@@ -40,6 +40,10 @@ pub struct OpenAIDriver {
     /// trace headers are emitted regardless of whether `CompletionRequest`'s
     /// caller-id fields are populated.
     emit_caller_trace_headers: bool,
+    /// Max in-driver retries for a single API call (#10). Counts re-attempts
+    /// after the first try, so the request is issued at most `max_retries + 1`
+    /// times. Sourced from `DriverConfig.max_retries` (default 3).
+    max_retries: u32,
 }
 
 impl OpenAIDriver {
@@ -81,6 +85,7 @@ impl OpenAIDriver {
             moonshot_file_cache: Default::default(),
             request_timeout_secs,
             emit_caller_trace_headers: true,
+            max_retries: 3,
         }
     }
 
@@ -126,6 +131,7 @@ impl OpenAIDriver {
             moonshot_file_cache: Default::default(),
             request_timeout_secs: None,
             emit_caller_trace_headers: true,
+            max_retries: 3,
         }
     }
 
@@ -438,6 +444,14 @@ impl OpenAIDriver {
         self.emit_caller_trace_headers = emit;
         self
     }
+
+    /// Override the max in-driver retry count (#10). Default is 3 (four total
+    /// attempts). Pass 0 to disable in-driver retries and rely on the outer
+    /// `FallbackChain`. Sourced from `DriverConfig.max_retries`.
+    pub fn with_max_retries(mut self, max_retries: u32) -> Self {
+        self.max_retries = max_retries;
+        self
+    }
 }
 
 /// Build the merged custom-header map for an outbound OpenAI-driver request.
@@ -501,7 +515,7 @@ struct OaiRequest {
     /// `complete()` and `stream()` so that extra_body values **override** any
     /// standard field with the same name.
     #[serde(skip_serializing)]
-    extra_body: Option<HashMap<String, serde_json::Value>>,
+    extra_body: Option<BTreeMap<String, serde_json::Value>>,
 }
 
 /// Merge `extra_body` provider-extension params into a serialized request
@@ -509,21 +523,16 @@ struct OaiRequest {
 ///
 /// Prompt-cache determinism (#3298, #5143): the body is sent on every LLM
 /// request, so its byte layout is part of the Anthropic/OpenAI prompt-cache
-/// key. `extra_body` is a `HashMap`, whose iteration order varies across
-/// processes. Today the merged result is still byte-stable *only* because
-/// the workspace `Cargo.toml` does not enable `serde_json`'s
-/// `preserve_order` feature, so `serde_json::Map` is a `BTreeMap` and
-/// re-sorts on insert. That is an implicit, fragile invariant — enabling
-/// `preserve_order` (e.g. for nicer dashboard JSON dumps) would silently
-/// re-introduce HashMap-order leakage into every request body with ≥2
-/// `extra_body` keys and invalidate the prompt cache.
-///
-/// This helper makes the invariant explicit and `preserve_order`-proof:
-/// the keys are collected and sorted before insertion, so the merge order
-/// is deterministic regardless of which `serde_json::Map` backend is
-/// active. See `tests::extra_body_merge_is_byte_identical_across_insertion_orders`.
+/// key. `extra_body` is now a `BTreeMap`, so its iteration order is already
+/// sorted and stable across processes — the explicit `keys.sort()` below is
+/// therefore redundant for the current type. It is kept as a cheap,
+/// self-documenting belt-and-suspenders guard: it costs nothing on a handful
+/// of provider-extension keys, and it keeps the merge order deterministic
+/// even if a future caller passes a different (e.g. `HashMap`-sourced)
+/// iteration order in. See
+/// `tests::extra_body_merge_is_byte_identical_across_insertion_orders`.
 fn merge_extra_body(
-    extra: &Option<HashMap<String, serde_json::Value>>,
+    extra: &Option<BTreeMap<String, serde_json::Value>>,
     body: &mut serde_json::Value,
 ) {
     if let (Some(extra), Some(obj)) = (extra, body.as_object_mut()) {
@@ -1130,7 +1139,8 @@ impl LlmDriver for OpenAIDriver {
         let guard_key_id = self.shared_guard_key_id();
         crate::shared_rate_guard::pre_request_check(guard_provider, &guard_key_id, "OpenAI")?;
 
-        let max_retries = 3;
+        // Configurable in-driver retry cap (#10); default 3.
+        let max_retries = self.max_retries;
         for attempt in 0..=max_retries {
             let url = match &self.url_query {
                 Some(q) => format!("{}/chat/completions?{}", self.base_url, q),
@@ -1177,10 +1187,26 @@ impl LlmDriver for OpenAIDriver {
                 .unwrap_or(300);
             req_builder = req_builder.timeout(std::time::Duration::from_secs(timeout_secs));
 
-            let resp = req_builder
-                .send()
-                .await
-                .map_err(|e| LlmError::Http(e.to_string()))?;
+            // #10: route transport-layer errors (connection refused, TLS,
+            // read timeout) through the same attempt/backoff decision as 429
+            // instead of returning immediately via `?`, so a single network
+            // hiccup on the only configured provider no longer fails the turn.
+            let resp = match req_builder.send().await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    if attempt < max_retries && crate::backoff::transport_error_is_retryable(&e) {
+                        let delay = standard_retry_delay(attempt + 1, std::time::Duration::ZERO);
+                        warn!(
+                            error = %e,
+                            delay_ms = delay.as_millis(),
+                            "Transport error, retrying"
+                        );
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    return Err(LlmError::Http(e.to_string()));
+                }
+            };
 
             let status = resp.status().as_u16();
             if status == 429 {
@@ -1550,7 +1576,8 @@ impl LlmDriver for OpenAIDriver {
         )?;
 
         // Retry loop for the initial HTTP request
-        let max_retries = 3;
+        // Configurable in-driver retry cap (#10); default 3.
+        let max_retries = self.max_retries;
         for attempt in 0..=max_retries {
             let url = match &self.url_query {
                 Some(q) => format!("{}/chat/completions?{}", self.base_url, q),
@@ -1595,10 +1622,26 @@ impl LlmDriver for OpenAIDriver {
                 .unwrap_or(300);
             req_builder = req_builder.timeout(std::time::Duration::from_secs(timeout_secs));
 
-            let resp = req_builder
-                .send()
-                .await
-                .map_err(|e| LlmError::Http(e.to_string()))?;
+            // #10: route transport-layer errors (connection refused, TLS,
+            // read timeout) through the same attempt/backoff decision as 429
+            // instead of returning immediately via `?`, so a single network
+            // hiccup on the only configured provider no longer fails the turn.
+            let resp = match req_builder.send().await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    if attempt < max_retries && crate::backoff::transport_error_is_retryable(&e) {
+                        let delay = standard_retry_delay(attempt + 1, std::time::Duration::ZERO);
+                        warn!(
+                            error = %e,
+                            delay_ms = delay.as_millis(),
+                            "Transport error, retrying"
+                        );
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    return Err(LlmError::Http(e.to_string()));
+                }
+            };
 
             let status = resp.status().as_u16();
             if status == 429 {
@@ -2272,8 +2315,14 @@ fn extract_thinking_summary(thinking: &str) -> String {
         if last.len() <= 2000 {
             last.to_string()
         } else {
-            // Take the last 2000 chars
-            last[last.len() - 2000..].to_string()
+            // Take the last ~2000 bytes, snapped to a char boundary. A raw
+            // byte index can land inside a multi-byte UTF-8 char (common for
+            // non-ASCII reasoning) and panic; advance to the next boundary.
+            let mut start = last.len() - 2000;
+            while start < last.len() && !last.is_char_boundary(start) {
+                start += 1;
+            }
+            last[start..].to_string()
         }
     } else {
         "[The model produced reasoning but no final answer. Try rephrasing your question.]"
@@ -2439,6 +2488,14 @@ pub(crate) fn ensure_object(v: serde_json::Value) -> serde_json::Value {
 /// with "trailing characters". This function finds the end of the first complete
 /// `{...}` JSON object via brace-depth tracking and parses only that slice.
 pub(crate) fn parse_tool_args(raw: &str) -> Result<serde_json::Value, serde_json::Error> {
+    // No-argument tool calls: OpenAI streams `arguments: ""` (or omits the
+    // field) for parameterless tools, and Anthropic can emit a `tool_use`
+    // block with no `input_json_delta`. An empty string is a valid empty
+    // object, not truncation — treat it as `{}` so the caller doesn't
+    // mis-flag it via `malformed_tool_input`.
+    if raw.trim().is_empty() {
+        return Ok(serde_json::json!({}));
+    }
     // Fast path: the whole string is valid JSON.
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) {
         return Ok(v);
@@ -2528,6 +2585,20 @@ mod tests {
         let raw = r#"{"a":{"b":1},"c":"d"} trailing text"#;
         let v = parse_tool_args(raw).unwrap();
         assert_eq!(v["c"], "d");
+    }
+
+    #[test]
+    fn test_parse_tool_args_empty_string_is_empty_object() {
+        // No-argument tool calls stream `arguments: ""` — must parse to `{}`,
+        // not be mis-flagged as truncated/malformed.
+        for raw in ["", "   ", "\n", "\t "] {
+            let v = parse_tool_args(raw)
+                .unwrap_or_else(|e| panic!("empty args {raw:?} should parse, got {e}"));
+            assert!(
+                v.as_object().map(|o| o.is_empty()).unwrap_or(false),
+                "expected empty object for {raw:?}, got {v}"
+            );
+        }
     }
 
     #[test]
@@ -2736,6 +2807,20 @@ mod tests {
         let input = "First I need to consider X.\n\nThen I should check Y.\n\nThe answer is 42.";
         let summary = extract_thinking_summary(input);
         assert_eq!(summary, "The answer is 42.");
+    }
+
+    #[test]
+    fn test_extract_thinking_summary_long_multibyte_no_panic() {
+        // A long final paragraph of multi-byte chars must not panic when the
+        // 2000-byte cut lands inside a UTF-8 char. "好" is 3 bytes; 1500 of
+        // them is 4500 bytes (> 2000), and 4500 - 2000 = 2500 is not a char
+        // boundary.
+        let long = "好".repeat(1500);
+        let summary = extract_thinking_summary(&long);
+        // Returned slice must still be valid UTF-8 (no panic, no torn char)
+        // and bounded near the 2000-byte window.
+        assert!(summary.len() <= 2000 + 3);
+        assert!(summary.chars().all(|c| c == '好'));
     }
 
     // ----- reasoning_content deserialization test -----
@@ -3496,7 +3581,7 @@ mod tests {
         // Value first, then merge extra_body on top so it overrides any
         // standard field with the same name.  This test verifies the merge
         // logic directly.
-        let mut extra = HashMap::new();
+        let mut extra = BTreeMap::new();
         extra.insert("temperature".to_string(), serde_json::json!(1.0));
         extra.insert("enable_memory".to_string(), serde_json::json!(true));
 
@@ -3537,18 +3622,17 @@ mod tests {
         );
     }
 
-    // Issue #5143 — `extra_body` is a HashMap merged into the wire request
+    // Issue #5143 / #3298 — `extra_body` is merged into the wire request
     // body, which is part of the provider prompt-cache key. The merge MUST
-    // produce a byte-identical body regardless of HashMap insertion order,
-    // and MUST stay deterministic even if `serde_json/preserve_order` is
-    // ever enabled workspace-wide. `merge_extra_body` sorts keys before
-    // insertion to enforce this. This pins byte equality across two
-    // different insertion orders, mirroring
-    // `mcp_summary_is_byte_identical_across_input_orders`.
+    // produce a byte-identical body regardless of the order keys were
+    // inserted. `extra_body` is now a `BTreeMap`, so the sorted iteration
+    // order is a type-level guarantee; this test still pins byte equality
+    // across two different insertion orders so the property cannot silently
+    // regress, mirroring `mcp_summary_is_byte_identical_across_input_orders`.
     #[test]
     fn extra_body_merge_is_byte_identical_across_insertion_orders() {
         fn build(order: &[(&str, serde_json::Value)]) -> String {
-            let mut extra = HashMap::new();
+            let mut extra = BTreeMap::new();
             for (k, v) in order {
                 extra.insert((*k).to_string(), v.clone());
             }
@@ -4067,5 +4151,126 @@ mod tests {
             result_upper.is_err(),
             "IMAGE/jpeg (upper-case) must NOT be skipped — upload arm must be entered and fail with no real server"
         );
+    }
+
+    // ── #10: transport-error retry behaviour ────────────────────────────
+
+    /// Spawn a fake HTTP server that drops (resets) its first `drop_first`
+    /// connections — surfacing as a transport-layer `send()` error on the
+    /// client before any HTTP status — then serves a valid OpenAI
+    /// chat-completions 200 on the next connection. Returns the bound
+    /// `http://127.0.0.1:PORT` base URL (no `/v1` suffix; the driver appends
+    /// `/chat/completions`).
+    async fn spawn_drop_then_ok_server(drop_first: usize) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let body = serde_json::json!({
+            "id": "cmpl-test",
+            "object": "chat.completion",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "ok"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        })
+        .to_string();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut dropped = 0usize;
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                if dropped < drop_first {
+                    dropped += 1;
+                    // Drop the socket without responding — the in-flight client
+                    // request fails at the transport layer (reset / incomplete
+                    // message), which before #10 bypassed the retry loop.
+                    drop(sock);
+                    continue;
+                }
+                let mut buf = [0u8; 8192];
+                let _ = sock.read(&mut buf).await;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.flush().await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn transport_retry_request() -> librefang_llm_driver::CompletionRequest {
+        use librefang_types::message::{Message, MessageContent, Role};
+        librefang_llm_driver::CompletionRequest {
+            model: "test-model".to_string(),
+            messages: std::sync::Arc::new(vec![Message {
+                role: Role::User,
+                content: MessageContent::Text("hi".to_string()),
+                pinned: false,
+                timestamp: None,
+            }]),
+            max_tokens: 16,
+            ..Default::default()
+        }
+    }
+
+    // The transport-layer error (a reset connection before any HTTP status)
+    // used to return immediately via `?`, never entering the retry loop. With
+    // #10 it is routed through the same attempt/backoff decision as a 429, so a
+    // single dropped connection followed by a healthy response succeeds. The
+    // OpenAI transport-retry path uses `standard_retry_delay`, so the test
+    // zero-backoff guard keeps this fast.
+    #[tokio::test]
+    async fn transport_error_is_retried_then_succeeds() {
+        let _g = crate::backoff::enable_test_zero_backoff();
+        let base = spawn_drop_then_ok_server(1).await;
+        let driver = OpenAIDriver::new("test-key".to_string(), base);
+        let resp = driver
+            .complete(transport_retry_request())
+            .await
+            .expect("driver must retry past one transport error and succeed");
+        assert_eq!(resp.text(), "ok");
+    }
+
+    // `max_retries = 0` disables the in-driver retry loop, so the first
+    // transport error propagates without a second attempt — proving both that
+    // the cap is honoured and that 0 is a meaningful disable value.
+    #[tokio::test]
+    async fn max_retries_zero_does_not_retry_transport_error() {
+        let _g = crate::backoff::enable_test_zero_backoff();
+        // Drop far more connections than any retry budget would cover.
+        let base = spawn_drop_then_ok_server(10).await;
+        let driver = OpenAIDriver::new("test-key".to_string(), base).with_max_retries(0);
+        let err = driver
+            .complete(transport_retry_request())
+            .await
+            .expect_err("max_retries(0) must not retry a transport error");
+        assert!(
+            matches!(err, LlmError::Http(_)),
+            "expected a transport (Http) error, got: {err:?}"
+        );
+    }
+
+    // The default driver (max_retries = 3) keeps retrying past several
+    // consecutive transport errors and still succeeds — exercising the loop
+    // body more than once, not just the first re-attempt.
+    #[tokio::test]
+    async fn default_retries_survive_multiple_transport_errors() {
+        let _g = crate::backoff::enable_test_zero_backoff();
+        let base = spawn_drop_then_ok_server(3).await;
+        let driver = OpenAIDriver::new("test-key".to_string(), base);
+        let resp = driver
+            .complete(transport_retry_request())
+            .await
+            .expect("default max_retries=3 must survive 3 transport errors");
+        assert_eq!(resp.text(), "ok");
     }
 }

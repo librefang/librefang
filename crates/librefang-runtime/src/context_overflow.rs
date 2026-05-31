@@ -13,7 +13,7 @@ use librefang_types::tool::ToolDefinition;
 use tracing::{debug, warn};
 
 /// Recovery stage that was applied.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum RecoveryStage {
     /// No recovery needed.
     None,

@@ -51,7 +51,6 @@ vi.mock("react-i18next", async () => {
 
 vi.mock("@tanstack/react-router", () => ({
   Link: ({ children, ...rest }: { children: React.ReactNode } & Record<string, unknown>) => (
-    // eslint-disable-next-line jsx-a11y/anchor-is-valid
     <a {...(rest as Record<string, unknown>)}>{children}</a>
   ),
 }));

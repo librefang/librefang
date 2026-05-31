@@ -9,7 +9,12 @@ import remarkGfm from "remark-gfm";
 // pointing at vault entries.
 const EXTRA_URL_SCHEMES = /^(obsidian|obsidian-advanced-uri):/i;
 
-const urlTransform = (url: string): string => {
+// Exported so other markdown renderers (e.g. Typewriter_v2, which renders
+// the streaming view) share one URL policy — otherwise react-markdown's
+// `defaultUrlTransform` runs implicitly there and strips the obsidian
+// schemes this allows, so a link would render differently while streaming
+// than in the settled MarkdownContent view.
+export const urlTransform = (url: string): string => {
   if (EXTRA_URL_SCHEMES.test(url)) {
     return url;
   }

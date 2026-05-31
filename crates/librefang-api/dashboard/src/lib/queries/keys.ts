@@ -43,6 +43,11 @@ export const agentKeys = {
     [...agentKeys.all, "experimentMetrics", experimentId] as const,
   tools: (agentId: string) =>
     [...agentKeys.all, "tools", agentId] as const,
+  // Per-agent skill assignment (#4917) — backs the inline assignment UI on
+  // the agent detail Skills tab. Distinct subtree from `tools` so a skill
+  // PUT only invalidates the skill read, not the tool read.
+  skills: (agentId: string) =>
+    [...agentKeys.all, "skills", agentId] as const,
 };
 
 export const toolKeys = {
@@ -284,12 +289,20 @@ export const usageKeys = {
 export const budgetKeys = {
   all: ["budget"] as const,
   status: () => [...budgetKeys.all, "status"] as const,
+  // Per-provider snapshot (#5650). Hierarchical under `budgetKeys.all`
+  // so `invalidateQueries({ queryKey: budgetKeys.all })` after a global
+  // `PUT /api/budget` (which can change `alert_threshold` and therefore
+  // the green/yellow/red coloring on each provider row) drops this cache
+  // too without a second `invalidateQueries` call.
+  providers: () => [...budgetKeys.all, "providers"] as const,
 };
 
 export const goalKeys = {
   all: ["goals"] as const,
   lists: () => [...goalKeys.all, "list"] as const,
   templates: () => [...goalKeys.all, "templates"] as const,
+  runs: () => [...goalKeys.all, "run"] as const,
+  run: (id: string) => [...goalKeys.runs(), id] as const,
 };
 
 export const networkKeys = {

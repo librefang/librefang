@@ -34,6 +34,7 @@ export {
   getUsageDaily,
   getUsageByModelPerformance,
   getBudgetStatus,
+  getProviderBudgets,
   // channels & comms
   listChannels,
   getChannelQr,
@@ -131,6 +132,8 @@ export {
   // tools
   listTools,
   getAgentTools,
+  // per-agent skill assignment — read (#4917)
+  getAgentSkills,
   getAgentTemplateToml,
   // overview
   loadDashboardSnapshot,
@@ -160,6 +163,10 @@ export {
 } from "../../api";
 
 export type {
+  // per-provider budget (#5650)
+  ProviderBudgetRow,
+  ProviderBudgetSnapshot,
+  ProviderBudgetPayload,
   UserBudgetResponse,
   UserBudgetWindow,
   UserBudgetPayload,
@@ -189,6 +196,8 @@ export {
   clearHandAgentRuntimeConfig,
   resetAgentSession,
   updateAgentTools,
+  // per-agent skill assignment — write (#4917)
+  setAgentSkills,
   createAgentSession,
   switchAgentSession,
   deleteSession,
@@ -205,6 +214,7 @@ export {
   resolveApproval,
   // analytics
   updateBudget,
+  updateProviderBudget,
   // channels & comms
   reloadChannels,
   saveSidecarConfig,
@@ -228,6 +238,9 @@ export {
   createGoal,
   updateGoal,
   deleteGoal,
+  startGoalRun,
+  stopGoalRun,
+  getGoalRun,
   // hands
   activateHand,
   deactivateHand,
@@ -294,6 +307,7 @@ export {
   evolveDeleteSkill,
   evolveWriteFile,
   evolveRemoveFile,
+  proposeSkillToRegistry,
   installSkill,
   uninstallSkill,
   // skill workshop pending review (#3328)
@@ -359,6 +373,7 @@ export type {
   HandSessionMessage,
   HandSettingsResponse,
   HandStatsResponse,
+  ProposeSkillResult,
   McpAuthStartResponse,
   McpAuthStatusResponse,
   MemoryItem,

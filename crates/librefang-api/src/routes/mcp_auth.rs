@@ -524,6 +524,47 @@ pub struct AuthCallbackParams {
     pub error_description: Option<String>,
 }
 
+/// RAII cleanup for the per-flow vault entries written by `auth_start`.
+///
+/// `auth_callback` has many early returns (state mismatch, missing PKCE,
+/// SSRF block, token-exchange / parse failures, …) — previously only the
+/// success path removed the per-flow keys, so every failed or abandoned
+/// flow leaked the PKCE verifier and its metadata into the vault forever
+/// (the vault has no TTL). Dropping this guard removes all per-flow fields
+/// on ANY exit once `flow_key_prefix` is known. `vault_remove` is sync, so
+/// it is safe to call from `Drop`.
+struct FlowVaultCleanup<'a> {
+    provider: &'a KernelOAuthProvider,
+    prefix: String,
+}
+
+impl Drop for FlowVaultCleanup<'_> {
+    fn drop(&mut self) {
+        // Every field `auth_start` writes under `{server_url}:{flow_id}`.
+        // `issuer_host` was previously omitted from the success-path cleanup
+        // and leaked even on success (#5885-cluster low item).
+        for field in [
+            "pkce_verifier",
+            "pkce_state",
+            "redirect_uri",
+            "token_endpoint",
+            "client_id",
+            "issuer_host",
+        ] {
+            let key = KernelOAuthProvider::vault_key(&self.prefix, field);
+            if let Err(e) = self.provider.vault_remove(&key) {
+                tracing::error!(
+                    target: "audit",
+                    op = "vault_remove",
+                    key = %key,
+                    error = %e,
+                    "vault op failed during per-flow PKCE cleanup"
+                );
+            }
+        }
+    }
+}
+
 /// GET /api/mcp/servers/{name}/auth/callback
 ///
 /// OAuth callback endpoint. The authorization server redirects here after
@@ -600,6 +641,13 @@ pub async fn auth_callback(
     // Load stored PKCE state from vault using the per-flow key (#3727).
     let provider = KernelOAuthProvider::new(state.kernel.home_dir().to_path_buf());
     let flow_key_prefix = format!("{server_url}:{flow_id}");
+    // Remove the per-flow vault entries on every exit from here on — failure,
+    // abandonment, or success — not just the happy path. Declared after
+    // `provider` so it drops first (while `provider` is still alive).
+    let _flow_cleanup = FlowVaultCleanup {
+        provider: &provider,
+        prefix: flow_key_prefix.clone(),
+    };
     // #3750: collapse vault Result into Option for callers below — a vault
     // storage failure during callback is logged and treated the same as
     // "value missing", since the recovery path (retry from dashboard) is
@@ -935,32 +983,13 @@ pub async fn auth_callback(
         tracing::warn!(error = %e, "Failed to persist OAuth metadata for refresh");
     }
 
-    // Clean up one-time PKCE values from vault (per-flow key — #3727).
-    //
-    // #3651: replaced `let _ = vault_remove(...)` so vault crypto failures
-    // during PKCE cleanup are no longer silently dropped. Behavior is
-    // intentionally unchanged on success (one-time cleanup, errors don't
-    // abort the OAuth callback path), but every failure now produces an
-    // `audit` log line so operators can correlate stale PKCE entries with
-    // a misconfigured `LIBREFANG_VAULT_KEY`.
-    for field in &[
-        "pkce_verifier",
-        "pkce_state",
-        "redirect_uri",
-        "token_endpoint",
-        "client_id",
-    ] {
-        let vault_key = KernelOAuthProvider::vault_key(&flow_key_prefix, field);
-        if let Err(e) = provider.vault_remove(&vault_key) {
-            tracing::error!(
-                target: "audit",
-                op = "vault_remove",
-                key = %vault_key,
-                error = %e,
-                "vault op failed during PKCE cleanup"
-            );
-        }
-    }
+    // Per-flow PKCE/metadata cleanup is handled by the `_flow_cleanup` RAII
+    // guard (declared near the top of this function), which removes every
+    // per-flow vault entry on ALL exit paths — including the early-return
+    // failure paths the old success-only loop here never reached (#3651's
+    // audit logging is preserved in the guard's Drop impl). The durable
+    // per-server `token_endpoint` / `client_id` were already promoted above,
+    // so removing the per-flow staging copies here is safe.
 
     // Retry the MCP connection now that we have tokens.
     // Awaited inline (blocks the browser tab up to the kernel's 60s tool-discovery timeout)
@@ -1673,5 +1702,62 @@ mod tests {
             captured.contains("status=400"),
             "non-success branch should report status; captured: {captured:?}"
         );
+    }
+
+    #[test]
+    fn flow_vault_cleanup_removes_all_per_flow_keys_on_drop() {
+        // Vault crypto needs a 32-byte key (this base64 decodes to 32 zero
+        // bytes). No other api test reads LIBREFANG_VAULT_KEY, so setting it
+        // process-wide here does not affect sibling tests.
+        std::env::set_var(
+            "LIBREFANG_VAULT_KEY",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        );
+        let home = std::env::temp_dir().join(format!("lf-vault-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&home).unwrap();
+        let provider = KernelOAuthProvider::new(home.clone());
+
+        // All six fields auth_start writes under the per-flow prefix.
+        let prefix = "https://mcp.example.com:caller-flow123".to_string();
+        let fields = [
+            "pkce_verifier",
+            "pkce_state",
+            "redirect_uri",
+            "token_endpoint",
+            "client_id",
+            "issuer_host",
+        ];
+        for f in fields {
+            provider
+                .vault_set(&KernelOAuthProvider::vault_key(&prefix, f), "secret-value")
+                .unwrap();
+        }
+        // Sanity: present before cleanup.
+        assert!(provider
+            .vault_get(&KernelOAuthProvider::vault_key(&prefix, "pkce_verifier"))
+            .unwrap()
+            .is_some());
+
+        // Dropping the guard (the failure/abandonment/success path) must wipe
+        // every per-flow field — including issuer_host, which the old
+        // success-only loop omitted.
+        {
+            let _guard = FlowVaultCleanup {
+                provider: &provider,
+                prefix: prefix.clone(),
+            };
+        }
+
+        for f in fields {
+            assert!(
+                provider
+                    .vault_get(&KernelOAuthProvider::vault_key(&prefix, f))
+                    .unwrap()
+                    .is_none(),
+                "per-flow field {f} should have been removed on guard drop"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

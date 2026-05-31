@@ -9,18 +9,21 @@ pub(crate) fn resolve_spill_config(
     spill_threshold_bytes: u64,
     max_artifact_bytes: u64,
 ) -> (u64, u64) {
-    (
-        if spill_threshold_bytes == 0 {
-            16_384 // ToolResultsConfig::default().spill_threshold_bytes
-        } else {
-            spill_threshold_bytes
-        },
-        if max_artifact_bytes == 0 {
-            crate::artifact_store::DEFAULT_MAX_ARTIFACT_BYTES
-        } else {
-            max_artifact_bytes
-        },
-    )
+    let threshold = if spill_threshold_bytes == 0 {
+        librefang_types::config::ToolResultsConfig::default().spill_threshold_bytes
+    } else {
+        spill_threshold_bytes
+    };
+    let max = if max_artifact_bytes == 0 {
+        crate::artifact_store::DEFAULT_MAX_ARTIFACT_BYTES
+    } else {
+        max_artifact_bytes
+    };
+    if threshold > max {
+        (max, max)
+    } else {
+        (threshold, max)
+    }
 }
 
 /// Apply artifact spill to a tool-result string, returning a compact stub
@@ -33,10 +36,12 @@ pub(super) fn spill_or_passthrough(
     threshold: u64,
     max_artifact: u64,
 ) -> String {
-    let bytes = body.as_bytes();
+    if body.len() as u64 <= threshold {
+        return body;
+    }
     if let Some(stub) = crate::artifact_store::maybe_spill(
         tool_name,
-        bytes,
+        body.as_bytes(),
         threshold,
         max_artifact,
         &crate::artifact_store::default_artifact_storage_dir(),

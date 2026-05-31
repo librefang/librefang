@@ -411,13 +411,15 @@ pub(super) async fn stream_with_retry(
                 // classification, log lines, error stringification through
                 // `LibreFangError::LlmDriver(e.to_string())`) only ever read
                 // `partial_text_len` and pay nothing for the body.
-                if let Some(body) = partial_text.as_deref() {
-                    if !body.is_empty() {
-                        let _ = tx
-                            .send(StreamEvent::TextDelta {
-                                text: body.to_string(),
-                            })
-                            .await;
+                if !cascade_leak_aborted {
+                    if let Some(body) = partial_text.as_deref() {
+                        if !body.is_empty() {
+                            let _ = tx
+                                .send(StreamEvent::TextDelta {
+                                    text: body.to_string(),
+                                })
+                                .await;
+                        }
                     }
                 }
                 return Err(LibreFangError::llm_driver_msg(format!(

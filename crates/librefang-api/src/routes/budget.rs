@@ -18,6 +18,15 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             "/budget",
             axum::routing::get(budget_status).put(update_budget),
         )
+        // #5650 — per-provider snapshot + cap mutation. List endpoint is
+        // read-only (operator inspection); the PUT path slots in / replaces
+        // a single `[budget.providers.<id>]` entry via `persist_budget`
+        // (same hot-reload pipeline as the global `[budget]` PUT).
+        .route("/budget/providers", axum::routing::get(provider_budget_list))
+        .route(
+            "/budget/providers/{provider_id}",
+            axum::routing::put(update_provider_budget),
+        )
         .route("/budget/agents", axum::routing::get(agent_budget_ranking))
         .route(
             "/budget/agents/{id}",
@@ -1402,4 +1411,318 @@ pub async fn delete_user_budget(
             ApiErrorResponse::internal(m).into_response()
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// #5650 — per-provider budget snapshot + cap mutation
+// ---------------------------------------------------------------------------
+
+/// Render `ExhaustionReason` as the same stable kebab-case label the
+/// metering layer emits in tracing fields. Keeping the label format
+/// consistent between log scrape and API payload means an operator who
+/// has alerts on `reason=budget_exceeded` doesn't need a second mapping
+/// layer when wiring the dashboard.
+fn exhaustion_reason_label(
+    reason: librefang_llm_driver::exhaustion::ExhaustionReason,
+) -> &'static str {
+    reason.as_metric_label()
+}
+
+/// GET /api/budget/providers — Per-provider spend snapshot.
+///
+/// Returns one row per provider that is either configured at
+/// `[budget.providers.<id>]` OR has emitted at least one usage event
+/// in the current month. Rows are ordered ascending by `provider` so
+/// the response is deterministic across processes (#3298 — same
+/// rationale as `ExhaustionSnapshotRow`).
+///
+/// Each row carries:
+///   - The four configured caps (`cap_hourly_usd`, `cap_daily_usd`,
+///     `cap_monthly_usd`, `cap_tokens_per_hour`) — `0` / `0.0` means
+///     "unlimited", matching the on-disk `ProviderBudget` contract.
+///   - The four current rollups (`spend_hourly_usd`, `spend_daily_usd`,
+///     `spend_monthly_usd`, `tokens_this_hour`) aggregated from
+///     `usage_events`.
+///   - `is_exhausted` + `exhaustion_reason` + `exhaustion_remaining_ms`
+///     from the live `ProviderExhaustionStore` so the operator can see
+///     which slots the fallback chain is currently skipping.
+///   - `unconfigured: bool` — `true` when the row only exists because
+///     of an observed `usage_events.provider` but no
+///     `[budget.providers.<id>]` entry. Lets the dashboard surface
+///     a "Set a cap" CTA for the unattended provider.
+///
+/// Read-only — no audit row. The PUT companion at
+/// `/api/budget/providers/{provider_id}` records its own ConfigChange
+/// audit entry on every mutation.
+#[utoipa::path(
+    get,
+    path = "/api/budget/providers",
+    tag = "budget",
+    responses(
+        (status = 200, description = "Per-provider budget snapshot", body = crate::types::JsonObject)
+    )
+)]
+pub async fn provider_budget_list(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let budget = state.kernel.budget_config();
+    let usage_store =
+        librefang_memory::usage::UsageStore::new(state.kernel.memory_substrate().pool());
+
+    // Build the union of (configured providers) ∪ (providers observed in
+    // usage_events this month). BTreeSet so iteration is sorted ascending
+    // for free — caller relies on this for deterministic UI ordering.
+    let mut providers: std::collections::BTreeSet<String> =
+        budget.providers.keys().cloned().collect();
+    let observed = usage_store.query_distinct_providers().unwrap_or_default();
+    for p in &observed {
+        providers.insert(p.clone());
+    }
+
+    // Snapshot the exhaustion store once so a row's `is_exhausted` view
+    // is consistent with the `exhaustion_remaining_ms` we report on the
+    // same row. Querying the store per-provider would race against an
+    // expiry sweep between calls.
+    let exhaustion_snapshot: std::collections::HashMap<
+        String,
+        librefang_llm_driver::exhaustion::ExhaustionSnapshotRow,
+    > = state
+        .kernel
+        .metering_ref()
+        .exhaustion_store()
+        .map(|store| {
+            store
+                .snapshot()
+                .into_iter()
+                .map(|row| (row.provider_id.clone(), row))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let rows: Vec<serde_json::Value> = providers
+        .into_iter()
+        .map(|provider| {
+            let configured = budget.providers.get(&provider).cloned().unwrap_or_default();
+            let unconfigured = !budget.providers.contains_key(&provider);
+            let spend_hourly = usage_store.query_provider_hourly(&provider).unwrap_or(0.0);
+            let spend_daily = usage_store.query_provider_daily(&provider).unwrap_or(0.0);
+            let spend_monthly = usage_store.query_provider_monthly(&provider).unwrap_or(0.0);
+            let tokens_hourly = usage_store
+                .query_provider_tokens_hourly(&provider)
+                .unwrap_or(0);
+            let ex = exhaustion_snapshot.get(&provider);
+            serde_json::json!({
+                "provider": provider,
+                "unconfigured": unconfigured,
+                "cap_hourly_usd": configured.max_cost_per_hour_usd,
+                "cap_daily_usd": configured.max_cost_per_day_usd,
+                "cap_monthly_usd": configured.max_cost_per_month_usd,
+                "cap_tokens_per_hour": configured.max_tokens_per_hour,
+                "spend_hourly_usd": spend_hourly,
+                "spend_daily_usd": spend_daily,
+                "spend_monthly_usd": spend_monthly,
+                "tokens_this_hour": tokens_hourly,
+                "is_exhausted": ex.is_some(),
+                "exhaustion_reason": ex.map(|r| exhaustion_reason_label(r.reason)),
+                "exhaustion_remaining_ms": ex.and_then(|r| r.remaining_ms),
+            })
+        })
+        .collect();
+
+    let alert_threshold = budget.alert_threshold;
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "providers": rows,
+            "alert_threshold": alert_threshold,
+        })),
+    )
+        .into_response()
+}
+
+/// Render `old → new` diff for a single `[budget.providers.<id>]` row
+/// in the audit detail field. `None` means "no entry" — i.e. the row was
+/// absent before / cleared after — and renders as the literal `none`
+/// token, mirroring `fmt_user_budget_diff`.
+fn fmt_provider_budget_diff(
+    old: Option<&librefang_types::config::ProviderBudget>,
+    new: Option<&librefang_types::config::ProviderBudget>,
+) -> String {
+    fn show<T: std::fmt::Display>(v: Option<T>) -> String {
+        match v {
+            Some(v) => v.to_string(),
+            None => "none".to_string(),
+        }
+    }
+    let h_old = show(old.map(|b| b.max_cost_per_hour_usd));
+    let h_new = show(new.map(|b| b.max_cost_per_hour_usd));
+    let d_old = show(old.map(|b| b.max_cost_per_day_usd));
+    let d_new = show(new.map(|b| b.max_cost_per_day_usd));
+    let m_old = show(old.map(|b| b.max_cost_per_month_usd));
+    let m_new = show(new.map(|b| b.max_cost_per_month_usd));
+    let t_old = show(old.map(|b| b.max_tokens_per_hour));
+    let t_new = show(new.map(|b| b.max_tokens_per_hour));
+    format!(
+        "hourly: {h_old}→{h_new} daily: {d_old}→{d_new} monthly: {m_old}→{m_new} tokens_hour: {t_old}→{t_new}"
+    )
+}
+
+/// PUT /api/budget/providers/{provider_id} — Upsert per-provider caps.
+///
+/// Mutates `[budget.providers.<provider_id>]` on disk via the same
+/// `persist_budget` pipeline the global `PUT /api/budget` uses, then
+/// triggers the kernel reload so the new caps reach
+/// `MeteringEngine::check_provider_budget` without a daemon restart.
+///
+/// Body shape: `{ "max_cost_per_hour_usd": 1.0, "max_cost_per_day_usd": 10.0,
+///                "max_cost_per_month_usd": 100.0, "max_tokens_per_hour": 1000000 }`
+/// Missing or `null` fields keep their prior value (partial PUT). Field
+/// validation mirrors `update_budget`: NaN, infinity, and negative
+/// numbers are 400'd at the boundary so a bad input never gets burned
+/// into `config.toml`.
+#[utoipa::path(
+    put,
+    path = "/api/budget/providers/{provider_id}",
+    tag = "budget",
+    params(("provider_id" = String, Path, description = "Provider identifier (e.g. `openai`, `groq`, `anthropic`)")),
+    request_body(
+        content = crate::types::JsonObject,
+        description = "Partial per-provider budget. Missing fields keep their prior value; 0 / 0.0 means unlimited."
+    ),
+    responses(
+        (status = 200, description = "Updated per-provider budget", body = crate::types::JsonObject),
+        (status = 400, description = "Submitted budget is malformed (NaN/infinity/negative cap, non-numeric type, blank provider id)", body = crate::types::JsonObject),
+        (status = 500, description = "Persist or reload failed", body = crate::types::JsonObject),
+    )
+)]
+pub async fn update_provider_budget(
+    State(state): State<Arc<AppState>>,
+    Path(provider_id): Path<String>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    let api_user_ref = api_user.as_ref().map(|e| &e.0);
+
+    // Reject a blank / whitespace-only provider id at the boundary. Empty
+    // strings would silently insert a `[budget.providers.""]` entry that
+    // `MeteringEngine::check_provider_budget` already short-circuits as
+    // an early-return (provider is empty) — so the cap would never gate
+    // anything and only clutter the dashboard.
+    let provider_id = provider_id.trim().to_string();
+    if provider_id.is_empty() {
+        return ApiErrorResponse::bad_request("provider_id must be a non-empty string")
+            .into_response();
+    }
+
+    let parse_cost_cap = |canonical: &str| -> Result<Option<f64>, String> {
+        let Some(v) = body.get(canonical) else {
+            return Ok(None);
+        };
+        if v.is_null() {
+            return Ok(None);
+        }
+        let n = v
+            .as_f64()
+            .ok_or_else(|| format!("{canonical} must be a JSON number (got {v})"))?;
+        if n.is_nan() || n.is_infinite() || n < 0.0 {
+            return Err(format!(
+                "{canonical} must be a finite, non-negative number (got {n})"
+            ));
+        }
+        Ok(Some(n))
+    };
+
+    let parse_token_cap = |canonical: &str| -> Result<Option<u64>, String> {
+        let Some(v) = body.get(canonical) else {
+            return Ok(None);
+        };
+        if v.is_null() {
+            return Ok(None);
+        }
+        let n = v
+            .as_u64()
+            .ok_or_else(|| format!("{canonical} must be a non-negative integer (got {v})"))?;
+        Ok(Some(n))
+    };
+
+    // Capture the OLD entry for the audit diff BEFORE we mutate. `None`
+    // here means "this provider was not configured before" — the diff
+    // will render the old side as `none` and the new side as the values
+    // the operator just set.
+    let old_budget_config = state.kernel.budget_config();
+    let old_provider = old_budget_config.providers.get(&provider_id).cloned();
+
+    // Start from the old row (or an unlimited default) so an unset field
+    // in the body keeps its prior value — matches the global PUT's
+    // partial-update contract (`budget_put_with_empty_object_is_noop`).
+    let mut next_provider = old_provider.clone().unwrap_or_default();
+    match parse_cost_cap("max_cost_per_hour_usd") {
+        Ok(Some(v)) => next_provider.max_cost_per_hour_usd = v,
+        Ok(None) => {}
+        Err(e) => return ApiErrorResponse::bad_request(e).into_response(),
+    }
+    match parse_cost_cap("max_cost_per_day_usd") {
+        Ok(Some(v)) => next_provider.max_cost_per_day_usd = v,
+        Ok(None) => {}
+        Err(e) => return ApiErrorResponse::bad_request(e).into_response(),
+    }
+    match parse_cost_cap("max_cost_per_month_usd") {
+        Ok(Some(v)) => next_provider.max_cost_per_month_usd = v,
+        Ok(None) => {}
+        Err(e) => return ApiErrorResponse::bad_request(e).into_response(),
+    }
+    match parse_token_cap("max_tokens_per_hour") {
+        Ok(Some(v)) => next_provider.max_tokens_per_hour = v,
+        Ok(None) => {}
+        Err(e) => return ApiErrorResponse::bad_request(e).into_response(),
+    }
+
+    // Compose the full BudgetConfig the persist layer expects, with the
+    // single provider entry swapped / inserted. The other fields are
+    // copied straight from the live snapshot so the disk write doesn't
+    // accidentally reset global caps.
+    let mut new_budget = old_budget_config.clone();
+    new_budget
+        .providers
+        .insert(provider_id.clone(), next_provider.clone());
+
+    if let Err(e) = persist_budget(&state, &new_budget).await {
+        state.kernel.audit().record_with_context(
+            "system",
+            librefang_kernel::audit::AuditAction::ConfigChange,
+            format!(
+                "provider_budget update rejected for {provider_id} ({e}): attempted {}",
+                fmt_provider_budget_diff(old_provider.as_ref(), Some(&next_provider))
+            ),
+            "error",
+            api_user_ref.map(|u| u.user_id),
+            Some("api".to_string()),
+        );
+        return match e {
+            PersistBudgetError::BadRequest(m) => ApiErrorResponse::bad_request(m).into_response(),
+            PersistBudgetError::Internal(m) => ApiErrorResponse::internal(m).into_response(),
+        };
+    }
+
+    state.kernel.audit().record_with_context(
+        "system",
+        librefang_kernel::audit::AuditAction::ConfigChange,
+        format!(
+            "provider_budget updated for {provider_id}: {}",
+            fmt_provider_budget_diff(old_provider.as_ref(), Some(&next_provider))
+        ),
+        "ok",
+        api_user_ref.map(|u| u.user_id),
+        Some("api".to_string()),
+    );
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "provider": provider_id,
+            "max_cost_per_hour_usd": next_provider.max_cost_per_hour_usd,
+            "max_cost_per_day_usd": next_provider.max_cost_per_day_usd,
+            "max_cost_per_month_usd": next_provider.max_cost_per_month_usd,
+            "max_tokens_per_hour": next_provider.max_tokens_per_hour,
+        })),
+    )
+        .into_response()
 }

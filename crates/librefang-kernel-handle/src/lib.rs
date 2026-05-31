@@ -734,6 +734,7 @@ pub trait ChannelSender: Send + Sync {
         is_quiz: bool,
         correct_option_id: Option<u8>,
         explanation: Option<&str>,
+        thread_id: Option<&str>,
         account_id: Option<&str>,
     ) -> Result<(), KernelOpError> {
         let _ = (
@@ -744,6 +745,7 @@ pub trait ChannelSender: Send + Sync {
             is_quiz,
             correct_option_id,
             explanation,
+            thread_id,
             account_id,
         );
         Err(KernelOpError::unavailable("Channel poll send"))
@@ -1394,9 +1396,24 @@ pub trait ApiAuth: Send + Sync {
 // ============================================================================
 
 pub trait SessionWriter: Send + Sync {
-    /// Pre-insert `blocks` as a User-role message into the agent's current
-    /// session so the LLM sees the content in the next turn.  No-op (with a
-    /// `warn!`) when the agent is not found; best-effort on save failure.
+    /// Pre-insert `blocks` as a User-role message into the **specific**
+    /// session identified by `session_id` so the LLM sees the content in
+    /// the next turn.  No-op (with a `warn!`) when the agent is not found;
+    /// best-effort on save failure.
+    ///
+    /// **Session isolation invariant (2026-05-20 incident).** Callers MUST
+    /// derive `session_id` with the *same* resolver used by the matching
+    /// `send_message_*` call for this turn (see
+    /// `kernel::messaging::send_message_streaming_with_incognito` /
+    /// `send_message_with_incognito`): explicit override wins, otherwise
+    /// `SessionId::for_sender_scope(agent, channel, chat_id)` for
+    /// channel-scoped turns, otherwise the agent's persistent
+    /// `entry.session_id`. Passing the agent's default registry session
+    /// when the text part of the same request will land on a
+    /// channel-derived session causes a cross-chat leak — the bug fixed
+    /// alongside this signature change. The implementation MUST write into
+    /// the SPECIFIC `session_id` and must NOT silently fall back to
+    /// `entry.session_id` on its own.
     ///
     /// **Blocking I/O notice.**  The current production implementation
     /// (`LibreFangKernel`) calls `MemorySubstrate::save_session` synchronously,
@@ -1408,6 +1425,7 @@ pub trait SessionWriter: Send + Sync {
     fn inject_attachment_blocks(
         &self,
         agent_id: librefang_types::agent::AgentId,
+        session_id: librefang_types::agent::SessionId,
         blocks: Vec<librefang_types::message::ContentBlock>,
     );
 
@@ -1668,6 +1686,20 @@ pub trait CatalogQuery: Send + Sync {
     ) -> librefang_types::model_catalog::ReasoningEchoPolicy {
         librefang_types::model_catalog::ReasoningEchoPolicy::None
     }
+
+    /// Resolve the effective proactive-memory `extraction_model` for the
+    /// agent identified by `agent_id` (#5475). Looks at the agent's
+    /// manifest `[proactive_memory] extraction_model` and falls back to
+    /// the kernel-global `[proactive_memory] extraction_model`. Returns
+    /// `None` when neither is set — the extractor then uses whatever
+    /// model it was constructed with at boot.
+    ///
+    /// Default impl returns `None` so existing test stubs and tooling
+    /// don't have to opt in; the real kernel impl threads through the
+    /// agent registry + active `KernelConfig` to perform the lookup.
+    fn proactive_memory_extraction_model_for(&self, _agent_id: &str) -> Option<String> {
+        None
+    }
 }
 
 // ============================================================================
@@ -1917,6 +1949,7 @@ mod tests {
         fn inject_attachment_blocks(
             &self,
             _agent_id: librefang_types::agent::AgentId,
+            _session_id: librefang_types::agent::SessionId,
             _blocks: Vec<librefang_types::message::ContentBlock>,
         ) {
         }

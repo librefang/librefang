@@ -454,6 +454,50 @@ fn test_recover_bare_json_tool_call() {
 }
 
 #[test]
+fn test_recover_bare_json_tool_call_with_closing_brace_in_string() {
+    let tools = vec![ToolDefinition {
+        name: "shell_exec".into(),
+        description: "Execute".into(),
+        input_schema: serde_json::json!({}),
+    }];
+    let text =
+        "I'll run that: {\"name\": \"shell_exec\", \"arguments\": {\"command\": \"printf '}'\"}}";
+    let calls = recover_text_tool_calls(text, &tools);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].name, "shell_exec");
+    assert_eq!(calls[0].input["command"], "printf '}'");
+}
+
+#[test]
+fn test_recover_bare_json_tool_call_with_opening_brace_in_string() {
+    let tools = vec![ToolDefinition {
+        name: "shell_exec".into(),
+        description: "Execute".into(),
+        input_schema: serde_json::json!({}),
+    }];
+    let text =
+        "I'll run that: {\"name\": \"shell_exec\", \"arguments\": {\"command\": \"printf '{'\"}}";
+    let calls = recover_text_tool_calls(text, &tools);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].name, "shell_exec");
+    assert_eq!(calls[0].input["command"], "printf '{'");
+}
+
+#[test]
+fn test_recover_bare_json_tool_call_with_escaped_quote_before_brace() {
+    let tools = vec![ToolDefinition {
+        name: "shell_exec".into(),
+        description: "Execute".into(),
+        input_schema: serde_json::json!({}),
+    }];
+    let text = r#"I'll run that: {"name": "shell_exec", "arguments": {"command": "printf \"}\""}}"#;
+    let calls = recover_text_tool_calls(text, &tools);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].name, "shell_exec");
+    assert_eq!(calls[0].input["command"], "printf \"}\"");
+}
+
+#[test]
 fn test_recover_bare_json_no_false_positive() {
     let tools = vec![ToolDefinition {
         name: "shell_exec".into(),

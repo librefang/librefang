@@ -16,9 +16,18 @@ pub struct DevArgs {
     /// Build in release mode
     #[arg(long)]
     pub release: bool,
+
+    /// Run the daemon (and sidecar binaries) inside the `librefang-rust-dev` container instead of natively.
+    ///
+    /// Host's `~/.librefang/` is bind-mounted into the container so config edits on the host are immediately visible to the daemon; cargo caches live in named volumes (`librefang-cargo`, `librefang-target`) so a first-run install of Rust on the host isn't required, and a Linux binary is produced regardless of the host OS. Dashboard and cargo-watch are skipped — both make more sense run on the host alongside the editor.
+    #[arg(long)]
+    pub docker: bool,
 }
 
 pub fn run(args: DevArgs) -> Result<(), Box<dyn std::error::Error>> {
+    if args.docker {
+        return run_docker(&args);
+    }
     let root = repo_root();
 
     // Kill stale processes on relevant ports
@@ -507,6 +516,166 @@ fn get_pids_on_port(port: u16) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Run the dev daemon (and sidecar binaries) inside the `librefang-rust-dev` container.
+///
+/// Layout inside the container:
+/// - `/work` ↔ host repo root (read-write — `cargo` writes lockfile updates back).
+/// - `/root/.librefang` ↔ host `~/.librefang` (so config / vault / logs persist on host).
+/// - `/cargo` ← named volume `librefang-cargo` (CARGO_HOME).
+/// - `/target` ← named volume `librefang-target` (CARGO_TARGET_DIR).
+///
+/// Binaries live at `/target/release/librefang` and `/target/release/librefang-sidecar-telegram`; reference them by the in-container path in `~/.librefang/config.toml`.
+fn run_docker(args: &DevArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let root = repo_root();
+    let home = librefang_home();
+
+    // Daemon needs the dir to exist before we can mount it.
+    std::fs::create_dir_all(&home)?;
+
+    // Build the dev image if it's not on the host yet (one-time, ~5 min).
+    let image_present = Command::new("docker")
+        .args(["image", "inspect", "librefang-rust-dev:latest"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !image_present {
+        println!("Building librefang-rust-dev:latest image (one-time, ~5 minutes)...");
+        let status = Command::new("docker")
+            .args([
+                "build",
+                "-t",
+                "librefang-rust-dev:latest",
+                "-f",
+                "Dockerfile.rust-dev",
+                ".",
+            ])
+            .current_dir(&root)
+            .status()?;
+        if !status.success() {
+            return Err("`docker build` of librefang-rust-dev:latest failed".into());
+        }
+    }
+
+    // Step 1: compile librefang-cli + librefang-sidecar-telegram into the named-volume target dir. This is a separate `docker run --rm` (no tty) so the long build doesn't share a process group with the interactive daemon below.
+    println!("Building daemon + Rust Telegram sidecar inside the dev container...");
+    let root_str = root.display().to_string();
+    let build_status = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-v",
+            &format!("{root_str}:/work"),
+            "-v",
+            "librefang-cargo:/cargo",
+            "-v",
+            "librefang-target:/target",
+            "-e",
+            "CARGO_HOME=/cargo",
+            "-e",
+            "CARGO_TARGET_DIR=/target",
+            "-w",
+            "/work",
+            "librefang-rust-dev:latest",
+            "sh",
+            "-c",
+            "export PATH=/usr/local/cargo/bin:$PATH && \
+             cargo build --release -p librefang-cli && \
+             cargo build --release --manifest-path sdk/rust/librefang-sidecar-telegram/Cargo.toml",
+        ])
+        .status()?;
+    if !build_status.success() {
+        return Err("Container build of librefang-cli / librefang-sidecar-telegram failed".into());
+    }
+
+    // Auto-init: run `librefang init --quick` inside the container if the operator's `~/.librefang/config.toml` doesn't exist yet. This produces a starter config keyed off the in-container binary paths.
+    let host_config = home.join("config.toml");
+    if !host_config.exists() {
+        println!(
+            "No config.toml at {} — bootstrapping with `librefang init --quick`...",
+            host_config.display()
+        );
+        let init_status = Command::new("docker")
+            .args([
+                "run",
+                "--rm",
+                "-v",
+                &format!("{root_str}:/work"),
+                "-v",
+                &format!("{}:/root/.librefang", home.display()),
+                "-v",
+                "librefang-target:/target",
+                "-w",
+                "/work",
+                "librefang-rust-dev:latest",
+                "/target/release/librefang",
+                "init",
+                "--quick",
+            ])
+            .status()?;
+        if !init_status.success() {
+            eprintln!("Warning: `librefang init --quick` exited non-zero; continuing.");
+        }
+        println!(
+            "Edit {} to add `[[sidecar_channels]]` entries — see\n  https://docs.librefang.ai/architecture/rust-telegram-sidecar\nfor the Rust Telegram sidecar config (use `command = \"/target/release/librefang-sidecar-telegram\"`).",
+            host_config.display()
+        );
+    }
+
+    // Step 2: start the daemon in the foreground with stdin/stdout attached so the operator sees logs live and ctrl-c stops it. Remove any stale `librefang-dev` container first — `--rm` covers clean exits, but a docker-daemon crash can leave an orphan that would fail with `name already in use`.
+    let _ = Command::new("docker")
+        .args(["rm", "-f", "librefang-dev"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    let port = args.port;
+    println!("\nStarting daemon in container on port {port}...");
+    println!("  Host repo  ↔ /work");
+    println!("  ~/.librefang ↔ /root/.librefang");
+    println!("  cargo cache ↔ named volume librefang-cargo");
+    println!("  binaries    ↔ named volume librefang-target");
+    println!();
+    let port_map = format!("{port}:{port}");
+    let port_env = format!("LIBREFANG_PORT={port}");
+    let home_mount = format!("{}:/root/.librefang", home.display());
+    let work_mount = format!("{root_str}:/work");
+    let docker_args: Vec<&str> = vec![
+        "run",
+        "-it",
+        "--rm",
+        "--name",
+        "librefang-dev",
+        "-v",
+        &work_mount,
+        "-v",
+        &home_mount,
+        "-v",
+        "librefang-cargo:/cargo",
+        "-v",
+        "librefang-target:/target",
+        "-e",
+        "CARGO_HOME=/cargo",
+        "-e",
+        "CARGO_TARGET_DIR=/target",
+        "-e",
+        &port_env,
+        "-p",
+        &port_map,
+        "-w",
+        "/work",
+        "librefang-rust-dev:latest",
+        "/target/release/librefang",
+        "start",
+        "--foreground",
+    ];
+    let status = Command::new("docker").args(&docker_args).status()?;
+    if !status.success() {
+        return Err(format!("daemon container exited with status {status:?}").into());
+    }
+    Ok(())
 }
 
 /// Resolve the LibreFang home directory (mirrors kernel logic).

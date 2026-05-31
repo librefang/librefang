@@ -38,9 +38,9 @@ use axum::http::StatusCode;
 /// | everything else                                 | 500    |
 pub fn kernel_op_status(err: &KernelOpError) -> StatusCode {
     match err {
-        KernelOpError::AgentNotFound(_) | KernelOpError::SessionNotFound(_) => {
-            StatusCode::NOT_FOUND
-        }
+        KernelOpError::AgentNotFound(_)
+        | KernelOpError::SessionNotFound(_)
+        | KernelOpError::ResourceNotFound { .. } => StatusCode::NOT_FOUND,
         KernelOpError::InvalidInput(_)
         | KernelOpError::InvalidState { .. }
         | KernelOpError::ManifestParse(_) => StatusCode::BAD_REQUEST,
@@ -66,7 +66,9 @@ pub fn kernel_op_code(err: &KernelOpError) -> &'static str {
 /// fields without a string round-trip.
 pub fn kernel_op_error_code(err: &KernelOpError) -> ErrorCode {
     match err {
-        KernelOpError::AgentNotFound(_) | KernelOpError::SessionNotFound(_) => ErrorCode::NotFound,
+        KernelOpError::AgentNotFound(_)
+        | KernelOpError::SessionNotFound(_)
+        | KernelOpError::ResourceNotFound { .. } => ErrorCode::NotFound,
         KernelOpError::InvalidInput(_)
         | KernelOpError::InvalidState { .. }
         | KernelOpError::ManifestParse(_) => ErrorCode::InvalidInput,

@@ -10,6 +10,7 @@ pub mod mcp_oauth;
 
 use arc_swap::ArcSwap;
 use http::{HeaderName, HeaderValue};
+use librefang_types::agent::SessionId;
 use librefang_types::config::{
     HttpCompatHeaderConfig, HttpCompatMethod, HttpCompatRequestMode, HttpCompatResponseMode,
     HttpCompatToolConfig,
@@ -25,6 +26,128 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
+
+// ---------------------------------------------------------------------------
+// Caller context (#5699)
+// ---------------------------------------------------------------------------
+
+/// Object-key used to ship the kernel-attested caller context inside the MCP
+/// `tools/call` `arguments` payload for Rmcp and SSE transports. Chosen with a
+/// leading underscore so it sorts deterministically and is visually flagged as
+/// LibreFang-private. Any agent-supplied value under this key is **stripped
+/// then overwritten** by the kernel value just before transmit — see
+/// [`McpConnection::call_tool_with_caller`].
+pub const CALLER_CONTEXT_ARG_KEY: &str = "_librefang_caller";
+
+/// HTTP header used to ship the kernel-attested caller context on the
+/// [`McpTransport::HttpCompat`] transport. The body of an HttpCompat request is
+/// templated against a backend's native API (path params, JSON body, or query
+/// string) — there is no general-purpose `arguments` envelope to inject the
+/// context object into, so we ship it as a side-channel header instead. The
+/// receiving server (when run by the same operator) can opt in to reading it.
+pub const CALLER_CONTEXT_HEADER: &str = "X-Librefang-Caller";
+
+/// Kernel-attested identity of the entity that drove the current agent turn.
+///
+/// Populated from `ToolExecContext.sender_id` / `.channel` / `.chat_id` /
+/// `.session_id` upstream in `librefang-runtime::tool_runner::dispatch`. Every
+/// field is `Option` because legacy call sites (autonomous loops, cron fires
+/// with no human sender, test fixtures) may not have all four signals on hand;
+/// MCP servers must treat missing fields as "do not authorize" rather than
+/// "authorize as default".
+///
+/// **Security invariant**: the kernel is the sole source of these values. The
+/// agent cannot influence them — any [`CALLER_CONTEXT_ARG_KEY`] entry the agent
+/// puts into `arguments` is stripped and overwritten before transmit. See
+/// `tests::caller_context_overwrites_agent_supplied_value` for the regression.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CallerContext {
+    /// Channel peer id that drove this turn (e.g. Telegram user id,
+    /// WhatsApp JID). `None` for non-channel call sites (direct API,
+    /// autonomous loop, cron with no sender attribution).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peer_id: Option<String>,
+    /// Channel name (`"telegram"`, `"whatsapp"`, `"slack"`, …). `None`
+    /// for direct API / non-channel call sites.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    /// Platform conversation id (Telegram chat_id, Discord channel_id,
+    /// WhatsApp JID) the originating user message arrived on. Distinct
+    /// from `peer_id` for group chats; coincides in DMs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chat_id: Option<String>,
+    /// LibreFang `SessionId` (string form) the tool call belongs to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+}
+
+impl CallerContext {
+    /// Build a context from the discrete identity signals carried in
+    /// `ToolExecContext`. Returns `None` if every signal is missing — the
+    /// caller can skip injection in that case and preserve the legacy
+    /// payload byte-for-byte (relevant for prompt-cache parity).
+    pub fn from_parts(
+        peer_id: Option<&str>,
+        channel: Option<&str>,
+        chat_id: Option<&str>,
+        session_id: Option<SessionId>,
+    ) -> Option<Self> {
+        if peer_id.is_none() && channel.is_none() && chat_id.is_none() && session_id.is_none() {
+            return None;
+        }
+        Some(Self {
+            peer_id: peer_id.map(str::to_string),
+            channel: channel.map(str::to_string),
+            chat_id: chat_id.map(str::to_string),
+            session_id: session_id.map(|s| s.0.to_string()),
+        })
+    }
+
+    /// Serialise to a compact JSON string suitable for the
+    /// [`CALLER_CONTEXT_HEADER`] HTTP header. Returns `Err` only if the
+    /// underlying `serde_json` serialiser fails, which is unreachable for
+    /// this all-`Option<String>` shape.
+    pub fn to_header_value(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
+    }
+}
+
+/// Build the wire arguments object: clone `arguments` (coercing non-object /
+/// null inputs to `{}` to match the MCP spec), **strip** any agent-supplied
+/// [`CALLER_CONTEXT_ARG_KEY`] entry, then **set** the kernel-attested value
+/// (when `caller` is `Some`).
+///
+/// The strip-then-set ordering is the security boundary — see
+/// [`McpConnection::call_tool_with_caller`].
+fn inject_caller_into_arguments(
+    arguments: &serde_json::Value,
+    caller: Option<&CallerContext>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut obj = arguments.as_object().cloned().unwrap_or_default();
+    // ALWAYS strip the agent-supplied key, even when `caller` is None —
+    // otherwise an agent that learned the key name could populate it and
+    // have it forwarded to a context-blind legacy MCP server.
+    obj.remove(CALLER_CONTEXT_ARG_KEY);
+    if let Some(c) = caller {
+        match serde_json::to_value(c) {
+            Ok(v) => {
+                obj.insert(CALLER_CONTEXT_ARG_KEY.to_string(), v);
+            }
+            Err(e) => {
+                // Unreachable for the all-`Option<String>` shape, but a
+                // serialisation failure must NEVER cause a privilege escalation
+                // (continuing without the kernel value would let the call
+                // proceed un-attested). Log and leave the key absent so the
+                // server defaults to its no-caller branch.
+                warn!(
+                    error = %e,
+                    "failed to serialise CallerContext; proceeding without _librefang_caller"
+                );
+            }
+        }
+    }
+    obj
+}
 
 /// Maximum JSON nesting depth the taint scanner will traverse. Anything
 /// deeper is rejected outright so a pathological payload can't blow the
@@ -2057,11 +2180,53 @@ fn json_type_name(v: &serde_json::Value) -> &'static str {
 }
 
 impl McpConnection {
-    /// Call a tool on the MCP server.
+    /// Call a tool on the MCP server with no kernel-attested caller context.
+    ///
+    /// Thin wrapper over [`call_tool_with_caller`] that passes `None`. Retained
+    /// for compatibility with call sites (tests, ad-hoc scripts) that don't
+    /// have a [`CallerContext`] on hand. Production dispatch always goes
+    /// through `call_tool_with_caller` so MCP servers receive the
+    /// kernel-attested identity (#5699).
     pub async fn call_tool(
         &mut self,
         name: &str,
         arguments: &serde_json::Value,
+    ) -> Result<String, String> {
+        self.call_tool_with_caller(name, arguments, None).await
+    }
+
+    /// Call a tool on the MCP server, propagating the kernel-attested
+    /// [`CallerContext`] alongside the arguments (#5699).
+    ///
+    /// # Caller-context injection (strip-then-set)
+    ///
+    /// When `caller` is `Some`, the kernel-attested identity is shipped to the
+    /// MCP server so per-user routing can be enforced server-side:
+    ///
+    /// - **Rmcp / SSE** transports: a clone of `arguments` is materialised, any
+    ///   agent-supplied [`CALLER_CONTEXT_ARG_KEY`] entry is **removed**, and the
+    ///   kernel value is then inserted under the same key. This strip-then-set
+    ///   ordering is the security boundary: an agent that learns the field name
+    ///   and tries to spoof a caller cannot, because their value is dropped
+    ///   before the kernel value is inserted. See
+    ///   `tests::caller_context_overwrites_agent_supplied_value`.
+    /// - **HttpCompat** transport: the body is template-rendered against the
+    ///   backend's native API and has no general-purpose envelope to inject
+    ///   into. The context is shipped as the [`CALLER_CONTEXT_HEADER`] HTTP
+    ///   header instead.
+    ///
+    /// When `caller` is `None` the arguments are forwarded byte-for-byte
+    /// (preserving prompt-cache equivalence with the pre-#5699 wire shape).
+    ///
+    /// The taint scanner runs against the **original** agent-supplied
+    /// arguments — before any kernel mutation — so a malicious agent cannot
+    /// hide credential-shaped data behind a `_librefang_caller` key. The
+    /// injection happens only on the cloned payload that goes to the wire.
+    pub async fn call_tool_with_caller(
+        &mut self,
+        name: &str,
+        arguments: &serde_json::Value,
+        caller: Option<&CallerContext>,
     ) -> Result<String, String> {
         // Resolve raw (un-prefixed) tool name before taint check so we can
         // look it up in the per-tool policy.
@@ -2138,7 +2303,11 @@ impl McpConnection {
                 // Always send an object — MCP spec requires `arguments` to
                 // be an object, and some servers (e.g. filesystem) reject
                 // `undefined`/`null` even for zero-parameter tools.
-                params.arguments = Some(arguments.as_object().cloned().unwrap_or_default());
+                //
+                // `inject_caller_into_arguments` strips any agent-supplied
+                // `_librefang_caller` entry and inserts the kernel-attested
+                // value (when `caller.is_some()`). See #5699.
+                params.arguments = Some(inject_caller_into_arguments(arguments, caller));
 
                 let timeout = std::time::Duration::from_secs(self.config.timeout_secs);
                 let result: rmcp::model::CallToolResult =
@@ -2180,9 +2349,15 @@ impl McpConnection {
             TransportKind::Sse => {
                 // `self.inner` is no longer borrowed here, so calling
                 // `self.sse_send_request` (which takes `&mut self`) is safe.
+                //
+                // `inject_caller_into_arguments` strips any agent-supplied
+                // `_librefang_caller` entry and inserts the kernel-attested
+                // value (when `caller.is_some()`). See #5699.
+                let wire_args =
+                    serde_json::Value::Object(inject_caller_into_arguments(arguments, caller));
                 let params = serde_json::json!({
                     "name": raw_name,
-                    "arguments": arguments,
+                    "arguments": wire_args,
                 });
 
                 let response = self.sse_send_request("tools/call", Some(params)).await?;
@@ -2223,14 +2398,25 @@ impl McpConnection {
                     tools,
                 } = &self.config.transport
                 {
+                    // Strip any agent-supplied `_librefang_caller` key from the
+                    // arguments object regardless of caller — the HttpCompat
+                    // transport ships the kernel-attested value via the
+                    // `X-Librefang-Caller` header instead, and we don't want a
+                    // smuggled key landing in the backend body / query string.
+                    // See #5699.
+                    let mut stripped_args = arguments.clone();
+                    if let Some(obj) = stripped_args.as_object_mut() {
+                        obj.remove(CALLER_CONTEXT_ARG_KEY);
+                    }
                     Self::call_http_compat_tool(
                         &client,
                         base_url,
                         headers,
                         tools,
                         raw_name.as_str(),
-                        arguments,
+                        &stripped_args,
                         self.config.timeout_secs,
+                        caller,
                     )
                     .await
                 } else {
@@ -2306,6 +2492,11 @@ impl McpConnection {
         Ok(())
     }
 
+    // Eight args (was seven before #5699 added `caller`). The arg list is
+    // dominated by `config.transport`-destructured fields plus the per-call
+    // arguments and caller context — bundling them into a temporary struct
+    // would push the noise into the call site without simplifying anything.
+    #[allow(clippy::too_many_arguments)]
     async fn call_http_compat_tool(
         client: &reqwest::Client,
         base_url: &str,
@@ -2314,6 +2505,7 @@ impl McpConnection {
         raw_name: &str,
         arguments: &serde_json::Value,
         timeout_secs: u64,
+        caller: Option<&CallerContext>,
     ) -> Result<String, String> {
         let tool = tools
             .iter()
@@ -2340,6 +2532,35 @@ impl McpConnection {
 
         request = request.timeout(std::time::Duration::from_secs(timeout_secs));
         request = Self::apply_http_compat_headers(request, headers)?;
+
+        // Ship the kernel-attested caller context as a header so the backend
+        // (when operated by the same party) can authorise per-caller. See
+        // #5699. Serialisation is infallible for the all-`Option<String>`
+        // shape; a header construction error is logged and the request
+        // proceeds without the header so we don't fail-open into the
+        // alternative (silently dropping the call would mask user-visible
+        // tool errors).
+        if let Some(c) = caller {
+            match c.to_header_value() {
+                Ok(value) => match HeaderValue::from_str(&value) {
+                    Ok(hv) => {
+                        request = request.header(CALLER_CONTEXT_HEADER, hv);
+                    }
+                    Err(e) => {
+                        warn!(
+                            error = %e,
+                            "failed to encode X-Librefang-Caller header value; sending request without caller context"
+                        );
+                    }
+                },
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        "failed to serialise CallerContext for header; sending request without caller context"
+                    );
+                }
+            }
+        }
 
         match tool.request_mode {
             HttpCompatRequestMode::JsonBody => {
@@ -4708,5 +4929,149 @@ mod tests {
             Some(ToolApprovalClass::Mutating),
             "producer string {class_str:?} must parse on the consumer side"
         );
+    }
+
+    // ── #5699 Caller-context propagation ───────────────────────────────
+
+    #[test]
+    fn caller_context_from_parts_returns_none_when_all_fields_missing() {
+        // No identity signals → no context to ship — the call falls back to
+        // the legacy un-attested wire shape, preserving prompt-cache
+        // equivalence for non-channel call sites (autonomous loops,
+        // direct-API).
+        assert!(CallerContext::from_parts(None, None, None, None).is_none());
+    }
+
+    #[test]
+    fn caller_context_from_parts_populates_when_any_field_present() {
+        let ctx = CallerContext::from_parts(Some("peer-1"), Some("telegram"), None, None)
+            .expect("at least one Some => Some(ctx)");
+        assert_eq!(ctx.peer_id.as_deref(), Some("peer-1"));
+        assert_eq!(ctx.channel.as_deref(), Some("telegram"));
+        assert!(ctx.chat_id.is_none());
+        assert!(ctx.session_id.is_none());
+    }
+
+    #[test]
+    fn caller_context_to_header_value_round_trips() {
+        let ctx = CallerContext {
+            peer_id: Some("user-7".to_string()),
+            channel: Some("telegram".to_string()),
+            chat_id: Some("chat-99".to_string()),
+            session_id: Some("00000000-0000-0000-0000-000000000001".to_string()),
+        };
+        let header = ctx.to_header_value().expect("infallible for this shape");
+        let parsed: CallerContext =
+            serde_json::from_str(&header).expect("header value must be valid JSON");
+        assert_eq!(parsed, ctx);
+    }
+
+    #[test]
+    fn caller_context_header_value_is_a_valid_http_header() {
+        // The header value must survive `HeaderValue::from_str` without
+        // tripping the ASCII / control-char gate — otherwise we'd silently
+        // drop the context at the HttpCompat transport. JSON of pure ASCII
+        // string fields always passes this, but verify so a future change
+        // (e.g. tacking on a non-ASCII field) gets flagged.
+        let ctx = CallerContext {
+            peer_id: Some("user-1".to_string()),
+            channel: Some("telegram".to_string()),
+            chat_id: None,
+            session_id: None,
+        };
+        let header = ctx.to_header_value().unwrap();
+        assert!(HeaderValue::from_str(&header).is_ok());
+    }
+
+    #[test]
+    fn inject_caller_strips_agent_supplied_key_when_caller_none() {
+        // Even with no kernel context, an agent-supplied `_librefang_caller`
+        // must NEVER be forwarded — otherwise a context-blind legacy server
+        // would happily read it as if it were attested.
+        let agent_payload = serde_json::json!({
+            "user_id": "<user-A>",
+            CALLER_CONTEXT_ARG_KEY: { "peer_id": "<spoofed-peer-B>" },
+        });
+        let wire = inject_caller_into_arguments(&agent_payload, None);
+        assert!(
+            !wire.contains_key(CALLER_CONTEXT_ARG_KEY),
+            "agent-supplied caller key must be stripped even when caller is None"
+        );
+        assert_eq!(
+            wire.get("user_id").and_then(|v| v.as_str()),
+            Some("<user-A>")
+        );
+    }
+
+    #[test]
+    fn inject_caller_overwrites_agent_supplied_value() {
+        // Core #5699 security regression: a malicious agent that knows the
+        // private key name MUST NOT be able to spoof the kernel-attested
+        // identity. The kernel value wins.
+        let agent_payload = serde_json::json!({
+            "user_id": "<user-A>",
+            CALLER_CONTEXT_ARG_KEY: {
+                "peer_id": "<spoofed-peer-B>",
+                "channel": "<spoofed-channel>",
+            },
+        });
+        let kernel_caller = CallerContext {
+            peer_id: Some("attested-peer-A".to_string()),
+            channel: Some("telegram".to_string()),
+            chat_id: Some("chat-1".to_string()),
+            session_id: None,
+        };
+        let wire = inject_caller_into_arguments(&agent_payload, Some(&kernel_caller));
+        let injected = wire
+            .get(CALLER_CONTEXT_ARG_KEY)
+            .expect("kernel caller must be present on the wire");
+        // Round-trip through CallerContext to assert the value is the
+        // kernel-attested one, not the agent's spoof attempt.
+        let parsed: CallerContext = serde_json::from_value(injected.clone())
+            .expect("injected value must deserialize as CallerContext");
+        assert_eq!(parsed, kernel_caller);
+        assert_eq!(parsed.peer_id.as_deref(), Some("attested-peer-A"));
+        // The agent's spoofed values must NOT survive.
+        assert_ne!(parsed.peer_id.as_deref(), Some("<spoofed-peer-B>"));
+        assert_ne!(parsed.channel.as_deref(), Some("<spoofed-channel>"));
+        // Other agent-supplied fields are forwarded byte-for-byte —
+        // the strip-then-set logic must NOT touch them.
+        assert_eq!(
+            wire.get("user_id").and_then(|v| v.as_str()),
+            Some("<user-A>")
+        );
+    }
+
+    #[test]
+    fn inject_caller_coerces_non_object_arguments_to_empty_object() {
+        // MCP spec requires `arguments` to be an object — a malformed
+        // non-object input (e.g. a stray array or string) must still
+        // produce an object on the wire, and the caller context must
+        // still be present.
+        let kernel_caller = CallerContext {
+            peer_id: Some("p".to_string()),
+            ..Default::default()
+        };
+        let wire = inject_caller_into_arguments(
+            &serde_json::Value::String("garbage".into()),
+            Some(&kernel_caller),
+        );
+        assert_eq!(wire.len(), 1);
+        assert!(wire.contains_key(CALLER_CONTEXT_ARG_KEY));
+    }
+
+    #[test]
+    fn inject_caller_with_none_and_no_agent_key_is_byte_identical() {
+        // Prompt-cache equivalence: legacy call sites that don't carry any
+        // caller context must produce the exact same `arguments` object as
+        // before #5699 — otherwise we'd silently bust the provider prompt
+        // cache for every existing deployment on upgrade.
+        let agent_payload = serde_json::json!({
+            "city": "Paris",
+            "units": "metric",
+        });
+        let wire = inject_caller_into_arguments(&agent_payload, None);
+        let wire_value = serde_json::Value::Object(wire);
+        assert_eq!(wire_value, agent_payload);
     }
 }

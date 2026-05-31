@@ -108,26 +108,68 @@ pub fn init_proactive_memory_full_with_extractor(
         return None;
     }
 
-    let (mut store, llm_extractor): (_, Option<Arc<LlmMemoryExtractor>>) =
-        if let Some((driver, model)) = llm {
-            // Hold two handles to the same extractor: one as the concrete
-            // type (so the kernel can install its weak self-ref on it
-            // later), one as the trait object (so the store can invoke it
-            // via `MemoryExtractor`).
-            let extractor_concrete = Arc::new(LlmMemoryExtractor::with_prompt_caching(
-                driver,
-                model,
-                prompt_caching,
-            ));
-            let extractor_dyn: Arc<dyn librefang_types::memory::MemoryExtractor> =
-                Arc::clone(&extractor_concrete) as _;
-            (
-                ProactiveMemoryStore::with_extractor(memory, config, extractor_dyn),
-                Some(extractor_concrete),
-            )
-        } else {
-            (ProactiveMemoryStore::new(memory, config), None)
-        };
+    // A configured-but-commandless [extractor_sidecar] table is a
+    // misconfiguration: spawning "" would fail on every turn and silently
+    // memorize nothing. Warn and fall through to the built-in path instead.
+    if let Some(s) = &config.extractor_sidecar {
+        if s.command.trim().is_empty() {
+            tracing::warn!(
+                "Proactive memory: [extractor_sidecar] has no command; ignoring it \
+                 and using the built-in extractor"
+            );
+        }
+    }
+    let sidecar_cfg = config
+        .extractor_sidecar
+        .clone()
+        .filter(|s| !s.command.trim().is_empty());
+
+    let (mut store, llm_extractor): (_, Option<Arc<LlmMemoryExtractor>>) = if let Some(sidecar) =
+        sidecar_cfg
+    {
+        // An out-of-process extractor takes precedence over the built-in
+        // LLM/rule-based path. There is no concrete `LlmMemoryExtractor` to
+        // return (the sidecar needs no kernel handle), so the second tuple
+        // element is `None`. The sidecar bypasses the built-in LLM extractor
+        // wholesale, including any per-agent `extraction_model` override — warn
+        // so an operator who set both isn't surprised which one wins.
+        if llm.is_some() {
+            tracing::warn!(
+                "Proactive memory: extractor_sidecar is configured, so the built-in LLM \
+                 extractor and any per-agent extraction_model override are bypassed"
+            );
+        }
+        tracing::info!(command = %sidecar.command, "Proactive memory: out-of-process extractor");
+        let extractor_dyn: Arc<dyn librefang_types::memory::MemoryExtractor> = Arc::new(
+            crate::proactive_memory_sidecar::SidecarMemoryExtractor::new(
+                sidecar.command,
+                sidecar.args,
+                sidecar.request_timeout_secs,
+            ),
+        );
+        (
+            ProactiveMemoryStore::with_extractor(memory, config, extractor_dyn),
+            None,
+        )
+    } else if let Some((driver, model)) = llm {
+        // Hold two handles to the same extractor: one as the concrete
+        // type (so the kernel can install its weak self-ref on it
+        // later), one as the trait object (so the store can invoke it
+        // via `MemoryExtractor`).
+        let extractor_concrete = Arc::new(LlmMemoryExtractor::with_prompt_caching(
+            driver,
+            model,
+            prompt_caching,
+        ));
+        let extractor_dyn: Arc<dyn librefang_types::memory::MemoryExtractor> =
+            Arc::clone(&extractor_concrete) as _;
+        (
+            ProactiveMemoryStore::with_extractor(memory, config, extractor_dyn),
+            Some(extractor_concrete),
+        )
+    } else {
+        (ProactiveMemoryStore::new(memory, config), None)
+    };
 
     if let Some(emb) = embedding {
         store = store.with_embedding(Arc::new(EmbeddingBridge(emb)));
@@ -151,6 +193,41 @@ pub fn init_proactive_memory_with_defaults(
 // ---------------------------------------------------------------------------
 
 const MAX_MEMORY_CONTENT_LENGTH: usize = 2000;
+
+/// Cap on memories accepted per extraction call (H2). A misbehaving
+/// extractor can dump dozens of low-quality fragments per turn; this
+/// stops one bad turn from blowing past the per-agent memory cap and
+/// the prompt-injection budget in `format_context`.
+const MAX_MEMORIES_PER_EXTRACTION: usize = 20;
+
+/// Snap a model-emitted category to the configured allowlist when the
+/// match is close enough that an exact-string compare would be brittle
+/// noise (H2 review-followup #7).
+///
+/// Two-pass:
+/// 1. Case-insensitive exact match — handles `"Preference"`.
+/// 2. Case-insensitive match after dropping a trailing `s` on either
+///    side — handles `"preferences"` vs configured `"preference"`,
+///    or `"preference"` vs configured `"preferences"` (rare, but
+///    operators do declare plural forms sometimes).
+///
+/// Returns the *configured* string so the canonical spelling lands in
+/// the column, regardless of what the model wrote.
+fn match_category_fuzzy<'a>(raw: &str, configured: &'a [String]) -> Option<&'a str> {
+    let raw_l = raw.to_ascii_lowercase();
+    let raw_stem = raw_l.strip_suffix('s').unwrap_or(&raw_l);
+    for c in configured {
+        let c_l = c.to_ascii_lowercase();
+        if c_l == raw_l {
+            return Some(c.as_str());
+        }
+        let c_stem = c_l.strip_suffix('s').unwrap_or(&c_l);
+        if c_stem == raw_stem {
+            return Some(c.as_str());
+        }
+    }
+    None
+}
 
 fn build_extraction_prompt(categories: &[String]) -> String {
     let categories_list = if categories.is_empty() {
@@ -197,6 +274,7 @@ Respond with a JSON object containing two arrays:
    - "content": the extracted memory (concise, one natural sentence with actionable nuance)
    - "category": one of: {categories_list}
    - "level": "user" for personal/preference info, "session" for current task context, "agent" for agent-specific learnings
+   - "confidence": float in [0.0, 1.0]. How sure are you the user stated or strongly demonstrated this fact? 1.0 = explicitly stated by the user this turn; 0.7 = strongly implied; 0.4 = inferred from partial evidence. Memories scoring below the configured extraction_threshold are dropped, so be calibrated rather than uniformly confident.
 
 2. "relations" - Entity relationships (knowledge graph triples):
    - "subject": entity name (e.g., "Alice")
@@ -208,8 +286,8 @@ Respond with a JSON object containing two arrays:
 Example:
 {{
   "memories": [
-    {{"content": "Experienced Rust developer who works on the LibreFang project — treat as expert, skip beginner explanations", "category": "{first_cat}", "level": "user"}},
-    {{"content": "Prefers concise code reviews — skip obvious comments, focus on logic and correctness issues only", "category": "{second_cat}", "level": "user"}}
+    {{"content": "Experienced Rust developer who works on the LibreFang project — treat as expert, skip beginner explanations", "category": "{first_cat}", "level": "user", "confidence": 0.95}},
+    {{"content": "Prefers concise code reviews — skip obvious comments, focus on logic and correctness issues only", "category": "{second_cat}", "level": "user", "confidence": 0.85}}
   ],
   "relations": [
     {{"subject": "User", "subject_type": "person", "relation": "experienced_with", "object": "Rust", "object_type": "tool"}}
@@ -328,26 +406,82 @@ impl LlmMemoryExtractor {
         }
     }
 
-    /// Resolve the `reasoning_echo_policy` for [`Self::model`] via the
+    /// Resolve the `reasoning_echo_policy` for the given model via the
     /// installed kernel handle. Returns `None` (the safe default) when no
     /// handle is installed, the kernel has been dropped, or the model
     /// isn't in the catalog — the driver's substring fallback handles
     /// those cases.
-    fn echo_policy(&self) -> librefang_types::model_catalog::ReasoningEchoPolicy {
+    fn echo_policy_for(&self, model: &str) -> librefang_types::model_catalog::ReasoningEchoPolicy {
         self.kernel_handle
             .lock()
             .ok()
             .and_then(|slot| slot.as_ref()?.upgrade())
-            .map(|k| k.reasoning_echo_policy_for(&self.model))
+            .map(|k| k.reasoning_echo_policy_for(model))
             .unwrap_or_default()
+    }
+
+    /// Convenience alias preserving the pre-#5475 callsite shape.
+    fn echo_policy(&self) -> librefang_types::model_catalog::ReasoningEchoPolicy {
+        self.echo_policy_for(&self.model)
+    }
+
+    /// Resolve the per-agent `extraction_model` override (#5475) via
+    /// the installed kernel handle. Returns the model string to use
+    /// for this extraction call, falling back to `self.model` when no
+    /// handle is installed, the kernel has been dropped, the agent
+    /// isn't known to the registry, or no override is configured.
+    ///
+    /// The returned string is whatever the operator wrote in
+    /// `agent.toml` (or the kernel config) — possibly `provider/model`
+    /// or `provider:model`. The boot path already stripped the prefix
+    /// from `self.model` for the global driver, so we mirror that here:
+    /// if the override carries a provider prefix matching the driver
+    /// the extractor was built with, strip it; otherwise pass the
+    /// string through. A mismatched provider prefix is logged but not
+    /// re-routed — full per-agent driver switching is a follow-up
+    /// (see `ProactiveMemoryOverrides::extraction_model` doc).
+    fn resolve_model_for_agent(&self, agent_id: &str) -> String {
+        let Some(override_spec) = self
+            .kernel_handle
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref()?.upgrade())
+            .and_then(|k| k.proactive_memory_extraction_model_for(agent_id))
+        else {
+            return self.model.clone();
+        };
+        // Strip a `provider/` or `provider:` prefix from the override
+        // when present. We do not have the catalog here to validate
+        // the provider — the kernel already enforces that the global
+        // extraction driver's provider is real, so any prefix in the
+        // override that doesn't match a registered provider would
+        // route to the default driver at the boot layer. Here we just
+        // need the bare model name to put on the wire.
+        let bare = override_spec
+            .split_once(':')
+            .or_else(|| override_spec.split_once('/'))
+            .map(|(_, m)| m.to_string())
+            .filter(|m| !m.is_empty())
+            .unwrap_or(override_spec.clone());
+        tracing::debug!(
+            agent_id = %agent_id,
+            override_spec = %override_spec,
+            resolved_model = %bare,
+            "Per-agent proactive memory extraction_model override applied (#5475)"
+        );
+        bare
     }
 }
 
-#[async_trait::async_trait]
-impl MemoryExtractor for LlmMemoryExtractor {
-    async fn extract_memories(
+impl LlmMemoryExtractor {
+    /// Shared extraction body used by both [`MemoryExtractor::extract_memories`]
+    /// and [`MemoryExtractor::extract_memories_with_agent_id`]. Takes an
+    /// explicit `model` so the per-agent override (#5475) can swap the
+    /// wire-level model name without touching `self.model`.
+    async fn extract_with_model(
         &self,
         messages: &[serde_json::Value],
+        model: &str,
         categories: &[String],
     ) -> librefang_types::error::LibreFangResult<ExtractionResult> {
         // Build a condensed version of the conversation for the LLM.
@@ -385,13 +519,11 @@ impl MemoryExtractor for LlmMemoryExtractor {
             if !content.is_empty() {
                 conversation_text.push_str(&format!("{role}: {content}\n"));
                 if conversation_text.len() > MAX_EXTRACTION_CHARS {
-                    // Truncate at last complete message (last newline within limit)
                     if let Some(last_newline) =
                         conversation_text[..MAX_EXTRACTION_CHARS].rfind('\n')
                     {
                         conversation_text.truncate(last_newline);
                     } else {
-                        // No newline within limit — truncate at char boundary
                         let mut safe = MAX_EXTRACTION_CHARS;
                         while safe > 0 && !conversation_text.is_char_boundary(safe) {
                             safe -= 1;
@@ -413,28 +545,8 @@ impl MemoryExtractor for LlmMemoryExtractor {
             });
         }
 
-        // NOTE: the fork-based path lives in `extract_memories_with_agent_id`
-        // — `extract_memories` has no agent_id and therefore can't target
-        // a fork. When auto_memorize wants the fork benefits it must call
-        // the _with_agent_id variant (it does, via the trait).
-        //
-        // Build the LLM request. `prompt_caching: true` lets Anthropic
-        // cache the ~1KB `EXTRACTION_SYSTEM_PROMPT` across back-to-back
-        // auto_memorize calls — the user message (conversation text)
-        // differs every call, but the system prompt is stable, so the
-        // driver stamps a `cache_control` marker on the system block and
-        // subsequent calls within the 5-min TTL hit cache. Non-Anthropic
-        // providers ignore the flag (OpenAI caches automatically; others
-        // no-op), so enabling it is safe cross-provider.
-        //
-        // NOTE: this does NOT share cache with the main agent's turn —
-        // LlmMemoryExtractor deliberately uses its own `EXTRACTION_SYSTEM_PROMPT`
-        // (not the agent's system prompt) for better extraction quality.
-        // Cross-call parent-child cache sharing would require rewriting
-        // the extractor to use the forkedAgent pattern + tool calls
-        // (libre-code's `extractMemories` shape); that's a separate PR.
         let request = crate::llm_driver::CompletionRequest {
-            model: self.model.clone(),
+            model: model.to_string(),
             messages: std::sync::Arc::new(vec![librefang_types::message::Message::user(format!(
                 "Extract memories from this conversation:\n\n{conversation_text}"
             ))]),
@@ -452,7 +564,7 @@ impl MemoryExtractor for LlmMemoryExtractor {
             agent_id: None,
             session_id: None,
             step_id: None,
-            reasoning_echo_policy: self.echo_policy(),
+            reasoning_echo_policy: self.echo_policy_for(model),
             sender_user_id: None,
             sender_channel: None,
             sender_chat_id: None,
@@ -464,97 +576,61 @@ impl MemoryExtractor for LlmMemoryExtractor {
         })?;
 
         let text = response.text();
-        parse_llm_extraction_response(&text)
+        parse_llm_extraction_response(&text, categories)
+    }
+}
+
+#[async_trait::async_trait]
+impl MemoryExtractor for LlmMemoryExtractor {
+    async fn extract_memories(
+        &self,
+        messages: &[serde_json::Value],
+        categories: &[String],
+    ) -> librefang_types::error::LibreFangResult<ExtractionResult> {
+        // No agent context → use the boot-time `self.model`. Per-agent
+        // override (#5475) is honoured only via the `_with_agent_id`
+        // variant, which the proactive-memory store calls on the
+        // auto_memorize hot path.
+        //
+        // `prompt_caching: true` (inside the helper) lets Anthropic
+        // cache the ~1KB `EXTRACTION_SYSTEM_PROMPT` across back-to-back
+        // calls. Non-Anthropic providers ignore the flag (OpenAI caches
+        // automatically; others no-op), so enabling it is safe cross-
+        // provider. This does NOT share cache with the main agent's
+        // turn — `LlmMemoryExtractor` deliberately uses its own
+        // `EXTRACTION_SYSTEM_PROMPT` (not the agent's system prompt) for
+        // better extraction quality. Cross-call parent-child cache
+        // sharing would require rewriting the extractor to use the
+        // forkedAgent pattern + tool calls; that's a separate PR.
+        let model = self.model.clone();
+        self.extract_with_model(messages, &model, categories).await
     }
 
-    /// Fork-aware extraction path. When a kernel handle is configured,
-    /// routes the extraction LLM call through `run_forked_agent_oneshot`
-    /// so it shares the parent agent's cache key. Falls back to the
-    /// standalone `extract_memories` path on any fork failure or when
-    /// no kernel handle was wired.
+    /// Per-agent extraction path. Consults the installed kernel handle
+    /// for the agent's `[proactive_memory] extraction_model` override
+    /// (#5475) and routes the LLM request through that model name
+    /// when one is configured; otherwise falls back to `self.model`
+    /// (the boot-time default).
+    ///
+    /// The driver itself is not swapped — the override changes only
+    /// the wire-level model name on the existing extraction driver. A
+    /// follow-up PR may introduce a per-agent driver cache for full
+    /// cross-provider routing.
+    ///
+    /// The fork-based path that previously lived here was removed
+    /// because `run_forked_agent_oneshot` cannot thread
+    /// `response_format: json_object`, which weak models need to keep
+    /// reply JSON parseable. Standalone calls retain JSON mode + the
+    /// dedicated `EXTRACTION_SYSTEM_PROMPT` + per-call system-block
+    /// caching.
     async fn extract_memories_with_agent_id(
         &self,
         messages: &[serde_json::Value],
         agent_id: &str,
         categories: &[String],
     ) -> librefang_types::error::LibreFangResult<ExtractionResult> {
-        // Re-run the conversation-text builder from `extract_memories`
-        // so the fork prompt gets the same truncation / role filtering.
-        // Duplicating ~40 lines here keeps each method independently
-        // auditable — factoring into a helper would tangle the fork
-        // path with the direct path's truncation quirks (the LLM's
-        // ~8000-char cap is specific to the standalone extractor's
-        // model context; a forked agent inherits its own limits from
-        // the parent manifest).
-        const MAX_EXTRACTION_CHARS: usize = 8000;
-        let mut conversation_text = String::new();
-        for msg in messages {
-            let role = msg
-                .get("role")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            if role == "system" || role == "unknown" {
-                continue;
-            }
-            let content = match msg.get("content") {
-                Some(serde_json::Value::String(s)) => s.clone(),
-                Some(serde_json::Value::Array(arr)) => arr
-                    .iter()
-                    .filter_map(|v| {
-                        v.get("text")
-                            .and_then(|t| t.as_str())
-                            .map(|s| s.to_string())
-                            .or_else(|| v.as_str().map(|s| s.to_string()))
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" "),
-                _ => String::new(),
-            };
-            if !content.is_empty() {
-                conversation_text.push_str(&format!("{role}: {content}\n"));
-                if conversation_text.len() > MAX_EXTRACTION_CHARS {
-                    if let Some(last_newline) =
-                        conversation_text[..MAX_EXTRACTION_CHARS].rfind('\n')
-                    {
-                        conversation_text.truncate(last_newline);
-                    } else {
-                        let mut safe = MAX_EXTRACTION_CHARS;
-                        while safe > 0 && !conversation_text.is_char_boundary(safe) {
-                            safe -= 1;
-                        }
-                        conversation_text.truncate(safe);
-                    }
-                    break;
-                }
-            }
-        }
-
-        if conversation_text.is_empty() {
-            return Ok(ExtractionResult {
-                has_content: false,
-                memories: Vec::new(),
-                relations: Vec::new(),
-                trigger: "llm_extractor_forked_empty".to_string(),
-                conflicts: Vec::new(),
-            });
-        }
-
-        // Always use the standalone path. The fork path cannot thread
-        // `response_format: json_object` through `run_forked_agent_oneshot`,
-        // so providers that honour JSON mode (ollama, OpenAI-compat,
-        // Anthropic with json schemas, …) lose that guarantee and weak
-        // models reply in prose, causing `Failed to parse extraction
-        // response JSON` warnings with no memory extracted.
-        //
-        // Standalone gives us JSON mode + dedicated EXTRACTION_SYSTEM_PROMPT
-        // + per-call system-block caching (`prompt_caching = true`). The
-        // cross-call parent-child cache sharing that fork was supposed to
-        // enable was never fully wired (see the "separate PR" note in
-        // `extract_memories`), so there is no real regression from
-        // skipping fork here.
-        let _ = agent_id; // kept in signature for forward compat
-        let _ = conversation_text;
-        self.extract_memories(messages, categories).await
+        let model = self.resolve_model_for_agent(agent_id);
+        self.extract_with_model(messages, &model, categories).await
     }
 
     /// LLM-powered conflict resolution: decide ADD/UPDATE/NOOP.
@@ -637,29 +713,13 @@ impl MemoryExtractor for LlmMemoryExtractor {
     }
 
     fn format_context(&self, memories: &[MemoryItem]) -> String {
-        if memories.is_empty() {
-            return String::new();
-        }
-
-        let mut context = String::from(
-            "You have the following understanding of this person from previous conversations. \
-             This is knowledge you have — not a list to recite. Let it naturally shape how you \
-             respond:\n\
-             \n\
-             - Reference relevant context when it helps (\"since you're working in Rust...\", \
-             \"keeping it concise like you prefer...\") but only when it genuinely adds value.\n\
-             - Let remembered preferences silently guide your style, format, and depth — you \
-             don't need to announce that you're doing so.\n\
-             - NEVER say \"based on my memory\", \"according to my records\", \"I recall that you...\", \
-             or mechanically list what you know. A friend doesn't preface every remark with \
-             \"I remember you told me...\".\n\
-             - If a memory is clearly outdated or the user contradicts it, trust the current \
-             conversation over stored context.\n\n",
-        );
-        for mem in memories {
-            context.push_str(&format!("- {}\n", mem.content));
-        }
-        context
+        // Trait method has no config access — fall back to the const
+        // default. The store's `format_context*` methods read the
+        // configured `format_context_max_chars` and pass it explicitly.
+        librefang_types::memory::format_memories_with_budget(
+            memories,
+            librefang_types::memory::FORMAT_CONTEXT_MAX_CHARS,
+        )
     }
 }
 
@@ -763,6 +823,7 @@ fn parse_decision_response(
 /// - Legacy: `[...]` (array of memory items, no relations)
 fn parse_llm_extraction_response(
     text: &str,
+    categories: &[String],
 ) -> librefang_types::error::LibreFangResult<ExtractionResult> {
     use librefang_types::memory::RelationTriple;
 
@@ -794,35 +855,92 @@ fn parse_llm_extraction_response(
         .into_iter()
         .filter_map(|item| {
             let content = item.get("content")?.as_str()?;
-            let content = if content.len() > MAX_MEMORY_CONTENT_LENGTH {
+            // H2: minimum-content guard. Weak / over-eager extractors will
+            // happily emit "ok", "ack", or single-word junk; without a floor
+            // these become useless rows that survive dedup (trivially unique)
+            // and pollute the store and the auto_retrieve prompt. 4 chars
+            // catches the worst of it ("ok", "no", "yes", "ack", single
+            // letters) while preserving short-but-real observations like
+            // "uses zsh" (8 chars — easily above the floor).
+            const MIN_MEMORY_CONTENT_CHARS: usize = 4;
+            let trimmed = content.trim();
+            if trimmed.chars().count() < MIN_MEMORY_CONTENT_CHARS {
+                tracing::debug!(
+                    "Extractor produced sub-minimum memory content (len={}), skipping: {:?}",
+                    trimmed.chars().count(),
+                    trimmed
+                );
+                return None;
+            }
+            let content = if trimmed.len() > MAX_MEMORY_CONTENT_LENGTH {
                 tracing::warn!(
                     "Memory content too long ({} chars), truncating to {}",
-                    content.len(),
+                    trimmed.len(),
                     MAX_MEMORY_CONTENT_LENGTH
                 );
-                let cutoff = content
+                let cutoff = trimmed
                     .char_indices()
                     .nth(MAX_MEMORY_CONTENT_LENGTH)
                     .map(|(i, _)| i)
-                    .unwrap_or(content.len());
-                &content[..cutoff]
+                    .unwrap_or(trimmed.len());
+                &trimmed[..cutoff]
             } else {
-                content
+                trimmed
             };
             let content = content.to_string();
-            let category = item
+            let raw_category = item
                 .get("category")
                 .and_then(|v| v.as_str())
                 .unwrap_or("general")
-                .to_string();
+                .trim();
+            // H2: category validation. When the agent has a configured
+            // `extract_categories` allowlist, anything outside it is
+            // downgraded to "general" so prompt-tuning the extractor
+            // can't smuggle unknown buckets into the dashboard's
+            // category facets. Empty / all-whitespace categories also
+            // collapse to "general". When the allowlist is empty
+            // (legacy / unconfigured agents) the LLM's raw category
+            // value is preserved.
+            let category = if raw_category.is_empty() {
+                "general".to_string()
+            } else if categories.is_empty() {
+                raw_category.to_string()
+            } else if let Some(matched) = match_category_fuzzy(raw_category, categories) {
+                // Snap "preferences"/"PREFERENCE" back to the canonical
+                // configured "preference" (H2 review-followup #7). Strict
+                // string match was too brittle: every model variation in
+                // case / number caused an unnecessary "general" downgrade.
+                matched.to_string()
+            } else {
+                tracing::debug!(
+                    "Extractor produced category '{raw_category}' not in allowlist; \
+                     downgrading to 'general'"
+                );
+                "general".to_string()
+            };
             let level = match item.get("level").and_then(|v| v.as_str()) {
                 Some("user") => MemoryLevel::User,
                 Some("agent") => MemoryLevel::Agent,
                 _ => MemoryLevel::Session,
             };
 
+            // C3 follow-up: the LLM extractor now asks each memory for a
+            // `confidence` field (see `build_extraction_prompt`). Clamp
+            // to [0, 1] and stash in metadata under the key that
+            // `SemanticStore::remember_with_embedding_and_peer` reads
+            // when populating the `confidence` column. Missing field →
+            // default 1.0 (preserves the "rule-based extractor always
+            // passes" behaviour and never silently drops a memory just
+            // because a model forgot to emit the field).
+            let confidence = item
+                .get("confidence")
+                .and_then(|v| v.as_f64())
+                .map(|f| f.clamp(0.0, 1.0))
+                .unwrap_or(1.0);
+
             let mut metadata = std::collections::HashMap::new();
             metadata.insert("extracted_by".to_string(), serde_json::json!("llm"));
+            metadata.insert("confidence".to_string(), serde_json::json!(confidence));
 
             Some(MemoryItem {
                 id: uuid::Uuid::new_v4().to_string(),
@@ -832,12 +950,19 @@ fn parse_llm_extraction_response(
                 metadata,
                 created_at: chrono::Utc::now(),
                 source: None,
-                confidence: None,
+                confidence: Some(confidence as f32),
                 accessed_at: None,
                 access_count: None,
                 agent_id: None,
             })
         })
+        // H2: cap memories per extraction. A misbehaving extractor can
+        // dump dozens of low-quality fragments per turn; this cap
+        // protects the eviction loop from churning and the prompt cap
+        // (H4) from being trivially hit. Operators that legitimately
+        // need more granular extraction can tighten the per-agent
+        // memory cap to manage volume instead.
+        .take(MAX_MEMORIES_PER_EXTRACTION)
         .collect();
 
     // Extract relations (knowledge graph triples)
@@ -1011,10 +1136,79 @@ mod tests {
     }
 
     #[test]
+    fn empty_sidecar_command_is_ignored_and_falls_through_to_llm() {
+        // A `[extractor_sidecar]` table with no (or whitespace-only) command is
+        // a misconfiguration; it must be ignored rather than spawning "" on
+        // every turn. With an LLM present, the built-in LLM extractor is then
+        // selected — proven by the concrete `Some(extractor)` second element
+        // (the sidecar branch returns `None`).
+        let substrate = librefang_memory::MemorySubstrate::open_in_memory(0.1).unwrap();
+        let config = ProactiveMemoryConfig {
+            auto_memorize: true,
+            extractor_sidecar: Some(librefang_types::memory::MemoryExtractorSidecarConfig {
+                command: "   ".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let llm: Option<(Arc<dyn crate::llm_driver::LlmDriver>, String)> = Some((
+            Arc::new(CannedLlmDriver {
+                response: "[]".into(),
+            }),
+            "model".into(),
+        ));
+        let (_store, llm_extractor) = init_proactive_memory_full_with_extractor(
+            Arc::new(substrate),
+            config,
+            llm,
+            None,
+            false,
+        )
+        .expect("store should be created");
+        assert!(
+            llm_extractor.is_some(),
+            "commandless sidecar must fall through to the LLM extractor"
+        );
+    }
+
+    #[test]
+    fn configured_sidecar_command_takes_precedence_over_llm() {
+        // A real command means the sidecar wins and no concrete LLM extractor
+        // is returned (`None`), even when an LLM driver is also supplied.
+        let substrate = librefang_memory::MemorySubstrate::open_in_memory(0.1).unwrap();
+        let config = ProactiveMemoryConfig {
+            auto_memorize: true,
+            extractor_sidecar: Some(librefang_types::memory::MemoryExtractorSidecarConfig {
+                command: "/nonexistent/extractor".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let llm: Option<(Arc<dyn crate::llm_driver::LlmDriver>, String)> = Some((
+            Arc::new(CannedLlmDriver {
+                response: "[]".into(),
+            }),
+            "model".into(),
+        ));
+        let (_store, llm_extractor) = init_proactive_memory_full_with_extractor(
+            Arc::new(substrate),
+            config,
+            llm,
+            None,
+            false,
+        )
+        .expect("store should be created");
+        assert!(
+            llm_extractor.is_none(),
+            "a configured sidecar command must take precedence over the LLM extractor"
+        );
+    }
+
+    #[test]
     fn test_parse_llm_extraction_json() {
         let json =
             r#"[{"content": "User prefers Rust", "category": "user_preference", "level": "user"}]"#;
-        let result = parse_llm_extraction_response(json).unwrap();
+        let result = parse_llm_extraction_response(json, &[]).unwrap();
         assert!(result.has_content);
         assert_eq!(result.memories.len(), 1);
         assert_eq!(result.memories[0].content, "User prefers Rust");
@@ -1028,7 +1222,7 @@ mod tests {
     #[test]
     fn test_parse_llm_extraction_code_block() {
         let json = "```json\n[{\"content\": \"Works at Acme\", \"category\": \"important_fact\", \"level\": \"user\"}]\n```";
-        let result = parse_llm_extraction_response(json).unwrap();
+        let result = parse_llm_extraction_response(json, &[]).unwrap();
         assert!(result.has_content);
         assert_eq!(result.memories.len(), 1);
         assert_eq!(result.memories[0].content, "Works at Acme");
@@ -1036,27 +1230,28 @@ mod tests {
 
     #[test]
     fn test_parse_llm_extraction_empty() {
-        let result = parse_llm_extraction_response("[]").unwrap();
+        let result = parse_llm_extraction_response("[]", &[]).unwrap();
         assert!(!result.has_content);
         assert!(result.memories.is_empty());
     }
 
     #[test]
     fn test_parse_llm_extraction_invalid() {
-        let result = parse_llm_extraction_response("not json at all").unwrap();
+        let result = parse_llm_extraction_response("not json at all", &[]).unwrap();
         assert!(!result.has_content);
         assert!(result.memories.is_empty());
     }
 
     #[test]
     fn test_parse_llm_extraction_levels() {
+        // Content strings must clear MIN_MEMORY_CONTENT_CHARS=4 (H2).
         let json = r#"[
-            {"content": "a", "level": "user"},
-            {"content": "b", "level": "session"},
-            {"content": "c", "level": "agent"},
-            {"content": "d"}
+            {"content": "user-level fact", "level": "user"},
+            {"content": "session-scoped note", "level": "session"},
+            {"content": "agent-scoped note", "level": "agent"},
+            {"content": "no level field"}
         ]"#;
-        let result = parse_llm_extraction_response(json).unwrap();
+        let result = parse_llm_extraction_response(json, &[]).unwrap();
         assert_eq!(result.memories.len(), 4);
         assert_eq!(result.memories[0].level, MemoryLevel::User);
         assert_eq!(result.memories[1].level, MemoryLevel::Session);
@@ -1074,7 +1269,7 @@ mod tests {
                 {"subject": "User", "subject_type": "person", "relation": "prefers", "object": "Rust", "object_type": "tool"}
             ]
         }"#;
-        let result = parse_llm_extraction_response(json).unwrap();
+        let result = parse_llm_extraction_response(json, &[]).unwrap();
         assert!(result.has_content);
         assert_eq!(result.memories.len(), 1);
         assert_eq!(result.memories[0].content, "User prefers Rust");
@@ -1093,7 +1288,7 @@ mod tests {
                 {"subject": "Alice", "subject_type": "person", "relation": "works_at", "object": "Google", "object_type": "organization"}
             ]
         }"#;
-        let result = parse_llm_extraction_response(json).unwrap();
+        let result = parse_llm_extraction_response(json, &[]).unwrap();
         assert!(result.has_content); // relations count as content
         assert!(result.memories.is_empty());
         assert_eq!(result.relations.len(), 1);
@@ -1321,7 +1516,7 @@ mod tests {
     fn test_parse_extraction_content_truncation_over_2000() {
         let long_content = "A".repeat(3000);
         let json = format!(r#"[{{"content": "{}", "level": "user"}}]"#, long_content);
-        let result = parse_llm_extraction_response(&json).unwrap();
+        let result = parse_llm_extraction_response(&json, &[]).unwrap();
         assert_eq!(result.memories.len(), 1);
         assert_eq!(result.memories[0].content.len(), MAX_MEMORY_CONTENT_LENGTH);
     }
@@ -1330,7 +1525,7 @@ mod tests {
     fn test_parse_extraction_content_exactly_2000_not_truncated() {
         let content = "A".repeat(2000);
         let json = format!(r#"[{{"content": "{}", "level": "user"}}]"#, content);
-        let result = parse_llm_extraction_response(&json).unwrap();
+        let result = parse_llm_extraction_response(&json, &[]).unwrap();
         assert_eq!(result.memories[0].content.len(), 2000);
         assert_eq!(result.memories[0].content, content);
     }
@@ -1339,7 +1534,7 @@ mod tests {
     fn test_parse_extraction_content_truncation_utf8_boundary() {
         let content = "ą".repeat(2500);
         let json = format!(r#"[{{"content": "{}", "level": "user"}}]"#, content);
-        let result = parse_llm_extraction_response(&json).unwrap();
+        let result = parse_llm_extraction_response(&json, &[]).unwrap();
         assert!(result.memories[0].content.chars().count() <= MAX_MEMORY_CONTENT_LENGTH);
         // Verify valid UTF-8 — no panics
         assert!(std::str::from_utf8(result.memories[0].content.as_bytes()).is_ok());
@@ -1348,7 +1543,7 @@ mod tests {
     #[test]
     fn test_parse_extraction_default_category() {
         let json = r#"[{"content": "test", "level": "user"}]"#;
-        let result = parse_llm_extraction_response(json).unwrap();
+        let result = parse_llm_extraction_response(json, &[]).unwrap();
         assert_eq!(result.memories[0].category, Some("general".to_string()));
     }
 
@@ -1360,7 +1555,7 @@ mod tests {
                 {"subject": "X", "relation": "relates_to", "object": "Y"}
             ]
         }"#;
-        let result = parse_llm_extraction_response(json).unwrap();
+        let result = parse_llm_extraction_response(json, &[]).unwrap();
         assert_eq!(result.relations[0].subject_type, "concept");
         assert_eq!(result.relations[0].object_type, "concept");
     }
@@ -1374,7 +1569,7 @@ mod tests {
                 {"subject": "B", "relation": "knows", "object": "C"}
             ]
         }"#;
-        let result = parse_llm_extraction_response(json).unwrap();
+        let result = parse_llm_extraction_response(json, &[]).unwrap();
         assert_eq!(result.relations.len(), 1);
         assert_eq!(result.relations[0].subject, "B");
     }
@@ -1382,7 +1577,7 @@ mod tests {
     #[test]
     fn test_parse_extraction_memory_missing_content_skipped() {
         let json = r#"[{"category": "x", "level": "user"}, {"content": "valid", "level": "user"}]"#;
-        let result = parse_llm_extraction_response(json).unwrap();
+        let result = parse_llm_extraction_response(json, &[]).unwrap();
         assert_eq!(result.memories.len(), 1);
         assert_eq!(result.memories[0].content, "valid");
     }
@@ -1395,17 +1590,160 @@ mod tests {
     "relations": [{"subject": "A", "relation": "r", "object": "B"}]
 }
 ```"#;
-        let result = parse_llm_extraction_response(input).unwrap();
+        let result = parse_llm_extraction_response(input, &[]).unwrap();
         assert_eq!(result.memories.len(), 1);
         assert_eq!(result.relations.len(), 1);
     }
 
     #[test]
     fn test_parse_extraction_empty_string() {
-        let result = parse_llm_extraction_response("").unwrap();
+        let result = parse_llm_extraction_response("", &[]).unwrap();
         assert!(!result.has_content);
         assert!(result.memories.is_empty());
         assert!(result.relations.is_empty());
+    }
+
+    // --- H2 extraction-validation regression tests ---
+
+    /// Sub-minimum content strings must be filtered out (H2). A weak
+    /// extractor that emits "ok" / "no" / "ack" should NOT pollute the
+    /// store with single-word "memories".
+    #[test]
+    fn parse_extraction_drops_sub_minimum_content() {
+        let json = r#"[
+            {"content": "ok", "level": "user"},
+            {"content": "yes", "level": "user"},
+            {"content": "  a  ", "level": "user"},
+            {"content": "real fact about preferences", "level": "user"}
+        ]"#;
+        let result = parse_llm_extraction_response(json, &[]).unwrap();
+        assert_eq!(
+            result.memories.len(),
+            1,
+            "only the long content should survive"
+        );
+        assert_eq!(result.memories[0].content, "real fact about preferences");
+    }
+
+    /// Review-followup #7: fuzzy category match accepts case + plural
+    /// variations from the model. "Preferences" / "PREFERENCE" /
+    /// "preferences" all snap to configured "preference".
+    #[test]
+    fn parse_extraction_fuzzy_matches_category_case_and_plural() {
+        let categories = vec!["preference".to_string(), "frustration".to_string()];
+        let json = r#"[
+            {"content": "case variation pref", "category": "Preference", "level": "user"},
+            {"content": "all caps pref", "category": "PREFERENCE", "level": "user"},
+            {"content": "plural pref", "category": "preferences", "level": "user"},
+            {"content": "plural frust", "category": "frustrations", "level": "user"}
+        ]"#;
+        let result = parse_llm_extraction_response(json, &categories).unwrap();
+        for m in &result.memories {
+            assert!(
+                matches!(
+                    m.category.as_deref(),
+                    Some("preference") | Some("frustration")
+                ),
+                "fuzzy-matched category must snap to canonical configured spelling; got {:?}",
+                m.category
+            );
+        }
+    }
+
+    /// When `extract_categories` is non-empty, categories outside the
+    /// allowlist are downgraded to "general" (H2). Prompt-tuning the
+    /// extractor can't smuggle unknown buckets onto the dashboard.
+    #[test]
+    fn parse_extraction_downgrades_unknown_category() {
+        let categories = vec!["preference".to_string(), "frustration".to_string()];
+        let json = r#"[
+            {"content": "uses dark mode editor", "category": "preference", "level": "user"},
+            {"content": "loves rust language", "category": "spam_category", "level": "user"},
+            {"content": "no category emitted", "level": "user"}
+        ]"#;
+        let result = parse_llm_extraction_response(json, &categories).unwrap();
+        assert_eq!(result.memories.len(), 3);
+        assert_eq!(result.memories[0].category.as_deref(), Some("preference"));
+        assert_eq!(
+            result.memories[1].category.as_deref(),
+            Some("general"),
+            "out-of-allowlist category must be downgraded to 'general'"
+        );
+        assert_eq!(
+            result.memories[2].category.as_deref(),
+            Some("general"),
+            "missing category must default to 'general'"
+        );
+    }
+
+    /// When `extract_categories` is empty (unconfigured agent), the LLM's
+    /// raw category is preserved — H2's allowlist is opt-in.
+    #[test]
+    fn parse_extraction_preserves_category_when_allowlist_empty() {
+        let json =
+            r#"[{"content": "loves rust language", "category": "custom_bucket", "level": "user"}]"#;
+        let result = parse_llm_extraction_response(json, &[]).unwrap();
+        assert_eq!(
+            result.memories[0].category.as_deref(),
+            Some("custom_bucket")
+        );
+    }
+
+    /// C3 follow-up: when the LLM emits a per-memory `confidence` field
+    /// (the prompt now asks for it), the parser must propagate it to
+    /// `MemoryItem.confidence` AND to `metadata["confidence"]` so the
+    /// `remember_with_embedding_and_peer` insert path can land it in the
+    /// `confidence` column. Missing → default 1.0.
+    #[test]
+    fn parse_extraction_propagates_confidence_to_metadata() {
+        let json = r#"[
+            {"content": "rust developer", "level": "user", "confidence": 0.62},
+            {"content": "missing confidence field", "level": "user"}
+        ]"#;
+        let result = parse_llm_extraction_response(json, &[]).unwrap();
+        assert_eq!(result.memories.len(), 2);
+        // Explicit confidence round-trips.
+        assert!(matches!(result.memories[0].confidence, Some(c) if (c - 0.62).abs() < 1e-6));
+        let meta_conf = result.memories[0]
+            .metadata
+            .get("confidence")
+            .and_then(|v| v.as_f64())
+            .expect("confidence metadata key present");
+        assert!((meta_conf - 0.62).abs() < 1e-9);
+        // Missing field falls back to 1.0 so legacy extractors don't
+        // suddenly start dropping memories under extraction_threshold.
+        assert!(matches!(result.memories[1].confidence, Some(c) if (c - 1.0).abs() < 1e-6));
+    }
+
+    /// Out-of-range confidence values are clamped, never propagated
+    /// unsafely into the column (which is REAL with no constraint).
+    #[test]
+    fn parse_extraction_clamps_confidence_to_unit_interval() {
+        let json = r#"[
+            {"content": "negative confidence", "level": "user", "confidence": -0.5},
+            {"content": "wild confidence", "level": "user", "confidence": 7.0}
+        ]"#;
+        let result = parse_llm_extraction_response(json, &[]).unwrap();
+        assert!(matches!(result.memories[0].confidence, Some(c) if (c - 0.0).abs() < 1e-6));
+        assert!(matches!(result.memories[1].confidence, Some(c) if (c - 1.0).abs() < 1e-6));
+    }
+
+    /// A runaway extractor cannot blow past the per-call cap (H2). 50
+    /// candidates → exactly MAX_MEMORIES_PER_EXTRACTION survive.
+    #[test]
+    fn parse_extraction_caps_total_memories_per_call() {
+        let items: Vec<String> = (0..50)
+            .map(|i| {
+                format!(r#"{{"content": "fact number {i:02} about something", "level": "user"}}"#)
+            })
+            .collect();
+        let json = format!("[{}]", items.join(","));
+        let result = parse_llm_extraction_response(&json, &[]).unwrap();
+        assert_eq!(
+            result.memories.len(),
+            MAX_MEMORIES_PER_EXTRACTION,
+            "extractor cap must bound a runaway response"
+        );
     }
 
     // --- format_context tests ---
@@ -1467,6 +1805,34 @@ mod tests {
         assert!(ctx.contains("based on my memory"));
         // But the memory content itself should appear as a bullet, not as a recitation
         assert!(ctx.contains("- test"));
+    }
+
+    /// H4 regression: even a runaway list of fat memories must not push
+    /// the formatted prompt past FORMAT_CONTEXT_MAX_CHARS, and the user
+    /// is told how many got dropped.
+    #[test]
+    fn format_context_caps_prompt_budget_with_truncation_marker() {
+        use librefang_types::memory::FORMAT_CONTEXT_MAX_CHARS;
+        let extractor = LlmMemoryExtractor::new(
+            Arc::new(CannedLlmDriver {
+                response: String::new(),
+            }),
+            "test".to_string(),
+        );
+        // 50 memories × ~600 chars each = ~30 KB raw — well past the
+        // ~8 KB cap. We expect the cap to clip the list well before 50.
+        let fat = "x".repeat(600);
+        let mems: Vec<_> = (0..50).map(|_| make_memory_item(&fat)).collect();
+        let ctx = extractor.format_context(&mems);
+        assert!(
+            ctx.len() <= FORMAT_CONTEXT_MAX_CHARS,
+            "context len {} must not exceed budget {FORMAT_CONTEXT_MAX_CHARS}",
+            ctx.len()
+        );
+        assert!(
+            ctx.contains("omitted to keep the prompt within budget"),
+            "truncation footer must tell the prompt builder rows were dropped"
+        );
     }
 
     // --- EmbeddingBridge tests ---

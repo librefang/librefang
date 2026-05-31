@@ -296,6 +296,15 @@ impl LibreFangKernel {
         )
         .map_err(|e| LibreFangError::BootFailed(format!("Memory init failed: {e}")))?;
 
+        // H5: sync the global consolidation engine's merge threshold with
+        // the configured proactive-memory threshold so the periodic kernel
+        // sweep and the per-agent on-demand consolidate (in
+        // `ProactiveMemoryStore::consolidate`) agree on what counts as a
+        // near-duplicate. Without this the global sweep stays at its
+        // hardcoded default while operators tune the on-demand path.
+        substrate
+            .set_consolidation_duplicate_threshold(config.proactive_memory.duplicate_threshold);
+
         // Optionally attach an external vector store backend.
         if let Some(ref backend) = config.memory.vector_backend {
             match backend.as_str() {
@@ -415,6 +424,13 @@ impl LibreFangKernel {
             .provider_request_timeout_secs
             .get(&config.default_model.provider)
             .copied();
+        // #10: per-provider in-driver retry cap; fall back to the compiled
+        // default (3) when the operator hasn't set one for this provider.
+        let default_max_retries = config
+            .provider_max_retries
+            .get(&config.default_model.provider)
+            .copied()
+            .unwrap_or_else(|| DriverConfig::default().max_retries);
         let driver_config = DriverConfig {
             provider: config.default_model.provider.clone(),
             api_key: default_api_key.clone(),
@@ -427,6 +443,7 @@ impl LibreFangKernel {
             proxy_url: default_proxy_url.clone(),
             request_timeout_secs: default_request_timeout_secs,
             emit_caller_trace_headers: config.telemetry.emit_caller_trace_headers,
+            max_retries: default_max_retries,
         };
         // Primary driver failure is non-fatal: the dashboard should remain accessible
         // even if the LLM provider is misconfigured. Users can fix config via dashboard.
@@ -465,6 +482,7 @@ impl LibreFangKernel {
                     proxy_url: default_proxy_url.clone(),
                     request_timeout_secs: default_request_timeout_secs,
                     emit_caller_trace_headers: config.telemetry.emit_caller_trace_headers,
+                    max_retries: default_max_retries,
                 };
                 match drivers::create_driver(&profile_config) {
                     Ok(profile_driver) => {
@@ -575,6 +593,11 @@ impl LibreFangKernel {
                                 .get(provider)
                                 .copied(),
                             emit_caller_trace_headers: config.telemetry.emit_caller_trace_headers,
+                            max_retries: config
+                                .provider_max_retries
+                                .get(provider)
+                                .copied()
+                                .unwrap_or_else(|| DriverConfig::default().max_retries),
                         };
                         match drivers::create_driver(&auto_config) {
                             Ok(d) => {
@@ -640,6 +663,11 @@ impl LibreFangKernel {
                     .get(&fb.provider)
                     .copied(),
                 emit_caller_trace_headers: config.telemetry.emit_caller_trace_headers,
+                max_retries: config
+                    .provider_max_retries
+                    .get(&fb.provider)
+                    .copied()
+                    .unwrap_or_else(|| DriverConfig::default().max_retries),
             };
             match drivers::create_driver(&fb_config) {
                 Ok(d) => {
@@ -719,6 +747,9 @@ impl LibreFangKernel {
             config.max_concurrent_bg_llm,
             config.background.max_consecutive_rate_limits,
         );
+        // Autonomous long-horizon goal runner (#5744) — shares the kernel
+        // shutdown signal so active runs end cleanly on shutdown.
+        let goal_runner = crate::goal_runner::GoalRunner::new(supervisor.subscribe());
 
         // Initialize WASM sandbox engine (shared across all WASM agents)
         let wasm_sandbox = WasmSandbox::new()
@@ -1449,6 +1480,7 @@ impl LibreFangKernel {
                 },
                 trigger_engine,
                 background,
+                goal_runner,
                 cron_scheduler,
                 command_queue,
             ),
@@ -2815,6 +2847,11 @@ fn build_extraction_driver(
         proxy_url: cfg.provider_proxy_urls.get(provider).cloned(),
         request_timeout_secs: cfg.provider_request_timeout_secs.get(provider).copied(),
         emit_caller_trace_headers: cfg.telemetry.emit_caller_trace_headers,
+        max_retries: cfg
+            .provider_max_retries
+            .get(provider)
+            .copied()
+            .unwrap_or_else(|| DriverConfig::default().max_retries),
     };
     drivers::create_driver(&driver_config).map_err(|e| e.to_string())
 }

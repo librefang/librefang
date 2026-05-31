@@ -815,6 +815,39 @@ impl UsageStore {
         Ok(tokens.max(0) as u64)
     }
 
+    /// Distinct provider identifiers observed in `usage_events` over the
+    /// current calendar month (UTC). Returned sorted ascending so the
+    /// caller can rely on stable ordering when merging with the operator's
+    /// `[budget.providers]` configuration map (#5650).
+    ///
+    /// Rows with an empty provider string are excluded — those are pre-#4807
+    /// usage entries that pre-date provider attribution and would otherwise
+    /// surface in the dashboard as an unnamed row the operator can't act on.
+    ///
+    /// Month window mirrors the longest `query_provider_*` rollup, so any
+    /// provider that contributed spend within the time horizon the
+    /// `[budget.providers]` table can cap is discoverable. Anything older
+    /// is operationally inert — no monthly cap applies to it.
+    pub fn query_distinct_providers(&self) -> LibreFangResult<Vec<String>> {
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT provider FROM usage_events
+                 WHERE provider IS NOT NULL AND provider <> ''
+                   AND timestamp > datetime('now', 'start of month')
+                 ORDER BY provider ASC",
+            )
+            .map_err(LibreFangError::memory)?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(LibreFangError::memory)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(LibreFangError::memory)?);
+        }
+        Ok(out)
+    }
+
     // ── Per-user spend rollup (RBAC M5) ─────────────────────────────────
     //
     // Pre-M5 rows have `user_id IS NULL` and never match these queries —

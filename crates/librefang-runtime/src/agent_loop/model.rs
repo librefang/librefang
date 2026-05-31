@@ -18,7 +18,7 @@ use tracing::warn;
 /// but the upstream API expects just `org/model` (e.g. `google/gemini-2.5-flash`).
 ///
 /// For providers that require qualified `org/model` format (OpenRouter, Together, Fireworks,
-/// Replicate, Chutes), bare model names like `gemini-2.5-flash` are normalized to their
+/// Replicate, HuggingFace), bare model names like `gemini-2.5-flash` are normalized to their
 /// fully-qualified form (e.g. `google/gemini-2.5-flash`) to prevent 400 errors.
 pub fn strip_provider_prefix(model: &str, provider: &str) -> String {
     let slash_prefix = format!("{}/", provider);
@@ -133,9 +133,15 @@ fn normalize_bare_model_id(bare_model: &str) -> Option<String> {
         m if m.starts_with("claude-") => format!("anthropic/{base}{suffix}"),
         // OpenAI models
         m if m.starts_with("gpt-")
-            || m.starts_with("o1")
-            || m.starts_with("o3")
-            || m.starts_with("o4") =>
+            || m.starts_with("o1-")
+            || m.starts_with("o1:")
+            || m == "o1"
+            || m.starts_with("o3-")
+            || m.starts_with("o3:")
+            || m == "o3"
+            || m.starts_with("o4-")
+            || m.starts_with("o4:")
+            || m == "o4" =>
         {
             format!("openai/{base}{suffix}")
         }
@@ -245,6 +251,30 @@ mod session_model_override_tests {
         apply_session_model_override_to_manifest(&mut m, "meta-llama/Llama-3.3-70B").unwrap();
         assert_eq!(m.model.provider, "meta-llama");
         assert_eq!(m.model.model, "Llama-3.3-70B");
+    }
+
+    #[test]
+    fn normalize_openai_o_series_accepts_known_bare_ids() {
+        for model in [
+            "o1", "o1-mini", "o1:free", "o3", "o3-mini", "o3:free", "o4", "o4-mini", "o4:free",
+        ] {
+            assert_eq!(
+                normalize_bare_model_id(model),
+                Some(format!("openai/{model}")),
+                "{model} should normalize to OpenAI"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_openai_o_series_rejects_lookalikes() {
+        for model in ["o1337", "o3x", "o42", "o1mini", "o3mini", "o4mini"] {
+            assert_eq!(
+                normalize_bare_model_id(model),
+                None,
+                "{model} should not normalize to OpenAI"
+            );
+        }
     }
 
     #[test]
