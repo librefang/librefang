@@ -428,7 +428,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: openapi-drift-${{ hashFiles('**/Cargo.lock') }}
+          shared-key: openapi-drift
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: '3.11'
@@ -655,7 +655,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: test-unit-${{ hashFiles('**/Cargo.lock') }}
+          shared-key: test-unit
       - name: Install nextest
         uses: taiki-e/install-action@4616abf838e456930a67014fba647f87c185cc6c # nextest
       - name: Ensure dashboard build dir exists
@@ -720,7 +720,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         if: steps.gate.outputs.skip != 'true'
         with:
-          key: test-ubuntu-${{ hashFiles('**/Cargo.lock') }}
+          shared-key: test-ubuntu
       - name: Install nextest
         if: steps.gate.outputs.skip != 'true'
         uses: taiki-e/install-action@4616abf838e456930a67014fba647f87c185cc6c # nextest
@@ -812,7 +812,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: test-windows-${{ hashFiles('**/Cargo.lock') }}
+          shared-key: test-windows
       - name: Install nextest
         uses: taiki-e/install-action@4616abf838e456930a67014fba647f87c185cc6c # nextest
       - name: Ensure dashboard build dir exists
@@ -843,7 +843,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: test-macos-${{ hashFiles('**/Cargo.lock') }}
+          shared-key: test-macos
       - name: Install nextest
         uses: taiki-e/install-action@4616abf838e456930a67014fba647f87c185cc6c # nextest
       - name: Ensure dashboard build dir exists
@@ -872,7 +872,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: build-aarch64-${{ hashFiles('**/Cargo.lock') }}
+          shared-key: build-aarch64
       - name: Ensure dashboard build dir exists
         run: mkdir -p crates/librefang-api/static/react
       - name: Install system deps (keyring + Tauri)
