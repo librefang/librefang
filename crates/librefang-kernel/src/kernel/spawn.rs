@@ -49,6 +49,49 @@ impl LibreFangKernel {
         self.spawn_agent_inner(manifest, parent, source_toml_path, None)
     }
 
+    /// Pure, side-effect-free spawn pre-checks shared by `spawn_agent_inner`
+    /// and destructive callers that must validate before mutating state.
+    ///
+    /// Runs the manifest module-path sandbox check (#3533), the reserved
+    /// agent-name namespace check (#4980), and the tool_exec backend
+    /// override check (#3332). None of these create sessions, directories,
+    /// or registry entries. Hand reactivation calls this for every role
+    /// BEFORE killing the existing agents, so a malformed hand definition is
+    /// rejected with the old agents and their cron/triggers still intact
+    /// instead of after `kill_agent` has already wiped them (#5956).
+    ///
+    /// `name` is passed separately from `manifest` so a caller can validate a
+    /// derived name (e.g. the `{hand_id}:{role}` prefix) against a manifest
+    /// whose own `name` field has not yet been rewritten.
+    pub(crate) fn validate_spawnable(
+        &self,
+        manifest: &AgentManifest,
+        name: &str,
+    ) -> KernelResult<()> {
+        validate_manifest_module_path(manifest, name)?;
+
+        if let Err(reason) = librefang_types::agent::validate_agent_name(name) {
+            warn!(agent = %name, %reason, "Rejecting manifest — reserved agent-name namespace");
+            return Err(KernelError::LibreFang(reason));
+        }
+
+        if let Some(override_kind) = manifest.tool_exec_backend {
+            if let Err(e) = self
+                .config
+                .load()
+                .tool_exec
+                .validate_override(override_kind)
+            {
+                return Err(KernelError::LibreFang(LibreFangError::InvalidInput(format!(
+                    "agent {name:?} tool_exec_backend = {:?} but {e}",
+                    override_kind.as_str()
+                ))));
+            }
+        }
+
+        Ok(())
+    }
+
     /// Spawn a new agent with all options including a predetermined ID.
     pub(crate) fn spawn_agent_inner(
         &self,
@@ -59,46 +102,12 @@ impl LibreFangKernel {
     ) -> KernelResult<AgentId> {
         let name = manifest.name.clone();
 
-        // SECURITY (#3533): reject manifest `module` strings that escape
-        // the LibreFang home dir before any further work. See
-        // `validate_manifest_module_path` for the full rationale and the
-        // sibling enforcement points (boot restore, hot reload,
-        // update_manifest).
-        validate_manifest_module_path(&manifest, &name)?;
-
-        // #4980 nit: the workflow engine labels operator-node step
-        // results with synthetic `_operator:<kind>` agent names. Reject
-        // user-supplied agent names that collide with that prefix at
-        // spawn time so dry-run previews and step-result rows stay
-        // unambiguous. `update_name` enforces the same check on
-        // rename; `update_manifest` / `reload_agent_from_disk` preserve
-        // the existing name and don't need a separate gate.
-        if let Err(reason) = librefang_types::agent::validate_agent_name(&name) {
-            warn!(agent = %name, %reason, "Rejecting manifest — reserved agent-name namespace");
-            return Err(KernelError::LibreFang(reason));
-        }
-
-        // tool_exec backend (#3332): if the manifest pins a backend
-        // override, the matching subtable must exist on the global
-        // config — otherwise the agent would fail at the first tool
-        // call, not at spawn. We do this before locking the registry so
-        // a misconfigured override never advances past spawn. Lost
-        // during the kernel/mod split; restored here.
-        if let Some(override_kind) = manifest.tool_exec_backend {
-            if let Err(e) = self
-                .config
-                .load()
-                .tool_exec
-                .validate_override(override_kind)
-            {
-                return Err(KernelError::LibreFang(LibreFangError::InvalidInput(
-                    format!(
-                        "agent {name:?} tool_exec_backend = {:?} but {e}",
-                        override_kind.as_str()
-                    ),
-                )));
-            }
-        }
+        // Pure, side-effect-free spawn pre-checks (module-path sandbox
+        // #3533, reserved-name namespace #4980, tool_exec backend override
+        // #3332). Extracted into `validate_spawnable` so destructive
+        // callers (hand reactivation) can run the same gate BEFORE killing
+        // existing agents — see #5956 and `validate_spawnable`.
+        self.validate_spawnable(&manifest, &name)?;
 
         // Use a deterministic agent ID derived from the agent name so the
         // same agent gets the same UUID across daemon restarts. This preserves

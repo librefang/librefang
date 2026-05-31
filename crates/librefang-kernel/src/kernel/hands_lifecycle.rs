@@ -92,6 +92,20 @@ impl LibreFangKernel {
                 .or_insert_with(|| serde_json::Value::String(setting.default.clone()));
         }
 
+        // Pre-flight (#5956): validate every role's manifest is spawnable
+        // BEFORE creating the instance or killing any existing agents. The
+        // bulk of spawn failures — module-path escape, reserved name,
+        // missing tool_exec backend — are pure, side-effect-free checks.
+        // Running them up front means a malformed hand definition is
+        // rejected while the previously-active agents and their cron jobs /
+        // triggers are still intact, instead of after the reactivation kill
+        // loop below has already torn them down. Validate against the same
+        // `{hand_id}:` prefixed name the spawn loop assigns.
+        for hand_agent in def.agents.values() {
+            let prefixed_name = format!("{hand_id}:{}", hand_agent.manifest.name);
+            self.validate_spawnable(&hand_agent.manifest, &prefixed_name)?;
+        }
+
         // Create the instance in the registry
         let instance = self
             .skills.hand_registry
@@ -211,6 +225,10 @@ impl LibreFangKernel {
         // Spawn an agent for each role in the hand definition
         let mut agent_ids_map = std::collections::BTreeMap::new();
         let mut last_manifest_path = None;
+        // Captures the first per-role spawn failure so rollback is handled
+        // once after the loop instead of via an in-loop `return` (which was
+        // the structural reason the snapshot was silently dropped — #5956).
+        let mut spawn_error: Option<KernelError> = None;
 
         for (role, hand_agent) in &def.agents {
             let mut manifest = hand_agent.manifest.clone();
@@ -438,38 +456,69 @@ impl LibreFangKernel {
             // When `instance_id` is Some (multi-instance or restart recovery),
             // uses the new format with instance UUID for uniqueness.
             let deterministic_id = AgentId::from_hand_agent(hand_id, role, instance_id);
-            let agent_id = match self.spawn_agent_inner(
+            match self.spawn_agent_inner(
                 manifest,
                 None,
                 Some(hand_toml_path),
                 Some(deterministic_id),
             ) {
-                Ok(id) => id,
-                Err(e) => {
-                    // Rollback: kill all agents spawned so far in this activation
-                    for spawned_id in agent_ids_map.values() {
-                        if let Err(kill_err) = self.kill_agent(*spawned_id) {
-                            warn!(
-                                hand = %hand_id,
-                                agent = %spawned_id,
-                                error = %kill_err,
-                                "Failed to rollback agent during hand activation failure"
-                            );
-                        }
-                    }
-                    // Deactivate the hand instance
-                    if let Err(e) = self.skills.hand_registry.deactivate(instance.instance_id) {
-                        warn!(
-                            instance_id = %instance.instance_id,
-                            error = %e,
-                            "Failed to deactivate hand instance during rollback"
-                        );
-                    }
-                    return Err(e);
+                Ok(id) => {
+                    agent_ids_map.insert(role.clone(), id);
                 }
-            };
+                Err(e) => {
+                    // Defer rollback to the single post-loop handler so the
+                    // `saved_triggers` / `saved_crons` snapshots are moved
+                    // exactly once (the success path below consumes them).
+                    spawn_error = Some(e);
+                    break;
+                }
+            }
+        }
 
-            agent_ids_map.insert(role.clone(), agent_id);
+        // If any role failed to spawn, roll back this activation. The
+        // pre-flight `validate_spawnable` pass above already rejected
+        // malformed definitions before the kill loop ran, so reaching here
+        // means a rarer runtime failure (e.g. session creation) after the
+        // previously-active agents were already torn down. Kill the
+        // partially-spawned agents and deactivate the instance. The triggers
+        // / cron jobs snapshotted from the killed previous agents cannot be
+        // safely re-homed — the failed role has no live agent, and restoring
+        // them to its deterministic id would dispatch to a dead agent every
+        // tick — so they are dropped here. Log loudly rather than silently so
+        // the loss is visible (#5956).
+        if let Some(e) = spawn_error {
+            for spawned_id in agent_ids_map.values() {
+                if let Err(kill_err) = self.kill_agent(*spawned_id) {
+                    warn!(
+                        hand = %hand_id,
+                        agent = %spawned_id,
+                        error = %kill_err,
+                        "Failed to rollback agent during hand activation failure"
+                    );
+                }
+            }
+            if let Err(de) = self.skills.hand_registry.deactivate(instance.instance_id) {
+                warn!(
+                    instance_id = %instance.instance_id,
+                    error = %de,
+                    "Failed to deactivate hand instance during rollback"
+                );
+            }
+            if !saved_triggers.is_empty() || !saved_crons.is_empty() {
+                let lost_trigger_roles: Vec<&str> =
+                    saved_triggers.keys().map(String::as_str).collect();
+                let lost_cron_roles: Vec<&str> =
+                    saved_crons.keys().map(String::as_str).collect();
+                warn!(
+                    hand = %hand_id,
+                    error = %e,
+                    ?lost_trigger_roles,
+                    ?lost_cron_roles,
+                    "Hand activation failed after teardown; snapshotted triggers/cron jobs \
+                     for the previous agents are lost (no live agent to restore them to)"
+                );
+            }
+            return Err(e);
         }
 
         // Restore saved triggers to the same role after reactivation.
