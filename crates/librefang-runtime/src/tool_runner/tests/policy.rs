@@ -432,6 +432,30 @@ fn test_detect_image_format_unknown() {
 }
 
 #[test]
+fn test_detect_image_format_tiff_le() {
+    let data = b"II\x2A\x00\x08\x00\x00\x00";
+    assert_eq!(detect_image_format(data), "tiff");
+}
+
+#[test]
+fn test_detect_image_format_tiff_be() {
+    let data = b"MM\x00\x2A\x00\x00\x00\x08";
+    assert_eq!(detect_image_format(data), "tiff");
+}
+
+#[test]
+fn test_detect_image_format_svg_bare() {
+    let data = b"<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>";
+    assert_eq!(detect_image_format(data), "svg");
+}
+
+#[test]
+fn test_detect_image_format_svg_with_xml_decl() {
+    let data = b"<?xml version=\"1.0\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>";
+    assert_eq!(detect_image_format(data), "svg");
+}
+
+#[test]
 fn test_extract_png_dimensions() {
     // Minimal PNG header: signature (8) + IHDR length (4) + "IHDR" (4) + width (4) + height (4)
     let mut data = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]; // signature
@@ -495,7 +519,7 @@ async fn test_image_analyze_missing_file() {
     .await;
     assert!(result.is_error);
     assert!(
-        result.content.contains("Failed to read"),
+        result.content.contains("nonexistent_image.png"),
         "unexpected error content: {}",
         result.content
     );

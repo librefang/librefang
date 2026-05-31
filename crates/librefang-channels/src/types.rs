@@ -950,6 +950,22 @@ pub trait ChannelAdapter: Send + Sync {
     fn account_id(&self) -> Option<&str> {
         None
     }
+
+    /// Per-instance channel behaviour overrides carried by the adapter
+    /// itself, rather than resolved kernel-side by channel type (#5841).
+    ///
+    /// Sidecar adapters build this from their `[[sidecar_channels]]`
+    /// block so that two adapters sharing the same `channel_type`
+    /// (e.g. two Telegram bots) can carry distinct command-policy and
+    /// message-coalescing settings — a channel-type-keyed lookup cannot
+    /// tell them apart. The bridge prefers this over the kernel-level
+    /// `channel_overrides(channel_type, …)` lookup when present.
+    ///
+    /// Default `None`: adapters with no per-instance overrides fall back
+    /// to the kernel-resolved overrides.
+    fn channel_overrides(&self) -> Option<librefang_types::config::ChannelOverrides> {
+        None
+    }
 }
 
 /// Split a message into chunks of at most `max_len` characters,

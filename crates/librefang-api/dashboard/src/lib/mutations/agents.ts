@@ -25,6 +25,7 @@ import {
   sendAgentMessage,
   resetAgentSession,
   updateAgentTools,
+  setAgentSkills,
   getAgentTemplateToml,
 } from "../http/client";
 import type { AgentSchedulePatch, PromptExperiment, PromptVersion, SendAgentMessageOptions } from "../../api";
@@ -521,6 +522,37 @@ export function useUpdateAgentTools() {
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
       qc.invalidateQueries({ queryKey: agentKeys.tools(variables.agentId) });
+    },
+  });
+}
+
+/**
+ * PUT /agents/{id}/skills — replace the agent's skill allowlist (#4917).
+ *
+ * Powers the inline assignment UI on the Skills tab. An empty array clears
+ * the allowlist back to "all" mode; a non-empty list is validated against
+ * the registry server-side.
+ *
+ * Invalidates:
+ * - `agentKeys.skills(id)` — the tab's own read (assigned / mode).
+ * - `agentKeys.detail(id)` — `skills` and `skills_mode` are echoed on the
+ *   agent detail payload and rendered in the summary drawer.
+ * - `agentKeys.lists()` — the list row's skill summary chips.
+ */
+export function useSetAgentSkills() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      agentId,
+      skills,
+    }: {
+      agentId: string;
+      skills: string[];
+    }) => setAgentSkills(agentId, skills),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: agentKeys.skills(variables.agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.lists() });
     },
   });
 }

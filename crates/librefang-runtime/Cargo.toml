@@ -66,11 +66,14 @@ pdf-extract = "0.10"
 # SSH transport for the optional remote-exec backend (#3332).
 # Locked behind the `ssh-backend` feature so the dependency tree stays
 # trim for users who only need the local / Docker backends.
-# 0.45 is the last release that targets `rand 0.8`; later releases pull
-# `internal-russh-forked-ssh-key` which conflicts with the workspace's
-# `rand = "0.10"` direct dep on the rand_core trait surface.
-russh = { version = "0.45", optional = true }
-russh-keys = { version = "0.45", optional = true }
+# 0.61 is the first release patched for the russh / russh-cryptovec
+# advisories (GHSA-wwx6-x28x-8259, GHSA-g9f8-wqj9-fjw5, …). The separate
+# `russh-keys` crate was merged into `russh::keys` after 0.50, so it is
+# no longer a direct dependency. russh pulls its own `rand_core` for the
+# handshake RNG; this crate never hands an RNG across that boundary, so
+# the duplicate coexists with the workspace's `rand = "0.10"` rather than
+# colliding on the trait surface.
+russh = { version = "0.61", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -101,7 +104,7 @@ default = ["media", "browser", "docker-sandbox", "seccomp-sandbox", "landlock-sa
 landlock-sandbox = ["dep:landlock"]
 seccomp-sandbox = ["dep:seccompiler"]
 # Remote SSH tool-execution backend (#3332).
-ssh-backend = ["dep:russh", "dep:russh-keys"]
+ssh-backend = ["dep:russh"]
 # Daytona managed-sandbox tool-execution backend (#3332).
 # Uses the existing reqwest stack — no new top-level deps needed.
 daytona-backend = []

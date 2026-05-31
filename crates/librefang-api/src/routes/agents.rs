@@ -2891,7 +2891,7 @@ pub async fn get_agent(
             "skills_disabled": entry.manifest.skills_disabled,
             "tools_disabled": entry.manifest.tools_disabled,
             "mcp_servers": entry.manifest.mcp_servers,
-            "mcp_servers_mode": if entry.manifest.mcp_servers.is_empty() { "all" } else { "allowlist" },
+            "mcp_servers_mode": mcp_servers_mode(&entry.manifest.mcp_servers),
             "fallback_models": entry.manifest.fallback_models,
             "auto_evolve": entry.manifest.auto_evolve,
             "web_search_augmentation": entry.manifest.web_search_augmentation,
@@ -4457,11 +4457,7 @@ pub async fn get_agent_mcp_servers(
             }
         }
     }
-    let mode = if entry.manifest.mcp_servers.is_empty() {
-        "all"
-    } else {
-        "allowlist"
-    };
+    let mode = mcp_servers_mode(&entry.manifest.mcp_servers);
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -5647,6 +5643,21 @@ fn skill_assignment_mode(manifest: &librefang_types::agent::AgentManifest) -> &'
     if manifest.skills_disabled {
         "none"
     } else if manifest.skills.is_empty() {
+        "all"
+    } else {
+        "allowlist"
+    }
+}
+
+/// Classify an agent's MCP server allowlist for display (#5855).
+///
+/// Mirrors the kernel semantics in `available_tools`: an empty list grants
+/// **no** MCP servers, `["*"]` grants all connected servers, anything else is
+/// a literal allowlist.
+fn mcp_servers_mode(mcp_servers: &[String]) -> &'static str {
+    if mcp_servers.is_empty() {
+        "none"
+    } else if mcp_servers.iter().any(|s| s == "*") {
         "all"
     } else {
         "allowlist"
@@ -7207,6 +7218,22 @@ mod tests {
         assert!(cloned.skills_disabled);
         assert_eq!(skill_assignment_mode(&cloned), "none");
         assert!(!cloned.tools.is_empty());
+    }
+
+    #[test]
+    fn test_mcp_servers_mode_classification() {
+        // #5855: empty allowlist is "none" (no servers), not "all".
+        assert_eq!(mcp_servers_mode(&[]), "none");
+        assert_eq!(mcp_servers_mode(&["*".to_string()]), "all");
+        assert_eq!(
+            mcp_servers_mode(&["server-a".to_string(), "*".to_string()]),
+            "all",
+            "a wildcard anywhere in the list means all servers"
+        );
+        assert_eq!(
+            mcp_servers_mode(&["server-a".to_string(), "server-b".to_string()]),
+            "allowlist"
+        );
     }
 
     #[test]

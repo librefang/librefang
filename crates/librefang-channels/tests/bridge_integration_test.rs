@@ -15,6 +15,7 @@ use librefang_channels::types::{
     ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
 };
 use librefang_types::agent::AgentId;
+use librefang_types::config::ChannelOverrides;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -54,12 +55,27 @@ struct MockAdapter {
     /// Captures all messages sent via send().
     sent: Arc<Mutex<Vec<(String, String)>>>,
     shutdown_tx: watch::Sender<bool>,
+    /// Per-instance overrides the bridge reads via `channel_overrides()`.
+    /// `None` mirrors a sidecar with no command policy (allow-all fallback).
+    overrides: Option<ChannelOverrides>,
 }
 
 impl MockAdapter {
     /// Create a new mock adapter. Returns (adapter, sender) — use the sender
     /// to inject test messages into the adapter's stream.
     fn new(name: &str, channel_type: ChannelType) -> (Arc<Self>, mpsc::Sender<ChannelMessage>) {
+        Self::new_with_overrides(name, channel_type, None)
+    }
+
+    /// Like `new`, but the adapter carries per-instance `ChannelOverrides`
+    /// (as a sidecar built from `[[sidecar_channels]]` would). The bridge
+    /// prefers these over the kernel-level lookup, so command-policy gating
+    /// can be exercised end-to-end.
+    fn new_with_overrides(
+        name: &str,
+        channel_type: ChannelType,
+        overrides: Option<ChannelOverrides>,
+    ) -> (Arc<Self>, mpsc::Sender<ChannelMessage>) {
         let (tx, rx) = mpsc::channel(256);
         let (shutdown_tx, _shutdown_rx) = watch::channel(false);
 
@@ -69,6 +85,7 @@ impl MockAdapter {
             rx: Mutex::new(Some(rx)),
             sent: Arc::new(Mutex::new(Vec::new())),
             shutdown_tx,
+            overrides,
         });
         (adapter, tx)
     }
@@ -136,6 +153,10 @@ impl ChannelAdapter for MockAdapter {
     async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
+    }
+
+    fn channel_overrides(&self) -> Option<ChannelOverrides> {
+        self.overrides.clone()
     }
 }
 
@@ -400,6 +421,89 @@ async fn test_bridge_dispatch_agent_select_command() {
     // Verify router was updated — user42 should now route to agent_id
     let resolved = router.resolve(&ChannelType::Telegram, "user42", None);
     assert_eq!(resolved, Some(agent_id));
+
+    manager.stop().await;
+}
+
+/// Regression (#5931): a sidecar with `command_policy = "allowlist"` and an
+/// empty `allowed_commands` must FAIL CLOSED — every command is gated, not
+/// allowed. We build the overrides through the real `SidecarAdapter` so the
+/// `overrides_from_sidecar_config` mapping is exercised end-to-end, then drive
+/// a `/agent coder` command through the live bridge dispatch path and assert
+/// it was NOT honoured (router unchanged) and was instead forwarded to the
+/// agent as plain text (`/agent coder`).
+#[tokio::test]
+async fn test_bridge_allowlist_empty_fails_closed_gates_command_5931() {
+    use librefang_channels::sidecar::SidecarAdapter;
+    use librefang_channels::types::ChannelAdapter as _;
+
+    // The real sidecar config → overrides path: allowlist + empty list.
+    let sidecar_cfg: librefang_types::config::SidecarChannelConfig =
+        serde_json::from_value(serde_json::json!({
+            "name": "public-bot",
+            "command": "true",
+            "command_policy": "allowlist",
+        }))
+        .expect("SidecarChannelConfig from json");
+    let sidecar = SidecarAdapter::new(&sidecar_cfg, std::env::temp_dir());
+    let overrides = sidecar
+        .channel_overrides()
+        .expect("allowlist policy yields per-instance overrides");
+    assert!(
+        overrides.disable_commands,
+        "empty allowlist must map to disable_commands (fail-closed)"
+    );
+
+    let agent_id = AgentId::new();
+    let handle = Arc::new(MockHandle::new(vec![(agent_id, "coder".to_string())]));
+    let router = Arc::new(AgentRouter::new());
+    // Pre-route the user so the forwarded text has somewhere to land.
+    router.set_user_default("user42".to_string(), agent_id);
+
+    let (adapter, tx) =
+        MockAdapter::new_with_overrides("public-bot", ChannelType::Telegram, Some(overrides));
+    let adapter_ref = adapter.clone();
+
+    let mut manager = BridgeManager::new(handle.clone(), router.clone());
+    manager.start_adapter(adapter.clone()).await.unwrap();
+
+    // A privileged command an end user must not be able to run on a public bot.
+    tx.send(make_command_msg(
+        ChannelType::Telegram,
+        "user42",
+        "agent",
+        vec!["coder"],
+    ))
+    .await
+    .unwrap();
+
+    wait_until("gated command forwarded as text", || {
+        !adapter_ref.get_sent().is_empty()
+    })
+    .await;
+
+    // The command was GATED: it was forwarded to the agent verbatim, not
+    // executed as a `/agent` switch (which would have replied with a selection
+    // confirmation).
+    let sent = adapter_ref.get_sent();
+    assert_eq!(sent.len(), 1, "expected exactly one reply, got {sent:?}");
+    assert_eq!(
+        sent[0].1, "Echo: /agent coder",
+        "blocked command must be forwarded to the agent as plain text, got: {}",
+        sent[0].1
+    );
+    assert!(
+        !sent[0].1.contains("Now talking to agent"),
+        "command must NOT have been honoured as an agent switch: {}",
+        sent[0].1
+    );
+
+    // The agent received the raw slash text, confirming it was treated as input.
+    {
+        let received = handle.received.lock().unwrap();
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].1, "/agent coder");
+    }
 
     manager.stop().await;
 }
