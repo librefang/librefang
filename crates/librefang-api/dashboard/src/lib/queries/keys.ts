@@ -43,6 +43,11 @@ export const agentKeys = {
     [...agentKeys.all, "experimentMetrics", experimentId] as const,
   tools: (agentId: string) =>
     [...agentKeys.all, "tools", agentId] as const,
+  // Per-agent skill assignment (#4917) — backs the inline assignment UI on
+  // the agent detail Skills tab. Distinct subtree from `tools` so a skill
+  // PUT only invalidates the skill read, not the tool read.
+  skills: (agentId: string) =>
+    [...agentKeys.all, "skills", agentId] as const,
 };
 
 export const toolKeys = {

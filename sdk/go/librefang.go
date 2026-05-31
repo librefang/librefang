@@ -1432,6 +1432,10 @@ func (r *SkillsResource) GetSupportingFile(name string, query map[string]string)
 	return r.client.request("GET", fmt.Sprintf("/api/skills/%s/file", name), nil, query)
 }
 
+func (r *SkillsResource) ProposeSkillToRegistry(name string) (interface{}, error) {
+	return r.client.request("POST", fmt.Sprintf("/api/skills/%s/propose", name), nil, nil)
+}
+
 func (r *SkillsResource) ListTools() (interface{}, error) {
 	return r.client.request("GET", "/api/tools", nil, nil)
 }

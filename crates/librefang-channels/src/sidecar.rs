@@ -1248,6 +1248,73 @@ pub struct SidecarAdapter {
     typing_rx: Arc<std::sync::Mutex<Option<mpsc::Receiver<TypingEvent>>>>,
     /// Supervision tunables snapshotted from config at construction.
     sup: SupCfg,
+    /// Per-instance channel behaviour overrides built from the
+    /// `[[sidecar_channels]]` block — command policy + message
+    /// coalescing (#5841). `None` when the block carries no such
+    /// settings, so the bridge falls back to kernel-resolved overrides.
+    overrides: Option<librefang_types::config::ChannelOverrides>,
+}
+
+/// Translate the command-policy + coalescing fields of a
+/// `[[sidecar_channels]]` block into the `ChannelOverrides` the bridge
+/// already understands (#5841). Returns `None` when every field is at
+/// its default, so a plain sidecar config produces no override and the
+/// bridge keeps falling back to the kernel-level lookup.
+fn overrides_from_sidecar_config(
+    config: &librefang_types::config::SidecarChannelConfig,
+) -> Option<librefang_types::config::ChannelOverrides> {
+    use librefang_types::config::SidecarCommandPolicy;
+
+    let policy = config.command_policy;
+    let coalesce_ms = config.message_coalesce_window_ms;
+
+    let has_command_policy = policy != SidecarCommandPolicy::Allow;
+    if !has_command_policy && coalesce_ms == 0 {
+        return None;
+    }
+
+    let mut ov = librefang_types::config::ChannelOverrides::default();
+    // Map the sidecar policy enum onto the existing boolean / list
+    // fields `is_command_allowed` consults. Precedence inside the bridge
+    // is `disable_commands` > `allowed_commands` > `blocked_commands`, so
+    // exactly one of the three is populated per policy variant.
+    match policy {
+        SidecarCommandPolicy::Allow => {}
+        SidecarCommandPolicy::Disable => ov.disable_commands = true,
+        SidecarCommandPolicy::Allowlist => {
+            // Fail closed: `allowlist` is an explicit default-deny intent. An
+            // empty list means "honour no commands", so it must deny all, not
+            // fall through to the allow-everything path `is_command_allowed`
+            // takes when `allowed_commands` is empty. Map empty-allowlist onto
+            // `disable_commands` (the highest-precedence deny) instead.
+            if config.allowed_commands.is_empty() {
+                warn!(
+                    channel = %config.name,
+                    "command_policy = \"allowlist\" with an empty allowed_commands list — denying all commands (fail-closed)"
+                );
+                ov.disable_commands = true;
+            } else {
+                ov.allowed_commands = config.allowed_commands.clone();
+            }
+        }
+        SidecarCommandPolicy::Blocklist => {
+            // An empty blocklist legitimately means "allow all, block nothing"
+            // — intuitive and harmless — but it usually signals a forgotten
+            // list, so surface it rather than silently allowing everything.
+            if config.blocked_commands.is_empty() {
+                warn!(
+                    channel = %config.name,
+                    "command_policy = \"blocklist\" with an empty blocked_commands list — all commands remain allowed"
+                );
+            }
+            ov.blocked_commands = config.blocked_commands.clone();
+        }
+    }
+    // The bridge's debouncer keys off `message_debounce_ms`; the
+    // sidecar-facing name is `message_coalesce_window_ms`, matching the
+    // pre-migration `[[channels.telegram]]` field operators knew (#4441).
+    ov.message_debounce_ms = coalesce_ms;
+    Some(ov)
 }
 
 impl SidecarAdapter {
@@ -1284,6 +1351,7 @@ impl SidecarAdapter {
             typing_tx,
             typing_rx: Arc::new(std::sync::Mutex::new(Some(typing_rx))),
             sup: SupCfg::from_config(config),
+            overrides: overrides_from_sidecar_config(config),
         }
     }
 
@@ -1312,6 +1380,10 @@ impl ChannelAdapter for SidecarAdapter {
 
     fn channel_type(&self) -> ChannelType {
         self.channel_type.clone()
+    }
+
+    fn channel_overrides(&self) -> Option<librefang_types::config::ChannelOverrides> {
+        self.overrides.clone()
     }
 
     async fn start(
@@ -2754,6 +2826,118 @@ mod tests {
             }))
             .unwrap();
         assert_eq!(c.default_agent.as_deref(), Some("fandangorodelo"));
+    }
+
+    // #5841 — command-policy + message-coalescing ported to sidecars.
+    // `overrides_from_sidecar_config` projects the sidecar-facing fields
+    // onto the `ChannelOverrides` the bridge already consults
+    // (`is_command_allowed`, debouncer setup).
+    fn cfg_json(value: serde_json::Value) -> librefang_types::config::SidecarChannelConfig {
+        serde_json::from_value(value).expect("SidecarChannelConfig from json")
+    }
+
+    #[test]
+    fn overrides_none_for_plain_sidecar_config_5841() {
+        // A default sidecar (allow-all, no coalescing) carries no
+        // override, so the bridge keeps falling back to the kernel lookup.
+        let c = cfg("telegram", "python3", vec![]);
+        assert!(super::overrides_from_sidecar_config(&c).is_none());
+    }
+
+    #[test]
+    fn overrides_disable_maps_to_disable_commands_5841() {
+        let c = cfg_json(serde_json::json!({
+            "name": "afina-sales-bot",
+            "command": "python3",
+            "command_policy": "disable",
+        }));
+        let ov = super::overrides_from_sidecar_config(&c).expect("override built");
+        assert!(ov.disable_commands);
+        assert!(ov.allowed_commands.is_empty());
+        assert!(ov.blocked_commands.is_empty());
+        assert_eq!(ov.message_debounce_ms, 0);
+    }
+
+    #[test]
+    fn overrides_allowlist_maps_to_allowed_commands_5841() {
+        let c = cfg_json(serde_json::json!({
+            "name": "bot",
+            "command": "python3",
+            "command_policy": "allowlist",
+            "allowed_commands": ["start", "/help"],
+        }));
+        let ov = super::overrides_from_sidecar_config(&c).expect("override built");
+        assert!(!ov.disable_commands);
+        assert_eq!(ov.allowed_commands, vec!["start", "/help"]);
+        assert!(ov.blocked_commands.is_empty());
+    }
+
+    #[test]
+    fn overrides_allowlist_empty_fails_closed_5841() {
+        // Regression (#5931): `allowlist` with an empty / omitted list is an
+        // explicit default-deny intent and must deny ALL commands, not fall
+        // through to the allow-everything path. It maps to `disable_commands`,
+        // the highest-precedence deny `is_command_allowed` honours.
+        let c = cfg_json(serde_json::json!({
+            "name": "public-bot",
+            "command": "python3",
+            "command_policy": "allowlist",
+        }));
+        let ov = super::overrides_from_sidecar_config(&c).expect("override built");
+        assert!(
+            ov.disable_commands,
+            "empty allowlist must fail closed (deny all)"
+        );
+        assert!(ov.allowed_commands.is_empty());
+        assert!(ov.blocked_commands.is_empty());
+    }
+
+    #[test]
+    fn overrides_blocklist_maps_to_blocked_commands_5841() {
+        let c = cfg_json(serde_json::json!({
+            "name": "bot",
+            "command": "python3",
+            "command_policy": "blocklist",
+            "blocked_commands": ["new", "reboot", "agent"],
+        }));
+        let ov = super::overrides_from_sidecar_config(&c).expect("override built");
+        assert!(!ov.disable_commands);
+        assert!(ov.allowed_commands.is_empty());
+        assert_eq!(ov.blocked_commands, vec!["new", "reboot", "agent"]);
+    }
+
+    #[test]
+    fn overrides_coalesce_window_maps_to_debounce_ms_5841() {
+        // Coalescing alone (policy left at the allow default) still yields
+        // an override so the bridge's debouncer turns on.
+        let c = cfg_json(serde_json::json!({
+            "name": "bot",
+            "command": "python3",
+            "message_coalesce_window_ms": 3000,
+        }));
+        let ov = super::overrides_from_sidecar_config(&c).expect("override built");
+        // Allow policy leaves every command-gating field untouched.
+        assert!(!ov.disable_commands);
+        assert!(ov.allowed_commands.is_empty());
+        assert!(ov.blocked_commands.is_empty());
+        assert_eq!(ov.message_debounce_ms, 3000);
+    }
+
+    #[test]
+    fn adapter_exposes_built_overrides_5841() {
+        // The trait method the bridge calls returns the built overrides.
+        let c = cfg_json(serde_json::json!({
+            "name": "bot",
+            "command": "python3",
+            "command_policy": "disable",
+            "message_coalesce_window_ms": 1500,
+        }));
+        let adapter = SidecarAdapter::new(&c, std::path::PathBuf::from("/tmp"));
+        let ov = adapter
+            .channel_overrides()
+            .expect("adapter carries overrides");
+        assert!(ov.disable_commands);
+        assert_eq!(ov.message_debounce_ms, 1500);
     }
 
     #[test]

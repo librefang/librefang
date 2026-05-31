@@ -1332,6 +1332,10 @@ class SkillsResource {
     return this._c._request("GET", `/api/skills/${name}/file`, undefined, query);
   }
 
+  async proposeSkillToRegistry(name) {
+    return this._c._request("POST", `/api/skills/${name}/propose`);
+  }
+
   async listTools() {
     return this._c._request("GET", "/api/tools");
   }
