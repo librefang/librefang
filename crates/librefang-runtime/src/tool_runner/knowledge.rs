@@ -75,9 +75,7 @@ pub(super) async fn tool_knowledge_add_entity(
                 .take(MAX_PROPERTY_COUNT)
                 .map(|(k, v)| {
                     let capped = if let Some(s) = v.as_str() {
-                        serde_json::Value::String(
-                            s.chars().take(MAX_PROPERTY_VALUE_LEN).collect(),
-                        )
+                        serde_json::Value::String(s.chars().take(MAX_PROPERTY_VALUE_LEN).collect())
                     } else {
                         v.clone()
                     };
@@ -127,9 +125,7 @@ pub(super) async fn tool_knowledge_add_relation(
                 .take(MAX_PROPERTY_COUNT)
                 .map(|(k, v)| {
                     let capped = if let Some(s) = v.as_str() {
-                        serde_json::Value::String(
-                            s.chars().take(MAX_PROPERTY_VALUE_LEN).collect(),
-                        )
+                        serde_json::Value::String(s.chars().take(MAX_PROPERTY_VALUE_LEN).collect())
                     } else {
                         v.clone()
                     };
@@ -207,7 +203,11 @@ pub(super) async fn tool_knowledge_query(
 
     let shown = matches.len().min(limit);
     let mut output = String::with_capacity(256 * shown);
-    output.push_str(&format!("Found {} match(es) (showing {}):\n", matches.len(), shown));
+    output.push_str(&format!(
+        "Found {} match(es) (showing {}):\n",
+        matches.len(),
+        shown
+    ));
     for m in matches.iter().take(limit) {
         use std::fmt::Write;
         let _ = write!(
