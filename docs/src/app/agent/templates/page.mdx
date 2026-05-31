@@ -444,7 +444,7 @@ tool_allowlist = ["web_search", "web_fetch", "file_read", "file_write"]
 tool_blocklist = ["shell_exec"]
 tools_disabled = false             # explicit master kill-switch — overrides everything else
 allowed_plugins = ["truncate", "redact"]   # plugin names; empty = all available plugins
-mcp_servers    = ["github", "linear"]     # MCP server names; empty = all connected servers
+mcp_servers    = ["github", "linear"]     # MCP server names; empty = no servers, ["*"] = all connected
 skills_disabled = false            # explicit master kill-switch for skills
 ```
 
@@ -454,7 +454,7 @@ skills_disabled = false            # explicit master kill-switch for skills
 | `tool_blocklist` | `Vec<string>` | `[]` | Tools this agent **may not** call. Applied **after** `tool_allowlist` so a name on both lists is denied. |
 | `tools_disabled` | bool | `false` | Master kill-switch — when `true`, the agent has zero tools regardless of allowlist / profile. |
 | `allowed_plugins` | `Vec<string>` | `[]` (= all plugins) | Plugin allowlist for this agent. |
-| `mcp_servers` | `Vec<string>` | `[]` (= all servers) | MCP server allowlist. Useful when one corp server has dangerous tools and you only want a few agents talking to it. |
+| `mcp_servers` | `Vec<string>` | `[]` (= **no** servers) | MCP server allowlist. `[]` exposes zero MCP tools; `["*"]` exposes all connected servers; a named list scopes to those servers. Useful when one corp server has dangerous tools and you only want a few agents talking to it. |
 | `skills_disabled` | bool | `false` | Master kill-switch for skills. |
 
 ### Identity & spawn behaviour

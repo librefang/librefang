@@ -13,6 +13,7 @@ import {
   evolveDeleteSkill,
   evolveWriteFile,
   evolveRemoveFile,
+  proposeSkillToRegistry,
   approvePendingCandidate,
   rejectPendingCandidate,
 } from "../http/client";
@@ -156,6 +157,19 @@ export function useEvolvePatchSkill() {
       qc.invalidateQueries({ queryKey: skillKeys.detail(variables.name) });
       qc.invalidateQueries({ queryKey: skillKeys.lists() });
     },
+  });
+}
+
+/**
+ * Propose an evolved skill to the public registry as a GitHub PR.
+ *
+ * Read-only with respect to local skill state — it forks the registry
+ * repo and opens a PR — so it invalidates no local query caches. The
+ * call site consumes the returned `pr_url` to show the operator the PR.
+ */
+export function useProposeSkillToRegistry() {
+  return useMutation({
+    mutationFn: ({ name }: { name: string }) => proposeSkillToRegistry(name),
   });
 }
 

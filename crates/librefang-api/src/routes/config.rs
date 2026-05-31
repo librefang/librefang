@@ -1406,6 +1406,7 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         "disabled": config.skills.disabled,
         "env_passthrough_denied_patterns": config.skills.env_passthrough_denied_patterns,
         "env_passthrough_per_skill": config.skills.env_passthrough_per_skill,
+        "registry_repo": config.skills.registry_repo,
     });
 
     // ── triggers ──

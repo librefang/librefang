@@ -3903,6 +3903,18 @@ impl SkillsResource {
         .await
     }
 
+    pub async fn propose_skill_to_registry(&self, name: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &format!("/api/skills/{}/propose", name),
+            None,
+            &[],
+        )
+        .await
+    }
+
     pub async fn list_tools(&self) -> Result<Value> {
         do_req(
             &self.client,

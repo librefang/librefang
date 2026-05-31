@@ -1437,6 +1437,45 @@ export async function updateAgentTools(agentId: string, payload: { capabilities_
   return put<AgentToolsResponse>(`/api/agents/${encodeURIComponent(agentId)}/tools`, payload);
 }
 
+/**
+ * Per-agent skill assignment, returned by `GET /api/agents/{id}/skills`.
+ *
+ * - `assigned`: the manifest allowlist (empty when `mode === "all"`).
+ * - `available`: every skill name in the daemon's registry — the pool the
+ *   inline assignment UI lets the operator add from.
+ * - `mode`: `"all"` (no allowlist; every registry skill is usable),
+ *   `"allowlist"` (manifest pins a specific set), or `"none"`
+ *   (`skills_disabled = true`; dispatch is off entirely).
+ * - `disabled`: mirrors the `none` mode as a boolean for convenience.
+ */
+export interface AgentSkillsResponse {
+  assigned: string[];
+  available: string[];
+  mode: "all" | "allowlist" | "none";
+  disabled: boolean;
+}
+
+export async function getAgentSkills(agentId: string): Promise<AgentSkillsResponse> {
+  return get<AgentSkillsResponse>(`/api/agents/${encodeURIComponent(agentId)}/skills`);
+}
+
+/**
+ * PUT /api/agents/{id}/skills — replace the agent's skill allowlist.
+ *
+ * An empty array clears the allowlist, switching the agent back to "all"
+ * mode (every registry skill available). A non-empty list is validated
+ * against the registry server-side; unknown names are rejected with a 4xx.
+ */
+export async function setAgentSkills(
+  agentId: string,
+  skills: string[],
+): Promise<{ status: string; skills: string[] }> {
+  return put<{ status: string; skills: string[] }>(
+    `/api/agents/${encodeURIComponent(agentId)}/skills`,
+    { skills },
+  );
+}
+
 export async function listAgents(
   opts: { includeHands?: boolean } = {},
 ): Promise<AgentItem[]> {
@@ -1923,6 +1962,25 @@ export async function evolveWriteFile(name: string, params: {
 
 export async function evolveRemoveFile(name: string, path: string): Promise<EvolutionResult> {
   return del<EvolutionResult>(`/api/skills/${encodeURIComponent(name)}/evolve/file?path=${encodeURIComponent(path)}`);
+}
+
+/** Result of proposing an evolved skill to the public registry as a PR. */
+export interface ProposeSkillResult {
+  /** HTML URL of the opened pull request. */
+  pr_url: string;
+  /** Upstream registry repo the PR targets (`owner/name`). */
+  repo: string;
+  /** Head branch created on the fork. */
+  branch: string;
+}
+
+/**
+ * Open a PR contributing this skill to the configured registry repo.
+ * Requires a GitHub token (env or vault) on the daemon side; a 401 is
+ * returned when none is configured.
+ */
+export async function proposeSkillToRegistry(name: string): Promise<ProposeSkillResult> {
+  return post<ProposeSkillResult>(`/api/skills/${encodeURIComponent(name)}/propose`, {});
 }
 
 export interface SupportingFileContents {

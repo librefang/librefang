@@ -1188,8 +1188,13 @@ fn draw_detail(f: &mut Frame, area: Rect, state: &AgentSelectState) {
                 ]));
             }
 
-            // MCP section
-            if detail.mcp_servers.is_empty() || detail.mcp_servers_mode == "all" {
+            // MCP section (#5855: empty allowlist = no servers, `["*"]` = all)
+            if detail.mcp_servers.is_empty() {
+                lines.push(Line::from(vec![
+                    Span::raw("  MCP:      "),
+                    Span::styled("[None]", Style::default().fg(theme::DIM)),
+                ]));
+            } else if detail.mcp_servers_mode == "all" {
                 lines.push(Line::from(vec![
                     Span::raw("  MCP:      "),
                     Span::styled("[All servers]", Style::default().fg(theme::GREEN)),
