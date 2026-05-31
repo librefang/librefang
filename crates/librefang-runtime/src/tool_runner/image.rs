@@ -13,6 +13,12 @@ use super::error::{ToolError, ToolResult};
 use super::resolve_file_path_ext;
 use std::path::Path;
 
+const MAX_IMAGE_SIZE: u64 = 50 * 1024 * 1024;
+
+const ALLOWED_EXTENSIONS: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "tiff", "tif", "svg",
+];
+
 pub(super) async fn tool_image_analyze(
     input: &serde_json::Value,
     workspace_root: Option<&Path>,
@@ -22,10 +28,6 @@ pub(super) async fn tool_image_analyze(
         .as_str()
         .ok_or(ToolError::MissingParameter("path"))?;
     let prompt = input["prompt"].as_str().unwrap_or("");
-    // Route through the workspace sandbox so user-supplied paths cannot
-    // escape to arbitrary filesystem locations (e.g. /etc/passwd). Named
-    // workspace prefixes are honored via `additional_roots` so agents can
-    // analyze images that live under declared `[workspaces]` mounts.
     let resolved =
         resolve_file_path_ext(raw_path, workspace_root, additional_roots).map_err(|reason| {
             ToolError::InvalidParameter {
@@ -33,6 +35,35 @@ pub(super) async fn tool_image_analyze(
                 reason,
             }
         })?;
+
+    let ext = resolved
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .unwrap_or_default();
+    if !ALLOWED_EXTENSIONS.contains(&ext.as_str()) {
+        return Err(ToolError::InvalidParameter {
+            name: "path",
+            reason: format!("File extension '.{ext}' is not a supported image format"),
+        });
+    }
+
+    let metadata = tokio::fs::metadata(&resolved)
+        .await
+        .map_err(|e| ToolError::Upstream {
+            message: format!("Failed to stat image '{raw_path}': {e}"),
+            source: Some(Box::new(e)),
+        })?;
+    if metadata.len() > MAX_IMAGE_SIZE {
+        return Err(ToolError::InvalidParameter {
+            name: "path",
+            reason: format!(
+                "File '{raw_path}' is {} bytes, exceeding the {} byte limit",
+                metadata.len(),
+                MAX_IMAGE_SIZE
+            ),
+        });
+    }
 
     let data = tokio::fs::read(&resolved)
         .await
@@ -43,19 +74,20 @@ pub(super) async fn tool_image_analyze(
 
     let file_size = data.len();
 
-    // Detect image format from magic bytes
     let format = detect_image_format(&data);
+    if format == "unknown" {
+        return Err(ToolError::InvalidParameter {
+            name: "path",
+            reason: format!("File '{raw_path}' does not match any recognized image format"),
+        });
+    }
 
-    // Extract dimensions for common formats
     let dimensions = extract_image_dimensions(&data, &format);
 
-    // Base64-encode (truncate for very large images in the response)
     let base64_preview = if file_size <= 512 * 1024 {
-        // Under 512KB — include full base64
         use base64::Engine;
         base64::engine::general_purpose::STANDARD.encode(&data)
     } else {
-        // Over 512KB — include first 64KB preview
         use base64::Engine;
         let preview_bytes = &data[..64 * 1024];
         format!(
@@ -89,12 +121,27 @@ pub(super) async fn tool_image_analyze(
     Ok(serde_json::to_string_pretty(&result)?)
 }
 
+/// Check whether the byte stream looks like an SVG (XML document whose root
+/// element is `<svg`).
+fn is_svg(data: &[u8]) -> bool {
+    let s = match std::str::from_utf8(&data[..data.len().min(512)]) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let trimmed = s.trim_start();
+    if trimmed.starts_with("<?xml") {
+        trimmed.contains("<svg")
+    } else {
+        trimmed.starts_with("<svg")
+    }
+}
+
 /// Detect image format from magic bytes.
 pub(super) fn detect_image_format(data: &[u8]) -> String {
     if data.len() < 4 {
         return "unknown".to_string();
     }
-    if data.starts_with(b"\x89PNG") {
+    if data.len() >= 8 && data.starts_with(b"\x89PNG\r\n\x1a\n") {
         "png".to_string()
     } else if data.starts_with(b"\xFF\xD8\xFF") {
         "jpeg".to_string()
@@ -106,6 +153,10 @@ pub(super) fn detect_image_format(data: &[u8]) -> String {
         "bmp".to_string()
     } else if data.starts_with(b"\x00\x00\x01\x00") {
         "ico".to_string()
+    } else if data.starts_with(b"II\x2A\x00") || data.starts_with(b"MM\x00\x2A") {
+        "tiff".to_string()
+    } else if is_svg(data) {
+        "svg".to_string()
     } else {
         "unknown".to_string()
     }
@@ -135,11 +186,10 @@ pub(super) fn extract_image_dimensions(data: &[u8], format: &str) -> Option<(u32
             }
         }
         "bmp" => {
-            // BMP: width at bytes 18-21, height at bytes 22-25 (little-endian)
             if data.len() >= 26 {
                 let w = u32::from_le_bytes([data[18], data[19], data[20], data[21]]);
-                let h = u32::from_le_bytes([data[22], data[23], data[24], data[25]]);
-                Some((w, h))
+                let h = i32::from_le_bytes([data[22], data[23], data[24], data[25]]);
+                Some((w, h.unsigned_abs()))
             } else {
                 None
             }
@@ -154,18 +204,33 @@ pub(super) fn extract_image_dimensions(data: &[u8], format: &str) -> Option<(u32
 
 /// Extract JPEG dimensions by scanning for SOF markers.
 pub(super) fn extract_jpeg_dimensions(data: &[u8]) -> Option<(u32, u32)> {
-    let mut i = 2; // Skip SOI marker
+    let mut i = 2;
     while i + 1 < data.len() {
         if data[i] != 0xFF {
             i += 1;
             continue;
         }
         let marker = data[i + 1];
-        // SOF0-SOF3 markers contain dimensions
+        if marker == 0x00 {
+            i += 2;
+            continue;
+        }
+        if (0xD0..=0xD7).contains(&marker) {
+            i += 2;
+            continue;
+        }
+        if marker == 0xFF {
+            i += 1;
+            continue;
+        }
         if (0xC0..=0xC3).contains(&marker) && i + 9 < data.len() {
             let h = u16::from_be_bytes([data[i + 5], data[i + 6]]) as u32;
             let w = u16::from_be_bytes([data[i + 7], data[i + 8]]) as u32;
             return Some((w, h));
+        }
+        if (0xD8..=0xD9).contains(&marker) {
+            i += 2;
+            continue;
         }
         if i + 3 < data.len() {
             let seg_len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
@@ -200,11 +265,64 @@ mod tests {
 
     #[tokio::test]
     async fn image_analyze_without_workspace_is_invalid_parameter() {
-        // resolve_file_path_ext rejects when no workspace sandbox is configured.
         let r = tool_image_analyze(&serde_json::json!({"path": "x.png"}), None, &[]).await;
         assert!(matches!(
             r,
             Err(ToolError::InvalidParameter { name: "path", .. })
         ));
+    }
+
+    #[test]
+    fn test_detect_image_format_png() {
+        let data = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x10\x00\x00\x00\x10";
+        assert_eq!(detect_image_format(data), "png");
+    }
+
+    #[test]
+    fn test_detect_image_format_jpeg() {
+        let data = b"\xFF\xD8\xFF\xE0\x00\x10JFIF";
+        assert_eq!(detect_image_format(data), "jpeg");
+    }
+
+    #[test]
+    fn test_detect_image_format_gif() {
+        let data = b"GIF89a\x10\x00\x10\x00";
+        assert_eq!(detect_image_format(data), "gif");
+    }
+
+    #[test]
+    fn test_detect_image_format_bmp() {
+        let data = b"BM\x00\x00\x00\x00";
+        assert_eq!(detect_image_format(data), "bmp");
+    }
+
+    #[test]
+    fn test_detect_image_format_unknown() {
+        let data = b"\x00\x00\x00\x00";
+        assert_eq!(detect_image_format(data), "unknown");
+    }
+
+    #[test]
+    fn test_detect_image_format_tiff_le() {
+        let data = b"II\x2A\x00\x08\x00\x00\x00";
+        assert_eq!(detect_image_format(data), "tiff");
+    }
+
+    #[test]
+    fn test_detect_image_format_tiff_be() {
+        let data = b"MM\x00\x2A\x00\x00\x00\x08";
+        assert_eq!(detect_image_format(data), "tiff");
+    }
+
+    #[test]
+    fn test_detect_image_format_svg_bare() {
+        let data = b"<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>";
+        assert_eq!(detect_image_format(data), "svg");
+    }
+
+    #[test]
+    fn test_detect_image_format_svg_with_xml_decl() {
+        let data = b"<?xml version=\"1.0\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>";
+        assert_eq!(detect_image_format(data), "svg");
     }
 }

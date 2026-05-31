@@ -270,11 +270,20 @@ install() {
     tar xzf "$ARCHIVE" -C "$INSTALL_DIR"
     chmod +x "$INSTALL_DIR/librefang"
 
+    # The Rust Telegram sidecar binary ships inside the same tarball since
+    # the release pipeline bundles it. Older tarballs lack it, so install it
+    # only when present and stay silent otherwise (backward compatible).
+    SIDECAR="$INSTALL_DIR/librefang-sidecar-telegram"
+    if [ -f "$SIDECAR" ]; then
+        chmod +x "$SIDECAR"
+    fi
+
     # Ad-hoc codesign on macOS (prevents SIGKILL on Apple Silicon).
     # Remove quarantine xattr before signing.
     if [ "$OS" = "darwin" ]; then
         if command_exists xattr; then
             xattr -cr "$INSTALL_DIR/librefang" 2>/dev/null || true
+            [ -f "$SIDECAR" ] && xattr -cr "$SIDECAR" 2>/dev/null || true
         fi
         if command_exists codesign; then
             if ! codesign --force --sign - "$INSTALL_DIR/librefang"; then
@@ -283,6 +292,9 @@ install() {
                 echo "  On Apple Silicon, the binary may be killed (SIGKILL) by Gatekeeper."
                 echo "  Try manually: xattr -cr $INSTALL_DIR/librefang && codesign --force --sign - $INSTALL_DIR/librefang"
                 echo ""
+            fi
+            if [ -f "$SIDECAR" ]; then
+                codesign --force --sign - "$SIDECAR" 2>/dev/null || true
             fi
         fi
     fi
