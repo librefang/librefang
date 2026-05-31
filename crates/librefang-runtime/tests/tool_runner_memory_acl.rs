@@ -406,19 +406,18 @@ async fn allowed_user_memory_store_succeeds_and_lands() {
 
 #[tokio::test]
 async fn no_acl_means_no_restriction_store_still_lands() {
-    let acl = UserMemoryAccess {
-        readable_namespaces: vec!["*".into()],
-        writable_namespaces: vec!["*".into()],
-        ..Default::default()
-    };
-    let (kernel, probes) = AclKernel::new(Some(acl));
+    let (kernel, probes) = AclKernel::new(None);
     let kernel: Arc<dyn KernelHandle> = Arc::new(kernel);
 
     let ctx = make_ctx(&kernel, Some("anyone"), None);
     let input = json!({"key": "k", "value": "v"});
     let result = execute_tool_raw("t1", "memory_store", &input, &ctx).await;
 
-    assert!(!result.is_error, "allow-all ACL => store succeeds");
+    assert!(
+        !result.is_error,
+        "no ACL (RBAC off) => store succeeds: {}",
+        result.content
+    );
     assert_eq!(probes.store.lock().unwrap().len(), 1);
 }
 
@@ -487,6 +486,30 @@ async fn allowed_user_memory_recall_runs() {
     let result = execute_tool_raw("t2", "memory_recall", &json!({"key": "k2"}), &ctx).await;
 
     assert!(!result.is_error, "kv:* reader must be allowed recall");
+    assert_eq!(probes.recall.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn no_acl_memory_list_and_recall_both_succeed() {
+    let (kernel, probes) = AclKernel::new(None);
+    let kernel: Arc<dyn KernelHandle> = Arc::new(kernel);
+
+    let ctx = make_ctx(&kernel, Some("anyone"), None);
+
+    let list_res = execute_tool_raw("t3", "memory_list", &json!({}), &ctx).await;
+    assert!(
+        !list_res.is_error,
+        "no ACL (RBAC off) => memory_list succeeds: {}",
+        list_res.content
+    );
+    assert_eq!(probes.list.lock().unwrap().len(), 1);
+
+    let recall_res = execute_tool_raw("t3b", "memory_recall", &json!({"key": "k"}), &ctx).await;
+    assert!(
+        !recall_res.is_error,
+        "no ACL (RBAC off) => memory_recall succeeds: {}",
+        recall_res.content
+    );
     assert_eq!(probes.recall.lock().unwrap().len(), 1);
 }
 

@@ -533,9 +533,9 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "limit": { "type": "integer", "description": "Max keys to return (default 100)" },
-                        "offset": { "type": "integer", "description": "Number of keys to skip" }
-                    },
+                        "limit": { "type": "integer", "description": "Maximum number of keys to return (default 100)" },
+                        "offset": { "type": "integer", "description": "Number of keys to skip (default 0)" }
+                    }
                 }),
             },
             ToolDefinition {

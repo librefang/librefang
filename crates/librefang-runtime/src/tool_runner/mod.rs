@@ -205,11 +205,10 @@ pub(super) fn enforce_memory_acl(
     let kh = kernel.ok_or_else(|| {
         ToolError::PermissionDenied("Kernel handle required for ACL enforcement".into())
     })?;
-    let acl = kh
-        .memory_acl_for_sender(sender_id, channel)
-        .ok_or_else(|| {
-            ToolError::PermissionDenied("Sender attribution required for ACL enforcement".into())
-        })?;
+    let acl = match kh.memory_acl_for_sender(sender_id, channel) {
+        Some(acl) => acl,
+        None => return Ok(()),
+    };
     let guard = librefang_memory::namespace_acl::MemoryNamespaceGuard::new(acl);
     let gate = match op {
         MemoryAclOp::Read => guard.check_read(namespace),
