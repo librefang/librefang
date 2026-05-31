@@ -167,7 +167,9 @@ const SEMANTIC_ONLY_THRESHOLD: f32 = 0.55;
 #[derive(Debug, Clone)]
 struct HandRouteCacheEntry {
     home_dir: Option<String>,
-    candidates: Vec<HandRouteCandidate>,
+    // `Arc` so per-message `hand_route_candidates()` hands out a refcount bump
+    // instead of deep-cloning the candidate Vec on every routing call.
+    candidates: Arc<Vec<HandRouteCandidate>>,
 }
 
 static HAND_ROUTE_CACHE: OnceLock<Mutex<Option<HandRouteCacheEntry>>> = OnceLock::new();
@@ -189,21 +191,21 @@ pub fn invalidate_hand_route_cache() {
     }
 }
 
-fn hand_route_candidates() -> Vec<HandRouteCandidate> {
+fn hand_route_candidates() -> Arc<Vec<HandRouteCandidate>> {
     let home_dir = resolve_hand_route_home_dir();
     let home_dir_key = Some(home_dir.to_string_lossy().to_string());
     let cache = HAND_ROUTE_CACHE.get_or_init(|| Mutex::new(None));
     let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref cached) = *guard {
         if cached.home_dir == home_dir_key {
-            return cached.candidates.clone();
+            return Arc::clone(&cached.candidates);
         }
     }
 
-    let candidates = build_hand_route_candidates(Some(&home_dir));
+    let candidates = Arc::new(build_hand_route_candidates(Some(&home_dir)));
     *guard = Some(HandRouteCacheEntry {
         home_dir: home_dir_key,
-        candidates: candidates.clone(),
+        candidates: Arc::clone(&candidates),
     });
     candidates
 }
@@ -462,7 +464,7 @@ pub fn auto_select_hand(
 ) -> HandSelection {
     let mut scored: Vec<(usize, String, Vec<String>)> = Vec::new();
 
-    for candidate in hand_route_candidates() {
+    for candidate in hand_route_candidates().iter() {
         let strong_hits: Vec<String> = candidate
             .strong_phrases
             .iter()
@@ -616,7 +618,7 @@ fn auto_select_template_from_metadata(
 ) -> Option<TemplateSelection> {
     let mut scored: Vec<(usize, String, Vec<String>)> = Vec::new();
 
-    for candidate in manifest_route_candidates(agents_dir) {
+    for candidate in manifest_route_candidates(agents_dir).iter() {
         let explicit_hits: Vec<String> = candidate
             .explicit_aliases
             .iter()
@@ -658,7 +660,7 @@ fn auto_select_template_from_metadata(
     // When keyword matching found nothing, try semantic-only candidates
     if scored.is_empty() {
         if let Some(scores) = semantic_scores {
-            for candidate in manifest_route_candidates(agents_dir) {
+            for candidate in manifest_route_candidates(agents_dir).iter() {
                 if let Some(&sim) = scores.get(candidate.template.as_str()) {
                     if sim >= SEMANTIC_ONLY_THRESHOLD {
                         let bonus = (sim * MAX_SEMANTIC_BONUS).round() as usize;
@@ -689,7 +691,7 @@ fn auto_select_template_from_metadata(
 /// Cached manifest route candidates, keyed by the `agents_dir` path used to
 /// build them. Invalidated via `invalidate_manifest_cache()`, which should be
 /// called on config hot-reload or agent install/uninstall.
-type ManifestCacheEntry = (PathBuf, Vec<ManifestRouteCandidate>);
+type ManifestCacheEntry = (PathBuf, Arc<Vec<ManifestRouteCandidate>>);
 static MANIFEST_CACHE: OnceLock<Mutex<Option<ManifestCacheEntry>>> = OnceLock::new();
 
 /// Invalidate the cached manifest route candidates so they are rebuilt on the
@@ -725,17 +727,17 @@ pub fn all_template_descriptions(agents_dir: &Path) -> Vec<(String, String)> {
     result
 }
 
-fn manifest_route_candidates(agents_dir: &Path) -> Vec<ManifestRouteCandidate> {
+fn manifest_route_candidates(agents_dir: &Path) -> Arc<Vec<ManifestRouteCandidate>> {
     let cache = MANIFEST_CACHE.get_or_init(|| Mutex::new(None));
     let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((ref cached_path, ref cached)) = *guard {
         if cached_path == agents_dir {
-            return cached.clone();
+            return Arc::clone(cached);
         }
     }
 
-    let candidates = build_manifest_route_candidates(agents_dir);
-    *guard = Some((agents_dir.to_path_buf(), candidates.clone()));
+    let candidates = Arc::new(build_manifest_route_candidates(agents_dir));
+    *guard = Some((agents_dir.to_path_buf(), Arc::clone(&candidates)));
     candidates
 }
 
