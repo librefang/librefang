@@ -144,12 +144,19 @@ docker build -t librefang-rust-dev:latest -f Dockerfile.rust-dev .
 #    point at named volumes (isolated from the host); reuse them across runs
 #    so deps compile once. Set PATH explicitly — a login shell ('bash -l')
 #    drops the image's /usr/local/cargo/bin from PATH.
+#    Prefix link-producing commands (build / test, NOT check) with `mold -run`.
+#    The image ships the mold linker; `mold -run` intercepts the child `ld`
+#    WITHOUT touching RUSTFLAGS, so it leaves the cached target dir valid while
+#    cutting the link phase that every incremental build still pays.
+#    Measured on a warm cache, a one-line edit + relink of the kernel-router
+#    test binary went 7.1s → 1.7s (4.1x). `cargo check` has no link step, so
+#    there is nothing to prefix there.
 docker run --rm \
   -v "$(git rev-parse --show-toplevel)":/work \
   -v librefang-cargo:/cargo -v librefang-target:/target \
   -e CARGO_HOME=/cargo -e CARGO_TARGET_DIR=/target -w /work \
   librefang-rust-dev:latest \
-  sh -c 'export PATH=/usr/local/cargo/bin:$PATH; cargo test -p librefang-api --lib'
+  sh -c 'export PATH=/usr/local/cargo/bin:$PATH; mold -run cargo test -p librefang-api --lib'
 ```
 
 Scope is still mandatory: `-p <crate>` (or the `kind(lib)|kind(bin)` nextest

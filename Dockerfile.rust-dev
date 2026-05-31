@@ -59,6 +59,14 @@ FROM rust:1-trixie
 #                                     match CI exactly)
 #      librsvg2-dev          — SVG icon rasterisation in Tauri
 #      patchelf              — Tauri bundler post-processing step
+#      mold                  — fast linker. Used via `mold -run cargo …` in
+#                              the dev wrapper, which intercepts the child
+#                              `ld` invocation WITHOUT changing RUSTFLAGS, so
+#                              it does not invalidate the cached target dir.
+#                              No effect on `cargo check` (no link step);
+#                              speeds up the link phase of `build` / `test`,
+#                              which is the per-iteration cost the cached
+#                              incremental build still pays on every change.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     pkg-config \
@@ -72,6 +80,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libayatana-appindicator3-dev \
     librsvg2-dev \
     patchelf \
+    mold \
     && rm -rf /var/lib/apt/lists/*
 
 # GitHub CLI (`gh`) — required by `cargo xtask release` (changelog generation hard-fails with "gh CLI required" at xtask/src/changelog.rs:421 if absent) and by `cargo xtask changelog`; also used by `release.rs` for the version-bump PR and by `cargo xtask contributors` for the GitHub-API-backed contributor list. Installed from GitHub's official apt repo per https://github.com/cli/cli/blob/trunk/docs/install_linux.md so the version tracks upstream stable rather than whatever Debian's archive carries. The release wrapper at scripts/run-xtask.sh forwards `GH_TOKEN` from the host (pulled out of the macOS Keychain when needed) so this `gh` authenticates without re-running `gh auth login` inside the container.
