@@ -59,6 +59,17 @@ impl Drop for Harness {
 }
 
 async fn boot_router_with_api_key(api_key: &str) -> Harness {
+    boot_router_with_config(api_key, Vec::new()).await
+}
+
+/// Boot a router with auth + an explicit hands SSRF allowlist.
+///
+/// The marketplace-install tests stand up a mock registry on `127.0.0.1`,
+/// which the install handler's `check_ssrf` guard now rejects unless the
+/// loopback host is exempt. Threading `registry_allowed_hosts` here is how
+/// those tests keep their loopback mock reachable; pass an empty list to
+/// exercise the default public-only policy.
+async fn boot_router_with_config(api_key: &str, registry_allowed_hosts: Vec<String>) -> Harness {
     let tmp = tempfile::tempdir().expect("tempdir");
 
     // Populate the registry cache so the kernel boots without network.
@@ -80,6 +91,9 @@ async fn boot_router_with_api_key(api_key: &str) -> Harness {
             message_timeout_secs: 300,
             extra_params: std::collections::BTreeMap::new(),
             cli_profile_dirs: Vec::new(),
+        },
+        hands: librefang_types::config::HandsConfig {
+            registry_allowed_hosts,
         },
         ..KernelConfig::default()
     };
@@ -106,6 +120,13 @@ const TEST_API_KEY: &str = "test-secret-key";
 /// module-level docstring.
 async fn boot_router_open() -> Harness {
     boot_router_with_api_key(TEST_API_KEY).await
+}
+
+/// Boot a router whose hands SSRF allowlist exempts the loopback mock
+/// registry. Used by the marketplace-install tests that bind their fake
+/// HandsHub on `127.0.0.1`.
+async fn boot_router_allowing_loopback() -> Harness {
+    boot_router_with_config(TEST_API_KEY, vec!["127.0.0.1".to_string()]).await
 }
 
 async fn send(
@@ -706,7 +727,7 @@ async fn spawn_mock_registry(advertised_sha: String) -> (String, tokio::task::Jo
 
 #[tokio::test(flavor = "multi_thread")]
 async fn marketplace_install_succeeds_and_registers_hand() {
-    let h = boot_router_open().await;
+    let h = boot_router_allowing_loopback().await;
 
     let (_, real_sha) = marketplace_bundle_bytes_and_sha();
     let (registry_url, server) = spawn_mock_registry(real_sha).await;
@@ -761,7 +782,7 @@ async fn marketplace_install_succeeds_and_registers_hand() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn marketplace_install_rejects_checksum_mismatch() {
-    let h = boot_router_open().await;
+    let h = boot_router_allowing_loopback().await;
 
     // Advertise a digest that does not match the served bundle — the download
     // step must fail the SHA-256 check before anything is written to disk.
@@ -801,4 +822,48 @@ async fn marketplace_install_rejects_checksum_mismatch() {
     );
 
     server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn marketplace_install_rejects_ssrf_registry_url() {
+    // The loopback exemption is present (the harness allows `127.0.0.1`), but a
+    // caller-supplied `registry_url` aimed at the cloud-metadata endpoint
+    // 169.254.169.254 must still be rejected — that range is unconditionally
+    // blocked regardless of the allowlist, and the install must not write
+    // anything to disk before the network call. This is the regression guard
+    // for the SSRF hole where `registry_url` flowed straight into
+    // `HandsHubClient::with_url`.
+    let h = boot_router_allowing_loopback().await;
+
+    let (status, body) = json_request(
+        &h.app,
+        Method::POST,
+        "/api/hands/marketplace/install",
+        Some(serde_json::json!({
+            "hand_id": "remote-uptime",
+            "registry_url": "http://169.254.169.254/api/v1",
+        })),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an SSRF registry_url must be rejected with 400: {body}"
+    );
+
+    // Side-effect: nothing was installed.
+    let (_, list) = get_json(&h.app, "/api/hands").await;
+    let found = list["items"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .any(|d| d["id"].as_str() == Some("remote-uptime"))
+        })
+        .unwrap_or(false);
+    assert!(
+        !found,
+        "an SSRF-rejected install must not register the hand: {list}"
+    );
 }

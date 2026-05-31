@@ -3177,7 +3177,43 @@ pub async fn install_hand_from_marketplace(
     }
 
     let hub = match req.registry_url.as_deref() {
-        Some(url) => librefang_hands::HandsHubClient::with_url(url),
+        // Caller-supplied registry URL: validate against the SSRF guard before
+        // pointing the daemon at it. Without this an authenticated caller could
+        // aim `download_bundle` at loopback / private / cloud-metadata addresses
+        // (e.g. http://169.254.169.254/...). The operator allowlist
+        // (`config.toml: [hands] registry_allowed_hosts`) exempts self-hosted
+        // mirrors on internal networks; it defaults empty (public-only) and can
+        // never exempt cloud-metadata ranges. `check_ssrf` resolves DNS
+        // synchronously, so it runs on a blocking thread (no sync I/O in the
+        // async handler).
+        Some(url) => {
+            let allowed_hosts = state
+                .kernel
+                .config_snapshot()
+                .hands
+                .registry_allowed_hosts
+                .clone();
+            let url = url.to_string();
+            let check = tokio::task::spawn_blocking(move || {
+                librefang_kernel::web_fetch::check_ssrf(&url, &allowed_hosts).map(|_| url)
+            })
+            .await;
+            let validated_url = match check {
+                Ok(Ok(url)) => url,
+                Ok(Err(e)) => {
+                    return ApiErrorResponse::bad_request(format!("registry_url rejected: {e}"))
+                        .into_json_tuple();
+                }
+                Err(e) => {
+                    return ApiErrorResponse::bad_request(format!(
+                        "registry_url validation failed: {e}"
+                    ))
+                    .into_json_tuple();
+                }
+            };
+            librefang_hands::HandsHubClient::with_url(&validated_url)
+        }
+        // Default registry (`hands.librefang.ai`) is trusted — skip the check.
         None => librefang_hands::HandsHubClient::new(),
     };
 
