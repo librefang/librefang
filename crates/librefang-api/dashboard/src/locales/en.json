@@ -381,7 +381,7 @@
       "skills_search_placeholder": "Search installed skills…",
       "mcp_servers": "MCP Servers",
       "mcp_servers_placeholder": "Empty = all connected servers",
-      "mcp_servers_hint": "Empty = all configured MCP servers available.",
+      "mcp_servers_hint": "Empty = no MCP servers exposed. [\"*\"] = all connected servers. A named list = only those servers.",
       "mcp_servers_search_placeholder": "Search MCP servers…",
       "live_toml": "Live TOML Preview",
       "preview_toml": "TOML",

@@ -10996,6 +10996,51 @@
         }
       }
     },
+    "/api/skills/{name}/propose": {
+      "post": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "POST /api/skills/{name}/propose — open a PR contributing this skill\nto the configured public skill registry.",
+        "description": "Forks the registry repo under the authenticated GitHub user, pushes\nthe skill files to a fresh branch, and opens a pull request with an\nauto-generated description (metadata + evolution changelog). Requires\na `GITHUB_TOKEN` (env or vault).",
+        "operationId": "propose_skill_to_registry",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Skill name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "PR opened against the registry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "No GitHub token configured"
+          },
+          "404": {
+            "description": "Skill not found"
+          },
+          "502": {
+            "description": "GitHub request failed"
+          }
+        }
+      }
+    },
     "/api/status": {
       "get": {
         "tags": [

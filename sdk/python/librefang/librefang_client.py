@@ -1051,6 +1051,9 @@ class _SkillsResource(_Resource):
     def get_supporting_file(self, name: str, path: Any = None):
         return self._c._request("GET", f"/api/skills/{name}/file", None, query={"path": path})
 
+    def propose_skill_to_registry(self, name: str):
+        return self._c._request("POST", f"/api/skills/{name}/propose")
+
     def list_tools(self):
         return self._c._request("GET", "/api/tools")
 

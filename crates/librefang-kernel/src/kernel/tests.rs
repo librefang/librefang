@@ -5665,7 +5665,8 @@ fn mcp_summary_is_byte_identical_across_input_orders() {
         "mcp_filesystem_list_directory".to_string(),
     ];
 
-    let allowlist: Vec<String> = Vec::new();
+    // `["*"]` = all servers; exercises the multi-server render path (#5855).
+    let allowlist: Vec<String> = vec!["*".to_string()];
     let summary_a = super::render_mcp_summary(&order_a, &configured, &allowlist);
     let summary_b = super::render_mcp_summary(&order_b, &configured, &allowlist);
 
@@ -5694,7 +5695,7 @@ fn mcp_summary_inner_tool_list_is_sorted() {
         "mcp_github_close_pr".to_string(),
     ];
 
-    let allowlist: Vec<String> = Vec::new();
+    let allowlist: Vec<String> = vec!["*".to_string()];
     let summary = super::render_mcp_summary(&tools, &configured, &allowlist);
 
     // The inner list joined with ", " must appear in alphabetical order.
@@ -5725,7 +5726,15 @@ fn mcp_summary_cache_key_is_order_independent() {
         super::mcp_summary_cache_key(&order_b),
         "cache key must be insertion-order-independent"
     );
-    assert_eq!(super::mcp_summary_cache_key(&[]), "*");
+    // #5855: empty allowlist ("no servers") gets its own sentinel key, distinct
+    // from the explicit `["*"]` wildcard ("all servers", keyed `*`).
+    assert_eq!(super::mcp_summary_cache_key(&[]), "\x1fnone\x1f");
+    assert_eq!(super::mcp_summary_cache_key(&["*".to_string()]), "*");
+    assert_ne!(
+        super::mcp_summary_cache_key(&[]),
+        super::mcp_summary_cache_key(&["*".to_string()]),
+        "empty (none) and [\"*\"] (all) must not collide in the summary cache"
+    );
 }
 
 #[test]
@@ -5748,6 +5757,9 @@ fn available_tools_mcp_section_is_sorted_across_connect_orders() {
         description: "agent for mcp order regression".to_string(),
         author: "test".to_string(),
         module: "builtin:chat".to_string(),
+        // `["*"]` opts into all servers so this test exercises the multi-server
+        // sort path; an empty allowlist now means "no MCP tools" (#5855).
+        mcp_servers: vec!["*".to_string()],
         ..Default::default()
     };
     let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
@@ -5906,6 +5918,8 @@ fn mcp_disabled_false_preserves_mcp_tools() {
         author: "test".to_string(),
         module: "builtin:chat".to_string(),
         mcp_disabled: false,
+        // `["*"]` = all servers; empty would now yield zero MCP tools (#5855).
+        mcp_servers: vec!["*".to_string()],
         ..Default::default()
     };
     let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
@@ -5938,6 +5952,210 @@ fn mcp_disabled_false_preserves_mcp_tools() {
     kernel.shutdown();
 }
 
+// ─── mcp_servers allowlist semantics (#5855) ──────────────────────────────
+//
+// Empty `mcp_servers = []` must NOT leak every globally-connected server's
+// tools into the agent. The field is a real allowlist:
+//   []        → zero MCP tools
+//   ["*"]     → all connected servers
+//   ["a"]     → only server `a`
+// Before #5855 the empty case was read as a wildcard, so an agent that never
+// opted into any MCP server saw the union of all servers' tools, attempted to
+// call them, and the streaming loop exited after 3 consecutive tool failures.
+
+/// Register a server name into the kernel's `effective_mcp_servers` snapshot
+/// so `resolve_mcp_server_from_known` can map a namespaced tool name back to
+/// its real owning server — the exact path `available_tools` and
+/// `render_mcp_summary` both take. Mirrors `seed_mcp_server` in
+/// `crates/librefang-api/tests/system_tools_sessions_test.rs`.
+fn register_mcp_server(kernel: &LibreFangKernel, server_name: &str) {
+    let entry = librefang_types::config::McpServerConfigEntry {
+        name: server_name.to_string(),
+        template_id: None,
+        transport: None,
+        timeout_secs: 30,
+        env: Vec::new(),
+        headers: Vec::new(),
+        oauth: None,
+        taint_scanning: true,
+        taint_policy: None,
+    };
+    kernel
+        .mcp
+        .effective_mcp_servers
+        .write()
+        .expect("effective_mcp_servers write lock not poisoned")
+        .push(entry);
+}
+
+/// Boot a kernel that has `servers` connected (registered in
+/// `effective_mcp_servers`) and `tools` in the global MCP tool map, spawn an
+/// agent with `mcp_servers = allowlist`, and return the agent's resolved MCP
+/// tool names.
+///
+/// Registering the servers — not just pushing tools — is load-bearing: the
+/// named-allowlist filter resolves each tool to its *real* owning server via
+/// `effective_mcp_servers`, then compares that server name to the allowlist by
+/// exact equality. An earlier revision resolved tools against the allowlist
+/// directly, which prefix-matched `mcp_server_x_*` under a `["server"]`
+/// allowlist; seeding the real servers here is what lets the test exercise the
+/// correct, summary-consistent algorithm.
+fn mcp_tool_names_for_servers(
+    test_name: &str,
+    servers: &[&str],
+    tools: &[&str],
+    allowlist: Vec<String>,
+) -> Vec<String> {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join(test_name);
+    std::fs::create_dir_all(home.join("data")).unwrap();
+    let cfg = KernelConfig {
+        home_dir: home.clone(),
+        data_dir: home.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(cfg).expect("kernel should boot");
+
+    let manifest = AgentManifest {
+        name: "allowlist-agent".to_string(),
+        description: "agent under mcp_servers allowlist test".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        mcp_disabled: false,
+        mcp_servers: allowlist,
+        ..Default::default()
+    };
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+
+    for server in servers {
+        register_mcp_server(&kernel, server);
+    }
+    {
+        let mut tool_guard = kernel.tools_ref().lock().unwrap();
+        for tool in tools {
+            tool_guard.push(librefang_types::tool::ToolDefinition {
+                name: (*tool).to_string(),
+                description: String::new(),
+                input_schema: serde_json::json!({}),
+            });
+        }
+    }
+    kernel
+        .mcp
+        .mcp_generation
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    let names: Vec<String> = kernel
+        .available_tools(agent_id)
+        .iter()
+        .filter(|t| t.name.starts_with("mcp_"))
+        .map(|t| t.name.clone())
+        .collect();
+    kernel.shutdown();
+    names
+}
+
+/// Register one tool each for two distinct global MCP servers, then assert the
+/// per-allowlist MCP tool set an agent with `mcp_servers = allowlist` resolves.
+fn mcp_tool_names_for_allowlist(test_name: &str, allowlist: Vec<String>) -> Vec<String> {
+    mcp_tool_names_for_servers(
+        test_name,
+        &["server_x", "server_y"],
+        &["mcp_server_x_do_thing", "mcp_server_y_other_thing"],
+        allowlist,
+    )
+}
+
+#[test]
+fn empty_mcp_servers_yields_no_mcp_tools() {
+    // The core leak: an unconfigured agent (mcp_servers = []) must see ZERO
+    // MCP tools even though two servers are connected globally.
+    let names = mcp_tool_names_for_allowlist("librefang-mcp-empty-allowlist-5855", vec![]);
+    assert!(
+        names.is_empty(),
+        "mcp_servers = [] must expose no MCP tools (#5855); leaked: {names:?}"
+    );
+}
+
+#[test]
+fn wildcard_mcp_servers_yields_all_mcp_tools() {
+    // ["*"] is the explicit opt-in to all connected servers.
+    let mut names = mcp_tool_names_for_allowlist(
+        "librefang-mcp-wildcard-allowlist-5855",
+        vec!["*".to_string()],
+    );
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            "mcp_server_x_do_thing".to_string(),
+            "mcp_server_y_other_thing".to_string(),
+        ],
+        "mcp_servers = [\"*\"] must expose every connected server's tools (#5855)"
+    );
+}
+
+#[test]
+fn explicit_mcp_servers_allowlist_filters_to_named_servers() {
+    // ["server_x"] selects only server_x's tools — server_y stays hidden.
+    let names = mcp_tool_names_for_allowlist(
+        "librefang-mcp-named-allowlist-5855",
+        vec!["server_x".to_string()],
+    );
+    assert_eq!(
+        names,
+        vec!["mcp_server_x_do_thing".to_string()],
+        "mcp_servers = [\"server_x\"] must expose only server_x tools; got: {names:?}"
+    );
+}
+
+#[test]
+fn named_allowlist_does_not_leak_prefix_overlapping_server() {
+    // Prefix-collision regression: server `server` and server `server_x` share
+    // the `mcp_server_` namespace prefix. An agent allowlisting only `server`
+    // must NOT see `server_x`'s tools. Resolving each tool against the agent's
+    // allowlist directly (rather than the connected-server set) would make
+    // `mcp_server_x_bar` prefix-match `mcp_server_` and leak — a narrower
+    // recurrence of the #5855 cross-agent leak. `explicit_*` above uses
+    // server_x/server_y, whose prefixes do not overlap, so it cannot catch this.
+    let names = mcp_tool_names_for_servers(
+        "librefang-mcp-prefix-overlap-5855",
+        &["server", "server_x"],
+        &["mcp_server_foo", "mcp_server_x_bar"],
+        vec!["server".to_string()],
+    );
+    assert_eq!(
+        names,
+        vec!["mcp_server_foo".to_string()],
+        "mcp_servers = [\"server\"] must expose only server's tools, never the \
+         prefix-overlapping server_x; got: {names:?}"
+    );
+}
+
+#[test]
+fn empty_mcp_allowlist_renders_empty_summary() {
+    // The prompt summary must mirror the tool list: an empty allowlist
+    // advertises no MCP servers, so the agent's prompt never names tools it
+    // cannot call (#5855).
+    let configured = vec!["filesystem".to_string(), "github".to_string()];
+    let tools = vec![
+        "mcp_filesystem_read_file".to_string(),
+        "mcp_github_create_issue".to_string(),
+    ];
+    let empty: Vec<String> = Vec::new();
+    assert_eq!(
+        super::render_mcp_summary(&tools, &configured, &empty),
+        "",
+        "empty mcp_servers must render an empty MCP summary (#5855)"
+    );
+    // Sanity: the same tools under `["*"]` DO render a non-empty summary.
+    let wildcard = vec!["*".to_string()];
+    assert!(
+        !super::render_mcp_summary(&tools, &configured, &wildcard).is_empty(),
+        "mcp_servers = [\"*\"] must render a non-empty summary"
+    );
+}
+
 #[test]
 fn mcp_disabled_hot_reload_takes_effect_without_respawn() {
     // After toggling mcp_disabled from false → true in a live manifest,
@@ -5961,6 +6179,8 @@ fn mcp_disabled_hot_reload_takes_effect_without_respawn() {
         author: "test".to_string(),
         module: "builtin:chat".to_string(),
         mcp_disabled: false,
+        // `["*"]` = all servers; empty would now yield zero MCP tools (#5855).
+        mcp_servers: vec!["*".to_string()],
         ..Default::default()
     };
     let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
@@ -6053,7 +6273,9 @@ fn mcp_disabled_produces_empty_mcp_summary() {
         "mcp_filesystem_read_file".to_string(),
         "mcp_github_create_issue".to_string(),
     ];
-    let allowlist: Vec<String> = Vec::new();
+    // `["*"]` = all servers; an empty allowlist would now render "" (#5855),
+    // which would defeat the "enabled produces non-empty summary" sanity check.
+    let allowlist: Vec<String> = vec!["*".to_string()];
 
     // Helper that mirrors the call-site gate exactly:
     //   `if mcp_tool_count > 0 && !mcp_disabled { build_mcp_summary(...) } else { "" }`

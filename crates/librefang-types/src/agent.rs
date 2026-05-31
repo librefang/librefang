@@ -1091,7 +1091,17 @@ pub struct AgentManifest {
     /// Explicitly disable all skills, overriding the empty-list = all-skills default.
     #[serde(default)]
     pub skills_disabled: bool,
-    /// MCP server allowlist (empty = all connected MCP servers available).
+    /// MCP server allowlist.
+    ///
+    /// - `[]` (empty / unset) → **no** MCP servers. The agent sees zero MCP
+    ///   tools and the MCP server summary is omitted from its prompt. This is
+    ///   a real allowlist, not a wildcard — an unconfigured agent must not
+    ///   silently inherit every globally-connected server's tools (#5855).
+    /// - `["*"]` → all connected MCP servers (explicit opt-in).
+    /// - `["a", "b"]` → only servers `a` and `b`.
+    ///
+    /// Use [`Self::mcp_disabled`] to additionally guarantee no MCP tools even
+    /// if `["*"]` or a non-empty list is set.
     #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
     pub mcp_servers: Vec<String>,
     /// Channel allowlist — restricts which configured channels this agent can
@@ -1100,7 +1110,9 @@ pub struct AgentManifest {
     #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
     pub channels: Vec<String>,
     /// Explicitly disable all MCP server tools for this agent. Mirrors
-    /// `skills_disabled` — `mcp_servers = []` means "all", this means "none".
+    /// `skills_disabled`. Since #5855, `mcp_servers = []` already means "no
+    /// servers", so this flag is the belt-and-braces guarantee: it forces zero
+    /// MCP tools even when `mcp_servers = ["*"]` or a non-empty allowlist is set.
     ///
     /// **Scope**: this flag hides MCP tools and the MCP server summary from
     /// *this agent's* LLM prompt only. MCP servers defined in `KernelConfig`
