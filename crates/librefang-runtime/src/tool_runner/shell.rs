@@ -17,6 +17,14 @@
 use super::error::{ToolError, ToolResult};
 use std::path::Path;
 
+fn resolve_timeout(
+    input: &serde_json::Value,
+    exec_policy: Option<&librefang_types::config::ExecPolicy>,
+) -> u64 {
+    let policy_timeout = exec_policy.map(|p| p.timeout_secs).unwrap_or(30);
+    input["timeout_seconds"].as_u64().unwrap_or(policy_timeout)
+}
+
 pub(super) async fn tool_shell_exec(
     input: &serde_json::Value,
     allowed_env: &[String],
@@ -30,9 +38,7 @@ pub(super) async fn tool_shell_exec(
         .as_str()
         .ok_or(ToolError::MissingParameter("command"))?;
 
-    let policy_timeout = exec_policy.map(|p| p.timeout_secs).unwrap_or(30);
-    let input_timeout = input["timeout_seconds"].as_u64().unwrap_or(policy_timeout);
-    let timeout_secs = input_timeout.min(policy_timeout);
+    let timeout_secs = resolve_timeout(input, exec_policy);
 
     let max_output = exec_policy.map(|p| p.max_output_bytes).unwrap_or(100_000);
 
@@ -405,5 +411,39 @@ mod tests {
     #[test]
     fn argv_multiple_spaces_no_empty_args() {
         assert_eq!(windows_argv_split("cmd   a").unwrap(), vec!["cmd", "a"],);
+    }
+
+    #[test]
+    fn timeout_default_uses_policy_value() {
+        let policy = librefang_types::config::ExecPolicy::default();
+        assert_eq!(resolve_timeout(&json!({}), Some(&policy)), 30);
+    }
+
+    #[test]
+    fn timeout_override_up_is_not_clamped() {
+        let policy = librefang_types::config::ExecPolicy::default();
+        assert_eq!(
+            resolve_timeout(&json!({"timeout_seconds": 300}), Some(&policy)),
+            300,
+        );
+    }
+
+    #[test]
+    fn timeout_override_down_is_honored() {
+        let policy = librefang_types::config::ExecPolicy::default();
+        assert_eq!(
+            resolve_timeout(&json!({"timeout_seconds": 5}), Some(&policy)),
+            5,
+        );
+    }
+
+    #[test]
+    fn timeout_no_policy_uses_hardcoded_default() {
+        assert_eq!(resolve_timeout(&json!({}), None), 30);
+    }
+
+    #[test]
+    fn timeout_no_policy_with_input_override() {
+        assert_eq!(resolve_timeout(&json!({"timeout_seconds": 120}), None), 120,);
     }
 }
