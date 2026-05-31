@@ -108,6 +108,10 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
         // Hands (browser automation engine)
         .route("/hands", axum::routing::get(list_hands))
         .route("/hands/install", axum::routing::post(install_hand))
+        .route(
+            "/hands/marketplace/install",
+            axum::routing::post(install_hand_from_marketplace),
+        )
         .route("/hands/{hand_id}", axum::routing::delete(uninstall_hand))
         .route("/hands/active", axum::routing::get(list_active_hands))
         .route("/hands/{hand_id}", axum::routing::get(get_hand))
@@ -3136,6 +3140,78 @@ pub async fn install_hand(
             let body = serde_json::to_value(&def).unwrap_or(serde_json::Value::Null);
             (StatusCode::OK, Json(body))
         }
+        Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
+    }
+}
+
+/// POST /api/hands/marketplace/install — Install a hand from the remote
+/// HandsHub marketplace.
+///
+/// Runs the same security pipeline as the local installer plus a network
+/// download: SHA-256 verification of the bundle against the registry digest,
+/// then the shared `librefang_skills::supply_chain::scan` audit (reused from
+/// the skills marketplace — see `HandRegistry::install_from_remote`). The
+/// verified content is funneled into the existing persisted-install path, so
+/// the on-disk layout is identical to a local install.
+///
+/// Status contract: 200 with the installed `HandDefinition`; 409 when the hand
+/// is already installed; 422 when the supply-chain audit blocks the bundle;
+/// 400 for everything else (bad id, download / checksum failure, parse error).
+#[utoipa::path(
+    post,
+    path = "/api/hands/marketplace/install",
+    tag = "hands",
+    request_body = crate::types::HandsHubInstallRequest,
+    responses(
+        (status = 200, description = "Install a hand from the HandsHub marketplace", body = crate::types::JsonObject),
+        (status = 409, description = "Hand already installed"),
+        (status = 422, description = "Bundle blocked by the supply-chain audit")
+    )
+)]
+pub async fn install_hand_from_marketplace(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<crate::types::HandsHubInstallRequest>,
+) -> impl IntoResponse {
+    if req.hand_id.trim().is_empty() {
+        return ApiErrorResponse::bad_request("Missing hand_id field").into_json_tuple();
+    }
+
+    let hub = match req.registry_url.as_deref() {
+        Some(url) => librefang_hands::HandsHubClient::with_url(url),
+        None => librefang_hands::HandsHubClient::new(),
+    };
+
+    let home_dir = state.kernel.home_dir().to_path_buf();
+    match state
+        .kernel
+        .hands()
+        .install_from_remote(&home_dir, &req.hand_id, &hub)
+        .await
+    {
+        Ok(result) => {
+            state.kernel.invalidate_hand_route_cache();
+            // Return the freshly installed canonical `HandDefinition` (plus the
+            // resolved version and checksum-verification flag) so dashboard /
+            // SDK callers can `setQueryData` without a follow-up GET — same
+            // contract as the local `install_hand` handler.
+            let def = state.kernel.hands().get_definition(&result.hand_id);
+            let body = serde_json::json!({
+                "hand_id": result.hand_id,
+                "version": result.version,
+                "checksum_verified": result.checksum_verified,
+                "definition": def,
+            });
+            (StatusCode::OK, Json(body))
+        }
+        Err(e @ librefang_hands::HandError::AlreadyActive(_))
+        | Err(e @ librefang_hands::HandError::AlreadyRegistered(_)) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+        Err(e @ librefang_hands::HandError::SecurityBlocked(_)) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
         Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
     }
 }

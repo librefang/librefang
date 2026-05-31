@@ -7,6 +7,7 @@ description = "Hands system for LibreFang — curated autonomous capability pack
 
 [dependencies]
 librefang-types = { path = "../librefang-types" }
+librefang-skills = { path = "../librefang-skills" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
@@ -15,6 +16,10 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 dashmap = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

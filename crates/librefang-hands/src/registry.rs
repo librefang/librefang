@@ -764,6 +764,113 @@ impl HandRegistry {
         Ok(stored)
     }
 
+    /// Download a hand from the remote marketplace, run the supply-chain audit
+    /// on the bundle, then install it under `<home_dir>/workspaces/<id>/`.
+    ///
+    /// Security pipeline (mirrors the skills ClawHub installer):
+    /// 1. Resolve the index entry for `hand_id` (to obtain `expected_sha256`).
+    /// 2. Download the bundle and verify its SHA-256 before anything touches
+    ///    disk (`HandsHubClient::download_bundle`).
+    /// 3. Stage the bundle files in a temp dir and run
+    ///    [`librefang_skills::supply_chain::scan`] — the *same* scanner the
+    ///    skills marketplace uses — to refuse `.pth` import-hijacks, symlink
+    ///    escapes, and critical prompt-injection payloads.
+    /// 4. Funnel the verified, scanned content into the existing
+    ///    [`install_from_content_persisted`](Self::install_from_content_persisted).
+    ///
+    /// The temp staging dir is always cleaned up, whether the scan passes or
+    /// fails.
+    pub async fn install_from_remote(
+        &self,
+        home_dir: &std::path::Path,
+        hand_id: &str,
+        hub: &crate::HandsHubClient,
+    ) -> HandResult<crate::HandsHubInstallResult> {
+        crate::hands_hub::validate_hand_id(hand_id)?;
+
+        // Step 1 — resolve the index entry to obtain the expected digest and
+        // the published version. Best-effort: if the index is unreachable we
+        // still attempt the download, but without a checksum to verify.
+        let entry = self.try_get_entry(hub, hand_id).await;
+        let expected_sha256 = entry.as_ref().and_then(|e| e.expected_sha256.clone());
+        let version = entry
+            .as_ref()
+            .map(|e| e.version.clone())
+            .unwrap_or_default();
+
+        // Step 2 — download + SHA-256 verification (fails fast on mismatch).
+        let (bundle, checksum_verified) = hub
+            .download_bundle(hand_id, expected_sha256.as_deref())
+            .await?;
+
+        // Step 3 — stage the bundle and run the supply-chain audit.
+        let staging = home_dir
+            .join(".staging")
+            .join(format!("hands-hub-{hand_id}-{}", Uuid::new_v4()));
+        let scan_result = (|| -> HandResult<()> {
+            std::fs::create_dir_all(&staging)?;
+            std::fs::write(staging.join("HAND.toml"), &bundle.toml)?;
+            if !bundle.skill.is_empty() {
+                std::fs::write(staging.join("SKILL.md"), &bundle.skill)?;
+            }
+            if let Err(violations) = librefang_skills::supply_chain::scan(&staging) {
+                let detail = violations
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return Err(HandError::SecurityBlocked(format!(
+                    "Hand '{hand_id}' failed supply-chain audit: {detail}"
+                )));
+            }
+            Ok(())
+        })();
+        // Always remove the staging dir — the persisted install writes its own
+        // copy under `workspaces/<id>/`.
+        let _ = std::fs::remove_dir_all(&staging);
+        scan_result?;
+
+        // Step 4 — funnel into the existing persisted-install path.
+        let def = self.install_from_content_persisted(home_dir, &bundle.toml, &bundle.skill)?;
+
+        let version = if version.is_empty() {
+            def.version.clone()
+        } else {
+            version
+        };
+
+        info!(
+            hand = %hand_id,
+            version = %version,
+            checksum_verified,
+            "Installed hand from remote marketplace"
+        );
+
+        Ok(crate::HandsHubInstallResult {
+            hand_id: def.id,
+            version,
+            checksum_verified,
+        })
+    }
+
+    /// Best-effort index lookup used by `install_from_remote`. An index fetch
+    /// failure is logged and treated as "entry unknown" so a transient
+    /// registry outage degrades to an unverified install rather than a hard
+    /// failure — the bundle download itself still has to succeed.
+    async fn try_get_entry(
+        &self,
+        hub: &crate::HandsHubClient,
+        hand_id: &str,
+    ) -> Option<crate::HandsHubEntry> {
+        match hub.get_entry(hand_id).await {
+            Ok(entry) => entry,
+            Err(e) => {
+                warn!(hand = %hand_id, error = %e, "Could not fetch HandsHub index entry; proceeding without checksum");
+                None
+            }
+        }
+    }
+
     /// Uninstall a user-installed hand — removes it from memory and deletes
     /// its `workspaces/{id}/` directory on disk.
     ///

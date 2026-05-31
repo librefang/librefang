@@ -615,3 +615,190 @@ async fn mutating_hands_routes_require_auth_when_api_key_set() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// POST /api/hands/marketplace/install — install a hand from a remote registry
+//
+// We never touch the network: a local axum listener stands in for the
+// HandsHub registry, serving the two endpoints `HandsHubClient` calls —
+// `GET /api/v1/index` and `GET /api/v1/hands/{id}/bundle`. The index entry
+// advertises the real SHA-256 of the served bundle bytes so the installer's
+// checksum gate passes; the second test corrupts that digest to assert the
+// gate actually fails the install.
+// ---------------------------------------------------------------------------
+
+const MARKETPLACE_HAND_TOML: &str = r#"
+id = "remote-uptime"
+name = "Remote Uptime"
+description = "Installed from the marketplace."
+category = "data"
+
+[routing]
+aliases = []
+
+[agent]
+name = "remote-uptime-agent"
+description = "Test hand agent"
+system_prompt = "Test prompt"
+"#;
+
+/// Build the exact bundle bytes the mock registry serves for `remote-uptime`,
+/// together with their SHA-256 hex digest. The digest is what the index
+/// entry advertises, so the two must be derived from the same bytes.
+fn marketplace_bundle_bytes_and_sha() -> (Vec<u8>, String) {
+    use sha2::{Digest, Sha256};
+    let bundle = serde_json::json!({
+        "toml": MARKETPLACE_HAND_TOML,
+        "skill": "# Remote skill\n",
+    });
+    let bytes = serde_json::to_vec(&bundle).expect("serialize bundle");
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let sha = hex::encode(hasher.finalize());
+    (bytes, sha)
+}
+
+/// Spawn a mock HandsHub registry. `advertised_sha` is the digest placed in
+/// the index entry — pass the real digest for the happy path, a wrong one to
+/// exercise the checksum-mismatch rejection. Returns the base URL
+/// (`http://127.0.0.1:PORT/api/v1`) and the server task handle.
+async fn spawn_mock_registry(advertised_sha: String) -> (String, tokio::task::JoinHandle<()>) {
+    use axum::extract::State;
+    use axum::response::IntoResponse;
+    use axum::routing::get;
+    use axum::Router;
+
+    let (bundle_bytes, _) = marketplace_bundle_bytes_and_sha();
+    let state = Arc::new((bundle_bytes, advertised_sha));
+
+    async fn index_handler(State(s): State<Arc<(Vec<u8>, String)>>) -> impl IntoResponse {
+        let index = serde_json::json!({
+            "hands": [
+                {
+                    "id": "remote-uptime",
+                    "name": "Remote Uptime",
+                    "description": "Installed from the marketplace.",
+                    "category": "data",
+                    "version": "1.0.0",
+                    "expected_sha256": s.1,
+                }
+            ]
+        });
+        ([("content-type", "application/json")], index.to_string())
+    }
+
+    async fn bundle_handler(State(s): State<Arc<(Vec<u8>, String)>>) -> impl IntoResponse {
+        ([("content-type", "application/json")], s.0.clone())
+    }
+
+    let app: Router = Router::new()
+        .route("/api/v1/index", get(index_handler))
+        .route("/api/v1/hands/{id}/bundle", get(bundle_handler))
+        .with_state(state);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}/api/v1"), handle)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn marketplace_install_succeeds_and_registers_hand() {
+    let h = boot_router_open().await;
+
+    let (_, real_sha) = marketplace_bundle_bytes_and_sha();
+    let (registry_url, server) = spawn_mock_registry(real_sha).await;
+
+    let (status, body) = json_request(
+        &h.app,
+        Method::POST,
+        "/api/hands/marketplace/install",
+        Some(serde_json::json!({
+            "hand_id": "remote-uptime",
+            "registry_url": registry_url,
+        })),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "marketplace install must succeed: {body}"
+    );
+    assert_eq!(body["hand_id"].as_str(), Some("remote-uptime"), "{body}");
+    assert_eq!(body["version"].as_str(), Some("1.0.0"), "{body}");
+    assert_eq!(
+        body["checksum_verified"].as_bool(),
+        Some(true),
+        "index advertised a matching digest, so the checksum must be verified: {body}"
+    );
+    assert_eq!(
+        body["definition"]["id"].as_str(),
+        Some("remote-uptime"),
+        "response must carry the installed HandDefinition: {body}"
+    );
+
+    // Side-effect: the hand is now in the registry and surfaces on GET /api/hands.
+    let (list_status, list) = get_json(&h.app, "/api/hands").await;
+    assert_eq!(list_status, StatusCode::OK);
+    let found = list["items"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .any(|d| d["id"].as_str() == Some("remote-uptime"))
+        })
+        .unwrap_or(false);
+    assert!(
+        found,
+        "installed hand must appear in GET /api/hands: {list}"
+    );
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn marketplace_install_rejects_checksum_mismatch() {
+    let h = boot_router_open().await;
+
+    // Advertise a digest that does not match the served bundle — the download
+    // step must fail the SHA-256 check before anything is written to disk.
+    let wrong_sha = "0".repeat(64);
+    let (registry_url, server) = spawn_mock_registry(wrong_sha).await;
+
+    let (status, body) = json_request(
+        &h.app,
+        Method::POST,
+        "/api/hands/marketplace/install",
+        Some(serde_json::json!({
+            "hand_id": "remote-uptime",
+            "registry_url": registry_url,
+        })),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "checksum mismatch must be rejected with 400: {body}"
+    );
+
+    // Side-effect: nothing was installed.
+    let (_, list) = get_json(&h.app, "/api/hands").await;
+    let found = list["items"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .any(|d| d["id"].as_str() == Some("remote-uptime"))
+        })
+        .unwrap_or(false);
+    assert!(
+        !found,
+        "a rejected install must not register the hand: {list}"
+    );
+
+    server.abort();
+}

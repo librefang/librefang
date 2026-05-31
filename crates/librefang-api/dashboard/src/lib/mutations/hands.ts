@@ -5,6 +5,7 @@ import {
   pauseHand,
   resumeHand,
   uninstallHand,
+  installHandFromMarketplace,
   setHandSecret,
   updateHandSettings,
   sendHandMessage,
@@ -80,6 +81,23 @@ export function useUninstallHand() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => uninstallHand(id),
+    onSuccess: () => invalidateHandAndAgentCaches(qc),
+  });
+}
+
+// Install a hand from the remote HandsHub marketplace. A new definition
+// appears in the hands list (and the agent space, since hands surface as
+// agents), so reuse the same broad invalidation as the lifecycle mutations.
+export function useInstallHandFromMarketplace() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      handId,
+      registryUrl,
+    }: {
+      handId: string;
+      registryUrl?: string;
+    }) => installHandFromMarketplace(handId, registryUrl),
     onSuccess: () => invalidateHandAndAgentCaches(qc),
   });
 }
