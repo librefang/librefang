@@ -18,12 +18,12 @@ fn validate_key(key: &str) -> Result<(), String> {
             key.len()
         ));
     }
-    if !key
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
-    {
+    if !key.chars().all(|c| {
+        c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' || c == ':' || c == '/'
+    }) {
         return Err(
-            "Memory key contains invalid characters (allowed: alphanumeric, _, -, .)".to_string(),
+            "Memory key contains invalid characters (allowed: alphanumeric, _, -, ., :, /)"
+                .to_string(),
         );
     }
     Ok(())
