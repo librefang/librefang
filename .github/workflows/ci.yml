@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  merge_group:
 
 permissions:
   contents: read
@@ -65,6 +66,21 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
+
+          # Merge queue: the queue branch is the last gate before main. A queued
+          # entry can batch several PRs, so a HEAD~1 diff is unreliable — instead
+          # force every route flag on and run the full suite on all platforms.
+          # This sidesteps the selective diff entirely.
+          if [ "$EVENT_NAME" = "merge_group" ]; then
+            {
+              echo "rust=true"; echo "docs=true"; echo "ci=true"; echo "install=true"
+              echo "full_run=true"; echo "full_test=true"
+              echo "skill_sdk=true"; echo "sidecar_rust=true"
+              echo "crates="
+            } >> "$GITHUB_OUTPUT"
+            echo "merge_group: forcing full run on all platforms"
+            exit 0
+          fi
 
           # Range: PR → base..head, push → just the pushed commit.
           if [ "$EVENT_NAME" = "pull_request" ]; then
@@ -567,7 +583,7 @@ jobs:
     needs: changes
     # PR-only: push to main already runs the full test matrix; the smoke
     # adds spawn-a-real-daemon coverage that the in-process tests miss.
-    if: github.event_name == 'pull_request' && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true')
+    if: (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -800,7 +816,7 @@ jobs:
   test-windows:
     name: Test / Windows (shard ${{ matrix.shard }}/2)
     needs: changes
-    if: github.event_name == 'push' && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true')
+    if: (github.event_name == 'push' || github.event_name == 'merge_group') && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true')
     runs-on: windows-latest
     timeout-minutes: 60
     strategy:
@@ -835,7 +851,7 @@ jobs:
   test-macos:
     name: Test / macOS
     needs: changes
-    if: github.event_name == 'push' && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true')
+    if: (github.event_name == 'push' || github.event_name == 'merge_group') && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true')
     runs-on: macos-latest
     timeout-minutes: 60
     steps:
