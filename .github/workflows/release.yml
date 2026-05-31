@@ -512,14 +512,21 @@ jobs:
           key: cli-${{ matrix.target }}-${{ env.RELEASE_TAG }}
       - name: Build CLI
         run: cargo build --release --target ${{ matrix.target }} --bin librefang
+      - name: Build Telegram sidecar
+        # Separate cargo workspace → separate target/ under the manifest dir.
+        run: cargo build --release --target ${{ matrix.target }} --manifest-path sdk/rust/librefang-sidecar-telegram/Cargo.toml
       - name: Ad-hoc codesign
         run: |
           xattr -cr target/${{ matrix.target }}/release/librefang || true
           codesign --force --sign - target/${{ matrix.target }}/release/librefang
+          SIDECAR=sdk/rust/librefang-sidecar-telegram/target/${{ matrix.target }}/release/librefang-sidecar-telegram
+          xattr -cr "$SIDECAR" || true
+          codesign --force --sign - "$SIDECAR"
       - name: Package
         run: |
+          cp sdk/rust/librefang-sidecar-telegram/target/${{ matrix.target }}/release/librefang-sidecar-telegram target/${{ matrix.target }}/release/librefang-sidecar-telegram
           cd target/${{ matrix.target }}/release
-          tar czf ../../../librefang-${{ matrix.target }}.tar.gz librefang
+          tar czf ../../../librefang-${{ matrix.target }}.tar.gz librefang librefang-sidecar-telegram
           cd ../../..
           shasum -a 256 librefang-${{ matrix.target }}.tar.gz > librefang-${{ matrix.target }}.tar.gz.sha256
       - name: Upload to GitHub Release
@@ -583,10 +590,19 @@ jobs:
           else
             cargo build --release --target ${{ matrix.target }} --bin librefang
           fi
+      - name: Build Telegram sidecar
+        # Separate cargo workspace → separate target/ under the manifest dir.
+        run: |
+          if [ "${{ matrix.use_cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }} --manifest-path sdk/rust/librefang-sidecar-telegram/Cargo.toml
+          else
+            cargo build --release --target ${{ matrix.target }} --manifest-path sdk/rust/librefang-sidecar-telegram/Cargo.toml
+          fi
       - name: Package
         run: |
+          cp sdk/rust/librefang-sidecar-telegram/target/${{ matrix.target }}/release/librefang-sidecar-telegram target/${{ matrix.target }}/release/librefang-sidecar-telegram
           cd target/${{ matrix.target }}/release
-          tar czf ../../../librefang-${{ matrix.target }}.tar.gz librefang
+          tar czf ../../../librefang-${{ matrix.target }}.tar.gz librefang librefang-sidecar-telegram
           cd ../../..
           sha256sum librefang-${{ matrix.target }}.tar.gz > librefang-${{ matrix.target }}.tar.gz.sha256
       - name: Upload to GitHub Release
@@ -743,6 +759,9 @@ jobs:
           key: cli-${{ matrix.target }}-${{ env.RELEASE_TAG }}
       - name: Build static CLI
         run: cross build --release --target ${{ matrix.target }} --bin librefang
+      - name: Build Telegram sidecar
+        # Separate cargo workspace → separate target/ under the manifest dir.
+        run: cross build --release --target ${{ matrix.target }} --manifest-path sdk/rust/librefang-sidecar-telegram/Cargo.toml
       - name: Verify static linking
         run: |
           FILE_OUT=$(file target/${{ matrix.target }}/release/librefang)
@@ -751,10 +770,17 @@ jobs:
             echo "::error::Binary is not statically linked!"
             exit 1
           fi
+          SIDECAR_OUT=$(file sdk/rust/librefang-sidecar-telegram/target/${{ matrix.target }}/release/librefang-sidecar-telegram)
+          echo "$SIDECAR_OUT"
+          if ! echo "$SIDECAR_OUT" | grep -qE "statically linked|static-pie linked"; then
+            echo "::error::Sidecar binary is not statically linked!"
+            exit 1
+          fi
       - name: Package
         run: |
+          cp sdk/rust/librefang-sidecar-telegram/target/${{ matrix.target }}/release/librefang-sidecar-telegram target/${{ matrix.target }}/release/librefang-sidecar-telegram
           cd target/${{ matrix.target }}/release
-          tar czf ../../../librefang-${{ matrix.target }}.tar.gz librefang
+          tar czf ../../../librefang-${{ matrix.target }}.tar.gz librefang librefang-sidecar-telegram
           cd ../../..
           sha256sum librefang-${{ matrix.target }}.tar.gz > librefang-${{ matrix.target }}.tar.gz.sha256
       - name: Upload to GitHub Release
@@ -803,10 +829,13 @@ jobs:
           key: cli-${{ matrix.target }}-${{ env.RELEASE_TAG }}
       - name: Build CLI
         run: cargo build --release --target ${{ matrix.target }} --bin librefang
+      - name: Build Telegram sidecar
+        # Separate cargo workspace → separate target/ under the manifest dir.
+        run: cargo build --release --target ${{ matrix.target }} --manifest-path sdk/rust/librefang-sidecar-telegram/Cargo.toml
       - name: Package
         shell: pwsh
         run: |
-          Compress-Archive -Path "target/${{ matrix.target }}/release/librefang.exe" -DestinationPath "librefang-${{ matrix.target }}.zip"
+          Compress-Archive -Path "target/${{ matrix.target }}/release/librefang.exe", "sdk/rust/librefang-sidecar-telegram/target/${{ matrix.target }}/release/librefang-sidecar-telegram.exe" -DestinationPath "librefang-${{ matrix.target }}.zip"
           $hash = (Get-FileHash "librefang-${{ matrix.target }}.zip" -Algorithm SHA256).Hash.ToLower()
           "$hash  librefang-${{ matrix.target }}.zip" | Out-File -Encoding ASCII "librefang-${{ matrix.target }}.zip.sha256"
       - name: Upload to GitHub Release

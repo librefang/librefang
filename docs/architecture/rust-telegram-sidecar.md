@@ -5,6 +5,9 @@ It is a feature-parity port of `sdk/python/librefang/sidecar/adapters/telegram.p
 
 Shipped with #5831.
 
+Since #5936 the binary ships inside the platform release tarballs alongside the main `librefang` binary, so `librefang update` drops it into `~/.librefang/bin/librefang-sidecar-telegram` (`.exe` on Windows) with no manual `cargo build` and no runtime network download.
+The daemon auto-resolves it (see [Auto-resolution](#auto-resolution) below), so the common configuration leaves `command` implicit.
+
 ## When to pick this over the Python adapter
 
 Both adapters speak the same protocol and the supervisor cannot tell them apart.
@@ -21,7 +24,7 @@ Otherwise the Python adapter is fine; both ship the same capability set and the 
 ```toml
 [[sidecar_channels]]
 name = "telegram"
-command = "/abs/path/to/target/release/librefang-sidecar-telegram"
+command = "librefang-sidecar-telegram"           # bare name ⇒ daemon auto-resolves the bundled binary
 args = []
 restart = true
 
@@ -32,6 +35,13 @@ TELEGRAM_BOT_TOKEN = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
 ALLOWED_USERS = "123456789, @your_username"      # optional, empty ⇒ open
 TELEGRAM_CLEAR_DONE_REACTION = "true"            # optional, default false
 ```
+
+### Auto-resolution
+
+When `command` is empty or the bare stem `librefang-sidecar-telegram` (no path component), the daemon resolves it to the bundled binary, checking in order: the daemon's own executable directory, then `~/.librefang/bin/`, then PATH (the historical fallback).
+An absolute or relative path, or any other program (`python3 -m …`, `uv`, …), is treated as explicit operator intent and passed through unchanged.
+Resolution lives in `resolve_sidecar_command` in `crates/librefang-channels/src/sidecar.rs`.
+A developer build that has not been installed via `librefang update` still points `command` at an explicit `target/release/librefang-sidecar-telegram` path.
 
 The dashboard's configure form is populated from the schema the binary serves via `--describe`, so operators set the bot token and ALLOWED_USERS through the UI without hand-editing `config.toml`.
 `TELEGRAM_BOT_TOKEN` is marked `secret` (the dashboard masks it on display); `ALLOWED_USERS` is marked `advanced`; `TELEGRAM_CLEAR_DONE_REACTION` is marked `advanced` + `bool`.
