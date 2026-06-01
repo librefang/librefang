@@ -4772,6 +4772,7 @@ dependencies = [
  "librefang-runtime",
  "librefang-types",
  "regex-lite",
+ "serde",
  "serde_json",
  "tempfile",
  "toml 1.1.2+spec-1.1.0",
