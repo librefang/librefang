@@ -41,6 +41,14 @@ function sourceLabel(source: PendingCaptureSource): {
         label: "Repeated tool pattern",
         detail: `${source.tools} ×${source.repeat_count}`,
       };
+    case "auto_evolve_review":
+      return {
+        label: "Auto-evolve review",
+        detail:
+          source.triggering_turn != null
+            ? `${source.action} · turn ${source.triggering_turn}`
+            : source.action,
+      };
   }
 }
 

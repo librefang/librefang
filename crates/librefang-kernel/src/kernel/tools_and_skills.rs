@@ -763,12 +763,18 @@ impl LibreFangKernel {
         let action = parsed["action"].as_str().unwrap_or("skip");
         let review_author = format!("reviewer:agent:{triggering_agent_id}");
 
-        // Resolve auto_evolve_mode from the agent's manifest. Controlled
-        // (default) routes all mutations through the pending queue for
-        // human approval; Free applies them directly.
-        let evolution_mode = kernel_weak
+        // Upgrade the kernel weak handle once and share it across every
+        // mutation branch below — the handle is needed for the manifest
+        // lookup, the registry read, the pending save, and the reload.
+        // A dropped kernel means the daemon is shutting down, so every
+        // branch treats it as a Permanent failure with uniform handling.
+        let kernel_arc = kernel_weak.as_ref().and_then(|w| w.upgrade());
+
+        // Resolve auto_evolve_mode from the agent's manifest. Free (the
+        // default) applies create mutations directly; Controlled routes
+        // create mutations through the pending approval queue.
+        let evolution_mode = kernel_arc
             .as_ref()
-            .and_then(|w| w.upgrade())
             .and_then(|kernel| {
                 kernel
                     .agents
@@ -778,78 +784,10 @@ impl LibreFangKernel {
             })
             .unwrap_or_default();
 
-        // Helper: lift an `Ok(result)` into a hot-reload + return.
+        // Helper: hot-reload the skill registry after a direct mutation.
         let do_reload = || {
-            if let Some(kernel) = kernel_weak.as_ref().and_then(|w| w.upgrade()) {
+            if let Some(kernel) = kernel_arc.as_ref() {
                 kernel.reload_skills();
-            }
-        };
-
-        // Helper: save a mutation as a pending candidate for human
-        // approval (Controlled mode). Builds a CandidateSkill from the
-        // reviewer's JSON fields and routes through the workshop's
-        // save_candidate pipeline (security scan, dedup, cap enforcement).
-        let save_as_pending = |action_label: &str,
-                               name: &str,
-                               description: &str,
-                               prompt_context: &str|
-         -> Result<(), ReviewError> {
-            let kernel = kernel_weak
-                .as_ref()
-                .and_then(|w| w.upgrade())
-                .ok_or_else(|| {
-                    ReviewError::Permanent("Kernel dropped before save_as_pending".to_string())
-                })?;
-            let candidate = crate::skill_workshop::candidate::CandidateSkill {
-                id: uuid::Uuid::new_v4().to_string(),
-                agent_id: triggering_agent_id.to_string(),
-                session_id: None,
-                captured_at: chrono::Utc::now(),
-                source: crate::skill_workshop::candidate::CaptureSource::ExplicitInstruction {
-                    trigger: format!("auto_evolve:{action_label}"),
-                },
-                name: name.to_string(),
-                description: description.to_string(),
-                prompt_context: prompt_context.to_string(),
-                provenance: crate::skill_workshop::candidate::Provenance {
-                    user_message_excerpt: safe_response_summary
-                        .chars()
-                        .take(crate::skill_workshop::candidate::PROVENANCE_EXCERPT_MAX_CHARS)
-                        .collect(),
-                    assistant_response_excerpt: Some(
-                        trace_summary
-                            .chars()
-                            .take(crate::skill_workshop::candidate::PROVENANCE_EXCERPT_MAX_CHARS)
-                            .collect(),
-                    ),
-                    turn_index: 0,
-                },
-            };
-            let skills_root = kernel.home_dir().join("skills");
-            match crate::skill_workshop::storage::save_candidate(&skills_root, &candidate, 50, None)
-            {
-                Ok(true) => {
-                    tracing::info!(
-                        skill = name,
-                        "Background review (controlled): pending candidate written for '{action_label}'"
-                    );
-                    Ok(())
-                }
-                Ok(false) => {
-                    tracing::debug!(
-                        skill = name,
-                        "Background review (controlled): candidate deduped or cap=0"
-                    );
-                    Ok(())
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        skill = name,
-                        error = %e,
-                        "Background review (controlled): failed to save pending candidate"
-                    );
-                    Err(ReviewError::Permanent(format!("save_as_pending: {e}")))
-                }
             }
         };
 
@@ -904,24 +842,26 @@ impl LibreFangKernel {
                     ReviewError::Permanent("Missing 'changelog' in update response".to_string())
                 })?;
 
-                // Controlled mode does not support updates yet — the
-                // pending queue only has CREATE semantics. Log and fall
-                // through to the direct path.
+                // Controlled mode does not yet support `update`. The pending
+                // queue is create-only — `approve_candidate` calls
+                // `evolution::create_skill`, so an approved "update" candidate
+                // would wrongly create a name-colliding skill rather than
+                // rewriting the existing one. Until the queue grows update
+                // semantics, skip rather than mis-apply.
                 if evolution_mode == librefang_types::agent::EvolutionMode::Controlled {
                     tracing::warn!(
                         skill = name,
-                        "Background skill review: controlled mode does not support \
-                         skill updates yet; applying directly"
+                        "Background skill review: controlled mode does not yet support \
+                         skill update; set auto_evolve_mode = \"free\" or apply the \
+                         change manually — skipping"
                     );
+                    return Ok(());
                 }
 
                 // Free mode: apply directly.
-                let kernel = kernel_weak
-                    .as_ref()
-                    .and_then(|w| w.upgrade())
-                    .ok_or_else(|| {
-                        ReviewError::Permanent("Kernel dropped before update".to_string())
-                    })?;
+                let kernel = kernel_arc.as_ref().ok_or_else(|| {
+                    ReviewError::Permanent("Kernel dropped before update".to_string())
+                })?;
                 let skill = {
                     let reg = kernel
                         .skills
@@ -967,14 +907,11 @@ impl LibreFangKernel {
             // where the reviewer identifies a specific sentence that's
             // wrong or outdated.
             //
-            // Design intent — patch stays on the DIRECT path intentionally:
-            // same rationale as the `update` arm above. A patch targets an
-            // already-approved skill; requiring human re-approval for every
-            // small textual fix would stall the incremental improvement loop
-            // without a meaningful security gain. The `evolution::patch_skill`
-            // call still runs the SkillVerifier scan (SecurityBlocked
-            // propagation is present in the match arm below), so malicious
-            // content cannot bypass the injection filter via the patch path.
+            // In `Free` mode this applies directly (the `evolution::patch_skill`
+            // call still runs the SkillVerifier scan, so malicious content
+            // cannot bypass the injection filter). In `Controlled` mode it is
+            // skipped — like `update`, the pending queue only has CREATE
+            // semantics, so there is no safe way to defer a patch for approval.
             "patch" => {
                 let name = name.ok_or_else(|| {
                     ReviewError::Permanent("Missing 'name' in patch response".to_string())
@@ -989,24 +926,24 @@ impl LibreFangKernel {
                     ReviewError::Permanent("Missing 'changelog' in patch response".to_string())
                 })?;
 
-                // Controlled mode does not support patches yet — the
-                // pending queue only has CREATE semantics. Log and fall
-                // through to the direct path.
+                // Controlled mode does not yet support `patch`. Same reason as
+                // `update`: the pending queue is create-only, so an approved
+                // patch candidate would create a name-colliding skill instead
+                // of editing the target. Skip rather than mis-apply.
                 if evolution_mode == librefang_types::agent::EvolutionMode::Controlled {
                     tracing::warn!(
                         skill = name,
-                        "Background skill review: controlled mode does not support \
-                         skill patches yet; applying directly"
+                        "Background skill review: controlled mode does not yet support \
+                         skill patch; set auto_evolve_mode = \"free\" or apply the \
+                         change manually — skipping"
                     );
+                    return Ok(());
                 }
 
                 // Free mode: apply directly.
-                let kernel = kernel_weak
-                    .as_ref()
-                    .and_then(|w| w.upgrade())
-                    .ok_or_else(|| {
-                        ReviewError::Permanent("Kernel dropped before patch".to_string())
-                    })?;
+                let kernel = kernel_arc.as_ref().ok_or_else(|| {
+                    ReviewError::Permanent("Kernel dropped before patch".to_string())
+                })?;
                 let skill = {
                     let reg = kernel
                         .skills
@@ -1065,19 +1002,14 @@ impl LibreFangKernel {
                     )
                 })?;
 
-                // Route through pending/ instead of creating the skill directly.
-                // This puts the LLM-proposed skill in the same approval queue as
-                // workshop-captured candidates — a human reviews it before it is
-                // loaded into the active registry.
-                let kernel = kernel_weak
-                    .as_ref()
-                    .and_then(|w| w.upgrade())
-                    .ok_or_else(|| {
-                        ReviewError::Permanent("Kernel dropped before pending save".to_string())
-                    })?;
-
                 // Read the agent's workshop config for cap / TTL settings.
-                // Fall back to the struct defaults when the agent entry is gone.
+                // These pending candidates land in the same pending/<agent>/
+                // dir the workshop manages, so the cap/TTL must match the
+                // workshop's. Fall back to struct defaults when the agent
+                // entry is gone.
+                let kernel = kernel_arc.as_ref().ok_or_else(|| {
+                    ReviewError::Permanent("Kernel dropped before pending save".to_string())
+                })?;
                 let workshop_cfg = kernel
                     .agents
                     .registry
@@ -1085,7 +1017,10 @@ impl LibreFangKernel {
                     .map(|e| e.manifest.skill_workshop)
                     .unwrap_or_default();
 
-                // Controlled mode: route creates through pending queue.
+                // Controlled mode: route creates through the pending queue.
+                // This puts the LLM-proposed skill in the same approval queue
+                // as workshop-captured candidates — a human reviews it before
+                // it is loaded into the active registry.
                 if evolution_mode == librefang_types::agent::EvolutionMode::Controlled {
                     let candidate = Self::build_reviewer_candidate(
                         triggering_agent_id,
@@ -1376,12 +1311,19 @@ impl LibreFangKernel {
     }
 
     /// Build the [`CandidateSkill`] that the background reviewer submits to the
-    /// pending queue when it decides to `create` a new skill.
+    /// pending queue when it decides to `create` a new skill in controlled mode.
     ///
     /// Extracted into its own method so the candidate-construction logic can be
     /// exercised in unit tests without spinning up a live kernel or LLM driver.
     /// The caller (`background_skill_review`) passes the already-sanitised
     /// summaries so this helper never touches raw agent output directly.
+    ///
+    /// The capture source is [`CaptureSource::AutoEvolveReview`] — not
+    /// `ExplicitInstruction` — so the dashboard labels it as an autonomous
+    /// reviewer proposal rather than a user-requested capture. The first
+    /// `REVIEWER_EXCERPT_MAX_CHARS` of `prompt_context` are lifted into
+    /// `assistant_response_excerpt` so an operator can see *why* the candidate
+    /// was proposed without opening the full body.
     pub(crate) fn build_reviewer_candidate(
         agent_id: AgentId,
         name: &str,
@@ -1389,13 +1331,18 @@ impl LibreFangKernel {
         prompt_context: &str,
         response_summary: &str,
     ) -> crate::skill_workshop::candidate::CandidateSkill {
+        /// Excerpt cap for the reviewer's proposed body shown in the dashboard.
+        const REVIEWER_EXCERPT_MAX_CHARS: usize = 500;
         crate::skill_workshop::candidate::CandidateSkill {
             id: uuid::Uuid::new_v4().to_string(),
             agent_id: agent_id.to_string(),
             session_id: None,
             captured_at: chrono::Utc::now(),
-            source: crate::skill_workshop::candidate::CaptureSource::ExplicitInstruction {
-                trigger: "auto_evolve_reviewer".to_string(),
+            source: crate::skill_workshop::candidate::CaptureSource::AutoEvolveReview {
+                action: "create".to_string(),
+                // TODO: thread turn_index from the session when the reviewer
+                // call carries it; 0/None until then.
+                triggering_turn: None,
             },
             name: name.to_string(),
             description: description.to_string(),
@@ -1405,7 +1352,13 @@ impl LibreFangKernel {
                     .chars()
                     .take(crate::skill_workshop::candidate::PROVENANCE_EXCERPT_MAX_CHARS)
                     .collect(),
-                assistant_response_excerpt: None,
+                assistant_response_excerpt: Some(
+                    prompt_context
+                        .chars()
+                        .take(REVIEWER_EXCERPT_MAX_CHARS)
+                        .collect(),
+                ),
+                // TODO: thread turn_index from the session context.
                 turn_index: 0,
             },
         }
@@ -1452,14 +1405,24 @@ mod tests {
         );
         assert_eq!(candidate.agent_id, agent_id.to_string());
         assert!(candidate.session_id.is_none());
-        assert!(candidate.provenance.assistant_response_excerpt.is_none());
+        // The reviewer's proposed body is lifted into the assistant excerpt so
+        // operators see why the candidate was proposed.
+        assert_eq!(
+            candidate.provenance.assistant_response_excerpt.as_deref(),
+            Some("# Cargo fmt\n\nRun `cargo fmt --all` before staging.")
+        );
         assert_eq!(candidate.provenance.turn_index, 0);
-        // Source must be ExplicitInstruction with the reviewer trigger tag.
+        // Source must be AutoEvolveReview tagged with the create action —
+        // NOT ExplicitInstruction (which would mislabel it as user-requested).
         match &candidate.source {
-            CaptureSource::ExplicitInstruction { trigger } => {
-                assert_eq!(trigger, "auto_evolve_reviewer");
+            CaptureSource::AutoEvolveReview {
+                action,
+                triggering_turn,
+            } => {
+                assert_eq!(action, "create");
+                assert!(triggering_turn.is_none());
             }
-            other => panic!("expected ExplicitInstruction source, got {other:?}"),
+            other => panic!("expected AutoEvolveReview source, got {other:?}"),
         }
         // Must be a valid UUID so the pending-queue storage path accepts it.
         uuid::Uuid::parse_str(&candidate.id).expect("candidate.id must be a valid UUID");
@@ -1483,6 +1446,134 @@ mod tests {
             PROVENANCE_EXCERPT_MAX_CHARS,
             "excerpt must be capped at PROVENANCE_EXCERPT_MAX_CHARS"
         );
+    }
+
+    // ── end-to-end mode-gating through background_skill_review ──────────────
+
+    use librefang_testing::MockLlmDriver;
+    use librefang_types::agent::{AgentManifest, EvolutionMode};
+    use librefang_types::config::{DefaultModelConfig, KernelConfig};
+
+    /// Boot a real kernel against a temp home and spawn one agent with the
+    /// requested `auto_evolve_mode`. Returns the kernel (wrapped in `Arc` so a
+    /// `Weak` can be handed to `background_skill_review`) and the agent id.
+    fn boot_kernel_with_mode(mode: EvolutionMode) -> (std::sync::Arc<LibreFangKernel>, AgentId) {
+        let tmp = tempdir().unwrap();
+        let home_dir = tmp.path().to_path_buf();
+        std::fs::create_dir_all(home_dir.join("data")).unwrap();
+        // Leak the TempDir so the on-disk home survives for the test body —
+        // dropping it would race the reload/save paths.
+        std::mem::forget(tmp);
+
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+        let kernel = std::sync::Arc::new(
+            LibreFangKernel::boot_with_config(config).expect("kernel should boot"),
+        );
+        let agent_id = kernel
+            .spawn_agent_inner(
+                AgentManifest {
+                    name: "evolve-agent".to_string(),
+                    description: "auto-evolve test agent".to_string(),
+                    author: "test".to_string(),
+                    module: "builtin:chat".to_string(),
+                    auto_evolve_mode: mode,
+                    ..Default::default()
+                },
+                None,
+                None,
+                None,
+            )
+            .expect("agent should spawn");
+        (kernel, agent_id)
+    }
+
+    /// A reviewer JSON response asking to `create` a brand-new skill.
+    fn create_action_json(name: &str) -> String {
+        format!(
+            "```json\n{{\"action\": \"create\", \"name\": \"{name}\", \
+             \"description\": \"A skill proposed by the reviewer\", \
+             \"prompt_context\": \"# Auto Skill\\n\\nDo the thing.\", \
+             \"tags\": [\"auto\"]}}\n```"
+        )
+    }
+
+    /// Controlled mode: a reviewer `create` must land in the pending queue and
+    /// must NOT install a live skill.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn controlled_mode_create_routes_to_pending_not_live() {
+        let (kernel, agent_id) = boot_kernel_with_mode(EvolutionMode::Controlled);
+        let skills_dir = kernel.home_dir().join("skills");
+        std::fs::create_dir_all(&skills_dir).unwrap();
+        let driver = std::sync::Arc::new(MockLlmDriver::with_response(create_action_json(
+            "controlled_new_skill",
+        )));
+
+        LibreFangKernel::background_skill_review(
+            driver,
+            &skills_dir,
+            "trace summary",
+            "response summary",
+            Some(std::sync::Arc::downgrade(&kernel)),
+            agent_id,
+            &DefaultModelConfig::default(),
+        )
+        .await
+        .expect("review should succeed");
+
+        let pending = storage::list_pending(&skills_dir, &agent_id.to_string())
+            .expect("list_pending must succeed");
+        assert_eq!(
+            pending.len(),
+            1,
+            "controlled mode must write exactly one pending candidate"
+        );
+        assert_eq!(pending[0].name, "controlled_new_skill");
+        assert!(
+            !skills_dir.join("controlled_new_skill").exists(),
+            "controlled mode must NOT install a live skill before approval"
+        );
+
+        kernel.shutdown();
+    }
+
+    /// Free mode: a reviewer `create` must install a live skill directly and
+    /// must NOT leave anything in the pending queue.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn free_mode_create_installs_live_skill_not_pending() {
+        let (kernel, agent_id) = boot_kernel_with_mode(EvolutionMode::Free);
+        let skills_dir = kernel.home_dir().join("skills");
+        std::fs::create_dir_all(&skills_dir).unwrap();
+        let driver = std::sync::Arc::new(MockLlmDriver::with_response(create_action_json(
+            "free_new_skill",
+        )));
+
+        LibreFangKernel::background_skill_review(
+            driver,
+            &skills_dir,
+            "trace summary",
+            "response summary",
+            Some(std::sync::Arc::downgrade(&kernel)),
+            agent_id,
+            &DefaultModelConfig::default(),
+        )
+        .await
+        .expect("review should succeed");
+
+        assert!(
+            skills_dir.join("free_new_skill").exists(),
+            "free mode must install the skill directly into the registry dir"
+        );
+        let pending = storage::list_pending(&skills_dir, &agent_id.to_string()).unwrap_or_default();
+        assert!(
+            pending.is_empty(),
+            "free mode must NOT write a pending candidate"
+        );
+
+        kernel.shutdown();
     }
 
     // ── create action routes through save_candidate (pending queue) ─────────

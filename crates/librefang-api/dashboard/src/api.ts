@@ -2006,7 +2006,8 @@ export async function getSupportingFile(name: string, path: string): Promise<Sup
 export type PendingCaptureSource =
   | { kind: "explicit_instruction"; trigger: string }
   | { kind: "user_correction"; trigger: string }
-  | { kind: "repeated_tool_pattern"; tools: string; repeat_count: number };
+  | { kind: "repeated_tool_pattern"; tools: string; repeat_count: number }
+  | { kind: "auto_evolve_review"; action: string; triggering_turn?: number | null };
 
 export interface PendingProvenance {
   user_message_excerpt: string;

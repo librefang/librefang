@@ -257,6 +257,7 @@ fn source_kind(source: &crate::skill_workshop::candidate::CaptureSource) -> &'st
         ExplicitInstruction { .. } => "explicit_instruction",
         UserCorrection { .. } => "user_correction",
         RepeatedToolPattern { .. } => "repeated_tool_pattern",
+        AutoEvolveReview { .. } => "auto_evolve_review",
     }
 }
 

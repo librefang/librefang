@@ -637,6 +637,10 @@ _308 PRs from 7 contributors since v2026.5.17-beta.12._
   The Android and `mini` variants are deliberately skipped (neither carries channels).
   `librefang update` therefore lands the binary at `~/.librefang/bin/librefang-sidecar-telegram` (`.exe` on Windows), and the daemon auto-resolves it: a sidecar channel whose `command` is empty or the bare stem `librefang-sidecar-telegram` is resolved against the daemon's own executable directory, then `~/.librefang/bin/`, then PATH; an absolute / relative path or any other program (`python3 -m …`) is treated as explicit operator intent and passed through unchanged.
   `install.sh` / `install.ps1` install the bundled binary when present and stay silent on older tarballs that lack it.
+- **agents: configurable `auto_evolve_mode` (`free` / `controlled`)** (#5828) (@DaBlitzStein) — a new per-agent manifest field and dashboard control governs how the background `auto_evolve` skill reviewer applies its proposals.
+  `free` (the default) applies `create` mutations directly, preserving the prior `auto_evolve = true` behavior; `controlled` routes proposed creations to the pending approval queue so an operator reviews each new skill before it loads.
+  Update / patch proposals are skipped with a warning in `controlled` mode because the pending queue is create-only.
+  Settable per agent in `agent.toml`, via `PATCH /api/agents/{id}/config`, or from the agent Skills tab in the dashboard.
 
 ### Fixed
 

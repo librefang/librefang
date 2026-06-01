@@ -62,6 +62,7 @@ export type AgentConfigPatch = {
   api_key_env?: string;
   base_url?: string;
   web_search_augmentation?: "off" | "auto" | "always";
+  auto_evolve_mode?: "controlled" | "free";
 };
 
 export function useSpawnAgent() {

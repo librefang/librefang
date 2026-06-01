@@ -71,6 +71,17 @@ pub enum CaptureSource {
         /// How many times the sequence was observed.
         repeat_count: u32,
     },
+    /// The background `auto_evolve` LLM reviewer proposed a skill mutation
+    /// while the agent runs in `controlled` mode, so it was routed to the
+    /// pending queue instead of being applied directly. Distinct from
+    /// `ExplicitInstruction` (which means the *user* asked for it) — these
+    /// are autonomous proposals from the reviewer pass.
+    AutoEvolveReview {
+        /// The reviewer action that produced this candidate (`"create"`).
+        action: String,
+        /// The session turn that triggered the review, when known.
+        triggering_turn: Option<u32>,
+    },
 }
 
 /// Conversation context the candidate was extracted from.

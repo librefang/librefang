@@ -1645,6 +1645,7 @@ admin_role = "admin"
             auto_dream_min_sessions,
             show_progress,
             auto_evolve,
+            auto_evolve_mode,
             channel_overrides,
             max_concurrent_invocations,
             cache_context,

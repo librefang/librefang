@@ -565,22 +565,25 @@ pub enum WebSearchAugmentationMode {
 ///
 /// Used alongside `auto_evolve = true` on `AgentManifest` to decide
 /// whether the background skill review pipeline applies mutations
-/// directly (free) or routes them through the pending queue for human
-/// approval (controlled). This is separate from `SkillWorkshopConfig`
-/// — the workshop handles passive capture from conversation turns,
-/// while `auto_evolve` + `EvolutionMode` govern the background LLM
-/// reviewer that runs after each turn.
+/// directly (free, the default) or routes proposed creations through
+/// the pending queue for human approval (controlled). This is separate
+/// from `SkillWorkshopConfig` — the workshop handles passive capture
+/// from conversation turns, while `auto_evolve` + `EvolutionMode` govern
+/// the background LLM reviewer that runs after each turn.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum EvolutionMode {
-    /// All mutations (create, update, patch) go through the pending
-    /// queue for human approval before taking effect.
+    /// `create` mutations route to the pending approval queue so an
+    /// operator reviews each proposed skill before it loads into the
+    /// active registry. `update`/`patch` are not yet supported in this
+    /// mode (the pending queue is create-only) and are skipped with a
+    /// warning rather than applied.
     Controlled,
     /// Mutations apply directly without approval. The agent evolves
-    /// autonomously. Default — preserves pre-existing behavior for
-    /// agents that already opted into `auto_evolve = true`.
+    /// autonomously. Default — preserves the prior behavior of agents
+    /// that already opted into `auto_evolve = true`.
     #[default]
     Free,
 }
@@ -1269,13 +1272,16 @@ pub struct AgentManifest {
     /// the background LLM budget or concurrency semaphore after a turn.
     #[serde(default = "default_true")]
     pub auto_evolve: bool,
-    /// Whether auto_evolve mutations require approval (`controlled`, default)
-    /// or apply directly (`free`). Only meaningful when `auto_evolve = true`.
+    /// Policy for how `auto_evolve` mutations are applied. Defaults to
+    /// `free`. Only meaningful when `auto_evolve = true`.
     ///
-    /// - `Controlled` (default): all mutations (create, update, patch) go
-    ///   through the pending queue for human approval before taking effect.
-    /// - `Free`: mutations apply directly without approval. The agent
+    /// - `Free` (default): mutations apply directly without approval,
+    ///   preserving the prior `auto_evolve = true` behavior — the agent
     ///   evolves autonomously.
+    /// - `Controlled`: `create` mutations route to the pending approval
+    ///   queue so an operator reviews each proposed skill before it loads.
+    ///   `update`/`patch` are not yet supported in controlled mode (the
+    ///   pending queue is create-only) and are skipped with a warning.
     #[serde(default)]
     pub auto_evolve_mode: EvolutionMode,
     /// Per-agent channel behavior overrides (dm_policy, group_policy, etc.).
@@ -3838,5 +3844,16 @@ model = "claude-3-haiku-20240307"
         }
         let w: W = toml::from_str(toml_str).unwrap();
         assert_eq!(w.auto_evolve_mode, EvolutionMode::Controlled);
+    }
+
+    #[test]
+    fn evolution_mode_rejects_unknown_variant() {
+        // An unrecognized mode must error rather than silently falling
+        // back to the default — a typo'd manifest should surface loudly.
+        let err = serde_json::from_str::<EvolutionMode>("\"semi-auto\"").unwrap_err();
+        assert!(
+            err.to_string().contains("unknown variant"),
+            "unknown auto_evolve_mode must error, got: {err}"
+        );
     }
 }

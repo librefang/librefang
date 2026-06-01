@@ -166,6 +166,15 @@ fn build_user_prompt(hit: &HeuristicHit) -> String {
             tools,
             repeat_count,
         } => format!("repeated_tool_pattern: tools=[{tools}], count={repeat_count}"),
+        crate::skill_workshop::candidate::CaptureSource::AutoEvolveReview {
+            action,
+            triggering_turn,
+        } => format!(
+            "auto_evolve_review: action={action}, turn={}",
+            triggering_turn
+                .map(|t| t.to_string())
+                .unwrap_or_else(|| "?".to_string())
+        ),
     };
     let assistant_excerpt = hit
         .assistant_response_excerpt
