@@ -2333,7 +2333,7 @@ fn filter_restricted_builtins(auto_evolve: bool, workshop_enabled: bool) -> Vec<
     tools
         .iter()
         .filter(|t| {
-            declared.iter().any(|d| *d == t.name.as_str())
+            declared.contains(&t.name.as_str())
                 || (evolve_enabled && LibreFangKernel::is_evolve_tool(&t.name))
         })
         .map(|t| t.name.clone())
