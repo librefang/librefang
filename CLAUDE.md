@@ -144,12 +144,32 @@ docker build -t librefang-rust-dev:latest -f Dockerfile.rust-dev .
 #    point at named volumes (isolated from the host); reuse them across runs
 #    so deps compile once. Set PATH explicitly — a login shell ('bash -l')
 #    drops the image's /usr/local/cargo/bin from PATH.
+#    Prefix link-producing commands (build / test, NOT check) with `mold -run`.
+#    The image ships the mold linker; `mold -run` intercepts the child `ld`
+#    WITHOUT touching RUSTFLAGS, so it leaves the cached target dir valid while
+#    cutting the link phase that every incremental build still pays.
+#    Measured on a warm cache, a one-line edit + relink of the kernel-router
+#    test binary went 7.1s → 1.7s (4.1x). `cargo check` has no link step, so
+#    there is nothing to prefix there.
+# 3. Use a PER-WORKTREE target volume. Sharing one target dir across
+#    worktrees that sit on different branches corrupts cargo's incremental
+#    cache: cargo reuses compiled metadata from another code state and emits
+#    phantom errors — e.g. `missing field 'x'` for a field the current source
+#    does not even define. Derive the volume name from the worktree so each
+#    branch is isolated. The cargo *download* cache (librefang-cargo) is safe
+#    to share — it holds fetched `.crate` files, not compiled artifacts.
+WORKTREE="$(git rev-parse --show-toplevel)"
+TARGET_VOL="librefang-target-$(basename "$WORKTREE")"
 docker run --rm \
-  -v "$(git rev-parse --show-toplevel)":/work \
-  -v librefang-cargo:/cargo -v librefang-target:/target \
+  -v "$WORKTREE":/work \
+  -v librefang-cargo:/cargo -v "$TARGET_VOL":/target \
   -e CARGO_HOME=/cargo -e CARGO_TARGET_DIR=/target -w /work \
   librefang-rust-dev:latest \
-  sh -c 'export PATH=/usr/local/cargo/bin:$PATH; cargo test -p librefang-api --lib'
+  sh -c 'export PATH=/usr/local/cargo/bin:$PATH; mold -run cargo test -p librefang-api --lib'
+# Reclaim a finished worktree's cache: docker volume rm "$TARGET_VOL"
+# On a small Docker VM, back each volume with a host dir on a big disk first:
+#   docker volume create --opt type=none --opt o=bind \
+#     --opt device=/big/disk/target-<wt> librefang-target-<wt>
 ```
 
 Scope is still mandatory: `-p <crate>` (or the `kind(lib)|kind(bin)` nextest
