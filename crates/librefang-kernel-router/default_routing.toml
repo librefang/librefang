@@ -1,0 +1,319 @@
+# Default template routing rules for the LibreFang kernel router.
+#
+# This file is embedded into the binary at compile time (include_str!) and is
+# the single source of truth for the built-in specialist routes.
+#
+# Operators override it by placing a routing.toml at
+#   $LIBREFANG_HOME/registry/templates/routing.toml
+# Entries merge by `target`:
+#   - same target  → overrides the default rule
+#   - new target   → appends a new rule
+#   - enabled=false → removes the default rule from routing
+# Edits to the override file take effect on `POST /api/config/reload` or a
+# daemon restart; the rule set is cached and not hot-reloaded on file change
+# alone.
+# A rule with an invalid regex (or an unparseable file) is skipped with a WARN;
+# routing never fails closed on a bad pattern.
+#
+# Each rule scores a message: a `strong` hit weighs 6 (explicit-alias weight),
+# a `weak` hit weighs 1. Regex values are matched case-insensitively.
+
+[[template]]
+target = "hello-world"
+strong = [
+  { label = "hello", regex = '\bhello\b|\bhi\b|\bhey\b|\bgreet\b|\bwelcome\b' },
+  { label = "打招呼", regex = '打个招呼|欢迎词|自我介绍|介绍你自己|你好' },
+]
+
+[[template]]
+target = "coder"
+strong = [
+  { label = "implement", regex = '\bimplement\b|\bbuild\b|\brefactor\b|\bpatch\b' },
+  { label = "写代码", regex = '写代码|实现功能|补丁|脚本|编码|重构|开发' },
+]
+weak = [
+  { label = "code", regex = '\bcode\b|\bfunction\b|\bapi\b' },
+  { label = "代码", regex = '代码|程序|模块|接口' },
+]
+
+[[template]]
+target = "debugger"
+strong = [
+  { label = "debug", regex = '\bdebug\b|traceback|stack trace' },
+  { label = "排查报错", regex = '报错|异常|错误日志|定位根因|排查 bug|故障排查|崩溃' },
+]
+weak = [
+  { label = "bug", regex = '\bbug\b' },
+  { label = "日志", regex = '日志|失败原因|根因' },
+]
+
+[[template]]
+target = "test-engineer"
+strong = [
+  { label = "test", regex = '\btest(?:s|ing)?\b|unit test|integration test|regression' },
+  { label = "测试", regex = '测试用例|单元测试|集成测试|回归测试|覆盖率|验收测试' },
+]
+weak = [
+  { label = "验证", regex = '验证|测试' },
+]
+
+[[template]]
+target = "code-reviewer"
+strong = [
+  { label = "code review", regex = 'code review|review this diff|review this pr' },
+  { label = "代码审查", regex = '代码审查|评审这个改动|审查代码|找回归风险' },
+]
+weak = [
+  { label = "diff", regex = '\bdiff\b|\bpr\b|\breview\b' },
+]
+
+[[template]]
+target = "architect"
+strong = [
+  { label = "architecture", regex = 'architecture|system design|technical design' },
+  { label = "架构设计", regex = '架构设计|模块划分|接口设计|技术方案|演进路线|系统设计' },
+]
+weak = [
+  { label = "边界", regex = '边界|拓扑|模块' },
+]
+
+[[template]]
+target = "security-auditor"
+strong = [
+  { label = "security", regex = 'security|vulnerability|threat model|xss|csrf|sql injection' },
+  { label = "安全审计", regex = '安全审计|漏洞|攻击面|鉴权|权限提升|sql注入|合规风险' },
+]
+weak = [
+  { label = "安全", regex = '安全|认证|授权|加密' },
+]
+
+[[template]]
+target = "devops-lead"
+strong = [
+  { label = "deploy", regex = '\bdeploy\b|ci/cd|kubernetes|docker|helm|infra|sre' },
+  { label = "部署运维", regex = '部署|上线|发布流程|监控告警|容器|k8s|devops|基础设施' },
+]
+weak = [
+  { label = "ops", regex = '运维平台|集群|流水线' },
+]
+
+[[template]]
+target = "researcher"
+strong = [
+  { label = "research", regex = '\bresearch\b|look up|fact check|latest' },
+  { label = "调研", regex = '调研|研究|查资料|搜集来源|最新进展|事实核查' },
+]
+weak = [
+  { label = "来源", regex = '来源|资料|背景|现状' },
+  { label = "对比", regex = '对比' },
+]
+
+[[template]]
+target = "analyst"
+strong = [
+  { label = "analysis", regex = 'business analysis|competitive analysis|trend analysis' },
+  { label = "业务分析", regex = '竞品分析|趋势分析|报表分析|指标分析|漏斗分析|商业分析' },
+]
+weak = [
+  { label = "分析", regex = '分析|指标|趋势|报表' },
+]
+
+[[template]]
+target = "data-scientist"
+strong = [
+  { label = "ml", regex = 'machine learning|regression|classification|forecast model|a/?b test' },
+  { label = "数据科学", regex = '数据科学|统计建模|回归分析|分类模型|实验设计|预测模型' },
+]
+weak = [
+  { label = "统计", regex = '统计|特征工程|建模' },
+]
+
+[[template]]
+target = "planner"
+strong = [
+  { label = "plan", regex = '\bplan\b|roadmap|timeline|milestone' },
+  { label = "项目计划", regex = '项目计划|里程碑|排期|执行计划|实施计划|三周计划|任务拆解|优先级' },
+]
+weak = [
+  { label = "依赖", regex = '依赖|风险|计划' },
+]
+
+[[template]]
+target = "writer"
+strong = [
+  { label = "writing", regex = 'write an article|blog post|rewrite|polish' },
+  { label = "写作", regex = '写一篇|起草文章|改写|润色|文案|写作' },
+]
+weak = [
+  { label = "内容创作", regex = '文章|博客|内容创作|内容策划|文章草稿' },
+]
+
+[[template]]
+target = "tutor"
+strong = [
+  { label = "teach", regex = 'teach me|explain step by step|lesson plan|tutor me' },
+  { label = "教学辅导", regex = '教我|讲解这个概念|一步一步解释|辅导学习|辅导功课|作业辅导' },
+]
+weak = [
+  { label = "练习", regex = '练习题|知识讲解|学习计划|教学' },
+]
+
+[[template]]
+target = "doc-writer"
+strong = [
+  { label = "docs", regex = '\bdocs?\b|readme|api docs|documentation' },
+  { label = "技术文档", regex = '技术文档|操作手册|接口文档|教程文档|架构文档|说明文档' },
+]
+weak = [
+  { label = "README", regex = 'readme|文档' },
+]
+
+[[template]]
+target = "translator"
+strong = [
+  { label = "translate", regex = '\btranslate\b|\btranslation\b|localization' },
+  { label = "翻译", regex = '翻译|本地化|中译英|英译中|日译中|术语统一' },
+]
+weak = [
+  { label = "译", regex = '译成|翻成' },
+]
+
+[[template]]
+target = "email-assistant"
+strong = [
+  { label = "email", regex = '\bemail\b|\bmail\b|draft reply' },
+  { label = "邮件", regex = '邮件草稿|回复邮件|收件箱|邮件总结|邮件跟进' },
+]
+weak = [
+  { label = "邮箱", regex = '邮箱|邮件' },
+]
+
+[[template]]
+target = "meeting-assistant"
+strong = [
+  { label = "meeting", regex = 'meeting notes|agenda|action items' },
+  { label = "会议", regex = '会议纪要|会议议程|行动项|会前准备|会后总结' },
+]
+weak = [
+  { label = "纪要", regex = '会议|纪要|议程' },
+]
+
+[[template]]
+target = "social-media"
+strong = [
+  { label = "social", regex = 'social media|twitter|linkedin post|content calendar' },
+  { label = "社媒", regex = '社交媒体|发帖|推文|微博|小红书|内容日历' },
+]
+weak = [
+  { label = "帖子", regex = '帖子|社媒' },
+]
+
+[[template]]
+target = "sales-assistant"
+strong = [
+  { label = "sales", regex = 'sales outreach|crm|pipeline|prospect' },
+  { label = "销售", regex = '销售跟进|客户开发|销售线索|商机|管道管理|crm' },
+]
+weak = [
+  { label = "客户", regex = '销售|客户跟进' },
+]
+
+[[template]]
+target = "customer-support"
+strong = [
+  { label = "support", regex = 'support ticket|customer support|faq reply' },
+  { label = "客服", regex = '客服回复|投诉处理|工单|售后|客户支持' },
+]
+weak = [
+  { label = "工单", regex = '客服|工单|售后' },
+]
+
+[[template]]
+target = "recruiter"
+strong = [
+  { label = "recruiting", regex = 'resume|curriculum vitae|job description|candidate' },
+  { label = "招聘", regex = '招聘|简历筛选|岗位描述|候选人|面试' },
+]
+weak = [
+  { label = "简历", regex = '简历|面试|岗位' },
+]
+
+[[template]]
+target = "legal-assistant"
+strong = [
+  { label = "legal", regex = 'contract|terms of service|privacy policy|nda' },
+  { label = "法务", regex = '法律|合同|条款|合规|法务|隐私政策' },
+]
+weak = [
+  { label = "协议", regex = '协议|免责声明' },
+]
+
+[[template]]
+target = "personal-finance"
+strong = [
+  { label = "finance", regex = 'budget|expense|cash flow|asset allocation' },
+  { label = "财务", regex = '财务规划|预算|支出分析|现金流|储蓄计划|理财' },
+]
+weak = [
+  { label = "花销", regex = '预算|花销|财务' },
+]
+
+[[template]]
+target = "recipe-assistant"
+strong = [
+  { label = "recipe", regex = 'recipe|meal plan|ingredient substitut|portion' },
+  { label = "食谱", regex = '食谱|菜谱|做菜|烹饪|膳食计划|配料替换' },
+]
+weak = [
+  { label = "烹饪", regex = '菜|做饭|食材|烹饪' },
+]
+
+[[template]]
+target = "travel-planner"
+strong = [
+  { label = "travel", regex = 'travel itinerary|trip plan|flight|hotel' },
+  { label = "旅行", regex = '行程规划|旅行|旅游计划|机票酒店|路线安排' },
+]
+weak = [
+  { label = "出行", regex = '出行|航班|酒店|景点' },
+]
+
+[[template]]
+target = "health-tracker"
+strong = [
+  { label = "health", regex = 'health tracker|fitness plan|diet log|sleep' },
+  { label = "健康", regex = '健康记录|健身计划|饮食追踪|睡眠|体重变化' },
+]
+weak = [
+  { label = "健康跟踪", regex = '健康|运动|饮食|睡眠|体重|用药' },
+]
+
+[[template]]
+target = "home-automation"
+strong = [
+  { label = "smart home", regex = 'home assistant|smart home|iot' },
+  { label = "智能家居", regex = '智能家居|自动化场景|传感器|设备联动' },
+]
+weak = [
+  { label = "设备", regex = '家庭自动化|设备|iot' },
+]
+
+[[template]]
+target = "ops"
+strong = [
+  { label = "incident", regex = 'incident response|service status|restore service' },
+  { label = "系统运维", regex = '系统状态|故障恢复|运行诊断|服务异常|恢复服务' },
+]
+weak = [
+  { label = "状态", regex = '状态检查|运行状态|故障' },
+]
+
+[[template]]
+target = "orchestrator"
+strong = [
+  { label = "orchestrate", regex = 'orchestrate|delegate|multi-agent|multi step' },
+  { label = "复杂协调", regex = '多代理|多个专家|复杂任务|拆成子任务|协调执行' },
+]
+weak = [
+  { label = "编排", regex = '编排|协作|分工' },
+]
