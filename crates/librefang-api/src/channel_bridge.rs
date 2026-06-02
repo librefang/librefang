@@ -2193,11 +2193,11 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     /// returns `Ok(None)` when disabled so the bridge delivers the raw
     /// `ImageFile` block to the agent unchanged. When enabled, materializes a
     /// `MediaAttachment` over the already-downloaded file and dispatches to
-    /// `MediaEngine::describe_image`.
-    ///
-    /// This allows text-only model agents to receive a natural-language
-    /// description alongside the `ImageFile` block. Vision-capable models
-    /// receive both and can choose which to use.
+    /// `MediaEngine::describe_image`, which routes to the configured
+    /// `image_provider`. Returns the description text so the bridge can prepend
+    /// it as an `<image_description>` block before the inline `ImageFile`,
+    /// anchoring text-only and vision models alike on the OCR/visual output and
+    /// suppressing fabricated weekdays / dates / prices on small in-image text.
     async fn describe_inbound_image(
         &self,
         path: &std::path::Path,

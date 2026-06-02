@@ -820,7 +820,7 @@
       "type": "object"
     },
     "ChannelsConfig": {
-      "description": "Channel bridge configuration.\n\nEach field uses `OneOrMany<T>` to support both single-instance (`[channels.slack]`) and multi-instance (`[[channels.slack]]`) TOML syntax for multi-bot routing.",
+      "description": "Channel bridge configuration.\n\nEvery channel runs as a sidecar (`[[sidecar_channels]]` — see [`SidecarChannelConfig`]); the per-vendor in-process fields that used to live here (`telegram`, `slack`, `whatsapp`, …, each typed `OneOrMany<*Config>`) are gone. What remains are the shared file-transfer caps + download dir that every channel honours.",
       "properties": {
         "file_download_dir": {
           "default": null,
@@ -2719,8 +2719,8 @@
           "type": "boolean"
         },
         "image_description": {
-          "default": true,
-          "description": "Enable image description. Default: true.",
+          "default": false,
+          "description": "Enable image description. Default: false — opt-in until the operator has configured a vision provider explicitly. Enabling without an `image_provider` setting falls through to env-var auto-detection (Anthropic → OpenAI → Gemini), which can route per-image OCR through the operator's primary-tier key. Set `image_provider = \"gemini\"` (or another cheap-tier provider) together with this flag.",
           "type": "boolean"
         },
         "image_provider": {
@@ -6274,6 +6274,11 @@
       },
       "description": "External authentication provider configuration (OAuth2/OIDC)."
     },
+    "external_auth_proxy": {
+      "default": false,
+      "description": "Acknowledges that the daemon is fronted by an external auth proxy (e.g. nginx `auth_request`, Cloudflare Access, a corporate IAM SSO sidecar) so the dashboard-reads allowlist can legitimately be left open.\n\nThis flag exists because the `require_auth_for_reads = Some(false)` escape hatch is otherwise indistinguishable from a config typo: an operator who flipped it without an external proxy in front exposed `/api/agents`, `/api/sessions`, `/api/providers` to any unauthenticated reader on non-loopback binds. Per audit `require-auth-for-reads-false-leak`, the resolver now refuses to honour `Some(false)` UNLESS this flag is also set — defence in depth against a single-line config mistake.\n\nBoot also emits a warning when `bind` is non-loopback and this flag is `false`, regardless of `require_auth_for_reads`, so an operator running open-on-LAN sees the posture mismatch even if they meant to. Defaults to `false` (no external proxy assumed); set to `true` only when the proxy in front is known-good.",
+      "type": "boolean"
+    },
     "fallback_providers": {
       "description": "Fallback providers tried in order if the primary fails. Configure in config.toml as `[[fallback_providers]]`.",
       "items": {
@@ -6456,7 +6461,7 @@
         "audio_model": null,
         "audio_provider": null,
         "audio_transcription": true,
-        "image_description": true,
+        "image_description": false,
         "image_provider": null,
         "max_concurrency": 2,
         "video_description": false

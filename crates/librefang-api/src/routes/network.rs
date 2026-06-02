@@ -2069,15 +2069,27 @@ pub async fn comms_send(
         );
     }
 
-    // Resolve URL-based attachments into image content blocks
+    // Resolve URL-based attachments into image content blocks, then run
+    // them through the auto-describe enricher so peer-to-peer LibreFang
+    // network messages get the same `<image_description>` anchor that the
+    // dashboard upload path and channel-bridge inbound path get. Without
+    // this hop the URL-attachment route was the one remaining hole on the
+    // image-enrichment surface — image still reaches the agent but the
+    // primary model has no OCR text to anchor on.
     let content_blocks = if req.attachments.is_empty() {
         None
     } else {
-        let blocks = super::agents::resolve_url_attachments(&req.attachments).await;
-        if blocks.is_empty() {
+        let raw = super::agents::resolve_url_attachments(&req.attachments).await;
+        if raw.is_empty() {
             None
         } else {
-            Some(blocks)
+            let enriched =
+                super::agents::enrich_attachment_blocks_with_description(&state, raw).await;
+            if enriched.is_empty() {
+                None
+            } else {
+                Some(enriched)
+            }
         }
     };
 

@@ -3776,7 +3776,11 @@ pub async fn hand_send_message(
     // hand path's behaviour byte-identical while closing the cross-chat
     // leak on the agent message path.
     if !req.attachments.is_empty() {
-        let image_blocks = super::agents::resolve_attachments(&state, &req.attachments);
+        let image_blocks = super::agents::enrich_attachment_blocks_with_description(
+            &state,
+            super::agents::resolve_attachments(&state, &req.attachments),
+        )
+        .await;
         if !image_blocks.is_empty() {
             let fallback_session_id = state
                 .kernel

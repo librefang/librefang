@@ -11,6 +11,13 @@
 
 use librefang_types::media::MediaConfig;
 
+/// Mirror of `librefang_runtime_media::media_understanding::NOT_IMPLEMENTED_SENTINEL`.
+/// Kept in sync so callers (channel-bridge enricher, agents.rs upload
+/// enricher) can match on the same string when the `media` Cargo feature
+/// is off. Stub builds never *produce* this sentinel (the stub returns a
+/// different Err), but the constant must exist so the consumer compiles.
+pub const NOT_IMPLEMENTED_SENTINEL: &str = "describe_image: not yet implemented (stub)";
+
 pub struct MediaEngine;
 
 impl MediaEngine {

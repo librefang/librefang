@@ -105,7 +105,12 @@ pub struct CustomSttConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct MediaConfig {
-    /// Enable image description. Default: true.
+    /// Enable image description. Default: false — opt-in until the operator
+    /// has configured a vision provider explicitly. Enabling without an
+    /// `image_provider` setting falls through to env-var auto-detection
+    /// (Anthropic → OpenAI → Gemini), which can route per-image OCR through
+    /// the operator's primary-tier key. Set `image_provider = "gemini"` (or
+    /// another cheap-tier provider) together with this flag.
     pub image_description: bool,
     /// Enable audio transcription. Default: true.
     pub audio_transcription: bool,
@@ -138,7 +143,7 @@ pub struct MediaConfig {
 impl Default for MediaConfig {
     fn default() -> Self {
         Self {
-            image_description: true,
+            image_description: false,
             audio_transcription: true,
             video_description: false,
             max_concurrency: 2,
@@ -783,7 +788,12 @@ mod tests {
     #[test]
     fn test_media_config_default() {
         let config = MediaConfig::default();
-        assert!(config.image_description);
+        // Default is OFF: opt-in until the operator has explicitly set
+        // `image_provider`. See `MediaConfig::default` doc comment for the
+        // rationale (the env-var auto-detect fallback can otherwise route
+        // every inbound channel image through the operator's primary-tier
+        // key — typically Anthropic Sonnet).
+        assert!(!config.image_description);
         assert!(config.audio_transcription);
         assert!(!config.video_description);
         assert_eq!(config.max_concurrency, 2);
@@ -995,7 +1005,8 @@ mod tests {
         let json = serde_json::to_string(&config).unwrap();
         let parsed: MediaConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.max_concurrency, 2);
-        assert!(parsed.image_description);
+        // Round-trip preserves the new opt-in default (false).
+        assert!(!parsed.image_description);
     }
 
     // ── Media generation types tests ───────────────────────────────────
