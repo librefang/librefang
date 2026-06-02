@@ -50,9 +50,12 @@ use crate::AgentSubsystemApi;
 /// `Option` override > global config value).
 fn export_enabled_for_agent(kernel: &LibreFangKernel, agent_id: AgentId) -> bool {
     let global = kernel.config_snapshot().rl_export.enabled;
+    // `get_arc` (Arc bump) not `get` (deep AgentEntry+manifest clone): this
+    // runs on the AgentLoopEnd hot path for every turn of every agent, even
+    // when export is globally disabled. Same rationale as `is_auto_dream_enabled`.
     kernel
         .agent_registry_ref()
-        .get(agent_id)
+        .get_arc(agent_id)
         .and_then(|e| e.manifest.rl_export.enabled)
         .unwrap_or(global)
 }
