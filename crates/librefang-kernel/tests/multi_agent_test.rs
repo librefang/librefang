@@ -799,6 +799,98 @@ fn test_reactivation_restores_triggers_to_original_roles() {
     kernel.shutdown();
 }
 
+/// #5956: a malformed hand definition must be rejected on reactivation
+/// BEFORE the kill loop tears down the previously-active agents, so their
+/// triggers survive. `validate_spawnable` pre-flights every role before any
+/// destructive work. Before the fix, the kill loop wiped the analyst (and its
+/// trigger) before the planner spawn failed, losing the trigger permanently.
+#[test]
+fn test_reactivation_preflight_preserves_triggers_on_bad_def() {
+    let kernel = LibreFangKernel::boot_with_config(test_config("react-preflight")).unwrap();
+    install_hand(&kernel, HAND_C);
+
+    let instance = kernel
+        .activate_hand("test-research", HashMap::new())
+        .unwrap();
+    let analyst_id = *instance
+        .agent_ids
+        .get("analyst")
+        .expect("analyst role agent id");
+
+    kernel
+        .register_trigger(
+            analyst_id,
+            TriggerPattern::System,
+            "wake analyst".to_string(),
+            0,
+        )
+        .unwrap();
+    assert_eq!(kernel.list_triggers(Some(analyst_id)).len(), 1);
+
+    // Drop the instance record (agents stay alive + tagged), then swap the
+    // in-memory definition for a malformed one under the same id by writing it
+    // to disk and reloading: the `planner` role gets a `..` module path that
+    // `validate_module_string` rejects as traversal. `reload_from_disk` uses an
+    // overwriting insert, unlike `install_from_content` which rejects duplicate
+    // ids. The home dir mirrors what `test_config("react-preflight")` builds.
+    kernel
+        .hand_registry_ref()
+        .deactivate(instance.instance_id)
+        .unwrap();
+    let bad_def = r#"
+id = "test-research"
+name = "Test Research Hand"
+description = "A test hand with a malformed planner role"
+category = "data"
+icon = "🧠"
+tools = ["file_read"]
+
+[agents.analyst]
+name = "analyst-agent"
+description = "Analyzes information"
+module = "builtin:chat"
+
+[agents.analyst.model]
+provider = "default"
+model = "default"
+system_prompt = "You are an analyst."
+
+[agents.planner]
+coordinator = true
+name = "planner-agent"
+description = "Plans the work"
+module = "../escape"
+
+[agents.planner.model]
+provider = "default"
+model = "default"
+system_prompt = "You are a planner."
+"#;
+    let home = std::env::temp_dir().join("librefang-hand-test-react-preflight");
+    let bad_dir = home.join("workspaces").join("test-research");
+    std::fs::create_dir_all(&bad_dir).unwrap();
+    std::fs::write(bad_dir.join("HAND.toml"), bad_def).unwrap();
+    kernel.hand_registry_ref().reload_from_disk(&home);
+
+    // Reactivation must fail at pre-flight, before the kill loop runs.
+    assert!(
+        kernel
+            .activate_hand("test-research", HashMap::new())
+            .is_err(),
+        "reactivation with a malformed role should be rejected"
+    );
+
+    // The previously-active analyst's trigger must survive — pre-flight
+    // rejected the bad definition before `kill_agent` could wipe it.
+    assert_eq!(
+        kernel.list_triggers(Some(analyst_id)).len(),
+        1,
+        "analyst trigger must survive a rejected reactivation"
+    );
+
+    kernel.shutdown();
+}
+
 // ── Live LLM integration test (requires GROQ_API_KEY) ───────────────────────
 
 fn load_manifest(toml_str: &str) -> AgentManifest {
