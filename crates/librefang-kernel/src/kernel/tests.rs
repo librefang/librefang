@@ -2309,55 +2309,221 @@ fn test_stable_mode_freezes_registry_and_skips_review_gate() {
     kernel.shutdown();
 }
 
-#[test]
-fn test_skill_evolve_tools_default_available_to_restricted_agent() {
-    // The PR's core promise is "every agent can self-evolve skills."
-    // Verify that an agent whose manifest declares a restrictive
-    // `capabilities.tools = ["memory_store"]` still sees the full
-    // skill_evolve_* surface at tool-selection time. Without this
-    // default-available behavior, out-of-the-box agents cannot trigger
-    // the feature.
-    //
-    // Rather than spin up a kernel + spawn an agent (which requires a
-    // full boot and signed manifest), assert directly on the same
-    // filter logic the kernel's Step 1 uses: every name in
-    // `default_available` must survive a filter that declares a
-    // restrictive capabilities.tools.
+// ---------------------------------------------------------------------------
+// skill_evolve gate — flag-combination matrix
+//
+// `LibreFangKernel::is_evolve_tool` is the single source of truth for which
+// tools count as "evolution tools".  These tests exercise the gate predicate
+// `evolve_enabled = auto_evolve || skill_workshop.enabled` for all four
+// (auto_evolve, skill_workshop.enabled) combinations so that the list of
+// suppressed names never drifts from the production code.
+// ---------------------------------------------------------------------------
+
+/// Simulate kernel Step-1 filtering for a restricted agent
+/// (`capabilities.tools = ["memory_store", "memory_recall"]`) using the real
+/// `LibreFangKernel::is_evolve_tool` predicate.
+///
+/// Used by the (T,F), (F,T), and (F,F) matrix tests.  The (T,T) case uses
+/// the real kernel path via `boot_with_config` + `available_tools` — see
+/// `test_skill_evolve_tools_present_when_both_flags_true`.
+fn filter_restricted_builtins(auto_evolve: bool, workshop_enabled: bool) -> Vec<String> {
     let tools = librefang_runtime::tool_runner::builtin_tool_definitions();
     let declared: &[&str] = &["memory_store", "memory_recall"];
-    let default_available: &[&str] = &[
-        "skill_read_file",
-        "skill_evolve_create",
-        "skill_evolve_update",
-        "skill_evolve_patch",
-        "skill_evolve_delete",
-        "skill_evolve_rollback",
-        "skill_evolve_write_file",
-        "skill_evolve_remove_file",
-    ];
-
-    // Mirror kernel::mod.rs Step 1 filter exactly.
-    let filtered: Vec<String> = tools
+    let evolve_enabled = auto_evolve || workshop_enabled;
+    tools
         .iter()
         .filter(|t| {
-            declared.contains(&t.name.as_str()) || default_available.contains(&t.name.as_str())
+            declared.contains(&t.name.as_str())
+                || (evolve_enabled && LibreFangKernel::is_evolve_tool(&t.name))
         })
         .map(|t| t.name.clone())
-        .collect();
+        .collect()
+}
 
-    for required in default_available {
+// (T, T) — both flags on: evolve tools must be present.
+//
+// Uses the real kernel path (`boot_with_config` → `spawn_agent` →
+// `available_tools`) so this test catches regressions in the actual
+// `available_tools` implementation, not just the inline predicate mirror.
+#[test]
+fn test_skill_evolve_tools_present_when_both_flags_true() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-evolve-matrix-tt");
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
+
+    // Restricted agent: only memory tools declared; both evolution paths on.
+    let manifest = AgentManifest {
+        name: "matrix-tt-agent".to_string(),
+        description: "matrix (T,T) test agent".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        capabilities: ManifestCapabilities {
+            tools: vec!["memory_store".to_string(), "memory_recall".to_string()],
+            ..Default::default()
+        },
+        auto_evolve: true,
+        skill_workshop: librefang_types::agent::SkillWorkshopConfig {
+            enabled: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+    let tools = kernel.available_tools(agent_id);
+    let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+
+    let all_builtins = librefang_runtime::tool_runner::builtin_tool_definitions();
+    for t in all_builtins
+        .iter()
+        .filter(|t| LibreFangKernel::is_evolve_tool(&t.name))
+    {
         assert!(
-            filtered.iter().any(|n| n == *required),
-            "skill-evolution tool {required} must be default-available — missing from {filtered:?}"
+            names.contains(&t.name.as_str()),
+            "evolve tool {} must be present when auto_evolve=true, workshop=true; got {names:?}",
+            t.name
         );
     }
-    // Also confirm the restrictive declarations still flow through.
-    for required in declared {
+    // Declared non-evolve tools must also be present.
+    assert!(
+        names.contains(&"memory_store"),
+        "memory_store must be present; got {names:?}"
+    );
+    assert!(
+        names.contains(&"memory_recall"),
+        "memory_recall must be present; got {names:?}"
+    );
+
+    kernel.shutdown();
+}
+
+// (T, F) — auto_evolve=true, workshop=false: evolve tools must be present.
+#[test]
+fn test_skill_evolve_tools_present_when_auto_evolve_true() {
+    let filtered = filter_restricted_builtins(true, false);
+    let tools = librefang_runtime::tool_runner::builtin_tool_definitions();
+    for t in tools
+        .iter()
+        .filter(|t| LibreFangKernel::is_evolve_tool(&t.name))
+    {
         assert!(
-            filtered.iter().any(|n| n == *required),
-            "declared tool {required} missing from {filtered:?}"
+            filtered.iter().any(|n| n == &t.name),
+            "evolve tool {} must be present when auto_evolve=true, workshop=false; got {filtered:?}",
+            t.name
         );
     }
+}
+
+// (F, T) — auto_evolve=false, workshop=true: evolve tools must be present.
+#[test]
+fn test_skill_evolve_tools_present_when_workshop_enabled() {
+    let filtered = filter_restricted_builtins(false, true);
+    let tools = librefang_runtime::tool_runner::builtin_tool_definitions();
+    for t in tools
+        .iter()
+        .filter(|t| LibreFangKernel::is_evolve_tool(&t.name))
+    {
+        assert!(
+            filtered.iter().any(|n| n == &t.name),
+            "evolve tool {} must be present when auto_evolve=false, workshop=true; got {filtered:?}",
+            t.name
+        );
+    }
+}
+
+// (F, F) — both flags off: evolve tools must be suppressed, declared tools
+// must still flow through.
+#[test]
+fn test_skill_evolve_tools_suppressed_when_evolution_disabled() {
+    let filtered = filter_restricted_builtins(false, false);
+    let tools = librefang_runtime::tool_runner::builtin_tool_definitions();
+    for t in tools
+        .iter()
+        .filter(|t| LibreFangKernel::is_evolve_tool(&t.name))
+    {
+        assert!(
+            !filtered.iter().any(|n| n == &t.name),
+            "evolve tool {} must be suppressed when auto_evolve=false, workshop=false; got {filtered:?}",
+            t.name
+        );
+    }
+    // Declared tools still flow through.
+    for required in &["memory_store", "memory_recall"] {
+        assert!(
+            filtered.iter().any(|n| n == *required),
+            "declared tool {required} must not be suppressed; got {filtered:?}"
+        );
+    }
+}
+
+// Regression: post-filter must NOT strip evolve tools that the operator
+// explicitly declared in capabilities.tools, even when both auto_evolve=false
+// AND skill_workshop.enabled=false.
+//
+// The bug: the blanket `all_tools.retain(!is_evolve_tool)` ran after the
+// explicit-declaration arm had already admitted the operator-declared tools,
+// silently removing them.  The fix threads `declared_tools` into the retain
+// predicate so explicit grants are honoured regardless of the gate flags.
+#[test]
+fn test_skill_evolve_tool_survives_when_explicitly_declared_and_evolution_disabled() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp
+        .path()
+        .join("librefang-kernel-explicit-evolve-gate-test");
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
+
+    // Operator explicitly declares skill_evolve_create alongside a normal
+    // tool.  Both auto_evolve and skill_workshop are off — the gate must
+    // still honour the explicit declaration.
+    let manifest = AgentManifest {
+        name: "explicit-evolve-agent".to_string(),
+        description: "agent with explicit evolve tool and evolution disabled".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        capabilities: ManifestCapabilities {
+            tools: vec![
+                "skill_evolve_create".to_string(),
+                "memory_store".to_string(),
+            ],
+            ..Default::default()
+        },
+        auto_evolve: false,
+        skill_workshop: librefang_types::agent::SkillWorkshopConfig {
+            enabled: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+    let tools = kernel.available_tools(agent_id);
+    let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+
+    assert!(
+        names.contains(&"skill_evolve_create"),
+        "skill_evolve_create must survive when explicitly declared, even with evolution flags off; \
+         got: {names:?}"
+    );
+    assert!(
+        names.contains(&"memory_store"),
+        "memory_store must survive (declared, non-evolve tool); got: {names:?}"
+    );
+
+    kernel.shutdown();
 }
 
 // Regression test for the fix that reads peer_id from job_json.
