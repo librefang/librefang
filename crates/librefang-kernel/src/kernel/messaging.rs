@@ -2563,6 +2563,23 @@ impl LibreFangKernel {
                     serde_json::Value::String(ctx.display_name.clone()),
                 );
             }
+            // houko #5311 finding 6: stamp the inbound `account_id` so
+            // the agent loop's rate-limit owner-notify path can resolve
+            // the correct sidecar in `{channel}:{account_id}`-keyed
+            // multi-bot deployments. Without this the dispatch falls
+            // through `account_id=None`, the `channel_sender` registry
+            // returns "Channel 'telegram' not found." on any account-
+            // qualified adapter, and the silent-drop regression
+            // resurfaces on exactly the deployments most likely to
+            // share a single OAuth-Max quota across multiple bots.
+            if let Some(aid) = ctx.account_id.as_deref() {
+                if !aid.is_empty() {
+                    manifest.metadata.insert(
+                        "account_id".to_string(),
+                        serde_json::Value::String(aid.to_string()),
+                    );
+                }
+            }
         }
 
         let memory = Arc::clone(&self.memory.substrate);

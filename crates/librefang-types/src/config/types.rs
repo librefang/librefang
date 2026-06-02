@@ -3636,6 +3636,15 @@ pub struct KernelConfig {
     /// provider is rate-limited or quota-exhausted.
     #[serde(default)]
     pub background: BackgroundConfig,
+    /// System-wide knobs (e.g. operator timezone) consumed by user-facing
+    /// timestamp formatting. See [`SystemConfig`].
+    #[serde(default)]
+    pub system: SystemConfig,
+    /// Default rate-limit owner-notification config applied to every agent
+    /// that does not override it in its manifest. See
+    /// [`RateLimitNotifyConfig`].
+    #[serde(default)]
+    pub rate_limit_notify: RateLimitNotifyConfig,
 }
 
 /// Input sanitization mode for channel messages.
@@ -5119,6 +5128,72 @@ impl Default for BackgroundConfig {
     }
 }
 
+/// System-wide knobs that are not provider-, agent-, or feature-specific.
+///
+/// Currently a single field — the operator's preferred IANA timezone — used
+/// by user-facing timestamp formatting (rate-limit owner notifications,
+/// scheduled-task labels, etc.). Defaults to UTC when unset or unparseable.
+///
+/// ```toml
+/// [system]
+/// timezone = "Europe/Rome"
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct SystemConfig {
+    /// IANA timezone name (e.g. `"Europe/Rome"`, `"America/New_York"`).
+    /// Defaults to UTC when unset or unparseable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+}
+
+/// Configuration for the rate-limit owner-notification feature (issue raised
+/// 2026-05-20: silent failure when Claude Code CLI exhausts its OAuth-Max
+/// 5-hour cap, leaving the owner with no chat-level signal of why the agent
+/// has gone quiet).
+///
+/// The kernel resolves the active config by walking
+/// `AgentManifest.rate_limit_notify` first (per-agent override), then
+/// `KernelConfig.rate_limit_notify` (deployment-wide default), then the
+/// hardcoded fallback in `librefang_runtime::rate_limit_notify`.
+///
+/// ```toml
+/// # config.toml — applies to every agent unless overridden:
+/// [rate_limit_notify]
+/// enabled = true
+/// template = "⏸️ Limite Claude raggiunto. Reset alle {reset_time}. Ti rispondo dopo."
+/// ```
+///
+/// ```toml
+/// # agent.toml — per-agent override:
+/// [rate_limit_notify]
+/// enabled = true
+/// template = "Signore, il maggiordomo è in permesso fino alle {reset_time} ({reset_in_minutes} min). 🎩"
+/// ```
+///
+/// Placeholders supported by `render_rate_limit_template`:
+/// - `{reset_time}` — `HH:MM` in the configured timezone
+/// - `{reset_time_full}` — `YYYY-MM-DD HH:MM:SS TZ`
+/// - `{reset_in_minutes}` — integer minutes from now to reset, floored
+/// - `{reset_tz}` — IANA tz name actually used (after fallback)
+/// - `{agent_name}` — manifest name
+///
+/// Unknown placeholders are left as the literal `{foo}` so a template typo
+/// surfaces visibly to the user instead of being silently elided.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct RateLimitNotifyConfig {
+    /// When `false` (the default), no notification is sent — the rate-limit
+    /// error propagates exactly as before. When `true`, the agent loop
+    /// renders the template and dispatches it to the channel/recipient
+    /// that originated the turn.
+    pub enabled: bool,
+    /// Optional template override. When `None`, the runtime hardcoded
+    /// fallback is used. See struct docs for the placeholder list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+}
+
 /// Registry sync configuration.
 ///
 /// Configure in config.toml:
@@ -6038,6 +6113,8 @@ impl Default for KernelConfig {
             workflow_stale_timeout_minutes: default_workflow_stale_timeout_minutes(),
             workflow_default_total_timeout_secs: None,
             background: BackgroundConfig::default(),
+            system: SystemConfig::default(),
+            rate_limit_notify: RateLimitNotifyConfig::default(),
         }
     }
 }

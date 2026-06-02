@@ -89,6 +89,7 @@ fn record_retry_failure(
 /// resets.
 const DEFAULT_DEFER_MS: u64 = 5 * 60 * 1000;
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_retryable_llm_error(
     attempt: u32,
     retry_after_ms: u64,
@@ -97,6 +98,7 @@ async fn handle_retryable_llm_error(
     last_error_label: &'static str,
     provider: Option<&str>,
     cooldown: Option<&ProviderCooldown>,
+    driver_message: Option<&str>,
 ) -> Result<String, LibreFangError> {
     if attempt == MAX_RETRIES {
         record_retry_failure(provider, cooldown, false);
@@ -106,8 +108,15 @@ async fn handle_retryable_llm_error(
         // Floor the hint at DEFAULT_DEFER_MS — providers that returned no
         // structured retry-after still need a usable delay.
         let defer_ms = retry_after_ms.max(DEFAULT_DEFER_MS);
+        // Also embed the driver's original message (Claude CLI's
+        // `rate_limit_event` parser includes `resets_at_unix=<ts>`),
+        // so the owner-notify layer can extract the precise reset
+        // wall-clock without re-parsing provider responses upstream.
+        let driver_tail = driver_message
+            .map(|m| format!(" | driver={m}"))
+            .unwrap_or_default();
         return Err(LibreFangError::llm_driver_msg(format!(
-            "{exhausted_message} {marker}={defer_ms}",
+            "{exhausted_message} {marker}={defer_ms}{driver_tail}",
             marker = librefang_channels::message_journal::RATE_LIMIT_DEFER_MARKER,
         )));
     }
@@ -185,7 +194,10 @@ pub(super) async fn call_with_retry(
                 record_retry_success(provider, cooldown);
                 return Ok(response);
             }
-            Err(LlmError::RateLimited { retry_after_ms, .. }) => {
+            Err(LlmError::RateLimited {
+                retry_after_ms,
+                message,
+            }) => {
                 last_error = Some(
                     handle_retryable_llm_error(
                         attempt,
@@ -195,6 +207,7 @@ pub(super) async fn call_with_retry(
                         "Rate limited",
                         provider,
                         cooldown,
+                        message.as_deref(),
                     )
                     .await?,
                 );
@@ -209,6 +222,7 @@ pub(super) async fn call_with_retry(
                         "Overloaded",
                         provider,
                         cooldown,
+                        None,
                     )
                     .await?,
                 );
@@ -367,7 +381,10 @@ pub(super) async fn stream_with_retry(
                     cascade_leak_aborted,
                 });
             }
-            Err(LlmError::RateLimited { retry_after_ms, .. }) => {
+            Err(LlmError::RateLimited {
+                retry_after_ms,
+                message,
+            }) => {
                 last_error = Some(
                     handle_retryable_llm_error(
                         attempt,
@@ -377,6 +394,7 @@ pub(super) async fn stream_with_retry(
                         "Rate limited",
                         provider,
                         cooldown,
+                        message.as_deref(),
                     )
                     .await?,
                 );
@@ -386,11 +404,12 @@ pub(super) async fn stream_with_retry(
                     handle_retryable_llm_error(
                         attempt,
                         retry_after_ms,
-                        format!("Model overloaded after {} retries", MAX_RETRIES),
+                        format!("Model overloaded (stream) after {} retries", MAX_RETRIES),
                         "Model overloaded (stream), retrying after delay",
                         "Overloaded",
                         provider,
                         cooldown,
+                        None,
                     )
                     .await?,
                 );

@@ -1046,9 +1046,48 @@ pub async fn run_agent_loop(
             k.touch_heartbeat(&agent_id_str);
         }
 
-        // Call LLM with retry, error classification, and circuit breaker
+        // Call LLM with retry, error classification, and circuit breaker.
+        // On exhausted rate-limit, dispatch an owner-side notification
+        // through the originating channel BEFORE propagating the error
+        // upward — the kernel/channel bridge otherwise drops the turn
+        // silently, leaving the user with no signal that the agent is
+        // offline until the quota window resets.
         let provider_name = manifest.model.provider.as_str();
-        let mut response = call_with_retry(&*driver, request, Some(provider_name), None).await?;
+        let mut response = match call_with_retry(&*driver, request, Some(provider_name), None).await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                if let Some(ref k) = kernel {
+                    // houko #5311 finding 2: route the notify to the chat
+                    // the original message arrived on, not to the author's
+                    // private DM. On split-channel sidecars (telegram /
+                    // slack / discord) `sender_user_id` is the author and
+                    // `sender_chat_scope` carries the chat-qualified
+                    // address adapters use as `ChannelUser.platform_id`.
+                    // Fall back to `sender_user_id` when scope is absent
+                    // (CLI, REST, gateway-collapsed channels where
+                    // platform_id == chat_id, e.g. WhatsApp).
+                    //
+                    // finding 6: pull `account_id` off manifest metadata
+                    // (stamped by `kernel::messaging` /
+                    // `kernel::agent_execution`) so the
+                    // `{channel}:{account_id}` adapter lookup hits on
+                    // multi-bot deployments.
+                    let recipient = sender_chat_scope.as_deref().or(sender_user_id.as_deref());
+                    let account_id = manifest.metadata.get("account_id").and_then(|v| v.as_str());
+                    let _ = crate::rate_limit_notify::dispatch_via_kernel(
+                        manifest,
+                        k,
+                        sender_channel.as_deref(),
+                        recipient,
+                        account_id,
+                        &e.to_string(),
+                    )
+                    .await;
+                }
+                return Err(e);
+            }
+        };
 
         accumulate_token_usage(&mut total_usage, &response.usage);
         // Track the actual-serving slot for billing attribution (#4807

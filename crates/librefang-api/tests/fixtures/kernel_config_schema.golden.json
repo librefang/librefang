@@ -106,6 +106,11 @@
           "description": "Auto-approve in autonomous mode. Default: `false`.",
           "type": "boolean"
         },
+        "cache_approvals_per_session": {
+          "default": true,
+          "description": "Cache approvals within a chat session (#5600).\n\nWhen `true` (the default), the first time a user approves a tool inside a session, subsequent calls of the same tool name in that session auto-approve without re-prompting. This matches typical IDE / MCP-client behaviour (one approval per (session, tool) is enough). Set to `false` to require per-call approval — useful for compliance environments that need an explicit human decision on every tool execution.\n\nScope: in-memory only. Daemon restart clears the cache. The cache keys on `(session_id, tool_name)`; different sessions still each see one prompt per distinct tool.",
+          "type": "boolean"
+        },
         "channel_rules": {
           "default": [],
           "description": "Per-channel tool authorization rules.\n\nEach rule specifies allowed and/or denied tools for a specific channel. Rules are evaluated in order; the first matching rule wins.  If no rule matches the request's channel, the default `require_approval` list applies.",
@@ -820,7 +825,7 @@
       "type": "object"
     },
     "ChannelsConfig": {
-      "description": "Channel bridge configuration.\n\nEach field uses `OneOrMany<T>` to support both single-instance (`[channels.slack]`) and multi-instance (`[[channels.slack]]`) TOML syntax for multi-bot routing.",
+      "description": "Channel bridge configuration.\n\nEvery channel runs as a sidecar (`[[sidecar_channels]]` — see [`SidecarChannelConfig`]); the per-vendor in-process fields that used to live here (`telegram`, `slack`, `whatsapp`, …, each typed `OneOrMany<*Config>`) are gone. What remains are the shared file-transfer caps + download dir that every channel honours.",
       "properties": {
         "file_download_dir": {
           "default": null,
@@ -3848,6 +3853,24 @@
       },
       "type": "object"
     },
+    "RateLimitNotifyConfig": {
+      "description": "Configuration for the rate-limit owner-notification feature (issue raised 2026-05-20: silent failure when Claude Code CLI exhausts its OAuth-Max 5-hour cap, leaving the owner with no chat-level signal of why the agent has gone quiet).\n\nThe kernel resolves the active config by walking `AgentManifest.rate_limit_notify` first (per-agent override), then `KernelConfig.rate_limit_notify` (deployment-wide default), then the hardcoded fallback in `librefang_runtime::rate_limit_notify`.\n\n```toml # config.toml — applies to every agent unless overridden: [rate_limit_notify] enabled = true template = \"⏸️ Limite Claude raggiunto. Reset alle {reset_time}. Ti rispondo dopo.\" ```\n\n```toml # agent.toml — per-agent override: [rate_limit_notify] enabled = true template = \"Signore, il maggiordomo è in permesso fino alle {reset_time} ({reset_in_minutes} min). 🎩\" ```\n\nPlaceholders supported by `render_rate_limit_template`: - `{reset_time}` — `HH:MM` in the configured timezone - `{reset_time_full}` — `YYYY-MM-DD HH:MM:SS TZ` - `{reset_in_minutes}` — integer minutes from now to reset, floored - `{reset_tz}` — IANA tz name actually used (after fallback) - `{agent_name}` — manifest name\n\nUnknown placeholders are left as the literal `{foo}` so a template typo surfaces visibly to the user instead of being silently elided.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "When `false` (the default), no notification is sent — the rate-limit error propagates exactly as before. When `true`, the agent loop renders the template and dispatches it to the channel/recipient that originated the turn.",
+          "type": "boolean"
+        },
+        "template": {
+          "description": "Optional template override. When `None`, the runtime hardcoded fallback is used. See struct docs for the placeholder list.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "RegistryConfig": {
       "description": "Registry sync configuration.\n\nConfigure in config.toml: ```toml [registry] cache_ttl_secs = 86400 # Optional: proxy/mirror prefix for users behind the GFW. # All GitHub URLs are prefixed with this value, e.g. #   registry_mirror = \"https://ghproxy.cn\" # turns \"https://github.com/...\" into \"https://ghproxy.cn/https://github.com/...\" registry_mirror = \"\" ```",
       "properties": {
@@ -4554,6 +4577,19 @@
         "workdir": {
           "description": "Optional working directory on the remote host. Empty = remote `$HOME`.",
           "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "SystemConfig": {
+      "description": "System-wide knobs that are not provider-, agent-, or feature-specific.\n\nCurrently a single field — the operator's preferred IANA timezone — used by user-facing timestamp formatting (rate-limit owner notifications, scheduled-task labels, etc.). Defaults to UTC when unset or unparseable.\n\n```toml [system] timezone = \"Europe/Rome\" ```",
+      "properties": {
+        "timezone": {
+          "description": "IANA timezone name (e.g. `\"Europe/Rome\"`, `\"America/New_York\"`). Defaults to UTC when unset or unparseable.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "type": "object"
@@ -5786,6 +5822,7 @@
         "audit_retention_days": 90,
         "auto_approve": false,
         "auto_approve_autonomous": false,
+        "cache_approvals_per_session": true,
         "channel_rules": [],
         "require_approval": [
           "shell_exec",
@@ -6274,6 +6311,11 @@
       },
       "description": "External authentication provider configuration (OAuth2/OIDC)."
     },
+    "external_auth_proxy": {
+      "default": false,
+      "description": "Acknowledges that the daemon is fronted by an external auth proxy (e.g. nginx `auth_request`, Cloudflare Access, a corporate IAM SSO sidecar) so the dashboard-reads allowlist can legitimately be left open.\n\nThis flag exists because the `require_auth_for_reads = Some(false)` escape hatch is otherwise indistinguishable from a config typo: an operator who flipped it without an external proxy in front exposed `/api/agents`, `/api/sessions`, `/api/providers` to any unauthenticated reader on non-loopback binds. Per audit `require-auth-for-reads-false-leak`, the resolver now refuses to honour `Some(false)` UNLESS this flag is also set — defence in depth against a single-line config mistake.\n\nBoot also emits a warning when `bind` is non-loopback and this flag is `false`, regardless of `require_auth_for_reads`, so an operator running open-on-LAN sees the posture mismatch even if they meant to. Defaults to `false` (no external proxy assumed); set to `true` only when the proxy in front is known-good.",
+      "type": "boolean"
+    },
     "fallback_providers": {
       "description": "Fallback providers tried in order if the primary fails. Configure in config.toml as `[[fallback_providers]]`.",
       "items": {
@@ -6417,7 +6459,7 @@
       "type": "integer"
     },
     "max_history_messages": {
-      "description": "Operator override for the agent message-history trim cap. When set, any agent without its own `max_history_messages` uses this value instead of the compiled-in default (`agent_loop::DEFAULT_MAX_HISTORY_MESSAGES`). Lower it to bound per-turn token cost; raise it for long-context models. `None` means \"use the compiled-in default\". Values below 4 are silently clamped at runtime with a warning log.",
+      "description": "Operator override for the agent message-history trim cap. When set, any agent without its own `max_history_messages` uses this value instead of the compiled-in default (`agent_loop::history::DEFAULT_MAX_HISTORY_MESSAGES`). Lower it to bound per-turn token cost; raise it for long-context models. `None` means \"use the compiled-in default\". Runtime clamps values below 4 up to the safe-trim floor and values above 500 down to the hard ceiling, emitting a `warn!` log with `agent`, `requested`, and `applied`.",
       "format": "uint",
       "minimum": 0.0,
       "type": [
@@ -6787,6 +6829,17 @@
       },
       "description": "API and WebSocket rate limiting configuration."
     },
+    "rate_limit_notify": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/RateLimitNotifyConfig"
+        }
+      ],
+      "default": {
+        "enabled": false
+      },
+      "description": "Default rate-limit owner-notification config applied to every agent that does not override it in its manifest. See [`RateLimitNotifyConfig`]."
+    },
     "registry": {
       "allOf": [
         {
@@ -6893,6 +6946,15 @@
       "default": false,
       "description": "Strict config mode: when `true`, the daemon refuses to start if the config file contains unknown or unrecognised fields. When `false` (the default), unknown fields are logged as warnings but the daemon boots normally. This is the \"tolerant mode\" toggle.",
       "type": "boolean"
+    },
+    "system": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/SystemConfig"
+        }
+      ],
+      "default": {},
+      "description": "System-wide knobs (e.g. operator timezone) consumed by user-facing timestamp formatting. See [`SystemConfig`]."
     },
     "taint_rules": {
       "description": "Reusable named taint rule sets referenced by [`McpTaintToolPolicy::rule_sets`]. Each entry defines a group of taint rules with a severity action (block / warn / log) that the MCP scanner applies to every tool that opts in.\n\n**Hot-reload caveat:** the kernel snapshots this list onto each connected MCP server at install / reload time. Edits to `[[taint_rules]]` followed by a config reload do NOT propagate to already-connected MCP servers until the server itself is reloaded (e.g. via `reload_mcp_server_config` or a daemon restart). The snapshot keeps the scanner's view stable for the lifetime of a single tool call.",

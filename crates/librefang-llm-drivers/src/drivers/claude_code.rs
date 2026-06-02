@@ -794,6 +794,29 @@ struct ClaudeUsage {
     output_tokens: u64,
 }
 
+/// Rate-limit metadata embedded in `rate_limit_event` lines of the Claude CLI's
+/// streaming JSON output. Captured so the driver can surface a precise
+/// `resets_at` to the agent loop's owner-notify path (see
+/// `crates/librefang-runtime/src/rate_limit_notify.rs`).
+///
+/// Sample (CLI 2.1.145, account near 5-hour OAuth-Max cap):
+/// ```json
+/// {"type":"rate_limit_event","rate_limit_info":{"status":"allowed",
+///  "resetsAt":1779282600,"rateLimitType":"five_hour",...}}
+/// ```
+#[derive(Debug, Deserialize, Default, Clone)]
+struct RateLimitInfo {
+    /// CLI-reported state: `"allowed"`, `"blocked"`, `"throttled"`, …
+    #[serde(default)]
+    status: String,
+    /// Unix-seconds timestamp at which the rate-limit window resets.
+    #[serde(default, rename = "resetsAt")]
+    resets_at: Option<i64>,
+    /// CLI-reported window type: `"five_hour"`, `"weekly"`, …
+    #[serde(default, rename = "rateLimitType")]
+    rate_limit_type: Option<String>,
+}
+
 /// Stream JSON event from `claude -p --output-format stream-json`.
 #[derive(Debug, Deserialize)]
 struct ClaudeStreamEvent {
@@ -808,6 +831,46 @@ struct ClaudeStreamEvent {
     /// The CLI sets this when the result is an error (auth failure, etc.).
     #[serde(default)]
     is_error: bool,
+    /// Present only on `type = "rate_limit_event"` lines. Captured by the
+    /// stream loop and replayed on non-success exit so the owner-notify
+    /// helper can render a precise `{reset_time}`.
+    #[serde(default)]
+    rate_limit_info: Option<RateLimitInfo>,
+}
+
+/// Build a rich `RateLimited` message that downstream consumers
+/// (`librefang_runtime::rate_limit_notify::parse_rate_limit_message`) can
+/// parse to recover the precise reset timestamp. The format is intentionally
+/// machine-readable while still being human-readable in logs.
+///
+/// When the CLI did not report a concrete `resetsAt` we emit the human
+/// "Resets at unix unknown" string but **omit** the machine-readable
+/// `resets_at_unix=` token entirely. Emitting `resets_at_unix=0` would be
+/// parsed by `rate_limit_notify::parse_rate_limit_message` as a literal
+/// 1970-01-01 reset, which the owner-notify template would then render as
+/// "Reset alle 00:00" with a 56-year-old timestamp (houko #5311 finding 8).
+fn build_rate_limit_message(info: Option<&RateLimitInfo>, fallback_text: &str) -> String {
+    let kind = info
+        .and_then(|i| i.rate_limit_type.as_deref())
+        .unwrap_or("unknown");
+    let resets_at_opt = info.and_then(|i| i.resets_at);
+    let resets_at_display = resets_at_opt
+        .map(|ts| ts.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let iso = resets_at_opt
+        .and_then(|ts| chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0))
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_else(|| "unknown".to_string());
+    let machine_marker = match resets_at_opt {
+        Some(ts) => format!("resets_at_unix={ts} "),
+        None => String::new(),
+    };
+    format!(
+        "Claude Code rate limit ({kind}). Resets at unix {resets_at_display} (UTC ISO {iso}). \
+         {machine_marker}rate_limit_type={kind} | {fallback_text}"
+    )
+    .trim()
+    .to_string()
 }
 
 /// Check if CLI response text looks like an auth or rate-limit error that
@@ -1258,6 +1321,13 @@ impl LlmDriver for ClaudeCodeDriver {
         // Track last known activity for timeout diagnostics
         let mut last_activity = "starting".to_string();
 
+        // Capture the most recent `rate_limit_event` line so that, on
+        // non-success CLI exit, we can surface a structured `RateLimited`
+        // error to the agent loop's owner-notify helper. The CLI emits this
+        // event whether or not the quota is exhausted; we only act on it
+        // when the subprocess later exits with an error.
+        let mut last_rate_limit_info: Option<RateLimitInfo> = None;
+
         // Progressive inactivity timeout with three escalation levels:
         //   1. warn  (20% of timeout) — log warning, internal only
         //   2. notify (40% of timeout) — send "still working..." to user
@@ -1356,6 +1426,21 @@ impl LlmDriver for ClaudeCodeDriver {
                                     .unwrap_or_else(|| format!("event: {etype}"));
                             } else if !etype.is_empty() {
                                 last_activity = format!("event: {etype}");
+                            }
+
+                            // Capture rate-limit metadata regardless of which
+                            // arm services the event — we may need it later
+                            // when the subprocess exits non-zero.
+                            if etype == "rate_limit_event" {
+                                if let Some(info) = event.rate_limit_info.clone() {
+                                    debug!(
+                                        status = %info.status,
+                                        rate_limit_type = ?info.rate_limit_type,
+                                        resets_at = ?info.resets_at,
+                                        "Captured rate_limit_event from Claude CLI stream"
+                                    );
+                                    last_rate_limit_info = Some(info);
+                                }
                             }
 
                             match etype {
@@ -1520,6 +1605,49 @@ impl LlmDriver for ClaudeCodeDriver {
                 stderr = %stderr_text,
                 "Claude Code CLI streaming subprocess exited with error"
             );
+            // If the stream captured a `rate_limit_event` whose status
+            // marks the quota as actually blocked/throttled, prefer that
+            // over the text-pattern heuristic — it gives the owner-notify
+            // path a real wall-clock reset to render. The CLI emits
+            // `status="allowed"` on healthy events too (see
+            // `SAMPLE_RATE_LIMIT_EVENT`), so gating purely on
+            // `resets_at.is_some()` would misclassify any subsequent
+            // unrelated non-success exit (network drop, subprocess crash,
+            // transient CLI bug) on the same session as "rate-limited" —
+            // pinging the owner with a fabricated reset they'd wait
+            // against (houko #5311 finding 1). We require both an
+            // explicit blocked/throttled status AND a concrete reset
+            // timestamp before classifying as RateLimited.
+            let throttled_status = last_rate_limit_info
+                .as_ref()
+                .map(|i| {
+                    let s = i.status.to_ascii_lowercase();
+                    s == "blocked" || s == "throttled" || s == "exhausted"
+                })
+                .unwrap_or(false);
+            if throttled_status
+                && last_rate_limit_info
+                    .as_ref()
+                    .and_then(|i| i.resets_at)
+                    .is_some()
+            {
+                let info = last_rate_limit_info.as_ref();
+                let now_ms = chrono::Utc::now().timestamp_millis();
+                let retry_after_ms = match info.and_then(|i| i.resets_at) {
+                    Some(ts) => ((ts.saturating_mul(1000)) - now_ms).max(0) as u64,
+                    None => 5 * 60 * 1000,
+                };
+                let message = build_rate_limit_message(info, &detail);
+                warn!(
+                    exit_code = code,
+                    retry_after_ms = retry_after_ms,
+                    "Treating CLI exit as rate-limited (structured rate_limit_event)"
+                );
+                return Err(LlmError::RateLimited {
+                    retry_after_ms,
+                    message: Some(message),
+                });
+            }
             // Detect rate-limit and auth error messages so token rotation can
             // kick in.  Use the shared helper first; fall back to the
             // empty-output heuristic for exit-code 1.
@@ -1528,6 +1656,20 @@ impl LlmDriver for ClaudeCodeDriver {
                     exit_code = code,
                     "Treating CLI exit as rotatable error for profile rotation"
                 );
+                // Enrich the rate-limit text with a uniform machine-readable
+                // header so the owner-notify helper can fall back to the
+                // text path without losing the `kind` label.
+                if let LlmError::RateLimited {
+                    retry_after_ms,
+                    message: _,
+                } = &err
+                {
+                    let enriched = build_rate_limit_message(None, &detail);
+                    return Err(LlmError::RateLimited {
+                        retry_after_ms: *retry_after_ms,
+                        message: Some(enriched),
+                    });
+                }
                 return Err(err);
             }
             // Do NOT assume empty exit-code-1 is rate-limit — it could be
@@ -1631,6 +1773,94 @@ fn home_dir() -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Production sample from CLI 2.1.145 against an account near its
+    /// five-hour OAuth-Max cap. The `status` is "allowed" here because the
+    /// CLI emits the same event shape both when the window resets and when
+    /// it blocks — the driver still captures it so a *later* non-success
+    /// exit can be enriched with the precise `resetsAt`.
+    const SAMPLE_RATE_LIMIT_EVENT: &str = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1779282600,"rateLimitType":"five_hour","overageStatus":"rejected","overageDisabledReason":"org_level_disabled","isUsingOverage":false},"uuid":"5785f6cb-67b4-4484-a118-443309bc8832","session_id":"52d549dc-17be-4486-8dc6-cebcb221cc1d"}"#;
+
+    #[test]
+    fn rate_limit_event_with_resets_at_parses() {
+        let event: ClaudeStreamEvent = serde_json::from_str(SAMPLE_RATE_LIMIT_EVENT)
+            .expect("production rate_limit_event sample must deserialize");
+        assert_eq!(event.r#type, "rate_limit_event");
+        let info = event
+            .rate_limit_info
+            .expect("rate_limit_info must be populated for this sample");
+        assert_eq!(info.status, "allowed");
+        assert_eq!(info.resets_at, Some(1_779_282_600));
+        assert_eq!(info.rate_limit_type.as_deref(), Some("five_hour"));
+    }
+
+    #[test]
+    fn rate_limit_event_without_info_parses() {
+        let event: ClaudeStreamEvent = serde_json::from_str(r#"{"type":"rate_limit_event"}"#)
+            .expect("type-only rate_limit_event must still deserialize");
+        assert_eq!(event.r#type, "rate_limit_event");
+        assert!(event.rate_limit_info.is_none());
+    }
+
+    #[test]
+    fn non_rate_limit_event_does_not_populate() {
+        let event: ClaudeStreamEvent =
+            serde_json::from_str(r#"{"type":"assistant","content":"hi"}"#)
+                .expect("assistant event must deserialize");
+        assert_eq!(event.r#type, "assistant");
+        assert_eq!(event.content.as_deref(), Some("hi"));
+        assert!(event.rate_limit_info.is_none());
+    }
+
+    #[test]
+    fn build_rate_limit_message_embeds_machine_readable_fields() {
+        let info = RateLimitInfo {
+            status: "blocked".to_string(),
+            resets_at: Some(1_779_282_600),
+            rate_limit_type: Some("five_hour".to_string()),
+        };
+        let msg = build_rate_limit_message(Some(&info), "stderr=hit limit");
+        assert!(
+            msg.contains("resets_at_unix=1779282600"),
+            "expected machine-readable resets_at_unix in {msg:?}"
+        );
+        assert!(
+            msg.contains("rate_limit_type=five_hour"),
+            "expected machine-readable rate_limit_type in {msg:?}"
+        );
+        assert!(
+            msg.contains("UTC ISO"),
+            "expected human ISO marker in {msg:?}"
+        );
+    }
+
+    #[test]
+    fn build_rate_limit_message_omits_zero_marker_when_resets_at_missing() {
+        // houko #5311 finding 8: when the CLI exit does not embed a concrete
+        // `resetsAt` we must NOT emit `resets_at_unix=0` — downstream
+        // `parse_rate_limit_message` would happily parse `0` and render
+        // "Reset alle 00:00 / 1970-01-01 UTC" at the owner.
+        let info = RateLimitInfo {
+            status: "blocked".to_string(),
+            resets_at: None,
+            rate_limit_type: Some("five_hour".to_string()),
+        };
+        let msg = build_rate_limit_message(Some(&info), "stderr=ambiguous");
+        assert!(
+            !msg.contains("resets_at_unix="),
+            "must omit machine marker when resets_at is None, got {msg:?}"
+        );
+        assert!(
+            msg.contains("Resets at unix unknown"),
+            "expected human 'unknown' marker in {msg:?}"
+        );
+        // No info at all → same property.
+        let none_msg = build_rate_limit_message(None, "stderr=ambiguous");
+        assert!(
+            !none_msg.contains("resets_at_unix="),
+            "must omit machine marker when info is None, got {none_msg:?}"
+        );
+    }
 
     /// Spawn a tiny cross-platform child process for the
     /// `diagnose_stdin_write_failure` tests. POSIX runners can rely on

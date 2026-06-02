@@ -1279,6 +1279,23 @@ pub trait ToolPolicy: Send + Sync {
         None
     }
 
+    /// Kernel-global default for the rate-limit owner-notification feature
+    /// (see `librefang_runtime::rate_limit_notify`). The agent loop's
+    /// notify path consults this *after* the per-agent override in the
+    /// manifest. Default impl returns `None` (notifications disabled);
+    /// real kernels override to pull from `KernelConfig.rate_limit_notify`.
+    fn rate_limit_notify_config(&self) -> Option<librefang_types::config::RateLimitNotifyConfig> {
+        None
+    }
+
+    /// Operator-configured IANA timezone for user-facing timestamp
+    /// rendering (rate-limit notifications, scheduled-task labels). `None`
+    /// = UTC. Real kernels override to pull from
+    /// `KernelConfig.system.timezone`.
+    fn system_timezone(&self) -> Option<String> {
+        None
+    }
+
     /// Return the canonicalized absolute paths of named workspaces declared as `read-only`
     /// for the given agent. Used by file-write tools to enforce workspace access modes.
     /// Default: no read-only prefixes (all writes allowed by the sandbox).

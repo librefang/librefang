@@ -738,6 +738,30 @@ pub async fn run_agent_loop_streaming(
             Ok(r) => r,
             Err(e) => {
                 let err_str = e.to_string();
+                // Dispatch the rate-limit owner notification BEFORE
+                // injecting the timeout/error note into the session.
+                // Mirrors the non-streaming `mod.rs` call site: the
+                // channel ping must land regardless of how the kernel
+                // post-processes the failed turn.
+                if let Some(ref k) = kernel {
+                    // houko #5311 findings 2 + 6: prefer the
+                    // chat-qualified scope as recipient (group chats on
+                    // split-channel sidecars), and thread the inbound
+                    // `account_id` for multi-bot deployments. See the
+                    // mirror call site in `agent_loop::run_agent_loop`
+                    // for the full rationale.
+                    let recipient = sender_chat_scope.as_deref().or(sender_user_id.as_deref());
+                    let account_id = manifest.metadata.get("account_id").and_then(|v| v.as_str());
+                    let _ = crate::rate_limit_notify::dispatch_via_kernel(
+                        manifest,
+                        k,
+                        sender_channel.as_deref(),
+                        recipient,
+                        account_id,
+                        &err_str,
+                    )
+                    .await;
+                }
                 if err_str.contains("timed out") {
                     // Extract last_activity from error if present (format: "last: <activity>")
                     let activity = err_str
