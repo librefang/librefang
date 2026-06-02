@@ -16,6 +16,12 @@ pub(crate) use crate::cli::*;
 pub(crate) use crate::install_ctrlc_handler;
 pub(crate) use super::common::*;
 
+// Command groups — re-exported so the dispatch match in `main.rs` and any
+// cross-group handler call resolves without per-call-site imports.
+pub(crate) use super::daemon::*;
+pub(crate) use super::init::*;
+pub(crate) use super::status::*;
+
 pub(crate) use colored::Colorize;
 pub(crate) use librefang_api::server::read_daemon_info;
 pub(crate) use librefang_extensions::dotenv;

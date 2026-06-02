@@ -8,3 +8,6 @@
 pub(crate) mod prelude;
 
 pub(crate) mod common;
+pub(crate) mod daemon;
+pub(crate) mod status;
+pub(crate) mod init;
