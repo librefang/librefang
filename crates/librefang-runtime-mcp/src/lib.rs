@@ -5107,8 +5107,7 @@ mod tests {
 
         let mut params = rmcp::model::CallToolRequestParams::new("some_tool");
         params.arguments = Some(strip_caller_from_arguments(&agent_payload));
-        let v = caller_context_meta_value(&kernel_caller)
-            .expect("CallerContext must serialise");
+        let v = caller_context_meta_value(&kernel_caller).expect("CallerContext must serialise");
         let mut meta = rmcp::model::Meta::new();
         meta.insert(CALLER_CONTEXT_META_KEY.to_string(), v);
         params.meta = Some(meta);
@@ -5120,7 +5119,10 @@ mod tests {
             !args.contains_key(CALLER_CONTEXT_ARG_KEY),
             "arguments must not carry the caller key"
         );
-        assert_eq!(args.get("user_id").and_then(|v| v.as_str()), Some("<user-A>"));
+        assert_eq!(
+            args.get("user_id").and_then(|v| v.as_str()),
+            Some("<user-A>")
+        );
 
         // (b) the kernel caller appears under `_meta` with the namespaced key,
         //     and serialises into the `_meta` field of the request.
@@ -5156,20 +5158,21 @@ mod tests {
             ..Default::default()
         };
 
-        let wire_args =
-            serde_json::Value::Object(strip_caller_from_arguments(&agent_payload));
+        let wire_args = serde_json::Value::Object(strip_caller_from_arguments(&agent_payload));
         let mut params = serde_json::json!({
             "name": "some_tool",
             "arguments": wire_args,
         });
-        let v = caller_context_meta_value(&kernel_caller)
-            .expect("CallerContext must serialise");
+        let v = caller_context_meta_value(&kernel_caller).expect("CallerContext must serialise");
         params["_meta"] = serde_json::json!({ (CALLER_CONTEXT_META_KEY): v });
 
         // arguments stripped of the caller key.
         let args = params.get("arguments").unwrap();
         assert!(args.get(CALLER_CONTEXT_ARG_KEY).is_none());
-        assert_eq!(args.get("user_id").and_then(|v| v.as_str()), Some("<user-A>"));
+        assert_eq!(
+            args.get("user_id").and_then(|v| v.as_str()),
+            Some("<user-A>")
+        );
 
         // caller present under the top-level `_meta`.
         let meta_caller = params
