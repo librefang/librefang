@@ -255,6 +255,45 @@ impl LibreFangKernel {
 
     /// Execute the default LLM-based agent loop.
     #[allow(clippy::too_many_arguments)]
+    /// Pre-dispatch per-provider budget gate (#5980, restoring #4807's
+    /// intended design).
+    ///
+    /// Evaluates the operator-set `[budget.providers.<id>]` cap for
+    /// `provider` against the rolling-window usage *before* the LLM call is
+    /// dispatched. This does NOT hard-error the call — #4807 deliberately
+    /// removed the synchronous `QuotaExceeded` pre-dispatch gate so the LLM
+    /// fallback chain can still route to a healthy provider. Instead we let
+    /// `MeteringEngine::check_provider_budget` run purely for its side
+    /// effect: when the cap is breached it flags the provider as
+    /// `BudgetExceeded` in the shared `ProviderExhaustionStore`. The
+    /// `FallbackDriver` / `FallbackChain` then `record_skip`s that slot on
+    /// dispatch and fails over to the next provider, so the rolling counter
+    /// cannot run multiples past the cap (the previous bug: the only
+    /// enforcement was post-call `check_all_and_record`, which recorded the
+    /// usage row anyway and never flagged the store).
+    ///
+    /// A zero cap is "unlimited" and short-circuits inside
+    /// `check_provider_budget`, so this is a cheap no-op for the common
+    /// unconfigured case. The returned `Err(QuotaExceeded)` is intentionally
+    /// swallowed: the store flag is the load-bearing output, not the error.
+    pub(crate) fn flag_provider_budget_if_exhausted(&self, provider: &str) {
+        if provider.is_empty() {
+            return;
+        }
+        let budget = self.current_budget();
+        let Some(provider_budget) = budget.providers.get(provider) else {
+            return;
+        };
+        // Side effect only: flags the shared `ProviderExhaustionStore` when
+        // the cap is already crossed. We deliberately ignore the returned
+        // `Err(QuotaExceeded)` — re-adding a hard pre-call error would
+        // regress #4807.
+        let _ = self
+            .metering
+            .engine
+            .check_provider_budget(provider, provider_budget);
+    }
+
     #[instrument(
         skip_all,
         fields(
@@ -906,6 +945,14 @@ impl LibreFangKernel {
                 }
             }
         }
+
+        // #5980: pre-dispatch per-provider budget gate. The provider name is
+        // now finalized (model routing + key-availability fallback above), so
+        // flag the shared `ProviderExhaustionStore` if this provider's
+        // operator cap is already crossed. The `FallbackDriver` built by
+        // `resolve_driver` reads the same store and skips the exhausted slot,
+        // failing over to a healthy provider instead of spending past the cap.
+        self.flag_provider_budget_if_exhausted(&manifest.model.provider);
 
         let driver = self.resolve_driver(&manifest)?;
 

@@ -573,6 +573,13 @@ impl LibreFangKernel {
                 librefang_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
         }
 
+        // #5980: pre-dispatch per-provider budget gate on the ephemeral
+        // (`/btw`) path too. Flags the shared `ProviderExhaustionStore` when
+        // this provider's operator cap is already crossed so the
+        // `FallbackDriver` skips the exhausted slot instead of spending past
+        // the cap. Side effect only — no hard pre-call error (#4807).
+        self.flag_provider_budget_if_exhausted(&manifest.model.provider);
+
         let driver = self.resolve_driver(&manifest)?;
 
         let ctx_window = Some(self.llm.model_catalog.load()).and_then(|cat| {
@@ -2262,6 +2269,13 @@ impl LibreFangKernel {
         // `LoopOptions::allowed_tools` in agent_loop instead. Before the
         // forkedAgent migration this was filtered here by matching on
         // `sender_context.channel == AUTO_DREAM_CHANNEL`.
+        //
+        // #5980: pre-dispatch per-provider budget gate on the streaming path
+        // too. Flags the shared `ProviderExhaustionStore` when this provider's
+        // operator cap is already crossed so the `FallbackDriver` skips the
+        // exhausted slot. Side effect only — no hard pre-call error (#4807).
+        self.flag_provider_budget_if_exhausted(&entry.manifest.model.provider);
+
         let driver = self.resolve_driver(&entry.manifest)?;
 
         // Look up model's actual context window from the catalog. Filter out
