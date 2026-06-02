@@ -82,9 +82,11 @@ pub(super) fn tool_memory_recall(
     // kills the turn and discards the user's actual request — so we never let
     // an optional read produce a hard failure.
     let Some(key) = input["key"].as_str() else {
-        return Ok("memory_recall needs a 'key' (the exact storage key to look \
+        return Ok(
+            "memory_recall needs a 'key' (the exact storage key to look \
                    up). Call memory_list to see the available keys."
-            .to_string());
+                .to_string(),
+        );
     };
     if let Err(reason) = enforce_memory_acl(
         kernel,
@@ -147,7 +149,9 @@ pub(super) fn tool_memory_list(
         Err(e) => {
             let e = e.to_string();
             tracing::warn!(error = %e, "memory_list backend error — continuing without it");
-            return Ok(format!("Could not list memory: {e}. Continuing without it."));
+            return Ok(format!(
+                "Could not list memory: {e}. Continuing without it."
+            ));
         }
     };
     if keys.is_empty() {
