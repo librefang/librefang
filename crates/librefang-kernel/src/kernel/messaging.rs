@@ -1579,7 +1579,7 @@ impl LibreFangKernel {
     /// that don't identify a sender, but a silent privacy leak for channel
     /// traffic. The HTTP `/message/stream` handler must build this from
     /// the request body (see `request_sender_context` in
-    /// `crates/librefang-api/src/routes/agents.rs`).
+    /// `crates/librefang-api/src/routes/agents/mod.rs`).
     pub async fn send_message_streaming_with_incognito(
         self: &Arc<Self>,
         agent_id: AgentId,
