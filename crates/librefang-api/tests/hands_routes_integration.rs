@@ -1055,9 +1055,16 @@ async fn marketplace_install_rejects_bundle_redirect_to_metadata_ip() {
     let (_, list) = get_json(&h.app, "/api/hands").await;
     let found = list["items"]
         .as_array()
-        .map(|items| items.iter().any(|d| d["id"].as_str() == Some("remote-uptime")))
+        .map(|items| {
+            items
+                .iter()
+                .any(|d| d["id"].as_str() == Some("remote-uptime"))
+        })
         .unwrap_or(false);
-    assert!(!found, "a rejected redirect install must not register the hand: {list}");
+    assert!(
+        !found,
+        "a rejected redirect install must not register the hand: {list}"
+    );
 
     server.abort();
 }
