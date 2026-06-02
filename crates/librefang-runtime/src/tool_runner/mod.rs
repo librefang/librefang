@@ -225,11 +225,21 @@ pub(super) fn enforce_memory_acl(
     match gate {
         librefang_memory::namespace_acl::NamespaceGate::Allow => Ok(()),
         librefang_memory::namespace_acl::NamespaceGate::Deny(reason) => Err(format!(
-            "Access denied: your user policy does not permit this memory operation \
-             on namespace '{namespace}' ({reason})."
+            "Access denied: {MEMORY_ACL_DENY_MARKER} on namespace '{namespace}' ({reason})."
         )),
     }
 }
+
+/// Stable substring of the [`enforce_memory_acl`] denial message. The loop
+/// guard's soft-error classifier (`agent_loop::message::is_soft_error_content`)
+/// matches on this so a per-user ACL denial — which is permanent and
+/// non-fatal — is reported to the model as a tool error but does NOT count
+/// toward the consecutive-hard-failure abort (`MAX_CONSECUTIVE_ALL_FAILED`).
+/// Without this, an agent prompted to recall memory whose policy denies the
+/// read retries the same denial into a death spiral that kills the turn.
+/// Single source of truth so the message and the matcher cannot drift.
+pub(crate) const MEMORY_ACL_DENY_MARKER: &str =
+    "your user policy does not permit this memory operation";
 
 /// Map a shared-KV peer scope to the ACL namespace string.
 ///
