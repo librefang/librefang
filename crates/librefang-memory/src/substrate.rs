@@ -1071,10 +1071,19 @@ impl MemorySubstrate {
                     // Update status to in_progress and stamp `claimed_at` so the
                     // stuck-task sweeper can TTL-reset workers that never complete.
                     let claimed_at = chrono::Utc::now().to_rfc3339();
-                    db.execute(
-                        "UPDATE task_queue SET status = 'in_progress', assigned_to = ?2, claimed_at = ?3 WHERE id = ?1",
+                    // Atomic compare-and-swap: only flip the row if it is still
+                    // 'pending'. Two concurrent claimants can both SELECT the same
+                    // pending row under SQLite's snapshot; gating the UPDATE on
+                    // status = 'pending' lets exactly one win. A 0-row result means
+                    // another claimant flipped it to in_progress between our SELECT
+                    // and this UPDATE — we lost the race and report no task claimed.
+                    let rows = db.execute(
+                        "UPDATE task_queue SET status = 'in_progress', assigned_to = ?2, claimed_at = ?3 WHERE id = ?1 AND status = 'pending'",
                         rusqlite::params![id, agent_id, claimed_at],
                     ).map_err(LibreFangError::memory)?;
+                    if rows == 0 {
+                        return Ok(None);
+                    }
 
                     Ok(Some(serde_json::json!({
                         "id": id,
@@ -1796,6 +1805,61 @@ mod tests {
         let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
         let claimed = substrate.task_claim("nobody", None).await.unwrap();
         assert!(claimed.is_none());
+    }
+
+    /// A single pending task fired at by many concurrent claimants must be
+    /// claimed exactly once (issue #5961). The pre-fix `task_claim` SELECTed a
+    /// pending row then UPDATEd it filtered only by `id`; two claimants could
+    /// both SELECT the same row under SQLite's snapshot and both UPDATE by id,
+    /// so both returned `Ok(Some(task))` — the same task claimed twice. The fix
+    /// gates the UPDATE on `status = 'pending'` (atomic compare-and-swap) and
+    /// returns `Ok(None)` when 0 rows change, so only one claimant wins.
+    ///
+    /// File-backed DB so WAL + multi-connection pool exercise real concurrent
+    /// writers; `open_in_memory` is max_size=1 and serialises on its single
+    /// connection, hiding the race. `busy_timeout=5000` (DEFAULT_CONNECTION_PRAGMAS)
+    /// makes a writer wait for the reserved lock instead of failing fast.
+    #[tokio::test]
+    async fn test_task_claim_is_single_winner_under_concurrency() {
+        use std::sync::Arc as StdArc;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("task_claim_race.db");
+        let substrate = StdArc::new(MemorySubstrate::open(&db_path, 0.1).unwrap());
+
+        // Exactly one pending task assigned to "worker".
+        substrate
+            .task_post("Race target", "Claim me exactly once", Some("worker"), None)
+            .await
+            .unwrap();
+
+        // Fire several concurrent claimants at the same agent and await all.
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let s = StdArc::clone(&substrate);
+                tokio::spawn(async move { s.task_claim("worker", Some("worker")).await })
+            })
+            .collect();
+
+        let mut claimed_count = 0;
+        let mut none_count = 0;
+        for h in handles {
+            match h.await.expect("join task").expect("task_claim Ok") {
+                Some(_) => claimed_count += 1,
+                None => none_count += 1,
+            }
+        }
+
+        assert_eq!(
+            claimed_count, 1,
+            "exactly one claimant must win the single pending task, but {} won (#5961)",
+            claimed_count,
+        );
+        assert_eq!(
+            none_count, 7,
+            "all losing claimants must observe Ok(None), but {} did (#5961)",
+            none_count,
+        );
     }
 
     /// Tasks posted with an agent *name* in assigned_to must be claimable when
