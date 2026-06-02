@@ -1055,50 +1055,66 @@ impl MemorySubstrate {
                  LIMIT 1"
             ).map_err(LibreFangError::memory)?;
 
-            let result = stmt.query_row(rusqlite::params![agent_id, agent_name], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                ))
-            });
+            // Claim the highest-priority pending task assignable to this agent.
+            // Each iteration re-SELECTs the current queue head (a fresh
+            // autocommit read snapshot) and tries to flip it via an atomic
+            // compare-and-swap. Losing the CAS to a concurrent claimant does
+            // NOT mean "no work": the lost row is now in_progress, so the next
+            // SELECT returns the following pending task and we retry instead of
+            // spuriously returning None while other claimable tasks remain. The
+            // bound caps the walk so pathological churn (claimants grabbing rows
+            // faster than we SELECT) can't spin this blocking task forever — the
+            // caller re-fires on its next invocation.
+            const MAX_CLAIM_ATTEMPTS: usize = 16;
+            for _ in 0..MAX_CLAIM_ATTEMPTS {
+                let result = stmt.query_row(rusqlite::params![agent_id, agent_name], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                });
 
-            match result {
-                Ok((id, title, description, _assigned, created_by, created_at)) => {
-                    // Update status to in_progress and stamp `claimed_at` so the
-                    // stuck-task sweeper can TTL-reset workers that never complete.
-                    let claimed_at = chrono::Utc::now().to_rfc3339();
-                    // Atomic compare-and-swap: only flip the row if it is still
-                    // 'pending'. Two concurrent claimants can both SELECT the same
-                    // pending row under SQLite's snapshot; gating the UPDATE on
-                    // status = 'pending' lets exactly one win. A 0-row result means
-                    // another claimant flipped it to in_progress between our SELECT
-                    // and this UPDATE — we lost the race and report no task claimed.
-                    let rows = db.execute(
-                        "UPDATE task_queue SET status = 'in_progress', assigned_to = ?2, claimed_at = ?3 WHERE id = ?1 AND status = 'pending'",
-                        rusqlite::params![id, agent_id, claimed_at],
-                    ).map_err(LibreFangError::memory)?;
-                    if rows == 0 {
-                        return Ok(None);
+                match result {
+                    Ok((id, title, description, _assigned, created_by, created_at)) => {
+                        // Stamp `claimed_at` so the stuck-task sweeper can
+                        // TTL-reset workers that never complete.
+                        let claimed_at = chrono::Utc::now().to_rfc3339();
+                        // Atomic compare-and-swap: only flip the row if it is
+                        // still 'pending'. A 0-row result means another claimant
+                        // won this row between our SELECT and UPDATE — loop to
+                        // try the next pending task instead of giving up.
+                        let rows = db.execute(
+                            "UPDATE task_queue SET status = 'in_progress', assigned_to = ?2, claimed_at = ?3 WHERE id = ?1 AND status = 'pending'",
+                            rusqlite::params![id, agent_id, claimed_at],
+                        ).map_err(LibreFangError::memory)?;
+                        if rows == 0 {
+                            continue;
+                        }
+
+                        return Ok(Some(serde_json::json!({
+                            "id": id,
+                            "title": title,
+                            "description": description,
+                            "status": "in_progress",
+                            "assigned_to": agent_id,
+                            "created_by": created_by,
+                            "created_at": created_at,
+                            "claimed_at": claimed_at,
+                        })));
                     }
-
-                    Ok(Some(serde_json::json!({
-                        "id": id,
-                        "title": title,
-                        "description": description,
-                        "status": "in_progress",
-                        "assigned_to": agent_id,
-                        "created_by": created_by,
-                        "created_at": created_at,
-                        "claimed_at": claimed_at,
-                    })))
+                    // No pending task assignable to this agent remains.
+                    Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+                    Err(e) => return Err(LibreFangError::memory(e)),
                 }
-                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-                Err(e) => Err(LibreFangError::memory(e)),
             }
+
+            // Exhausted the attempt budget under heavy contention without
+            // claiming a row — report no task; the caller retries next time.
+            Ok(None)
         })
         .await
         .map_err(|e| LibreFangError::Internal(e.to_string()))?
@@ -1819,7 +1835,7 @@ mod tests {
     /// writers; `open_in_memory` is max_size=1 and serialises on its single
     /// connection, hiding the race. `busy_timeout=5000` (DEFAULT_CONNECTION_PRAGMAS)
     /// makes a writer wait for the reserved lock instead of failing fast.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn test_task_claim_is_single_winner_under_concurrency() {
         use std::sync::Arc as StdArc;
 
@@ -1858,6 +1874,74 @@ mod tests {
         assert_eq!(
             none_count, 7,
             "all losing claimants must observe Ok(None), but {} did (#5961)",
+            none_count,
+        );
+    }
+
+    /// With as many pending tasks as concurrent claimants, every claimant must
+    /// walk past any lost compare-and-swap race and claim a *distinct* task —
+    /// none should spuriously return `Ok(None)` while claimable work remains
+    /// (issue #5961 review follow-up). Before the bounded retry loop, `task_claim`
+    /// tried the single queue head once and returned `Ok(None)` on a lost CAS, so
+    /// under contention a claimant could come back empty even though other pending
+    /// tasks were free. The loop now re-SELECTs the next pending task after a lost
+    /// race, so N claimants drain N pending tasks one-to-one.
+    ///
+    /// File-backed DB (WAL + multi-connection pool) for real concurrent writers,
+    /// same rationale as `test_task_claim_is_single_winner_under_concurrency`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn test_task_claim_concurrent_claimants_each_get_distinct_task() {
+        use std::collections::HashSet;
+        use std::sync::Arc as StdArc;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("task_claim_distinct.db");
+        let substrate = StdArc::new(MemorySubstrate::open(&db_path, 0.1).unwrap());
+
+        // As many pending tasks as claimants, all assignable to "worker".
+        const N: usize = 8;
+        for i in 0..N {
+            substrate
+                .task_post(&format!("task-{i}"), "claim me", Some("worker"), None)
+                .await
+                .unwrap();
+        }
+
+        // Fire N concurrent claimants; each must claim one distinct task.
+        let handles: Vec<_> = (0..N)
+            .map(|_| {
+                let s = StdArc::clone(&substrate);
+                tokio::spawn(async move { s.task_claim("worker", Some("worker")).await })
+            })
+            .collect();
+
+        let mut ids = HashSet::new();
+        let mut none_count = 0;
+        for h in handles {
+            match h.await.expect("join task").expect("task_claim Ok") {
+                Some(task) => {
+                    let id = task["id"]
+                        .as_str()
+                        .expect("claimed task has id")
+                        .to_string();
+                    assert!(
+                        ids.insert(id),
+                        "the same task was claimed by two claimants (#5961)"
+                    );
+                }
+                None => none_count += 1,
+            }
+        }
+
+        assert_eq!(
+            ids.len(),
+            N,
+            "all {N} pending tasks must be claimed distinctly, got {} (#5961)",
+            ids.len(),
+        );
+        assert_eq!(
+            none_count, 0,
+            "no claimant should return None while claimable tasks remain, but {} did (#5961)",
             none_count,
         );
     }
