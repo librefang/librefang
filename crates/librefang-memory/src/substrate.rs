@@ -1920,15 +1920,22 @@ mod tests {
         for h in handles {
             match h.await.expect("join task").expect("task_claim Ok") {
                 Some(task) => {
-                    let id = task["id"].as_str().expect("claimed task has id").to_string();
-                    assert!(ids.insert(id), "the same task was claimed by two claimants (#5961)");
+                    let id = task["id"]
+                        .as_str()
+                        .expect("claimed task has id")
+                        .to_string();
+                    assert!(
+                        ids.insert(id),
+                        "the same task was claimed by two claimants (#5961)"
+                    );
                 }
                 None => none_count += 1,
             }
         }
 
         assert_eq!(
-            ids.len(), N,
+            ids.len(),
+            N,
             "all {N} pending tasks must be claimed distinctly, got {} (#5961)",
             ids.len(),
         );
