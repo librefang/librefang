@@ -692,6 +692,7 @@ async fn test_text_tool_call_recovery_e2e() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(TextToolCallDriver::new());
@@ -776,6 +777,7 @@ async fn test_normal_flow_unaffected_by_recovery() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(NormalDriver);
@@ -842,6 +844,7 @@ async fn test_text_tool_call_recovery_streaming_e2e() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(TextToolCallDriver::new());

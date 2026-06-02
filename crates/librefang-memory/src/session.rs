@@ -98,6 +98,24 @@ pub struct Session {
     /// repair pass. `None` means the session was cold-loaded or freshly
     /// constructed and must be repaired once before skip logic can apply.
     pub last_repaired_generation: Option<u64>,
+    /// Conversation identifier (channel-specific chat id / JID) when the
+    /// session is scoped to a single contact — the WhatsApp or Telegram
+    /// `chat_id` fed into `SessionId::for_sender_scope`. This is the
+    /// *conversation* key, not the individual speaker; in group chats it
+    /// identifies the group, not a particular member. Differs from
+    /// `memories.peer_id`, which stores `sender_user_id` (the speaker)
+    /// — a future join across the two columns must account for this.
+    /// `None` for canonical / auto-dream / cron / fork / WebUI sessions
+    /// that span all peers.
+    ///
+    /// Migration v16 (#2015) added the underlying `sessions.peer_id`
+    /// column plus an `idx_sessions_peer(agent_id, peer_id)` covering
+    /// index, but `save_session` did not populate it; every row inserted
+    /// since v16 carried `peer_id IS NULL`, leaving the index dead weight
+    /// and `SELECT ... WHERE peer_id = ?` returning nothing. Channel-
+    /// derived construction sites now populate this from the inbound
+    /// `SenderContext.chat_id` so per-peer queries actually work.
+    pub peer_id: Option<String>,
 }
 
 impl Session {
@@ -261,7 +279,7 @@ impl SessionStore {
     pub fn get_session(&self, session_id: SessionId) -> LibreFangResult<Option<Session>> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let mut stmt = conn
-            .prepare("SELECT agent_id, messages, context_window_tokens, label, model_override, messages_generation FROM sessions WHERE id = ?1")
+            .prepare("SELECT agent_id, messages, context_window_tokens, label, model_override, messages_generation, peer_id FROM sessions WHERE id = ?1")
             .map_err(LibreFangError::memory)?;
 
         let result = stmt.query_row(rusqlite::params![session_id.0.to_string()], |row| {
@@ -271,6 +289,7 @@ impl SessionStore {
             let label: Option<String> = row.get(3).unwrap_or(None);
             let model_override: Option<String> = row.get(4).unwrap_or(None);
             let messages_generation: i64 = row.get(5).unwrap_or(0);
+            let peer_id: Option<String> = row.get(6).unwrap_or(None);
             Ok((
                 agent_str,
                 messages_blob,
@@ -278,11 +297,20 @@ impl SessionStore {
                 label,
                 model_override,
                 messages_generation,
+                peer_id,
             ))
         });
 
         match result {
-            Ok((agent_str, messages_blob, tokens, label, model_override, messages_generation)) => {
+            Ok((
+                agent_str,
+                messages_blob,
+                tokens,
+                label,
+                model_override,
+                messages_generation,
+                peer_id,
+            )) => {
                 let agent_id = uuid::Uuid::parse_str(&agent_str)
                     .map(AgentId)
                     .map_err(LibreFangError::memory)?;
@@ -297,6 +325,7 @@ impl SessionStore {
                     model_override,
                     messages_generation: messages_generation.max(0) as u64,
                     last_repaired_generation: None,
+                    peer_id,
                 }))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -311,7 +340,7 @@ impl SessionStore {
     ) -> LibreFangResult<Option<(Session, String)>> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let mut stmt = conn
-            .prepare("SELECT agent_id, messages, context_window_tokens, label, created_at, model_override, messages_generation FROM sessions WHERE id = ?1")
+            .prepare("SELECT agent_id, messages, context_window_tokens, label, created_at, model_override, messages_generation, peer_id FROM sessions WHERE id = ?1")
             .map_err(LibreFangError::memory)?;
 
         let result = stmt.query_row(rusqlite::params![session_id.0.to_string()], |row| {
@@ -322,6 +351,7 @@ impl SessionStore {
             let created_at: String = row.get(4)?;
             let model_override: Option<String> = row.get(5).unwrap_or(None);
             let messages_generation: i64 = row.get(6).unwrap_or(0);
+            let peer_id: Option<String> = row.get(7).unwrap_or(None);
             Ok((
                 agent_str,
                 messages_blob,
@@ -330,6 +360,7 @@ impl SessionStore {
                 created_at,
                 model_override,
                 messages_generation,
+                peer_id,
             ))
         });
 
@@ -342,6 +373,7 @@ impl SessionStore {
                 created_at,
                 model_override,
                 messages_generation,
+                peer_id,
             )) => {
                 let agent_id = uuid::Uuid::parse_str(&agent_str)
                     .map(AgentId)
@@ -358,6 +390,7 @@ impl SessionStore {
                         model_override,
                         messages_generation: messages_generation.max(0) as u64,
                         last_repaired_generation: None,
+                        peer_id,
                     },
                     created_at,
                 )))
@@ -453,10 +486,15 @@ impl SessionStore {
         // column, every cold load reset the counter to 0 and forced a
         // full repair pass on the first post-load save even when the
         // stored blob was already repaired.
+        // `peer_id` was added to the schema by migration v16 for per-user
+        // isolation queries, but was never written by `save_session`. Channel-
+        // derived sessions now populate it from `SenderContext.chat_id` at
+        // construction time, so the `idx_sessions_peer(agent_id, peer_id)`
+        // index actually carries something.
         tx.execute(
-            "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, label, message_count, messages_generation, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
-             ON CONFLICT(id) DO UPDATE SET messages = ?3, context_window_tokens = ?4, label = ?5, message_count = ?6, messages_generation = ?7, updated_at = ?8",
+            "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, label, message_count, messages_generation, peer_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
+             ON CONFLICT(id) DO UPDATE SET messages = ?3, context_window_tokens = ?4, label = ?5, message_count = ?6, messages_generation = ?7, peer_id = ?8, updated_at = ?9",
             rusqlite::params![
                 session_id_str,
                 session.agent_id.0.to_string(),
@@ -465,6 +503,7 @@ impl SessionStore {
                 session.label.as_deref(),
                 message_count,
                 session.messages_generation as i64,
+                session.peer_id.as_deref(),
                 now,
             ],
         )
@@ -1059,6 +1098,8 @@ impl SessionStore {
             model_override: None,
             messages_generation: 0,
             last_repaired_generation: None,
+            // No sender context — admin / diagnostic / API path.
+            peer_id: None,
         };
         self.save_session(&session)?;
         Ok(session)
@@ -1111,7 +1152,7 @@ impl SessionStore {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, messages, context_window_tokens, label, model_override, messages_generation FROM sessions \
+                "SELECT id, messages, context_window_tokens, label, model_override, messages_generation, peer_id FROM sessions \
                  WHERE agent_id = ?1 AND label = ?2 LIMIT 1",
             )
             .map_err(LibreFangError::memory)?;
@@ -1123,6 +1164,7 @@ impl SessionStore {
             let lbl: Option<String> = row.get(3).unwrap_or(None);
             let model_override: Option<String> = row.get(4).unwrap_or(None);
             let messages_generation: i64 = row.get(5).unwrap_or(0);
+            let peer_id: Option<String> = row.get(6).unwrap_or(None);
             Ok((
                 id_str,
                 messages_blob,
@@ -1130,11 +1172,20 @@ impl SessionStore {
                 lbl,
                 model_override,
                 messages_generation,
+                peer_id,
             ))
         });
 
         match result {
-            Ok((id_str, messages_blob, tokens, lbl, model_override, messages_generation)) => {
+            Ok((
+                id_str,
+                messages_blob,
+                tokens,
+                lbl,
+                model_override,
+                messages_generation,
+                peer_id,
+            )) => {
                 let session_id = uuid::Uuid::parse_str(&id_str)
                     .map(SessionId)
                     .map_err(LibreFangError::memory)?;
@@ -1149,6 +1200,7 @@ impl SessionStore {
                     model_override,
                     messages_generation: messages_generation.max(0) as u64,
                     last_repaired_generation: None,
+                    peer_id,
                 }))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -1224,6 +1276,8 @@ impl SessionStore {
             model_override: None,
             messages_generation: 0,
             last_repaired_generation: None,
+            // No sender context — admin / diagnostic / API path.
+            peer_id: None,
         };
         self.save_session(&session)?;
         Ok(session)
@@ -2575,6 +2629,7 @@ mod tests {
             model_override: None,
             messages_generation: 0,
             last_repaired_generation: None,
+            peer_id: None,
         };
         store.save_session(&recreated).unwrap();
 
@@ -3449,5 +3504,106 @@ mod tests {
         let s4: Vec<Message> = Vec::new();
         assert_eq!(SessionStore::extract_text_content(&s4), legacy(&s4));
         assert_eq!(SessionStore::extract_text_content(&s4), "");
+    }
+
+    /// Migration v16 added `sessions.peer_id` and
+    /// `idx_sessions_peer(agent_id, peer_id)` for per-user isolation, but
+    /// `save_session` never wrote the field. This is the regression guard:
+    /// if `save_session` ever stops persisting `peer_id` again, the column
+    /// query below returns NULL and the assertion fires.
+    ///
+    /// We deliberately read back through the raw SQLite column rather than
+    /// just the `Session` struct, so a future bug that round-trips the
+    /// in-memory field correctly while silently dropping the SQL bind still
+    /// surfaces here.
+    #[test]
+    fn test_save_session_persists_peer_id() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let session_id = SessionId::new();
+        let peer = "+393760105565";
+
+        let session = Session {
+            id: session_id,
+            agent_id,
+            messages: vec![Message::user("ciao Ambrogio")],
+            context_window_tokens: 0,
+            label: Some("whatsapp:+393760105565".to_string()),
+            model_override: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
+            peer_id: Some(peer.to_string()),
+        };
+        store.save_session(&session).expect("save_session ok");
+
+        // 1. Raw column round-trip — proves the INSERT actually carries the value.
+        let raw_peer: Option<String> = {
+            let conn = store.pool.get().expect("pool get");
+            conn.query_row(
+                "SELECT peer_id FROM sessions WHERE id = ?1",
+                rusqlite::params![session_id.0.to_string()],
+                |row| row.get(0),
+            )
+            .expect("session row exists")
+        };
+        assert_eq!(
+            raw_peer.as_deref(),
+            Some(peer),
+            "save_session must persist `peer_id` into the SQL column, not leave it NULL"
+        );
+
+        // 2. The `Session` struct re-loaded via `get_session` must also see it.
+        let loaded = store
+            .get_session(session_id)
+            .expect("get_session ok")
+            .expect("session exists");
+        assert_eq!(loaded.peer_id.as_deref(), Some(peer));
+
+        // 3. UPSERT path: rewriting an existing row preserves the column.
+        let mut session2 = loaded.clone();
+        session2.push_message(Message::user("seconda riga"));
+        store.save_session(&session2).expect("re-save ok");
+        let raw_peer2: Option<String> = {
+            let conn = store.pool.get().expect("pool get");
+            conn.query_row(
+                "SELECT peer_id FROM sessions WHERE id = ?1",
+                rusqlite::params![session_id.0.to_string()],
+                |row| row.get(0),
+            )
+            .expect("session row exists")
+        };
+        assert_eq!(
+            raw_peer2.as_deref(),
+            Some(peer),
+            "ON CONFLICT UPDATE branch of save_session must also write `peer_id`"
+        );
+
+        // 4. None stays None — canonical / cron sessions don't get a phantom value.
+        let canonical_sid = SessionId::new();
+        let canonical = Session {
+            id: canonical_sid,
+            agent_id,
+            messages: vec![Message::user("canonical")],
+            context_window_tokens: 0,
+            label: None,
+            model_override: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
+            peer_id: None,
+        };
+        store.save_session(&canonical).expect("save_session ok");
+        let canonical_peer: Option<String> = {
+            let conn = store.pool.get().expect("pool get");
+            conn.query_row(
+                "SELECT peer_id FROM sessions WHERE id = ?1",
+                rusqlite::params![canonical_sid.0.to_string()],
+                |row| row.get(0),
+            )
+            .expect("canonical session row exists")
+        };
+        assert!(
+            canonical_peer.is_none(),
+            "canonical / cross-peer sessions must keep peer_id NULL"
+        );
     }
 }

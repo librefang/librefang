@@ -192,6 +192,50 @@ pub fn is_quiet_hours(quiet_hours: &str) -> bool {
     }
 }
 
+/// What the monitor loop should do with a single agent's status this tick,
+/// given the set of agents already known to be unresponsive.
+///
+/// Encapsulates the state-transition logic so it can be unit-tested without
+/// spawning the background task (heartbeat.rs:128 — the caller tracks
+/// transitions to avoid spamming repeated warnings / events).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeartbeatTransition {
+    /// Agent just became unresponsive — emit a warning and publish a
+    /// `HealthCheckFailed` event exactly once.
+    BecameUnresponsive,
+    /// Agent recovered from a previously-flagged unresponsive state — clear it.
+    Recovered,
+    /// No change since the last tick — stay silent (already-known-dead agent,
+    /// or a still-healthy agent). The monitor must not act on this.
+    NoChange,
+}
+
+/// Fold one agent's heartbeat status into the `known_unresponsive` set and
+/// report the resulting transition.
+///
+/// `known_unresponsive` is mutated in place: the agent id is inserted on the
+/// transition into unresponsive and removed on recovery. This is the single
+/// source of truth for the monitor loop's "emit only on the edge" behavior.
+pub fn classify_transition(
+    status: &HeartbeatStatus,
+    known_unresponsive: &mut std::collections::HashSet<AgentId>,
+) -> HeartbeatTransition {
+    if status.unresponsive {
+        // `insert` returns true only when the id was not already present,
+        // i.e. on the edge into unresponsive — that is the only tick on
+        // which we warn and publish an event.
+        if known_unresponsive.insert(status.agent_id) {
+            HeartbeatTransition::BecameUnresponsive
+        } else {
+            HeartbeatTransition::NoChange
+        }
+    } else if known_unresponsive.remove(&status.agent_id) {
+        HeartbeatTransition::Recovered
+    } else {
+        HeartbeatTransition::NoChange
+    }
+}
+
 /// Aggregate heartbeat summary.
 #[derive(Debug, Clone, Default)]
 pub struct HeartbeatSummary {
@@ -557,5 +601,120 @@ mod tests {
         assert_eq!(summary.unresponsive, 1);
         assert_eq!(summary.unresponsive_agents.len(), 1);
         assert_eq!(summary.unresponsive_agents[0].name, "agent-2");
+    }
+
+    fn status(agent_id: AgentId, unresponsive: bool) -> HeartbeatStatus {
+        HeartbeatStatus {
+            agent_id,
+            name: "agent".to_string(),
+            inactive_secs: if unresponsive { 120 } else { 5 },
+            unresponsive,
+        }
+    }
+
+    #[test]
+    fn test_unresponsive_agent_emits_exactly_once() {
+        // An agent that stays unresponsive across many ticks must produce the
+        // `BecameUnresponsive` edge exactly once — on the first tick — and
+        // `NoChange` on every subsequent tick (no per-tick event spam).
+        use std::collections::HashSet;
+        let mut known = HashSet::new();
+        let id = AgentId::new();
+
+        // First tick: the transition edge.
+        assert_eq!(
+            classify_transition(&status(id, true), &mut known),
+            HeartbeatTransition::BecameUnresponsive
+        );
+        assert!(known.contains(&id));
+
+        // Subsequent ticks while still unresponsive: silent.
+        for _ in 0..5 {
+            assert_eq!(
+                classify_transition(&status(id, true), &mut known),
+                HeartbeatTransition::NoChange
+            );
+        }
+    }
+
+    #[test]
+    fn test_responsive_agent_emits_nothing() {
+        // A healthy agent never transitions, so every tick is `NoChange` and
+        // it is never inserted into the known-unresponsive set.
+        use std::collections::HashSet;
+        let mut known = HashSet::new();
+        let id = AgentId::new();
+
+        for _ in 0..5 {
+            assert_eq!(
+                classify_transition(&status(id, false), &mut known),
+                HeartbeatTransition::NoChange
+            );
+        }
+        assert!(known.is_empty());
+    }
+
+    #[test]
+    fn test_recovery_then_refailure_emits_second_event() {
+        // fail → recover → fail must produce two distinct `BecameUnresponsive`
+        // edges with a `Recovered` edge between them. Recovery clears the set
+        // so the next failure is treated as a fresh transition (the operator
+        // is alerted again), not suppressed as already-known.
+        use std::collections::HashSet;
+        let mut known = HashSet::new();
+        let id = AgentId::new();
+
+        // First failure.
+        assert_eq!(
+            classify_transition(&status(id, true), &mut known),
+            HeartbeatTransition::BecameUnresponsive
+        );
+        // Recovery edge (and idempotent thereafter).
+        assert_eq!(
+            classify_transition(&status(id, false), &mut known),
+            HeartbeatTransition::Recovered
+        );
+        assert!(!known.contains(&id));
+        assert_eq!(
+            classify_transition(&status(id, false), &mut known),
+            HeartbeatTransition::NoChange
+        );
+        // Second failure — a fresh edge, not suppressed.
+        assert_eq!(
+            classify_transition(&status(id, true), &mut known),
+            HeartbeatTransition::BecameUnresponsive
+        );
+    }
+
+    #[test]
+    fn test_two_agents_tracked_independently() {
+        // The known-unresponsive set keys on agent id, so one agent's
+        // transition must not mask another's. Agent A failing does not emit
+        // for agent B, and each agent emits its own single edge.
+        use std::collections::HashSet;
+        let mut known = HashSet::new();
+        let a = AgentId::new();
+        let b = AgentId::new();
+
+        assert_eq!(
+            classify_transition(&status(a, true), &mut known),
+            HeartbeatTransition::BecameUnresponsive
+        );
+        // B is still healthy.
+        assert_eq!(
+            classify_transition(&status(b, false), &mut known),
+            HeartbeatTransition::NoChange
+        );
+        // B fails — its own fresh edge, independent of A.
+        assert_eq!(
+            classify_transition(&status(b, true), &mut known),
+            HeartbeatTransition::BecameUnresponsive
+        );
+        // A is still flagged — no repeat.
+        assert_eq!(
+            classify_transition(&status(a, true), &mut known),
+            HeartbeatTransition::NoChange
+        );
+        assert_eq!(known.len(), 2);
     }
 }
