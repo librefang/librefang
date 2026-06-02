@@ -16,3 +16,7 @@ pub(crate) mod skill;
 pub(crate) mod hand;
 pub(crate) mod channel;
 pub(crate) mod mcp_cmds;
+pub(crate) mod config;
+pub(crate) mod auth;
+pub(crate) mod models;
+pub(crate) mod automation;
