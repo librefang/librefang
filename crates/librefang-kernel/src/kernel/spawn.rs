@@ -82,10 +82,12 @@ impl LibreFangKernel {
                 .tool_exec
                 .validate_override(override_kind)
             {
-                return Err(KernelError::LibreFang(LibreFangError::InvalidInput(format!(
-                    "agent {name:?} tool_exec_backend = {:?} but {e}",
-                    override_kind.as_str()
-                ))));
+                return Err(KernelError::LibreFang(LibreFangError::InvalidInput(
+                    format!(
+                        "agent {name:?} tool_exec_backend = {:?} but {e}",
+                        override_kind.as_str()
+                    ),
+                )));
             }
         }
 

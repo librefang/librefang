@@ -507,8 +507,7 @@ impl LibreFangKernel {
             if !saved_triggers.is_empty() || !saved_crons.is_empty() {
                 let lost_trigger_roles: Vec<&str> =
                     saved_triggers.keys().map(String::as_str).collect();
-                let lost_cron_roles: Vec<&str> =
-                    saved_crons.keys().map(String::as_str).collect();
+                let lost_cron_roles: Vec<&str> = saved_crons.keys().map(String::as_str).collect();
                 warn!(
                     hand = %hand_id,
                     error = %e,

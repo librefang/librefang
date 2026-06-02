@@ -874,7 +874,9 @@ system_prompt = "You are a planner."
 
     // Reactivation must fail at pre-flight, before the kill loop runs.
     assert!(
-        kernel.activate_hand("test-research", HashMap::new()).is_err(),
+        kernel
+            .activate_hand("test-research", HashMap::new())
+            .is_err(),
         "reactivation with a malformed role should be rejected"
     );
 
