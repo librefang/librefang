@@ -423,7 +423,10 @@ async fn no_acl_means_no_restriction_store_still_lands() {
 #[tokio::test]
 async fn restricted_user_memory_recall_is_denied_and_does_not_read() {
     // ACL that can write its own kv but is NOT allowed to read kv at all
-    // (e.g. an append-only inbox role). Recall of `kv:victim-peer` must fail.
+    // (e.g. an append-only inbox role). Recall of `kv:victim-peer` must be
+    // denied: a soft Ok that never reaches the substrate (no cross-user leak).
+    // A read is non-essential, so the denial is reported as Ok-with-reason
+    // rather than a hard error that would abort the whole turn.
     let acl = UserMemoryAccess {
         readable_namespaces: vec!["proactive".into()],
         writable_namespaces: vec!["kv:*".into()],
@@ -439,8 +442,13 @@ async fn restricted_user_memory_recall_is_denied_and_does_not_read() {
     let result = execute_tool_raw("t2", "memory_recall", &input, &ctx).await;
 
     assert!(
-        result.is_error,
-        "recall must be denied when kv read is not in the ACL: {}",
+        !result.is_error,
+        "denied recall degrades to a soft Ok, not a hard error: {}",
+        result.content
+    );
+    assert!(
+        result.content.to_lowercase().contains("could not read"),
+        "denied recall must tell the model it could not read memory: {}",
         result.content
     );
     assert!(
@@ -464,8 +472,13 @@ async fn restricted_user_memory_list_is_denied_and_does_not_enumerate() {
     let result = execute_tool_raw("t3", "memory_list", &json!({}), &ctx).await;
 
     assert!(
-        result.is_error,
-        "list must be denied without kv read access: {}",
+        !result.is_error,
+        "denied list degrades to a soft Ok, not a hard error: {}",
+        result.content
+    );
+    assert!(
+        result.content.to_lowercase().contains("could not list"),
+        "denied list must tell the model it could not list memory: {}",
         result.content
     );
     assert!(
