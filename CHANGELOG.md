@@ -650,6 +650,10 @@ _308 PRs from 7 contributors since v2026.5.17-beta.12._
   Registration key and resolution key now both derive from `SidecarChannelConfig::name`, so they line up.
   Regression tests: `router::tests::sidecar_default_does_not_collide_across_bots` (two sidecars register under distinct `telegram:<name>` keys, no last-writer-wins collision) and `sidecar::tests::test_sidecar_stamps_account_id_from_adapter_name` (a real sidecar subprocess stamps `account_id` from the config name, not the `ready`-event account, and preserves an adapter-supplied one).
 
+- **runtime(history-fold): preserve omitted tool-result content instead of substituting an "unavailable" stub** (#5978) (@DaBlitzStein).
+  The fold's apply loop unconditionally replaced every omitted tool result with the `[summarisation unavailable]` fallback string, so a recalled memory tool result lost its content and the agent re-issued `memory_recall` forever, an endless loop that drained tokens.
+  Omitted results now keep their preview-truncated original content, breaking the loop while still bounding the folded size.
+
 - **kernel(cron): day-of-week now follows the POSIX convention (`0` and `7` both mean Sunday)** instead of the `cron` crate's 1-7 mapping (#5966) (@DaBlitzStein).
   Sunday-only schedules like `0 16 * * 0` were previously rejected as unschedulable, and numeric weekday ranges such as `1-5` silently shifted by one day (firing Sun-Thu instead of Mon-Fri).
   The 5/6-field expression is now remapped at the single conversion site before it reaches the crate, so `0`/`7` resolve to Sunday and `1-5` fires Monday through Friday as written.

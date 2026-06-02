@@ -83,7 +83,22 @@ const FOLD_PREFIX: &str = "[history-fold]";
 const FOLD_PREVIEW_CHARS: usize = 500;
 
 /// Static-stub text used when the aux-LLM summarisation call fails outright.
-const FALLBACK_SUMMARY: &str = "[summarisation unavailable]";
+///
+/// Explicitly tells the model the call genuinely failed so it does NOT
+/// re-issue the identical tool call.  Only applied when the whole batched
+/// summariser call failed (network/empty) — see `bulk_fallback`.  For the
+/// narrower case where the model simply *omitted* one id from an otherwise
+/// successful batch, the original tool result is preserved instead (see the
+/// `[result preserved — summarisation omitted]` branch in the apply loop) so
+/// the model never reads a folded block as "result not available yet" and
+/// retries (issue #5978).
+const FALLBACK_SUMMARY: &str = "[summarisation unavailable — do not retry this tool call]";
+
+/// Marker prefixing a fold block whose id the summariser omitted from an
+/// otherwise-successful batch.  The original tool result is preserved
+/// (preview-truncated) after this marker so the model sees what the tool
+/// returned and does not re-issue the identical call (issue #5978).
+const OMITTED_SUMMARY_PREFIX: &str = "[result preserved — summarisation omitted]";
 
 /// Hard cap on `max_tokens` requested from the summariser.  Several
 /// providers (Groq Llama-3.1, Cerebras, older Anthropic SKUs) reject
@@ -282,7 +297,7 @@ pub async fn fold_stale_tool_results(
             if !missing.is_empty() {
                 warn!(
                     missing_ids = ?missing,
-                    "history_fold: model omitted summaries for some stale tool_use_ids — those blocks fall back to the static stub"
+                    "history_fold: model omitted summaries for some stale tool_use_ids — those blocks preserve a preview-truncated copy of the original tool result (issue #5978)"
                 );
             }
             (map, None)
@@ -320,12 +335,37 @@ pub async fn fold_stale_tool_results(
                     ..
                 } = block
                 {
-                    let summary = summaries_by_id
-                        .get(tool_use_id)
-                        .cloned()
-                        .or_else(|| bulk_fallback.clone())
-                        .unwrap_or_else(|| FALLBACK_SUMMARY.to_string());
-                    let new_content = format!("{FOLD_PREFIX} {summary}");
+                    // Resolve the new folded content for this block:
+                    //   1. model-returned per-id summary (happy path), OR
+                    //   2. bulk fallback — either the raw non-JSON response
+                    //      (Parse failure) or the static stub (call failure), OR
+                    //   3. neither: the batched call *succeeded* but the model
+                    //      silently omitted this id.  Previously this fell back
+                    //      to FALLBACK_SUMMARY, discarding the real prior tool
+                    //      result — the model then read the block as "result
+                    //      not available yet" and re-issued the identical call,
+                    //      producing the endless memory_recall loop in #5978.
+                    //      Instead, PRESERVE a preview-truncated copy of the
+                    //      ORIGINAL `content` (still intact at this point — the
+                    //      apply loop has not overwritten it yet) so the model
+                    //      sees what the tool returned and does not retry.
+                    let new_content = if let Some(summary) =
+                        summaries_by_id.get(tool_use_id).cloned()
+                    {
+                        format!("{FOLD_PREFIX} {summary}")
+                    } else if let Some(bulk) = bulk_fallback.clone() {
+                        format!("{FOLD_PREFIX} {bulk}")
+                    } else {
+                        // Omitted id from an otherwise-successful batch:
+                        // preserve the original result, preview-truncated.
+                        let preview: String = content.chars().take(FOLD_PREVIEW_CHARS).collect();
+                        let ellipsis = if content.chars().count() > FOLD_PREVIEW_CHARS {
+                            "…"
+                        } else {
+                            ""
+                        };
+                        format!("{FOLD_PREFIX} {OMITTED_SUMMARY_PREFIX} {preview}{ellipsis}")
+                    };
                     if *content != new_content {
                         *content = new_content.clone();
                         result.rewrites.insert(tool_use_id.clone(), new_content);
@@ -530,7 +570,11 @@ async fn summarise_batch(
          Capture what the tool did and what it returned, omitting raw data. \
          Output ONLY a JSON array of objects with this shape: \
          [{\"id\":\"<tool_use_id>\",\"summary\":\"...\"}]. \
-         Echo every id verbatim. No preamble, no markdown fences.\n\n\
+         You MUST return exactly one object for EVERY id listed below, in the \
+         same order, even when a result is empty, an error, or trivial — in \
+         that case summarise it as such (e.g. \"returned no output\" or \
+         \"errored: <reason>\") rather than omitting the id. Never skip, merge, \
+         or drop an id. Echo every id verbatim. No preamble, no markdown fences.\n\n\
          Results:\n",
     );
     for b in blocks {
@@ -1490,14 +1534,18 @@ mod tests {
     }
 
     /// JSON parse succeeds but every returned `id` is bogus (no overlap
-    /// with stale `tool_use_id`s).  The Ok-path runs, the per-block
-    /// apply loop finds no matching summary, every block falls back to
-    /// the static stub.  `groups_used_fallback` stays 0 (the aux-LLM
-    /// call itself succeeded — the operator-visible drift is surfaced
-    /// via the unmatched-ids warn, not this counter).
+    /// with stale `tool_use_id`s).  The Ok-path runs, the per-block apply
+    /// loop finds no matching summary AND there is no `bulk_fallback`
+    /// (the call succeeded), so every block lands on the omitted-id
+    /// preservation branch (issue #5978): the ORIGINAL tool result is
+    /// kept, preview-truncated, NOT the static stub.  This prevents the
+    /// model from reading the fold as "result not available yet" and
+    /// re-issuing the identical call.  `groups_used_fallback` stays 0
+    /// (the aux-LLM call itself succeeded — the operator-visible drift
+    /// is surfaced via the unmatched-ids warn, not this counter).
     #[tokio::test]
-    async fn parse_succeeds_but_all_ids_bogus_falls_back_per_block() {
-        let messages = build_history(10); // tid_0..tid_9
+    async fn parse_succeeds_but_all_ids_bogus_preserves_original_content() {
+        let messages = build_history(10); // tid_0..tid_9, content "output of turn N"
         let bogus = r#"[{"id":"not_a_real_id","summary":"won't match anything"}]"#;
         let driver: Arc<dyn LlmDriver> = Arc::new(OkDriver(bogus.to_string()));
 
@@ -1514,18 +1562,20 @@ mod tests {
         )
         .await;
 
-        // Ok-path → aux-call-failure counter stays 0 even though every
-        // block ended up on the static stub.
+        // Ok-path → aux-call-failure counter stays 0.
         assert_eq!(result.groups_used_fallback, 0);
-        // But every folded block should carry the static FALLBACK_SUMMARY
-        // marker, not arbitrary text.
-        let stale_count = out
+        // Every folded block must carry the omitted-id preservation marker
+        // plus a copy of the ORIGINAL tool result — and must NOT carry the
+        // "summarisation unavailable" static stub.
+        let preserved_count = out
             .iter()
             .filter(|m| match &m.content {
                 MessageContent::Blocks(blocks) => blocks.iter().any(|b| match b {
                     ContentBlock::ToolResult { content, .. } => {
                         content.starts_with(FOLD_PREFIX)
-                            && content.contains("summarisation unavailable")
+                            && content.contains(OMITTED_SUMMARY_PREFIX)
+                            && content.contains("output of turn")
+                            && !content.contains("summarisation unavailable")
                     }
                     _ => false,
                 }),
@@ -1533,10 +1583,155 @@ mod tests {
             })
             .count();
         assert!(
-            stale_count >= 8,
-            "every stale block must carry the static fallback stub when no \
-             returned id matches; saw {stale_count}"
+            preserved_count >= 8,
+            "every stale block must preserve its original tool result when no \
+             returned id matches (issue #5978); saw {preserved_count}"
         );
+    }
+
+    /// Issue #5978 regression: when the summariser returns a valid batch
+    /// but OMITS one stale id, that block must preserve a preview-truncated
+    /// copy of its ORIGINAL tool result — never the static
+    /// `[summarisation unavailable]` stub, which the model reads as "result
+    /// not available yet" and re-issues the identical call (the endless
+    /// memory_recall loop).
+    #[tokio::test]
+    async fn omitted_ids_preserve_original_content() {
+        // build_history(10) with fold_after=2 → stale ids tid_0..tid_7,
+        // each with content "output of turn N".  The response below names
+        // tid_0..tid_6 but DELIBERATELY omits tid_7.
+        let messages = build_history(10);
+        let json = r#"[
+            {"id":"tid_0","summary":"s0"},
+            {"id":"tid_1","summary":"s1"},
+            {"id":"tid_2","summary":"s2"},
+            {"id":"tid_3","summary":"s3"},
+            {"id":"tid_4","summary":"s4"},
+            {"id":"tid_5","summary":"s5"},
+            {"id":"tid_6","summary":"s6"}
+        ]"#;
+        let driver: Arc<dyn LlmDriver> = Arc::new(OkDriver(json.to_string()));
+
+        let (out, _result) = fold_stale_tool_results(
+            messages,
+            FoldConfig {
+                fold_after_turns: 2,
+                min_batch_size: 1,
+            },
+            "test-model",
+            None,
+            driver,
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
+
+        // The omitted tid_7 block must keep a copy of its original result.
+        let tid_7_content = out.iter().find_map(|m| match &m.content {
+            MessageContent::Blocks(blocks) => blocks.iter().find_map(|b| match b {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    ..
+                } if tool_use_id == "tid_7" => Some(content.clone()),
+                _ => None,
+            }),
+            _ => None,
+        });
+        let content = tid_7_content.expect("tid_7 ToolResult must survive fold");
+        assert!(
+            content.contains("output of turn 7"),
+            "omitted id must preserve a substring of the ORIGINAL tool result, got: {content:?}"
+        );
+        assert!(
+            !content.contains("summarisation unavailable"),
+            "omitted id must NOT carry the static FALLBACK_SUMMARY stub, got: {content:?}"
+        );
+        assert!(
+            content.contains(OMITTED_SUMMARY_PREFIX),
+            "omitted id must carry the preservation marker, got: {content:?}"
+        );
+
+        // A named id (tid_0) must still receive its model summary.
+        let tid_0_content = out.iter().find_map(|m| match &m.content {
+            MessageContent::Blocks(blocks) => blocks.iter().find_map(|b| match b {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    ..
+                } if tool_use_id == "tid_0" => Some(content.clone()),
+                _ => None,
+            }),
+            _ => None,
+        });
+        assert_eq!(
+            tid_0_content.as_deref(),
+            Some("[history-fold] s0"),
+            "named ids must still receive their per-id model summary"
+        );
+    }
+
+    /// Issue #5978 regression (negative assertion): the FALLBACK_SUMMARY
+    /// text must NOT appear in any block whose id was merely omitted from
+    /// an otherwise-successful batch.  Belt-and-suspenders companion to
+    /// `omitted_ids_preserve_original_content`.
+    #[tokio::test]
+    async fn omitted_ids_do_not_carry_fallback_summary_string() {
+        let messages = build_history(10); // stale tid_0..tid_7
+                                          // Name only tid_0; tid_1..tid_7 are all omitted.
+        let json = r#"[{"id":"tid_0","summary":"only one named"}]"#;
+        let driver: Arc<dyn LlmDriver> = Arc::new(OkDriver(json.to_string()));
+
+        let (out, _result) = fold_stale_tool_results(
+            messages,
+            FoldConfig {
+                fold_after_turns: 2,
+                min_batch_size: 1,
+            },
+            "test-model",
+            None,
+            driver,
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
+
+        // No folded block may carry the static "summarisation unavailable"
+        // stub — every omitted id preserves its original content instead.
+        let any_fallback = out.iter().any(|m| match &m.content {
+            MessageContent::Blocks(blocks) => blocks.iter().any(|b| match b {
+                ContentBlock::ToolResult { content, .. } => {
+                    content.contains("summarisation unavailable")
+                }
+                _ => false,
+            }),
+            _ => false,
+        });
+        assert!(
+            !any_fallback,
+            "no omitted-id block may carry the FALLBACK_SUMMARY stub (issue #5978)"
+        );
+
+        // And the omitted blocks must preserve their original results.
+        for i in 1..=7 {
+            let id = format!("tid_{i}");
+            let content = out
+                .iter()
+                .find_map(|m| match &m.content {
+                    MessageContent::Blocks(blocks) => blocks.iter().find_map(|b| match b {
+                        ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            ..
+                        } if *tool_use_id == id => Some(content.clone()),
+                        _ => None,
+                    }),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            assert!(
+                content.contains(&format!("output of turn {i}")),
+                "omitted {id} must preserve its original result, got: {content:?}"
+            );
+        }
     }
 
     /// `apply_fold_rewrites` must walk a separate message list (typically
