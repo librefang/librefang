@@ -97,8 +97,14 @@ jobs:
           for CAT in "${cats[@]}"; do
             echo "=== Scanning category: ${CAT} ==="
 
-            gh api "repos/${REPO}/discussions" --paginate --jq \
-              --arg cat "$CAT" '.[] | select(.category.name == $cat) | @base64' \
+            # NOTE: pipe to standalone `jq`, not `gh api --jq`. `gh api --jq`
+            # only takes a single bare filter string and does NOT accept jq's
+            # `--arg` flag, so passing it produces "accepts 1 arg(s), received 4"
+            # and the call fails before any HTTP request. Shell-injection
+            # hardening (no `${CAT}` interpolated into the jq source) is
+            # preserved by feeding the category through `--arg cat`. See #5753.
+            gh api "repos/${REPO}/discussions" --paginate \
+              | jq -r --arg cat "$CAT" '.[] | select(.category.name == $cat) | @base64' \
             | while IFS= read -r row; do
                 decoded=$(printf '%s' "$row" | base64 -d)
                 num=$(printf '%s' "$decoded" | jq -r '.number')

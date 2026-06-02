@@ -546,7 +546,8 @@ pub struct HookConfig {
     ///
     /// When `false`: on Linux, wraps the launch with `unshare --net` if that
     /// binary is available; on all platforms, injects `no_proxy=*`/`NO_PROXY=*`
-    /// into the subprocess env. Defaults to `true`.
+    /// into the subprocess env. Defaults to `false` (secure-by-default — a
+    /// plugin that needs outbound network must opt in with `allow_network = true`).
     pub allow_network: bool,
     /// Whether hook subprocesses are allowed filesystem write access.
     ///
@@ -559,6 +560,9 @@ pub struct HookConfig {
     /// - Applied unconditionally on Linux when feature is enabled
     /// - Allowlist of ~60 syscalls; any other syscall kills the process with SIGSYS
     /// - Does not require root or user namespaces
+    ///
+    /// Defaults to `false` (secure-by-default — a plugin that needs filesystem
+    /// write access must opt in with `allow_filesystem = true`).
     pub allow_filesystem: bool,
     /// Path to the per-plugin shared state JSON file.
     ///
@@ -593,8 +597,8 @@ impl Default for HookConfig {
             allowed_env_vars: Vec::new(),
             plugin_env: Vec::new(),
             max_memory_mb: None,
-            allow_network: true,
-            allow_filesystem: true,
+            allow_network: false,
+            allow_filesystem: false,
             state_file: None,
             hook_timeouts: std::collections::HashMap::new(),
             retry_delay_ms: 500,
@@ -741,24 +745,44 @@ fn runtime_passthrough_vars(runtime: PluginRuntime) -> &'static [&'static str] {
     }
 }
 
-/// On Linux, attempt to wrap a command with `unshare --net` for true network
-/// namespace isolation when `allow_network == false`.
+/// On Linux, probe whether `unshare` can actually create the given namespace
+/// in the current environment.
 ///
-/// Returns `(launcher, args)` unchanged if `unshare` is not available or if
-/// we are not on Linux. The probe uses `--help` (which exits 0 on modern util-linux)
-/// rather than `--version` because some older builds don't support `--version`.
+/// The probe runs `unshare --<ns> -- true` and checks for a clean exit.
+/// Probing the *operation* (not merely `unshare --help`) matters because
+/// `unshare` being installed does not imply the kernel will grant the
+/// namespace: unprivileged containers (Docker without `--privileged`),
+/// hardened CI runners, and seccomp-restricted hosts routinely have the
+/// binary present but reject `CLONE_NEWNET` / `CLONE_NEWNS` with EPERM.
+/// If we wrapped on `--help` alone, every locked-down hook would be spawned
+/// behind an `unshare` that exits non-zero before exec — killing the child
+/// (surfacing as a "Broken pipe" when the parent writes stdin) instead of
+/// merely failing open to the env-var soft isolation. With deny-by-default
+/// now the default posture (#2), that would break essentially every plugin
+/// in those environments, so the probe must reflect reality.
 #[cfg(target_os = "linux")]
-fn try_wrap_with_unshare(launcher: &str, args: &[String]) -> (String, Vec<String>) {
-    let available = std::process::Command::new("unshare")
-        .arg("--help")
+fn unshare_namespace_works(ns_flag: &str) -> bool {
+    std::process::Command::new("unshare")
+        .arg(ns_flag)
+        .args(["--", "true"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
         .map(|s| s.success())
-        .unwrap_or(false);
+        .unwrap_or(false)
+}
 
-    if available {
+/// On Linux, attempt to wrap a command with `unshare --net` for true network
+/// namespace isolation when `allow_network == false`.
+///
+/// Returns `(launcher, args)` unchanged if the kernel will not grant a network
+/// namespace here (see `unshare_namespace_works`) or if we are not on Linux.
+/// In that case the env-var soft isolation applied by the caller is the only
+/// network restriction — best-effort, never fatal to the hook.
+#[cfg(target_os = "linux")]
+fn try_wrap_with_unshare(launcher: &str, args: &[String]) -> (String, Vec<String>) {
+    if unshare_namespace_works("--net") {
         let mut new_args = vec!["--net".to_string(), "--".to_string(), launcher.to_string()];
         new_args.extend_from_slice(args);
         return ("unshare".to_string(), new_args);
@@ -774,20 +798,13 @@ fn try_wrap_with_unshare(launcher: &str, args: &[String]) -> (String, Vec<String
 /// On Linux, attempt to wrap a command with `unshare --mount` for mount namespace
 /// isolation when `allow_filesystem == false`.
 ///
-/// Returns `(launcher, args)` unchanged if `unshare` is not available or if
-/// we are not on Linux. Best-effort: falls back silently.
+/// Returns `(launcher, args)` unchanged if the kernel will not grant a mount
+/// namespace here (see `unshare_namespace_works`) or if we are not on Linux.
+/// Best-effort: falls back to the env-var / Landlock isolation the caller
+/// applies; never fatal to the hook.
 #[cfg(target_os = "linux")]
 fn try_wrap_with_unshare_mount(launcher: &str, args: &[String]) -> (String, Vec<String>) {
-    let available = std::process::Command::new("unshare")
-        .arg("--help")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-
-    if available {
+    if unshare_namespace_works("--mount") {
         let mut new_args = vec![
             "--mount".to_string(),
             "--".to_string(),
@@ -895,6 +912,9 @@ fn apply_seccomp_allowlist(_allow_network: bool) -> bool {
         libc::SYS_fstat,
         libc::SYS_newfstatat,
         libc::SYS_faccessat,
+        // glibc 2.33+ resolves library access through faccessat2 when the
+        // dynamic linker locates shared libraries for a freshly exec'd binary.
+        libc::SYS_faccessat2,
         libc::SYS_lseek,
         libc::SYS_dup,
         libc::SYS_dup3,
@@ -918,6 +938,10 @@ fn apply_seccomp_allowlist(_allow_network: bool) -> bool {
         libc::SYS_getppid,
         libc::SYS_gettid,
         libc::SYS_set_tid_address,
+        // glibc registers the robust-mutex list and (2.35+) the restartable
+        // sequence area during process/thread init.
+        libc::SYS_set_robust_list,
+        libc::SYS_rseq,
         libc::SYS_futex,
         libc::SYS_nanosleep,
         libc::SYS_clock_gettime,
@@ -940,6 +964,14 @@ fn apply_seccomp_allowlist(_allow_network: bool) -> bool {
         libc::SYS_execveat,
         libc::SYS_wait4,
         libc::SYS_waitid,
+        // Job control: /bin/sh (dash) puts a spawned external command in its
+        // own process group via setpgid when a hook shells out (e.g. `sleep`).
+        // A hook that only uses shell builtins never trips this, which is why
+        // it slipped past the locked-down round-trip test.
+        libc::SYS_setpgid,
+        libc::SYS_getpgid,
+        libc::SYS_getsid,
+        libc::SYS_setsid,
         // I/O multiplexing — universal variants
         libc::SYS_pselect6,
         libc::SYS_ppoll,
@@ -978,6 +1010,25 @@ fn apply_seccomp_allowlist(_allow_network: bool) -> bool {
         libc::SYS_setgroups,
         // prlimit64 is the universal replacement for getrlimit/setrlimit;
         // the legacy syscalls are x86_64-only (see cfg block below).
+        //
+        // Runtime / glibc start-up syscalls. Modern glibc (>= 2.35) and the
+        // language runtimes we launch (sh, python3, node, go) issue these
+        // during thread / process bring-up; omitting them makes the
+        // KillProcess filter SIGSYS the child before it ever reads stdin,
+        // which surfaces to the parent as a "Broken pipe". These were the
+        // missing entries that blocked enabling `seccomp-sandbox` in the
+        // default feature set — without them every hook child died on
+        // aarch64. Universal variants (present on both x86_64 and aarch64).
+        libc::SYS_rseq,            // glibc >= 2.35 restartable sequences (per-thread)
+        libc::SYS_set_robust_list, // pthread robust-mutex bookkeeping at thread start
+        libc::SYS_get_robust_list,
+        libc::SYS_rt_sigtimedwait, // signal waits in runtimes (Go scheduler, Python)
+        libc::SYS_restart_syscall, // kernel-injected on EINTR resume
+        libc::SYS_clock_getres,
+        libc::SYS_sched_getaffinity, // CPU topology probe (Go/Node thread pools)
+        libc::SYS_sched_yield,
+        libc::SYS_statx,      // glibc stat family routes through statx on new kernels
+        libc::SYS_membarrier, // memory-barrier sync used by some runtimes
     ];
 
     // x86_64-only syscalls: these were replaced by *at / newer variants on
@@ -997,6 +1048,10 @@ fn apply_seccomp_allowlist(_allow_network: bool) -> bool {
         libc::SYS_epoll_wait,
         libc::SYS_eventfd,
         libc::SYS_getdents,
+        // getpgrp is x86_64-only (aarch64 has no such syscall — glibc routes it
+        // through getpgid(0) there). dash reads the process group under job
+        // control when spawning external commands.
+        libc::SYS_getpgrp,
         libc::SYS_mkdir,
         libc::SYS_rmdir,
         libc::SYS_unlink,
@@ -1004,6 +1059,11 @@ fn apply_seccomp_allowlist(_allow_network: bool) -> bool {
         libc::SYS_symlink,
         libc::SYS_readlink,
         libc::SYS_fork,
+        // Debian/Ubuntu `dash` (/bin/sh) is built with USE_VFORK, so it spawns
+        // external commands (e.g. a hook running `sleep`) via the x86_64 vfork
+        // syscall — absent on aarch64, which is why it was missing here and the
+        // spawn was SIGSYS-killed only on x86_64 CI.
+        libc::SYS_vfork,
         libc::SYS_arch_prctl,
         // Legacy resource-limit syscalls replaced by prlimit64 on aarch64
         libc::SYS_getrlimit,
@@ -1558,6 +1618,14 @@ impl HookProcessPool {
             return run_wasm_hook(script_path, input, config).await;
         }
 
+        // Bound each call's write + read. `timeout_secs` defaults to 30; guard
+        // an explicit 0 so it doesn't degenerate into an instant timeout.
+        let timeout = Duration::from_secs(if config.timeout_secs == 0 {
+            30
+        } else {
+            config.timeout_secs
+        });
+
         let slot = {
             let mut map = self.procs.lock().unwrap();
             map.entry(script_path.to_string())
@@ -1581,7 +1649,7 @@ impl HookProcessPool {
         }
 
         // Try to call; on failure, evict the dead slot then restart and retry once.
-        let result = Self::do_call(guard.as_mut().unwrap(), input).await;
+        let result = Self::do_call(guard.as_mut().unwrap(), input, timeout).await;
         if result.is_err() {
             // Probe exit status before evicting so we can produce a classified label.
             let exit_label = if let Some(ref mut proc) = *guard {
@@ -1600,7 +1668,7 @@ impl HookProcessPool {
             // even if the spawn below fails (returns Err and drops the guard).
             *guard = None;
             *guard = Some(Self::spawn(script_path, runtime, config).await?);
-            return Self::do_call(guard.as_mut().unwrap(), input).await;
+            return Self::do_call(guard.as_mut().unwrap(), input, timeout).await;
         }
         result
     }
@@ -1683,42 +1751,77 @@ impl HookProcessPool {
     async fn do_call(
         proc: &mut PersistentProcess,
         input: &serde_json::Value,
+        timeout: Duration,
     ) -> Result<serde_json::Value, PluginRuntimeError> {
+        // 4 MiB cap, enforced *during* the read (the shared transport caps as it
+        // accumulates) rather than after — a hook streaming without a newline
+        // can't grow memory without bound.
+        const MAX_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
+
         let mut line =
             serde_json::to_string(input).map_err(|e| PluginRuntimeError::Io(e.to_string()))?;
         line.push('\n');
 
-        proc.stdin
-            .write_all(line.as_bytes())
-            .await
-            .map_err(|e| PluginRuntimeError::Io(format!("write stdin: {e}")))?;
-        proc.stdin
-            .flush()
-            .await
-            .map_err(|e| PluginRuntimeError::Io(format!("flush stdin: {e}")))?;
+        // The persistent pool previously enforced no timeout on either the
+        // write or the read; a hook that stopped reading its stdin or never
+        // replied would wedge the call forever. Both are now bounded by
+        // `timeout`.
+        //
+        // Review-followup C: write and read share a single deadline so the
+        // configured `timeout` is the *total* wall-clock budget, not
+        // 2× as it would be if we passed `timeout` to each stage
+        // independently. A slow write that consumes 25/30s leaves only
+        // 5s for the reply — exactly what an operator who configured
+        // "30s per call" expects. The split-timeout interpretation
+        // (the prior commit's version) made the configured value an
+        // odd half-budget instead.
+        let deadline = tokio::time::Instant::now() + timeout;
 
-        let mut response = String::new();
-        proc.stdout
-            .read_line(&mut response)
-            .await
-            .map_err(|e| PluginRuntimeError::Io(format!("read stdout: {e}")))?;
-
-        if response.is_empty() {
-            return Err(PluginRuntimeError::Io(
-                "persistent process closed stdout".into(),
-            ));
-        }
-
-        // Guard against misbehaving scripts that emit enormous outputs.
-        const MAX_OUTPUT_BYTES: usize = 4 * 1024 * 1024; // 4 MiB
-        if response.len() > MAX_OUTPUT_BYTES {
-            return Err(PluginRuntimeError::InvalidOutput(format!(
-                "Hook output exceeds maximum size ({} bytes > {} bytes limit). \
-                 Truncate your hook's JSON response.",
-                response.len(),
-                MAX_OUTPUT_BYTES
+        let write_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if write_budget.is_zero() {
+            return Err(PluginRuntimeError::Io(format!(
+                "persistent hook timed out after {}s (no budget left before write)",
+                timeout.as_secs()
             )));
         }
+        librefang_subprocess::write_line_timeout(&mut proc.stdin, line.as_bytes(), write_budget)
+            .await
+            .map_err(|e| PluginRuntimeError::Io(format!("write stdin: {e}")))?;
+
+        let read_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if read_budget.is_zero() {
+            return Err(PluginRuntimeError::Io(format!(
+                "persistent hook timed out after {}s (no budget left before read)",
+                timeout.as_secs()
+            )));
+        }
+        let mut buf = Vec::new();
+        let response = match tokio::time::timeout(
+            read_budget,
+            librefang_subprocess::read_capped_line(&mut proc.stdout, &mut buf, MAX_OUTPUT_BYTES),
+        )
+        .await
+        {
+            Ok(Ok(librefang_subprocess::Line::Data(s))) => s,
+            Ok(Ok(librefang_subprocess::Line::Eof)) => {
+                return Err(PluginRuntimeError::Io(
+                    "persistent process closed stdout".into(),
+                ));
+            }
+            Ok(Ok(librefang_subprocess::Line::TooLong)) => {
+                return Err(PluginRuntimeError::InvalidOutput(format!(
+                    "Hook output exceeds maximum size ({MAX_OUTPUT_BYTES} bytes limit). \
+                     Truncate your hook's JSON response."
+                )));
+            }
+            Ok(Err(e)) => return Err(PluginRuntimeError::Io(format!("read stdout: {e}"))),
+            Err(_) => {
+                return Err(PluginRuntimeError::Io(format!(
+                    "persistent hook timed out after {}s",
+                    timeout.as_secs()
+                )));
+            }
+        };
 
         // The persistent process is still running, so /proc/{pid}/status is valid.
         if let Some(pid) = proc.child.id() {

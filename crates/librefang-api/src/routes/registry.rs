@@ -296,14 +296,31 @@ async fn create_registry_content(
         }
 
         let target_for_closure = target.clone();
+        // The trait method returns `()`; capture the load result via a
+        // surrounding `&mut Option<_>` (per the `model_catalog_update` contract).
+        let mut merge_result: Option<Result<usize, String>> = None;
+        let sink = &mut merge_result;
         state.kernel.model_catalog_update(&mut move |catalog| {
-            if let Err(e) = catalog.load_catalog_file(&target_for_closure) {
-                tracing::warn!("Failed to merge provider file into catalog: {e}");
-            }
+            *sink = Some(catalog.load_catalog_file(&target_for_closure));
             catalog.detect_auth();
         });
         // Invalidate cached LLM drivers — URLs/keys may have changed.
         state.kernel.clear_driver_cache();
+
+        // The file was written to disk but failed to load into the catalog.
+        // Previously this was swallowed as a `warn!`, so the dashboard saw a
+        // success while the provider silently never appeared (#5822). Roll
+        // back the unusable file — leaving it would also re-trigger the same
+        // parse warning on every daemon boot — and surface the error so the
+        // operator can correct the definition.
+        if let Some(Err(e)) = merge_result {
+            let _ = std::fs::remove_file(&target);
+            return ApiErrorResponse::bad_request(format!(
+                "Provider definition was rejected and not saved: {e}"
+            ))
+            .into_json_tuple()
+            .into_response();
+        }
 
         if api_key_to_save.is_some() {
             state.kernel.clone().spawn_key_validation();
@@ -326,11 +343,25 @@ async fn create_registry_content(
         .unwrap_or_else(|_| {
             std::path::PathBuf::from(target.file_name().unwrap_or(target.as_os_str()))
         });
+    // Render with forward-slash separators regardless of host OS — this
+    // is a JSON API response and the dashboard / SDKs expect a
+    // platform-independent shape (`providers/openai.toml`, not
+    // `providers\openai.toml`). `Path::display()` uses the platform
+    // separator, which produced backslashes on Windows and broke the
+    // `registry_content_path_test` regression tests.
+    let relative_path_str = relative_path
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => s.to_str(),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/");
     Json(serde_json::json!({
         "ok": true,
         "content_type": content_type,
         "identifier": identifier,
-        "path": relative_path.display().to_string(),
+        "path": relative_path_str,
     }))
     .into_response()
 }

@@ -606,11 +606,16 @@ impl ApprovalManager {
     ) -> bool {
         let policy = self.policy.read().unwrap_or_else(|e| e.into_inner());
 
+        // Trusted senders bypass channel deny rules ONLY for non-high-risk
+        // tools. A channel deny on a Critical/High tool (shell_exec,
+        // file_write, agent_spawn, …) stays in force even for a trusted
+        // sender — trust is an approval-prompt convenience, not a waiver on
+        // code execution or destructive mutations.
         if let Some(sid) = sender_id {
-            if policy.is_trusted_sender(sid) {
+            if policy.is_trusted_sender(sid) && !Self::is_high_risk(tool_name) {
                 debug!(
                     sender_id = sid,
-                    tool_name, "Trusted sender — channel deny bypassed"
+                    tool_name, "Trusted sender — channel deny bypassed (low-risk tool)"
                 );
                 return false;
             }
@@ -625,13 +630,19 @@ impl ApprovalManager {
     /// into account.
     ///
     /// Returns `false` (no approval needed) if:
-    /// 1. The sender is in the `trusted_senders` list, OR
+    /// 1. The sender is in the `trusted_senders` list AND the tool is not
+    ///    high-risk (`classify_risk` below `High`), OR
     /// 2. A channel rule explicitly allows the tool, OR
     /// 3. The tool is not in the `require_approval` list.
     ///
     /// Returns `true` (approval needed) if:
     /// 1. A channel rule explicitly denies the tool, OR
     /// 2. The tool is in `require_approval` and none of the above bypasses apply.
+    ///
+    /// The trusted-sender bypass deliberately does NOT cover high-risk tools
+    /// (`shell_exec`, `file_write`, `agent_spawn`, …): trust spares an
+    /// operator the prompt for routine tools, it is not a blanket waiver on
+    /// code execution or destructive mutations.
     ///
     /// Agent-aware variant that consults the remembered-decisions cache
     /// (#3313) before falling through to the policy check. The caller
@@ -663,12 +674,17 @@ impl ApprovalManager {
     ) -> bool {
         let policy = self.policy.read().unwrap_or_else(|e| e.into_inner());
 
-        // Trusted sender bypass: auto-approve all tools.
+        // Trusted sender bypass: auto-approve low-risk tools only. High-risk
+        // tools (Critical/High per `classify_risk` — shell_exec, file_write,
+        // agent_spawn, …) still require human approval even from a trusted
+        // sender, and still fall through to the channel/require_approval
+        // checks below. This closes the all-or-nothing escape hatch where a
+        // single trusted user_id silently waived approval for every tool.
         if let Some(sid) = sender_id {
-            if policy.is_trusted_sender(sid) {
+            if policy.is_trusted_sender(sid) && !Self::is_high_risk(tool_name) {
                 debug!(
                     sender_id = sid,
-                    tool_name, "Trusted sender — approval bypassed"
+                    tool_name, "Trusted sender — approval bypassed (low-risk tool)"
                 );
                 return false;
             }
@@ -1342,13 +1358,36 @@ impl ApprovalManager {
     }
 
     /// Classify the risk level of a tool invocation.
+    ///
+    /// `shell_exec` and the control-plane tools (`agent_spawn`,
+    /// `agent_kill`, `config_set`, `kernel_reload`) are `Critical`: each can
+    /// execute arbitrary code, spawn/kill agents, or rewrite the daemon's
+    /// runtime configuration. The mutating filesystem tools (`file_write`,
+    /// `file_delete`, `apply_patch`) are `High`. Tools at `High` or above are
+    /// the ones the approval gate refuses to auto-exempt for trusted senders
+    /// — see `requires_approval_with_context` / `is_tool_denied_with_context`.
     pub fn classify_risk(tool_name: &str) -> RiskLevel {
         match tool_name {
-            "shell_exec" => RiskLevel::Critical,
+            "shell_exec" | "agent_spawn" | "agent_kill" | "config_set" | "kernel_reload" => {
+                RiskLevel::Critical
+            }
             "file_write" | "file_delete" | "apply_patch" => RiskLevel::High,
             "web_fetch" | "browser_navigate" => RiskLevel::Medium,
             _ => RiskLevel::Low,
         }
+    }
+
+    /// Whether a tool is too dangerous for the `trusted_senders` escape
+    /// hatch to bypass.
+    ///
+    /// `trusted_senders` is meant to spare a known operator the approval
+    /// prompt for routine, low-blast-radius tools — not to hand them a
+    /// blanket waiver on code execution, control-plane mutations, or
+    /// destructive filesystem writes. Any tool classified `High` or above
+    /// (see `classify_risk`) still requires explicit approval and is still
+    /// subject to channel deny rules, regardless of who sent the request.
+    pub fn is_high_risk(tool_name: &str) -> bool {
+        Self::classify_risk(tool_name) >= RiskLevel::High
     }
 
     // -----------------------------------------------------------------------
@@ -2269,6 +2308,24 @@ mod tests {
             ApprovalManager::classify_risk("browser_navigate"),
             RiskLevel::Medium
         );
+        // Control-plane tools are Critical: they spawn/kill agents or
+        // rewrite the daemon's runtime configuration.
+        assert_eq!(
+            ApprovalManager::classify_risk("agent_spawn"),
+            RiskLevel::Critical
+        );
+        assert_eq!(
+            ApprovalManager::classify_risk("agent_kill"),
+            RiskLevel::Critical
+        );
+        assert_eq!(
+            ApprovalManager::classify_risk("config_set"),
+            RiskLevel::Critical
+        );
+        assert_eq!(
+            ApprovalManager::classify_risk("kernel_reload"),
+            RiskLevel::Critical
+        );
         assert_eq!(ApprovalManager::classify_risk("file_read"), RiskLevel::Low);
         assert_eq!(
             ApprovalManager::classify_risk("unknown_tool"),
@@ -2521,21 +2578,52 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_context_trusted_sender_bypasses_approval() {
+    fn test_context_trusted_sender_bypasses_low_risk_only() {
         let policy = ApprovalPolicy {
-            require_approval: vec!["shell_exec".to_string()],
+            // Gate the default high-risk mutation/exec tools plus one
+            // low-risk tool (web_search) so we can prove the trust bypass
+            // discriminates by risk level, not by membership alone.
+            require_approval: vec![
+                "shell_exec".to_string(),
+                "file_write".to_string(),
+                "web_search".to_string(),
+            ],
             trusted_senders: vec!["admin_123".to_string()],
+            // A control-plane tool (agent_spawn, Critical) gated via a
+            // channel deny rather than require_approval, to prove trust
+            // does not waive a deny on a high-risk tool either.
+            channel_rules: vec![librefang_types::approval::ChannelToolRule {
+                channel: "telegram".to_string(),
+                allowed_tools: vec![],
+                denied_tools: vec!["agent_spawn".to_string()],
+            }],
             ..Default::default()
         };
         let mgr = ApprovalManager::new(policy);
 
-        // Trusted sender should bypass even for shell_exec
-        assert!(!mgr.requires_approval_with_context("shell_exec", Some("admin_123"), None));
+        // (b) Trusted sender + low-risk tool → exemption still applies even
+        // though web_search is in require_approval.
+        assert!(!mgr.requires_approval_with_context("web_search", Some("admin_123"), None));
 
-        // Untrusted sender still requires approval
+        // (a) Trusted sender + Critical tool (shell_exec) → still gated. The
+        // all-or-nothing escape hatch is closed.
+        assert!(mgr.requires_approval_with_context("shell_exec", Some("admin_123"), None));
+
+        // (a) Trusted sender + High tool (file_write) → still gated.
+        assert!(mgr.requires_approval_with_context("file_write", Some("admin_123"), None));
+
+        // (a) Trusted sender + Critical control-plane tool (agent_spawn)
+        // denied on this channel → trust does not waive the deny.
+        assert!(mgr.requires_approval_with_context(
+            "agent_spawn",
+            Some("admin_123"),
+            Some("telegram")
+        ));
+
+        // (c) Untrusted sender is unaffected — still requires approval.
         assert!(mgr.requires_approval_with_context("shell_exec", Some("random_user"), None));
 
-        // No sender context falls back to default
+        // No sender context falls back to default.
         assert!(mgr.requires_approval_with_context("shell_exec", None, None));
     }
 
@@ -2582,32 +2670,38 @@ mod tests {
     }
 
     #[test]
-    fn test_context_trusted_sender_overrides_channel_deny() {
+    fn test_context_trusted_sender_channel_deny_high_risk_still_enforced() {
         let policy = ApprovalPolicy {
             require_approval: vec!["shell_exec".to_string()],
             trusted_senders: vec!["admin_123".to_string()],
             channel_rules: vec![librefang_types::approval::ChannelToolRule {
                 channel: "telegram".to_string(),
                 allowed_tools: vec![],
-                denied_tools: vec!["shell_exec".to_string()],
+                // Deny a high-risk tool and a low-risk tool on this channel.
+                denied_tools: vec!["shell_exec".to_string(), "web_search".to_string()],
             }],
             ..Default::default()
         };
         let mgr = ApprovalManager::new(policy);
 
-        // Trusted sender bypasses even channel deny rules
-        assert!(!mgr.is_tool_denied_with_context(
-            "shell_exec",
-            Some("admin_123"),
-            Some("telegram")
-        ));
-        assert!(!mgr.requires_approval_with_context(
+        // Channel deny on a Critical tool stays in force even for a trusted
+        // sender — trust does not waive the deny on shell_exec.
+        assert!(mgr.is_tool_denied_with_context("shell_exec", Some("admin_123"), Some("telegram")));
+        assert!(mgr.requires_approval_with_context(
             "shell_exec",
             Some("admin_123"),
             Some("telegram")
         ));
 
-        // Untrusted sender from telegram is denied
+        // Channel deny on a low-risk tool IS bypassed for a trusted sender —
+        // the convenience exemption still works for routine tools.
+        assert!(!mgr.is_tool_denied_with_context(
+            "web_search",
+            Some("admin_123"),
+            Some("telegram")
+        ));
+
+        // Untrusted sender from telegram is denied regardless of risk level.
         assert!(mgr.is_tool_denied_with_context(
             "shell_exec",
             Some("random_user"),

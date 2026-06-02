@@ -58,6 +58,13 @@ TELEGRAM_BOT_TOKEN = "..."
 
 See [`[[sidecar_channels]]`](#sidecar_channels) below for all fields. The sidecar preserves the same runtime semantics: `TELEGRAM_BOT_TOKEN` env var, optional `ALLOWED_USERS` allowlist, `channel_type = "telegram"`, and RBAC mapping via `channel_role_mapping.telegram`.
 
+**Rust alternative (since #5831).** A first-party Rust port of the Telegram sidecar ships at `sdk/rust/librefang-sidecar-telegram/` — pick it when you do not want a Python runtime on the host, when per-respawn startup latency matters, or when the ~3 MB stripped binary saves enough image weight to justify it.
+The wire shape and access-control semantics are byte-equivalent with the Python adapter; the supervisor cannot tell them apart.
+Since #5936 the binary ships inside the platform release tarballs, so `librefang update` installs it to `~/.librefang/bin/librefang-sidecar-telegram` — no manual `cargo build` required.
+Configure with the bare `command = "librefang-sidecar-telegram"` and the daemon auto-resolves the bundled binary (it checks its own executable directory, then `~/.librefang/bin/`, then PATH); the same `TELEGRAM_BOT_TOKEN` / `ALLOWED_USERS` env applies.
+A development build that has not been installed via `librefang update` still uses an explicit `command = "/abs/path/to/target/release/librefang-sidecar-telegram"`.
+See [Rust Telegram sidecar adapter](/architecture/rust-telegram-sidecar) for the full reference.
+
 #### Discord (sidecar)
 
 Discord migrated to an out-of-process sidecar in v2026.5; declare it as a

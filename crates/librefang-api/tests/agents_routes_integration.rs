@@ -65,7 +65,7 @@ async fn boot(api_key: &str) -> Harness {
             api_key_env: "OLLAMA_API_KEY".to_string(),
             base_url: None,
             message_timeout_secs: 300,
-            extra_params: std::collections::HashMap::new(),
+            extra_params: std::collections::BTreeMap::new(),
             cli_profile_dirs: Vec::new(),
         },
         ..KernelConfig::default()
@@ -1581,4 +1581,70 @@ async fn test_set_mode_invalid_id_returns_400() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "body={body:?}");
     assert_eq!(body["code"], "invalid_agent_id");
+}
+
+// ---------------------------------------------------------------------------
+// PATCH /api/agents/{id} — auto_evolve field
+//
+// Pins the contract: toggling auto_evolve off via PATCH must be reflected
+// by the subsequent GET, confirming the field is persisted and serialised in
+// the agent response.
+// ---------------------------------------------------------------------------
+
+/// PATCH `{"auto_evolve": false}` then GET — the response must contain
+/// `auto_evolve: false`.  Also verifies round-trip back to `true`.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_patch_agent_auto_evolve_persists() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "auto-evolve-target");
+
+    // Default: auto_evolve should be true on a freshly spawned agent.
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{}", id))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["auto_evolve"], true,
+        "expected auto_evolve=true by default, got {:?}",
+        body["auto_evolve"]
+    );
+
+    // PATCH auto_evolve to false.
+    let (status, _) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{}", id),
+            serde_json::json!({"auto_evolve": false}),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Read-after-write — GET must reflect the new value.
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{}", id))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["auto_evolve"], false,
+        "expected auto_evolve=false after PATCH, got {:?}",
+        body["auto_evolve"]
+    );
+
+    // Round-trip: restore auto_evolve to true.
+    let (status, _) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{}", id),
+            serde_json::json!({"auto_evolve": true}),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{}", id))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["auto_evolve"], true,
+        "expected auto_evolve=true after re-enable PATCH, got {:?}",
+        body["auto_evolve"]
+    );
 }

@@ -32,6 +32,10 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
             axum::routing::post(evolve_write_file).delete(evolve_remove_file),
         )
         .route("/skills/{name}/file", axum::routing::get(get_supporting_file))
+        .route(
+            "/skills/{name}/propose",
+            axum::routing::post(propose_skill_to_registry),
+        )
         // Skill workshop (#3328) — passive after-turn capture review.
         .route(
             "/skills/pending",
@@ -562,10 +566,7 @@ pub async fn list_pending_candidates(
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": format!("invalid agent id (must be a UUID): {id}")})),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("failed to read pending dir: {e}")})),
-        ),
+        Err(e) => ApiErrorResponse::internal_scrub(e).into_json_tuple(),
     }
 }
 
@@ -602,10 +603,7 @@ pub async fn show_pending_candidate(
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": format!("candidate '{id}' not found")})),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("failed to load candidate: {e}")})),
-        ),
+        Err(e) => ApiErrorResponse::internal_scrub(e).into_json_tuple(),
     }
 }
 
@@ -701,14 +699,11 @@ pub async fn approve_pending_candidate(
                 Ok(c) => Some(c),
                 Err(librefang_kernel::skill_workshop::WorkshopError::NotFound(_)) => None,
                 Err(e) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!({
-                            "error": format!(
-                                "Active skill '{skill_name}' already exists; failed to read candidate to disambiguate phantom vs collision: {e}"
-                            ),
-                        })),
-                    );
+                    // Scrub the raw storage error (audit:
+                    // rusqlite-errors-leak) — keep the operator-useful
+                    // context in the log, return a generic body.
+                    tracing::error!(error = %e, %skill_name, "failed to read candidate to disambiguate phantom vs collision");
+                    return ApiErrorResponse::internal_scrub(e).into_json_tuple();
                 }
             };
             let bodies_match = match &candidate {
@@ -741,14 +736,13 @@ pub async fn approve_pending_candidate(
                             ),
                         })),
                     ),
-                    Err(e) => (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!({
-                            "error": format!(
-                                "Active skill '{skill_name}' already exists, but failed to clear pending entry: {e}"
-                            ),
-                        })),
-                    ),
+                    Err(e) => {
+                        // Scrub the raw storage error (audit:
+                        // rusqlite-errors-leak); operator context in
+                        // the log, generic body to the client.
+                        tracing::error!(error = %e, %skill_name, "failed to clear pending entry after phantom recovery");
+                        ApiErrorResponse::internal_scrub(e).into_json_tuple()
+                    }
                 }
             } else {
                 // Real name collision. Pending file is intentionally
@@ -773,10 +767,7 @@ pub async fn approve_pending_candidate(
             StatusCode::CONFLICT,
             Json(serde_json::json!({"error": format!("promotion rejected: {e}")})),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("failed to approve candidate: {e}")})),
-        ),
+        Err(e) => ApiErrorResponse::internal_scrub(e).into_json_tuple(),
     }
 }
 
@@ -814,10 +805,7 @@ pub async fn reject_pending_candidate(
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": format!("candidate '{id}' not found")})),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("failed to reject candidate: {e}")})),
-        ),
+        Err(e) => ApiErrorResponse::internal_scrub(e).into_json_tuple(),
     }
 }
 
@@ -1505,7 +1493,16 @@ pub async fn clawhub_install(
                 StatusCode::INTERNAL_SERVER_ERROR
             };
             tracing::warn!("ClawHub install failed: {msg}");
-            (status, Json(serde_json::json!({"error": msg})))
+            // 4xx / 502 echo the actionable SkillError (security
+            // block, rate limit, network); the 500 catch-all scrubs to
+            // a generic body (audit: rusqlite-errors-leak). Full error
+            // already logged above.
+            let body = if status == StatusCode::INTERNAL_SERVER_ERROR {
+                "Internal server error".to_string()
+            } else {
+                msg
+            };
+            (status, Json(serde_json::json!({"error": body})))
         }
     }
 }
@@ -1872,7 +1869,15 @@ pub async fn clawhub_cn_install(
                 StatusCode::INTERNAL_SERVER_ERROR
             };
             tracing::warn!("ClawHub CN install failed: {msg}");
-            (status, Json(serde_json::json!({"error": msg})))
+            // See ClawHub install above: 500 catch-all scrubbed
+            // (audit: rusqlite-errors-leak), actionable 4xx / 502
+            // echoed. Full error already logged above.
+            let body = if status == StatusCode::INTERNAL_SERVER_ERROR {
+                "Internal server error".to_string()
+            } else {
+                msg
+            };
+            (status, Json(serde_json::json!({"error": body})))
         }
     }
 }
@@ -2170,7 +2175,15 @@ pub async fn skillhub_install(
                 StatusCode::INTERNAL_SERVER_ERROR
             };
             tracing::warn!("Skillhub install failed: {msg}");
-            (status, Json(serde_json::json!({"error": msg})))
+            // See ClawHub install above: 500 catch-all scrubbed
+            // (audit: rusqlite-errors-leak), actionable 4xx / 502
+            // echoed. Full error already logged above.
+            let body = if status == StatusCode::INTERNAL_SERVER_ERROR {
+                "Internal server error".to_string()
+            } else {
+                msg
+            };
+            (status, Json(serde_json::json!({"error": body})))
         }
     }
 }
@@ -2587,11 +2600,11 @@ pub async fn get_hand_manifest(
         match toml::to_string_pretty(&definition) {
             Ok(s) => toml_content = Some(s),
             Err(e) => {
-                return ApiErrorResponse::internal(format!(
-                    "Failed to serialize hand definition: {e}"
-                ))
-                .into_json_tuple()
-                .into_response();
+                // Scrub the serialize error (audit: rusqlite-errors-leak).
+                tracing::error!(error = %e, "failed to serialize hand definition");
+                return ApiErrorResponse::internal_scrub(e)
+                    .into_json_tuple()
+                    .into_response();
             }
         }
     }
@@ -3749,13 +3762,34 @@ pub async fn hand_send_message(
         );
     }
 
-    // Resolve file attachments
+    // Resolve file attachments. Hand/skill calls do not carry a channel
+    // sender context (the hand call is the channel from the kernel's
+    // POV), so we route the injection through the helper with
+    // `sender_context = None` and the agent's persistent registry
+    // session id as the fallback. This matches the
+    // `send_message_with_handle` path below, which is itself a
+    // `Persistent`-mode dispatch landing on `entry.session_id`. Without
+    // this signature change the helper would silently land on the same
+    // session anyway, but it would do so via the kernel's "agent
+    // default" branch — the very fallback we are removing for
+    // channel-scoped callers. Threading the explicit fallback keeps the
+    // hand path's behaviour byte-identical while closing the cross-chat
+    // leak on the agent message path.
     if !req.attachments.is_empty() {
         let image_blocks = super::agents::resolve_attachments(&state, &req.attachments);
         if !image_blocks.is_empty() {
+            let fallback_session_id = state
+                .kernel
+                .agent_registry()
+                .get(agent_id)
+                .map(|e| e.session_id)
+                .unwrap_or_else(librefang_types::agent::SessionId::new);
             super::agents::inject_attachments_into_session(
                 state.kernel.as_ref(),
                 agent_id,
+                None,
+                None,
+                fallback_session_id,
                 image_blocks,
             );
         }
@@ -4503,11 +4537,10 @@ pub async fn update_mcp_server(
     // Persist — upsert replaces an existing entry with the same name
     let config_path = state.kernel.home_dir().join("config.toml");
     if let Err(e) = upsert_mcp_server_config(&config_path, &entry) {
-        return ApiErrorResponse::internal(t.t_args(
-            "api-error-config-write-failed",
-            &[("error", &e.to_string())],
-        ))
-        .into_json_tuple();
+        // Scrub the config-write error (audit: rusqlite-errors-leak):
+        // the helper string carries io / TOML-parse detail. Full error
+        // logged; client sees the generic body.
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
     // Drop ErrorTranslator before .await — FluentBundle is !Send and cannot
     // be held across an async suspension point.
@@ -4622,11 +4655,10 @@ pub async fn patch_mcp_server_taint(
 
     let config_path = state.kernel.home_dir().join("config.toml");
     if let Err(e) = upsert_mcp_server_config(&config_path, &entry) {
-        return ApiErrorResponse::internal(t.t_args(
-            "api-error-config-write-failed",
-            &[("error", &e.to_string())],
-        ))
-        .into_json_tuple();
+        // Scrub the config-write error (audit: rusqlite-errors-leak):
+        // the helper string carries io / TOML-parse detail. Full error
+        // logged; client sees the generic body.
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
     // Drop ErrorTranslator before .await — FluentBundle is !Send and cannot
     // be held across an async suspension point.
@@ -4717,11 +4749,10 @@ pub async fn delete_mcp_server(
 
     let config_path = state.kernel.home_dir().join("config.toml");
     if let Err(e) = remove_mcp_server_config(&config_path, &name) {
-        return ApiErrorResponse::internal(t.t_args(
-            "api-error-config-write-failed",
-            &[("error", &e.to_string())],
-        ))
-        .into_json_tuple();
+        // Scrub the config-write error (audit: rusqlite-errors-leak):
+        // the helper string carries io / TOML-parse detail. Full error
+        // logged; client sees the generic body.
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
     drop(t);
 
@@ -5052,6 +5083,106 @@ pub async fn get_skill_detail(
     )
 }
 
+/// Resolve a GitHub token for registry operations: prefer the process
+/// env (`GITHUB_TOKEN`, set by the dashboard GitHub OAuth flow and by
+/// operators), then fall back to the vault. Returns `None` when neither
+/// holds a non-empty token.
+fn resolve_github_token(state: &Arc<AppState>) -> Option<String> {
+    if let Ok(tok) = std::env::var("GITHUB_TOKEN") {
+        if !tok.trim().is_empty() {
+            return Some(tok);
+        }
+    }
+    state
+        .kernel
+        .vault_get("GITHUB_TOKEN")
+        .filter(|t| !t.trim().is_empty())
+}
+
+/// POST /api/skills/{name}/propose — open a PR contributing this skill
+/// to the configured public skill registry.
+///
+/// Forks the registry repo under the authenticated GitHub user, pushes
+/// the skill files to a fresh branch, and opens a pull request with an
+/// auto-generated description (metadata + evolution changelog). Requires
+/// a `GITHUB_TOKEN` (env or vault).
+#[utoipa::path(
+    post,
+    path = "/api/skills/{name}/propose",
+    tag = "skills",
+    params(("name" = String, Path, description = "Skill name")),
+    responses(
+        (status = 200, description = "PR opened against the registry", body = crate::types::JsonObject),
+        (status = 400, description = "Invalid request"),
+        (status = 401, description = "No GitHub token configured"),
+        (status = 404, description = "Skill not found"),
+        (status = 502, description = "GitHub request failed")
+    )
+)]
+pub async fn propose_skill_to_registry(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let skill = match clone_installed_skill(&state, &name) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+
+    let Some(token) = resolve_github_token(&state) else {
+        return ApiErrorResponse::unauthorized(
+            "No GitHub token configured. Connect GitHub in Settings or set GITHUB_TOKEN.",
+        )
+        .into_json_tuple();
+    };
+
+    let registry_repo = state
+        .kernel
+        .config_snapshot()
+        .skills
+        .registry_repo
+        .clone()
+        .filter(|r| !r.trim().is_empty())
+        .unwrap_or_else(|| librefang_skills::registry_pr::DEFAULT_REGISTRY_REPO.to_string());
+
+    let evolution = librefang_skills::evolution::get_evolution_info(&skill);
+
+    let result = librefang_skills::registry_pr::propose_skill_to_registry(
+        librefang_skills::registry_pr::ProposeRequest {
+            skill: &skill,
+            evolution: &evolution,
+            registry_repo: &registry_repo,
+            token: &token,
+        },
+    )
+    .await;
+
+    match result {
+        Ok(pr) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "pr_url": pr.pr_url,
+                "repo": pr.repo,
+                "branch": pr.branch,
+            })),
+        ),
+        Err(librefang_skills::SkillError::SecurityBlocked(msg)) => {
+            ApiErrorResponse::unauthorized(msg).into_json_tuple()
+        }
+        Err(librefang_skills::SkillError::InvalidManifest(msg)) => {
+            ApiErrorResponse::bad_request(msg).into_json_tuple()
+        }
+        Err(librefang_skills::SkillError::NotFound(msg)) => {
+            ApiErrorResponse::not_found(msg).into_json_tuple()
+        }
+        // Network / GitHub failures surface as 502 Bad Gateway — the
+        // request was well-formed but the upstream dependency failed.
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
 // ── Skill evolution handlers ───────────────────────────────────────────
 //
 // Each handler looks the skill up by name, clones the InstalledSkill
@@ -5125,7 +5256,10 @@ fn evolution_err_to_response(
         E::InvalidManifest(_) | E::SecurityBlocked(_) | E::YamlParse(_) | E::TomlParse(_) => {
             ApiErrorResponse::bad_request(msg).into_json_tuple()
         }
-        _ => ApiErrorResponse::internal(msg).into_json_tuple(),
+        // 4xx arms above echo the actionable SkillError; the catch-all
+        // 500 scrubs (audit: rusqlite-errors-leak) — `internal_scrub`
+        // logs `msg` and returns the generic body.
+        _ => ApiErrorResponse::internal_scrub(msg).into_json_tuple(),
     }
 }
 
@@ -5832,14 +5966,21 @@ pub async fn reconnect_mcp_server_handler(
                 "tool_count": tool_count,
             })),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "id": name,
-                "status": "error",
-                "error": e,
-            })),
-        ),
+        Err(e) => {
+            // Scrub the raw reconnect error (audit:
+            // rusqlite-errors-leak); operators keep the detail in the
+            // log, the client sees the generic body alongside the
+            // structured status fields.
+            tracing::error!(error = %e, server = %name, "MCP reconnect failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "id": name,
+                    "status": "error",
+                    "error": "Internal server error",
+                })),
+            )
+        }
     }
 }
 
@@ -6104,18 +6245,26 @@ pub async fn install_extension(
                 }
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             };
-            return (status, Json(serde_json::json!({"error": err_str})));
+            // 404 echoes the "not found" message (caller-useful); the
+            // 500 catch-all scrubs (audit: rusqlite-errors-leak) and
+            // logs the full error for operators.
+            let body = if status == StatusCode::INTERNAL_SERVER_ERROR {
+                tracing::error!(error = %err_str, extension = %name, "extension install failed");
+                "Internal server error".to_string()
+            } else {
+                err_str
+            };
+            return (status, Json(serde_json::json!({"error": body})));
         }
     };
 
     let config_path = state.kernel.home_dir().join("config.toml");
     if let Err(e) = upsert_mcp_server_config(&config_path, &result.server) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "error": format!("Failed to write config: {e}"),
-            })),
-        );
+        // Scrub the config-write io error (audit:
+        // rusqlite-errors-leak) — path / permission detail stays in
+        // the log, the client sees a generic body.
+        tracing::error!(error = %e, "failed to write config after extension install");
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
 
     // Sync the in-memory config with the freshly-written config.toml before
@@ -6345,6 +6494,95 @@ mod tests {
         }
     }
 
+    /// Regression for #5799: patching taint_scanning=false on one server must
+    /// not affect the taint_scanning value of any other server in the file.
+    ///
+    /// The upsert reads the whole config.toml, replaces the matching entry,
+    /// and re-serialises. This test confirms the round-trip preserves each
+    /// server's independent taint_scanning field so the two-server scenario
+    /// reported in #5799 (one disabled, one still enabled) survives a write.
+    #[test]
+    fn upsert_mcp_server_taint_scanning_false_does_not_affect_other_servers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.toml");
+        std::fs::write(&config_path, "").unwrap();
+
+        // Add server A (taint enabled, the default).
+        let server_a = McpServerConfigEntry {
+            name: "server-a".to_string(),
+            template_id: None,
+            transport: Some(McpTransportEntry::Stdio {
+                command: "npx".to_string(),
+                args: vec!["mcp-a".to_string()],
+            }),
+            timeout_secs: 30,
+            env: vec![],
+            headers: vec![],
+            oauth: None,
+            taint_scanning: true,
+            taint_policy: None,
+        };
+        upsert_mcp_server_config(&config_path, &server_a).unwrap();
+
+        // Add server B (taint also enabled initially).
+        let server_b = McpServerConfigEntry {
+            name: "server-b".to_string(),
+            template_id: None,
+            transport: Some(McpTransportEntry::Stdio {
+                command: "npx".to_string(),
+                args: vec!["mcp-b".to_string()],
+            }),
+            timeout_secs: 30,
+            env: vec![],
+            headers: vec![],
+            oauth: None,
+            taint_scanning: true,
+            taint_policy: None,
+        };
+        upsert_mcp_server_config(&config_path, &server_b).unwrap();
+
+        // Simulate the PATCH /api/mcp/servers/server-a/taint disabling scanning on A.
+        let server_a_patched = McpServerConfigEntry {
+            name: "server-a".to_string(),
+            taint_scanning: false,
+            ..server_a.clone()
+        };
+        upsert_mcp_server_config(&config_path, &server_a_patched).unwrap();
+
+        // Deserialise and assert per-server independence.
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            mcp_servers: Vec<McpServerConfigEntry>,
+        }
+        let raw = std::fs::read_to_string(&config_path).unwrap();
+        let parsed: Wrapper = toml::from_str(&raw).expect("round-tripped TOML must parse cleanly");
+        assert_eq!(
+            parsed.mcp_servers.len(),
+            2,
+            "must still have exactly 2 servers"
+        );
+
+        let a = parsed
+            .mcp_servers
+            .iter()
+            .find(|s| s.name == "server-a")
+            .expect("server-a missing");
+        let b = parsed
+            .mcp_servers
+            .iter()
+            .find(|s| s.name == "server-b")
+            .expect("server-b missing");
+
+        assert!(
+            !a.taint_scanning,
+            "server-a must have taint_scanning=false after patch"
+        );
+        assert!(
+            b.taint_scanning,
+            "server-b must retain taint_scanning=true — patching server-a must not affect it"
+        );
+    }
+
     // 16 channel-config tests (upsert / remove / append / update /
     // remove_channel_instance, AoT-conflict guards, legacy-table
     // promotion) retired alongside the helper functions they
@@ -6475,6 +6713,56 @@ mod tests {
         assert!(
             !path.exists(),
             "secrets.env must not be created on validation error"
+        );
+    }
+
+    /// Regression for #5857: on Windows the dashboard "save provider key"
+    /// action failed with `unsafe path 'C:\Users\root\.librefang\secrets.env'`.
+    /// `validate_static_file_path` (the gate on every secrets.env / config.toml
+    /// write) used to reject `Component::Prefix(_)` alongside `ParentDir`, and a
+    /// Windows absolute path always carries a drive-letter prefix — so every
+    /// legitimate, server-constructed `home_dir().join("secrets.env")` tripped
+    /// the check. PR #1770 narrowed the rejection to `ParentDir` only; this
+    /// asserts the drive-letter prefix is accepted so the rejection cannot be
+    /// re-added without failing the Windows CI shard.
+    #[cfg(windows)]
+    #[test]
+    fn validate_static_file_path_accepts_windows_drive_prefix() {
+        let path = std::path::Path::new(r"C:\Users\root\.librefang\secrets.env");
+        // Sanity: the host parser really does emit a drive-letter prefix here,
+        // otherwise the assertion below would pass vacuously.
+        assert!(
+            path.components()
+                .any(|c| matches!(c, std::path::Component::Prefix(_))),
+            "test precondition: Windows path must carry a Component::Prefix",
+        );
+        assert!(
+            validate_static_file_path(path, "secrets.env").is_ok(),
+            "a server-constructed Windows absolute secrets.env path must validate; \
+             rejecting Component::Prefix re-introduces #5857",
+        );
+    }
+
+    /// Platform-independent companion to the #5857 guard above. The Windows
+    /// `Prefix` component is unreachable on a Unix test host, but the contract —
+    /// "reject `..`, accept everything else for the fixed filename" — is the
+    /// same on every platform and must hold for the boot-time path shape the
+    /// daemon actually constructs (`home_dir().join("secrets.env")`).
+    #[test]
+    fn validate_static_file_path_rejects_parent_dir_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let good = tmp.path().join("secrets.env");
+        assert!(
+            validate_static_file_path(&good, "secrets.env").is_ok(),
+            "an absolute, traversal-free secrets.env path must validate",
+        );
+
+        let traversal = tmp.path().join("..").join("secrets.env");
+        let err = validate_static_file_path(&traversal, "secrets.env")
+            .expect_err("a `..` component must be rejected");
+        assert!(
+            err.contains("unsafe path"),
+            "rejection message should flag the unsafe path, got: {err}",
         );
     }
 }

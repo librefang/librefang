@@ -40,7 +40,7 @@ async fn build_harness(tool_invoke: librefang_types::config::ToolInvokeConfig) -
             api_key_env: "OLLAMA_API_KEY".into(),
             base_url: None,
             message_timeout_secs: 300,
-            extra_params: std::collections::HashMap::new(),
+            extra_params: std::collections::BTreeMap::new(),
             cli_profile_dirs: Vec::new(),
         };
         cfg.tool_invoke = tool_invoke;

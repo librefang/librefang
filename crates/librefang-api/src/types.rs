@@ -223,6 +223,18 @@ impl ApiErrorResponse {
         }
     }
 
+    /// 401 Unauthorized.
+    pub fn unauthorized(msg: impl Into<String>) -> Self {
+        Self {
+            error: msg.into(),
+            code: None,
+            r#type: None,
+            details: None,
+            request_id: None,
+            status: StatusCode::UNAUTHORIZED,
+        }
+    }
+
     /// 403 Forbidden.
     pub fn forbidden(msg: impl Into<String>) -> Self {
         Self {

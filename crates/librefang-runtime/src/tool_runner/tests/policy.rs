@@ -41,6 +41,8 @@ async fn tool_runner_rbac_user_deny_returns_hard_error() {
         None,
         None,
         None,
+        0,
+        0,
     )
     .await;
 
@@ -104,6 +106,8 @@ async fn tool_runner_rbac_user_needs_approval_routes_through_approval_queue() {
         None,
         None,
         None,
+        0,
+        0,
     )
     .await;
 
@@ -167,6 +171,8 @@ async fn tool_runner_rbac_full_mode_does_not_bypass_user_needs_approval() {
         None,
         None,
         None,
+        0,
+        0,
     )
     .await;
 
@@ -225,6 +231,8 @@ async fn tool_runner_rbac_user_allow_falls_through_to_existing_approval_logic() 
         None,
         None,
         None,
+        0,
+        0,
     )
     .await;
 
@@ -281,6 +289,8 @@ async fn test_shell_exec_uses_exec_policy_allowed_env_vars() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
 
@@ -422,6 +432,30 @@ fn test_detect_image_format_unknown() {
 }
 
 #[test]
+fn test_detect_image_format_tiff_le() {
+    let data = b"II\x2A\x00\x08\x00\x00\x00";
+    assert_eq!(detect_image_format(data), "tiff");
+}
+
+#[test]
+fn test_detect_image_format_tiff_be() {
+    let data = b"MM\x00\x2A\x00\x00\x00\x08";
+    assert_eq!(detect_image_format(data), "tiff");
+}
+
+#[test]
+fn test_detect_image_format_svg_bare() {
+    let data = b"<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>";
+    assert_eq!(detect_image_format(data), "svg");
+}
+
+#[test]
+fn test_detect_image_format_svg_with_xml_decl() {
+    let data = b"<?xml version=\"1.0\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>";
+    assert_eq!(detect_image_format(data), "svg");
+}
+
+#[test]
 fn test_extract_png_dimensions() {
     // Minimal PNG header: signature (8) + IHDR length (4) + "IHDR" (4) + width (4) + height (4)
     let mut data = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]; // signature
@@ -479,11 +513,13 @@ async fn test_image_analyze_missing_file() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(result.is_error);
     assert!(
-        result.content.contains("Failed to read"),
+        result.content.contains("nonexistent_image.png"),
         "unexpected error content: {}",
         result.content
     );
@@ -519,7 +555,9 @@ async fn test_media_tools_honor_named_workspace_prefixes() {
          no named-workspace prefixes are provided, got: {:?}",
         denied
     );
-    let err = denied.unwrap_err();
+    // #3576: Err is now ToolError; assert via its Display (the sandbox reason
+    // is preserved inside InvalidParameter).
+    let err = denied.unwrap_err().to_string();
     assert!(
         err.contains("resolves outside workspace") || err.contains("Access denied"),
         "expected sandbox rejection, got: {err}"
@@ -534,18 +572,6 @@ async fn test_media_tools_honor_named_workspace_prefixes() {
          got: {:?}",
         ok
     );
-}
-
-#[test]
-fn test_depth_limit_constant() {
-    assert_eq!(MAX_AGENT_CALL_DEPTH, 5);
-}
-
-#[test]
-fn test_depth_limit_first_call_succeeds() {
-    // Default depth is 0, which is < MAX_AGENT_CALL_DEPTH
-    let default_depth = AGENT_CALL_DEPTH.try_with(|d| d.get()).unwrap_or(0);
-    assert!(default_depth < MAX_AGENT_CALL_DEPTH);
 }
 
 #[test]
@@ -586,10 +612,16 @@ async fn test_schedule_tools_without_kernel() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(result.is_error);
-    assert!(result.content.contains("Kernel handle not available"));
+    // #3576: schedule_* now goes through `require_kernel_typed`, which yields
+    // `ToolError::Unavailable("Kernel handle")` rendered as "Kernel handle
+    // unavailable" (the old `require_kernel` string was "Kernel handle not
+    // available ..."). shell.rs still asserts the old text until shell migrates.
+    assert!(result.content.contains("Kernel handle unavailable"));
 }
 
 // ─── Canvas / A2UI tests ────────────────────────────────────────
@@ -622,23 +654,28 @@ fn test_sanitize_canvas_rejects_iframe() {
 fn test_sanitize_canvas_rejects_event_handler() {
     let html = "<div onclick=\"alert('xss')\">click me</div>";
     let result = sanitize_canvas_html(html, 512 * 1024);
-    assert!(result.is_err());
-    assert!(result.unwrap_err().contains("event handler"));
+    assert!(result.is_ok());
+    assert!(!result.unwrap().contains("onclick"));
 }
 
 #[test]
 fn test_sanitize_canvas_rejects_onload() {
     let html = "<img src='x' onerror = \"alert(1)\">";
     let result = sanitize_canvas_html(html, 512 * 1024);
-    assert!(result.is_err());
+    assert!(result.is_ok());
+    assert!(!result.unwrap().contains("onerror"));
 }
 
 #[test]
 fn test_sanitize_canvas_rejects_javascript_url() {
     let html = "<a href=\"javascript:alert('xss')\">click</a>";
     let result = sanitize_canvas_html(html, 512 * 1024);
-    assert!(result.is_err());
-    assert!(result.unwrap_err().contains("javascript:"));
+    assert!(result.is_ok());
+    let sanitized = result.unwrap();
+    assert!(
+        !sanitized.contains("javascript:"),
+        "dangerous javascript URL not stripped: {sanitized}"
+    );
 }
 
 #[test]
@@ -658,6 +695,51 @@ fn test_sanitize_canvas_rejects_empty() {
 #[test]
 fn test_sanitize_canvas_size_limit() {
     let html = "x".repeat(1024);
+    let result = sanitize_canvas_html(&html, 100);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("too large"));
+}
+
+#[test]
+fn test_sanitize_canvas_preserves_entities() {
+    let html = "<p>Tom &amp; Jerry &lt;3</p>";
+    let result = sanitize_canvas_html(html, 512 * 1024).unwrap();
+    assert_eq!(result, html);
+}
+
+#[test]
+fn test_sanitize_canvas_preserves_numeric_entities() {
+    let html = "<p>It&#39;s a test &amp; more</p>";
+    let result = sanitize_canvas_html(html, 512 * 1024).unwrap();
+    assert_eq!(result, html);
+}
+
+#[test]
+fn test_sanitize_canvas_escapes_bare_ampersand() {
+    let html = "<p>Tom & Jerry</p>";
+    let result = sanitize_canvas_html(html, 512 * 1024).unwrap();
+    assert_eq!(result, "<p>Tom &amp; Jerry</p>");
+}
+
+#[test]
+fn test_sanitize_canvas_escapes_malformed_entity() {
+    // Bare & (no semicolon), lone &;, and invalid numeric &#zzz; must be escaped.
+    // &foo; passes through: well-formed named entity (alphabetic + semicolon), safe.
+    let html = "<p>&amp &; &#zzz;</p>";
+    let result = sanitize_canvas_html(html, 512 * 1024).unwrap();
+    assert_eq!(result, "<p>&amp;amp &amp;; &amp;#zzz;</p>");
+}
+
+#[test]
+fn test_sanitize_canvas_utf8_passthrough() {
+    let html = "<p>Zażółć gęślą jaźń — 日本語 🦀</p>";
+    let result = sanitize_canvas_html(html, 512 * 1024).unwrap();
+    assert_eq!(result, html);
+}
+
+#[test]
+fn test_sanitize_canvas_upfront_size_limit() {
+    let html = "x".repeat(200);
     let result = sanitize_canvas_html(&html, 100);
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("too large"));
@@ -809,6 +891,8 @@ async fn test_file_read_no_workspace_root_returns_error() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(
@@ -857,6 +941,8 @@ async fn test_file_write_no_workspace_root_returns_error() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(
@@ -902,6 +988,8 @@ async fn test_file_list_no_workspace_root_returns_error() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(
@@ -956,6 +1044,8 @@ async fn test_agent_spawn_capability_escalation_denied() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(
@@ -1014,6 +1104,8 @@ async fn test_agent_spawn_subset_capabilities_allowed() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(
@@ -1115,6 +1207,8 @@ async fn test_mcp_tool_blocked_by_allowed_tools() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(result.is_error);
@@ -1159,6 +1253,8 @@ async fn test_mcp_tool_allowed_passes_check() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     // Should fail for "MCP not available", not "Permission denied"
@@ -1212,6 +1308,8 @@ async fn test_allowed_tools_wildcard_prefix_match() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     // Should NOT be a permission-denied error
@@ -1255,6 +1353,8 @@ async fn test_allowed_tools_wildcard_blocks_non_matching() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(result.is_error);
@@ -1298,6 +1398,8 @@ async fn test_allowed_tools_star_allows_everything() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(
@@ -1340,6 +1442,8 @@ async fn test_allowed_tools_mixed_wildcard_and_exact() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(
@@ -1382,6 +1486,8 @@ async fn test_mcp_tool_wildcard_allowed() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     // Should fail for "MCP not available", not "Permission denied"
@@ -1421,7 +1527,8 @@ fn test_goal_update_missing_kernel() {
     });
     let result = tool_goal_update(&input, None);
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("Kernel handle"));
+    // #3576: Err is now ToolError; assert via its Display.
+    assert!(result.unwrap_err().to_string().contains("Kernel handle"));
 }
 
 #[test]
@@ -1440,7 +1547,7 @@ fn test_goal_update_no_fields() {
     });
     let result = tool_goal_update(&input, None);
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("At least one"));
+    assert!(result.unwrap_err().to_string().contains("At least one"));
 }
 
 #[test]
@@ -1451,7 +1558,7 @@ fn test_goal_update_invalid_status() {
     });
     let result = tool_goal_update(&input, None);
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("Invalid status"));
+    assert!(result.unwrap_err().to_string().contains("Invalid status"));
 }
 
 /// Mock kernel that validates capability inheritance in spawn_agent_checked.
@@ -1668,6 +1775,7 @@ impl SessionWriter for SpawnCheckKernel {
     fn inject_attachment_blocks(
         &self,
         _agent_id: librefang_types::agent::AgentId,
+        _session_id: librefang_types::agent::SessionId,
         _blocks: Vec<librefang_types::message::ContentBlock>,
     ) {
     }
