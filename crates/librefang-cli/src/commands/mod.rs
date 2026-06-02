@@ -20,3 +20,7 @@ pub(crate) mod config;
 pub(crate) mod auth;
 pub(crate) mod models;
 pub(crate) mod automation;
+pub(crate) mod monitoring;
+pub(crate) mod system;
+pub(crate) mod doctor_cmd;
+pub(crate) mod maintenance;

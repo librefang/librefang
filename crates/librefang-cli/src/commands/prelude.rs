@@ -15,6 +15,10 @@
 pub(crate) use crate::cli::*;
 pub(crate) use crate::install_ctrlc_handler;
 pub(crate) use super::common::*;
+pub(crate) use super::monitoring::*;
+pub(crate) use super::system::*;
+pub(crate) use super::doctor_cmd::*;
+pub(crate) use super::maintenance::*;
 pub(crate) use super::config::*;
 pub(crate) use super::auth::*;
 pub(crate) use super::models::*;
