@@ -1594,6 +1594,7 @@ admin_role = "admin"
             exec_policy,
             max_history_messages,
             tool_exec_backend,
+            rl_export,
 
             // --- OTHER: not a global-section override. -------------------
             // These are agent-only settings with no matching global
@@ -1666,6 +1667,7 @@ admin_role = "admin"
             "max_history_messages",
             "tool_exec",
             "tool_exec_backend",
+            "rl_export",
         ]
         .into_iter()
         .collect();

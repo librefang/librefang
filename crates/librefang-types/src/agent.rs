@@ -1332,6 +1332,15 @@ pub struct AgentManifest {
     /// fits-all once both agents share a daemon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction: Option<CompactionOverrides>,
+    /// Per-agent override for the kernel-global `[rl_export]` toggle
+    /// (#3331). When `enabled` is `Some`, it supersedes
+    /// `KernelConfig.rl_export.enabled` for this agent only. `None`
+    /// (the default) inherits the global. The export **target** itself
+    /// is not overridable per-agent — only whether this agent
+    /// participates — so a single deployment exports every opted-in
+    /// agent's trajectories to one configured upstream.
+    #[serde(default)]
+    pub rl_export: RlExportOverride,
     /// Declarative event triggers (#5014) — symmetric to runtime
     /// triggers created via `POST /api/triggers`. On agent spawn or
     /// reload the kernel reconciles this list against the existing
@@ -1569,6 +1578,7 @@ impl Default for AgentManifest {
             tool_exec_backend: None,
             skill_workshop: SkillWorkshopConfig::default(),
             proactive_memory: crate::memory::ProactiveMemoryOverrides::default(),
+            rl_export: RlExportOverride::default(),
             compaction: None,
             triggers: Vec::new(),
             reconcile_orphans: OrphanPolicy::default(),
@@ -1647,6 +1657,23 @@ pub struct ManifestCapabilities {
     /// Allowed OFP peer patterns.
     #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
     pub ofp_connect: Vec<String>,
+}
+
+/// Per-agent override for the kernel-global `[rl_export]` policy (#3331).
+///
+/// Only the participation toggle is overridable per-agent; the export
+/// destination is a deployment-wide concern that stays on
+/// `KernelConfig.rl_export.target`. `enabled = Some(false)` opts a single
+/// agent out of an otherwise-global export; `Some(true)` opts one agent in
+/// when the global default is off. `None` (the default) inherits the
+/// global toggle.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RlExportOverride {
+    /// Override the master `[rl_export] enabled` switch for this agent.
+    /// `None` inherits the kernel-global value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
 }
 
 /// Skill workshop configuration (#3328).
