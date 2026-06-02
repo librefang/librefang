@@ -4480,6 +4480,7 @@ dependencies = [
  "walkdir",
  "which",
  "windows-sys 0.61.2",
+ "zeroize",
  "zip 8.6.0",
 ]
 
