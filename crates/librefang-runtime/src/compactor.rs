@@ -1063,6 +1063,7 @@ mod tests {
 
             messages_generation: 0,
             last_repaired_generation: None,
+            peer_id: None,
         };
         let config = CompactionConfig::default();
         assert!(!needs_compaction(&session, &config));
@@ -1083,6 +1084,7 @@ mod tests {
 
             messages_generation: 0,
             last_repaired_generation: None,
+            peer_id: None,
         };
         let config = CompactionConfig::default();
         assert!(needs_compaction(&session, &config));
@@ -1138,6 +1140,7 @@ mod tests {
 
             messages_generation: 0,
             last_repaired_generation: None,
+            peer_id: None,
         };
         let config = CompactionConfig {
             threshold: 30,
@@ -1243,6 +1246,7 @@ mod tests {
 
             messages_generation: 0,
             last_repaired_generation: None,
+            peer_id: None,
         };
         let config = CompactionConfig {
             threshold: 5,
@@ -1326,6 +1330,7 @@ mod tests {
 
             messages_generation: 0,
             last_repaired_generation: None,
+            peer_id: None,
         };
         let config = CompactionConfig {
             threshold: 30,
@@ -1463,6 +1468,7 @@ mod tests {
 
             messages_generation: 0,
             last_repaired_generation: None,
+            peer_id: None,
         };
         let config = CompactionConfig {
             threshold: 10,
