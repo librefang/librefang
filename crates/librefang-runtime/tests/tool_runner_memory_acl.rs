@@ -405,7 +405,7 @@ async fn allowed_user_memory_store_succeeds_and_lands() {
 }
 
 #[tokio::test]
-async fn no_acl_memory_store_is_denied() {
+async fn no_acl_memory_store_is_allowed() {
     let (kernel, probes) = AclKernel::new(None);
     let kernel: Arc<dyn KernelHandle> = Arc::new(kernel);
 
@@ -414,14 +414,12 @@ async fn no_acl_memory_store_is_denied() {
     let result = execute_tool_raw("t1", "memory_store", &input, &ctx).await;
 
     assert!(
-        result.is_error,
-        "no ACL (None) => store must be denied (fail-closed): {}",
+        !result.is_error,
+        "no ACL (None) => store must be allowed (auth-off deployment): {}",
         result.content
     );
-    assert!(
-        probes.store.lock().unwrap().is_empty(),
-        "denied memory_store must never reach the substrate"
-    );
+    let store_calls = probes.store.lock().unwrap();
+    assert_eq!(store_calls.len(), 1, "allowed store must land");
 }
 
 // ── memory_recall / memory_list ──────────────────────────────────────────
@@ -493,7 +491,7 @@ async fn allowed_user_memory_recall_runs() {
 }
 
 #[tokio::test]
-async fn no_acl_memory_list_and_recall_both_denied() {
+async fn no_acl_memory_list_and_recall_both_allowed() {
     let (kernel, probes) = AclKernel::new(None);
     let kernel: Arc<dyn KernelHandle> = Arc::new(kernel);
 
@@ -501,24 +499,26 @@ async fn no_acl_memory_list_and_recall_both_denied() {
 
     let list_res = execute_tool_raw("t3", "memory_list", &json!({}), &ctx).await;
     assert!(
-        list_res.is_error,
-        "no ACL (None) => memory_list must be denied (fail-closed): {}",
+        !list_res.is_error,
+        "no ACL (None) => memory_list must be allowed (auth-off deployment): {}",
         list_res.content
     );
-    assert!(
-        probes.list.lock().unwrap().is_empty(),
-        "denied memory_list must never enumerate the substrate"
+    assert_eq!(
+        probes.list.lock().unwrap().len(),
+        1,
+        "allowed memory_list must reach the substrate"
     );
 
     let recall_res = execute_tool_raw("t3b", "memory_recall", &json!({"key": "k"}), &ctx).await;
     assert!(
-        recall_res.is_error,
-        "no ACL (None) => memory_recall must be denied (fail-closed): {}",
+        !recall_res.is_error,
+        "no ACL (None) => memory_recall must be allowed (auth-off deployment): {}",
         recall_res.content
     );
-    assert!(
-        probes.recall.lock().unwrap().is_empty(),
-        "denied memory_recall must never reach the substrate"
+    assert_eq!(
+        probes.recall.lock().unwrap().len(),
+        1,
+        "allowed memory_recall must reach the substrate"
     );
 }
 
