@@ -50,7 +50,7 @@ impl ParallelPlan {
 
     /// `true` iff this plan describes a fully sequential execution
     /// (every group has at most one element). Used by the dispatcher's
-    /// fast path to skip `join_all` overhead.
+    /// fast path to skip the concurrent-execution overhead.
     pub fn is_fully_sequential(&self) -> bool {
         self.groups.iter().all(|g| g.len() <= 1)
     }
@@ -155,8 +155,9 @@ fn paths_overlap(a: &NormalizedPath, b: &NormalizedPath) -> bool {
 /// when the tool isn't path-scoped or when the input doesn't carry the
 /// expected `path` / `name` field.
 ///
-/// Only called for [`ParallelSafety::WriteScoped`] tools — read-only tools
-/// don't need a scope, write-shared tools own their bucket regardless.
+/// Called for [`ParallelSafety::WriteScoped`] tools; the read-only projection
+/// used for RAW/WAR conflict detection lives in [`extract_read_scope_path`].
+/// Write-shared tools own their bucket regardless.
 fn extract_scope_path(tool: &str, input: &serde_json::Value) -> Option<NormalizedPath> {
     let raw = match tool {
         "file_write" | "file_edit" | "apply_patch" => input.get("path").and_then(|v| v.as_str())?,
@@ -164,6 +165,29 @@ fn extract_scope_path(tool: &str, input: &serde_json::Value) -> Option<Normalize
             let name = input.get("name").and_then(|v| v.as_str())?;
             return Some(NormalizedPath::Virtual(format!("skill::{name}")));
         }
+        _ => return None,
+    };
+    if raw.is_empty() {
+        return None;
+    }
+    Some(normalize_path(raw))
+}
+
+/// Project a path-shaped scope from a [`ParallelSafety::ReadOnly`] tool's
+/// input, for read-vs-write conflict detection in [`plan_batch`].
+///
+/// Filesystem reads (`file_read` / `cat` / `ls` / `grep` carry `path`,
+/// `glob` carries `pattern`) project a [`NormalizedPath`]. Network reads
+/// (`web_search` / `web_fetch`) and any tool without a recognised path field
+/// return `None` — they cannot collide with a filesystem `WriteScoped` peer,
+/// so they never constrain grouping. An unprojectable read is therefore a
+/// no-op for safety: it just doesn't gate against a write (no regression),
+/// while a projectable one correctly forces a same-path read off a write's
+/// bucket.
+fn extract_read_scope_path(tool: &str, input: &serde_json::Value) -> Option<NormalizedPath> {
+    let raw = match tool {
+        "file_read" | "cat" | "ls" | "grep" => input.get("path").and_then(|v| v.as_str())?,
+        "glob" => input.get("pattern").and_then(|v| v.as_str())?,
         _ => return None,
     };
     if raw.is_empty() {
@@ -229,7 +253,12 @@ pub fn plan_batch(calls: &[ToolCall], defs: &[ToolDefinition]) -> ParallelPlan {
     // bucket, or sits in its own bucket (and immediately flushes it).
     let mut groups: Vec<Vec<usize>> = Vec::new();
     let mut current: Vec<usize> = Vec::new();
+    // Projected WriteScoped target paths in the current bucket.
     let mut current_paths: Vec<NormalizedPath> = Vec::new();
+    // Projected ReadOnly target paths in the current bucket. Tracked
+    // separately because reads never conflict with each other — they only
+    // gate against writes (RAW / WAR), not against peer reads (#5948).
+    let mut current_read_paths: Vec<NormalizedPath> = Vec::new();
 
     for (i, call) in calls.iter().enumerate() {
         let safety = safeties[i];
@@ -246,18 +275,44 @@ pub fn plan_batch(calls: &[ToolCall], defs: &[ToolDefinition]) -> ParallelPlan {
                 if !current.is_empty() {
                     groups.push(std::mem::take(&mut current));
                     current_paths.clear();
+                    current_read_paths.clear();
                 }
                 groups.push(vec![i]);
             }
 
             ParallelSafety::ReadOnly => {
-                current.push(i);
+                // A read whose target path overlaps a WriteScoped peer already
+                // in this bucket would observe non-deterministic (pre- or
+                // post-write) content if run concurrently — flush so the read
+                // lands in a later, sequential bucket (#5948 RAW hazard).
+                // Reads with no projectable filesystem path (web_search /
+                // web_fetch, or an unrecognised field) can't collide with a
+                // file write, so they join the bucket unconstrained.
+                match extract_read_scope_path(&call.name, &call.input) {
+                    Some(p) => {
+                        if current_paths.iter().any(|q| paths_overlap(&p, q)) {
+                            groups.push(std::mem::take(&mut current));
+                            current_paths.clear();
+                            current_read_paths.clear();
+                        }
+                        current.push(i);
+                        current_read_paths.push(p);
+                    }
+                    None => current.push(i),
+                }
             }
 
             ParallelSafety::WriteScoped => {
                 let scope = extract_scope_path(&call.name, &call.input);
                 let conflict = match &scope {
-                    Some(p) => current_paths.iter().any(|q| paths_overlap(p, q)),
+                    // Conflict if the write overlaps any peer's path — another
+                    // write (WAW) OR a read (WAR): a read placed before this
+                    // write expects the pre-write content, so the two must not
+                    // run concurrently.
+                    Some(p) => current_paths
+                        .iter()
+                        .chain(current_read_paths.iter())
+                        .any(|q| paths_overlap(p, q)),
                     // No projectable path → cannot prove disjointness with
                     // any peer in the current bucket. Treat as conflict
                     // when the bucket is non-empty.
@@ -266,6 +321,7 @@ pub fn plan_batch(calls: &[ToolCall], defs: &[ToolDefinition]) -> ParallelPlan {
                 if conflict {
                     groups.push(std::mem::take(&mut current));
                     current_paths.clear();
+                    current_read_paths.clear();
                 }
                 current.push(i);
                 match scope {
@@ -276,6 +332,7 @@ pub fn plan_batch(calls: &[ToolCall], defs: &[ToolDefinition]) -> ParallelPlan {
                         // bucket.
                         groups.push(std::mem::take(&mut current));
                         current_paths.clear();
+                        current_read_paths.clear();
                     }
                 }
             }
@@ -343,13 +400,66 @@ mod tests {
         assert_plan_covers_all(&plan, 3);
     }
 
-    /// Read + write on disjoint dirs — the read is `ReadOnly` (no scope),
-    /// the write is `WriteScoped` with a different path. Same group OK.
+    /// Read + write on disjoint dirs — the read projects `/a`, the write
+    /// `/b`. The paths don't overlap, so they stay in one group.
     #[test]
     fn read_plus_write_disjoint_one_group() {
         let calls = vec![
             call("a", "file_read", json!({"path": "/a"})),
             call("b", "file_write", json!({"path": "/b", "content": "x"})),
+        ];
+        let plan = plan_batch(&calls, &[]);
+        assert_eq!(plan.groups, vec![vec![0, 1]]);
+        assert_plan_covers_all(&plan, 2);
+    }
+
+    /// Write then read on the SAME path must split into two sequential
+    /// groups: run concurrently, the read could observe pre- or post-write
+    /// content non-deterministically (#5948 RAW hazard).
+    #[test]
+    fn write_then_read_same_path_two_groups() {
+        let calls = vec![
+            call(
+                "a",
+                "file_write",
+                json!({"path": "/a/config.json", "content": "x"}),
+            ),
+            call("b", "file_read", json!({"path": "/a/config.json"})),
+        ];
+        let plan = plan_batch(&calls, &[]);
+        assert_eq!(plan.groups, vec![vec![0], vec![1]]);
+        assert_plan_covers_all(&plan, 2);
+    }
+
+    /// Read then write on the same path also splits (WAR): the read placed
+    /// first expects the pre-write content, so it must not run alongside the
+    /// write (#5948).
+    #[test]
+    fn read_then_write_same_path_two_groups() {
+        let calls = vec![
+            call("a", "file_read", json!({"path": "/a/config.json"})),
+            call(
+                "b",
+                "file_write",
+                json!({"path": "/a/config.json", "content": "x"}),
+            ),
+        ];
+        let plan = plan_batch(&calls, &[]);
+        assert_eq!(plan.groups, vec![vec![0], vec![1]]);
+        assert_plan_covers_all(&plan, 2);
+    }
+
+    /// A non-filesystem read (`web_fetch`) has no projectable path, so it
+    /// never gates against a file write — they share a group.
+    #[test]
+    fn network_read_plus_write_one_group() {
+        let calls = vec![
+            call("a", "web_fetch", json!({"url": "https://example.com"})),
+            call(
+                "b",
+                "file_write",
+                json!({"path": "/a/config.json", "content": "x"}),
+            ),
         ];
         let plan = plan_batch(&calls, &[]);
         assert_eq!(plan.groups, vec![vec![0, 1]]);
