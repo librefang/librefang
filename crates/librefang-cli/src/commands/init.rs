@@ -631,8 +631,7 @@ pub(crate) fn write_config_if_missing(
     // Write config.example.toml with the full annotated template for reference
     let example_path = librefang_dir.join("config.example.toml");
     if !example_path.exists() {
-        let example_content = include_str!("../../templates/init_default_config.toml");
-        if let Err(e) = std::fs::write(&example_path, example_content) {
+        if let Err(e) = std::fs::write(&example_path, INIT_DEFAULT_CONFIG_TEMPLATE) {
             ui::hint(&format!("Could not write config.example.toml: {e}"));
         }
     }
