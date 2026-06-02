@@ -246,6 +246,7 @@ async fn test_tool_failure_allows_retry_on_next_iteration() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(FailThenTextDriver::new());
@@ -309,6 +310,7 @@ async fn test_repeated_tool_failures_cap_exits_loop() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(AlwaysFailingToolDriver);
@@ -371,6 +373,7 @@ async fn test_streaming_tool_failure_allows_retry() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(FailThenTextDriver::new());
@@ -436,6 +439,7 @@ async fn test_streaming_repeated_tool_failures_cap_exits() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(AlwaysFailingToolDriver);
@@ -513,6 +517,7 @@ fn fresh_session() -> librefang_memory::session::Session {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     }
 }
 
@@ -1316,6 +1321,7 @@ async fn test_normal_turn_persists_session_as_incognito_control() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(NormalDriver);
@@ -1386,6 +1392,7 @@ async fn test_incognito_skips_session_save_on_end_turn() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(NormalDriver);
@@ -1466,6 +1473,7 @@ async fn test_incognito_skips_proactive_memory_auto_memorize() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(NormalDriver);
@@ -1547,6 +1555,7 @@ async fn test_normal_turn_auto_memorizes_proactive_memory_control() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(NormalDriver);

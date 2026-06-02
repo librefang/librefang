@@ -581,6 +581,7 @@ impl LibreFangKernel {
         // agents are picked up on the next routing call.
         router::invalidate_manifest_cache();
         router::invalidate_hand_route_cache();
+        router::invalidate_template_rule_cache();
     }
 }
 
