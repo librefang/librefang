@@ -1038,6 +1038,12 @@ impl MemorySubstrate {
         agent_name: Option<&str>,
     ) -> LibreFangResult<Option<serde_json::Value>> {
         let conn = self.pool.clone();
+        // Derive the retry budget from the pool size instead of a magic number:
+        // at most `max_size` claimants can hold a connection (and thus contend
+        // on the CAS) at once — the rest block on `conn.get()` — so 2× that
+        // comfortably outlasts a full wave of rivals before yielding to the
+        // caller. Scales automatically when the pool is configured larger.
+        let max_claim_attempts = self.pool.max_size() as usize * 2;
         let agent_id = agent_id.to_string();
         let agent_name = agent_name.unwrap_or("").to_string();
 
@@ -1065,8 +1071,7 @@ impl MemorySubstrate {
             // bound caps the walk so pathological churn (claimants grabbing rows
             // faster than we SELECT) can't spin this blocking task forever — the
             // caller re-fires on its next invocation.
-            const MAX_CLAIM_ATTEMPTS: usize = 16;
-            for _ in 0..MAX_CLAIM_ATTEMPTS {
+            for _ in 0..max_claim_attempts {
                 let result = stmt.query_row(rusqlite::params![agent_id, agent_name], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
