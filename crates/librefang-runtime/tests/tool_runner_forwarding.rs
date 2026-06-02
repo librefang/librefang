@@ -314,6 +314,33 @@ async fn test_memory_recall_forwards_sender_id_as_peer_id() {
 }
 
 #[tokio::test]
+async fn test_memory_recall_missing_key_is_soft_not_hard_error() {
+    // A malformed recall (no `key`) must be a soft `Ok`, not a hard error:
+    // three consecutive hard tool failures abort the whole turn
+    // (`MAX_CONSECUTIVE_ALL_FAILED`), so a deterministically-failing,
+    // non-essential memory read used to be retried into a death spiral that
+    // killed the turn and dropped the user's actual request. The handler now
+    // returns guidance instead of erroring.
+    let (kernel, _calls) = CapturingKernel::new();
+    let kernel: Arc<dyn KernelHandle> = Arc::new(kernel);
+
+    let ctx = make_ctx(&kernel, Some("user-1"));
+    let input = json!({}); // no "key"
+    let result = execute_tool_raw("t9", "memory_recall", &input, &ctx).await;
+
+    assert!(
+        !result.is_error,
+        "missing-key recall must be a soft Ok, not a hard error: {}",
+        result.content
+    );
+    assert!(
+        result.content.contains("key"),
+        "result should guide the model to provide a key: {}",
+        result.content
+    );
+}
+
+#[tokio::test]
 async fn test_memory_recall_forwards_none_when_no_sender() {
     let (kernel, calls) = CapturingKernel::new();
     let kernel: Arc<dyn KernelHandle> = Arc::new(kernel);

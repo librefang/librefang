@@ -73,23 +73,42 @@ pub(super) fn tool_memory_recall(
     channel: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
-    let key = input["key"].as_str().ok_or("Missing 'key' parameter")?;
-    enforce_memory_acl(
+    // Memory reads degrade gracefully: a missing key, a denied ACL, or a
+    // backend error returns an explanatory `Ok` rather than `Err`. An `Err`
+    // here is a *hard* tool failure, and three consecutive hard failures abort
+    // the whole turn (`MAX_CONSECUTIVE_ALL_FAILED` in agent_loop). A
+    // non-essential recall that fails deterministically (e.g. the same ACL
+    // denial every time) would otherwise be retried into a death spiral that
+    // kills the turn and discards the user's actual request — so we never let
+    // an optional read produce a hard failure.
+    let Some(key) = input["key"].as_str() else {
+        return Ok("memory_recall needs a 'key' (the exact storage key to look \
+                   up). Call memory_list to see the available keys."
+            .to_string());
+    };
+    if let Err(reason) = enforce_memory_acl(
         kernel,
         peer_id,
         channel,
         MemoryAclOp::Read,
         &kv_acl_namespace(peer_id),
-    )?;
-    match kh
-        .memory_recall(key, caller_agent_id, peer_id)
-        .map_err(|e| e.to_string())?
-    {
-        Some(val) => {
+    ) {
+        tracing::warn!(%key, %reason, "memory_recall denied by ACL — continuing without it");
+        return Ok(format!("Could not read memory: {reason}"));
+    }
+    match kh.memory_recall(key, caller_agent_id, peer_id) {
+        Ok(Some(val)) => {
             let rendered = serde_json::to_string_pretty(&val).unwrap_or_else(|_| val.to_string());
             Ok(truncate_output(&rendered, MAX_RECALL_BYTES))
         }
-        None => Ok(format!("No value found for key '{key}'.")),
+        Ok(None) => Ok(format!("No value found for key '{key}'.")),
+        Err(e) => {
+            let e = e.to_string();
+            tracing::warn!(%key, error = %e, "memory_recall backend error — continuing without it");
+            Ok(format!(
+                "Could not read memory for key '{key}': {e}. Continuing without it."
+            ))
+        }
     }
 }
 
@@ -101,13 +120,18 @@ pub(super) fn tool_memory_list(
     channel: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
-    enforce_memory_acl(
+    // Reads degrade gracefully — see `tool_memory_recall` for why an optional
+    // memory read must never produce a hard tool failure.
+    if let Err(reason) = enforce_memory_acl(
         kernel,
         peer_id,
         channel,
         MemoryAclOp::Read,
         &kv_acl_namespace(peer_id),
-    )?;
+    ) {
+        tracing::warn!(%reason, "memory_list denied by ACL — continuing without it");
+        return Ok(format!("Could not list memory: {reason}"));
+    }
     let limit = input
         .get("limit")
         .and_then(|v| v.as_u64())
@@ -118,9 +142,14 @@ pub(super) fn tool_memory_list(
         .and_then(|v| v.as_u64())
         .map(|n| n as usize)
         .unwrap_or(0);
-    let keys = kh
-        .memory_list(caller_agent_id, peer_id)
-        .map_err(|e| e.to_string())?;
+    let keys = match kh.memory_list(caller_agent_id, peer_id) {
+        Ok(keys) => keys,
+        Err(e) => {
+            let e = e.to_string();
+            tracing::warn!(error = %e, "memory_list backend error — continuing without it");
+            return Ok(format!("Could not list memory: {e}. Continuing without it."));
+        }
+    };
     if keys.is_empty() {
         return Ok("No entries found in this agent's memory.".to_string());
     }
