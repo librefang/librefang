@@ -51,7 +51,10 @@ LEGACY_FILES=(
   # them apart cheaply. The cleanup pass needs human review.
   "crates/librefang-api/src/routes/approvals.rs"
   # Follow-up to #3505: migrate skills {"status":"error", …} sites.
-  "crates/librefang-api/src/routes/skills.rs"
+  # (routes/skills.rs was split into routes/skills/; the legacy sites now
+  # live in the hands/ and mcp/ submodules — #3505 cleanup still pending.)
+  "crates/librefang-api/src/routes/skills/hands.rs"
+  "crates/librefang-api/src/routes/skills/mcp.rs"
   # Follow-up to #3505: migrate users {"status":"error", …} sites.
   "crates/librefang-api/src/routes/users.rs"
   # Follow-up to #3505: migrate config {"status":"error", …} sites.
