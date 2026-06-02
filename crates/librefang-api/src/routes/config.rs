@@ -2242,6 +2242,7 @@ pub fn ui_sections_overlay() -> serde_json::Value {
         {"key": "heartbeat", "struct_field": "heartbeat"},
         {"key": "plugins", "struct_field": "plugins"},
         {"key": "registry", "struct_field": "registry"},
+        {"key": "hands", "struct_field": "hands"},
         {"key": "privacy", "struct_field": "privacy"},
         {"key": "sanitize", "struct_field": "sanitize"},
         {"key": "inbox", "struct_field": "inbox"},
