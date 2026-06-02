@@ -1487,7 +1487,7 @@ pub async fn run_agent_loop(
                     let max_concurrent = cfg.max_concurrent as usize;
                     let plan =
                         crate::parallel_dispatch::plan_batch(&response.tool_calls, available_tools);
-                    let mut hard_error_at: Option<usize> = None;
+                    let mut hard_error_hit = false;
                     'groups: for group in &plan.groups {
                         let mut tool_exec_ctx = build_tool_exec_ctx!();
                         let group_results = execute_tool_group(
@@ -1509,18 +1509,18 @@ pub async fn run_agent_loop(
                                 &mut pending_owner_notice,
                                 &mut session_loaded_tools,
                             );
-                            if is_hard_error && hard_error_at.is_none() {
+                            if is_hard_error && !hard_error_hit {
                                 warn!(
                                     tool = %tool_name,
                                     "Tool execution failed — skipping remaining tool calls"
                                 );
-                                hard_error_at = Some(*idx);
+                                hard_error_hit = true;
                             }
                         }
                         // Stop launching further groups on a hard error; stub
                         // every not-yet-executed id so the wire format stays
                         // complete (#2381).
-                        if let Some(failed_idx) = hard_error_at {
+                        if hard_error_hit {
                             let executed_ids: std::collections::HashSet<&str> = staged
                                 .tool_result_blocks
                                 .iter()
@@ -1537,7 +1537,6 @@ pub async fn run_agent_loop(
                                 .filter(|tc| !executed_ids.contains(tc.id.as_str()))
                                 .cloned()
                                 .collect();
-                            let _ = failed_idx;
                             append_skipped_tool_results(
                                 &mut staged.tool_result_blocks,
                                 &remaining,
