@@ -587,16 +587,6 @@ pub struct HookConfig {
     /// Maximum delay between retries in milliseconds, regardless of
     /// how many times the multiplier has been applied.  Defaults to 30 000 ms.
     pub max_retry_delay_ms: u64,
-    /// Capability grants for `runtime = "wasm"` hooks, in the same
-    /// `Variant(value)` string form skills use under `[requirements]
-    /// capabilities = [...]` (e.g. `"FileRead(/tmp/*)"`, `"ShellExec(*)"`).
-    ///
-    /// Parsed fail-closed by [`run_wasm_hook`] via the shared skill capability
-    /// parser: an unrecognised or malformed entry is WARN-logged and dropped,
-    /// never granted. Ignored by the subprocess runtimes, which gate access
-    /// through `allow_network` / `allow_filesystem` / seccomp instead. Empty
-    /// by default, so a WASM hook is pure-compute until it explicitly opts in.
-    pub capabilities: Vec<String>,
 }
 
 impl Default for HookConfig {
@@ -614,7 +604,6 @@ impl Default for HookConfig {
             retry_delay_ms: 500,
             retry_backoff_multiplier: 2.0,
             max_retry_delay_ms: 30_000,
-            capabilities: Vec::new(),
         }
     }
 }
@@ -1538,13 +1527,29 @@ fn parse_output(lines: &[String]) -> Result<serde_json::Value, PluginRuntimeErro
 
 /// Execute a Wasm hook module inline via the in-process [`WasmSandbox`].
 ///
-/// Pure-compute: the hook runs with `kernel = None`, so host calls that need
-/// the kernel (`agent_send`, `agent_spawn`) return an error to the guest
-/// rather than executing — a lifecycle hook has no kernel context. The guest
-/// ABI is the sandbox's `host_call` surface (`memory` / `alloc` / `execute`),
-/// not WASI: the hook input JSON is handed to the guest directly and its JSON
-/// return value becomes the hook result. The protocol stays bare JSON in /
-/// bare JSON out, matching the subprocess hooks.
+/// Pure-compute: the hook runs with `kernel = None` and **no granted
+/// capabilities**, so every kernel- or resource-bearing host call
+/// (`agent_send`, `agent_spawn`, `fs_*`, `net_fetch`, `shell_exec`, …) is
+/// denied at the sandbox boundary rather than executing — a lifecycle hook
+/// has no kernel context and no filesystem/network grant. Capability grants
+/// for hooks are not wired through any manifest field today; declaring them is
+/// a follow-up (the hook manifest type carries no `capabilities` key). Until
+/// then a WASM hook can only compute over its JSON input.
+///
+/// The guest ABI is the sandbox's `host_call` surface (`memory` / `alloc` /
+/// `execute`), not WASI: the hook input JSON is handed to the guest directly
+/// and its JSON return value becomes the hook result. The protocol stays bare
+/// JSON in / bare JSON out, matching the subprocess hooks.
+///
+/// **Determinism caveat:** the sandbox keeps `time_now` always-allowed (it is
+/// a pure-host call with no capability gate — see `host_functions::dispatch`),
+/// so a hook that calls `host_call("time_now")` observes the host wall clock.
+/// "Pure-compute" here means *no kernel/resource side effects*, not strict
+/// bit-for-bit determinism: a hook whose output feeds an LLM prompt and which
+/// reads the clock is not guaranteed reproducible across runs. Gating the
+/// clock off would require threading a per-execution flag through the shared
+/// `SandboxConfig` / `GuestState` / `dispatch` path used by skills too, so it
+/// is intentionally left to a follow-up that touches the sandbox surface.
 pub async fn run_wasm_hook(
     wasm_path: &str,
     input: &serde_json::Value,
@@ -1563,29 +1568,16 @@ pub async fn run_wasm_hook(
     // hook input directly, unlike the skill envelope `{tool, input, config}`.
     let payload = input.clone();
 
-    // Map the hook's declared capability strings through the SAME fail-closed
-    // parser skills use: an unrecognised entry is WARN-logged and dropped,
-    // never granted, so a hook stays pure-compute until it opts in.
-    let capabilities = config
-        .capabilities
-        .iter()
-        .filter_map(|raw| match crate::tool_runner::parse_capability(raw) {
-            Some(cap) => Some(cap),
-            None => {
-                warn!(
-                    capability = raw.as_str(),
-                    "unrecognized WASM hook capability string; not granting to sandbox"
-                );
-                None
-            }
-        })
-        .collect();
-
-    // Pure-compute execution: `kernel = None`. A `timeout_secs` of 0 means
-    // "unset" → the sandbox's own default, never a 0s instant timeout.
+    // Pure-compute execution: `kernel = None` and an empty capability set, so
+    // the deny-by-default sandbox refuses every kernel/resource host call.
+    //
+    // `HookConfig::default().timeout_secs` is 30, so the `!= 0` guard below
+    // normally forwards that 30s budget; the `None` (→ sandbox default) branch
+    // only triggers when a caller has *explicitly* set `timeout_secs = 0`,
+    // which we treat as "unset" rather than a 0s instant timeout.
     let sandbox_config = SandboxConfig {
         timeout_secs: (config.timeout_secs != 0).then_some(config.timeout_secs),
-        capabilities,
+        capabilities: Vec::new(),
         ..Default::default()
     };
 

@@ -30,11 +30,7 @@ use tracing::{debug, warn};
 /// caller drops it rather than granting an unintended permission. The string
 /// form mirrors the enum's `Variant(value)` shape declared in
 /// `skill.toml` under `[requirements] capabilities = [...]`.
-///
-/// `pub(crate)` so the WASM-hook path (`plugin_runtime::run_wasm_hook`) parses
-/// hook-declared capability strings with the identical fail-closed grammar —
-/// one parser, one set of rules, no divergence between skills and hooks.
-pub(crate) fn parse_capability(s: &str) -> Option<Capability> {
+fn parse_capability(s: &str) -> Option<Capability> {
     use Capability::*;
     let s = s.trim();
     let (name, arg) = match s.split_once('(') {
