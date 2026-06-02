@@ -52,7 +52,6 @@ pub(crate) fn cmd_channel_list() {
     t.print();
 }
 
-
 pub(crate) fn cmd_channel_reload() {
     let base = require_daemon("channel reload");
     let client = daemon_client();
@@ -69,7 +68,6 @@ pub(crate) fn cmd_channel_reload() {
         .unwrap_or(0);
     println!("Channels reloaded ({started} sidecar(s) started).");
 }
-
 
 pub(crate) fn cmd_channel_setup(name: Option<&str>) {
     let base = require_daemon("channel setup");
@@ -254,7 +252,6 @@ pub(crate) fn cmd_channel_setup(name: Option<&str>) {
     }
 }
 
-
 pub(crate) fn cmd_channel_rm(name: &str) {
     // Strip the matching `[[sidecar_channels]]` entry from
     // ~/.librefang/config.toml in-place, then trigger a daemon reload
@@ -339,4 +336,3 @@ pub(crate) fn cmd_channel_rm(name: &str) {
         None => println!("  Daemon not running; change will apply on next start."),
     }
 }
-

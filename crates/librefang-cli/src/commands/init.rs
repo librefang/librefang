@@ -91,7 +91,6 @@ pub(crate) fn cmd_init(quick: bool) {
     }
 }
 
-
 /// Upgrade an existing LibreFang installation: backup config, sync registry, merge new defaults.
 pub(crate) fn cmd_init_upgrade() {
     let librefang_dir = cli_librefang_home();
@@ -310,7 +309,6 @@ pub(crate) fn cmd_init_upgrade() {
     ui::blank();
 }
 
-
 /// Keep only the `keep` most recent `config-*.toml` backups under `backups_dir`.
 /// The embedded `YYYYMMDD-HHMMSS` timestamp sorts lexicographically, so a
 /// filename sort gives the same order as a chronological sort.
@@ -338,11 +336,13 @@ pub(crate) fn prune_old_config_backups(backups_dir: &std::path::Path, keep: usiz
     }
 }
 
-
 /// Find top-level keys in `defaults` that are missing from `existing`.
 /// Only checks top-level — does not recurse into sub-tables to avoid
 /// injecting partial sections the user intentionally omitted.
-pub(crate) fn find_missing_toplevel_keys(existing: &toml::Value, defaults: &toml::Value) -> Vec<String> {
+pub(crate) fn find_missing_toplevel_keys(
+    existing: &toml::Value,
+    defaults: &toml::Value,
+) -> Vec<String> {
     let (Some(existing_table), Some(defaults_table)) = (existing.as_table(), defaults.as_table())
     else {
         return Vec::new();
@@ -353,7 +353,6 @@ pub(crate) fn find_missing_toplevel_keys(existing: &toml::Value, defaults: &toml
         .cloned()
         .collect()
 }
-
 
 /// Initialize vault if it doesn't exist yet (silent no-op if already initialized).
 pub(crate) fn init_vault_if_missing(librefang_dir: &std::path::Path) {
@@ -368,7 +367,6 @@ pub(crate) fn init_vault_if_missing(librefang_dir: &std::path::Path) {
         tracing::debug!("vault init skipped: {e}");
     }
 }
-
 
 /// Initialize a git repo in ~/.librefang/ for config version control.
 pub(crate) fn init_git_if_missing(librefang_dir: &std::path::Path) {
@@ -409,7 +407,6 @@ pub(crate) fn init_git_if_missing(librefang_dir: &std::path::Path) {
         .status();
 }
 
-
 /// Quick init: no prompts, auto-detect, write config + .env, print next steps.
 pub(crate) fn cmd_init_quick(librefang_dir: &std::path::Path) {
     ui::banner();
@@ -426,7 +423,6 @@ pub(crate) fn cmd_init_quick(librefang_dir: &std::path::Path) {
     ui::blank();
     ui::next_steps(&[&i18n::t("init-next-start"), &i18n::t("init-next-chat")]);
 }
-
 
 /// Interactive 5-step onboarding wizard (ratatui TUI).
 pub(crate) fn cmd_init_interactive(librefang_dir: &std::path::Path) {
@@ -486,7 +482,6 @@ pub(crate) fn cmd_init_interactive(librefang_dir: &std::path::Path) {
     }
 }
 
-
 /// Launch the librefang-desktop Tauri app, connecting to the running daemon.
 pub(crate) fn launch_desktop_app(_librefang_dir: &std::path::Path) {
     if let Some(path) = desktop_install::find_desktop_binary() {
@@ -499,7 +494,6 @@ pub(crate) fn launch_desktop_app(_librefang_dir: &std::path::Path) {
         desktop_install::launch(&installed);
     }
 }
-
 
 /// Auto-detect the best available provider.
 ///
@@ -570,7 +564,6 @@ pub(crate) fn detect_best_provider() -> (String, String, String) {
     )
 }
 
-
 /// Interactive TUI guide: help user pick a free LLM provider and set up an API key.
 /// Returns `Some((provider, env_var, model))` on success, `None` if user cancels.
 pub(crate) fn guide_free_provider_setup() -> Option<(String, String, String)> {
@@ -586,7 +579,6 @@ pub(crate) fn guide_free_provider_setup() -> Option<(String, String, String)> {
     }
 }
 
-
 /// Quick probe to check if Ollama is running on localhost.
 pub(crate) fn check_ollama_available() -> bool {
     std::net::TcpStream::connect_timeout(
@@ -596,7 +588,6 @@ pub(crate) fn check_ollama_available() -> bool {
     .is_ok()
 }
 
-
 pub(crate) fn render_init_default_config(provider: &str, model: &str, api_key_env: &str) -> String {
     INIT_DEFAULT_CONFIG_TEMPLATE
         .replace("{{provider}}", provider)
@@ -604,14 +595,12 @@ pub(crate) fn render_init_default_config(provider: &str, model: &str, api_key_en
         .replace("{{api_key_env}}", api_key_env)
 }
 
-
 pub(crate) fn default_model_for_provider(provider: &str) -> String {
     let catalog = librefang_runtime::model_catalog::ModelCatalog::default();
     catalog
         .default_model_for_provider(provider)
         .unwrap_or_else(|| "local-model".to_string())
 }
-
 
 /// Write config.toml if it doesn't already exist.
 pub(crate) fn write_config_if_missing(
@@ -642,10 +631,9 @@ pub(crate) fn write_config_if_missing(
     // Write config.example.toml with the full annotated template for reference
     let example_path = librefang_dir.join("config.example.toml");
     if !example_path.exists() {
-        let example_content = include_str!("../templates/init_default_config.toml");
+        let example_content = include_str!("../../templates/init_default_config.toml");
         if let Err(e) = std::fs::write(&example_path, example_content) {
             ui::hint(&format!("Could not write config.example.toml: {e}"));
         }
     }
 }
-

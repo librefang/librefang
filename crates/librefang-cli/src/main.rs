@@ -14,21 +14,23 @@
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-mod acp;
+// Sibling modules are pub(crate) so the command groups under `commands/` can
+// reach them as `crate::<mod>` (and via the prelude re-export).
+pub(crate) mod acp;
 mod cli;
 mod commands;
-mod desktop_install;
-pub mod doctor;
-mod http_client;
-pub mod i18n;
-mod launcher;
-mod log_filter;
-mod mcp;
-pub mod progress;
-pub mod table;
-mod templates;
-mod tui;
-mod ui;
+pub(crate) mod desktop_install;
+pub(crate) mod doctor;
+pub(crate) mod http_client;
+pub(crate) mod i18n;
+pub(crate) mod launcher;
+pub(crate) mod log_filter;
+pub(crate) mod mcp;
+pub(crate) mod progress;
+pub(crate) mod table;
+pub(crate) mod templates;
+pub(crate) mod tui;
+pub(crate) mod ui;
 
 use clap::Parser;
 // All other shared symbols (cli defs, common helpers, command groups, and the
@@ -37,7 +39,6 @@ use clap::Parser;
 use commands::prelude::*;
 #[cfg(windows)]
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Global flag set by the Ctrl+C handler.
 static CTRLC_PRESSED: AtomicBool = AtomicBool::new(false);

@@ -27,7 +27,6 @@ pub(crate) fn cmd_agent_spawn(
     spawn_prepared_agent(config, prepared);
 }
 
-
 pub(crate) fn cmd_spawn_alias(
     config: Option<PathBuf>,
     target: Option<String>,
@@ -103,7 +102,6 @@ pub(crate) fn cmd_spawn_alias(
     }
 }
 
-
 pub(crate) fn prepared_agent_manifest_from_path(
     manifest_path: &std::path::Path,
     name_override: Option<&str>,
@@ -134,7 +132,6 @@ pub(crate) fn prepared_agent_manifest_from_path(
     )
 }
 
-
 pub(crate) fn prepared_agent_manifest_from_template(
     template: &templates::AgentTemplate,
     name_override: Option<&str>,
@@ -145,7 +142,6 @@ pub(crate) fn prepared_agent_manifest_from_template(
         name_override,
     )
 }
-
 
 pub(crate) fn prepared_agent_manifest_from_contents(
     contents: &str,
@@ -180,7 +176,6 @@ pub(crate) fn prepared_agent_manifest_from_contents(
     }
 }
 
-
 pub(crate) fn preview_agent_manifest(prepared: &PreparedAgentManifest) {
     ui::section("Agent Dry Run");
     ui::kv("Source", &prepared.source_label);
@@ -207,7 +202,6 @@ pub(crate) fn preview_agent_manifest(prepared: &PreparedAgentManifest) {
     }
     ui::success("Manifest parsed successfully. No agent was spawned.");
 }
-
 
 pub(crate) fn spawn_prepared_agent(config: Option<PathBuf>, prepared: PreparedAgentManifest) {
     if let Some(base) = find_daemon() {
@@ -258,7 +252,6 @@ pub(crate) fn spawn_prepared_agent(config: Option<PathBuf>, prepared: PreparedAg
         }
     }
 }
-
 
 pub(crate) fn cmd_agent_list(config: Option<PathBuf>, json: bool) {
     if let Some(base) = find_daemon() {
@@ -343,12 +336,10 @@ pub(crate) fn cmd_agent_list(config: Option<PathBuf>, json: bool) {
     }
 }
 
-
 pub(crate) fn cmd_agent_chat(config: Option<PathBuf>, agent_id_str: &str) {
     ensure_initialized(&config);
     tui::chat_runner::run_chat_tui(config, Some(agent_id_str.to_string()));
 }
-
 
 pub(crate) fn cmd_agent_kill(config: Option<PathBuf>, agent_id_str: &str) {
     if let Some(base) = find_daemon() {
@@ -402,7 +393,6 @@ pub(crate) fn cmd_agent_kill(config: Option<PathBuf>, agent_id_str: &str) {
         }
     }
 }
-
 
 /// Refs #4614 — `librefang agent delete <name>` with confirmation prompt.
 ///
@@ -468,7 +458,6 @@ pub(crate) fn cmd_agent_delete(config: Option<PathBuf>, name: &str, yes: bool) {
     }
 }
 
-
 /// Refs #4614 — `librefang agent reset-uuid <name>` with confirmation.
 ///
 /// Drops the canonical UUID binding without killing a running agent. The
@@ -521,7 +510,6 @@ pub(crate) fn cmd_agent_reset_uuid(config: Option<PathBuf>, name: &str, yes: boo
     }
 }
 
-
 /// Refs #4614 — `librefang agent merge-history` placeholder.
 ///
 /// The cross-table reassignment is not yet implemented — see the
@@ -534,7 +522,6 @@ pub(crate) fn cmd_agent_merge_history(name: &str, from: &str) {
     eprintln!("substrate that is being tracked separately.");
     std::process::exit(2);
 }
-
 
 /// Look up the canonical UUID for `name` via the identity-registry
 /// endpoint. Returns `None` if no entry exists (or on any HTTP error —
@@ -554,7 +541,6 @@ pub(crate) fn lookup_canonical_uuid(base: &str, name: &str) -> Option<String> {
     }
     None
 }
-
 
 pub(crate) fn cmd_agent_set(agent_id_str: &str, field: &str, value: &str) {
     match field {
@@ -588,7 +574,6 @@ pub(crate) fn cmd_agent_set(agent_id_str: &str, field: &str, value: &str) {
         }
     }
 }
-
 
 pub(crate) fn cmd_agent_new(config: Option<PathBuf>, template_name: Option<String>) {
     let all_templates = templates::load_all_templates();
@@ -646,7 +631,6 @@ pub(crate) fn cmd_agent_new(config: Option<PathBuf>, template_name: Option<Strin
     // Spawn the agent
     spawn_template_agent(config, chosen, None);
 }
-
 
 /// Spawn an agent from a template, via daemon or in-process.
 pub(crate) fn spawn_template_agent(
@@ -714,7 +698,6 @@ pub(crate) fn spawn_template_agent(
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // Quick chat (OpenClaw alias)
 // ---------------------------------------------------------------------------
@@ -723,7 +706,6 @@ pub(crate) fn cmd_quick_chat(config: Option<PathBuf>, agent: Option<String>) {
     ensure_initialized(&config);
     tui::chat_runner::run_chat_tui(config, agent);
 }
-
 
 pub(crate) fn cmd_sessions(agent: Option<&str>, json: bool, active_only: bool) {
     let base = require_daemon("sessions");
@@ -852,7 +834,6 @@ pub(crate) fn cmd_sessions(agent: Option<&str>, json: bool, active_only: bool) {
     }
 }
 
-
 pub(crate) fn cmd_message(agent: &str, text: &str, json: bool, incognito: bool) {
     let base = require_daemon("message");
     let agent_id = resolve_agent_id(&base, agent);
@@ -879,4 +860,3 @@ pub(crate) fn cmd_message(agent: &str, text: &str, json: bool, incognito: bool) 
         );
     }
 }
-

@@ -28,7 +28,6 @@ pub(crate) fn cmd_config_show() {
     println!("{content}");
 }
 
-
 pub(crate) fn cmd_config_edit() {
     let home = librefang_home();
     let config_path = home.join("config.toml");
@@ -58,7 +57,6 @@ pub(crate) fn cmd_config_edit() {
         }
     }
 }
-
 
 pub(crate) fn cmd_config_get(key: &str) {
     let home = librefang_home();
@@ -107,7 +105,6 @@ pub(crate) fn cmd_config_get(key: &str) {
     }
 }
 
-
 /// Parse a string as a TOML integer, rejecting values outside i64 range.
 /// TOML integers are i64; we never silently truncate `u64 > i64::MAX` into
 /// negative numbers (#3461).
@@ -126,7 +123,6 @@ pub(crate) fn parse_toml_integer(raw: &str) -> Result<toml::Value, String> {
     }
     Err(format!("'{raw}' is not a valid integer"))
 }
-
 
 pub(crate) fn cmd_config_set(key: &str, value: &str) {
     let home = librefang_home();
@@ -261,7 +257,6 @@ pub(crate) fn cmd_config_set(key: &str, value: &str) {
     ));
 }
 
-
 pub(crate) fn cmd_config_unset(key: &str) {
     let home = librefang_home();
     let config_path = home.join("config.toml");
@@ -337,7 +332,6 @@ pub(crate) fn cmd_config_unset(key: &str) {
     ui::success(&i18n::t_args("config-removed-key", &[("key", key)]));
 }
 
-
 pub(crate) fn cmd_config_set_key(provider: &str) {
     let env_var = provider_to_env_var(provider);
 
@@ -369,7 +363,6 @@ pub(crate) fn cmd_config_set_key(provider: &str) {
     }
 }
 
-
 pub(crate) fn cmd_config_delete_key(provider: &str) {
     let env_var = provider_to_env_var(provider);
 
@@ -387,7 +380,6 @@ pub(crate) fn cmd_config_delete_key(provider: &str) {
         }
     }
 }
-
 
 pub(crate) fn cmd_config_test_key(provider: &str) {
     let env_var = provider_to_env_var(provider);
@@ -417,4 +409,3 @@ pub(crate) fn cmd_config_test_key(provider: &str) {
         std::process::exit(1);
     }
 }
-

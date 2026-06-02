@@ -32,7 +32,6 @@ pub(crate) fn cmd_workflow_list() {
     }
 }
 
-
 pub(crate) fn cmd_workflow_create(file: PathBuf) {
     let base = require_daemon("workflow create");
     if !file.exists() {
@@ -68,7 +67,6 @@ pub(crate) fn cmd_workflow_create(file: PathBuf) {
     }
 }
 
-
 pub(crate) fn cmd_workflow_run(workflow_id: &str, input: &str) {
     let base = require_daemon("workflow run");
     let client = daemon_client();
@@ -91,7 +89,6 @@ pub(crate) fn cmd_workflow_run(workflow_id: &str, input: &str) {
         std::process::exit(1);
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Trigger commands
@@ -132,7 +129,6 @@ pub(crate) fn cmd_trigger_list(agent_id: Option<&str>) {
         None => println!("No triggers registered."),
     }
 }
-
 
 pub(crate) fn cmd_trigger_create(
     agent_id: &str,
@@ -195,7 +191,6 @@ pub(crate) fn cmd_trigger_create(
     }
 }
 
-
 pub(crate) fn cmd_trigger_delete(trigger_id: &str) {
     let base = require_daemon("trigger delete");
     let client = daemon_client();
@@ -215,7 +210,6 @@ pub(crate) fn cmd_trigger_delete(trigger_id: &str) {
         std::process::exit(1);
     }
 }
-
 
 pub(crate) fn cmd_trigger_get(trigger_id: &str) {
     let base = require_daemon("trigger get");
@@ -269,7 +263,6 @@ pub(crate) fn cmd_trigger_get(trigger_id: &str) {
         println!("Session mode:  {m}");
     }
 }
-
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn cmd_trigger_update(
@@ -338,7 +331,6 @@ pub(crate) fn cmd_trigger_update(
     println!("Trigger {trigger_id} updated.");
 }
 
-
 pub(crate) fn cmd_trigger_set_enabled(trigger_id: &str, enabled: bool) {
     let base = require_daemon(if enabled {
         "trigger enable"
@@ -367,7 +359,6 @@ pub(crate) fn cmd_trigger_set_enabled(trigger_id: &str, enabled: bool) {
         if enabled { "enabled" } else { "disabled" }
     );
 }
-
 
 pub(crate) fn cmd_cron_list(json: bool) {
     let base = require_daemon("cron list");
@@ -420,7 +411,6 @@ pub(crate) fn cmd_cron_list(json: bool) {
         );
     }
 }
-
 
 pub(crate) fn cmd_cron_create(agent: &str, spec: &str, prompt: &str, explicit_name: Option<&str>) {
     let base = require_daemon("cron create");
@@ -478,7 +468,6 @@ pub(crate) fn cmd_cron_create(agent: &str, spec: &str, prompt: &str, explicit_na
     }
 }
 
-
 pub(crate) fn cmd_cron_delete(id: &str) {
     let base = require_daemon("cron delete");
     let client = daemon_client();
@@ -492,7 +481,6 @@ pub(crate) fn cmd_cron_delete(id: &str) {
         ui::success(&i18n::t_args("cron-deleted", &[("id", id)]));
     }
 }
-
 
 pub(crate) fn cmd_cron_toggle(id: &str, enable: bool) {
     let base = require_daemon("cron");
@@ -518,4 +506,3 @@ pub(crate) fn cmd_cron_toggle(id: &str, enable: bool) {
         ));
     }
 }
-

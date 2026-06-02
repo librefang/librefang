@@ -67,7 +67,6 @@ pub(crate) fn cmd_hand_install(path: &str) {
     );
 }
 
-
 pub(crate) fn cmd_hand_list() {
     let base = require_daemon("hand list");
     let client = daemon_client();
@@ -109,7 +108,6 @@ pub(crate) fn cmd_hand_list() {
     }
 }
 
-
 pub(crate) fn cmd_hand_active() {
     let base = require_daemon("hand active");
     let client = daemon_client();
@@ -129,7 +127,6 @@ pub(crate) fn cmd_hand_active() {
     }
     t.print();
 }
-
 
 pub(crate) fn cmd_hand_status(id: Option<&str>) {
     if id.is_none() {
@@ -178,7 +175,6 @@ pub(crate) fn cmd_hand_status(id: Option<&str>) {
     }
 }
 
-
 pub(crate) fn cmd_hand_activate(id: &str) {
     let base = require_daemon("hand activate");
     let client = daemon_client();
@@ -205,7 +201,6 @@ pub(crate) fn cmd_hand_activate(id: &str) {
         std::process::exit(1);
     }
 }
-
 
 pub(crate) fn cmd_hand_deactivate(id: &str) {
     let base = require_daemon("hand deactivate");
@@ -244,7 +239,6 @@ pub(crate) fn cmd_hand_deactivate(id: &str) {
     }
 }
 
-
 pub(crate) fn cmd_hand_info(id: &str) {
     let base = require_daemon("hand info");
     let client = daemon_client();
@@ -258,7 +252,6 @@ pub(crate) fn cmd_hand_info(id: &str) {
         serde_json::to_string_pretty(&body).unwrap_or_default()
     );
 }
-
 
 pub(crate) fn cmd_hand_check_deps(id: &str) {
     let base = require_daemon("hand check-deps");
@@ -280,7 +273,6 @@ pub(crate) fn cmd_hand_check_deps(id: &str) {
         );
     }
 }
-
 
 pub(crate) fn cmd_hand_install_deps(id: &str) {
     let base = require_daemon("hand install-deps");
@@ -305,7 +297,6 @@ pub(crate) fn cmd_hand_install_deps(id: &str) {
         }
     }
 }
-
 
 pub(crate) fn cmd_hand_pause(id: &str) {
     let base = require_daemon("hand pause");
@@ -339,7 +330,6 @@ pub(crate) fn cmd_hand_pause(id: &str) {
     }
 }
 
-
 pub(crate) fn cmd_hand_resume(id: &str) {
     let base = require_daemon("hand resume");
     let client = daemon_client();
@@ -372,7 +362,6 @@ pub(crate) fn cmd_hand_resume(id: &str) {
     }
 }
 
-
 pub(crate) fn cmd_hand_settings(id: &str) {
     let base = require_daemon("hand settings");
     let client = daemon_client();
@@ -398,7 +387,6 @@ pub(crate) fn cmd_hand_settings(id: &str) {
     }
 }
 
-
 pub(crate) fn cmd_hand_set(id: &str, key: &str, value: &str) {
     let base = require_daemon("hand set");
     let client = daemon_client();
@@ -423,7 +411,6 @@ pub(crate) fn cmd_hand_set(id: &str, key: &str, value: &str) {
     ui::success(&format!("Set {key}={value} for hand '{id}'."));
 }
 
-
 pub(crate) fn cmd_hand_reload() {
     let base = require_daemon("hand reload");
     let client = daemon_client();
@@ -442,7 +429,6 @@ pub(crate) fn cmd_hand_reload() {
         "Reloaded hands: {added} added, {updated} updated, {total} total."
     ));
 }
-
 
 pub(crate) fn cmd_hand_chat(id: &str) {
     let base = require_daemon("hand chat");
@@ -508,7 +494,6 @@ pub(crate) fn cmd_hand_chat(id: &str) {
     }
 }
 
-
 pub(crate) fn fetch_active_hand_instances(
     base: &str,
     client: &reqwest::blocking::Client,
@@ -520,7 +505,6 @@ pub(crate) fn fetch_active_hand_instances(
         .cloned()
         .unwrap_or_default()
 }
-
 
 pub(crate) fn resolve_hand_instance(
     active_instances: &[serde_json::Value],
@@ -534,4 +518,3 @@ pub(crate) fn resolve_hand_instance(
         })
         .cloned()
 }
-

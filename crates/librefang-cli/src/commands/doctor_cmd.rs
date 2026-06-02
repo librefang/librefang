@@ -1141,4 +1141,3 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
         }
     }
 }
-

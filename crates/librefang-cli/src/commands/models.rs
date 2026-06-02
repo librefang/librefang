@@ -91,7 +91,6 @@ pub(crate) fn cmd_models_list(provider_filter: Option<&str>, json: bool) {
     }
 }
 
-
 pub(crate) fn cmd_models_aliases(json: bool) {
     if let Some(base) = find_daemon() {
         let client = daemon_client();
@@ -143,7 +142,6 @@ pub(crate) fn cmd_models_aliases(json: bool) {
         t.print();
     }
 }
-
 
 pub(crate) fn cmd_models_providers(json: bool) {
     if let Some(base) = find_daemon() {
@@ -208,7 +206,6 @@ pub(crate) fn cmd_models_providers(json: bool) {
     }
 }
 
-
 pub(crate) fn cmd_models_set(model: Option<String>) {
     let model = match model {
         Some(m) => m,
@@ -232,7 +229,6 @@ pub(crate) fn cmd_models_set(model: Option<String>) {
         ui::success(&i18n::t_args("model-set-success", &[("model", &model)]));
     }
 }
-
 
 /// Interactive model picker — shows numbered list, accepts number or model ID.
 pub(crate) fn pick_model() -> String {
@@ -297,7 +293,6 @@ pub(crate) fn pick_model() -> String {
     }
 }
 
-
 pub(crate) fn cmd_approvals_list(json: bool) {
     let base = require_daemon("approvals list");
     let client = daemon_client();
@@ -336,7 +331,6 @@ pub(crate) fn cmd_approvals_list(json: bool) {
     }
 }
 
-
 pub(crate) fn cmd_approvals_respond(id: &str, approve: bool) {
     let base = require_daemon("approvals");
     let client = daemon_client();
@@ -361,4 +355,3 @@ pub(crate) fn cmd_approvals_respond(id: &str, approve: bool) {
         ));
     }
 }
-

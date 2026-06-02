@@ -25,7 +25,6 @@ pub(crate) fn resolve_skills_dir(hand: Option<&str>) -> PathBuf {
     }
 }
 
-
 pub(crate) fn cmd_skill_install(source: &str, hand: Option<&str>) {
     let skills_dir = resolve_skills_dir(hand);
     std::fs::create_dir_all(&skills_dir).unwrap_or_else(|e| {
@@ -120,7 +119,6 @@ pub(crate) fn cmd_skill_install(source: &str, hand: Option<&str>) {
     }
 }
 
-
 pub(crate) fn cmd_skill_list(hand: Option<&str>) {
     let skills_dir = resolve_skills_dir(hand);
 
@@ -157,7 +155,6 @@ pub(crate) fn cmd_skill_list(hand: Option<&str>) {
     }
 }
 
-
 pub(crate) fn cmd_skill_remove(name: &str, hand: Option<&str>) {
     // Route through the safe uninstall path (lock + path-traversal
     // guard) instead of `registry.remove()` which calls `remove_dir_all`
@@ -177,7 +174,6 @@ pub(crate) fn cmd_skill_remove(name: &str, hand: Option<&str>) {
         }
     }
 }
-
 
 pub(crate) fn cmd_skill_search(query: &str) {
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -203,7 +199,6 @@ pub(crate) fn cmd_skill_search(query: &str) {
         }
     }
 }
-
 
 pub(crate) fn cmd_skill_test(path: Option<PathBuf>, tool: Option<String>, input: Option<String>) {
     let skill_path = resolve_skill_path(path);
@@ -311,7 +306,6 @@ pub(crate) fn cmd_skill_test(path: Option<PathBuf>, tool: Option<String>, input:
     }
 }
 
-
 pub(crate) fn cmd_skill_publish(
     path: Option<PathBuf>,
     repo: Option<String>,
@@ -409,7 +403,6 @@ pub(crate) fn cmd_skill_publish(
     }
 }
 
-
 pub(crate) fn resolve_skill_path(path: Option<PathBuf>) -> PathBuf {
     path.unwrap_or_else(|| {
         std::env::current_dir().unwrap_or_else(|e| {
@@ -418,7 +411,6 @@ pub(crate) fn resolve_skill_path(path: Option<PathBuf>) -> PathBuf {
         })
     })
 }
-
 
 pub(crate) fn print_skill_warnings(warnings: &[librefang_skills::verify::SkillWarning]) {
     if warnings.is_empty() {
@@ -436,7 +428,6 @@ pub(crate) fn print_skill_warnings(warnings: &[librefang_skills::verify::SkillWa
     }
 }
 
-
 pub(crate) fn severity_label(severity: librefang_skills::verify::WarningSeverity) -> &'static str {
     match severity {
         librefang_skills::verify::WarningSeverity::Info => "info",
@@ -444,7 +435,6 @@ pub(crate) fn severity_label(severity: librefang_skills::verify::WarningSeverity
         librefang_skills::verify::WarningSeverity::Critical => "critical",
     }
 }
-
 
 pub(crate) fn cmd_skill_create() {
     let name = prompt_input("Skill name: ");
@@ -671,7 +661,6 @@ capabilities = []
     );
 }
 
-
 /// Print an EvolutionResult as a one-line status.
 pub(crate) fn print_evolution_result(result: &librefang_skills::evolution::EvolutionResult) {
     let marker = if result.success { "OK" } else { "FAIL" };
@@ -680,7 +669,6 @@ pub(crate) fn print_evolution_result(result: &librefang_skills::evolution::Evolu
         None => println!("[{marker}] {}", result.message),
     }
 }
-
 
 /// Resolve a skill by name. Respects `--hand` so evolve operations can
 /// target a per-hand workspace skills dir just like `install`/`list`.
@@ -702,7 +690,6 @@ pub(crate) fn load_installed_skill(
         }
     }
 }
-
 
 pub(crate) fn cmd_skill_evolve(sub: EvolveCommands) {
     match sub {
@@ -894,7 +881,6 @@ pub(crate) fn cmd_skill_evolve(sub: EvolveCommands) {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // Skill workshop pending review (#3328)
 // ---------------------------------------------------------------------------
@@ -997,4 +983,3 @@ pub(crate) fn cmd_skill_pending(sub: PendingCommands) {
         }
     }
 }
-

@@ -28,7 +28,6 @@ pub(crate) fn resolve_device_auth_start(
     }
 }
 
-
 pub(crate) async fn authenticate_chatgpt(
     device_auth: bool,
 ) -> Result<librefang_runtime::chatgpt_oauth::ChatGptAuthResult, String> {
@@ -68,7 +67,6 @@ pub(crate) async fn authenticate_chatgpt(
     chatgpt_oauth::exchange_code_for_tokens(&code, &code_verifier, port).await
 }
 
-
 pub(crate) async fn persist_chatgpt_auth(
     auth_result: librefang_runtime::chatgpt_oauth::ChatGptAuthResult,
 ) -> Result<(), String> {
@@ -97,7 +95,6 @@ pub(crate) async fn persist_chatgpt_auth(
     println!("config.toml updated: provider = \"chatgpt\", model = \"{best_model}\"");
     Ok(())
 }
-
 
 pub(crate) fn write_chatgpt_secrets(
     home: &std::path::Path,
@@ -137,8 +134,10 @@ pub(crate) fn write_chatgpt_secrets(
     Ok(secrets_path)
 }
 
-
-pub(crate) fn update_chatgpt_config(home: &std::path::Path, best_model: &str) -> Result<(), String> {
+pub(crate) fn update_chatgpt_config(
+    home: &std::path::Path,
+    best_model: &str,
+) -> Result<(), String> {
     let config_path = home.join("config.toml");
     let config_str = std::fs::read_to_string(&config_path).unwrap_or_default();
     let mut doc = if config_str.trim().is_empty() {
@@ -168,7 +167,6 @@ pub(crate) fn update_chatgpt_config(home: &std::path::Path, best_model: &str) ->
     Ok(())
 }
 
-
 pub(crate) fn cmd_auth_chatgpt(device_auth: bool) {
     println!("Starting ChatGPT authentication flow...\n");
 
@@ -188,7 +186,6 @@ pub(crate) fn cmd_auth_chatgpt(device_auth: bool) {
     }
 }
 
-
 // ─── Credential pool commands (#4965) ───────────────────────────────────────
 
 /// Resolve the active config.toml path. `--config <path>` overrides; else
@@ -196,7 +193,6 @@ pub(crate) fn cmd_auth_chatgpt(device_auth: bool) {
 pub(crate) fn pool_config_path(config_override: Option<PathBuf>) -> PathBuf {
     config_override.unwrap_or_else(|| librefang_home().join("config.toml"))
 }
-
 
 /// Parse config.toml into a `toml_edit::DocumentMut` so comments, blank
 /// lines, key ordering, and unrelated sections are preserved through any
@@ -229,14 +225,12 @@ pub(crate) fn pool_load_doc_or_exit(path: &std::path::Path) -> toml_edit::Docume
         })
 }
 
-
 pub(crate) fn pool_write_doc_or_exit(path: &std::path::Path, doc: &toml_edit::DocumentMut) {
     std::fs::write(path, doc.to_string()).unwrap_or_else(|e| {
         ui::error(&format!("Failed to write {}: {e}", path.display()));
         std::process::exit(1);
     });
 }
-
 
 pub(crate) fn pool_strategy_canon(input: &str) -> Option<&'static str> {
     match input.to_ascii_lowercase().replace('-', "_").as_str() {
@@ -247,7 +241,6 @@ pub(crate) fn pool_strategy_canon(input: &str) -> Option<&'static str> {
         _ => None,
     }
 }
-
 
 /// Locate the `[[credential_pools]]` entry whose `provider` matches
 /// `provider_name`, creating the surrounding `ArrayOfTables` if it does not
@@ -281,7 +274,6 @@ pub(crate) fn pool_lookup_doc_mut<'d>(
     });
     (arr, idx)
 }
-
 
 pub(crate) fn cmd_auth_pool_list(config: Option<PathBuf>, json: bool) {
     // Prefer the running daemon — its snapshot includes live request_count
@@ -384,7 +376,6 @@ pub(crate) fn cmd_auth_pool_list(config: Option<PathBuf>, json: bool) {
     }
 }
 
-
 pub(crate) fn print_pool_summary_human(body: &serde_json::Value) {
     let pools = match body.as_array() {
         Some(a) if !a.is_empty() => a,
@@ -454,7 +445,6 @@ pub(crate) fn print_pool_summary_human(body: &serde_json::Value) {
     }
 }
 
-
 /// Best-effort env-var name sanity check used by `auth pool add`. POSIX
 /// env-var names are `[A-Z_][A-Z0-9_]*`; reject obvious nonsense (spaces,
 /// punctuation, leading digit) at config-time so the operator finds out
@@ -470,7 +460,6 @@ pub(crate) fn is_valid_env_var_name(name: &str) -> bool {
     }
     chars.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
 }
-
 
 pub(crate) fn cmd_auth_pool_add(
     config: Option<PathBuf>,
@@ -574,7 +563,6 @@ pub(crate) fn cmd_auth_pool_add(
     ));
 }
 
-
 pub(crate) fn cmd_auth_pool_remove(config: Option<PathBuf>, provider: &str, env_var: &str) {
     let path = pool_config_path(config);
     let mut doc = pool_load_doc_or_exit(&path);
@@ -638,7 +626,6 @@ pub(crate) fn cmd_auth_pool_remove(config: Option<PathBuf>, provider: &str, env_
     }
 }
 
-
 pub(crate) fn cmd_auth_pool_strategy(config: Option<PathBuf>, provider: &str, strategy: &str) {
     let Some(canon) = pool_strategy_canon(strategy) else {
         ui::error(&format!(
@@ -668,7 +655,6 @@ pub(crate) fn cmd_auth_pool_strategy(config: Option<PathBuf>, provider: &str, st
     ));
 }
 
-
 // ---------------------------------------------------------------------------
 // Vault commands (librefang vault init/set/list/remove)
 // ---------------------------------------------------------------------------
@@ -686,7 +672,6 @@ pub(crate) fn cmd_vault_init() {
         }
     }
 }
-
 
 pub(crate) fn cmd_vault_set(key: &str) {
     use zeroize::Zeroizing;
@@ -726,7 +711,6 @@ pub(crate) fn cmd_vault_set(key: &str) {
     }
 }
 
-
 pub(crate) fn cmd_vault_list() {
     let home = librefang_home();
     let vault_path = home.join("vault.enc");
@@ -755,7 +739,6 @@ pub(crate) fn cmd_vault_list() {
         }
     }
 }
-
 
 pub(crate) fn cmd_vault_remove(key: &str) {
     let home = librefang_home();
@@ -786,7 +769,6 @@ pub(crate) fn cmd_vault_remove(key: &str) {
         }
     }
 }
-
 
 /// Rotate the vault master key by re-encrypting every entry under a fresh
 /// 32-byte key. Issue #3651.
@@ -932,7 +914,6 @@ pub(crate) fn cmd_vault_rotate_key(from_stdin: bool) {
     println!("{}", i18n::t("vault-rotate-next-step"));
 }
 
-
 // ---------------------------------------------------------------------------
 // hash-password command
 // ---------------------------------------------------------------------------
@@ -967,4 +948,3 @@ pub(crate) fn cmd_hash_password(password: Option<String>) {
         }
     }
 }
-

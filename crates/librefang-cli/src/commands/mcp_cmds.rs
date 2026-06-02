@@ -137,7 +137,6 @@ pub(crate) fn cmd_mcp_add(name: &str, key: Option<&str>) {
     }
 }
 
-
 pub(crate) fn cmd_mcp_remove(name: &str) {
     let home = librefang_home();
     let config_path = home.join("config.toml");
@@ -185,7 +184,6 @@ pub(crate) fn cmd_mcp_remove(name: &str) {
         let _ = client.post(format!("{base_url}/api/mcp/reload")).send();
     }
 }
-
 
 pub(crate) fn cmd_mcp_catalog(query: Option<&str>) {
     let home = librefang_home();
@@ -266,7 +264,6 @@ pub(crate) fn cmd_mcp_catalog(query: Option<&str>) {
     println!("  Use `librefang mcp add <id>` to install an MCP server.");
 }
 
-
 pub(crate) fn cmd_mcp_list() {
     let home = librefang_home();
     let raw = std::fs::read_to_string(home.join("config.toml")).unwrap_or_default();
@@ -323,7 +320,6 @@ pub(crate) fn cmd_mcp_list() {
     println!("  Use `librefang mcp catalog` to list installable entries.");
 }
 
-
 /// Local upsert helper — mirrors the API's `upsert_mcp_server_config`.
 pub(crate) fn upsert_mcp_server_local(
     config_path: &std::path::Path,
@@ -366,8 +362,10 @@ pub(crate) fn upsert_mcp_server_local(
     Ok(())
 }
 
-
-pub(crate) fn remove_mcp_server_local(config_path: &std::path::Path, name: &str) -> Result<(), String> {
+pub(crate) fn remove_mcp_server_local(
+    config_path: &std::path::Path,
+    name: &str,
+) -> Result<(), String> {
     let mut table: toml::value::Table = if config_path.exists() {
         let content = std::fs::read_to_string(config_path).map_err(|e| e.to_string())?;
         toml::from_str(&content).map_err(|e| format!("config.toml is not valid TOML: {e}"))?
@@ -387,4 +385,3 @@ pub(crate) fn remove_mcp_server_local(config_path: &std::path::Path, name: &str)
     std::fs::write(config_path, toml_string).map_err(|e| e.to_string())?;
     Ok(())
 }
-

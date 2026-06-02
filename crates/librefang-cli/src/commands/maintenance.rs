@@ -39,7 +39,6 @@ pub(crate) fn resolve_binary_path() -> std::path::PathBuf {
         .unwrap_or_else(|_| std::env::current_exe().unwrap_or_else(|_| "librefang".into()))
 }
 
-
 pub(crate) fn cmd_service_install() {
     // Warn if running as root — the service would be installed for root, not
     // the actual user. This catches `sudo librefang service install` mistakes.
@@ -78,7 +77,6 @@ pub(crate) fn cmd_service_install() {
         ui::error("Auto-start service is not supported on this platform.");
     }
 }
-
 
 #[cfg(target_os = "linux")]
 pub(crate) fn service_install_linux(binary: &std::path::Path, librefang_home: &std::path::Path) {
@@ -147,7 +145,6 @@ pub(crate) fn service_install_linux(binary: &std::path::Path, librefang_home: &s
         _ => ui::error("systemctl --user enable librefang.service failed"),
     }
 }
-
 
 #[cfg(target_os = "macos")]
 pub(crate) fn service_install_macos(binary: &std::path::Path, librefang_home: &std::path::Path) {
@@ -225,7 +222,6 @@ pub(crate) fn service_install_macos(binary: &std::path::Path, librefang_home: &s
     }
 }
 
-
 #[cfg(windows)]
 pub(crate) fn service_install_windows(binary: &std::path::Path) {
     let value = format!("\"{}\" start", binary.display());
@@ -253,7 +249,6 @@ pub(crate) fn service_install_windows(binary: &std::path::Path) {
         Err(e) => ui::error(&format!("Failed to run reg.exe: {e}")),
     }
 }
-
 
 pub(crate) fn cmd_service_uninstall() {
     #[cfg(target_os = "linux")]
@@ -316,7 +311,6 @@ pub(crate) fn cmd_service_uninstall() {
         ui::error("Auto-start service is not supported on this platform.");
     }
 }
-
 
 pub(crate) fn cmd_service_status() {
     #[cfg(target_os = "linux")]
@@ -390,7 +384,6 @@ pub(crate) fn cmd_service_status() {
     }
 }
 
-
 pub(crate) fn cmd_reset(confirm: bool) {
     let librefang_dir = cli_librefang_home();
 
@@ -430,7 +423,6 @@ pub(crate) fn cmd_reset(confirm: bool) {
         }
     }
 }
-
 
 pub(crate) fn cmd_update(check: bool, version: Option<String>, channel_override: Option<String>) {
     use librefang_types::config::UpdateChannel;
@@ -617,7 +609,6 @@ pub(crate) fn cmd_update(check: bool, version: Option<String>, channel_override:
     ui::hint("If this binary came from another package manager, update it with that package manager instead.");
 }
 
-
 pub(crate) fn fetch_latest_release_tag(
     channel: librefang_types::config::UpdateChannel,
 ) -> Result<String, String> {
@@ -684,7 +675,6 @@ pub(crate) fn fetch_latest_release_tag(
     }
 }
 
-
 pub(crate) fn update_http_client() -> Result<reqwest::blocking::Client, String> {
     crate::http_client::client_builder()
         .user_agent(format!("librefang-cli/{}", env!("CARGO_PKG_VERSION")))
@@ -692,7 +682,6 @@ pub(crate) fn update_http_client() -> Result<reqwest::blocking::Client, String> 
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {e}"))
 }
-
 
 pub(crate) fn compare_release_tag(tag: &str, current_version: &str) -> ReleaseComparison {
     let Some(release_core) = parse_version_core(normalize_release_tag(tag)) else {
@@ -709,7 +698,6 @@ pub(crate) fn compare_release_tag(tag: &str, current_version: &str) -> ReleaseCo
     }
 }
 
-
 pub(crate) fn parse_version_core(version: &str) -> Option<Vec<u64>> {
     let core = version.split('-').next()?;
     if core.is_empty() {
@@ -719,7 +707,6 @@ pub(crate) fn parse_version_core(version: &str) -> Option<Vec<u64>> {
         .map(|part| part.parse::<u64>().ok())
         .collect()
 }
-
 
 pub(crate) fn run_official_update(version: Option<&str>) -> Result<UpdateLaunch, String> {
     let script_url = if cfg!(windows) {
@@ -785,7 +772,6 @@ pub(crate) fn run_official_update(version: Option<&str>) -> Result<UpdateLaunch,
     }
 }
 
-
 pub(crate) fn download_text(url: &str) -> Result<String, String> {
     let client = update_http_client()?;
     let response = client
@@ -800,7 +786,6 @@ pub(crate) fn download_text(url: &str) -> Result<String, String> {
         .text()
         .map_err(|e| format!("Failed to read response body: {e}"))
 }
-
 
 #[cfg(not(windows))]
 pub(crate) fn installed_binary_version(path: &std::path::Path) -> Option<String> {
@@ -820,7 +805,6 @@ pub(crate) fn installed_binary_version(path: &std::path::Path) -> Option<String>
     }
 }
 
-
 pub(crate) fn write_update_script(contents: &str, extension: &str) -> Result<PathBuf, String> {
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -835,11 +819,9 @@ pub(crate) fn write_update_script(contents: &str, extension: &str) -> Result<Pat
     Ok(path)
 }
 
-
 pub(crate) fn default_install_executable() -> PathBuf {
     cli_librefang_home().join("bin").join(binary_name())
 }
-
 
 pub(crate) fn cargo_install_executable() -> PathBuf {
     dirs::home_dir()
@@ -849,7 +831,6 @@ pub(crate) fn cargo_install_executable() -> PathBuf {
         .join(binary_name())
 }
 
-
 pub(crate) fn binary_name() -> &'static str {
     if cfg!(windows) {
         "librefang.exe"
@@ -858,18 +839,15 @@ pub(crate) fn binary_name() -> &'static str {
     }
 }
 
-
 pub(crate) fn same_path(left: &std::path::Path, right: &std::path::Path) -> bool {
     let left = std::fs::canonicalize(left).unwrap_or_else(|_| left.to_path_buf());
     let right = std::fs::canonicalize(right).unwrap_or_else(|_| right.to_path_buf());
     left == right
 }
 
-
 pub(crate) fn normalize_release_tag(tag: &str) -> &str {
     tag.strip_prefix('v').unwrap_or(tag)
 }
-
 
 pub(crate) fn cargo_update_command(version: Option<&str>) -> String {
     match version {
@@ -881,7 +859,6 @@ pub(crate) fn cargo_update_command(version: Option<&str>) -> String {
         ),
     }
 }
-
 
 pub(crate) fn manual_installer_command(version: Option<&str>) -> String {
     #[cfg(windows)]
@@ -902,7 +879,6 @@ pub(crate) fn manual_installer_command(version: Option<&str>) -> String {
         }
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Uninstall
@@ -1037,7 +1013,6 @@ pub(crate) fn cmd_uninstall(confirm: bool, keep_config: bool) {
     ui::success(&i18n::t("uninstall-goodbye"));
 }
 
-
 /// Remove auto-start / launch-agent / systemd entries.
 #[allow(unused_variables)]
 pub(crate) fn remove_autostart_entries(home: &std::path::Path) {
@@ -1113,7 +1088,6 @@ pub(crate) fn remove_autostart_entries(home: &std::path::Path) {
         }
     }
 }
-
 
 /// Remove lines from shell config files that add librefang to PATH.
 #[allow(unused_variables)]
@@ -1199,7 +1173,6 @@ pub(crate) fn clean_path_entries(home: &std::path::Path, librefang_dir: &str) {
     }
 }
 
-
 /// Returns true if a shell config line is an librefang PATH export.
 /// Must match BOTH an librefang reference AND a PATH-setting pattern.
 #[cfg(any(not(windows), test))]
@@ -1217,7 +1190,6 @@ pub(crate) fn is_librefang_path_line(line: &str, librefang_dir: &str) -> bool {
         || lower.contains("set -gx path")
         || lower.contains("fish_add_path")
 }
-
 
 /// Remove everything in ~/.librefang/ except config files.
 pub(crate) fn remove_dir_except_config(librefang_dir: &std::path::Path) {
@@ -1239,7 +1211,6 @@ pub(crate) fn remove_dir_except_config(librefang_dir: &std::path::Path) {
         }
     }
 }
-
 
 /// Remove the currently-running binary.
 pub(crate) fn remove_self_binary(exe_path: &std::path::Path) {
@@ -1294,4 +1265,3 @@ pub(crate) fn remove_self_binary(exe_path: &std::path::Path) {
         ));
     }
 }
-

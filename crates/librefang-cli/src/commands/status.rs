@@ -14,7 +14,13 @@ use crate::commands::prelude::*;
 /// - **Authenticated** (requires `api_key`): `/api/status` for agent list,
 ///   session count, and memory usage. When the key is missing we show a
 ///   locked section with a one-line fix hint instead of leaking empty fields.
-pub(crate) fn cmd_status(config: Option<PathBuf>, json: bool, verbose: bool, quiet: bool, watch: Option<u64>) {
+pub(crate) fn cmd_status(
+    config: Option<PathBuf>,
+    json: bool,
+    verbose: bool,
+    quiet: bool,
+    watch: Option<u64>,
+) {
     if let Some(secs) = watch {
         let interval = std::time::Duration::from_secs(secs.max(1));
         // Watch mode: redraw indefinitely. A non-zero exit code from a single
@@ -45,8 +51,12 @@ pub(crate) fn cmd_status(config: Option<PathBuf>, json: bool, verbose: bool, qui
     }
 }
 
-
-pub(crate) fn render_status_once(config: Option<PathBuf>, json: bool, verbose: bool, quiet: bool) -> i32 {
+pub(crate) fn render_status_once(
+    config: Option<PathBuf>,
+    json: bool,
+    verbose: bool,
+    quiet: bool,
+) -> i32 {
     let daemon = daemon_config_context(config.as_deref());
     if let Some(base) = find_daemon_in_home(&daemon.home_dir) {
         render_status_daemon(config.as_deref(), &base, &daemon, json, verbose, quiet)
@@ -54,7 +64,6 @@ pub(crate) fn render_status_once(config: Option<PathBuf>, json: bool, verbose: b
         render_status_inprocess(config, json, quiet)
     }
 }
-
 
 pub(crate) fn render_status_daemon(
     config: Option<&std::path::Path>,
@@ -249,7 +258,6 @@ pub(crate) fn render_status_daemon(
     exit_code
 }
 
-
 /// Map health response to a semantic exit code.
 ///
 /// - `0` — daemon running and `/api/health` reports `ok`.
@@ -266,7 +274,6 @@ pub(crate) fn classify_exit(health: Option<&serde_json::Value>) -> i32 {
     }
 }
 
-
 /// Heuristic for "this port is reachable from the internet if the machine
 /// has a public IP." Catches the two common foot-guns: `0.0.0.0` (IPv4 any)
 /// and `::` / `[::]` (IPv6 any). IPv4 loopback, IPv6 loopback, and named
@@ -279,11 +286,12 @@ pub(crate) fn listener_is_public(listen_addr: &str) -> bool {
     matches!(host, "0.0.0.0" | "::" | "[::]")
 }
 
-
 /// Compute whether the configured default provider has a usable API key in
 /// the environment (or in `provider_api_keys` in config.toml). Local
 /// providers (ollama/vllm/lmstudio/lemonade) don't need one.
-pub(crate) fn provider_key_state(cfg: &librefang_types::config::KernelConfig) -> (String, bool, bool) {
+pub(crate) fn provider_key_state(
+    cfg: &librefang_types::config::KernelConfig,
+) -> (String, bool, bool) {
     let provider = cfg.default_model.provider.as_str();
     let key_required = !librefang_runtime::provider_health::is_local_provider(provider);
     let key_env = if cfg.default_model.api_key_env.trim().is_empty() {
@@ -301,7 +309,6 @@ pub(crate) fn provider_key_state(cfg: &librefang_types::config::KernelConfig) ->
         .unwrap_or(false);
     (key_env, env_has_key || config_has_key, key_required)
 }
-
 
 /// Scan the last chunk of `daemon.log` for ERROR-level entries. We read a
 /// capped suffix of the file so a multi-GB log doesn't blow up memory, then
@@ -339,7 +346,6 @@ pub(crate) fn recent_daemon_errors(home_dir: &std::path::Path, limit: usize) -> 
         .collect()
 }
 
-
 /// One-line quiet summary for `librefang status -q`. Stays stable across
 /// releases so scripts can parse it — prefix is always `librefang`, second
 /// token is a state word, remaining tokens are `key=value`.
@@ -370,7 +376,6 @@ pub(crate) fn render_status_quiet_daemon(
     println!("librefang {version} {state} uptime={uptime_s} {auth_s} ({base})");
     exit_code
 }
-
 
 /// Extra verbose-only section. Everything in here is best-effort: anything
 /// that fails to load just isn't shown — we never stop the main render.
@@ -447,7 +452,6 @@ pub(crate) fn render_verbose_section(
     }
 }
 
-
 pub(crate) fn fetch_peer_status(base: &str, api_key: Option<&str>) -> Option<(bool, u64, u64)> {
     let client = daemon_client_with_api_key(api_key);
     let resp = client
@@ -463,7 +467,6 @@ pub(crate) fn fetch_peer_status(base: &str, api_key: Option<&str>) -> Option<(bo
     let total = body["total_peers"].as_u64().unwrap_or(0);
     Some((enabled, connected, total))
 }
-
 
 pub(crate) fn fetch_array_count(base: &str, path: &str, api_key: &str) -> Option<u64> {
     let client = daemon_client_with_api_key(Some(api_key));
@@ -490,7 +493,6 @@ pub(crate) fn fetch_array_count(base: &str, path: &str, api_key: &str) -> Option
     None
 }
 
-
 pub(crate) fn render_detail_section(body: &serde_json::Value) {
     let total = body["agent_count"].as_u64().unwrap_or(0);
     let active = body["active_agent_count"].as_u64().unwrap_or(0);
@@ -515,7 +517,6 @@ pub(crate) fn render_detail_section(body: &serde_json::Value) {
         }
     }
 }
-
 
 /// Render the agent list as a column-aligned table. Empty input is a no-op
 /// so the caller can unconditionally call this after a non-empty check.
@@ -551,7 +552,6 @@ pub(crate) fn render_agents_table(agents: &[serde_json::Value]) {
     }
     t.print();
 }
-
 
 pub(crate) fn render_status_inprocess(config: Option<PathBuf>, json: bool, quiet: bool) -> i32 {
     // Quiet mode short-circuits the kernel boot — we don't need to load 22
@@ -629,12 +629,13 @@ pub(crate) fn render_status_inprocess(config: Option<PathBuf>, json: bool, quiet
     1
 }
 
-
 /// Fetch the public `/api/health` payload along with the round-trip time.
 /// Returns `(None, None)` on network failure and `(None, Some(_))` when the
 /// server responded but the body didn't parse, so the caller can still
 /// surface "responded in 42ms but unreadable" if needed.
-pub(crate) fn fetch_health_timed(base: &str) -> (Option<serde_json::Value>, Option<std::time::Duration>) {
+pub(crate) fn fetch_health_timed(
+    base: &str,
+) -> (Option<serde_json::Value>, Option<std::time::Duration>) {
     let client = daemon_client_with_api_key(None);
     let start = std::time::Instant::now();
     let resp = match client.get(format!("{base}/api/health")).send() {
@@ -648,7 +649,6 @@ pub(crate) fn fetch_health_timed(base: &str) -> (Option<serde_json::Value>, Opti
     (resp.json::<serde_json::Value>().ok(), Some(elapsed))
 }
 
-
 /// Fetch the authenticated `/api/status` payload. Returns `None` on any
 /// failure — including 401 — so the renderer falls back to the locked
 /// section rather than printing `?` for every field.
@@ -660,7 +660,6 @@ pub(crate) fn fetch_status_detail(base: &str, api_key: &str) -> Option<serde_jso
     }
     resp.json::<serde_json::Value>().ok()
 }
-
 
 /// Prefer authoritative uptime from the daemon; fall back to `now - started_at`
 /// from `daemon.json` when the detail tier is unavailable.
@@ -679,7 +678,6 @@ pub(crate) fn uptime_secs(
     let delta = now.signed_duration_since(started.with_timezone(&chrono::Utc));
     u64::try_from(delta.num_seconds()).ok()
 }
-
 
 pub(crate) fn cmd_health(json: bool) {
     match find_daemon() {
@@ -714,4 +712,3 @@ pub(crate) fn cmd_health(json: bool) {
         }
     }
 }
-

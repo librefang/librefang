@@ -43,7 +43,6 @@ pub(crate) fn cmd_dashboard() {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // Shell completion command
 // ---------------------------------------------------------------------------
@@ -53,7 +52,6 @@ pub(crate) fn cmd_completion(shell: clap_complete::Shell) {
     let mut cmd = Cli::command();
     clap_complete::generate(shell, &mut cmd, "librefang", &mut std::io::stdout());
 }
-
 
 // ---------------------------------------------------------------------------
 // Migrate command
@@ -117,7 +115,6 @@ pub(crate) fn cmd_migrate(args: MigrateArgs) {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // Scaffold commands (librefang new skill/integration)
 // ---------------------------------------------------------------------------
@@ -140,7 +137,6 @@ pub(crate) fn cmd_scaffold(kind: ScaffoldKind) {
         }
     }
 }
-
 
 pub(crate) fn cmd_system_info(json: bool) {
     if let Some(base) = find_daemon() {
@@ -211,7 +207,6 @@ pub(crate) fn cmd_system_info(json: bool) {
     }
 }
 
-
 pub(crate) fn cmd_system_version(json: bool) {
     if json {
         println!(
@@ -222,4 +217,3 @@ pub(crate) fn cmd_system_version(json: bool) {
     }
     println!("librefang {}", env!("CARGO_PKG_VERSION"));
 }
-

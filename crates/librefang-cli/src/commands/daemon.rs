@@ -33,7 +33,6 @@ pub(crate) fn daemon_log_path_for_home(home_dir: &std::path::Path) -> PathBuf {
     home_dir.join("logs").join("daemon.log")
 }
 
-
 pub(crate) fn daemon_log_path_for_config(config: Option<&std::path::Path>) -> PathBuf {
     let daemon = daemon_config_context(config);
     if let Some(ref log_dir) = daemon.log_dir {
@@ -42,7 +41,6 @@ pub(crate) fn daemon_log_path_for_config(config: Option<&std::path::Path>) -> Pa
         daemon_log_path_for_home(&daemon.home_dir)
     }
 }
-
 
 pub(crate) fn detached_daemon_args(config: Option<&std::path::Path>) -> Vec<OsString> {
     let mut args = Vec::new();
@@ -54,7 +52,6 @@ pub(crate) fn detached_daemon_args(config: Option<&std::path::Path>) -> Vec<OsSt
     args.push(OsString::from("--spawned"));
     args
 }
-
 
 pub(crate) fn spawn_detached_daemon(
     config: Option<&std::path::Path>,
@@ -114,7 +111,6 @@ pub(crate) fn spawn_detached_daemon(
         .map_err(|e| format!("spawn detached daemon: {e}"))
 }
 
-
 /// Generate a daily log path for the current daemon start.
 /// Returns e.g. ~/.librefang/logs/daemon-2026-04-23.log
 /// Same day restarts reuse the same file.
@@ -126,7 +122,6 @@ pub(crate) fn timestamped_log_path(config: Option<&std::path::Path>) -> std::pat
     let date = chrono_lite_date();
     log_dir.join(format!("daemon-{date}.log"))
 }
-
 
 /// Prune rotated daemon logs older than `max_age_days`, keeping the log dir tidy.
 pub(crate) fn prune_rotated_logs(config: Option<&std::path::Path>, max_age_days: u64) {
@@ -166,7 +161,6 @@ pub(crate) fn prune_rotated_logs(config: Option<&std::path::Path>, max_age_days:
         }
     }
 }
-
 
 /// Set up tee for --foreground mode: redirect stdout/stderr to a pipe,
 /// spawn a background thread that copies to both terminal and log file.
@@ -258,7 +252,6 @@ pub(crate) fn setup_foreground_tee(log_path: &std::path::Path) -> ForegroundTeeG
     }
 }
 
-
 /// Ensure LibreFang is initialized (config.toml exists). Auto-runs quick init on first run.
 pub(crate) fn ensure_initialized(config: &Option<PathBuf>) {
     match config {
@@ -280,7 +273,6 @@ pub(crate) fn ensure_initialized(config: &Option<PathBuf>) {
         }
     }
 }
-
 
 pub(crate) fn cmd_start(config: Option<PathBuf>, tail: bool, spawned: bool, foreground: bool) {
     ensure_initialized(&config);
@@ -492,7 +484,6 @@ pub(crate) fn cmd_start(config: Option<PathBuf>, tail: bool, spawned: bool, fore
     });
 }
 
-
 pub(crate) fn cmd_stop(config: Option<PathBuf>) {
     let daemon = daemon_config_context(config.as_deref());
     match find_daemon_in_home(&daemon.home_dir) {
@@ -580,7 +571,6 @@ pub(crate) fn cmd_stop(config: Option<PathBuf>) {
     }
 }
 
-
 pub(crate) fn cmd_restart(config: Option<PathBuf>, tail: bool, foreground: bool) {
     // Same fail-closed rule as `cmd_start` (#5186 follow-up): a bad config
     // must abort before we read `home_dir` to look up a running daemon, or
@@ -602,7 +592,6 @@ pub(crate) fn cmd_restart(config: Option<PathBuf>, tail: bool, foreground: bool)
     cmd_start(config, tail, false, foreground);
 }
 
-
 pub(crate) fn force_kill_pid(pid: u32) {
     #[cfg(unix)]
     {
@@ -617,7 +606,6 @@ pub(crate) fn force_kill_pid(pid: u32) {
             .output();
     }
 }
-
 
 pub(crate) fn show_log_file(log_path: &std::path::Path, lines: usize, follow: bool) {
     if !log_path.exists() {
@@ -668,7 +656,6 @@ pub(crate) fn show_log_file(log_path: &std::path::Path, lines: usize, follow: bo
     }
 }
 
-
 pub(crate) fn cmd_logs(config: Option<PathBuf>, lines: usize, follow: bool) {
     let daemon = daemon_config_context(config.as_deref());
     let daemon_log = daemon_log_path_for_config(config.as_deref());
@@ -692,4 +679,3 @@ pub(crate) fn cmd_logs(config: Option<PathBuf>, lines: usize, follow: bool) {
 
     show_log_file(&daemon_log, lines, follow);
 }
-

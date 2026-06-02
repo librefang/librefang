@@ -24,7 +24,6 @@ pub(crate) fn cli_librefang_home() -> std::path::PathBuf {
         .join(".librefang")
 }
 
-
 pub(crate) fn daemon_config_context(config: Option<&std::path::Path>) -> DaemonConfigContext {
     let config = load_config(config).unwrap_or_else(|e| {
         eprintln!("warning: {e}; using default config values for this command");
@@ -45,7 +44,6 @@ pub(crate) fn daemon_config_context(config: Option<&std::path::Path>) -> DaemonC
     }
 }
 
-
 /// Load just the `update_channel` field from config.toml without fully deserializing.
 pub(crate) fn load_update_channel_from_config() -> Option<librefang_types::config::UpdateChannel> {
     let config_path = dirs::home_dir()?.join(".librefang").join("config.toml");
@@ -58,7 +56,6 @@ pub(crate) fn load_update_channel_from_config() -> Option<librefang_types::confi
         .ok()
 }
 
-
 /// Load the `[skills]` config block and derive the `EnvPassthroughPolicy`
 /// the daemon would apply. Falls back to `SkillsConfig::default()` so the
 /// conservative built-in deny patterns still apply when no config exists —
@@ -68,7 +65,8 @@ pub(crate) fn load_update_channel_from_config() -> Option<librefang_types::confi
 /// what prod will do. Returns `None` only when the operator has explicitly
 /// cleared both `env_passthrough_denied_patterns` and
 /// `env_passthrough_per_skill` — matching the kernel-side semantics.
-pub(crate) fn load_skill_env_policy_from_config() -> Option<librefang_types::config::EnvPassthroughPolicy> {
+pub(crate) fn load_skill_env_policy_from_config(
+) -> Option<librefang_types::config::EnvPassthroughPolicy> {
     let cfg = (|| -> Option<librefang_types::config::SkillsConfig> {
         let config_path = dirs::home_dir()?.join(".librefang").join("config.toml");
         let content = std::fs::read_to_string(&config_path).ok()?;
@@ -81,7 +79,6 @@ pub(crate) fn load_skill_env_policy_from_config() -> Option<librefang_types::con
     .unwrap_or_default();
     librefang_types::config::EnvPassthroughPolicy::from_skills_config(&cfg)
 }
-
 
 /// Write `msg` followed by a newline to stdout, exiting with code 0 on
 /// `BrokenPipe`. Use this instead of `println!` for machine-readable (JSON)
@@ -100,7 +97,6 @@ pub(crate) fn write_stdout_safe(msg: &str) {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // Daemon detection helpers
 // ---------------------------------------------------------------------------
@@ -113,10 +109,8 @@ pub(crate) fn restrict_file_permissions(path: &std::path::Path) {
     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
 }
 
-
 #[cfg(not(unix))]
 pub(crate) fn restrict_file_permissions(_path: &std::path::Path) {}
-
 
 /// SECURITY: Restrict directory permissions to owner-only (0700) on Unix.
 #[cfg(unix)]
@@ -125,10 +119,8 @@ pub(crate) fn restrict_dir_permissions(path: &std::path::Path) {
     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
 }
 
-
 #[cfg(not(unix))]
 pub(crate) fn restrict_dir_permissions(_path: &std::path::Path) {}
-
 
 /// Normalize a daemon listen address for client-side probing.
 ///
@@ -137,7 +129,6 @@ pub(crate) fn restrict_dir_permissions(_path: &std::path::Path) {}
 pub(crate) fn normalize_daemon_addr(listen_addr: &str) -> String {
     listen_addr.replace("0.0.0.0", "127.0.0.1")
 }
-
 
 /// Core daemon-detection logic, parameterized over the health-probe.
 ///
@@ -158,7 +149,6 @@ where
     }
 }
 
-
 pub(crate) fn find_daemon_in_home(home_dir: &std::path::Path) -> Option<String> {
     find_daemon_with_probe(home_dir, |url| {
         let client = match crate::http_client::client_builder()
@@ -177,11 +167,9 @@ pub(crate) fn find_daemon_in_home(home_dir: &std::path::Path) -> Option<String> 
     })
 }
 
-
 pub(crate) fn find_daemon() -> Option<String> {
     find_daemon_in_home(&cli_librefang_home())
 }
-
 
 /// Build an HTTP client for daemon calls.
 ///
@@ -191,7 +179,6 @@ pub(crate) fn find_daemon() -> Option<String> {
 pub(crate) fn daemon_client() -> reqwest::blocking::Client {
     daemon_client_with_api_key(read_api_key().as_deref())
 }
-
 
 pub(crate) fn daemon_client_with_api_key(api_key: Option<&str>) -> reqwest::blocking::Client {
     let mut builder =
@@ -207,7 +194,6 @@ pub(crate) fn daemon_client_with_api_key(api_key: Option<&str>) -> reqwest::bloc
 
     builder.build().expect("Failed to build HTTP client")
 }
-
 
 /// Helper: send a request to the daemon and parse the JSON body.
 /// Exits with error on connection failure.
@@ -249,12 +235,10 @@ pub(crate) fn daemon_json(
     }
 }
 
-
 /// Generate a local timestamp string in YYYYMMDD-HHMMSS format.
 pub(crate) fn format_local_timestamp() -> String {
     chrono::Local::now().format("%Y%m%d-%H%M%S").to_string()
 }
-
 
 /// Lightweight date string (YYYY-MM-DD) without external dependencies.
 pub(crate) fn chrono_lite_date() -> String {
@@ -288,11 +272,9 @@ pub(crate) fn chrono_lite_date() -> String {
     format!("{:04}-{:02}-{:02}", year, month, day)
 }
 
-
 pub(crate) fn is_leap_year(y: i64) -> bool {
     (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
 }
-
 
 /// Parse YYYY-MM-DD to Unix seconds at 00:00:00 UTC.
 pub(crate) fn parse_daily_date_timestamp(s: &str) -> Option<u64> {
@@ -305,7 +287,6 @@ pub(crate) fn parse_daily_date_timestamp(s: &str) -> Option<u64> {
     let day: u64 = parts[2].parse().ok()?;
     Some(days_since_epoch(year, month, day) * 86400)
 }
-
 
 pub(crate) fn days_since_epoch(year: u64, month: u64, day: u64) -> u64 {
     let mut days = 0;
@@ -322,7 +303,6 @@ pub(crate) fn days_since_epoch(year: u64, month: u64, day: u64) -> u64 {
     days + day - 1
 }
 
-
 /// Read the daemon api_key from the effective CLI config (if any).
 ///
 /// Returns `None` when the key is missing, empty, or whitespace-only —
@@ -330,7 +310,6 @@ pub(crate) fn days_since_epoch(year: u64, month: u64, day: u64) -> u64 {
 pub(crate) fn read_api_key() -> Option<String> {
     daemon_config_context(None).api_key
 }
-
 
 /// Show context-aware error for kernel boot failures.
 pub(crate) fn boot_kernel_error(e: &librefang_kernel::error::KernelError) {
@@ -352,7 +331,6 @@ pub(crate) fn boot_kernel_error(e: &librefang_kernel::error::KernelError) {
     }
 }
 
-
 /// Minimal percent-encoder for a single URL path segment. Encodes
 /// everything outside the `unreserved` set (RFC 3986 §2.3) plus `/` so
 /// the segment can't escape into a parent path. Avoids pulling a new
@@ -371,7 +349,6 @@ pub(crate) fn percent_encode_path_segment(s: &str) -> String {
     }
     out
 }
-
 
 /// Minimal `[y/N]` prompt for destructive operations. Reads a single
 /// line from stdin; treats anything other than `y` / `Y` / `yes` /
@@ -392,7 +369,6 @@ pub(crate) fn prompt_yes_no(prompt: &str, default_yes: bool) -> bool {
     matches!(trimmed.as_str(), "y" | "yes")
 }
 
-
 pub(crate) fn format_latency(d: std::time::Duration) -> String {
     let ms = d.as_millis();
     if ms < 1 {
@@ -401,7 +377,6 @@ pub(crate) fn format_latency(d: std::time::Duration) -> String {
         format!("{ms}ms")
     }
 }
-
 
 /// Recursively sum file sizes under `dir`. Returns `None` if `dir` does not
 /// exist or cannot be read. Symlinks are followed because the default data
@@ -425,7 +400,6 @@ pub(crate) fn dir_size_bytes(dir: &std::path::Path) -> Option<u64> {
     Some(total)
 }
 
-
 pub(crate) fn format_bytes(bytes: u64) -> String {
     const UNITS: &[(&str, u64)] = &[
         ("GiB", 1u64 << 30),
@@ -439,7 +413,6 @@ pub(crate) fn format_bytes(bytes: u64) -> String {
     }
     format!("{bytes} B")
 }
-
 
 pub(crate) fn format_uptime(secs: u64) -> String {
     if secs < 60 {
@@ -457,7 +430,6 @@ pub(crate) fn format_uptime(secs: u64) -> String {
         )
     }
 }
-
 
 /// Copy text to the system clipboard. Returns true on success.
 pub(crate) fn copy_to_clipboard(text: &str) -> bool {
@@ -530,7 +502,6 @@ pub(crate) fn copy_to_clipboard(text: &str) -> bool {
     }
 }
 
-
 /// Try to open a URL in the default browser. Returns true on success.
 pub(crate) fn open_in_browser(url: &str) -> bool {
     #[cfg(target_os = "windows")]
@@ -579,7 +550,6 @@ pub(crate) fn open_in_browser(url: &str) -> bool {
     }
 }
 
-
 /// Require a running daemon — exit with helpful message if not found.
 pub(crate) fn require_daemon(command: &str) -> String {
     find_daemon().unwrap_or_else(|| {
@@ -592,7 +562,6 @@ pub(crate) fn require_daemon(command: &str) -> String {
     })
 }
 
-
 pub(crate) fn boot_kernel(config: Option<PathBuf>) -> LibreFangKernel {
     match LibreFangKernel::boot(config.as_deref()) {
         Ok(k) => k,
@@ -602,7 +571,6 @@ pub(crate) fn boot_kernel(config: Option<PathBuf>) -> LibreFangKernel {
         }
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Skill evolve commands — thin CLI wrappers over librefang_skills::evolution
@@ -619,7 +587,6 @@ pub(crate) fn read_file_or_stdin(path: &std::path::Path) -> std::io::Result<Stri
         std::fs::read_to_string(path)
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Provider / API key helpers
@@ -646,7 +613,6 @@ pub(crate) fn provider_to_env_var(provider: &str) -> String {
         other => format!("{}_API_KEY", other.to_uppercase()),
     }
 }
-
 
 /// Test an API key by hitting the provider's models/health endpoint.
 ///
@@ -712,7 +678,6 @@ pub(crate) fn test_api_key(provider: &str, key: &str) -> bool {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // Background daemon start
 // ---------------------------------------------------------------------------
@@ -760,7 +725,6 @@ pub(crate) fn start_daemon_background() -> Result<String, String> {
     Err("Daemon did not become ready within 10 seconds".to_string())
 }
 
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -777,7 +741,6 @@ pub(crate) fn librefang_home() -> PathBuf {
         .join(".librefang")
 }
 
-
 pub(crate) fn prompt_input(prompt: &str) -> String {
     print!("{prompt}");
     io::stdout().flush().unwrap();
@@ -785,7 +748,6 @@ pub(crate) fn prompt_input(prompt: &str) -> String {
     io::stdin().lock().read_line(&mut line).unwrap_or(0);
     line.trim().to_string()
 }
-
 
 pub(crate) fn copy_dir_recursive(src: &PathBuf, dst: &PathBuf) {
     std::fs::create_dir_all(dst).unwrap();
@@ -801,7 +763,6 @@ pub(crate) fn copy_dir_recursive(src: &PathBuf, dst: &PathBuf) {
         }
     }
 }
-
 
 /// JSON → TOML converter. Duplicates the `json_to_toml_value` helper from
 /// the API crate to avoid a cross-crate dependency.
@@ -832,7 +793,6 @@ pub(crate) fn json_to_toml_value_cli(value: &serde_json::Value) -> toml::Value {
     }
 }
 
-
 /// Resolve an agent name-or-id to a UUID by querying the daemon.
 pub(crate) fn resolve_agent_id(base: &str, name_or_id: &str) -> String {
     if uuid::Uuid::try_parse(name_or_id).is_ok() {
@@ -853,4 +813,3 @@ pub(crate) fn resolve_agent_id(base: &str, name_or_id: &str) -> String {
     }
     name_or_id.to_string()
 }
-

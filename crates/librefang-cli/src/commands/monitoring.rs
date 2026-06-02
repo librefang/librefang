@@ -47,7 +47,6 @@ pub(crate) fn cmd_security_status(json: bool) {
     }
 }
 
-
 pub(crate) fn cmd_security_audit(limit: usize, json: bool) {
     let base = require_daemon("security audit");
     let client = daemon_client();
@@ -104,7 +103,6 @@ pub(crate) fn cmd_security_audit(limit: usize, json: bool) {
     }
 }
 
-
 pub(crate) fn cmd_security_verify() {
     let base = require_daemon("security verify");
     let client = daemon_client();
@@ -119,7 +117,6 @@ pub(crate) fn cmd_security_verify() {
         std::process::exit(1);
     }
 }
-
 
 /// Destructively reset the local audit trail.
 ///
@@ -228,7 +225,6 @@ pub(crate) fn cmd_audit_reset(config: Option<PathBuf>, confirm: bool) {
     ui::hint("The next daemon boot will seed a fresh Merkle chain from the current tip.");
 }
 
-
 pub(crate) fn cmd_memory_list(agent: &str, json: bool) {
     let base = require_daemon("memory list");
     let agent = resolve_agent_id(&base, agent);
@@ -275,7 +271,6 @@ pub(crate) fn cmd_memory_list(agent: &str, json: bool) {
     }
 }
 
-
 pub(crate) fn cmd_memory_get(agent: &str, key: &str, json: bool) {
     let base = require_daemon("memory get");
     let agent = resolve_agent_id(&base, agent);
@@ -302,7 +297,6 @@ pub(crate) fn cmd_memory_get(agent: &str, key: &str, json: bool) {
     }
 }
 
-
 pub(crate) fn cmd_memory_set(agent: &str, key: &str, value: &str) {
     let base = require_daemon("memory set");
     let agent = resolve_agent_id(&base, agent);
@@ -326,7 +320,6 @@ pub(crate) fn cmd_memory_set(agent: &str, key: &str, value: &str) {
     }
 }
 
-
 pub(crate) fn cmd_memory_delete(agent: &str, key: &str) {
     let base = require_daemon("memory delete");
     let agent = resolve_agent_id(&base, agent);
@@ -348,7 +341,6 @@ pub(crate) fn cmd_memory_delete(agent: &str, key: &str) {
         ));
     }
 }
-
 
 pub(crate) fn cmd_devices_list(json: bool) {
     let base = require_daemon("devices list");
@@ -383,7 +375,6 @@ pub(crate) fn cmd_devices_list(json: bool) {
     }
 }
 
-
 pub(crate) fn cmd_devices_pair() {
     let base = require_daemon("qr");
     let client = daemon_client();
@@ -410,7 +401,6 @@ pub(crate) fn cmd_devices_pair() {
     }
 }
 
-
 pub(crate) fn cmd_devices_remove(id: &str) {
     let base = require_daemon("devices remove");
     let client = daemon_client();
@@ -428,7 +418,6 @@ pub(crate) fn cmd_devices_remove(id: &str) {
         ui::success(&i18n::t_args("device-removed", &[("id", id)]));
     }
 }
-
 
 pub(crate) fn cmd_webhooks_list(json: bool) {
     let base = require_daemon("webhooks list");
@@ -472,7 +461,6 @@ pub(crate) fn cmd_webhooks_list(json: bool) {
     }
 }
 
-
 pub(crate) fn cmd_webhooks_create(agent: &str, url: &str) {
     let base = require_daemon("webhooks create");
     let agent = resolve_agent_id(&base, agent);
@@ -504,7 +492,6 @@ pub(crate) fn cmd_webhooks_create(agent: &str, url: &str) {
     }
 }
 
-
 pub(crate) fn cmd_webhooks_delete(id: &str) {
     let base = require_daemon("webhooks delete");
     let client = daemon_client();
@@ -519,7 +506,6 @@ pub(crate) fn cmd_webhooks_delete(id: &str) {
     }
 }
 
-
 pub(crate) fn cmd_webhooks_test(id: &str) {
     let base = require_daemon("webhooks test");
     let client = daemon_client();
@@ -533,4 +519,3 @@ pub(crate) fn cmd_webhooks_test(id: &str) {
         ));
     }
 }
-
