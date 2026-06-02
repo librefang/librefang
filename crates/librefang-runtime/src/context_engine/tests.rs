@@ -553,6 +553,7 @@ async fn test_summary_engine_compact_called_once_on_threshold_cross() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
 
     // Manually call compact once (mirrors what agent_loop does when

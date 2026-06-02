@@ -1,0 +1,1267 @@
+//! `maintenance` CLI command handlers, split out of `main.rs`.
+//!
+//! Dispatched from `main.rs`; shared helpers and imports come via
+//! [`crate::commands::prelude`].
+
+use crate::commands::prelude::*;
+
+const RELEASE_REPO: &str = "librefang/librefang";
+const RELEASES_LATEST_API: &str =
+    "https://api.github.com/repos/librefang/librefang/releases/latest";
+const RELEASES_API: &str = "https://api.github.com/repos/librefang/librefang/releases";
+const SHELL_INSTALLER_URL: &str = "https://librefang.ai/install.sh";
+const POWERSHELL_INSTALLER_URL: &str = "https://librefang.ai/install.ps1";
+
+pub(crate) enum UpdateLaunch {
+    #[cfg(not(windows))]
+    Completed,
+    #[cfg(windows)]
+    Detached,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReleaseComparison {
+    Newer,
+    SameCore,
+    Older,
+    Unknown,
+}
+
+// ---------------------------------------------------------------------------
+// Service management (boot auto-start)
+// ---------------------------------------------------------------------------
+
+/// Resolve the absolute path to the current librefang binary.
+pub(crate) fn resolve_binary_path() -> std::path::PathBuf {
+    std::env::current_exe()
+        .unwrap_or_else(|_| std::path::PathBuf::from("librefang"))
+        .canonicalize()
+        .unwrap_or_else(|_| std::env::current_exe().unwrap_or_else(|_| "librefang".into()))
+}
+
+pub(crate) fn cmd_service_install() {
+    // Warn if running as root — the service would be installed for root, not
+    // the actual user. This catches `sudo librefang service install` mistakes.
+    #[cfg(unix)]
+    {
+        // SAFETY: geteuid() is always safe to call.
+        if unsafe { libc::geteuid() } == 0 {
+            ui::error(
+                "Running as root — the service will be installed for the root account, \
+                 not your user. Run without sudo instead.",
+            );
+            std::process::exit(1);
+        }
+    }
+
+    let binary = resolve_binary_path();
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let librefang_home = cli_librefang_home();
+
+    #[cfg(target_os = "linux")]
+    {
+        service_install_linux(&binary, &librefang_home);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        service_install_macos(&binary, &librefang_home);
+    }
+    #[cfg(windows)]
+    {
+        service_install_windows(&binary);
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        let _ = &binary;
+        ui::error("Auto-start service is not supported on this platform.");
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn service_install_linux(binary: &std::path::Path, librefang_home: &std::path::Path) {
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => {
+            ui::error("Cannot determine home directory.");
+            return;
+        }
+    };
+    let service_dir = home.join(".config/systemd/user");
+    if let Err(e) = std::fs::create_dir_all(&service_dir) {
+        ui::error(&format!("Failed to create {}: {e}", service_dir.display()));
+        return;
+    }
+
+    let unit = format!(
+        "[Unit]\n\
+         Description=LibreFang Agent OS Daemon\n\
+         Documentation=https://librefang.ai\n\
+         After=network-online.target\n\
+         Wants=network-online.target\n\
+         \n\
+         [Service]\n\
+         Type=simple\n\
+         ExecStart={binary} start --foreground\n\
+         Restart=on-failure\n\
+         RestartSec=5\n\
+         WorkingDirectory={home}\n\
+         EnvironmentFile=-{home}/env\n\
+         EnvironmentFile=-{home}/secrets.env\n\
+         \n\
+         [Install]\n\
+         WantedBy=default.target\n",
+        binary = binary.display(),
+        home = librefang_home.display(),
+    );
+
+    let service_path = service_dir.join("librefang.service");
+    if let Err(e) = std::fs::write(&service_path, &unit) {
+        ui::error(&format!("Failed to write {}: {e}", service_path.display()));
+        return;
+    }
+    ui::success(&format!("Wrote {}", service_path.display()));
+
+    // Reload and enable
+    let reload = std::process::Command::new("systemctl")
+        .args(["--user", "daemon-reload"])
+        .output();
+    if let Ok(o) = &reload {
+        if !o.status.success() {
+            ui::error("systemctl --user daemon-reload failed");
+            return;
+        }
+    }
+    let enable = std::process::Command::new("systemctl")
+        .args(["--user", "enable", "librefang.service"])
+        .output();
+    match enable {
+        Ok(o) if o.status.success() => {
+            ui::success("Service enabled (will start on next login)");
+            ui::hint("Start now with: systemctl --user start librefang.service");
+            // Enable lingering so the user service runs without an active login session
+            ui::hint("For headless servers, also run: loginctl enable-linger");
+        }
+        _ => ui::error("systemctl --user enable librefang.service failed"),
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn service_install_macos(binary: &std::path::Path, librefang_home: &std::path::Path) {
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => {
+            ui::error("Cannot determine home directory.");
+            return;
+        }
+    };
+    let agents_dir = home.join("Library/LaunchAgents");
+    if let Err(e) = std::fs::create_dir_all(&agents_dir) {
+        ui::error(&format!("Failed to create {}: {e}", agents_dir.display()));
+        return;
+    }
+
+    let plist = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>ai.librefang.daemon</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{binary}</string>
+        <string>start</string>
+        <string>--foreground</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>WorkingDirectory</key>
+    <string>{home}</string>
+    <key>StandardOutPath</key>
+    <string>{home}/daemon.log</string>
+    <key>StandardErrorPath</key>
+    <string>{home}/daemon.log</string>
+</dict>
+</plist>
+"#,
+        binary = binary.display(),
+        home = librefang_home.display(),
+    );
+
+    let plist_path = agents_dir.join("ai.librefang.daemon.plist");
+
+    // Unload existing service first (if any) to avoid launchctl errors
+    if plist_path.exists() {
+        let _ = std::process::Command::new("launchctl")
+            .args(["unload", &plist_path.to_string_lossy()])
+            .output();
+    }
+
+    if let Err(e) = std::fs::write(&plist_path, &plist) {
+        ui::error(&format!("Failed to write {}: {e}", plist_path.display()));
+        return;
+    }
+    ui::success(&format!("Wrote {}", plist_path.display()));
+
+    let load = std::process::Command::new("launchctl")
+        .args(["load", &plist_path.to_string_lossy()])
+        .output();
+    match load {
+        Ok(o) if o.status.success() => {
+            ui::success("LaunchAgent loaded (will start on login and now)");
+        }
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            ui::error(&format!("launchctl load failed: {stderr}"));
+        }
+        Err(e) => ui::error(&format!("Failed to run launchctl: {e}")),
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn service_install_windows(binary: &std::path::Path) {
+    let value = format!("\"{}\" start", binary.display());
+    let output = std::process::Command::new("reg")
+        .args([
+            "add",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+            "/v",
+            "LibreFang",
+            "/t",
+            "REG_SZ",
+            "/d",
+            &value,
+            "/f",
+        ])
+        .output();
+    match output {
+        Ok(o) if o.status.success() => {
+            ui::success("Added to Windows startup (HKCU\\...\\Run)");
+        }
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            ui::error(&format!("Failed to write registry: {stderr}"));
+        }
+        Err(e) => ui::error(&format!("Failed to run reg.exe: {e}")),
+    }
+}
+
+pub(crate) fn cmd_service_uninstall() {
+    #[cfg(target_os = "linux")]
+    {
+        let home = dirs::home_dir().unwrap_or_default();
+        let service_path = home.join(".config/systemd/user/librefang.service");
+        if service_path.exists() {
+            let _ = std::process::Command::new("systemctl")
+                .args(["--user", "disable", "--now", "librefang.service"])
+                .output();
+            match std::fs::remove_file(&service_path) {
+                Ok(()) => {
+                    let _ = std::process::Command::new("systemctl")
+                        .args(["--user", "daemon-reload"])
+                        .output();
+                    ui::success("Removed systemd user service");
+                }
+                Err(e) => ui::error(&format!("Failed to remove service file: {e}")),
+            }
+        } else {
+            ui::hint("No systemd user service found — nothing to remove.");
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let home = dirs::home_dir().unwrap_or_default();
+        let plist_path = home.join("Library/LaunchAgents/ai.librefang.daemon.plist");
+        if plist_path.exists() {
+            let _ = std::process::Command::new("launchctl")
+                .args(["unload", &plist_path.to_string_lossy()])
+                .output();
+            match std::fs::remove_file(&plist_path) {
+                Ok(()) => ui::success("Removed LaunchAgent"),
+                Err(e) => ui::error(&format!("Failed to remove plist: {e}")),
+            }
+        } else {
+            ui::hint("No LaunchAgent found — nothing to remove.");
+        }
+    }
+    #[cfg(windows)]
+    {
+        let output = std::process::Command::new("reg")
+            .args([
+                "delete",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                "/v",
+                "LibreFang",
+                "/f",
+            ])
+            .output();
+        match output {
+            Ok(o) if o.status.success() => {
+                ui::success("Removed from Windows startup");
+            }
+            _ => ui::hint("No startup entry found — nothing to remove."),
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        ui::error("Auto-start service is not supported on this platform.");
+    }
+}
+
+pub(crate) fn cmd_service_status() {
+    #[cfg(target_os = "linux")]
+    {
+        let home = dirs::home_dir().unwrap_or_default();
+        let service_path = home.join(".config/systemd/user/librefang.service");
+        if service_path.exists() {
+            ui::success("Systemd user service is registered");
+            // Show enabled/active status
+            if let Ok(output) = std::process::Command::new("systemctl")
+                .args(["--user", "is-enabled", "librefang.service"])
+                .output()
+            {
+                let status = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                ui::kv("  Enabled", &status);
+            }
+            if let Ok(output) = std::process::Command::new("systemctl")
+                .args(["--user", "is-active", "librefang.service"])
+                .output()
+            {
+                let status = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                ui::kv("  Active", &status);
+            }
+        } else {
+            ui::hint("No systemd user service registered.");
+            ui::hint("Run `librefang service install` to set it up.");
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let home = dirs::home_dir().unwrap_or_default();
+        let plist_path = home.join("Library/LaunchAgents/ai.librefang.daemon.plist");
+        if plist_path.exists() {
+            ui::success("LaunchAgent is registered");
+            if let Ok(output) = std::process::Command::new("launchctl")
+                .args(["list"])
+                .output()
+            {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let running = stdout.lines().any(|l| l.contains("ai.librefang.daemon"));
+                ui::kv("  Loaded", if running { "yes" } else { "not loaded" });
+            }
+        } else {
+            ui::hint("No LaunchAgent registered.");
+            ui::hint("Run `librefang service install` to set it up.");
+        }
+    }
+    #[cfg(windows)]
+    {
+        let output = std::process::Command::new("reg")
+            .args([
+                "query",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                "/v",
+                "LibreFang",
+            ])
+            .output();
+        match output {
+            Ok(o) if o.status.success() => {
+                ui::success("Windows startup entry is registered");
+            }
+            _ => {
+                ui::hint("No startup entry registered.");
+                ui::hint("Run `librefang service install` to set it up.");
+            }
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        ui::error("Auto-start service is not supported on this platform.");
+    }
+}
+
+pub(crate) fn cmd_reset(confirm: bool) {
+    let librefang_dir = cli_librefang_home();
+
+    if !librefang_dir.exists() {
+        println!(
+            "Nothing to reset — {} does not exist.",
+            librefang_dir.display()
+        );
+        return;
+    }
+
+    if !confirm {
+        println!("  This will delete all data in {}", librefang_dir.display());
+        println!("  Including: config, database, agent manifests, credentials.");
+        println!();
+        let answer = prompt_input("  Are you sure? Type 'yes' to confirm: ");
+        if answer.trim() != "yes" {
+            println!("  Cancelled.");
+            return;
+        }
+    }
+
+    match std::fs::remove_dir_all(&librefang_dir) {
+        Ok(()) => ui::success(&i18n::t_args(
+            "reset-success",
+            &[("path", &librefang_dir.display().to_string())],
+        )),
+        Err(e) => {
+            ui::error(&i18n::t_args(
+                "reset-fail",
+                &[
+                    ("path", &librefang_dir.display().to_string()),
+                    ("error", &e.to_string()),
+                ],
+            ));
+            std::process::exit(1);
+        }
+    }
+}
+
+pub(crate) fn cmd_update(check: bool, version: Option<String>, channel_override: Option<String>) {
+    use librefang_types::config::UpdateChannel;
+
+    let current_exe = std::env::current_exe().unwrap_or_else(|e| {
+        ui::error(&format!("Cannot determine current executable path: {e}"));
+        std::process::exit(1);
+    });
+
+    let current_version = env!("CARGO_PKG_VERSION");
+    let current_exe_display = current_exe.display().to_string();
+    let requested_version = version.as_deref();
+
+    // Resolve update channel: CLI arg > config.toml > default (stable)
+    let channel = if let Some(ref ch) = channel_override {
+        match ch.parse::<UpdateChannel>() {
+            Ok(c) => c,
+            Err(e) => {
+                ui::error(&e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        load_update_channel_from_config().unwrap_or_default()
+    };
+
+    ui::section("Update");
+    ui::kv("Current", current_version);
+    ui::kv("Channel", &channel.to_string());
+    ui::kv("Binary", &current_exe_display);
+
+    let latest_tag = if requested_version.is_none() {
+        match fetch_latest_release_tag(channel) {
+            Ok(tag) => {
+                ui::kv("Latest", &tag);
+                Some(tag)
+            }
+            Err(err) => {
+                if check {
+                    ui::error(&format!("Failed to check latest release: {err}"));
+                    std::process::exit(1);
+                }
+                ui::warn_with_fix(
+                    &format!("Could not resolve the latest published release: {err}"),
+                    "Retry later, or pass `--version <tag>` to target a specific release.",
+                );
+                None
+            }
+        }
+    } else {
+        if let Some(target) = requested_version {
+            ui::kv("Target", target);
+        }
+        None
+    };
+    let target_tag = requested_version
+        .map(str::to_owned)
+        .or_else(|| latest_tag.clone());
+    let target_comparison = target_tag
+        .as_deref()
+        .map(|tag| compare_release_tag(tag, current_version));
+
+    if check {
+        match (target_tag.as_deref(), target_comparison) {
+            (Some(tag), Some(ReleaseComparison::Newer)) => {
+                ui::warn_with_fix(
+                    &format!("A newer published release is available: {tag}"),
+                    "Run `librefang update` to install it.",
+                );
+            }
+            (Some(tag), Some(ReleaseComparison::SameCore)) => {
+                ui::warn_with_fix(
+                    &format!(
+                        "The published release {tag} uses the same CLI version core as the current binary ({current_version})."
+                    ),
+                    "Run `librefang update` if you want the latest published build for this version line.",
+                );
+            }
+            (Some(tag), Some(ReleaseComparison::Older)) => {
+                ui::success(&format!(
+                    "Current binary version {current_version} is ahead of the published release {tag}."
+                ));
+            }
+            (Some(tag), Some(ReleaseComparison::Unknown)) => {
+                ui::warn_with_fix(
+                    &format!("Could not compare the current binary with release tag {tag}."),
+                    "If you want that exact release, run `librefang update --version <tag>`.",
+                );
+            }
+            _ => {
+                ui::warn_with_fix(
+                    "Unable to determine whether an update is available.",
+                    "Retry later when GitHub Releases is reachable.",
+                );
+            }
+        }
+        return;
+    }
+
+    if requested_version.is_none() {
+        match (latest_tag.as_deref(), target_comparison) {
+            (Some(tag), Some(ReleaseComparison::Older)) => {
+                ui::success(&format!(
+                    "Current binary version {current_version} is ahead of the latest published release {tag}."
+                ));
+                return;
+            }
+            (Some(tag), Some(ReleaseComparison::Unknown)) => {
+                ui::warn_with_fix(
+                    &format!(
+                        "Could not safely compare the current binary against release tag {tag}."
+                    ),
+                    &format!(
+                        "Re-run with `librefang update --version {tag}` to install it explicitly."
+                    ),
+                );
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    let default_install = default_install_executable();
+    let cargo_install = cargo_install_executable();
+    let target_version = target_tag.as_deref();
+
+    #[cfg(windows)]
+    if same_path(&current_exe, &default_install) && find_daemon().is_some() {
+        ui::error_with_fix(
+            "Stop the running daemon before updating on Windows.",
+            "Run `librefang stop`, then `librefang update`, then `librefang start`.",
+        );
+        std::process::exit(1);
+    }
+
+    if same_path(&current_exe, &default_install) {
+        match run_official_update(target_version) {
+            #[cfg(not(windows))]
+            Ok(UpdateLaunch::Completed) => {
+                ui::success("LibreFang CLI updated.");
+                if let Some(installed) = installed_binary_version(&default_install) {
+                    ui::kv("Installed", &installed);
+                }
+                // Merge any new config defaults added in the updated binary.
+                // Spawn the new binary rather than calling cmd_init_upgrade() here,
+                // because the current process still holds the old binary's template.
+                ui::blank();
+                ui::hint("Merging new config defaults...");
+                let _ = std::process::Command::new(&default_install)
+                    .args(["init", "--upgrade"])
+                    .status();
+                ui::hint("If the daemon is running, restart it with `librefang restart`.");
+            }
+            #[cfg(windows)]
+            Ok(UpdateLaunch::Detached) => {
+                ui::success("Update launched in the background.");
+                ui::hint("Open a new terminal after it finishes and run `librefang --version`.");
+                ui::hint("If the daemon is running, restart it after the update completes.");
+            }
+            Err(err) => {
+                ui::error(&format!("Update failed: {err}"));
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    if same_path(&current_exe, &cargo_install) {
+        let cargo_cmd = cargo_update_command(target_version);
+        ui::warn_with_fix(
+            "This binary was installed with cargo. Running `cargo install` from inside the active executable is intentionally blocked.",
+            &cargo_cmd,
+        );
+        return;
+    }
+
+    let official_path = default_install.display().to_string();
+    ui::warn_with_fix(
+        &format!(
+            "Automatic update only supports the official install path ({official_path}). This binary is running from a different location."
+        ),
+        &manual_installer_command(target_version),
+    );
+    ui::hint("If this binary came from another package manager, update it with that package manager instead.");
+}
+
+pub(crate) fn fetch_latest_release_tag(
+    channel: librefang_types::config::UpdateChannel,
+) -> Result<String, String> {
+    use librefang_types::config::UpdateChannel;
+
+    let client = update_http_client()?;
+
+    match channel {
+        UpdateChannel::Stable => {
+            // /releases/latest returns the latest non-draft, non-prerelease
+            let response = client
+                .get(RELEASES_LATEST_API)
+                .send()
+                .map_err(|e| format!("GitHub request failed: {e}"))?;
+            let status = response.status();
+            if !status.is_success() {
+                return Err(format!("GitHub API returned {status}"));
+            }
+            let body = response
+                .json::<serde_json::Value>()
+                .map_err(|e| format!("Failed to decode release metadata: {e}"))?;
+            body["tag_name"]
+                .as_str()
+                .filter(|tag| !tag.is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| "Release metadata is missing `tag_name`".to_string())
+        }
+        UpdateChannel::Beta | UpdateChannel::Rc => {
+            // /releases lists all releases, newest first — filter by channel
+            let response = client
+                .get(RELEASES_API)
+                .send()
+                .map_err(|e| format!("GitHub request failed: {e}"))?;
+            let status = response.status();
+            if !status.is_success() {
+                return Err(format!("GitHub API returned {status}"));
+            }
+            let releases = response
+                .json::<Vec<serde_json::Value>>()
+                .map_err(|e| format!("Failed to decode releases list: {e}"))?;
+
+            for release in &releases {
+                let draft = release["draft"].as_bool().unwrap_or(false);
+                if draft {
+                    continue;
+                }
+                let Some(tag) = release["tag_name"].as_str().filter(|t| !t.is_empty()) else {
+                    continue;
+                };
+                match channel {
+                    UpdateChannel::Rc => return Ok(tag.to_string()),
+                    UpdateChannel::Beta => {
+                        if !tag.contains("-rc") {
+                            return Ok(tag.to_string());
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            Err(format!(
+                "No matching release found for the '{channel}' channel"
+            ))
+        }
+    }
+}
+
+pub(crate) fn update_http_client() -> Result<reqwest::blocking::Client, String> {
+    crate::http_client::client_builder()
+        .user_agent(format!("librefang-cli/{}", env!("CARGO_PKG_VERSION")))
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {e}"))
+}
+
+pub(crate) fn compare_release_tag(tag: &str, current_version: &str) -> ReleaseComparison {
+    let Some(release_core) = parse_version_core(normalize_release_tag(tag)) else {
+        return ReleaseComparison::Unknown;
+    };
+    let Some(current_core) = parse_version_core(current_version) else {
+        return ReleaseComparison::Unknown;
+    };
+
+    match release_core.cmp(&current_core) {
+        std::cmp::Ordering::Greater => ReleaseComparison::Newer,
+        std::cmp::Ordering::Equal => ReleaseComparison::SameCore,
+        std::cmp::Ordering::Less => ReleaseComparison::Older,
+    }
+}
+
+pub(crate) fn parse_version_core(version: &str) -> Option<Vec<u64>> {
+    let core = version.split('-').next()?;
+    if core.is_empty() {
+        return None;
+    }
+    core.split('.')
+        .map(|part| part.parse::<u64>().ok())
+        .collect()
+}
+
+pub(crate) fn run_official_update(version: Option<&str>) -> Result<UpdateLaunch, String> {
+    let script_url = if cfg!(windows) {
+        POWERSHELL_INSTALLER_URL
+    } else {
+        SHELL_INSTALLER_URL
+    };
+    let script = download_text(script_url)?;
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+
+        let wrapped = format!(
+            "Start-Sleep -Seconds 1\r\n{script}\r\nRemove-Item $MyInvocation.MyCommand.Path -ErrorAction SilentlyContinue\r\n"
+        );
+        let script_path = write_update_script(&wrapped, "ps1")?;
+        let script_arg = script_path.to_string_lossy().to_string();
+
+        let mut command = std::process::Command::new("powershell");
+        command
+            .args([
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                &script_arg,
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
+        if let Some(tag) = version {
+            command.env("LIBREFANG_VERSION", tag);
+        }
+
+        command
+            .spawn()
+            .map_err(|e| format!("Failed to launch PowerShell updater: {e}"))?;
+        Ok(UpdateLaunch::Detached)
+    }
+
+    #[cfg(not(windows))]
+    {
+        let script_path = write_update_script(&script, "sh")?;
+        let mut command = std::process::Command::new("sh");
+        command.arg(&script_path);
+        if let Some(tag) = version {
+            command.env("LIBREFANG_VERSION", tag);
+        }
+
+        let status = command
+            .status()
+            .map_err(|e| format!("Failed to run installer: {e}"))?;
+        let _ = std::fs::remove_file(&script_path);
+        if !status.success() {
+            return Err(format!("Installer exited with status {status}"));
+        }
+        Ok(UpdateLaunch::Completed)
+    }
+}
+
+pub(crate) fn download_text(url: &str) -> Result<String, String> {
+    let client = update_http_client()?;
+    let response = client
+        .get(url)
+        .send()
+        .map_err(|e| format!("Download failed: {e}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("Download returned {status}"));
+    }
+    response
+        .text()
+        .map_err(|e| format!("Failed to read response body: {e}"))
+}
+
+#[cfg(not(windows))]
+pub(crate) fn installed_binary_version(path: &std::path::Path) -> Option<String> {
+    let output = std::process::Command::new(path)
+        .arg("--version")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if version.is_empty() {
+        None
+    } else {
+        Some(version)
+    }
+}
+
+pub(crate) fn write_update_script(contents: &str, extension: &str) -> Result<PathBuf, String> {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let path = std::env::temp_dir().join(format!(
+        "librefang-update-{}-{unique}.{extension}",
+        std::process::id()
+    ));
+    std::fs::write(&path, contents).map_err(|e| format!("Failed to write updater script: {e}"))?;
+    restrict_file_permissions(&path);
+    Ok(path)
+}
+
+pub(crate) fn default_install_executable() -> PathBuf {
+    cli_librefang_home().join("bin").join(binary_name())
+}
+
+pub(crate) fn cargo_install_executable() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join(".cargo")
+        .join("bin")
+        .join(binary_name())
+}
+
+pub(crate) fn binary_name() -> &'static str {
+    if cfg!(windows) {
+        "librefang.exe"
+    } else {
+        "librefang"
+    }
+}
+
+pub(crate) fn same_path(left: &std::path::Path, right: &std::path::Path) -> bool {
+    let left = std::fs::canonicalize(left).unwrap_or_else(|_| left.to_path_buf());
+    let right = std::fs::canonicalize(right).unwrap_or_else(|_| right.to_path_buf());
+    left == right
+}
+
+pub(crate) fn normalize_release_tag(tag: &str) -> &str {
+    tag.strip_prefix('v').unwrap_or(tag)
+}
+
+pub(crate) fn cargo_update_command(version: Option<&str>) -> String {
+    match version {
+        Some(tag) => format!(
+            "cargo install --git https://github.com/{RELEASE_REPO} --tag {tag} librefang-cli --force"
+        ),
+        None => format!(
+            "cargo install --git https://github.com/{RELEASE_REPO} librefang-cli --force"
+        ),
+    }
+}
+
+pub(crate) fn manual_installer_command(version: Option<&str>) -> String {
+    #[cfg(windows)]
+    {
+        match version {
+            Some(tag) => {
+                format!("$env:LIBREFANG_VERSION='{tag}'; irm {POWERSHELL_INSTALLER_URL} | iex")
+            }
+            None => format!("irm {POWERSHELL_INSTALLER_URL} | iex"),
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        match version {
+            Some(tag) => format!("curl -fsSL {SHELL_INSTALLER_URL} | LIBREFANG_VERSION={tag} sh"),
+            None => format!("curl -fsSL {SHELL_INSTALLER_URL} | sh"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Uninstall
+// ---------------------------------------------------------------------------
+
+pub(crate) fn cmd_uninstall(confirm: bool, keep_config: bool) {
+    let librefang_dir = cli_librefang_home();
+    let exe_path = std::env::current_exe().ok();
+
+    // Step 1: Show what will be removed
+    println!();
+    println!(
+        "  {}",
+        "This will completely uninstall LibreFang from your system."
+            .bold()
+            .red()
+    );
+    println!();
+    if librefang_dir.exists() {
+        if keep_config {
+            println!(
+                "  • Remove data in {} (keeping config files)",
+                librefang_dir.display()
+            );
+        } else {
+            println!("  • Remove {}", librefang_dir.display());
+        }
+    }
+    if let Some(ref exe) = exe_path {
+        println!("  • Remove binary: {}", exe.display());
+    }
+    // Check cargo bin path
+    let cargo_bin = dirs::home_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join(".cargo")
+        .join("bin")
+        .join(if cfg!(windows) {
+            "librefang.exe"
+        } else {
+            "librefang"
+        });
+    if cargo_bin.exists() && exe_path.as_ref().is_none_or(|e| *e != cargo_bin) {
+        println!("  • Remove cargo binary: {}", cargo_bin.display());
+    }
+    println!("  • Remove auto-start entries (if any)");
+    println!("  • Clean PATH from shell configs (if any)");
+    println!();
+
+    // Step 2: Confirm
+    if !confirm {
+        let answer = prompt_input("  Type 'uninstall' to confirm: ");
+        if answer.trim() != "uninstall" {
+            println!("  Cancelled.");
+            return;
+        }
+        println!();
+    }
+
+    // Step 3: Stop running daemon
+    if find_daemon().is_some() {
+        println!("  {}", i18n::t("uninstall-stopping-daemon"));
+        cmd_stop(None);
+        // Give it a moment
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        // Force kill if still alive
+        if find_daemon().is_some() {
+            if let Some(info) = read_daemon_info(&librefang_dir) {
+                force_kill_pid(info.pid);
+                let _ = std::fs::remove_file(librefang_dir.join("daemon.json"));
+            }
+        }
+    }
+
+    // Step 4: Remove auto-start entries
+    let user_home = dirs::home_dir().unwrap_or_else(std::env::temp_dir);
+    remove_autostart_entries(&user_home);
+
+    // Step 5: Clean PATH from shell configs
+    if let Some(ref exe) = exe_path {
+        if let Some(bin_dir) = exe.parent() {
+            clean_path_entries(&user_home, &bin_dir.to_string_lossy());
+        }
+    }
+
+    // Step 6: Remove ~/.librefang/ data
+    if librefang_dir.exists() {
+        if keep_config {
+            remove_dir_except_config(&librefang_dir);
+            ui::success(&i18n::t("uninstall-removed-data-kept"));
+        } else {
+            match std::fs::remove_dir_all(&librefang_dir) {
+                Ok(()) => ui::success(&i18n::t_args(
+                    "uninstall-removed",
+                    &[("path", &librefang_dir.display().to_string())],
+                )),
+                Err(e) => ui::error(&i18n::t_args(
+                    "uninstall-remove-failed",
+                    &[
+                        ("path", &librefang_dir.display().to_string()),
+                        ("error", &e.to_string()),
+                    ],
+                )),
+            }
+        }
+    }
+
+    // Step 7: Remove cargo bin copy if it exists and is separate from current exe
+    if cargo_bin.exists() && exe_path.as_ref().is_none_or(|e| *e != cargo_bin) {
+        match std::fs::remove_file(&cargo_bin) {
+            Ok(()) => ui::success(&i18n::t_args(
+                "uninstall-removed",
+                &[("path", &cargo_bin.display().to_string())],
+            )),
+            Err(e) => ui::error(&i18n::t_args(
+                "uninstall-remove-failed",
+                &[
+                    ("path", &cargo_bin.display().to_string()),
+                    ("error", &e.to_string()),
+                ],
+            )),
+        }
+    }
+
+    // Step 8: Remove the binary itself (skip if already removed with ~/.librefang/)
+    if let Some(exe) = exe_path {
+        if exe.exists() {
+            remove_self_binary(&exe);
+        }
+    }
+
+    println!();
+    ui::success(&i18n::t("uninstall-goodbye"));
+}
+
+/// Remove auto-start / launch-agent / systemd entries.
+#[allow(unused_variables)]
+pub(crate) fn remove_autostart_entries(home: &std::path::Path) {
+    #[cfg(windows)]
+    {
+        // Windows: remove from HKCU\Software\Microsoft\Windows\CurrentVersion\Run
+        let output = std::process::Command::new("reg")
+            .args([
+                "delete",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                "/v",
+                "LibreFang",
+                "/f",
+            ])
+            .output();
+        match output {
+            Ok(o) if o.status.success() => {
+                ui::success(&i18n::t("uninstall-removed-autostart-win"));
+            }
+            _ => {} // Entry didn't exist — that's fine
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let plist = home.join("Library/LaunchAgents/ai.librefang.desktop.plist");
+        if plist.exists() {
+            // Unload first
+            let _ = std::process::Command::new("launchctl")
+                .args(["unload", &plist.to_string_lossy()])
+                .output();
+            match std::fs::remove_file(&plist) {
+                Ok(()) => ui::success(&i18n::t("uninstall-removed-launch-agent")),
+                Err(e) => ui::error(&i18n::t_args(
+                    "uninstall-remove-launch-fail",
+                    &[("error", &e.to_string())],
+                )),
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let desktop_file = home.join(".config/autostart/LibreFang.desktop");
+        if desktop_file.exists() {
+            match std::fs::remove_file(&desktop_file) {
+                Ok(()) => ui::success(&i18n::t("uninstall-removed-autostart-linux")),
+                Err(e) => ui::error(&i18n::t_args(
+                    "uninstall-remove-autostart-fail",
+                    &[("error", &e.to_string())],
+                )),
+            }
+        }
+
+        // Also check for systemd user service
+        let service_file = home.join(".config/systemd/user/librefang.service");
+        if service_file.exists() {
+            let _ = std::process::Command::new("systemctl")
+                .args(["--user", "disable", "--now", "librefang.service"])
+                .output();
+            match std::fs::remove_file(&service_file) {
+                Ok(()) => {
+                    let _ = std::process::Command::new("systemctl")
+                        .args(["--user", "daemon-reload"])
+                        .output();
+                    ui::success(&i18n::t("uninstall-removed-systemd"));
+                }
+                Err(e) => ui::error(&i18n::t_args(
+                    "uninstall-remove-systemd-fail",
+                    &[("error", &e.to_string())],
+                )),
+            }
+        }
+    }
+}
+
+/// Remove lines from shell config files that add librefang to PATH.
+#[allow(unused_variables)]
+pub(crate) fn clean_path_entries(home: &std::path::Path, librefang_dir: &str) {
+    #[cfg(not(windows))]
+    {
+        let shell_files = [
+            home.join(".bashrc"),
+            home.join(".bash_profile"),
+            home.join(".profile"),
+            home.join(".zshrc"),
+            home.join(".config/fish/config.fish"),
+        ];
+
+        for path in &shell_files {
+            if !path.exists() {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            let filtered: Vec<&str> = content
+                .lines()
+                .filter(|line| !is_librefang_path_line(line, librefang_dir))
+                .collect();
+            if filtered.len() < content.lines().count() {
+                let new_content = filtered.join("\n");
+                // Preserve trailing newline if original had one
+                let new_content = if content.ends_with('\n') {
+                    format!("{new_content}\n")
+                } else {
+                    new_content
+                };
+                if std::fs::write(path, &new_content).is_ok() {
+                    ui::success(&i18n::t_args(
+                        "uninstall-cleaned-path",
+                        &[("path", &path.display().to_string())],
+                    ));
+                }
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        // Read User PATH via PowerShell, filter out librefang entries, write back
+        let output = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "[Environment]::GetEnvironmentVariable('PATH', 'User')",
+            ])
+            .output();
+        if let Ok(out) = output {
+            if out.status.success() {
+                let current = String::from_utf8_lossy(&out.stdout);
+                let current = current.trim();
+                if !current.is_empty() {
+                    let dir_lower = librefang_dir.to_lowercase();
+                    let filtered: Vec<&str> = current
+                        .split(';')
+                        .filter(|entry| {
+                            let e = entry.trim().to_lowercase();
+                            !e.is_empty() && !e.contains("librefang") && !e.contains(&dir_lower)
+                        })
+                        .collect();
+                    if filtered.len() < current.split(';').count() {
+                        let new_path = filtered.join(";");
+                        let ps_cmd = format!(
+                            "[Environment]::SetEnvironmentVariable('PATH', '{}', 'User')",
+                            new_path.replace('\'', "''")
+                        );
+                        let result = std::process::Command::new("powershell")
+                            .args(["-NoProfile", "-Command", &ps_cmd])
+                            .output();
+                        if result.is_ok_and(|o| o.status.success()) {
+                            ui::success(&i18n::t("uninstall-cleaned-path-win"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Returns true if a shell config line is an librefang PATH export.
+/// Must match BOTH an librefang reference AND a PATH-setting pattern.
+#[cfg(any(not(windows), test))]
+pub(crate) fn is_librefang_path_line(line: &str, librefang_dir: &str) -> bool {
+    let lower = line.to_lowercase();
+    let has_librefang =
+        lower.contains("librefang") || lower.contains(&librefang_dir.to_lowercase());
+    if !has_librefang {
+        return false;
+    }
+    // Match common PATH-setting patterns
+    lower.contains("export path=")
+        || lower.contains("export path =")
+        || lower.starts_with("path=")
+        || lower.contains("set -gx path")
+        || lower.contains("fish_add_path")
+}
+
+/// Remove everything in ~/.librefang/ except config files.
+pub(crate) fn remove_dir_except_config(librefang_dir: &std::path::Path) {
+    let keep = ["config.toml", ".env", "secrets.env"];
+    let Ok(entries) = std::fs::read_dir(librefang_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if keep.contains(&name_str.as_ref()) {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            let _ = std::fs::remove_dir_all(&path);
+        } else {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
+/// Remove the currently-running binary.
+pub(crate) fn remove_self_binary(exe_path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        // On Unix, running binaries can be unlinked — the OS keeps the inode
+        // alive until the process exits.
+        match std::fs::remove_file(exe_path) {
+            Ok(()) => ui::success(&i18n::t_args(
+                "uninstall-removed",
+                &[("path", &exe_path.display().to_string())],
+            )),
+            Err(e) => ui::error(&i18n::t_args(
+                "uninstall-remove-failed",
+                &[
+                    ("path", &exe_path.display().to_string()),
+                    ("error", &e.to_string()),
+                ],
+            )),
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        // Windows locks running executables. Rename first, then spawn a
+        // detached process that waits briefly and deletes the renamed file.
+        let old_path = exe_path.with_extension("exe.old");
+        if std::fs::rename(exe_path, &old_path).is_err() {
+            ui::error(&format!(
+                "Could not rename binary for deferred deletion: {}",
+                exe_path.display()
+            ));
+            return;
+        }
+
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+
+        let del_cmd = format!(
+            "ping -n 3 127.0.0.1 >nul & del /f /q \"{}\"",
+            old_path.display()
+        );
+        let _ = std::process::Command::new("cmd.exe")
+            .args(["/C", &del_cmd])
+            .creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS)
+            .spawn();
+
+        ui::success(&i18n::t_args(
+            "uninstall-removed",
+            &[("path", &exe_path.display().to_string())],
+        ));
+    }
+}

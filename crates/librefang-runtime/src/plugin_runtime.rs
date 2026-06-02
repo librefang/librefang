@@ -1525,25 +1525,68 @@ fn parse_output(lines: &[String]) -> Result<serde_json::Value, PluginRuntimeErro
     Ok(serde_json::json!({ "text": joined }))
 }
 
-/// Execute a Wasm hook module inline using the built-in wasmtime engine.
+/// Execute a Wasm hook module inline via the in-process [`WasmSandbox`].
 ///
-/// The module receives the input JSON on its stdin (via WASI) and must write
-/// its JSON response to stdout.  The hook protocol is identical to subprocess
-/// hooks: one JSON object in, one JSON object out.
+/// Pure-compute: the hook runs with `kernel = None` and **no granted
+/// capabilities**, so every kernel- or resource-bearing host call
+/// (`agent_send`, `agent_spawn`, `fs_*`, `net_fetch`, `shell_exec`, …) is
+/// denied at the sandbox boundary rather than executing — a lifecycle hook
+/// has no kernel context and no filesystem/network grant. Capability grants
+/// for hooks are not wired through any manifest field today; declaring them is
+/// a follow-up (the hook manifest type carries no `capabilities` key). Until
+/// then a WASM hook can only compute over its JSON input.
 ///
-/// Currently always returns `Err(PluginRuntimeError::SpawnFailed)` — the
-/// wasmtime+WASI integration is not implemented. The `wasm-hooks` Cargo
-/// feature was removed in #3337 because it claimed support that did not
-/// exist; this stub keeps the call site stable until a real implementation
-/// lands.
+/// The guest ABI is the sandbox's `host_call` surface (`memory` / `alloc` /
+/// `execute`), not WASI: the hook input JSON is handed to the guest directly
+/// and its JSON return value becomes the hook result. The protocol stays bare
+/// JSON in / bare JSON out, matching the subprocess hooks.
+///
+/// **Determinism caveat:** the sandbox keeps `time_now` always-allowed (it is
+/// a pure-host call with no capability gate — see `host_functions::dispatch`),
+/// so a hook that calls `host_call("time_now")` observes the host wall clock.
+/// "Pure-compute" here means *no kernel/resource side effects*, not strict
+/// bit-for-bit determinism: a hook whose output feeds an LLM prompt and which
+/// reads the clock is not guaranteed reproducible across runs. Gating the
+/// clock off would require threading a per-execution flag through the shared
+/// `SandboxConfig` / `GuestState` / `dispatch` path used by skills too, so it
+/// is intentionally left to a follow-up that touches the sandbox surface.
 pub async fn run_wasm_hook(
-    _wasm_path: &str,
-    _input: &serde_json::Value,
-    _config: &HookConfig,
+    wasm_path: &str,
+    input: &serde_json::Value,
+    config: &HookConfig,
 ) -> Result<serde_json::Value, PluginRuntimeError> {
-    Err(PluginRuntimeError::SpawnFailed(
-        "Wasm hook execution is not implemented".to_string(),
-    ))
+    use crate::sandbox::{SandboxConfig, WasmSandbox};
+
+    // The module path comes from operator-controlled hook config (the same
+    // trust level as a subprocess hook's `command`), so it is read directly —
+    // no skill-style relative-entry containment guard applies here.
+    let wasm_bytes = tokio::fs::read(wasm_path).await.map_err(|e| {
+        PluginRuntimeError::SpawnFailed(format!("WASM hook module not readable ({wasm_path}): {e}"))
+    })?;
+
+    // Hook protocol is bare JSON in / bare JSON out — the guest receives the
+    // hook input directly, unlike the skill envelope `{tool, input, config}`.
+    let payload = input.clone();
+
+    // Pure-compute execution: `kernel = None` and an empty capability set, so
+    // the deny-by-default sandbox refuses every kernel/resource host call.
+    //
+    // `HookConfig::default().timeout_secs` is 30, so the `!= 0` guard below
+    // normally forwards that 30s budget; the `None` (→ sandbox default) branch
+    // only triggers when a caller has *explicitly* set `timeout_secs = 0`,
+    // which we treat as "unset" rather than a 0s instant timeout.
+    let sandbox_config = SandboxConfig {
+        timeout_secs: (config.timeout_secs != 0).then_some(config.timeout_secs),
+        capabilities: Vec::new(),
+        ..Default::default()
+    };
+
+    let result = WasmSandbox
+        .execute(&wasm_bytes, payload, sandbox_config, None, "wasm-hook")
+        .await
+        .map_err(|e| PluginRuntimeError::SpawnFailed(format!("WASM hook execution failed: {e}")))?;
+
+    Ok(result.output)
 }
 
 /// Generate a short random hex string suitable for unique temp directory names.
