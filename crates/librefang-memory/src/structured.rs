@@ -1085,6 +1085,33 @@ mod tests {
     ///   scope for this fix.
     #[test]
     fn agent_cascade_purges_every_agent_keyed_table() {
+        // If `column` carries a `CHECK (<column> IN ('a','b',...))` allow-list
+        // in `table`'s schema, return the first permitted literal. The generic
+        // seeder below uses it so a CHECK-constrained enum column (e.g.
+        // `goal_runs.phase`) gets a value the DB accepts instead of a `seed-N`
+        // placeholder that would trip the constraint. Returns None for any
+        // other CHECK shape, so it can only help — never regress — existing
+        // tables.
+        fn check_in_first_literal(
+            conn: &rusqlite::Connection,
+            table: &str,
+            column: &str,
+        ) -> Option<String> {
+            let sql: String = conn
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .ok()?;
+            let needle = format!("{column} IN (");
+            let start = sql.find(&needle)? + needle.len();
+            let rest = &sql[start..];
+            let open = rest.find('\'')? + 1;
+            let close = rest[open..].find('\'')? + open;
+            Some(rest[open..close].to_string())
+        }
+
         // Use the substrate's own remove path so we exercise the
         // exact transaction that runs in production (it invokes
         // both `execute_session_agent_deletes` and
@@ -1231,7 +1258,9 @@ mod tests {
                     }
                     seq += 1;
                     let upper = decl_type.to_uppercase();
-                    let v = if upper.contains("INT") {
+                    let v = if let Some(allowed) = check_in_first_literal(&conn, table, name) {
+                        rusqlite::types::Value::Text(allowed)
+                    } else if upper.contains("INT") {
                         rusqlite::types::Value::Integer(seq)
                     } else if upper.contains("REAL")
                         || upper.contains("FLOA")
