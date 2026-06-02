@@ -18,12 +18,14 @@ chrono = { workspace = true }
 dashmap = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true }
+futures = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
 librefang-runtime = { path = "../librefang-runtime" }
+wiremock = "0.6"
 serial_test = "3"
 
 [lints]

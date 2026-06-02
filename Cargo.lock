@@ -4637,6 +4637,7 @@ version = "2026.5.31-beta.16"
 dependencies = [
  "chrono",
  "dashmap",
+ "futures",
  "hex",
  "librefang-runtime",
  "librefang-skills",
@@ -4652,6 +4653,7 @@ dependencies = [
  "toml 1.1.2+spec-1.1.0",
  "tracing",
  "uuid",
+ "wiremock",
 ]
 
 [[package]]

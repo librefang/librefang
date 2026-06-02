@@ -775,8 +775,17 @@ impl HandRegistry {
     ///    [`librefang_skills::supply_chain::scan`] — the *same* scanner the
     ///    skills marketplace uses — to refuse `.pth` import-hijacks, symlink
     ///    escapes, and critical prompt-injection payloads.
-    /// 4. Funnel the verified, scanned content into the existing
+    /// 4. Assert the bundle's declared `id` equals the requested `hand_id`
+    ///    (the registry must not be able to swap in a different hand under a
+    ///    name the caller asked for — name-confusion guard).
+    /// 5. Funnel the verified, scanned content into the existing
     ///    [`install_from_content_persisted`](Self::install_from_content_persisted).
+    ///
+    /// `require_checksum` is the third-party-registry trust gate: when `true`
+    /// the install is refused unless the bundle was checksum-verified against a
+    /// digest the index advertised. The API layer sets it for a
+    /// caller-supplied `registry_url` and leaves it `false` for the
+    /// compiled-in default registry (which keeps its best-effort behaviour).
     ///
     /// The temp staging dir is always cleaned up, whether the scan passes or
     /// fails.
@@ -785,6 +794,7 @@ impl HandRegistry {
         home_dir: &std::path::Path,
         hand_id: &str,
         hub: &crate::HandsHubClient,
+        require_checksum: bool,
     ) -> HandResult<crate::HandsHubInstallResult> {
         crate::hands_hub::validate_hand_id(hand_id)?;
 
@@ -802,6 +812,19 @@ impl HandRegistry {
         let (bundle, checksum_verified) = hub
             .download_bundle(hand_id, expected_sha256.as_deref())
             .await?;
+
+        // Step 2b — third-party-registry trust gate (#5954 F4). A
+        // caller-supplied `registry_url` is not on the project's trust path, so
+        // an install from one MUST be content-pinned: refuse it when the index
+        // advertised no digest (or was unreachable), since an unverified
+        // bundle from an untrusted host could be silently swapped. The default
+        // registry keeps its historical best-effort behaviour (WARN + install).
+        if require_checksum && !checksum_verified {
+            return Err(HandError::Config(format!(
+                "Hand '{hand_id}' from a custom registry has no advertised SHA-256; \
+                 unverified installs are refused from non-default registries"
+            )));
+        }
 
         // Step 3 — stage the bundle and run the supply-chain audit.
         let staging = home_dir
@@ -830,7 +853,27 @@ impl HandRegistry {
         let _ = std::fs::remove_dir_all(&staging);
         scan_result?;
 
-        // Step 4 — funnel into the existing persisted-install path.
+        // Step 4 — name-confusion guard (#5954 F3). The bundle's own declared
+        // `id` must equal the `hand_id` the caller requested; otherwise the
+        // registry could return a *different* hand under the requested name and
+        // it would install (and later route) under the wrong id. Parse the
+        // bundle to read its declared id and reject a mismatch before anything
+        // is written to disk.
+        let agents_dir = resolve_agents_dir(home_dir);
+        let parsed = parse_hand_toml_with_agents_dir(
+            &bundle.toml,
+            &bundle.skill,
+            HashMap::new(),
+            agents_dir.as_deref(),
+        )?;
+        if parsed.id != hand_id {
+            return Err(HandError::Config(format!(
+                "Hand bundle id mismatch: requested '{hand_id}', bundle declares '{}'",
+                parsed.id
+            )));
+        }
+
+        // Step 5 — funnel into the existing persisted-install path.
         let def = self.install_from_content_persisted(home_dir, &bundle.toml, &bundle.skill)?;
 
         let version = if version.is_empty() {

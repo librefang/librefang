@@ -3148,15 +3148,21 @@ pub async fn install_hand(
 /// HandsHub marketplace.
 ///
 /// Runs the same security pipeline as the local installer plus a network
-/// download: SHA-256 verification of the bundle against the registry digest,
-/// then the shared `librefang_skills::supply_chain::scan` audit (reused from
-/// the skills marketplace — see `HandRegistry::install_from_remote`). The
+/// download: a caller-supplied `registry_url` is SSRF-checked and its
+/// validated address is pinned onto a redirect-disabled HTTP client (#5954
+/// F1); SHA-256 verification of the bundle against the registry digest — and
+/// for a third-party registry a digest is *required* (#5954 F4); the shared
+/// `librefang_skills::supply_chain::scan` audit (reused from the skills
+/// marketplace); and a bundle-id == requested-id assertion (#5954 F3). The
 /// verified content is funneled into the existing persisted-install path, so
-/// the on-disk layout is identical to a local install.
+/// the on-disk layout is identical to a local install. See
+/// `HandRegistry::install_from_remote`.
 ///
 /// Status contract: 200 with the installed `HandDefinition`; 409 when the hand
 /// is already installed; 422 when the supply-chain audit blocks the bundle;
-/// 400 for everything else (bad id, download / checksum failure, parse error).
+/// 400 for everything else (bad id, rejected `registry_url`, download /
+/// checksum failure, bundle-id mismatch, missing checksum from a third-party
+/// registry, parse error).
 #[utoipa::path(
     post,
     path = "/api/hands/marketplace/install",
@@ -3176,7 +3182,11 @@ pub async fn install_hand_from_marketplace(
         return ApiErrorResponse::bad_request("Missing hand_id field").into_json_tuple();
     }
 
-    let hub = match req.registry_url.as_deref() {
+    // `require_checksum` is the F4 trust gate: a caller-supplied third-party
+    // `registry_url` MUST advertise a SHA-256 (rejected otherwise); the
+    // compiled-in default registry (`hands.librefang.ai`) keeps its existing
+    // best-effort behaviour (WARN + install when the index omits a digest).
+    let (hub, require_checksum) = match req.registry_url.as_deref() {
         // Caller-supplied registry URL: validate against the SSRF guard before
         // pointing the daemon at it. Without this an authenticated caller could
         // aim `download_bundle` at loopback / private / cloud-metadata addresses
@@ -3186,6 +3196,13 @@ pub async fn install_hand_from_marketplace(
         // never exempt cloud-metadata ranges. `check_ssrf` resolves DNS
         // synchronously, so it runs on a blocking thread (no sync I/O in the
         // async handler).
+        //
+        // The resolution it returns is NOT discarded: the validated hostname +
+        // IPs are pinned onto the HandsHub client so the address we checked is
+        // the address the bundle/index fetch connects to (closing the
+        // DNS-rebind TOCTOU). Auto-redirects are disabled inside the client, so
+        // a registry that passed the check cannot 302 the fetch to an internal
+        // target.
         Some(url) => {
             let allowed_hosts = state
                 .kernel
@@ -3195,11 +3212,12 @@ pub async fn install_hand_from_marketplace(
                 .clone();
             let url = url.to_string();
             let check = tokio::task::spawn_blocking(move || {
-                librefang_kernel::web_fetch::check_ssrf(&url, &allowed_hosts).map(|_| url)
+                librefang_kernel::web_fetch::check_ssrf(&url, &allowed_hosts)
+                    .map(|resolution| (url, resolution))
             })
             .await;
-            let validated_url = match check {
-                Ok(Ok(url)) => url,
+            let (validated_url, resolution) = match check {
+                Ok(Ok(pair)) => pair,
                 Ok(Err(e)) => {
                     return ApiErrorResponse::bad_request(format!("registry_url rejected: {e}"))
                         .into_json_tuple();
@@ -3211,17 +3229,27 @@ pub async fn install_hand_from_marketplace(
                     .into_json_tuple();
                 }
             };
-            librefang_hands::HandsHubClient::with_url(&validated_url)
+            let pinned_ips: Vec<std::net::IpAddr> =
+                resolution.resolved.iter().map(|addr| addr.ip()).collect();
+            (
+                librefang_hands::HandsHubClient::with_pinned_url(
+                    &validated_url,
+                    &resolution.hostname,
+                    &pinned_ips,
+                ),
+                true,
+            )
         }
-        // Default registry (`hands.librefang.ai`) is trusted — skip the check.
-        None => librefang_hands::HandsHubClient::new(),
+        // Default registry (`hands.librefang.ai`) is trusted — skip the check
+        // and keep the best-effort checksum policy.
+        None => (librefang_hands::HandsHubClient::new(), false),
     };
 
     let home_dir = state.kernel.home_dir().to_path_buf();
     match state
         .kernel
         .hands()
-        .install_from_remote(&home_dir, &req.hand_id, &hub)
+        .install_from_remote(&home_dir, &req.hand_id, &hub, require_checksum)
         .await
     {
         Ok(result) => {
