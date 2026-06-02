@@ -669,6 +669,9 @@ impl LibreFangKernel {
                 // Ephemeral /btw also starts empty — gateway pass would
                 // no-op (under threshold) so we skip it explicitly.
                 gateway_compression: None,
+                // Honour the operator's parallel-dispatch setting even for
+                // ephemeral /btw turns; default-off config is a no-op.
+                parallel_tools_config: Some(self.config.load().parallel_tools.clone()),
             },
         )
         .await
@@ -1613,6 +1616,7 @@ impl LibreFangKernel {
             // agent registry has been consulted — leave as None here.
             compaction_config: None,
             gateway_compression: Some(self.config.load().gateway_compression.clone()),
+            parallel_tools_config: Some(self.config.load().parallel_tools.clone()),
         };
         self.send_message_streaming_with_sender_and_opts(
             effective_id,
@@ -1808,6 +1812,7 @@ impl LibreFangKernel {
             // layer; allowed_tools is the only fork-specific override).
             compaction_config: None,
             gateway_compression: Some(self.config.load().gateway_compression.clone()),
+            parallel_tools_config: Some(self.config.load().parallel_tools.clone()),
         };
         // INVARIANT: forks must use the canonical session so the parent turn's
         // prompt-cache prefix is reused. Do NOT pass a `session_id_override`
@@ -1886,6 +1891,7 @@ impl LibreFangKernel {
             // registry has been consulted for this agent's manifest.
             compaction_config: None,
             gateway_compression: Some(self.config.load().gateway_compression.clone()),
+            parallel_tools_config: Some(self.config.load().parallel_tools.clone()),
         };
         self.send_message_streaming_with_sender_and_opts(
             agent_id,
