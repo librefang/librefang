@@ -14,20 +14,23 @@
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-// Sibling modules are pub(crate) so the command groups under `commands/` can
-// reach them as `crate::<mod>` (and via the prelude re-export).
+// Sibling modules are at least pub(crate) so the command groups under
+// `commands/` can reach them as `crate::<mod>` (and via the prelude
+// re-export). `doctor`/`i18n`/`progress`/`table` stay `pub mod` as they were
+// pre-split — narrowing them to pub(crate) would expose pre-existing
+// (already-dead) helper methods to the dead_code lint.
 pub(crate) mod acp;
 mod cli;
 mod commands;
 pub(crate) mod desktop_install;
-pub(crate) mod doctor;
+pub mod doctor;
 pub(crate) mod http_client;
-pub(crate) mod i18n;
+pub mod i18n;
 pub(crate) mod launcher;
 pub(crate) mod log_filter;
 pub(crate) mod mcp;
-pub(crate) mod progress;
-pub(crate) mod table;
+pub mod progress;
+pub mod table;
 pub(crate) mod templates;
 pub(crate) mod tui;
 pub(crate) mod ui;
