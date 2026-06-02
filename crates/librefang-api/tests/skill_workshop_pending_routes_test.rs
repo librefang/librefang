@@ -417,6 +417,87 @@ async fn pending_approve_name_collision_with_different_body_returns_409() {
     );
 }
 
+/// Auto-assign on approve: promoting a pending candidate must append the
+/// new skill to the creating agent's allowlist so the agent that taught
+/// the behaviour can use it immediately, without an operator hand-editing
+/// `agent.toml`. Registers an agent (empty skills), stages a candidate
+/// carrying that agent's id, approves it over HTTP, then asserts both the
+/// `auto_assigned_to` response field and the registry side effect.
+#[tokio::test(flavor = "multi_thread")]
+async fn pending_approve_auto_assigns_skill_to_creator_agent() {
+    use librefang_types::agent::{
+        AgentEntry, AgentId, AgentManifest, AgentMode, AgentState, SessionId,
+    };
+
+    let h = boot().await;
+    let root = skills_root(&h);
+
+    // Register a real agent with an empty skill allowlist.
+    let agent_id = AgentId::new();
+    let entry = AgentEntry {
+        id: agent_id,
+        name: "creator_agent".to_string(),
+        manifest: AgentManifest {
+            name: "creator_agent".to_string(),
+            description: "test".to_string(),
+            author: "test".to_string(),
+            module: "builtin:chat".to_string(),
+            skills: Vec::new(),
+            ..Default::default()
+        },
+        state: AgentState::Running,
+        mode: AgentMode::default(),
+        created_at: Utc::now(),
+        last_active: Utc::now(),
+        session_id: SessionId::new(),
+        ..Default::default()
+    };
+    h.state
+        .kernel
+        .agent_registry()
+        .register(entry)
+        .expect("register creator agent");
+
+    // Stage a candidate whose `agent_id` is the registered agent.
+    let agent_str = agent_id.to_string();
+    let cand_id = "12121212-0000-0000-0000-0000000000aa";
+    storage::save_candidate(&root, &fixture_candidate(&agent_str, cand_id), 20, None).unwrap();
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/skills/pending/{cand_id}/approve"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(body["status"], "approved");
+    assert_eq!(body["skill_name"], "fmt_before_commit");
+    assert_eq!(
+        body["auto_assigned_to"], agent_str,
+        "approve response must echo the creator agent it assigned to: {body:?}"
+    );
+
+    // Registry side effect: the agent's allowlist now carries the skill.
+    let updated = h
+        .state
+        .kernel
+        .agent_registry()
+        .get(agent_id)
+        .expect("agent still registered after approve");
+    assert!(
+        updated
+            .manifest
+            .skills
+            .contains(&"fmt_before_commit".to_string()),
+        "approved skill must be appended to the creator agent's allowlist; got {:?}",
+        updated.manifest.skills
+    );
+    assert!(
+        !updated.manifest.skills_disabled,
+        "auto-assign must clear skills_disabled so the new skill is live"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // POST /api/skills/pending/{id}/reject
 // ---------------------------------------------------------------------------
