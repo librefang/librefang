@@ -91,6 +91,24 @@ export function TaintPolicyEditor({
     () => deepClone(server.taint_policy?.tools ?? {}),
   );
 
+  // Sync local draft state only on server-identity change. Production also
+  // relies on `key={server.id ?? server.name}` at the render site, which
+  // fully remounts on selection (and is the canonical fix for #5799);
+  // this `useEffect` is the same contract for the in-place prop-swap path
+  // exercised by the unit test.
+  //
+  // Crucially, the dependency list deliberately does NOT include
+  // `server.taint_scanning` or `server.taint_policy`: those change on
+  // every background query poll (TanStack returns fresh object identities),
+  // and re-running this effect on value changes would silently overwrite
+  // the user's in-progress local edits (there is no way to distinguish a
+  // post-save refresh from an unrelated background refetch).
+  useEffect(() => {
+    setScanning(server.taint_scanning ?? true);
+    setTools(deepClone(server.taint_policy?.tools ?? {}));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [server.name]);
+
   // ── tool-level helpers ────────────────────────────────────────────────
   const setToolField = useCallback(
     <K extends keyof McpTaintToolPolicy>(name: string, key: K, value: McpTaintToolPolicy[K]) => {

@@ -236,24 +236,31 @@ impl ChannelRateLimiter {
         // Collect (key, last_seen) pairs. Buckets without a `last_seen`
         // (shouldn't happen post-`check`, but guard against the
         // race where another thread inserted via `entry().or_default()`
-        // but hasn't reached the assignment yet) sort to the front via
-        // `Instant::now() - 1day` so they evict first.
-        let mut snapshot: Vec<(String, Instant)> = self
+        // but hasn't reached the assignment yet) sort to the front (evict
+        // first) by treating `None` as older than any `Some(Instant)`.
+        //
+        // We avoid `Instant::now() - 1day` here because on freshly booted
+        // systems (Windows CI runners that have been up < 24h) that
+        // subtraction panics with "overflow when subtracting duration from
+        // instant" (#5726). Instead, sort `None` explicitly before `Some`.
+        let mut snapshot: Vec<(String, Option<Instant>)> = self
             .inner
             .buckets
             .iter()
-            .map(|e| {
-                let ts = e
-                    .value()
-                    .last_seen
-                    .unwrap_or_else(|| Instant::now() - Duration::from_secs(86_400));
-                (e.key().clone(), ts)
-            })
+            .map(|e| (e.key().clone(), e.value().last_seen))
             .collect();
-        // Partial sort: smaller `last_seen` = older = evict first.
-        // `select_nth_unstable_by_key` is O(n) average vs full sort's O(n log n).
+        // Partial sort: None (never seen) sorts before Some(older) before
+        // Some(newer). `select_nth_unstable_by` is O(n) average.
         if snapshot.len() > count {
-            snapshot.select_nth_unstable_by_key(count, |(_, ts)| *ts);
+            snapshot.select_nth_unstable_by(count, |(_, a), (_, b)| {
+                // `Instant` is Copy, so deref is cheap.
+                match (*a, *b) {
+                    (None, None) => std::cmp::Ordering::Equal,
+                    (None, Some(_)) => std::cmp::Ordering::Less, // None evicts first
+                    (Some(_), None) => std::cmp::Ordering::Greater,
+                    (Some(a), Some(b)) => a.cmp(&b), // older Instant evicts first
+                }
+            });
             snapshot.truncate(count);
         }
         for (key, _) in snapshot {
@@ -640,19 +647,28 @@ mod tests {
     }
 
     /// When the cap is hit, the oldest entries must go — never the freshly
-    /// inserted ones. We seed `MAX_BUCKETS` "old" buckets with backdated
-    /// `last_seen`, then insert one new key. The new key must survive; at
-    /// least some of the old keys must be gone.
+    /// inserted ones. We seed `MAX_BUCKETS` "old" buckets with `last_seen =
+    /// None` (the never-seen sentinel that `evict_oldest` sorts to the front),
+    /// then insert one new key. The new key must survive; at least some of the
+    /// old keys must be gone.
+    ///
+    /// Using `None` rather than a backdated `Instant` makes the test
+    /// platform-independent: `Instant::now() - large_duration` panics on
+    /// freshly-booted Windows CI runners whose system uptime is shorter than
+    /// the subtracted duration (#5726).
     #[test]
     fn overflow_eviction_drops_oldest_not_newest() {
         let limiter = ChannelRateLimiter::default();
-        let old_ts = Instant::now() - Duration::from_secs(3600);
         for i in 0..MAX_BUCKETS {
             limiter.inner.buckets.insert(
                 format!("telegram:old{i}"),
                 Bucket {
                     timestamps: SmallVec::new(),
-                    last_seen: Some(old_ts),
+                    // `last_seen = None` sorts before any `Some(Instant)` in
+                    // `evict_oldest`, so these are always evicted before the
+                    // freshly-inserted key whose `last_seen` is set to
+                    // `Instant::now()` inside `check()`.
+                    last_seen: None,
                 },
             );
         }

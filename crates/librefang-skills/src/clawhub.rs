@@ -627,65 +627,85 @@ impl ClawHubClient {
         let seq = STAGING_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let skill_dir = resolve_skill_dir(target_dir, slug)?;
         let tmp_dir = target_dir.join(format!(".staging-{}-{}-{}", slug, std::process::id(), seq));
-        // Defensive: clean up if a path collision somehow occurred.
-        if tmp_dir.exists() {
-            let _ = std::fs::remove_dir_all(&tmp_dir);
-        }
-        std::fs::create_dir_all(&tmp_dir)?;
+        // Extraction — tmp-dir setup, zip decompression, and per-entry writes
+        // — is blocking and, for a zip skill, unbounded in size. Offload it to
+        // a blocking thread so it does not stall the tokio worker for the full
+        // archive (refs blocking-fs-on-executor). Returns `is_skillmd`, which
+        // the conversion step below needs.
+        let is_skillmd = {
+            let tmp_dir = tmp_dir.clone();
+            let bytes = bytes.to_vec();
+            let slug = slug.to_string();
+            tokio::task::spawn_blocking(move || -> Result<bool, SkillError> {
+                // Defensive: clean up if a path collision somehow occurred.
+                if tmp_dir.exists() {
+                    let _ = std::fs::remove_dir_all(&tmp_dir);
+                }
+                std::fs::create_dir_all(&tmp_dir)?;
 
-        // Detect content type and extract accordingly
-        let content_str = String::from_utf8_lossy(bytes);
-        let is_skillmd = content_str.trim_start().starts_with("---");
+                // Detect content type and extract accordingly
+                let content_str = String::from_utf8_lossy(&bytes);
+                let is_skillmd = content_str.trim_start().starts_with("---");
 
-        if is_skillmd {
-            let skill_md_path = resolve_skill_child_path(&tmp_dir, Path::new("SKILL.md"))?;
-            std::fs::write(skill_md_path, bytes)?;
-        } else if bytes.len() >= 4 && bytes[0] == 0x50 && bytes[1] == 0x4b {
-            // Zip archive — extract all files
-            let cursor = std::io::Cursor::new(bytes);
-            match zip::ZipArchive::new(cursor) {
-                Ok(mut archive) => {
-                    for i in 0..archive.len() {
-                        let mut file = match archive.by_index(i) {
-                            Ok(f) => f,
-                            Err(e) => {
-                                warn!(index = i, error = %e, "Skipping zip entry");
-                                continue;
+                if is_skillmd {
+                    let skill_md_path = resolve_skill_child_path(&tmp_dir, Path::new("SKILL.md"))?;
+                    std::fs::write(skill_md_path, &bytes)?;
+                } else if bytes.len() >= 4 && bytes[0] == 0x50 && bytes[1] == 0x4b {
+                    // Zip archive — extract all files
+                    let cursor = std::io::Cursor::new(&bytes);
+                    match zip::ZipArchive::new(cursor) {
+                        Ok(mut archive) => {
+                            for i in 0..archive.len() {
+                                let mut file = match archive.by_index(i) {
+                                    Ok(f) => f,
+                                    Err(e) => {
+                                        warn!(index = i, error = %e, "Skipping zip entry");
+                                        continue;
+                                    }
+                                };
+                                let Some(enclosed_name) = file.enclosed_name() else {
+                                    warn!("Skipping zip entry with unsafe path");
+                                    continue;
+                                };
+                                let out_path =
+                                    match resolve_skill_child_path(&tmp_dir, &enclosed_name) {
+                                        Ok(path) => path,
+                                        Err(e) => {
+                                            warn!(index = i, error = %e, "Skipping zip entry with unsafe path");
+                                            continue;
+                                        }
+                                    };
+                                if file.is_dir() {
+                                    std::fs::create_dir_all(&out_path)?;
+                                } else {
+                                    if let Some(parent) = out_path.parent() {
+                                        std::fs::create_dir_all(parent)?;
+                                    }
+                                    let mut out_file = std::fs::File::create(&out_path)?;
+                                    std::io::copy(&mut file, &mut out_file)?;
+                                }
                             }
-                        };
-                        let Some(enclosed_name) = file.enclosed_name() else {
-                            warn!("Skipping zip entry with unsafe path");
-                            continue;
-                        };
-                        let out_path = match resolve_skill_child_path(&tmp_dir, &enclosed_name) {
-                            Ok(path) => path,
-                            Err(e) => {
-                                warn!(index = i, error = %e, "Skipping zip entry with unsafe path");
-                                continue;
-                            }
-                        };
-                        if file.is_dir() {
-                            std::fs::create_dir_all(&out_path)?;
-                        } else {
-                            if let Some(parent) = out_path.parent() {
-                                std::fs::create_dir_all(parent)?;
-                            }
-                            let mut out_file = std::fs::File::create(&out_path)?;
-                            std::io::copy(&mut file, &mut out_file)?;
+                            info!(slug, entries = archive.len(), "Extracted skill zip");
+                        }
+                        Err(e) => {
+                            warn!(slug, error = %e, "Failed to read zip, saving raw");
+                            let zip_path =
+                                resolve_skill_child_path(&tmp_dir, Path::new("skill.zip"))?;
+                            std::fs::write(zip_path, &bytes)?;
                         }
                     }
-                    info!(slug, entries = archive.len(), "Extracted skill zip");
+                } else {
+                    let package_path =
+                        resolve_skill_child_path(&tmp_dir, Path::new("package.json"))?;
+                    std::fs::write(package_path, &bytes)?;
                 }
-                Err(e) => {
-                    warn!(slug, error = %e, "Failed to read zip, saving raw");
-                    let zip_path = resolve_skill_child_path(&tmp_dir, Path::new("skill.zip"))?;
-                    std::fs::write(zip_path, bytes)?;
-                }
-            }
-        } else {
-            let package_path = resolve_skill_child_path(&tmp_dir, Path::new("package.json"))?;
-            std::fs::write(package_path, bytes)?;
-        }
+                Ok(is_skillmd)
+            })
+            .await
+            .map_err(|e| {
+                SkillError::Io(std::io::Error::other(format!("extract task join: {e}")))
+            })??
+        };
 
         // Step 2-3: Detect format and convert (operate on tmp_dir throughout)
         let mut all_warnings = Vec::new();

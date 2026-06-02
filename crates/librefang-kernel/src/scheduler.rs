@@ -158,9 +158,11 @@ impl AgentScheduler {
             // Hourly absolute quota counts every token (cache hits included)
             // because the operator-facing knob `max_llm_tokens_per_hour` is
             // historically "raw tokens per hour" — keep that contract.
-            tracker.total_tokens += usage.total();
-            tracker.input_tokens += usage.input_tokens;
-            tracker.output_tokens += usage.output_tokens;
+            // Saturating: `usage.*` is provider-supplied wire data, which the
+            // metering crate treats as untrusted and clamps the same way.
+            tracker.total_tokens = tracker.total_tokens.saturating_add(usage.total());
+            tracker.input_tokens = tracker.input_tokens.saturating_add(usage.input_tokens);
+            tracker.output_tokens = tracker.output_tokens.saturating_add(usage.output_tokens);
             tracker.llm_calls += 1;
             // Per-minute sliding window for burst detection (#4943): use
             // burst_tokens(), which excludes cache-read hits — they're
@@ -369,12 +371,14 @@ impl AgentScheduler {
                     .saturating_add(actual_tokens);
             } else {
                 // No reservation was made (no quota) — behave like record_usage
-                tracker.total_tokens += actual_tokens;
+                tracker.total_tokens = tracker.total_tokens.saturating_add(actual_tokens);
             }
 
-            // Per-dimension counters (never pre-charged)
-            tracker.input_tokens += usage.input_tokens;
-            tracker.output_tokens += usage.output_tokens;
+            // Per-dimension counters (never pre-charged). Saturating because
+            // `usage.*` is untrusted provider wire data (matches the metering
+            // crate's clamping of the same fields).
+            tracker.input_tokens = tracker.input_tokens.saturating_add(usage.input_tokens);
+            tracker.output_tokens = tracker.output_tokens.saturating_add(usage.output_tokens);
             tracker.llm_calls += 1;
 
             // Sliding-window for burst detection (#4943): see record_usage
@@ -986,9 +990,22 @@ mod tests {
         let agent_id = AgentId::new();
         scheduler.usage.insert(agent_id, UsageTracker::default());
         // Seed: 200 timestamps from 2 hours ago.
+        //
+        // `instant_now_minus` uses `checked_sub` internally and returns
+        // `Instant::now()` when the requested look-back exceeds system uptime
+        // (e.g. freshly-provisioned Windows CI runners). In that case
+        // the "stale" timestamps equal `now`, which is inside the eviction
+        // window, so the eviction assertion below would falsely fail (#5726).
+        // Skip the eviction sub-test when we can't materialize a truly stale
+        // instant; the bounded-deque invariant is covered by the sibling test
+        // `record_tool_calls_long_horizon_stays_bounded_without_quota`.
+        let two_hours = ONE_MINUTE * 120;
+        let stale = match Instant::now().checked_sub(two_hours) {
+            Some(t) => t,
+            None => return, // system uptime < 2 h — can't create stale timestamps
+        };
         {
             let mut tracker = scheduler.usage.get_mut(&agent_id).unwrap();
-            let stale = instant_now_minus(ONE_MINUTE * 120);
             for _ in 0..200 {
                 tracker.tool_call_timestamps.push_back(stale);
             }

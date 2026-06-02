@@ -1,32 +1,54 @@
 //! System info tools: location lookup and clock readout.
+//!
+//! `tool_location_get` migrated from `Result<String, String>` to
+//! `Result<String, ToolError>` (#3576). All failures are external HTTP / parse
+//! failures, mapped to `ToolError::Upstream`. The typed `reqwest::Error`s
+//! (build / send / json) keep their original prefixed message AND preserve the
+//! error on the `source()` chain (consistent with how the sibling slices wrap
+//! typed errors); the two non-`Error` API-level failures use `upstream_msg`.
+//! `Upstream`'s Display is the bare message, so the exact strings are
+//! preserved. `tool_system_time` is infallible (returns `String`), unchanged.
+
+use super::error::{ToolError, ToolResult};
+
+const IP_API_URL: &str = "https://ip-api.com/json/?fields=status,message,country,regionName,city,zip,lat,lon,timezone,isp,query";
+const IP_API_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Look up approximate location via ip-api.com.
-pub(super) async fn tool_location_get() -> Result<String, String> {
-    let client = crate::http_client::proxied_client_builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
+pub(super) async fn tool_location_get() -> ToolResult {
+    let client = crate::http_client::proxied_client();
 
-    // Use ip-api.com (free, no API key, JSON response)
     let resp = client
-        .get("https://ip-api.com/json/?fields=status,message,country,regionName,city,zip,lat,lon,timezone,isp,query")
-        .header("User-Agent", "LibreFang/0.1")
+        .get(IP_API_URL)
+        .timeout(IP_API_TIMEOUT)
         .send()
         .await
-        .map_err(|e| format!("Location request failed: {e}"))?;
+        .map_err(|e| ToolError::Upstream {
+            message: format!("Location request failed: {e}"),
+            source: Some(Box::new(e)),
+        })?;
 
     if !resp.status().is_success() {
-        return Err(format!("Location API returned {}", resp.status()));
+        let status = resp.status();
+        let body = resp
+            .text()
+            .await
+            .unwrap_or_else(|_| "<no body>".to_string());
+        return Err(ToolError::upstream_msg(format!(
+            "Location API returned {status}: {body}"
+        )));
     }
 
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse location response: {e}"))?;
+    let body: serde_json::Value = resp.json().await.map_err(|e| ToolError::Upstream {
+        message: format!("Failed to parse location response: {e}"),
+        source: Some(Box::new(e)),
+    })?;
 
     if body["status"].as_str() != Some("success") {
         let msg = body["message"].as_str().unwrap_or("Unknown error");
-        return Err(format!("Location lookup failed: {msg}"));
+        return Err(ToolError::upstream_msg(format!(
+            "Location lookup failed: {msg}"
+        )));
     }
 
     let result = serde_json::json!({
@@ -41,7 +63,7 @@ pub(super) async fn tool_location_get() -> Result<String, String> {
         "ip": body["query"],
     });
 
-    serde_json::to_string_pretty(&result).map_err(|e| format!("Serialize error: {e}"))
+    Ok(serde_json::to_string_pretty(&result)?)
 }
 
 /// Return current date, time, timezone, and Unix epoch.

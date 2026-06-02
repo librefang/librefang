@@ -245,10 +245,16 @@ Smallest-blast-radius first. Each module is independently reviewable.
 
 1. **`tool_runner/cron.rs`** — 3 fns, 9 sites, 1 caller (`dispatch.rs`).
    The canonical first migration. **Done in this PR.**
-2. **`tool_runner/{event,artifact,goal,spill,notify,sandbox,system}.rs`** —
+2. **`tool_runner/{event,artifact,goal,sandbox,system}.rs`** —
    small, mostly-pure (no kernel handle plumbing beyond `require_kernel`).
+   **Done.** `spill.rs` / `notify.rs` were named in an earlier draft of this
+   list but never returned `Result<String, String>` — `spill.rs` is pure
+   config plumbing and `notify.rs` returns the unrelated
+   `librefang_types::tool::ToolResult` response struct, so neither is in this
+   migration's scope.
 3. **`tool_runner/{memory,a2a,task,process}.rs`** — kernel-handle-heavy, need
-   the `From<LibreFangError>` impl exercised.
+   the `From<LibreFangError>` impl exercised. Only `memory.rs` remains;
+   `a2a` / `task` / `process` are already typed.
 4. **`tool_runner/{shell,knowledge,image,meta,canvas,wiki,web_legacy,hand}.rs`** —
    the long tail. Each PR migrates one file + adds tests.
 5. **`tool_runner/{fs,dispatch}.rs`** — last, because `dispatch.rs` is the

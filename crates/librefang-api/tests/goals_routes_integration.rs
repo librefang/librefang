@@ -524,3 +524,57 @@ async fn concurrent_goal_creates_lose_no_writes_5138() {
     expected.sort();
     assert_eq!(titles, expected, "no individual goal may be clobbered");
 }
+
+// ---------------------------------------------------------------------------
+// POST /api/goals/{id}/start | /stop, GET /api/goals/{id}/run
+// Autonomous long-horizon goal runner (#5744).
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_run_start_requires_assigned_agent() {
+    let h = boot().await;
+    let goal = create_goal(&h, serde_json::json!({"title": "No agent"})).await;
+    let id = goal["id"].as_str().unwrap();
+    let (status, body) =
+        json_request(&h, Method::POST, &format!("/api/goals/{id}/start"), None).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "starting a run for a goal with no assigned agent must 400: {body:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_run_start_then_stop_with_agent() {
+    let h = boot().await;
+    // A syntactically valid agent id; the run loop is aborted by stop() before
+    // it can complete a real agent turn, so no provider is needed.
+    let agent = "11111111-1111-1111-1111-111111111111";
+    let goal = create_goal(
+        &h,
+        serde_json::json!({"title": "Driveable", "agent_id": agent}),
+    )
+    .await;
+    let id = goal["id"].as_str().unwrap().to_string();
+
+    let (status, body) =
+        json_request(&h, Method::POST, &format!("/api/goals/{id}/start"), None).await;
+    assert_eq!(status, StatusCode::OK, "start failed: {body:?}");
+    assert_eq!(body["ok"].as_bool(), Some(true));
+    assert_eq!(body["run"]["phase"].as_str(), Some("running"));
+    assert_eq!(body["run"]["max_iterations"].as_u64(), Some(25));
+
+    // The run is observable via GET /run.
+    let (rs, run) = json_request(&h, Method::GET, &format!("/api/goals/{id}/run"), None).await;
+    assert_eq!(rs, StatusCode::OK);
+    assert_eq!(run["running"].as_bool(), Some(true));
+
+    // Stop the run.
+    let (ss, stop) = json_request(&h, Method::POST, &format!("/api/goals/{id}/stop"), None).await;
+    assert_eq!(ss, StatusCode::OK);
+    assert_eq!(stop["stopped"].as_bool(), Some(true));
+
+    // Stopping again reports no active run.
+    let (_s2, stop2) = json_request(&h, Method::POST, &format!("/api/goals/{id}/stop"), None).await;
+    assert_eq!(stop2["stopped"].as_bool(), Some(false));
+}

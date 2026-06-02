@@ -241,6 +241,12 @@ impl AuxClient {
                 .get(provider)
                 .copied(),
             emit_caller_trace_headers: self.kernel_config.telemetry.emit_caller_trace_headers,
+            max_retries: self
+                .kernel_config
+                .provider_max_retries
+                .get(provider)
+                .copied()
+                .unwrap_or_else(|| DriverConfig::default().max_retries),
         };
 
         create_driver(&driver_cfg).map_err(|e| e.to_string())

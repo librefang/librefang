@@ -192,6 +192,18 @@ function Install-LibreFang {
     # Install
     Copy-Item -Path $exePath -Destination (Join-Path $InstallDir "librefang.exe") -Force
 
+    # The Rust Telegram sidecar binary ships inside the same archive since the
+    # release pipeline bundles it. Older archives lack it, so install it only
+    # when present and stay silent otherwise (backward compatible).
+    $sidecarPath = Join-Path $tempDir "librefang-sidecar-telegram.exe"
+    if (-not (Test-Path $sidecarPath)) {
+        $foundSidecar = Get-ChildItem -Path $tempDir -Filter "librefang-sidecar-telegram.exe" -Recurse | Select-Object -First 1
+        if ($foundSidecar) { $sidecarPath = $foundSidecar.FullName } else { $sidecarPath = $null }
+    }
+    if ($sidecarPath) {
+        Copy-Item -Path $sidecarPath -Destination (Join-Path $InstallDir "librefang-sidecar-telegram.exe") -Force
+    }
+
     # Clean up temp
     Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
 

@@ -7359,14 +7359,29 @@ fn cmd_skill_test(path: Option<PathBuf>, tool: Option<String>, input: Option<Str
     };
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let env_policy = load_skill_env_policy_from_config();
-    let result = rt.block_on(librefang_skills::loader::execute_skill_tool(
-        &prepared.manifest,
-        &prepared.source_dir,
-        &tool_name,
-        &input_json,
-        env_policy.as_ref(),
-    ));
+    let result = if prepared.manifest.runtime.runtime_type == librefang_skills::SkillRuntime::Wasm {
+        // WASM skills execute in the real sandbox. We pass no kernel handle:
+        // pure-compute tools run end to end, while capability-bearing host
+        // calls return an error in the result rather than crashing — the right
+        // behaviour for a local smoke test outside a running daemon.
+        rt.block_on(librefang_runtime::tool_runner::execute_wasm_skill(
+            &prepared.manifest,
+            &prepared.source_dir,
+            &tool_name,
+            &input_json,
+            None,
+            "cli-test",
+        ))
+    } else {
+        let env_policy = load_skill_env_policy_from_config();
+        rt.block_on(librefang_skills::loader::execute_skill_tool(
+            &prepared.manifest,
+            &prepared.source_dir,
+            &tool_name,
+            &input_json,
+            env_policy.as_ref(),
+        ))
+    };
     match result {
         Ok(result) => {
             println!("\nTool result ({tool_name}):");
@@ -7536,38 +7551,49 @@ fn cmd_skill_create() {
         std::process::exit(1);
     });
 
-    let manifest = format!(
-        r#"[skill]
-name = "{name}"
-version = "{version}"
-description = "{description}"
-author = ""
-license = "MIT"
-tags = []
+    let tool_name = name.replace('-', "_");
 
-[runtime]
-type = "{runtime}"
-entry = "src/main.py"
+    // A Cargo package name must be `[A-Za-z0-9_-]+` and not start with a digit;
+    // a skill name can be anything the user typed. Derive a legal package name
+    // for the WASM scaffold's Cargo.toml. The artifact name is fixed to
+    // `skill` via `[lib] name`, so this only needs to be valid, not meaningful.
+    let pkg_name = {
+        let cleaned: String = name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c.to_ascii_lowercase()
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        let cleaned = cleaned.trim_matches('-');
+        if cleaned.is_empty() {
+            "skill".to_string()
+        } else if cleaned.starts_with(|c: char| c.is_ascii_digit()) {
+            format!("skill-{cleaned}")
+        } else {
+            cleaned.to_string()
+        }
+    };
 
-[[tools.provided]]
-name = "{tool_name}"
-description = "{description}"
-input_schema = {{ type = "object", properties = {{ input = {{ type = "string" }} }}, required = ["input"] }}
+    // Per-runtime scaffold: the manifest `entry` path, the files to write
+    // (relative to the skill dir), and any extra build steps the author must
+    // run before the entry exists.
+    struct Scaffold {
+        entry: String,
+        files: Vec<(String, String)>,
+        build_steps: Vec<String>,
+    }
 
-[requirements]
-tools = []
-capabilities = []
-"#,
-        version = librefang_types::VERSION,
-        tool_name = name.replace('-', "_"),
-    );
-
-    std::fs::write(skill_dir.join("skill.toml"), &manifest).unwrap();
-
-    // Create entry point
-    let entry_content = match runtime.as_str() {
-        "python" => format!(
-            r#"#!/usr/bin/env python3
+    let scaffold = match runtime.as_str() {
+        "python" => Scaffold {
+            entry: "src/main.py".to_string(),
+            files: vec![(
+                "src/main.py".to_string(),
+                format!(
+                    r#"#!/usr/bin/env python3
 """LibreFang skill: {name}"""
 import json
 import sys
@@ -7585,29 +7611,150 @@ def main():
 if __name__ == "__main__":
     main()
 "#
-        ),
-        _ => "// TODO: Implement your skill\n".to_string(),
+                ),
+            )],
+            build_steps: vec![],
+        },
+        "node" => Scaffold {
+            entry: "src/index.js".to_string(),
+            files: vec![(
+                "src/index.js".to_string(),
+                format!(
+                    r#"// LibreFang skill: {name}
+const chunks = [];
+process.stdin.on("data", (c) => chunks.push(c));
+process.stdin.on("end", () => {{
+  const payload = JSON.parse(Buffer.concat(chunks).toString());
+  const input = payload.input || {{}};
+  // TODO: Implement your skill logic here
+  const result = {{ result: `Processed: ${{input.input ?? ""}}` }};
+  process.stdout.write(JSON.stringify(result));
+}});
+"#
+                ),
+            )],
+            build_steps: vec![],
+        },
+        "wasm" => Scaffold {
+            // Entry is the artifact at the skill root, NOT under target/: the
+            // packager (`should_include_entry`) excludes `target/`, so a skill
+            // referencing the build dir would publish without its binary. The
+            // build step copies the compiled module to the root.
+            entry: "skill.wasm".to_string(),
+            files: vec![
+                (
+                    "Cargo.toml".to_string(),
+                    format!(
+                        r#"[package]
+name = "{pkg_name}"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+# Fixed name so the artifact is always `skill.wasm` regardless of package name.
+name = "skill"
+crate-type = ["cdylib"]
+
+[dependencies]
+librefang-skill = "0.1"
+serde_json = "1"
+
+[profile.release]
+panic = "abort"
+"#
+                    ),
+                ),
+                (
+                    "src/lib.rs".to_string(),
+                    format!(
+                        r#"//! LibreFang skill: {name}
+use librefang_skill::{{skill, Request}};
+use serde_json::{{json, Value}};
+
+fn handle(req: Request) -> Result<Value, String> {{
+    match req.tool.as_str() {{
+        "{tool_name}" => {{
+            // TODO: Implement your skill logic here.
+            let input = req.input.get("input").and_then(Value::as_str).unwrap_or("");
+            Ok(json!({{ "result": format!("Processed: {{input}}") }}))
+        }}
+        other => Err(format!("unknown tool: {{other}}")),
+    }}
+}}
+
+skill!(handle);
+"#
+                    ),
+                ),
+            ],
+            build_steps: vec![
+                "rustup target add wasm32-unknown-unknown".to_string(),
+                "cargo build --release --target wasm32-unknown-unknown".to_string(),
+                "cp target/wasm32-unknown-unknown/release/skill.wasm skill.wasm".to_string(),
+            ],
+        },
+        other => {
+            eprintln!("Unsupported runtime '{other}'. Choose one of: python, node, wasm.");
+            std::process::exit(1);
+        }
     };
 
-    let entry_path = if runtime == "python" {
-        "src/main.py"
-    } else {
-        "src/index.js"
-    };
-    std::fs::write(skill_dir.join(entry_path), entry_content).unwrap();
+    let manifest = format!(
+        r#"[skill]
+name = "{name}"
+version = "{version}"
+description = "{description}"
+author = ""
+license = "MIT"
+tags = []
+
+[runtime]
+type = "{runtime}"
+entry = "{entry}"
+
+[[tools.provided]]
+name = "{tool_name}"
+description = "{description}"
+input_schema = {{ type = "object", properties = {{ input = {{ type = "string" }} }}, required = ["input"] }}
+
+[requirements]
+tools = []
+capabilities = []
+"#,
+        version = librefang_types::VERSION,
+        entry = scaffold.entry,
+    );
+
+    std::fs::write(skill_dir.join("skill.toml"), &manifest).unwrap();
+    for (rel, content) in &scaffold.files {
+        let path = skill_dir.join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&path, content).unwrap();
+    }
 
     println!("\nSkill created: {}", skill_dir.display());
     println!("\nFiles:");
     println!("  skill.toml");
-    println!("  {entry_path}");
+    for (rel, _) in &scaffold.files {
+        println!("  {rel}");
+    }
     println!("\nNext steps:");
-    println!("  1. Edit the entry point to implement your skill logic");
+    let mut step = 1;
+    println!("  {step}. Edit the entry point to implement your skill logic");
+    for build_step in &scaffold.build_steps {
+        step += 1;
+        println!("  {step}. {build_step}");
+    }
+    step += 1;
     println!(
-        "  2. Test locally: librefang skill test {}",
+        "  {step}. Test locally: librefang skill test {}",
         skill_dir.display()
     );
+    step += 1;
     println!(
-        "  3. Install: librefang skill install {}",
+        "  {step}. Install: librefang skill install {}",
         skill_dir.display()
     );
 }

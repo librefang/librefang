@@ -145,7 +145,12 @@ jobs:
                 });
                 issue = r.data;
               } catch (e) {
-                if (e.status === 404) { skipped.push(`#${num} (not found)`); continue; }
+                // 404 = never existed; 410 = existed but was deleted (Gone).
+                // Both mean "no issue to act on" — skip rather than crash the run.
+                if (e.status === 404 || e.status === 410) {
+                  skipped.push(`#${num} (${e.status === 410 ? 'deleted' : 'not found'})`);
+                  continue;
+                }
                 throw e;
               }
 

@@ -29,11 +29,6 @@
 //!   body, which is exactly the regression class #3571 calls out.
 //!
 //! Out of scope (skipped, with reason):
-//! - `PATCH /api/memory/config` writes to `~/.librefang/config.toml`. The
-//!   tempdir kernel boot does not materialize that file, so the handler's
-//!   read-modify-write would 500 on the read step. Exercising it requires
-//!   either pre-seeding the file or refactoring the handler to tolerate a
-//!   missing file — both out of scope for a test-only PR.
 //! - Endpoints that require an actual `ProactiveMemoryStore` populated with
 //!   data (search-by-content, history, consolidate, export/import, relations,
 //!   duplicates, decay/cleanup side effects). The default kernel boot leaves
@@ -55,7 +50,7 @@ use tower::ServiceExt;
 
 struct RouterHarness {
     app: axum::Router,
-    _tmp: tempfile::TempDir,
+    tmp: tempfile::TempDir,
     _state: Arc<librefang_api::routes::AppState>,
 }
 
@@ -85,7 +80,7 @@ async fn boot_router_with_api_key(api_key: &str) -> RouterHarness {
             api_key_env: "OLLAMA_API_KEY".to_string(),
             base_url: None,
             message_timeout_secs: 300,
-            extra_params: std::collections::HashMap::new(),
+            extra_params: std::collections::BTreeMap::new(),
             cli_profile_dirs: Vec::new(),
         },
         ..KernelConfig::default()
@@ -99,7 +94,7 @@ async fn boot_router_with_api_key(api_key: &str) -> RouterHarness {
 
     RouterHarness {
         app,
-        _tmp: tmp,
+        tmp,
         _state: state,
     }
 }
@@ -311,6 +306,123 @@ async fn get_memory_config_returns_documented_shape() {
 }
 
 // ---------------------------------------------------------------------------
+// PATCH /api/memory/config — hot-reload contract (M12 review-followup #2)
+// ---------------------------------------------------------------------------
+
+/// PATCH must return `body.status == "applied"` on the happy path:
+/// disk write succeeded AND `kernel.reload_config()` succeeded. Without
+/// this regression test the M12 contract could silently revert to the
+/// pre-fix `restart_required: true` behaviour with no test failure,
+/// since `get_memory_config_returns_documented_shape` only covers GET.
+///
+/// The harness boots with an in-memory `KernelConfig` snapshot but no
+/// on-disk `config.toml`. PATCH reads `home_dir/config.toml`, so we
+/// seed a minimal file (matching the kernel's `KernelConfig::default()`
+/// state plus the `[memory]` / `[proactive_memory]` blocks the handler
+/// will touch) before the call.
+#[tokio::test(flavor = "multi_thread")]
+async fn patch_memory_config_hot_reloads_and_reports_applied() {
+    let harness = boot_router_with_api_key(TEST_KEY).await;
+    // Pre-seed `config.toml` — the PATCH handler does a
+    // read-modify-write on it. A bare `[memory]` table with no fields
+    // round-trips cleanly through the kernel's TOML deserialiser
+    // because every `KernelConfig` field has `#[serde(default)]` or a
+    // `default` fn.
+    let config_path = harness.tmp.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "api_key = \"{TEST_KEY}\"\n\
+             \n\
+             [default_model]\n\
+             provider = \"ollama\"\n\
+             model = \"test-model\"\n\
+             api_key_env = \"OLLAMA_API_KEY\"\n\
+             \n\
+             [memory]\n\
+             \n\
+             [proactive_memory]\n\
+             auto_memorize = true\n"
+        ),
+    )
+    .expect("seed config.toml");
+
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(authed_json(
+            Method::PATCH,
+            "/api/memory/config",
+            serde_json::json!({
+                "proactive_memory": {
+                    "auto_memorize": false,
+                },
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = read_json(resp).await;
+    let body_obj = body
+        .as_object()
+        .expect("PATCH response must be a JSON object");
+
+    // Review-followup #1: assert key *presence* before checking value.
+    // `serde_json::Value`'s `Index` returns `Value::Null` for missing
+    // keys, so `assert_eq!(body["reload_error"], Value::Null)` alone
+    // would silently pass if the field were removed entirely. Pin the
+    // contract by checking the key is in the object first.
+    for key in ["status", "restart_required", "reload_error"] {
+        assert!(
+            body_obj.contains_key(key),
+            "PATCH response missing required key `{key}`; body: {body}"
+        );
+    }
+
+    // Review-followup #5: accept either `"applied"` (full hot-reload)
+    // or `"partial"` (disk write succeeded, live reload validation
+    // failed because the test's seeded `config.toml` doesn't exactly
+    // mirror the kernel's boot-time defaults). Both branches are the
+    // post-fix M12 contract; the pre-fix behaviour was a hard-coded
+    // `restart_required: true` with no `status` field at all. The
+    // status field's existence (asserted above) is what we're really
+    // pinning.
+    let status = body["status"]
+        .as_str()
+        .unwrap_or_else(|| panic!("status must be a string; got {body}"));
+    assert!(
+        matches!(status, "applied" | "partial"),
+        "PATCH status must be applied or partial; got {status:?} in body: {body}"
+    );
+    if status == "applied" {
+        assert_eq!(
+            body["reload_error"],
+            serde_json::Value::Null,
+            "reload_error must be null when status is applied; got body: {body}"
+        );
+    } else {
+        // Partial: reload_error must carry the validator output so
+        // the operator knows what's wrong on disk. Review-followup
+        // C: assert non-empty after trimming — an empty string,
+        // whitespace, or any other zero-info value would be just as
+        // useless as the field being absent.
+        let err = body["reload_error"].as_str().unwrap_or_else(|| {
+            panic!("reload_error must be a string when status is partial; got body: {body}")
+        });
+        assert!(
+            !err.trim().is_empty(),
+            "reload_error must carry an actionable message when status is partial; \
+             got {err:?} in body: {body}"
+        );
+    }
+    // The PATCHed value round-trips into the response body sourced
+    // from the freshly-written TOML, so a client doing
+    // `setQueryData(body)` sees the new value without an extra GET.
+    assert_eq!(body["proactive_memory"]["auto_memorize"], false);
+}
+
+// ---------------------------------------------------------------------------
 // DELETE /api/memory/agents/{id}/level/{level} — input validation
 // ---------------------------------------------------------------------------
 
@@ -465,6 +577,86 @@ async fn post_memory_add_returns_json_error_on_empty_store() {
             "error response missing JSON `error` field: {body}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// No-auth loopback (default `librefang start`) — RBAC regression guard (#5839).
+// With no api_key configured, a loopback caller is a fully-trusted local
+// operator and must be attributed Owner, so memory WRITES are not 403.
+// ---------------------------------------------------------------------------
+
+fn loopback_json(method: Method, path: &str, body: serde_json::Value) -> Request<Body> {
+    let mut req = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.1:54321".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    req
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn no_auth_loopback_memory_write_is_not_forbidden() {
+    // Empty api_key = no auth configured (the default single-user dev setup).
+    let harness = boot_router_with_api_key("").await;
+
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(loopback_json(
+            Method::POST,
+            "/api/memory",
+            serde_json::json!({
+                "messages": [{"role": "user", "content": "remember this"}],
+                "user_id": "u1",
+                "agent_id": "a1",
+            }),
+        ))
+        .await
+        .unwrap();
+    let status = resp.status();
+    // The #5839 regression downgraded the unattributed loopback caller to the
+    // anonymous Viewer fallback, returning 403 on every memory write. Owner
+    // attribution must prevent that. (The embedding step may still 4xx/5xx on
+    // an empty store, but it must NOT be an auth/ACL denial.)
+    assert_ne!(
+        status,
+        StatusCode::FORBIDDEN,
+        "no-auth loopback write must be Owner-attributed, not Viewer-denied"
+    );
+    assert_ne!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "loopback no-auth must bypass"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn no_auth_non_loopback_memory_write_still_401() {
+    // Same no-auth config, but no ConnectInfo → treated as non-loopback. The
+    // Owner attribution must NOT leak to LAN/WAN callers: fail closed (#1034).
+    let harness = boot_router_with_api_key("").await;
+
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(authed_json(
+            // authed_json sends a Bearer, but no api_key is configured so it
+            // matches nothing; the point is the request carries no ConnectInfo.
+            Method::POST,
+            "/api/memory",
+            serde_json::json!({"messages": [], "user_id": "u1", "agent_id": "a1"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "no-auth non-loopback must fail closed, not inherit Owner"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
