@@ -720,6 +720,12 @@ pub fn build_reload_plan_with_caps(
             field_changed(&old.auto_dream, &new.auto_dream),
             "auto_dream",
         );
+        // The RL-export hook reads `config.rl_export` live per turn, but the
+        // target (W&B / Tinker / Atropos credentials and base URLs) is an
+        // egress-security surface; classify conservatively as restart so an
+        // operator's intent to redirect / disable the export takes effect
+        // through the documented restart path rather than mid-session.
+        restart_if_changed(field_changed(&old.rl_export, &new.rl_export), "rl_export");
         restart_if_changed(field_changed(&old.audit, &new.audit), "audit");
         restart_if_changed(field_changed(&old.telemetry, &new.telemetry), "telemetry");
         restart_if_changed(
@@ -971,6 +977,7 @@ pub fn classified_reload_fields() -> std::collections::BTreeSet<&'static str> {
         "max_upload_size_bytes",
         "max_concurrent_bg_llm",
         "auto_dream",
+        "rl_export",
         "audit",
         "telemetry",
         "context_engine",

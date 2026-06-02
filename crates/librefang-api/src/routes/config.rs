@@ -2246,6 +2246,7 @@ pub fn ui_sections_overlay() -> serde_json::Value {
         {"key": "sanitize", "struct_field": "sanitize"},
         {"key": "inbox", "struct_field": "inbox"},
         {"key": "telemetry", "struct_field": "telemetry"},
+        {"key": "rl_export", "struct_field": "rl_export"},
         {"key": "prompt_intelligence", "struct_field": "prompt_intelligence"},
         {"key": "rate_limit", "struct_field": "rate_limit"},
         {"key": "tool_invoke", "struct_field": "tool_invoke"},

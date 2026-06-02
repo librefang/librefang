@@ -73,6 +73,7 @@ pub(super) const PER_AGENT_OVERRIDE_KEYS: &[&str] = &[
     "exec_policy",
     "max_history_messages",
     "proactive_memory",
+    "rl_export",
     "skill_workshop",
     "thinking",
     "tool_exec",
