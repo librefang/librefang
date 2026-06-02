@@ -41,8 +41,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Global flag set by the Ctrl+C handler.
 static CTRLC_PRESSED: AtomicBool = AtomicBool::new(false);
-const INIT_DEFAULT_CONFIG_TEMPLATE: &str = include_str!("../templates/init_default_config.toml");
-const LOG_RETENTION_DAYS: u64 = 7;
+// Re-exported via the command prelude; the `include_str!` path is relative to
+// this source file, so the const stays in `main.rs`.
+pub(crate) const INIT_DEFAULT_CONFIG_TEMPLATE: &str =
+    include_str!("../templates/init_default_config.toml");
 
 /// Install a Ctrl+C handler that force-exits the process.
 /// On Windows/MINGW, the default handler doesn't reliably interrupt blocking
@@ -672,13 +674,9 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        compare_release_tag, daemon_log_path_for_config, daemon_log_path_for_home,
-        detached_daemon_args, find_daemon_with_probe, is_valid_env_var_name, normalize_daemon_addr,
-        normalize_release_tag, parse_toml_integer, parse_version_core, pool_strategy_canon,
-        resolve_device_auth_start, resolve_hand_instance, AuthCommands, ChannelCommands, Cli,
-        Commands, DeviceAuthNextStep, GatewayCommands, MemoryCommands, ReleaseComparison,
-    };
+    // The items under test now live in `crate::commands::*`; pull them in via
+    // the command prelude (clap defs + every handler group + shared helpers).
+    use crate::commands::prelude::*;
     use clap::Parser;
     use serde_json::json;
     use std::ffi::OsString;

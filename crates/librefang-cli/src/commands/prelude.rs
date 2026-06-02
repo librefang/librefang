@@ -14,6 +14,7 @@
 
 pub(crate) use crate::cli::*;
 pub(crate) use crate::install_ctrlc_handler;
+pub(crate) use crate::INIT_DEFAULT_CONFIG_TEMPLATE;
 pub(crate) use super::common::*;
 pub(crate) use super::monitoring::*;
 pub(crate) use super::system::*;

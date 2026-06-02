@@ -7,6 +7,9 @@ use crate::commands::prelude::*;
 #[cfg(unix)]
 use std::os::unix::io::RawFd;
 
+/// Days of rotated daemon logs to keep before pruning.
+const LOG_RETENTION_DAYS: u64 = 7;
+
 /// Guard that tees all stdout/stderr to a log file in foreground mode.
 /// On drop, restores original stdout/stderr and joins the tee thread.
 #[cfg(unix)]
