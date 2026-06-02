@@ -1132,151 +1132,272 @@ pub async fn run_agent_loop_streaming(
                 let mut iteration_outcomes = ToolResultOutcomeSummary::default();
                 let mut committed_by_signal = false;
                 let total_tool_calls = response.tool_calls.len();
-                for (call_idx, tool_call) in response.tool_calls.iter().enumerate() {
-                    let mut tool_exec_ctx = ToolExecutionContext {
-                        manifest,
-                        loop_guard: &mut loop_guard,
-                        memory,
-                        session,
-                        kernel: kernel.as_ref(),
-                        available_tool_names: &staged.allowed_tool_names,
-                        available_tools,
-                        caller_id_str: &staged.caller_id_str,
-                        skill_registry,
-                        allowed_skills: &manifest.skills,
-                        mcp_connections,
-                        web_ctx,
-                        browser_ctx,
-                        hand_allowed_env: &hand_allowed_env,
-                        workspace_root,
-                        media_engine,
-                        media_drivers,
-                        tts_engine,
-                        docker_config,
-                        hooks,
-                        process_manager,
-                        process_registry,
-                        sender_user_id: sender_user_id.as_deref(),
-                        sender_channel: sender_channel.as_deref(),
-                        sender_chat_id: sender_chat_id.as_deref(),
-                        checkpoint_manager: checkpoint_manager.as_ref(),
-                        context_budget: &context_budget,
-                        context_engine,
-                        context_window_tokens: ctx_window,
-                        on_phase,
-                        decision_traces: &mut decision_traces,
-                        rationale_text: &staged.rationale_text,
-                        tools_recovered_from_text,
-                        iteration,
-                        streaming: true,
-                        agent_id_str: agent_id_str.as_str(),
-                        opts,
-                        interrupt: opts.interrupt.clone(),
-                        dangerous_command_checker: Some(&session_checker),
-                    };
-                    let executed = execute_single_tool_call(&mut tool_exec_ctx, tool_call).await?;
 
-                    // §A — capture owner_notice from notify_owner tool and
-                    // surface it on the live SSE stream so the gateway can
-                    // route it to OWNER_JID without waiting for turn end.
-                    if let Some(ref notice) = executed.result.owner_notice {
-                        pending_owner_notice = Some(match pending_owner_notice.take() {
-                            Some(prev) => format!("{prev}\n\n{notice}"),
-                            None => notice.clone(),
-                        });
+                // Execution-context constructor — rebuilt per dispatch step so
+                // its `&mut` borrows release before the between-step mid-turn
+                // signal check. See the non-streaming twin in `mod.rs`.
+                macro_rules! build_tool_exec_ctx {
+                    () => {
+                        ToolExecutionContext {
+                            manifest,
+                            loop_guard: &mut loop_guard,
+                            memory,
+                            session,
+                            kernel: kernel.as_ref(),
+                            available_tool_names: &staged.allowed_tool_names,
+                            available_tools,
+                            caller_id_str: &staged.caller_id_str,
+                            skill_registry,
+                            allowed_skills: &manifest.skills,
+                            mcp_connections,
+                            web_ctx,
+                            browser_ctx,
+                            hand_allowed_env: &hand_allowed_env,
+                            workspace_root,
+                            media_engine,
+                            media_drivers,
+                            tts_engine,
+                            docker_config,
+                            hooks,
+                            process_manager,
+                            process_registry,
+                            sender_user_id: sender_user_id.as_deref(),
+                            sender_channel: sender_channel.as_deref(),
+                            sender_chat_id: sender_chat_id.as_deref(),
+                            checkpoint_manager: checkpoint_manager.as_ref(),
+                            context_budget: &context_budget,
+                            context_engine,
+                            context_window_tokens: ctx_window,
+                            on_phase,
+                            decision_traces: &mut decision_traces,
+                            rationale_text: &staged.rationale_text,
+                            tools_recovered_from_text,
+                            iteration,
+                            streaming: true,
+                            agent_id_str: agent_id_str.as_str(),
+                            opts,
+                            interrupt: opts.interrupt.clone(),
+                            dangerous_command_checker: Some(&session_checker),
+                        }
+                    };
+                }
+
+                // Per-result staging + live SSE emission. Awaits the stream
+                // sends, so it stays an async block (not a closure) and is
+                // invoked in original tool-call index order by both paths —
+                // the streaming twin of `process_executed` in `mod.rs`.
+                // Returns `true` when the call was a hard error.
+                macro_rules! process_executed_streaming {
+                    ($executed:expr, $tool_name:expr) => {{
+                        let executed: &ExecutedToolCall = $executed;
+                        let tool_name: &str = $tool_name;
+
+                        // §A — owner_notice side-channel + live SSE emit.
+                        if let Some(ref notice) = executed.result.owner_notice {
+                            pending_owner_notice = Some(match pending_owner_notice.take() {
+                                Some(prev) => format!("{prev}\n\n{notice}"),
+                                None => notice.clone(),
+                            });
+                            if stream_tx
+                                .send(StreamEvent::OwnerNotice {
+                                    text: notice.clone(),
+                                })
+                                .await
+                                .is_err()
+                            {
+                                warn!(agent = %manifest.name, "Stream consumer disconnected during owner_notice emit");
+                            }
+                        }
+
+                        // Lazy-load side-channel (issue #3044).
+                        if let Some(def) = executed.result.loaded_tool.clone() {
+                            if !session_loaded_tools.iter().any(|t| t.name == def.name) {
+                                session_loaded_tools.push(def);
+                            }
+                        }
+
+                        // Layer 2: per-result budget — spill oversized outputs
+                        // to the artifact store (#3347 2/N + #2 follow-up).
+                        let budgeted_content = ToolBudgetEnforcer::new(
+                            tr_per_result,
+                            tr_per_turn,
+                            tr_max_artifact_bytes,
+                        )
+                        .maybe_persist_result(
+                            &executed.final_content,
+                            &executed.result.tool_use_id,
+                        );
+
+                        // Notify client of tool execution result. Emitted in
+                        // index order even though group members may finish out
+                        // of order (the group helper returns results sorted by
+                        // index, and both paths iterate that order).
+                        let preview: String = budgeted_content.chars().take(300).collect();
                         if stream_tx
-                            .send(StreamEvent::OwnerNotice {
-                                text: notice.clone(),
+                            .send(StreamEvent::ToolExecutionResult {
+                                name: tool_name.to_string(),
+                                result_preview: preview,
+                                is_error: executed.result.is_error,
                             })
                             .await
                             .is_err()
                         {
-                            warn!(agent = %manifest.name, "Stream consumer disconnected during owner_notice emit");
+                            warn!(agent = %manifest.name, "Stream consumer disconnected — continuing tool loop but will not stream further");
                         }
-                    }
 
-                    // Capture lazy-load side-channel (issue #3044) — the
-                    // streaming path, same rationale as the non-streaming
-                    // version above.
-                    if let Some(def) = executed.result.loaded_tool.clone() {
-                        if !session_loaded_tools.iter().any(|t| t.name == def.name) {
-                            session_loaded_tools.push(def);
-                        }
-                    }
-
-                    // Layer 2: per-result budget — spill oversized outputs to
-                    // the artifact store (#3347 2/N + #2 review-followup).
-                    let budgeted_content =
-                        ToolBudgetEnforcer::new(tr_per_result, tr_per_turn, tr_max_artifact_bytes)
-                            .maybe_persist_result(
-                                &executed.final_content,
-                                &executed.result.tool_use_id,
-                            );
-
-                    // Notify client of tool execution result (detect dead consumer)
-                    let preview: String = budgeted_content.chars().take(300).collect();
-                    if stream_tx
-                        .send(StreamEvent::ToolExecutionResult {
-                            name: tool_call.name.clone(),
-                            result_preview: preview,
+                        staged.append_result(ContentBlock::ToolResult {
+                            tool_use_id: executed.result.tool_use_id.clone(),
+                            tool_name: tool_name.to_string(),
+                            content: budgeted_content,
                             is_error: executed.result.is_error,
-                        })
-                        .await
-                        .is_err()
-                    {
-                        warn!(agent = %manifest.name, "Stream consumer disconnected — continuing tool loop but will not stream further");
+                            status: executed.result.status,
+                            approval_request_id: executed.result.approval_request_id.clone(),
+                        });
+
+                        let is_soft_error = executed.result.status.is_soft_error()
+                            || is_soft_error_content(&executed.result.content);
+                        executed.result.is_error && !is_soft_error
+                    }};
+                }
+
+                let parallel_enabled = opts
+                    .parallel_tools_config
+                    .as_ref()
+                    .map(|c| c.enabled)
+                    .unwrap_or(false);
+
+                if parallel_enabled && total_tool_calls > 1 {
+                    let cfg = opts.parallel_tools_config.as_ref().unwrap();
+                    let max_concurrent = cfg.max_concurrent as usize;
+                    let plan =
+                        crate::parallel_dispatch::plan_batch(&response.tool_calls, available_tools);
+                    let mut hard_error_hit = false;
+                    'groups: for group in &plan.groups {
+                        let mut tool_exec_ctx = build_tool_exec_ctx!();
+                        let group_results = execute_tool_group(
+                            &mut tool_exec_ctx,
+                            &response.tool_calls,
+                            group,
+                            max_concurrent,
+                        )
+                        .await?;
+                        drop(tool_exec_ctx);
+
+                        // Emit + stage results in original index order.
+                        for (idx, executed) in &group_results {
+                            let tool_name = response.tool_calls[*idx].name.clone();
+                            let is_hard_error = process_executed_streaming!(executed, &tool_name);
+                            if is_hard_error && !hard_error_hit {
+                                warn!(
+                                    tool = %tool_name,
+                                    "Tool execution failed — skipping remaining tool calls (streaming)"
+                                );
+                                hard_error_hit = true;
+                            }
+                        }
+
+                        if hard_error_hit {
+                            let executed_ids: std::collections::HashSet<&str> = staged
+                                .tool_result_blocks
+                                .iter()
+                                .filter_map(|b| match b {
+                                    ContentBlock::ToolResult { tool_use_id, .. } => {
+                                        Some(tool_use_id.as_str())
+                                    }
+                                    _ => None,
+                                })
+                                .collect();
+                            let remaining: Vec<ToolCall> = response
+                                .tool_calls
+                                .iter()
+                                .filter(|tc| !executed_ids.contains(tc.id.as_str()))
+                                .cloned()
+                                .collect();
+                            append_skipped_tool_results(
+                                &mut staged.tool_result_blocks,
+                                &remaining,
+                                "previous tool call in the same batch failed with a hard error",
+                            );
+                            break 'groups;
+                        }
+
+                        if let Some(flushed_outcomes) = handle_mid_turn_signal(
+                            pending_messages,
+                            &manifest.name,
+                            session,
+                            &mut messages,
+                            &mut staged,
+                        ) {
+                            let executed_ids: std::collections::HashSet<&str> = staged
+                                .tool_result_blocks
+                                .iter()
+                                .filter_map(|b| match b {
+                                    ContentBlock::ToolResult { tool_use_id, .. } => {
+                                        Some(tool_use_id.as_str())
+                                    }
+                                    _ => None,
+                                })
+                                .collect();
+                            let remaining: Vec<ToolCall> = response
+                                .tool_calls
+                                .iter()
+                                .filter(|tc| !executed_ids.contains(tc.id.as_str()))
+                                .cloned()
+                                .collect();
+                            append_skipped_tool_results(
+                                &mut staged.tool_result_blocks,
+                                &remaining,
+                                "tool batch interrupted by a mid-turn user message",
+                            );
+                            iteration_outcomes.accumulate(flushed_outcomes);
+                            committed_by_signal = true;
+                            break 'groups;
+                        }
                     }
+                } else {
+                    for (call_idx, tool_call) in response.tool_calls.iter().enumerate() {
+                        let mut tool_exec_ctx = build_tool_exec_ctx!();
+                        let executed =
+                            execute_single_tool_call(&mut tool_exec_ctx, tool_call).await?;
+                        drop(tool_exec_ctx);
 
-                    staged.append_result(ContentBlock::ToolResult {
-                        tool_use_id: executed.result.tool_use_id.clone(),
-                        tool_name: tool_call.name.clone(),
-                        content: budgeted_content,
-                        is_error: executed.result.is_error,
-                        status: executed.result.status,
-                        approval_request_id: executed.result.approval_request_id.clone(),
-                    });
+                        let is_hard_error = process_executed_streaming!(&executed, &tool_call.name);
 
-                    // Stop executing remaining tool calls on failure (#948)
-                    // but not for approval denials or sandbox security rejections —
-                    // those should let the LLM recover and retry with a valid path (#1861)
-                    // Issue #2381: stub the remaining tool_calls so every tool_call_id
-                    // has a matching tool_result. See the non-streaming branch above for
-                    // the full explanation of why this matters.
-                    let is_soft_error = executed.result.status.is_soft_error()
-                        || is_soft_error_content(&executed.result.content);
-                    if executed.result.is_error && !is_soft_error {
-                        warn!(
-                            tool = %tool_call.name,
-                            "Tool execution failed — skipping remaining tool calls (streaming)"
-                        );
-                        append_skipped_tool_results(
-                            &mut staged.tool_result_blocks,
-                            &response.tool_calls[call_idx + 1..],
-                            "previous tool call in the same batch failed with a hard error",
-                        );
-                        break;
-                    }
-
-                    // Mid-turn message injection (#956): check for
-                    // pending user messages between tool calls (streaming
-                    // variant).
-                    if let Some(flushed_outcomes) = handle_mid_turn_signal(
-                        pending_messages,
-                        &manifest.name,
-                        session,
-                        &mut messages,
-                        &mut staged,
-                    ) {
-                        if call_idx + 1 < total_tool_calls {
+                        // Stop executing remaining tool calls on failure (#948)
+                        // but not for approval denials or sandbox security
+                        // rejections (#1861). Issue #2381: stub the remaining
+                        // tool_calls so every tool_call_id has a matching
+                        // tool_result.
+                        if is_hard_error {
                             append_skipped_tool_results(
                                 &mut staged.tool_result_blocks,
                                 &response.tool_calls[call_idx + 1..],
-                                "tool batch interrupted by a mid-turn user message",
+                                "previous tool call in the same batch failed with a hard error",
                             );
+                            break;
                         }
-                        iteration_outcomes.accumulate(flushed_outcomes);
-                        committed_by_signal = true;
-                        break;
+
+                        // Mid-turn message injection (#956): check for
+                        // pending user messages between tool calls (streaming
+                        // variant).
+                        if let Some(flushed_outcomes) = handle_mid_turn_signal(
+                            pending_messages,
+                            &manifest.name,
+                            session,
+                            &mut messages,
+                            &mut staged,
+                        ) {
+                            if call_idx + 1 < total_tool_calls {
+                                append_skipped_tool_results(
+                                    &mut staged.tool_result_blocks,
+                                    &response.tool_calls[call_idx + 1..],
+                                    "tool batch interrupted by a mid-turn user message",
+                                );
+                            }
+                            iteration_outcomes.accumulate(flushed_outcomes);
+                            committed_by_signal = true;
+                            break;
+                        }
                     }
                 }
 

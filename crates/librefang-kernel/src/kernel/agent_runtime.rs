@@ -731,7 +731,7 @@ impl LibreFangKernel {
         );
 
         // Bubble the DB-remove failure last so the operator hears about it
-        // (#5117); on success this is a no-op. routes/agents.rs::kill_agent
+        // (#5117); on success this is a no-op. routes/agents/lifecycle.rs::kill_agent
         // maps a non-AgentNotFound KernelError to ApiErrorResponse::internal
         // → HTTP 500, so the DELETE no longer returns a false 200 OK.
         db_remove_result.map_err(KernelError::LibreFang)?;
