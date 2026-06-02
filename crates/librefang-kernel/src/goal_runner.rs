@@ -190,10 +190,14 @@ fn delete_persisted_run(store: &Option<GoalRunStore>, goal_id: GoalId) {
     }
 }
 
-/// A single in-flight goal run: the spawned loop task plus its observable state
+/// A single goal run entry: the spawned loop task plus its observable state
 /// and a cooperative stop flag.
 struct RunHandle {
-    task: JoinHandle<()>,
+    /// The spawned loop task. `None` for a terminal entry reconstructed at boot
+    /// by [`GoalRunner::recover_stale_runs`] — that run's process already died,
+    /// so there is no live loop to abort; the entry exists only so the demoted
+    /// `Stopped` state stays observable via [`GoalRunner::state`].
+    task: Option<JoinHandle<()>>,
     state: Arc<Mutex<GoalRunState>>,
     stop: Arc<AtomicBool>,
     /// Monotonic id for this run, used by the task's self-cleanup so it only
@@ -254,7 +258,10 @@ impl GoalRunner {
     pub fn stop(&self, goal_id: GoalId) -> bool {
         if let Some((_, handle)) = self.runs.remove(&goal_id) {
             handle.stop.store(true, Ordering::SeqCst);
-            handle.task.abort();
+            // A recovered terminal entry has no live loop task to abort.
+            if let Some(task) = handle.task {
+                task.abort();
+            }
             delete_persisted_run(&self.store, goal_id);
             true
         } else {
@@ -334,7 +341,7 @@ impl GoalRunner {
         self.runs.insert(
             goal_id,
             RunHandle {
-                task,
+                task: Some(task),
                 state,
                 stop,
                 generation,
@@ -425,6 +432,49 @@ impl GoalRunner {
             if let Err(e) = store.save_run(&recovered_row) {
                 warn!(goal_id = %goal_id, "Failed to persist recovered goal run: {e}");
                 continue;
+            }
+            // Load the demoted row back into the in-memory registry so the
+            // runtime read path (`state` → `goal_run_status` → GET
+            // /goals/{id}/run) surfaces "stopped — interrupted by daemon
+            // restart" after a restart, instead of returning `None` for a row
+            // that exists only on disk. Mirrors `WorkflowEngine::load_runs`,
+            // which loads persisted rows back into memory before the stale
+            // sweep so demoted runs stay observable. The entry carries no live
+            // task (`task: None`) and is purely a terminal placeholder — the
+            // run is **not** resumed or re-executed.
+            match recovered_row.agent_id.parse::<AgentId>() {
+                Ok(agent_id) => {
+                    let state = GoalRunState {
+                        goal_id,
+                        agent_id,
+                        phase: GoalRunPhase::Stopped,
+                        iteration: recovered_row.iteration.max(0) as u32,
+                        max_iterations: recovered_row.max_iterations.max(0) as u32,
+                        last_progress: recovered_row.last_progress.clamp(0, 100) as u8,
+                        last_error: recovered_row.last_error.clone(),
+                        started_at,
+                        updated_at: now,
+                    };
+                    self.runs.insert(
+                        goal_id,
+                        RunHandle {
+                            task: None,
+                            state: Arc::new(Mutex::new(state)),
+                            stop: Arc::new(AtomicBool::new(true)),
+                            generation: self.next_gen.fetch_add(1, Ordering::SeqCst),
+                        },
+                    );
+                }
+                Err(_) => {
+                    // The row was demoted on disk; only the in-memory surfacing
+                    // is skipped. Operators still see the corrected DB row.
+                    warn!(
+                        goal_id = %goal_id,
+                        agent_id = %recovered_row.agent_id,
+                        "Recovered goal run has unparseable agent id; demoted on \
+                         disk but not surfaced via the runtime read path"
+                    );
+                }
             }
             recovered.push(goal_id);
         }
@@ -1023,6 +1073,65 @@ mod tests {
             row.last_error,
             Some("Interrupted by daemon restart".to_string())
         );
+    }
+
+    #[test]
+    fn recovered_stale_run_is_observable_via_runtime_read_path() {
+        // Regression: a stale `Running` row demoted to `Stopped` at boot must
+        // also be loaded back into the in-memory registry so `state()` — the
+        // runtime read path behind `goal_run_status` and GET /goals/{id}/run —
+        // surfaces it, instead of returning `None` for a row that exists only
+        // on disk (write-only invisibility). Mirrors WorkflowEngine, which
+        // loads persisted rows back into memory before the stale sweep.
+        let substrate = MemorySubstrate::open_in_memory(0.01).unwrap();
+        let store = store_from(&substrate);
+        let goal_id = GoalId::new();
+        let agent_id = AgentId::new();
+
+        let stale_started = Utc::now() - chrono::Duration::seconds(3600);
+        store
+            .save_run(&GoalRunRow {
+                goal_id: goal_id.to_string(),
+                agent_id: agent_id.to_string(),
+                phase: GoalRunPhase::Running.to_string(),
+                iteration: 5,
+                max_iterations: 25,
+                last_progress: 50,
+                last_error: None,
+                started_at: stale_started.to_rfc3339(),
+                updated_at: stale_started.to_rfc3339(),
+            })
+            .unwrap();
+
+        let (_tx, rx) = watch::channel(false);
+        let runner = GoalRunner::new_with_store(rx, store.clone());
+
+        // Before recovery the registry is empty — nothing observable yet.
+        assert!(runner.state(goal_id).is_none());
+
+        let recovered = runner.recover_stale_runs(Duration::from_secs(600));
+        assert_eq!(recovered, vec![goal_id]);
+
+        // The demoted run is now visible through the runtime read path, not
+        // just present in the DB, and carries the interrupted marker.
+        let observed = runner
+            .state(goal_id)
+            .expect("recovered run must be observable via the runtime read path");
+        assert_eq!(observed.phase, GoalRunPhase::Stopped);
+        assert_eq!(observed.agent_id, agent_id);
+        assert_eq!(observed.iteration, 5);
+        assert_eq!(observed.max_iterations, 25);
+        assert_eq!(observed.last_progress, 50);
+        assert_eq!(
+            observed.last_error,
+            Some("Interrupted by daemon restart".to_string())
+        );
+
+        // The terminal placeholder must not shadow a future live run: an
+        // operator stop clears it (start() calls stop() before inserting the
+        // new run), restoring the empty-registry invariant.
+        assert!(runner.stop(goal_id), "stop() removes the recovered entry");
+        assert!(runner.state(goal_id).is_none());
     }
 
     #[test]
