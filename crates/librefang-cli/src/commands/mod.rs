@@ -11,3 +11,8 @@ pub(crate) mod common;
 pub(crate) mod daemon;
 pub(crate) mod status;
 pub(crate) mod init;
+pub(crate) mod agent;
+pub(crate) mod skill;
+pub(crate) mod hand;
+pub(crate) mod channel;
+pub(crate) mod mcp_cmds;

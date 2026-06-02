@@ -15,6 +15,11 @@
 pub(crate) use crate::cli::*;
 pub(crate) use crate::install_ctrlc_handler;
 pub(crate) use super::common::*;
+pub(crate) use super::agent::*;
+pub(crate) use super::skill::*;
+pub(crate) use super::hand::*;
+pub(crate) use super::channel::*;
+pub(crate) use super::mcp_cmds::*;
 
 // Command groups — re-exported so the dispatch match in `main.rs` and any
 // cross-group handler call resolves without per-call-site imports.
