@@ -2279,7 +2279,7 @@ mod tests {
     }
 
     /// Minimal `AppState` for unit-testing the audit-emit path of
-    /// [`auth_denied`]. Mirrors the fixture in `routes/agents.rs` but
+    /// [`auth_denied`]. Mirrors the fixture in `routes/agents/mod.rs` but
     /// keeps fields to the bare minimum we touch here.
     fn audit_test_app_state() -> (Arc<AppState>, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();

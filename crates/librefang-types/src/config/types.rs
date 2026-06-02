@@ -6956,8 +6956,9 @@ pub struct ParallelToolsConfig {
     pub enabled: bool,
 
     /// Cap on concurrent tool calls within a single bucket. `0` =
-    /// uncapped (use the bucket size). The dispatcher honours this
-    /// when launching futures via `join_all`.
+    /// uncapped (use the bucket size). The dispatcher honours this with a
+    /// `FuturesUnordered` prime/backfill loop (`join_all` cannot bound
+    /// concurrency, so it is not used).
     pub max_concurrent: u32,
 
     /// Default `ParallelSafety` class assigned to MCP tools whose
