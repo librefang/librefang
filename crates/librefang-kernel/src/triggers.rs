@@ -1375,9 +1375,7 @@ fn agent_identity_filter_matches(
     };
     match filter.as_str() {
         "self" => match owner {
-            Some((id, name)) => {
-                candidate == id.to_string() || name.as_deref() == Some(candidate)
-            }
+            Some((id, name)) => candidate == id.to_string() || name.as_deref() == Some(candidate),
             None => false,
         },
         other => candidate == other,
@@ -2569,7 +2567,9 @@ mod tests {
         engine
             .register(
                 owner,
-                TriggerPattern::TaskClaimed { creator_match: None },
+                TriggerPattern::TaskClaimed {
+                    creator_match: None,
+                },
                 "notify {{event}}".to_string(),
                 0,
             )
