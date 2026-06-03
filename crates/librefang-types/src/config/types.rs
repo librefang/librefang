@@ -2023,6 +2023,16 @@ pub struct ExecPolicy {
     /// prompts. When `true`, a command like `env` (every chained base in
     /// `safe_bins`) executes without prompting, while any non-safe base
     /// (e.g. `env; curl …`) still routes through approval.
+    ///
+    /// Security trade-off when enabling: you are replacing the per-command
+    /// approval prompt with the argument-blind allowlist + dangerous-command
+    /// denylist. So a read-capable `safe_bin` (`cat`, `tail`, `head`) can read
+    /// arbitrary files into the agent's context with no prompt — only put a
+    /// binary in `safe_bins` if you accept that for *any* arguments. Never put
+    /// a shell wrapper (`sh`, `bash`, `zsh`) in `safe_bins`: it would let the
+    /// outer base pass while the real command hides in `-c "…"`. (The skip is
+    /// gated to a strict subset of the execution allowlist — metacharacters and
+    /// wrappers are still rejected — but the approval prompt is gone.)
     #[serde(default)]
     pub safe_bins_skip_approval: bool,
     /// Global command allowlist (when mode = allowlist).

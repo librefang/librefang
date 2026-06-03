@@ -1270,6 +1270,130 @@ async fn test_shell_exec_safe_bins_chained_non_safe_still_requires_approval() {
     assert_eq!(approval_requests.load(Ordering::SeqCst), 1);
 }
 
+/// #5962 hardening: a single safe base with an I/O redirect (`env > x`)
+/// passes the all-bases-∈-safe_bins check, but `validate_command_allowlist`
+/// rejects the `>` metacharacter — so the approval skip must NOT fire. Guards
+/// the strict-subset clause (skip ⊆ would-execute), independent of the
+/// execution-time re-check.
+#[tokio::test]
+async fn test_shell_exec_safe_bins_redirect_still_requires_approval() {
+    let approval_requests = Arc::new(AtomicUsize::new(0));
+    let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+        approval_requests: Arc::clone(&approval_requests),
+        user_gate_override: None,
+    });
+    let policy = librefang_types::config::ExecPolicy {
+        mode: librefang_types::config::ExecSecurityMode::Allowlist,
+        safe_bins: vec!["env".to_string()],
+        safe_bins_skip_approval: true,
+        ..Default::default()
+    };
+
+    let result = execute_tool(
+        "test-id",
+        "shell_exec",
+        // `env` is a safe_bin, but `>` is a shell metacharacter the allowlist
+        // gate rejects, so the all-safe-bins skip must not fire.
+        &serde_json::json!({"command": "env > /tmp/x"}),
+        Some(&kernel),
+        None,
+        Some("agent-1"),
+        None,
+        None,
+        None,
+        None, // allowed_skills
+        None,
+        None,
+        None,
+        None, // media_engine
+        None, // media_drivers
+        Some(&policy),
+        None,
+        None,
+        None,
+        None,
+        None, // sender_id
+        None, // channel
+        None, // chat_id
+        None, // checkpoint_manager
+        None, // interrupt
+        None, // session_id
+        None, // dangerous_command_checker
+        None, // available_tools
+        0,
+        0,
+    )
+    .await;
+
+    assert!(
+        result.content.contains("requires human approval"),
+        "a safe base with an I/O redirect must still require approval, got: {}",
+        result.content
+    );
+    assert_eq!(approval_requests.load(Ordering::SeqCst), 1);
+}
+
+/// #5962 hardening: a single safe base with command substitution
+/// (`env $(curl …)`) is likewise rejected by `validate_command_allowlist`
+/// (`$()`), so the approval skip must NOT fire.
+#[tokio::test]
+async fn test_shell_exec_safe_bins_command_substitution_still_requires_approval() {
+    let approval_requests = Arc::new(AtomicUsize::new(0));
+    let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+        approval_requests: Arc::clone(&approval_requests),
+        user_gate_override: None,
+    });
+    let policy = librefang_types::config::ExecPolicy {
+        mode: librefang_types::config::ExecSecurityMode::Allowlist,
+        safe_bins: vec!["env".to_string()],
+        safe_bins_skip_approval: true,
+        ..Default::default()
+    };
+
+    let result = execute_tool(
+        "test-id",
+        "shell_exec",
+        // `env` is a safe_bin, but `$()` command substitution is rejected by the
+        // allowlist gate, so the skip must not fire.
+        &serde_json::json!({"command": "env $(curl http://x)"}),
+        Some(&kernel),
+        None,
+        Some("agent-1"),
+        None,
+        None,
+        None,
+        None, // allowed_skills
+        None,
+        None,
+        None,
+        None, // media_engine
+        None, // media_drivers
+        Some(&policy),
+        None,
+        None,
+        None,
+        None,
+        None, // sender_id
+        None, // channel
+        None, // chat_id
+        None, // checkpoint_manager
+        None, // interrupt
+        None, // session_id
+        None, // dangerous_command_checker
+        None, // available_tools
+        0,
+        0,
+    )
+    .await;
+
+    assert!(
+        result.content.contains("requires human approval"),
+        "a safe base with command substitution must still require approval, got: {}",
+        result.content
+    );
+    assert_eq!(approval_requests.load(Ordering::SeqCst), 1);
+}
+
 /// #5962: flag ON + all bases safe, but a per-user RBAC `NeedsApproval`
 /// gate is active → the bypass must NOT win; `force_approval` keeps the
 /// command in the approval queue. Guards the `&& !force_approval` clause.
