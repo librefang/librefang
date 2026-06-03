@@ -33,6 +33,7 @@ pub use librefang_kernel_metering as metering;
 pub mod orchestration;
 pub mod pairing;
 pub mod registry;
+pub mod rl_export;
 pub use librefang_kernel_router as router;
 pub mod scheduler;
 pub mod session_lifecycle;
