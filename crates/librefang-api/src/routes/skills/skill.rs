@@ -353,43 +353,38 @@ pub async fn approve_pending_candidate(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
+    // `skills_root` is still needed by the `AlreadyInstalled` phantom-vs-collision
+    // disambiguation branch below, which reads the candidate + active skill body
+    // directly off disk.
     let skills_root = state.kernel.home_dir().join("skills");
-    // Capture the creating agent id BEFORE promotion: `approve_candidate`
-    // deletes the pending TOML on success, after which `agent_id` is no
-    // longer recoverable. Best-effort — a read failure here must not block
-    // the approve (auto-assign is a convenience, not a precondition).
+    // Capture the creating agent id BEFORE promotion: the kernel approve
+    // deletes the pending TOML on success, and the phantom-recovery arm
+    // below (AlreadyInstalled) still needs it to converge the best-effort
+    // auto-assign. A read failure here must not block the approve.
     let creator_agent_id =
         match librefang_kernel::skill_workshop::storage::load_candidate(&skills_root, &id) {
             Ok(c) => Some(c.agent_id),
             Err(_) => None,
         };
-    match librefang_kernel::skill_workshop::storage::approve_candidate(
-        &skills_root,
-        &skills_root,
-        &id,
-    ) {
-        Ok(result) => {
-            // Successful promotion landed a new directory under
-            // `skills_root`; refresh the in-memory registry so the next
-            // turn's prompt build sees the new skill.
-            state.kernel.reload_skills();
-            // Auto-assign the promoted skill to the agent that produced it
-            // so the workshop loop (capture → review → approve → use)
-            // closes without a manual `agent.toml` edit (#5989). Best-effort:
-            // logs and continues if the agent was deleted between capture
-            // and approval, so the approve still returns 200.
-            assign_skill_to_creator(&state, creator_agent_id.as_deref(), &result.skill_name);
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "status": "approved",
-                    "candidate_id": id,
-                    "skill_name": result.skill_name,
-                    "version": result.version,
-                    "message": result.message,
-                })),
-            )
-        }
+    // Promote through the kernel so a CREATE is also auto-assigned to the
+    // creating agent's allowlist (#5844 / #5989): the kernel method loads
+    // the candidate, calls approve_candidate (re-running the injection
+    // scan), reloads the registry, and appends the new skill to the owner
+    // agent's allowlist when the candidate is a create, clearing
+    // skills_disabled so it goes live. The AlreadyInstalled arm below
+    // handles phantom recovery, where the kernel errored and did not
+    // assign, so it re-runs the route-level best-effort assign itself.
+    match state.kernel.approve_pending_skill(&id) {
+        Ok(result) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "approved",
+                "candidate_id": id,
+                "skill_name": result.skill_name,
+                "version": result.version,
+                "message": result.message,
+            })),
+        ),
         Err(librefang_kernel::skill_workshop::WorkshopError::InvalidId(_)) => (
             StatusCode::BAD_REQUEST,
             Json(

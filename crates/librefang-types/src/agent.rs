@@ -1752,6 +1752,21 @@ pub struct SkillWorkshopConfig {
     /// operator who configured zero expecting the disabled meaning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_pending_age_days: Option<u32>,
+    /// How background skill evolution (`auto_evolve` / `background_skill_review`)
+    /// routes its mutations.
+    ///
+    /// - [`EvolutionMode::Free`] (default) preserves today's behavior: a
+    ///   `create` goes to the pending queue (#5800) while an `update` / `patch`
+    ///   to an already-approved skill applies directly.
+    /// - [`EvolutionMode::Controlled`] sends *every* mutation — create, update,
+    ///   and patch — to the pending queue so a human approves each one. The
+    ///   update/patch then crosses the same `SkillVerifier` prompt-injection
+    ///   scan that `save_candidate` runs for creates (#5844).
+    ///
+    /// Per-agent only: lives in `agent.toml` / `HAND.toml [agents.<name>]`,
+    /// never `config.toml` (#5476).
+    #[serde(default)]
+    pub evolution_mode: EvolutionMode,
 }
 
 impl Default for SkillWorkshopConfig {
@@ -1772,8 +1787,32 @@ impl Default for SkillWorkshopConfig {
             // No TTL by default — the cap is the only aging mechanism
             // unless the operator opts in.
             max_pending_age_days: None,
+            // `free` preserves today's behavior: creates queue (#5800),
+            // updates/patches apply directly. Opt into `controlled` to
+            // route every mutation through the pending queue (#5844).
+            evolution_mode: EvolutionMode::Free,
         }
     }
+}
+
+/// How background skill evolution routes its mutations (#5819 / #5844).
+///
+/// Resolved per-agent from `SkillWorkshopConfig::evolution_mode` (set in
+/// `agent.toml` / `HAND.toml [agents.<name>]`, never `config.toml` — #5476).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EvolutionMode {
+    /// Default — preserves today's behavior. A reviewer `create` is routed
+    /// to the pending queue (#5800); an `update` / `patch` to an existing,
+    /// already-approved skill applies directly via `evolution::update_skill`
+    /// / `patch_skill`.
+    #[default]
+    Free,
+    /// All mutations — create, update, and patch — are routed to the pending
+    /// queue for explicit human approval. Updates/patches cross the same
+    /// `SkillVerifier` prompt-injection scan creates already do (#5844), and
+    /// nothing reaches the active registry without an approve.
+    Controlled,
 }
 
 /// What happens to a positively-classified skill workshop candidate.

@@ -19,7 +19,9 @@ use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use chrono::Utc;
 use librefang_api::routes::{self, AppState};
-use librefang_kernel::skill_workshop::candidate::{CandidateSkill, CaptureSource, Provenance};
+use librefang_kernel::skill_workshop::candidate::{
+    CandidateKind, CandidateSkill, CaptureSource, Provenance,
+};
 use librefang_kernel::skill_workshop::storage;
 use librefang_kernel::AgentSubsystemApi;
 use librefang_kernel::MemorySubsystemApi;
@@ -103,6 +105,10 @@ fn fixture_candidate(agent_id: &str, id: &str) -> CandidateSkill {
             assistant_response_excerpt: Some("Got it.".to_string()),
             turn_index: 1,
         },
+        kind: CandidateKind::Create,
+        target_skill_id: None,
+        current_version: None,
+        proposed_version: None,
     }
 }
 
@@ -642,8 +648,8 @@ async fn auto_policy_promotes_to_active_and_reloads_registry() {
     use librefang_kernel::skill_workshop;
     use librefang_memory::session::Session;
     use librefang_types::agent::{
-        AgentEntry, AgentId, AgentManifest, AgentMode, AgentState, ApprovalPolicy, ReviewMode,
-        SessionId, SkillWorkshopConfig,
+        AgentEntry, AgentId, AgentManifest, AgentMode, AgentState, ApprovalPolicy, EvolutionMode,
+        ReviewMode, SessionId, SkillWorkshopConfig,
     };
     use librefang_types::message::Message;
 
@@ -671,6 +677,7 @@ async fn auto_policy_promotes_to_active_and_reloads_registry() {
             review_mode: ReviewMode::Heuristic,
             max_pending: 20,
             max_pending_age_days: None,
+            evolution_mode: EvolutionMode::Free,
         },
         ..Default::default()
     };
@@ -788,6 +795,85 @@ async fn auto_policy_promotes_to_active_and_reloads_registry() {
     );
 }
 
+/// Approving a pending CREATE through the kernel's `approve_pending_skill`
+/// (the path the `POST /api/skills/pending/{id}/approve` route now uses)
+/// auto-assigns the promoted skill to the creating agent's allowlist (#5844).
+/// An agent with a non-empty `skills` allowlist can then actually use the
+/// skill it created.
+#[tokio::test(flavor = "multi_thread")]
+async fn approve_create_auto_assigns_skill_to_creator_allowlist() {
+    use librefang_kernel::skill_workshop::storage;
+    use librefang_types::agent::{
+        AgentEntry, AgentId, AgentManifest, AgentMode, AgentState, EvolutionMode, SessionId,
+        SkillWorkshopConfig,
+    };
+
+    let (kernel, _tmp) = MockKernelBuilder::new().build();
+    let skills_root = kernel.home_dir().join("skills");
+
+    let agent_id = AgentId::new();
+    let session_id = SessionId::new();
+    let manifest = AgentManifest {
+        name: "allowlist_creator".to_string(),
+        description: "test".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        // Non-empty allowlist → auto-assign is meaningful.
+        skills: vec!["preexisting".to_string()],
+        skill_workshop: SkillWorkshopConfig {
+            enabled: true,
+            evolution_mode: EvolutionMode::Free,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let entry = AgentEntry {
+        id: agent_id,
+        name: "allowlist_creator".to_string(),
+        manifest,
+        state: AgentState::Running,
+        mode: AgentMode::default(),
+        created_at: Utc::now(),
+        last_active: Utc::now(),
+        session_id,
+        ..Default::default()
+    };
+    kernel
+        .agent_registry_ref()
+        .register(entry)
+        .expect("register agent");
+
+    // Seed a pending CREATE candidate owned by this agent.
+    let mut candidate = fixture_candidate(&agent_id.to_string(), &uuid::Uuid::new_v4().to_string());
+    candidate.name = "agent_made_skill".to_string();
+    candidate.kind = CandidateKind::Create;
+    let cand_id = candidate.id.clone();
+    storage::save_candidate(&skills_root, &candidate, 20, None).expect("save create candidate");
+
+    // Approve via the kernel path the route uses.
+    let result = kernel
+        .approve_pending_skill(&cand_id)
+        .expect("approve should succeed");
+    assert_eq!(result.skill_name, "agent_made_skill");
+
+    // The creating agent's allowlist now contains the new skill, alongside
+    // the pre-existing entry.
+    let skills = kernel
+        .agent_registry_ref()
+        .get(agent_id)
+        .expect("agent still registered")
+        .manifest
+        .skills;
+    assert!(
+        skills.contains(&"agent_made_skill".to_string()),
+        "created skill must be auto-assigned to creator allowlist; got {skills:?}"
+    );
+    assert!(
+        skills.contains(&"preexisting".to_string()),
+        "pre-existing allowlist entry must be preserved; got {skills:?}"
+    );
+}
+
 /// Regression test for the "orphan-pending death loop" corner: if a
 /// previous `evolution::create_skill` attempt failed and left an
 /// orphan pending file behind, the next turn's auto-promote attempt
@@ -808,8 +894,8 @@ async fn auto_policy_recovers_orphaned_pending_via_retry() {
     use librefang_kernel::skill_workshop::{self, candidate::CandidateSkill, storage};
     use librefang_memory::session::Session;
     use librefang_types::agent::{
-        AgentEntry, AgentId, AgentManifest, AgentMode, AgentState, ApprovalPolicy, ReviewMode,
-        SessionId, SkillWorkshopConfig,
+        AgentEntry, AgentId, AgentManifest, AgentMode, AgentState, ApprovalPolicy, EvolutionMode,
+        ReviewMode, SessionId, SkillWorkshopConfig,
     };
     use librefang_types::message::Message;
 
@@ -830,6 +916,7 @@ async fn auto_policy_recovers_orphaned_pending_via_retry() {
             review_mode: ReviewMode::Heuristic,
             max_pending: 20,
             max_pending_age_days: None,
+            evolution_mode: EvolutionMode::Free,
         },
         ..Default::default()
     };
@@ -871,6 +958,10 @@ async fn auto_policy_recovers_orphaned_pending_via_retry() {
             assistant_response_excerpt: hit.assistant_response_excerpt.clone(),
             turn_index: 1,
         },
+        kind: CandidateKind::Create,
+        target_skill_id: None,
+        current_version: None,
+        proposed_version: None,
     };
     storage::save_candidate(&skills_root_path, &orphan, 20, None)
         .expect("seed orphan pending file");

@@ -647,6 +647,10 @@ mod tests {
                 assistant_response_excerpt: None,
                 turn_index: 1,
             },
+            kind: crate::skill_workshop::candidate::CandidateKind::Create,
+            target_skill_id: None,
+            current_version: None,
+            proposed_version: None,
         }
     }
 

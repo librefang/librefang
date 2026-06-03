@@ -44,6 +44,44 @@ pub struct CandidateSkill {
     pub prompt_context: String,
     /// Trace back to the conversation turn that produced this candidate.
     pub provenance: Provenance,
+    /// Whether this draft creates a brand-new skill or proposes an update to
+    /// an existing one (#5844 / #5819). Defaults to [`CandidateKind::Create`]
+    /// so pending drafts written before this field existed still deserialize.
+    #[serde(default)]
+    pub kind: CandidateKind,
+    /// For an [`CandidateKind::Update`] draft: the name/id of the existing,
+    /// already-installed skill this draft proposes to replace. `None` for a
+    /// create. The actual old-vs-new diff is computed at display time (a later
+    /// PR) — this only records the target so the reviewer / dashboard can
+    /// locate it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_skill_id: Option<String>,
+    /// For an update draft: the current on-disk version of `target_skill_id`
+    /// at capture time. `None` for a create or when the version is unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_version: Option<String>,
+    /// For an update draft: the version the reviewer proposes bumping to on
+    /// approval. `None` when the bump is decided at approval time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed_version: Option<String>,
+}
+
+/// Whether a [`CandidateSkill`] models a new-skill create or an update to an
+/// existing skill (#5844 / #5819).
+///
+/// Serialized lowercase (`create` / `update`) and defaults to `Create` so the
+/// field can be added to the persisted TOML without breaking older drafts on
+/// disk under `~/.librefang/skills/pending/<agent>/<uuid>.toml`.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CandidateKind {
+    /// A brand-new skill. Approval routes through `evolution::create_skill`.
+    #[default]
+    Create,
+    /// An update/patch to an existing skill (`target_skill_id`). Carried
+    /// through the pending queue when the agent runs in
+    /// [`librefang_types::agent::EvolutionMode::Controlled`].
+    Update,
 }
 
 /// What signal in the turn led the workshop to produce this candidate.
@@ -158,12 +196,79 @@ mod tests {
                 assistant_response_excerpt: Some("Got it.".to_string()),
                 turn_index: 3,
             },
+            kind: CandidateKind::Create,
+            target_skill_id: None,
+            current_version: None,
+            proposed_version: None,
         };
         let toml = toml::to_string_pretty(&candidate).expect("serialise");
         let parsed: CandidateSkill = toml::from_str(&toml).expect("deserialise");
         assert_eq!(parsed.id, candidate.id);
         assert_eq!(parsed.name, candidate.name);
         assert_eq!(parsed.source, candidate.source);
+        assert_eq!(parsed.kind, candidate.kind);
+    }
+
+    /// A pending TOML written before the update-draft fields existed (no
+    /// `kind` / `target_skill_id` / `current_version` / `proposed_version`)
+    /// must still deserialize, defaulting `kind` to `Create` so #5800 drafts
+    /// on disk survive an upgrade (#5844 / #5819).
+    #[test]
+    fn legacy_candidate_without_update_fields_defaults_to_create() {
+        let legacy_toml = r#"
+id = "00000000-0000-0000-0000-000000000002"
+agent_id = "agent-x"
+captured_at = "2026-01-01T00:00:00Z"
+name = "legacy_skill"
+description = "Drafted before update-kind existed"
+prompt_context = "# Legacy\n\nBody.\n"
+
+[source]
+kind = "explicit_instruction"
+trigger = "from now on"
+
+[provenance]
+user_message_excerpt = "from now on do X"
+turn_index = 1
+"#;
+        let parsed: CandidateSkill = toml::from_str(legacy_toml).expect("legacy draft must parse");
+        assert_eq!(parsed.kind, CandidateKind::Create);
+        assert!(parsed.target_skill_id.is_none());
+        assert!(parsed.current_version.is_none());
+        assert!(parsed.proposed_version.is_none());
+    }
+
+    /// An update draft round-trips through TOML carrying its kind + target +
+    /// version metadata.
+    #[test]
+    fn update_candidate_round_trips_with_kind_and_target() {
+        let candidate = CandidateSkill {
+            id: "00000000-0000-0000-0000-000000000003".to_string(),
+            agent_id: "agent-x".to_string(),
+            session_id: None,
+            captured_at: Utc::now(),
+            source: CaptureSource::ExplicitInstruction {
+                trigger: "auto_evolve_reviewer_update".to_string(),
+            },
+            name: "existing_skill".to_string(),
+            description: "tighten the error handling".to_string(),
+            prompt_context: "# Existing skill\n\nRewritten body.\n".to_string(),
+            provenance: Provenance {
+                user_message_excerpt: "worked around a limitation".to_string(),
+                assistant_response_excerpt: None,
+                turn_index: 0,
+            },
+            kind: CandidateKind::Update,
+            target_skill_id: Some("existing_skill".to_string()),
+            current_version: Some("0.2.0".to_string()),
+            proposed_version: Some("0.2.1".to_string()),
+        };
+        let toml = toml::to_string_pretty(&candidate).expect("serialise");
+        let parsed: CandidateSkill = toml::from_str(&toml).expect("deserialise");
+        assert_eq!(parsed.kind, CandidateKind::Update);
+        assert_eq!(parsed.target_skill_id.as_deref(), Some("existing_skill"));
+        assert_eq!(parsed.current_version.as_deref(), Some("0.2.0"));
+        assert_eq!(parsed.proposed_version.as_deref(), Some("0.2.1"));
     }
 
     #[test]

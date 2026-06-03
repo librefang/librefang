@@ -393,6 +393,118 @@ impl LibreFangKernel {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Approve a pending skill candidate and, for a CREATE, auto-assign the
+    /// promoted skill to the creating agent's allowlist (#5844).
+    ///
+    /// Wraps [`storage::approve_candidate`] (which promotes through
+    /// `evolution::create_skill`, re-running the prompt-injection scan) with the
+    /// kernel-side registry mutation the storage layer cannot perform on its own
+    /// (it has no `AgentRegistry` handle). The flow:
+    ///
+    /// 1. Load the candidate so we know its owning agent and whether it is a
+    ///    create vs an update.
+    /// 2. Promote it via `approve_candidate`.
+    /// 3. For a `CandidateKind::Create`, append the new skill name to the
+    ///    creating agent's `manifest.skills` allowlist so an agent that runs
+    ///    with a non-empty (allowlist) `skills` list can actually use the skill
+    ///    it created. Idempotent — an already-listed skill is not duplicated.
+    ///    An agent with an EMPTY `skills` list already sees every skill, so we
+    ///    leave it empty rather than pinning it to a one-element allowlist.
+    ///    Updates need no re-assignment (the target was already assigned).
+    ///
+    /// Returns the [`EvolutionResult`] from promotion. Registry assignment is
+    /// best-effort: a failure to update the allowlist is logged but does not
+    /// fail the approve (the skill is already installed; the operator can assign
+    /// it manually).
+    pub fn approve_pending_skill(
+        &self,
+        id: &str,
+    ) -> Result<librefang_skills::evolution::EvolutionResult, crate::skill_workshop::WorkshopError>
+    {
+        let skills_root = self.home_dir_boot.join("skills");
+
+        // Load first so we can read the owning agent + kind even though
+        // `approve_candidate` deletes the pending file on success.
+        let candidate = crate::skill_workshop::storage::load_candidate(&skills_root, id)?;
+        let owner_agent_id = candidate.agent_id.clone();
+        let is_create =
+            candidate.kind == crate::skill_workshop::candidate::CandidateKind::Create;
+
+        let result =
+            crate::skill_workshop::storage::approve_candidate(&skills_root, &skills_root, id)?;
+
+        // Refresh the in-memory registry so the next prompt build sees it.
+        self.reload_skills();
+
+        if is_create {
+            self.assign_skill_to_agent_allowlist(&owner_agent_id, &result.skill_name);
+        }
+
+        Ok(result)
+    }
+
+    /// Append `skill_name` to `agent_id_str`'s skill allowlist if (a) the agent
+    /// exists, (b) its allowlist is non-empty (an empty list means "all skills",
+    /// so there is nothing to add — pinning it would REDUCE the agent's access),
+    /// and (c) the skill is not already listed. Best-effort: parse / registry
+    /// errors are logged, not propagated.
+    fn assign_skill_to_agent_allowlist(&self, agent_id_str: &str, skill_name: &str) {
+        let agent_id = match agent_id_str.parse::<AgentId>() {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::warn!(
+                    agent = agent_id_str,
+                    error = %e,
+                    "skill approve: candidate agent_id is not a valid AgentId — skipping auto-assign"
+                );
+                return;
+            }
+        };
+        let Some(entry) = self.agents.registry.get(agent_id) else {
+            tracing::warn!(
+                agent = %agent_id,
+                skill = skill_name,
+                "skill approve: creating agent no longer exists — skipping auto-assign"
+            );
+            return;
+        };
+        let current = &entry.manifest.skills;
+        // Empty allowlist already grants every skill; don't pin it.
+        if current.is_empty() {
+            tracing::debug!(
+                agent = %agent_id,
+                skill = skill_name,
+                "skill approve: agent allowlist is empty (all-skills) — no auto-assign needed"
+            );
+            return;
+        }
+        // Guard against double-add (idempotent re-approve).
+        if current.iter().any(|s| s == skill_name) {
+            tracing::debug!(
+                agent = %agent_id,
+                skill = skill_name,
+                "skill approve: skill already in agent allowlist — no-op"
+            );
+            return;
+        }
+        let mut updated = current.clone();
+        updated.push(skill_name.to_string());
+        if let Err(e) = self.agents.registry.update_skills(agent_id, updated) {
+            tracing::warn!(
+                agent = %agent_id,
+                skill = skill_name,
+                error = %e,
+                "skill approve: failed to add skill to creating agent's allowlist"
+            );
+        } else {
+            tracing::info!(
+                agent = %agent_id,
+                skill = skill_name,
+                "skill approve: auto-assigned newly-created skill to creating agent's allowlist"
+            );
+        }
+    }
+
     // ── Background skill review ──────────────────────────────────────
 
     // Note: the helper types `ReviewError`, `sanitize_reviewer_line`, and
@@ -842,6 +954,40 @@ impl LibreFangKernel {
                         return Ok(());
                     }
                 };
+
+                // #5844 / #5819: in `controlled` mode an update is NOT applied
+                // directly — it is queued as a pending draft so a human reviews
+                // the change before it reaches the active registry. The
+                // `save_candidate` path runs the same `SkillVerifier`
+                // prompt-injection scan creates already cross, so a malicious
+                // LLM-proposed update can no longer bypass the injection filter
+                // by riding the direct update path.
+                if kernel.resolve_evolution_mode(triggering_agent_id)
+                    == librefang_types::agent::EvolutionMode::Controlled
+                {
+                    let current_version =
+                        Some(skill.manifest.skill.version.clone()).filter(|v| !v.is_empty());
+                    let proposed_version = current_version
+                        .as_deref()
+                        .map(librefang_skills::evolution::bump_patch_version);
+                    let candidate = Self::build_reviewer_update_candidate(
+                        triggering_agent_id,
+                        name,
+                        changelog,
+                        prompt_context,
+                        current_version,
+                        proposed_version,
+                        &safe_response_summary,
+                    );
+                    return Self::queue_reviewer_candidate(
+                        skills_dir,
+                        &kernel,
+                        triggering_agent_id,
+                        &candidate,
+                        "update",
+                    );
+                }
+
                 match librefang_skills::evolution::update_skill(
                     &skill,
                     prompt_context,
@@ -915,6 +1061,72 @@ impl LibreFangKernel {
                         return Ok(());
                     }
                 };
+
+                // #5844 / #5819: in `controlled` mode a patch is NOT applied
+                // directly. We materialize the FULL rewritten body (apply the
+                // fuzzy find-and-replace to the current on-disk content) and
+                // queue it as a pending update draft so a human approves it.
+                // An update draft always carries a complete `prompt_context.md`
+                // — the shape `approve_candidate → evolution::create_skill`
+                // expects — so a patch and an update converge to the same
+                // pending model. The `save_candidate` injection scan applies
+                // here too.
+                if kernel.resolve_evolution_mode(triggering_agent_id)
+                    == librefang_types::agent::EvolutionMode::Controlled
+                {
+                    // Read the current body from disk, falling back to the
+                    // manifest's cached copy (mirrors `patch_skill`).
+                    let current_body = std::fs::read_to_string(skill.path.join("prompt_context.md"))
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| skill.manifest.prompt_context.clone());
+                    let current_body = match current_body {
+                        Some(b) if !b.is_empty() => b,
+                        _ => {
+                            tracing::info!(
+                                skill = name,
+                                "Reviewer patch in controlled mode: skill has no prompt_context to patch — skipping"
+                            );
+                            return Ok(());
+                        }
+                    };
+                    let rewritten = match librefang_skills::evolution::fuzzy_find_and_replace(
+                        &current_body,
+                        old_string,
+                        new_string,
+                        false, // never replace_all from the reviewer — too risky
+                    ) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            // Fuzzy match failures are common; log + skip rather
+                            // than retry (same prompt would fail identically).
+                            tracing::debug!(skill = name, error = %e, "Reviewer patch (controlled) fuzzy match failed — skipping");
+                            return Ok(());
+                        }
+                    };
+                    let current_version = Some(skill.manifest.skill.version.clone())
+                        .filter(|v| !v.is_empty());
+                    let proposed_version = current_version
+                        .as_deref()
+                        .map(librefang_skills::evolution::bump_patch_version);
+                    let candidate = Self::build_reviewer_update_candidate(
+                        triggering_agent_id,
+                        name,
+                        changelog,
+                        &rewritten.new_content,
+                        current_version,
+                        proposed_version,
+                        &safe_response_summary,
+                    );
+                    return Self::queue_reviewer_candidate(
+                        skills_dir,
+                        &kernel,
+                        triggering_agent_id,
+                        &candidate,
+                        "update",
+                    );
+                }
+
                 match librefang_skills::evolution::patch_skill(
                     &skill,
                     old_string,
@@ -966,15 +1178,6 @@ impl LibreFangKernel {
                         ReviewError::Permanent("Kernel dropped before pending save".to_string())
                     })?;
 
-                // Read the agent's workshop config for cap / TTL settings.
-                // Fall back to the struct defaults when the agent entry is gone.
-                let workshop_cfg = kernel
-                    .agents
-                    .registry
-                    .get(triggering_agent_id)
-                    .map(|e| e.manifest.skill_workshop)
-                    .unwrap_or_default();
-
                 let candidate = Self::build_reviewer_candidate(
                     triggering_agent_id,
                     name,
@@ -983,39 +1186,13 @@ impl LibreFangKernel {
                     &safe_response_summary,
                 );
 
-                match crate::skill_workshop::storage::save_candidate(
+                Self::queue_reviewer_candidate(
                     skills_dir,
+                    &kernel,
+                    triggering_agent_id,
                     &candidate,
-                    workshop_cfg.max_pending,
-                    workshop_cfg.max_pending_age_days,
-                ) {
-                    Ok(true) => {
-                        tracing::info!(
-                            skill = name,
-                            agent = %triggering_agent_id,
-                            "Background skill review: queued '{}' as pending draft for human approval",
-                            name
-                        );
-                        Ok(())
-                    }
-                    Ok(false) => {
-                        tracing::debug!(
-                            skill = name,
-                            "Background skill review: pending save skipped (duplicate or max_pending=0)"
-                        );
-                        Ok(())
-                    }
-                    Err(crate::skill_workshop::storage::WorkshopError::SecurityBlocked(msg)) => {
-                        Err(ReviewError::Permanent(format!("security_blocked: {msg}")))
-                    }
-                    Err(crate::skill_workshop::storage::WorkshopError::Io(e)) => {
-                        Err(ReviewError::Transient(format!("save_candidate io: {e}")))
-                    }
-                    Err(e) => {
-                        tracing::debug!(skill = name, error = %e, "Background skill review: pending save failed");
-                        Err(ReviewError::Permanent(format!("save_candidate: {e}")))
-                    }
-                }
+                    "create",
+                )
             }
 
             // Unknown action — info-log and skip. Future reviewer prompts
@@ -1219,6 +1396,24 @@ impl LibreFangKernel {
         Some(engine)
     }
 
+    /// Resolve the [`EvolutionMode`] for an agent's background skill evolution.
+    ///
+    /// Reads the agent's manifest `skill_workshop.evolution_mode` (set in
+    /// `agent.toml` / `HAND.toml [agents.<name>]`, never `config.toml` — #5476),
+    /// the same surface every other per-agent skill-workshop knob resolves from.
+    /// Falls back to [`EvolutionMode::Free`] (the struct default) when the agent
+    /// entry is gone, preserving today's behavior for an unknown agent.
+    pub(crate) fn resolve_evolution_mode(
+        &self,
+        agent_id: AgentId,
+    ) -> librefang_types::agent::EvolutionMode {
+        self.agents
+            .registry
+            .get(agent_id)
+            .map(|e| e.manifest.skill_workshop.evolution_mode)
+            .unwrap_or_default()
+    }
+
     /// Build the [`CandidateSkill`] that the background reviewer submits to the
     /// pending queue when it decides to `create` a new skill.
     ///
@@ -1252,6 +1447,131 @@ impl LibreFangKernel {
                 assistant_response_excerpt: None,
                 turn_index: 0,
             },
+            kind: crate::skill_workshop::candidate::CandidateKind::Create,
+            target_skill_id: None,
+            current_version: None,
+            proposed_version: None,
+        }
+    }
+
+    /// Build the [`CandidateSkill`] that the background reviewer submits to the
+    /// pending queue when it decides to `update` / `patch` an EXISTING skill
+    /// while the agent runs in [`EvolutionMode::Controlled`] (#5844 / #5819).
+    ///
+    /// Unlike [`build_reviewer_candidate`], this draft is tagged
+    /// [`CandidateKind::Update`] and records the target skill (`target_skill_id`
+    /// = the existing skill name) plus its current version, so the pending-tab
+    /// reviewer (and a later diff-view PR) can locate the on-disk skill being
+    /// replaced. `proposed_new_version` is the version the reviewer wants to
+    /// bump to on approval; `None` defers the bump to approval time. The
+    /// `changelog` (why the change was proposed) is carried in `description`
+    /// so it survives to the pending TOML and the dashboard list view.
+    ///
+    /// `prompt_context` is the FULL proposed body — for a `patch` the caller
+    /// applies the find-and-replace to the current body first and passes the
+    /// rewritten result here, so an update draft always carries a complete
+    /// `prompt_context.md` (the same shape `approve_candidate` →
+    /// `evolution::create_skill` expects).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn build_reviewer_update_candidate(
+        agent_id: AgentId,
+        target_skill_name: &str,
+        changelog: &str,
+        prompt_context: &str,
+        current_version: Option<String>,
+        proposed_new_version: Option<String>,
+        response_summary: &str,
+    ) -> crate::skill_workshop::candidate::CandidateSkill {
+        crate::skill_workshop::candidate::CandidateSkill {
+            id: uuid::Uuid::new_v4().to_string(),
+            agent_id: agent_id.to_string(),
+            session_id: None,
+            captured_at: chrono::Utc::now(),
+            source: crate::skill_workshop::candidate::CaptureSource::ExplicitInstruction {
+                trigger: "auto_evolve_reviewer_update".to_string(),
+            },
+            name: target_skill_name.to_string(),
+            // Carry the reviewer's changelog as the candidate description so a
+            // human (or the dashboard list) sees WHY the update was proposed
+            // without opening the diff. `evolution::create_skill` accepts any
+            // ≤1024-char string here at approval time.
+            description: changelog.to_string(),
+            prompt_context: prompt_context.to_string(),
+            provenance: crate::skill_workshop::candidate::Provenance {
+                user_message_excerpt: response_summary
+                    .chars()
+                    .take(crate::skill_workshop::candidate::PROVENANCE_EXCERPT_MAX_CHARS)
+                    .collect(),
+                assistant_response_excerpt: None,
+                turn_index: 0,
+            },
+            kind: crate::skill_workshop::candidate::CandidateKind::Update,
+            target_skill_id: Some(target_skill_name.to_string()),
+            current_version,
+            proposed_version: proposed_new_version,
+        }
+    }
+
+    /// Route a reviewer-produced [`CandidateSkill`] through the pending queue
+    /// via [`storage::save_candidate`], reading the agent's `max_pending` /
+    /// `max_pending_age_days` knobs and mapping the storage outcome onto a
+    /// [`ReviewError`].
+    ///
+    /// Shared by the `create` arm (#5800) and the `controlled`-mode update arm
+    /// (#5844 / #5819) so both kinds of draft cross the SAME injection scan and
+    /// cap/dedup logic. `kind_label` is purely for the log line ("create" /
+    /// "update").
+    pub(crate) fn queue_reviewer_candidate(
+        skills_dir: &std::path::Path,
+        kernel: &LibreFangKernel,
+        triggering_agent_id: AgentId,
+        candidate: &crate::skill_workshop::candidate::CandidateSkill,
+        kind_label: &str,
+    ) -> Result<(), ReviewError> {
+        // Read the agent's workshop config for cap / TTL settings. Fall back to
+        // the struct defaults when the agent entry is gone.
+        let workshop_cfg = kernel
+            .agents
+            .registry
+            .get(triggering_agent_id)
+            .map(|e| e.manifest.skill_workshop)
+            .unwrap_or_default();
+
+        match crate::skill_workshop::storage::save_candidate(
+            skills_dir,
+            candidate,
+            workshop_cfg.max_pending,
+            workshop_cfg.max_pending_age_days,
+        ) {
+            Ok(true) => {
+                tracing::info!(
+                    skill = %candidate.name,
+                    agent = %triggering_agent_id,
+                    kind = kind_label,
+                    "Background skill review: queued '{}' ({}) as pending draft for human approval",
+                    candidate.name,
+                    kind_label
+                );
+                Ok(())
+            }
+            Ok(false) => {
+                tracing::debug!(
+                    skill = %candidate.name,
+                    kind = kind_label,
+                    "Background skill review: pending save skipped (duplicate or max_pending=0)"
+                );
+                Ok(())
+            }
+            Err(crate::skill_workshop::storage::WorkshopError::SecurityBlocked(msg)) => {
+                Err(ReviewError::Permanent(format!("security_blocked: {msg}")))
+            }
+            Err(crate::skill_workshop::storage::WorkshopError::Io(e)) => {
+                Err(ReviewError::Transient(format!("save_candidate io: {e}")))
+            }
+            Err(e) => {
+                tracing::debug!(skill = %candidate.name, error = %e, "Background skill review: pending save failed");
+                Err(ReviewError::Permanent(format!("save_candidate: {e}")))
+            }
         }
     }
 }
