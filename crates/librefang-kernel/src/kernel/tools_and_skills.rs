@@ -447,7 +447,7 @@ impl LibreFangKernel {
     /// so there is nothing to add — pinning it would REDUCE the agent's access),
     /// and (c) the skill is not already listed. Best-effort: parse / registry
     /// errors are logged, not propagated.
-    fn assign_skill_to_agent_allowlist(&self, agent_id_str: &str, skill_name: &str) {
+    pub(crate) fn assign_skill_to_agent_allowlist(&self, agent_id_str: &str, skill_name: &str) {
         let agent_id = match agent_id_str.parse::<AgentId>() {
             Ok(id) => id,
             Err(e) => {
