@@ -443,6 +443,11 @@ jobs:
     # don't receive the secret, and pushes to main aren't auto-committed; both
     # fall back to the read-only verify-and-fail path, leaving regen to the
     # author.
+    # Belt-and-suspenders: the push is authenticated by the PAT that
+    # actions/checkout persists into the origin remote, not by GITHUB_TOKEN, so
+    # this scope isn't strictly consumed by it (and GitHub forces GITHUB_TOKEN
+    # read-only on fork PRs regardless). Kept for clarity / any future
+    # GITHUB_TOKEN-based step.
     permissions:
       contents: write
     steps:
@@ -486,6 +491,7 @@ jobs:
         env:
           PAT: ${{ secrets.WEBSITE_REPO_TOKEN }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          EVENT_NAME: ${{ github.event_name }}
           IS_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
         run: |
           if git diff --quiet -- openapi.json sdk/ xtask/baselines/; then
@@ -506,7 +512,7 @@ jobs:
 
           # Only auto-commit on same-repo pull_request runs that carry the PAT.
           # Fork PRs (secret withheld) and push events fall back to verify-and-fail.
-          if [ "${{ github.event_name }}" != "pull_request" ] || [ "$IS_FORK" = "true" ] || [ -z "$PAT" ]; then
+          if [ "$EVENT_NAME" != "pull_request" ] || [ "$IS_FORK" = "true" ] || [ -z "$PAT" ]; then
             fail_manual
           fi
 
