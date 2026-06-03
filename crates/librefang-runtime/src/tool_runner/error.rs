@@ -148,6 +148,24 @@ impl ToolError {
             source: None,
         }
     }
+
+    /// The [`librefang_types::tool::ToolExecutionStatus`] this error maps to.
+    ///
+    /// `PermissionDenied` is a **soft** `Denied`: a per-user RBAC denial is
+    /// permanent and non-fatal — it's reported to the model (`is_error` stays
+    /// true) but must NOT count toward the consecutive-hard-failure abort
+    /// (`MAX_CONSECUTIVE_ALL_FAILED`), exactly like an approval denial. Without
+    /// this, an agent whose policy denies a memory/wiki read retries the same
+    /// denial into a death spiral that kills the turn. Everything else is a
+    /// hard `Error`; parameter errors are already softened by the content-based
+    /// `is_parameter_error_content` classifier in `agent_loop::message`.
+    pub fn execution_status(&self) -> librefang_types::tool::ToolExecutionStatus {
+        use librefang_types::tool::ToolExecutionStatus;
+        match self {
+            ToolError::PermissionDenied(_) => ToolExecutionStatus::Denied,
+            _ => ToolExecutionStatus::Error,
+        }
+    }
 }
 
 /// Auto-conversion so call sites can `?`-bubble `serde_json` failures

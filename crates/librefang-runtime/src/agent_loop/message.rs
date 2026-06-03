@@ -178,11 +178,6 @@ pub(super) fn is_soft_error_content(content: &str) -> bool {
         || content.contains(ERR_SANDBOX_ESCAPE)
         || content.contains(ERR_SYMLINK_LEAF)
         || content.contains("arguments were truncated")
-        // A per-user memory/wiki ACL denial is permanent and non-fatal: surface
-        // it to the model but don't let a denied optional read trip the
-        // consecutive-hard-failure abort. Without this a recall the policy
-        // denies is retried into a death spiral that kills the turn.
-        || content.contains(crate::tool_runner::MEMORY_ACL_DENY_MARKER)
         || is_parameter_error_content(content)
 }
 
@@ -528,31 +523,6 @@ mod safe_trim_session_repair_tests {
             "persisted session_messages[0] must be User after trim+repair, \
              got {:?} — this is the regression the audit closed",
             session[0].role
-        );
-    }
-}
-
-#[cfg(test)]
-mod soft_error_classification_tests {
-    use super::*;
-
-    /// A per-user memory/wiki ACL denial must be classified soft (reported to
-    /// the model, but not counted toward MAX_CONSECUTIVE_ALL_FAILED), while a
-    /// genuine backend error stays hard so a real outage still surfaces and
-    /// trips the guard. Guards the death-spiral fix for denied optional reads.
-    #[test]
-    fn acl_denial_is_soft_backend_error_is_hard() {
-        let denied = format!(
-            "Access denied: {} on namespace 'kv:u1' (kv:* is not readable).",
-            crate::tool_runner::MEMORY_ACL_DENY_MARKER
-        );
-        assert!(
-            is_soft_error_content(&denied),
-            "ACL denial must be soft: {denied}"
-        );
-        assert!(
-            !is_soft_error_content("Memory recall failed: database is locked"),
-            "a genuine backend error must stay hard"
         );
     }
 }
