@@ -2,7 +2,7 @@
 //!
 //! Issue #3744: keep route modules from importing
 //! `librefang_kernel::error::*` directly. Several handlers in
-//! `routes/agents.rs` need to pattern-match on kernel error variants
+//! `routes/agents/` need to pattern-match on kernel error variants
 //! (`LibreFang(_)`, `Backpressure(_)`, …) to translate them into HTTP
 //! status codes; routing those matches through this re-export keeps
 //! the kernel internal module path off the route call sites.

@@ -180,6 +180,7 @@ classified differently — the row note spells out which is which.
 | `skills` | H | Skills config (bundled + user-installed) — reloads registry. |
 | `plugins` | R | Plugin registry config. |
 | `registry` | R | Registry sync config (cache TTL, …). |
+| `hands` | N | Hands marketplace SSRF allowlist (`registry_allowed_hosts`) — read live by the install handler per request. |
 | `bindings` | R | Agent bindings for multi-account routing. |
 
 ### Memory / sessions
@@ -190,6 +191,7 @@ classified differently — the row note spells out which is which.
 | `memory_wiki` | R | Memory wiki vault (constructed once at boot). |
 | `proactive_memory` | H | mem0-style proactive memory config — updated in place. Also pushes `duplicate_threshold` into the background `ConsolidationEngine` so the kernel-wide sweep and the per-agent on-demand consolidate stay in lockstep (audit findings #5839 H5). |
 | `auto_dream` | R | Background memory-consolidation config. |
+| `rl_export` | R | RL rollout trajectory export config (upstream target + enable toggle). Classified restart so a target / credential redirect takes effect through the documented restart path, not mid-session. |
 | `session` | R | Session retention policy. |
 
 ### Budget / metering / privacy

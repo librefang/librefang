@@ -557,6 +557,9 @@ class _HandsResource(_Resource):
     def hand_stats(self, id: str):
         return self._c._request("GET", f"/api/hands/instances/{id}/stats")
 
+    def install_hand_from_marketplace(self, **data):
+        return self._c._request("POST", "/api/hands/marketplace/install", data)
+
     def reload_hands(self):
         return self._c._request("POST", "/api/hands/reload")
 

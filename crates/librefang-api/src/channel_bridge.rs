@@ -2785,7 +2785,7 @@ pub async fn reload_channels_from_disk(
     // None immediately, then tear down the old instance.
     //
     // #5142: `Arc::try_unwrap` only yields `&mut` when no other strong ref
-    // exists — but `routes/agents.rs::push_message` does
+    // exists — but `routes/agents/messaging.rs::push_message` does
     // `state.bridge_manager.load_full()` and holds the Arc across an `.await`
     // on `push_message`, so on a busy channel `try_unwrap` returns `Err` and
     // (pre-#5142) the graceful `stop()` was skipped entirely, leaking the old

@@ -432,15 +432,35 @@ jobs:
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # Read-only: this job verifies the committed generated artifacts match
-    # what the source produces. It no longer pushes regenerated files back to
-    # the PR branch (the old internal-PR auto-commit used [skip ci], which
-    # leaves the head with no CI run and deadlocks required-status-checks), so
-    # it inherits the workflow-level `contents: read` and needs no write scope.
-    # Drift is the author's to regenerate + commit — identically for internal
-    # and fork PRs.
+    # Auto-sync the committed generated artifacts (openapi.json, SDKs, schema
+    # baselines) to the source on same-repo PRs: regenerate, and if anything
+    # drifted, commit it back to the PR branch. The push uses WEBSITE_REPO_TOKEN
+    # (a PAT), NOT the default GITHUB_TOKEN — GitHub suppresses workflow runs
+    # for GITHUB_TOKEN pushes to prevent recursion, which would leave the new
+    # head with no CI run and deadlock required-status-checks (the reason the
+    # old [skip ci] auto-commit was removed). The PAT push triggers a fresh
+    # pull_request run that re-verifies and converges in one cycle. Fork PRs
+    # don't receive the secret, and pushes to main aren't auto-committed; both
+    # fall back to the read-only verify-and-fail path, leaving regen to the
+    # author.
+    # Belt-and-suspenders: the push is authenticated by the PAT that
+    # actions/checkout persists into the origin remote, not by GITHUB_TOKEN, so
+    # this scope isn't strictly consumed by it (and GitHub forces GITHUB_TOKEN
+    # read-only on fork PRs regardless). Kept for clarity / any future
+    # GITHUB_TOKEN-based step.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          # Same-repo PRs: check out the head branch with the PAT so a
+          # regenerated commit can be pushed back AND re-trigger CI. Fork PRs
+          # get an empty secret here (falls back to the read-only token) and
+          # push events check out the pushed ref — both end on the verify-only
+          # path below.
+          token: ${{ secrets.WEBSITE_REPO_TOKEN || github.token }}
+          ref: ${{ github.event.pull_request.head.ref || github.ref }}
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
@@ -467,20 +487,53 @@ jobs:
       # PRs no longer need a manual `cargo xtask schema-check gen` round.
       - name: Regenerate schema baselines
         run: cargo xtask schema-check gen
-      - name: Verify no drift
+      - name: Sync drift (commit on same-repo PRs) or fail
+        env:
+          PAT: ${{ secrets.WEBSITE_REPO_TOKEN }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          EVENT_NAME: ${{ github.event_name }}
+          IS_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
         run: |
           if git diff --quiet -- openapi.json sdk/ xtask/baselines/; then
             echo "openapi.json, SDKs, and schema baselines are in sync."
             exit 0
           fi
-          echo "::error::openapi.json, generated SDKs, or schema baselines are out of sync with the source code."
-          echo "Regenerate locally and commit the result:"
-          echo "  cargo xtask codegen --openapi"
-          echo "  python3 scripts/codegen-sdks.py"
-          echo "  cargo xtask schema-check gen"
-          echo "Then commit the updated openapi.json, sdk/*, and xtask/baselines/* files."
-          git --no-pager diff --stat -- openapi.json sdk/ xtask/baselines/
-          exit 1
+
+          fail_manual() {
+            echo "::error::openapi.json, generated SDKs, or schema baselines are out of sync with the source code."
+            echo "Regenerate locally and commit the result:"
+            echo "  cargo xtask codegen --openapi"
+            echo "  python3 scripts/codegen-sdks.py"
+            echo "  cargo xtask schema-check gen"
+            echo "Then commit the updated openapi.json, sdk/*, and xtask/baselines/* files."
+            git --no-pager diff --stat -- openapi.json sdk/ xtask/baselines/
+            exit 1
+          }
+
+          # Only auto-commit on same-repo pull_request runs that carry the PAT.
+          # Fork PRs (secret withheld) and push events fall back to verify-and-fail.
+          if [ "$EVENT_NAME" != "pull_request" ] || [ "$IS_FORK" = "true" ] || [ -z "$PAT" ]; then
+            fail_manual
+          fi
+
+          # Loop guard: if the previous commit is already an auto-codegen sync
+          # yet drift persists, generation is non-deterministic — fail rather
+          # than push forever.
+          if git log -1 --pretty=%s | grep -q '^chore(codegen): sync generated artifacts'; then
+            echo "::error::drift persists after an auto-codegen sync commit — generation is non-deterministic. Failing to avoid a push loop."
+            git --no-pager diff --stat -- openapi.json sdk/ xtask/baselines/
+            exit 1
+          fi
+
+          echo "Drift detected on a same-repo PR — committing regenerated artifacts back to '$HEAD_REF'."
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add openapi.json sdk/ xtask/baselines/
+          git commit -m "chore(codegen): sync generated artifacts (openapi.json, SDKs, baselines)"
+          # actions/checkout configured the origin remote with the PAT, so this
+          # push re-triggers CI on the new head (GITHUB_TOKEN pushes would not).
+          git push origin "HEAD:$HEAD_REF"
+          echo "Pushed regenerated artifacts; a fresh CI run will verify the synced commit."
       # Sanity verify that `schema-check gen` produced baselines that
       # match the on-disk schema artifacts — catches a bug in `gen`
       # itself rather than letting drift leak past us.

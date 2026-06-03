@@ -18,6 +18,7 @@ librefang-hands = { path = "../librefang-hands" }
 librefang-extensions = { path = "../librefang-extensions" }
 librefang-llm-driver = { path = "../librefang-llm-driver" }
 librefang-llm-drivers = { path = "../librefang-llm-drivers" }
+librefang-rl-export = { path = "../librefang-rl-export" }
 librefang-wire = { path = "../librefang-wire" }
 librefang-channels = { path = "../librefang-channels", default-features = false }
 tokio = { workspace = true }

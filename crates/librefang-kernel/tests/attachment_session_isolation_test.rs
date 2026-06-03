@@ -22,7 +22,7 @@
 //!
 //! **Fix.** The trait now requires an explicit `session_id` parameter
 //! and the API call site (`inject_attachments_into_session` in
-//! `routes/agents.rs`) derives the same session id the kernel's
+//! `routes/agents/attachments.rs`) derives the same session id the kernel's
 //! `send_message_*` would, using the per-request `SenderContext` and
 //! `session_id_override`.
 //!
