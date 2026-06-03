@@ -302,13 +302,23 @@ pub async fn fold_stale_tool_results(
             }
             (map, None)
         }
-        Err(BatchSummariseFailure::Parse { raw, error }) => {
+        Err(BatchSummariseFailure::Parse { error }) => {
+            // The aux model returned a body we could not parse as the
+            // expected `[{id,summary}]` JSON.  Do NOT dump the raw non-JSON
+            // text over every stale tool result as a bulk summary — that is
+            // exactly the #5978 failure: a `memory_recall` result gets
+            // overwritten with garbage, the model reads it as "no answer"
+            // and re-issues the identical call forever (verified live,
+            // session 81620c15).  Treat it like a fully-omitted batch:
+            // an empty map + `None` bulk fallback routes every stale block
+            // into the content-preserving branch below, so each keeps a
+            // preview-truncated copy of its own original result.
             warn!(
                 count = stale_count,
                 error = %error,
-                "history_fold: JSON parse failed — applying raw response as bulk summary"
+                "history_fold: JSON parse failed — preserving preview-truncated original tool results (issue #5978)"
             );
-            (BTreeMap::new(), Some(raw))
+            (BTreeMap::new(), None)
         }
         Err(err) => {
             warn!(
@@ -337,18 +347,21 @@ pub async fn fold_stale_tool_results(
                 {
                     // Resolve the new folded content for this block:
                     //   1. model-returned per-id summary (happy path), OR
-                    //   2. bulk fallback — either the raw non-JSON response
-                    //      (Parse failure) or the static stub (call failure), OR
+                    //   2. bulk fallback — the static stub, used only when the
+                    //      aux call itself failed (network / empty body), OR
                     //   3. neither: the batched call *succeeded* but the model
-                    //      silently omitted this id.  Previously this fell back
-                    //      to FALLBACK_SUMMARY, discarding the real prior tool
-                    //      result — the model then read the block as "result
-                    //      not available yet" and re-issued the identical call,
-                    //      producing the endless memory_recall loop in #5978.
-                    //      Instead, PRESERVE a preview-truncated copy of the
-                    //      ORIGINAL `content` (still intact at this point — the
-                    //      apply loop has not overwritten it yet) so the model
-                    //      sees what the tool returned and does not retry.
+                    //      silently omitted this id, OR the response could not
+                    //      be parsed as JSON at all (Parse failure → empty map
+                    //      + `None` fallback, so every block lands here).
+                    //      Previously both of those fell back to a stub that
+                    //      discarded the real prior tool result — the model
+                    //      then read the block as "result not available yet"
+                    //      and re-issued the identical call, producing the
+                    //      endless memory_recall loop in #5978.  Instead,
+                    //      PRESERVE a preview-truncated copy of the ORIGINAL
+                    //      `content` (still intact at this point — the apply
+                    //      loop has not overwritten it yet) so the model sees
+                    //      what the tool returned and does not retry.
                     let new_content = if let Some(summary) =
                         summaries_by_id.get(tool_use_id).cloned()
                     {
@@ -533,13 +546,16 @@ fn is_already_folded(msg: &Message) -> bool {
     }
 }
 
-/// Failure modes for the batched summariser.  `Parse` retains the raw
-/// model response so the caller can fall back to Option-1 bulk-summary
-/// semantics instead of wasting the round-trip.
+/// Failure modes for the batched summariser.  All three are handled by
+/// preserving the stale blocks' original content rather than substituting a
+/// summary: `Call` / `Empty` fall back to the static stub, while `Parse`
+/// (an unparseable response) keeps each block's own preview-truncated
+/// original — dumping the raw non-JSON text as a bulk summary is the #5978
+/// memory_recall loop, so the raw body is intentionally not retained.
 enum BatchSummariseFailure {
     Call(String),
     Empty,
-    Parse { raw: String, error: String },
+    Parse { error: String },
 }
 
 impl std::fmt::Display for BatchSummariseFailure {
@@ -547,7 +563,7 @@ impl std::fmt::Display for BatchSummariseFailure {
         match self {
             BatchSummariseFailure::Call(e) => write!(f, "LLM call failed: {e}"),
             BatchSummariseFailure::Empty => write!(f, "LLM returned empty response"),
-            BatchSummariseFailure::Parse { error, .. } => write!(f, "{error}"),
+            BatchSummariseFailure::Parse { error } => write!(f, "{error}"),
         }
     }
 }
@@ -673,10 +689,7 @@ async fn summarise_batch(
         return Err(BatchSummariseFailure::Empty);
     }
 
-    parse_labeled_summaries(&raw).map_err(|error| BatchSummariseFailure::Parse {
-        raw: raw.clone(),
-        error,
-    })
+    parse_labeled_summaries(&raw).map_err(|error| BatchSummariseFailure::Parse { error })
 }
 
 /// Parse the batched-call response into a `tool_use_id → summary` map.
@@ -1490,8 +1503,14 @@ mod tests {
     /// behaviour identical to the pre-#4866 single-group fast-path so
     /// existing call sites that rely on `messages_replaced > 0` still
     /// signal correctly.
+    /// Companion to `parse_failure_preserves_original_per_block_content`,
+    /// exercising the *pure-prose* Parse variant (`serde_json::from_str`
+    /// fails outright, vs a valid array with no `{id,summary}` pairs).  Both
+    /// route to the same arm: the raw response is NOT applied as a bulk
+    /// summary (that was the #5978 loop) — every stale block keeps its own
+    /// preview-truncated original.
     #[tokio::test]
-    async fn parse_failure_falls_back_to_raw_response_as_bulk_summary() {
+    async fn parse_failure_does_not_apply_raw_response_as_bulk_summary() {
         let messages = build_history(10);
         let driver: Arc<dyn LlmDriver> = Arc::new(OkDriver(
             "not json at all — just prose the model produced".to_string(),
@@ -1516,21 +1535,45 @@ mod tests {
         // observability: an operator chasing "why is fold falling back"
         // can distinguish "aux unreachable" from "model produced prose".
         assert_eq!(result.groups_used_fallback, 0);
-        // Every stale block should carry the raw response prose.
-        let all_stale_carry_raw_prose =
+        // No stale block may carry the raw prose as a bulk summary — that
+        // overwrites the real tool result and re-triggers the loop (#5978).
+        let any_carries_raw_prose =
             out.iter()
                 .filter(|m| has_folded_tool_result(m))
-                .all(|m| match &m.content {
-                    MessageContent::Blocks(blocks) => blocks.iter().all(|b| match b {
+                .any(|m| match &m.content {
+                    MessageContent::Blocks(blocks) => blocks.iter().any(|b| match b {
                         ContentBlock::ToolResult { content, .. } => content.contains("just prose"),
-                        _ => true,
+                        _ => false,
                     }),
                     _ => false,
                 });
         assert!(
-            all_stale_carry_raw_prose,
-            "parse failure must apply the raw response as bulk summary, not the static stub"
+            !any_carries_raw_prose,
+            "parse failure must NOT apply the raw response as a bulk summary (issue #5978)"
         );
+        // Instead every stale block preserves its own original result.
+        for i in 0..=7 {
+            let id = format!("tid_{i}");
+            let content = out
+                .iter()
+                .find_map(|m| match &m.content {
+                    MessageContent::Blocks(blocks) => blocks.iter().find_map(|b| match b {
+                        ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            ..
+                        } if *tool_use_id == id => Some(content.clone()),
+                        _ => None,
+                    }),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            assert!(
+                content.contains(&format!("output of turn {i}"))
+                    && content.contains(OMITTED_SUMMARY_PREFIX),
+                "{id} must preserve its preview-truncated original, got: {content:?}"
+            );
+        }
     }
 
     /// JSON parse succeeds but every returned `id` is bogus (no overlap
@@ -1730,6 +1773,86 @@ mod tests {
             assert!(
                 content.contains(&format!("output of turn {i}")),
                 "omitted {id} must preserve its original result, got: {content:?}"
+            );
+        }
+    }
+
+    /// Issue #5978 (live-verified, session 81620c15): when the aux model's
+    /// batched-summary response cannot be parsed as `[{id,summary}]` JSON at
+    /// all (here a valid array with no `{id,summary}` pairs → the exact live
+    /// "JSON entries did not contain any {id,summary} pairs" error), the fold
+    /// must NOT overwrite every stale tool result with the raw non-JSON
+    /// response as a bulk summary.  Doing so destroyed the real memory_recall
+    /// result, the model read it as "no answer", and re-issued the identical
+    /// call until the loop guard blocked it forever.  Each stale block must
+    /// instead keep a preview-truncated copy of its OWN original content, and
+    /// every `tool_use_id` must survive (pairing invariant).
+    #[tokio::test]
+    async fn parse_failure_preserves_original_per_block_content() {
+        let messages = build_history(10); // stale tid_0..tid_7
+        let ids_before: Vec<String> = messages.iter().flat_map(tool_use_ids_in).collect();
+
+        // Valid JSON, but no entry carries the {id,summary} shape — this is
+        // the precise failure fandangorodelo hit, routed to the Parse arm.
+        let raw = r#"[{"foo":"bar"},{"baz":42}]"#;
+        let driver: Arc<dyn LlmDriver> = Arc::new(OkDriver(raw.to_string()));
+
+        let (out, _result) = fold_stale_tool_results(
+            messages,
+            FoldConfig {
+                fold_after_turns: 2,
+                min_batch_size: 1,
+            },
+            "test-model",
+            None,
+            driver,
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
+
+        // Pairing invariant: no tool_use_id may be dropped by the fold.
+        let ids_after: Vec<String> = out.iter().flat_map(tool_use_ids_in).collect();
+        assert_eq!(
+            ids_before, ids_after,
+            "fold must preserve every tool_use_id on a parse failure (pairing invariant)"
+        );
+
+        for i in 0..=7 {
+            let id = format!("tid_{i}");
+            let content = out
+                .iter()
+                .find_map(|m| match &m.content {
+                    MessageContent::Blocks(blocks) => blocks.iter().find_map(|b| match b {
+                        ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            ..
+                        } if *tool_use_id == id => Some(content.clone()),
+                        _ => None,
+                    }),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{id} ToolResult must survive fold"));
+
+            // Must preserve the ORIGINAL result, not the raw garbage response.
+            assert!(
+                content.contains(&format!("output of turn {i}")),
+                "{id} must preserve its original result on parse failure, got: {content:?}"
+            );
+            // Must NOT dump the raw non-JSON response as a bulk summary.
+            assert!(
+                !content.contains("foo") && !content.contains("baz"),
+                "{id} must NOT carry the raw unparsed response as a bulk summary, got: {content:?}"
+            );
+            // Must NOT carry the static call-failure stub either.
+            assert!(
+                !content.contains("summarisation unavailable"),
+                "{id} must NOT carry the FALLBACK_SUMMARY stub on a parse failure, got: {content:?}"
+            );
+            // Must carry the preservation marker.
+            assert!(
+                content.contains(OMITTED_SUMMARY_PREFIX),
+                "{id} must carry the preservation marker, got: {content:?}"
             );
         }
     }
