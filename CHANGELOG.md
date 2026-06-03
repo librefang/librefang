@@ -5,6 +5,12 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [Unreleased]
+
+### Added
+
+- Opt-in `exec_policy.safe_bins_skip_approval` lets allowlist-mode `shell_exec` calls whose every base command is a declared `safe_bin` skip the approval prompt; default off preserves today's posture (#5962) (@jerrywang121)
+
 ## [2026.5.31] - 2026-05-31
 
 _16 PRs from 2 contributors since v2026.5.30-beta.15._
