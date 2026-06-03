@@ -2027,6 +2027,15 @@ pub struct ExecPolicy {
     pub mode: ExecSecurityMode,
     /// Commands that bypass allowlist (stdin-only utilities).
     pub safe_bins: Vec<String>,
+    /// Opt-in: in `allowlist` mode, let a `shell_exec` whose every base
+    /// command is a declared `safe_bin` also skip the human-approval prompt.
+    /// Default `false` preserves today's posture — `safe_bins` membership only
+    /// satisfies the allowlist gate, and an approved-but-required tool still
+    /// prompts. When `true`, a command like `env` (every chained base in
+    /// `safe_bins`) executes without prompting, while any non-safe base
+    /// (e.g. `env; curl …`) still routes through approval.
+    #[serde(default)]
+    pub safe_bins_skip_approval: bool,
     /// Global command allowlist (when mode = allowlist).
     pub allowed_commands: Vec<String>,
     /// Environment variables explicitly allowed to pass through to `shell_exec`.
@@ -2057,6 +2066,7 @@ impl Default for ExecPolicy {
             .into_iter()
             .map(String::from)
             .collect(),
+            safe_bins_skip_approval: false,
             allowed_commands: Vec::new(),
             allowed_env_vars: Vec::new(),
             timeout_secs: 30,

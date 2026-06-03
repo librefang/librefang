@@ -1027,4 +1027,62 @@ mod tests {
             Some(agent)
         );
     }
+
+    /// Regression test for #5955: two Telegram sidecars that share the
+    /// `"telegram"` channel type but carry distinct config `name`s must
+    /// register under distinct `"telegram:<name>"` channel-default keys,
+    /// not collide on the bare `"telegram"` key (last-writer-wins).
+    ///
+    /// This reproduces the exact key-building the daemon performs in
+    /// `librefang-api/src/channel_bridge.rs`: with `account_id = Some(name)`
+    /// the key is `"<channel>:<name>"`; the buggy `account_id = None` path
+    /// collapsed both sidecars onto `"<channel>"`, so whichever sidecar
+    /// registered last won every chat. We assert each bot resolves to its
+    /// own default independently.
+    #[test]
+    fn sidecar_default_does_not_collide_across_bots() {
+        let router = AgentRouter::new();
+        let agent_a = AgentId::new();
+        let agent_b = AgentId::new();
+
+        // Mirror channel_bridge.rs: account_id = Some(sidecar.name) ⇒
+        // key = "telegram:<name>".
+        let ct = ChannelType::Telegram;
+        for (name, agent) in [("bot-a", agent_a), ("bot-b", agent_b)] {
+            let channel_key = format!("{}:{}", channel_type_to_str(&ct), name);
+            router.set_channel_default_with_name(channel_key, agent, name.to_string());
+        }
+
+        // Each bot's qualified key resolves to its own default — no
+        // last-writer-wins collision.
+        assert_eq!(
+            router.channel_default("telegram:bot-a"),
+            Some(agent_a),
+            "bot-a must keep its own channel default"
+        );
+        assert_eq!(
+            router.channel_default("telegram:bot-b"),
+            Some(agent_b),
+            "bot-b must keep its own channel default — not bot-a's, and \
+             not lost to a bare `telegram` collision"
+        );
+        // The configured names are preserved per-bot too (used by the
+        // reply-precheck bot-name lookup in bridge.rs).
+        assert_eq!(
+            router.channel_default_name("telegram:bot-a").as_deref(),
+            Some("bot-a")
+        );
+        assert_eq!(
+            router.channel_default_name("telegram:bot-b").as_deref(),
+            Some("bot-b")
+        );
+        // The bare `"telegram"` key was never written under the fixed
+        // keying, so it does not silently shadow either bot.
+        assert_eq!(
+            router.channel_default("telegram"),
+            None,
+            "no sidecar should claim the unqualified `telegram` default \
+             when each carries a distinct account_id"
+        );
+    }
 }
