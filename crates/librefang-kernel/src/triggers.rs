@@ -127,9 +127,39 @@ pub enum TriggerPattern {
         assignee_match: Option<String>,
     },
     /// Match when a task is claimed from the Task Board.
-    TaskClaimed,
+    ///
+    /// `creator_match` narrows the match to tasks originally posted by a
+    /// specific agent (mirror of `TaskPosted`'s `assignee_match`):
+    /// - `Some("self")` — only fire for tasks posted by the trigger-owning
+    ///   agent. Accepts both the agent's UUID and its display name.
+    /// - `Some("<uuid>"|"<name>")` — only fire for tasks posted by that
+    ///   specific agent.
+    /// - `None` — fire for every `TaskClaimed` event (legacy behavior).
+    ///
+    /// The field is `#[serde(default)]` so legacy triggers persisted or
+    /// transmitted as the bare JSON string `"task_claimed"` still parse via
+    /// the `normalize_pattern_json` helper (see API route).
+    TaskClaimed {
+        #[serde(default)]
+        creator_match: Option<String>,
+    },
     /// Match when a task is completed on the Task Board.
-    TaskCompleted,
+    ///
+    /// `creator_match` narrows the match to tasks originally posted by a
+    /// specific agent (mirror of `TaskPosted`'s `assignee_match`):
+    /// - `Some("self")` — only fire for tasks posted by the trigger-owning
+    ///   agent. Accepts both the agent's UUID and its display name.
+    /// - `Some("<uuid>"|"<name>")` — only fire for tasks posted by that
+    ///   specific agent.
+    /// - `None` — fire for every `TaskCompleted` event (legacy behavior).
+    ///
+    /// The field is `#[serde(default)]` so legacy triggers persisted or
+    /// transmitted as the bare JSON string `"task_completed"` still parse via
+    /// the `normalize_pattern_json` helper (see API route).
+    TaskCompleted {
+        #[serde(default)]
+        creator_match: Option<String>,
+    },
 }
 
 /// A registered trigger definition.
@@ -1243,7 +1273,9 @@ impl ReconcileReport {
 /// optional fields.
 pub fn normalize_manifest_pattern_json(value: serde_json::Value) -> serde_json::Value {
     match value.as_str() {
-        Some(tag @ "task_posted") => serde_json::json!({ tag: {} }),
+        Some(tag @ ("task_posted" | "task_claimed" | "task_completed")) => {
+            serde_json::json!({ tag: {} })
+        }
         _ => value,
     }
 }
@@ -1298,38 +1330,57 @@ fn matches_pattern(
             .contains(&substring.to_lowercase()),
         TriggerPattern::TaskPosted { assignee_match } => match &event.payload {
             EventPayload::System(SystemEvent::TaskPosted { assigned_to, .. }) => {
-                match assignee_match {
-                    None => true,
-                    Some(filter) => {
-                        // Empty assigned_to can't match any filter — the task
-                        // isn't assigned to anyone, so an assignee_match
-                        // predicate is definitionally false.
-                        let Some(assigned) = assigned_to else {
-                            return false;
-                        };
-                        match filter.as_str() {
-                            "self" => match &owner {
-                                Some((id, name)) => {
-                                    assigned == &id.to_string()
-                                        || name.as_deref() == Some(assigned.as_str())
-                                }
-                                None => false,
-                            },
-                            other => assigned == other,
-                        }
-                    }
-                }
+                agent_identity_filter_matches(assignee_match, assigned_to.as_deref(), &owner)
             }
             _ => false,
         },
-        TriggerPattern::TaskClaimed => matches!(
-            event.payload,
-            EventPayload::System(SystemEvent::TaskClaimed { .. })
-        ),
-        TriggerPattern::TaskCompleted => matches!(
-            event.payload,
-            EventPayload::System(SystemEvent::TaskCompleted { .. })
-        ),
+        TriggerPattern::TaskClaimed { creator_match } => match &event.payload {
+            EventPayload::System(SystemEvent::TaskClaimed { created_by, .. }) => {
+                agent_identity_filter_matches(creator_match, created_by.as_deref(), &owner)
+            }
+            _ => false,
+        },
+        TriggerPattern::TaskCompleted { creator_match } => match &event.payload {
+            EventPayload::System(SystemEvent::TaskCompleted { created_by, .. }) => {
+                agent_identity_filter_matches(creator_match, created_by.as_deref(), &owner)
+            }
+            _ => false,
+        },
+    }
+}
+
+/// Resolve an optional agent-identity filter against a candidate agent string.
+///
+/// Shared by the task-board patterns so `assignee_match` (`TaskPosted`) and
+/// `creator_match` (`TaskClaimed` / `TaskCompleted`) have byte-identical
+/// semantics:
+/// - `filter == None` → always matches (legacy fire-for-all).
+/// - `candidate == None` → never matches a non-`None` filter (the task field
+///   isn't set, so any identity predicate is definitionally false).
+/// - `filter == Some("self")` → matches when `candidate` equals the
+///   trigger-owner's UUID **or** display name (via the resolver-supplied
+///   `owner` tuple).
+/// - `filter == Some("<uuid>"|"<name>")` → exact string match against
+///   `candidate`.
+fn agent_identity_filter_matches(
+    filter: &Option<String>,
+    candidate: Option<&str>,
+    owner: &Option<(AgentId, Option<String>)>,
+) -> bool {
+    let Some(filter) = filter else {
+        return true;
+    };
+    let Some(candidate) = candidate else {
+        return false;
+    };
+    match filter.as_str() {
+        "self" => match owner {
+            Some((id, name)) => {
+                candidate == id.to_string() || name.as_deref() == Some(candidate)
+            }
+            None => false,
+        },
+        other => candidate == other,
     }
 }
 
@@ -1423,6 +1474,7 @@ fn describe_event(event: &Event) -> String {
             SystemEvent::TaskClaimed {
                 task_id,
                 claimed_by,
+                ..
             } => {
                 format!("Task claimed: {task_id} by {claimed_by}")
             }
@@ -1430,6 +1482,7 @@ fn describe_event(event: &Event) -> String {
                 task_id,
                 completed_by,
                 result,
+                ..
             } => {
                 format!("Task completed: {task_id} by {completed_by} result={result}")
             }
@@ -2352,6 +2405,190 @@ mod tests {
             matches.len(),
             1,
             "assignee_match:self must accept the owner's display name too"
+        );
+    }
+
+    #[test]
+    fn task_claimed_creator_match_self_filters_by_uuid_and_name() {
+        // #5960 — `{"task_claimed":{"creator_match":"self"}}` must only fire for
+        // claims of tasks the trigger-owning (orchestrator) agent originally
+        // posted, mirroring `TaskPosted`'s `assignee_match:self`.
+        let engine = TriggerEngine::new();
+        let orchestrator = AgentId::new();
+        let worker = AgentId::new();
+
+        engine
+            .register(
+                orchestrator,
+                TriggerPattern::TaskClaimed {
+                    creator_match: Some("self".to_string()),
+                },
+                "notify the user about {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+
+        // A claim of a task posted by someone else must NOT match.
+        let claimed_other = Event::new(
+            worker,
+            EventTarget::Broadcast,
+            EventPayload::System(SystemEvent::TaskClaimed {
+                task_id: "t-1".to_string(),
+                claimed_by: worker.to_string(),
+                created_by: Some(worker.to_string()),
+            }),
+        );
+        let (matches, _) = engine.evaluate_with_resolver(&claimed_other, |id| {
+            if id == orchestrator {
+                Some("orchestrator".to_string())
+            } else {
+                None
+            }
+        });
+        assert!(
+            matches.is_empty(),
+            "creator_match:self must reject claims of tasks posted by another agent"
+        );
+
+        // A claim of a task the orchestrator posted (creator by UUID) MUST match.
+        let claimed_mine = Event::new(
+            worker,
+            EventTarget::Broadcast,
+            EventPayload::System(SystemEvent::TaskClaimed {
+                task_id: "t-2".to_string(),
+                claimed_by: worker.to_string(),
+                created_by: Some(orchestrator.to_string()),
+            }),
+        );
+        let (matches, _) = engine.evaluate_with_resolver(&claimed_mine, |id| {
+            if id == orchestrator {
+                Some("orchestrator".to_string())
+            } else {
+                None
+            }
+        });
+        assert_eq!(
+            matches.len(),
+            1,
+            "creator_match:self must fire for claims of tasks the owner posted (by UUID)"
+        );
+
+        // Creator by display name MUST also match.
+        let claimed_mine_by_name = Event::new(
+            worker,
+            EventTarget::Broadcast,
+            EventPayload::System(SystemEvent::TaskClaimed {
+                task_id: "t-3".to_string(),
+                claimed_by: worker.to_string(),
+                created_by: Some("orchestrator".to_string()),
+            }),
+        );
+        for mut entry in engine.triggers.iter_mut() {
+            entry.cooldown_secs = Some(0);
+        }
+        let (matches, _) = engine.evaluate_with_resolver(&claimed_mine_by_name, |id| {
+            if id == orchestrator {
+                Some("orchestrator".to_string())
+            } else {
+                None
+            }
+        });
+        assert_eq!(
+            matches.len(),
+            1,
+            "creator_match:self must accept the owner's display name too"
+        );
+    }
+
+    #[test]
+    fn task_completed_creator_match_explicit_uuid_filters() {
+        // #5960 — an explicit `creator_match` UUID on `TaskCompleted` scopes the
+        // fire to completions of tasks that specific agent posted.
+        let engine = TriggerEngine::new();
+        let orchestrator = AgentId::new();
+        let worker = AgentId::new();
+
+        engine
+            .register(
+                orchestrator,
+                TriggerPattern::TaskCompleted {
+                    creator_match: Some(orchestrator.to_string()),
+                },
+                "report {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+
+        // Completion of a task posted by another agent must NOT match.
+        let completed_other = Event::new(
+            worker,
+            EventTarget::Broadcast,
+            EventPayload::System(SystemEvent::TaskCompleted {
+                task_id: "t-1".to_string(),
+                completed_by: worker.to_string(),
+                result: "done".to_string(),
+                created_by: Some(worker.to_string()),
+            }),
+        );
+        let (matches, _) = engine.evaluate_with_resolver(&completed_other, |_| None);
+        assert!(
+            matches.is_empty(),
+            "explicit creator_match must reject completions of tasks posted by another agent"
+        );
+
+        // Completion of a task the orchestrator posted MUST match.
+        let completed_mine = Event::new(
+            worker,
+            EventTarget::Broadcast,
+            EventPayload::System(SystemEvent::TaskCompleted {
+                task_id: "t-2".to_string(),
+                completed_by: worker.to_string(),
+                result: "done".to_string(),
+                created_by: Some(orchestrator.to_string()),
+            }),
+        );
+        for mut entry in engine.triggers.iter_mut() {
+            entry.cooldown_secs = Some(0);
+        }
+        let (matches, _) = engine.evaluate_with_resolver(&completed_mine, |_| None);
+        assert_eq!(
+            matches.len(),
+            1,
+            "explicit creator_match must fire for completions of the matching poster's task"
+        );
+    }
+
+    #[test]
+    fn task_trigger_creator_match_none_fires_for_all() {
+        // #5960 — `creator_match: None` preserves the legacy fire-for-all
+        // behaviour for both task-board patterns.
+        let engine = TriggerEngine::new();
+        let owner = AgentId::new();
+        let other = AgentId::new();
+
+        engine
+            .register(
+                owner,
+                TriggerPattern::TaskClaimed { creator_match: None },
+                "notify {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+
+        let claimed_by_unrelated = Event::new(
+            other,
+            EventTarget::Broadcast,
+            EventPayload::System(SystemEvent::TaskClaimed {
+                task_id: "t-1".to_string(),
+                claimed_by: other.to_string(),
+                created_by: Some(other.to_string()),
+            }),
+        );
+        let (matches, _) = engine.evaluate_with_resolver(&claimed_by_unrelated, |_| None);
+        assert_eq!(
+            matches.len(),
+            1,
+            "creator_match:None must fire for every claim regardless of who posted the task"
         );
     }
 
