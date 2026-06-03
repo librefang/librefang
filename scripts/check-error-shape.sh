@@ -58,7 +58,10 @@ LEGACY_FILES=(
   # Follow-up to #3505: migrate users {"status":"error", …} sites.
   "crates/librefang-api/src/routes/users.rs"
   # Follow-up to #3505: migrate config {"status":"error", …} sites.
-  "crates/librefang-api/src/routes/config.rs"
+  # (routes/config.rs was split into routes/config/; the legacy sites now
+  # live in the manage/ and system/ submodules — #3505 cleanup still pending.)
+  "crates/librefang-api/src/routes/config/manage.rs"
+  "crates/librefang-api/src/routes/config/system.rs"
 )
 
 # Build an extended-regex alternation of legacy paths for grep filtering.
