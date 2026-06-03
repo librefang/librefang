@@ -1622,6 +1622,20 @@ pub async fn execute_tool(
     let shell_exec_full_mode = tool_name == "shell_exec"
         && exec_policy.is_some_and(|p| p.mode == librefang_types::config::ExecSecurityMode::Full);
 
+    // #5962: opt-in — in allowlist mode, a shell_exec whose EVERY base command is a
+    // declared safe_bin may skip the approval prompt. Off by default. The base-command
+    // set is extracted by the same `extract_all_commands` the allowlist gate uses, so a
+    // chained command with any non-safe base (e.g. `env; curl evil`) does NOT bypass.
+    let shell_exec_all_safe_bins = tool_name == "shell_exec"
+        && exec_policy.is_some_and(|p| {
+            p.safe_bins_skip_approval
+                && p.mode == librefang_types::config::ExecSecurityMode::Allowlist
+                && input["command"].as_str().is_some_and(|cmd| {
+                    let bases = crate::subprocess_sandbox::extract_all_commands(cmd);
+                    !bases.is_empty() && bases.iter().all(|b| p.safe_bins.iter().any(|sb| sb == b))
+                })
+        });
+
     // Parse the session id once. Invalid UUIDs (legacy non-uuid session
     // ids, channel-derived synthetic ids) leave this `None` so the ACP
     // routing in `file_read` / `file_write` falls through to the
@@ -1677,12 +1691,14 @@ pub async fn execute_tool(
             }
         };
 
-        // SECURITY: the shell-Full bypass only applies to the global
-        // `require_approval` list — a user-policy `NeedsApproval` MUST
-        // still route through the approval queue. Without `!force_approval`
-        // here, a user whose RBAC policy demanded approval would have the
-        // call execute directly under Full mode, defeating Phase-2.
-        let skip_approval_for_full_exec = shell_exec_full_mode && !force_approval;
+        // SECURITY: the shell-Full bypass (and the #5962 opt-in all-safe-bins
+        // bypass) only applies to the global `require_approval` list — a
+        // user-policy `NeedsApproval` MUST still route through the approval
+        // queue. Without `!force_approval` here, a user whose RBAC policy
+        // demanded approval would have the call execute directly, defeating
+        // Phase-2.
+        let skip_approval_for_full_exec =
+            (shell_exec_full_mode || shell_exec_all_safe_bins) && !force_approval;
 
         if !skip_approval_for_full_exec
             && (force_approval || kh.requires_approval_with_context(tool_name, sender_id, channel))

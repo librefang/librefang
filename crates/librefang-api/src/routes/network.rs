@@ -1741,6 +1741,7 @@ fn filter_to_comms_event(
                 SystemEvent::TaskClaimed {
                     task_id,
                     claimed_by,
+                    ..
                 } => Some(CommsEvent {
                     id: event.id.to_string(),
                     timestamp: event.timestamp.to_rfc3339(),
@@ -1755,6 +1756,7 @@ fn filter_to_comms_event(
                     task_id,
                     completed_by,
                     result,
+                    ..
                 } => Some(CommsEvent {
                     id: event.id.to_string(),
                     timestamp: event.timestamp.to_rfc3339(),
