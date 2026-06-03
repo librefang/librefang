@@ -1772,4 +1772,3 @@ pub async fn install_hand_from_marketplace(
         Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
     }
 }
-
