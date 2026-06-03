@@ -112,6 +112,7 @@ pub use librefang_runtime::registry_sync;
 pub use librefang_runtime::silent_response;
 pub use librefang_runtime::str_utils;
 pub use librefang_runtime::tool_runner;
+pub use librefang_runtime::web_fetch;
 
 // ---------------------------------------------------------------------------
 // Shared persist utility

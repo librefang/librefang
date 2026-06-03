@@ -118,6 +118,29 @@ pub struct ToolExecContext<'a> {
 // and the destructured `media_engine`, `media_drivers`, `browser_ctx`,
 // `tts_engine`, `docker_config` bindings have no consumer. Re-flagging
 // them per-feature would be 5 nested `cfg_attr` blocks; this is cleaner.
+/// Build a [`ToolResult`] from a `ToolError`-native tool's result, mapping the
+/// error through [`ToolError::execution_status`] so an ACL `PermissionDenied`
+/// carries `ToolExecutionStatus::Denied` (a *soft* error — reported to the
+/// model but not counted toward the consecutive-hard-failure abort) instead of
+/// the default hard `Error` status the stringly boundary produces. (#5984)
+fn tool_result_from_typed(tool_use_id: &str, result: TypedToolResult) -> ToolResult {
+    match result {
+        Ok(content) => ToolResult {
+            tool_use_id: tool_use_id.to_string(),
+            content,
+            is_error: false,
+            ..Default::default()
+        },
+        Err(e) => ToolResult {
+            tool_use_id: tool_use_id.to_string(),
+            content: format!("Error: {e}"),
+            status: e.execution_status(),
+            is_error: true,
+            ..Default::default()
+        },
+    }
+}
+
 #[allow(unused_variables)]
 pub async fn execute_tool_raw(
     tool_use_id: &str,
@@ -185,6 +208,50 @@ pub async fn execute_tool_raw(
         interrupt,
         dangerous_command_checker,
     } = ctx;
+
+    // ACL-gated, `ToolError`-native tools (memory_* + wiki_*) are dispatched
+    // here, before the stringly `match` below, through the typed boundary —
+    // so a per-user `PermissionDenied` (from the shared `enforce_memory_acl`
+    // gate, #5139) carries `ToolExecutionStatus::Denied` (soft: reported to
+    // the model but not counted toward the consecutive-hard-failure abort)
+    // instead of being flattened to a hard string error that death-spirals the
+    // turn on a permanent, non-fatal denial. (#5984)
+    let acl_gated: Option<TypedToolResult> = match tool_name {
+        "memory_store" => Some(tool_memory_store(
+            input,
+            *kernel,
+            *caller_agent_id,
+            *sender_id,
+            *channel,
+        )),
+        "memory_recall" => Some(tool_memory_recall(
+            input,
+            *kernel,
+            *caller_agent_id,
+            *sender_id,
+            *channel,
+        )),
+        "memory_list" => Some(tool_memory_list(
+            input,
+            *kernel,
+            *caller_agent_id,
+            *sender_id,
+            *channel,
+        )),
+        "wiki_get" => Some(tool_wiki_get(input, *kernel, *sender_id, *channel)),
+        "wiki_search" => Some(tool_wiki_search(input, *kernel, *sender_id, *channel)),
+        "wiki_write" => Some(tool_wiki_write(
+            input,
+            *kernel,
+            *caller_agent_id,
+            *sender_id,
+            *channel,
+        )),
+        _ => None,
+    };
+    if let Some(typed) = acl_gated {
+        return tool_result_from_typed(tool_use_id, typed);
+    }
 
     let result = match tool_name {
         // Filesystem tools
@@ -897,26 +964,9 @@ pub async fn execute_tool_raw(
         "agent_list" => tool_agent_list(*kernel).map_err(|e| e.to_string()),
         "agent_kill" => tool_agent_kill(input, *kernel).map_err(|e| e.to_string()),
 
-        // Shared memory tools (peer-scoped when sender_id is present).
-        // #5139: the per-user `UserMemoryAccess` ACL is enforced inside each
-        // tool fn (`enforce_memory_acl`) using the attributed sender +
-        // channel, mirroring the proactive-retrieval gate.
-        "memory_store" => tool_memory_store(input, *kernel, *caller_agent_id, *sender_id, *channel),
-        "memory_recall" => {
-            tool_memory_recall(input, *kernel, *caller_agent_id, *sender_id, *channel)
-        }
-        "memory_list" => tool_memory_list(input, *kernel, *caller_agent_id, *sender_id, *channel),
-
-        // Memory wiki tools (issue #3329) — same #5139 per-user ACL gate.
-        // #3576: submodule returns Result<String, ToolError>; narrow here.
-        "wiki_get" => {
-            tool_wiki_get(input, *kernel, *sender_id, *channel).map_err(|e| e.to_string())
-        }
-        "wiki_search" => {
-            tool_wiki_search(input, *kernel, *sender_id, *channel).map_err(|e| e.to_string())
-        }
-        "wiki_write" => tool_wiki_write(input, *kernel, *caller_agent_id, *sender_id, *channel)
-            .map_err(|e| e.to_string()),
+        // Shared memory (`memory_*`) and wiki (`wiki_*`) tools are dispatched
+        // before this match, through the typed `ToolError` boundary, so their
+        // per-user ACL denials carry the soft `Denied` status (#5139 / #5984).
 
         // Collaboration tools. task_* is the #3576 third slice: the submodule
         // returns `Result<String, ToolError>`; arms narrow to

@@ -140,6 +140,10 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
         // Hands (browser automation engine)
         .route("/hands", axum::routing::get(list_hands))
         .route("/hands/install", axum::routing::post(install_hand))
+        .route(
+            "/hands/marketplace/install",
+            axum::routing::post(install_hand_from_marketplace),
+        )
         .route("/hands/{hand_id}", axum::routing::delete(uninstall_hand))
         .route("/hands/active", axum::routing::get(list_active_hands))
         .route("/hands/{hand_id}", axum::routing::get(get_hand))

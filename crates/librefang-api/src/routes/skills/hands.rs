@@ -1636,3 +1636,139 @@ pub async fn hand_instance_status(
 
     (StatusCode::OK, Json(resp))
 }
+
+/// POST /api/hands/marketplace/install — Install a hand from the remote
+/// HandsHub marketplace.
+///
+/// Runs the same security pipeline as the local installer plus a network
+/// download: a caller-supplied `registry_url` is SSRF-checked and its
+/// validated address is pinned onto a redirect-disabled HTTP client (#5954
+/// F1); SHA-256 verification of the bundle against the registry digest — and
+/// for a third-party registry a digest is *required* (#5954 F4); the shared
+/// `librefang_skills::supply_chain::scan` audit (reused from the skills
+/// marketplace); and a bundle-id == requested-id assertion (#5954 F3). The
+/// verified content is funneled into the existing persisted-install path, so
+/// the on-disk layout is identical to a local install. See
+/// `HandRegistry::install_from_remote`.
+///
+/// Status contract: 200 with the installed `HandDefinition`; 409 when the hand
+/// is already installed; 422 when the supply-chain audit blocks the bundle;
+/// 400 for everything else (bad id, rejected `registry_url`, download /
+/// checksum failure, bundle-id mismatch, missing checksum from a third-party
+/// registry, parse error).
+#[utoipa::path(
+    post,
+    path = "/api/hands/marketplace/install",
+    tag = "hands",
+    request_body = crate::types::HandsHubInstallRequest,
+    responses(
+        (status = 200, description = "Install a hand from the HandsHub marketplace", body = crate::types::JsonObject),
+        (status = 409, description = "Hand already installed"),
+        (status = 422, description = "Bundle blocked by the supply-chain audit")
+    )
+)]
+pub async fn install_hand_from_marketplace(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<crate::types::HandsHubInstallRequest>,
+) -> impl IntoResponse {
+    if req.hand_id.trim().is_empty() {
+        return ApiErrorResponse::bad_request("Missing hand_id field").into_json_tuple();
+    }
+
+    // `require_checksum` is the F4 trust gate: a caller-supplied third-party
+    // `registry_url` MUST advertise a SHA-256 (rejected otherwise); the
+    // compiled-in default registry (`hands.librefang.ai`) keeps its existing
+    // best-effort behaviour (WARN + install when the index omits a digest).
+    let (hub, require_checksum) = match req.registry_url.as_deref() {
+        // Caller-supplied registry URL: validate against the SSRF guard before
+        // pointing the daemon at it. Without this an authenticated caller could
+        // aim `download_bundle` at loopback / private / cloud-metadata addresses
+        // (e.g. http://169.254.169.254/...). The operator allowlist
+        // (`config.toml: [hands] registry_allowed_hosts`) exempts self-hosted
+        // mirrors on internal networks; it defaults empty (public-only) and can
+        // never exempt cloud-metadata ranges. `check_ssrf` resolves DNS
+        // synchronously, so it runs on a blocking thread (no sync I/O in the
+        // async handler).
+        //
+        // The resolution it returns is NOT discarded: the validated hostname +
+        // IPs are pinned onto the HandsHub client so the address we checked is
+        // the address the bundle/index fetch connects to (closing the
+        // DNS-rebind TOCTOU). Auto-redirects are disabled inside the client, so
+        // a registry that passed the check cannot 302 the fetch to an internal
+        // target.
+        Some(url) => {
+            let allowed_hosts = state
+                .kernel
+                .config_snapshot()
+                .hands
+                .registry_allowed_hosts
+                .clone();
+            let url = url.to_string();
+            let check = tokio::task::spawn_blocking(move || {
+                librefang_kernel::web_fetch::check_ssrf(&url, &allowed_hosts)
+                    .map(|resolution| (url, resolution))
+            })
+            .await;
+            let (validated_url, resolution) = match check {
+                Ok(Ok(pair)) => pair,
+                Ok(Err(e)) => {
+                    return ApiErrorResponse::bad_request(format!("registry_url rejected: {e}"))
+                        .into_json_tuple();
+                }
+                Err(e) => {
+                    return ApiErrorResponse::bad_request(format!(
+                        "registry_url validation failed: {e}"
+                    ))
+                    .into_json_tuple();
+                }
+            };
+            let pinned_ips: Vec<std::net::IpAddr> =
+                resolution.resolved.iter().map(|addr| addr.ip()).collect();
+            (
+                librefang_hands::HandsHubClient::with_pinned_url(
+                    &validated_url,
+                    &resolution.hostname,
+                    &pinned_ips,
+                ),
+                true,
+            )
+        }
+        // Default registry (`hands.librefang.ai`) is trusted — skip the check
+        // and keep the best-effort checksum policy.
+        None => (librefang_hands::HandsHubClient::new(), false),
+    };
+
+    let home_dir = state.kernel.home_dir().to_path_buf();
+    match state
+        .kernel
+        .hands()
+        .install_from_remote(&home_dir, &req.hand_id, &hub, require_checksum)
+        .await
+    {
+        Ok(result) => {
+            state.kernel.invalidate_hand_route_cache();
+            // Return the freshly installed canonical `HandDefinition` (plus the
+            // resolved version and checksum-verification flag) so dashboard /
+            // SDK callers can `setQueryData` without a follow-up GET — same
+            // contract as the local `install_hand` handler.
+            let def = state.kernel.hands().get_definition(&result.hand_id);
+            let body = serde_json::json!({
+                "hand_id": result.hand_id,
+                "version": result.version,
+                "checksum_verified": result.checksum_verified,
+                "definition": def,
+            });
+            (StatusCode::OK, Json(body))
+        }
+        Err(e @ librefang_hands::HandError::AlreadyActive(_))
+        | Err(e @ librefang_hands::HandError::AlreadyRegistered(_)) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+        Err(e @ librefang_hands::HandError::SecurityBlocked(_)) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+        Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
+    }
+}

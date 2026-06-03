@@ -800,6 +800,10 @@ pub fn build_reload_plan_with_caps(
         );
         noop_if_changed(field_changed(&old.tts, &new.tts), "tts");
         noop_if_changed(field_changed(&old.media, &new.media), "media");
+        // The hands marketplace install handler reads `hands.registry_allowed_hosts`
+        // live from `config_snapshot()` on every request, so a swap is effective
+        // on the next install with no explicit reapply action.
+        noop_if_changed(field_changed(&old.hands, &new.hands), "hands");
         noop_if_changed(field_changed(&old.links, &new.links), "links");
         noop_if_changed(field_changed(&old.privacy, &new.privacy), "privacy");
         noop_if_changed(field_changed(&old.pairing, &new.pairing), "pairing");
@@ -1003,6 +1007,7 @@ pub fn classified_reload_fields() -> std::collections::BTreeSet<&'static str> {
         "notification",
         "tts",
         "media",
+        "hands",
         "links",
         "privacy",
         "pairing",

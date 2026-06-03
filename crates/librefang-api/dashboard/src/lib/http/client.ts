@@ -247,6 +247,7 @@ export {
   pauseHand,
   resumeHand,
   uninstallHand,
+  installHandFromMarketplace,
   setHandSecret,
   updateHandSettings,
   sendHandMessage,

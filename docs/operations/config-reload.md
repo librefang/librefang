@@ -180,6 +180,7 @@ classified differently — the row note spells out which is which.
 | `skills` | H | Skills config (bundled + user-installed) — reloads registry. |
 | `plugins` | R | Plugin registry config. |
 | `registry` | R | Registry sync config (cache TTL, …). |
+| `hands` | N | Hands marketplace SSRF allowlist (`registry_allowed_hosts`) — read live by the install handler per request. |
 | `bindings` | R | Agent bindings for multi-account routing. |
 
 ### Memory / sessions
