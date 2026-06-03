@@ -2509,11 +2509,17 @@ pub async fn start_channel_bridge_with_config(
         started_at: Instant::now(),
     };
 
-    // (adapter, default_agent_name, account_id) — `account_id` is
-    // always None because `SidecarChannelConfig` carries no such
-    // field (sidecars surface their own per-instance id via env
-    // vars like `TEAMS_ACCOUNT_ID`). The triple stays for the
-    // downstream router-population loop's signature.
+    // (adapter, default_agent_name, account_id) — `account_id` is the
+    // sidecar's config `name`, which qualifies the per-bot routing key
+    // (#5955). Two Telegram sidecars share the `"telegram"` channel
+    // type, so without a distinct `account_id` the downstream
+    // router-population loop would key both under the bare `"telegram"`
+    // default (last-writer-wins) and the `metadata["account_id"]`
+    // resolution path in `bridge.rs` would collapse a `/agent`
+    // selection across every bot of the same platform. The sidecar
+    // reader loop stamps the matching `metadata["account_id"]` from the
+    // same `name` (`librefang-channels/src/sidecar.rs`), so the
+    // registration key and the resolution key line up.
     #[allow(clippy::type_complexity)]
     let mut adapters: Vec<(Arc<dyn ChannelAdapter>, Option<String>, Option<String>)> = Vec::new();
 
@@ -2547,7 +2553,17 @@ pub async fn start_channel_bridge_with_config(
         // the non-deterministic "first available agent" branch in
         // `resolve_or_fallback`, silently routing traffic to whichever agent
         // happens to be first in the registry iteration order.
-        adapters.push((adapter, sidecar_config.default_agent.clone(), None));
+        // #5955 — qualify each sidecar under its own `name` so per-bot
+        // isolation (PR #5688) actually engages. `None` here keyed every
+        // Telegram sidecar under the bare `"telegram"` default, so the
+        // last-registered bot won every chat and `/agent` selections
+        // leaked across bots. Must match the `metadata["account_id"]`
+        // the sidecar reader loop stamps from the same `name`.
+        adapters.push((
+            adapter,
+            sidecar_config.default_agent.clone(),
+            Some(sidecar_config.name.clone()),
+        ));
     }
 
     if adapters.is_empty() {

@@ -640,6 +640,13 @@ _308 PRs from 7 contributors since v2026.5.17-beta.12._
 
 ### Fixed
 
+- **security(channels): propagate per-sidecar `account_id` so multi-bot Telegram isolation actually engages** (#5955) (@nevgenov).
+  Multi-instance sidecar setups (several `[[sidecar_channels]]` of `channel_type = "telegram"`) regressed the #5688 per-bot isolation because the daemon never propagated the operator-known `SidecarChannelConfig::name` as `account_id`, leaving the #5688 guards as dead code for sidecars.
+  Two manifestations, one root: the daemon registration hardcoded `account_id = None`, so every sidecar's `default_agent` collided on the bare `channel_defaults["telegram"]` key (last-booted bot answered in every bot); and the sidecar reader loop stamped `channel_id` / `platform` / `sender_username` into per-message metadata but never `account_id`, so `dispatch_message` always took the global `set_user_default` branch and a `/agent <name>` selection in bot-A leaked to bot-B for the same platform user.
+  The registration now qualifies each sidecar under its own `name` (`channel_bridge.rs`), and the reader loop stamps `metadata["account_id"]` from the same adapter name via `entry().or_insert_with(...)` so an adapter that already supplies its own `account_id` (dingtalk / email / google_chat) is preserved (`sidecar.rs`).
+  Registration key and resolution key now both derive from `SidecarChannelConfig::name`, so they line up.
+  Regression tests: `router::tests::sidecar_default_does_not_collide_across_bots` (two sidecars register under distinct `telegram:<name>` keys, no last-writer-wins collision) and `sidecar::tests::test_sidecar_stamps_account_id_from_adapter_name` (a real sidecar subprocess stamps `account_id` from the config name, not the `ready`-event account, and preserves an adapter-supplied one).
+
 - **kernel(cron): day-of-week now follows the POSIX convention (`0` and `7` both mean Sunday)** instead of the `cron` crate's 1-7 mapping (#5966) (@DaBlitzStein).
   Sunday-only schedules like `0 16 * * 0` were previously rejected as unschedulable, and numeric weekday ranges such as `1-5` silently shifted by one day (firing Sun-Thu instead of Mon-Fri).
   The 5/6-field expression is now remapped at the single conversion site before it reaches the crate, so `0`/`7` resolve to Sunday and `1-5` fires Monday through Friday as written.
