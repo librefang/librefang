@@ -1178,7 +1178,7 @@ pub fn tool_hint(name: &str) -> &'static str {
 
         // Memory
         "memory_store" => "save a key-value pair to memory",
-        "memory_recall" => "search memory for relevant context",
+        "memory_recall" => "recall a stored value by its exact key (use memory_list to find keys)",
         "memory_delete" => "delete a memory entry",
         "memory_list" => "list stored memory keys",
 

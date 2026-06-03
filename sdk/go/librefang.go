@@ -800,6 +800,10 @@ func (r *HandsResource) HandStats(id string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/hands/instances/%s/stats", id), nil, nil)
 }
 
+func (r *HandsResource) InstallHandFromMarketplace(data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", "/api/hands/marketplace/install", data, nil)
+}
+
 func (r *HandsResource) ReloadHands() (interface{}, error) {
 	return r.client.request("POST", "/api/hands/reload", nil, nil)
 }

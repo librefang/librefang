@@ -3399,6 +3399,28 @@ export async function activateHand(
   });
 }
 
+/** Result of installing a hand from the remote HandsHub marketplace. */
+export interface HandsHubInstallResult {
+  hand_id: string;
+  version: string;
+  checksum_verified: boolean;
+  definition: HandDefinitionItem | null;
+}
+
+/** Install a hand from the remote HandsHub marketplace. The server downloads
+ *  the bundle, verifies its SHA-256 against the registry digest, runs the
+ *  shared supply-chain audit, then installs it. `registryUrl` overrides the
+ *  default registry (self-hosted forks). */
+export async function installHandFromMarketplace(
+  handId: string,
+  registryUrl?: string
+): Promise<HandsHubInstallResult> {
+  return post<HandsHubInstallResult>("/api/hands/marketplace/install", {
+    hand_id: handId,
+    ...(registryUrl ? { registry_url: registryUrl } : {})
+  });
+}
+
 // #3832: pause/resume return the post-mutation HandInstanceItem so the
 // dashboard can setQueryData on the live instance without a follow-up GET.
 export async function pauseHand(instanceId: string): Promise<HandInstanceItem> {

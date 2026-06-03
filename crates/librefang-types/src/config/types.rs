@@ -3523,6 +3523,10 @@ pub struct KernelConfig {
     /// Registry sync configuration (cache TTL, etc.).
     #[serde(default)]
     pub registry: RegistryConfig,
+    /// Hands marketplace configuration (SSRF allowlist for a caller-supplied
+    /// `registry_url` on the install endpoint).
+    #[serde(default)]
+    pub hands: HandsConfig,
     /// PII privacy controls for LLM context filtering.
     #[serde(default)]
     pub privacy: PrivacyConfig,
@@ -5257,6 +5261,29 @@ impl Default for RegistryConfig {
     }
 }
 
+/// Hands marketplace configuration.
+///
+/// Configure in config.toml:
+/// ```toml
+/// [hands]
+/// # Hosts/CIDRs/glob patterns that a caller-supplied `registry_url` is
+/// # allowed to resolve to even when it points at a private/internal
+/// # network — e.g. a self-hosted HandsHub mirror inside a VPC/K8s cluster.
+/// # Default empty: only public registries are reachable. Cloud-metadata
+/// # endpoints (169.254.x.x, etc.) stay blocked regardless of this list.
+/// registry_allowed_hosts = ["hub.internal.example.com", "10.0.0.0/8"]
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct HandsConfig {
+    /// SSRF allowlist for a caller-supplied `registry_url` on
+    /// `POST /api/hands/marketplace/install`. Entries are CIDRs, glob hostname
+    /// patterns, or literal IPs/hostnames that are exempt from the private-IP
+    /// SSRF block. Cloud-metadata ranges remain unconditionally blocked.
+    /// Default empty means only public registries are reachable.
+    pub registry_allowed_hosts: Vec<String>,
+}
+
 /// Plugin registry configuration.
 ///
 /// Configure in config.toml:
@@ -6107,6 +6134,7 @@ impl Default for KernelConfig {
             heartbeat: HeartbeatTomlConfig::default(),
             plugins: PluginsConfig::default(),
             registry: RegistryConfig::default(),
+            hands: HandsConfig::default(),
             cors_origin: Vec::new(),
             trusted_hosts: Vec::new(),
             trusted_proxies: Vec::new(),

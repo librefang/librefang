@@ -1951,6 +1951,18 @@ impl HandsResource {
         .await
     }
 
+    pub async fn install_hand_from_marketplace(&self, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &"/api/hands/marketplace/install".to_string(),
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
     pub async fn reload_hands(&self) -> Result<Value> {
         do_req(
             &self.client,

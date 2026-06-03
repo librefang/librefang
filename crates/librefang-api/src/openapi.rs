@@ -149,6 +149,7 @@ use crate::types;
         // ── Hands ──
         routes::list_hands,
         routes::install_hand,
+        routes::install_hand_from_marketplace,
         routes::list_active_hands,
         routes::get_hand,
         routes::get_hand_manifest,

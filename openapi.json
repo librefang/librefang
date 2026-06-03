@@ -6116,6 +6116,44 @@
         }
       }
     },
+    "/api/hands/marketplace/install": {
+      "post": {
+        "tags": [
+          "hands"
+        ],
+        "summary": "POST /api/hands/marketplace/install — Install a hand from the remote\nHandsHub marketplace.",
+        "description": "Runs the same security pipeline as the local installer plus a network\ndownload: a caller-supplied `registry_url` is SSRF-checked and its\nvalidated address is pinned onto a redirect-disabled HTTP client (#5954\nF1); SHA-256 verification of the bundle against the registry digest — and\nfor a third-party registry a digest is *required* (#5954 F4); the shared\n`librefang_skills::supply_chain::scan` audit (reused from the skills\nmarketplace); and a bundle-id == requested-id assertion (#5954 F3). The\nverified content is funneled into the existing persisted-install path, so\nthe on-disk layout is identical to a local install. See\n`HandRegistry::install_from_remote`.\n\nStatus contract: 200 with the installed `HandDefinition`; 409 when the hand\nis already installed; 422 when the supply-chain audit blocks the bundle;\n400 for everything else (bad id, rejected `registry_url`, download /\nchecksum failure, bundle-id mismatch, missing checksum from a third-party\nregistry, parse error).",
+        "operationId": "install_hand_from_marketplace",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HandsHubInstallRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Install a hand from the HandsHub marketplace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Hand already installed"
+          },
+          "422": {
+            "description": "Bundle blocked by the supply-chain audit"
+          }
+        }
+      }
+    },
     "/api/hands/reload": {
       "post": {
         "tags": [
@@ -13219,6 +13257,27 @@
           "name": {
             "type": "string",
             "description": "Extension/integration ID to remove."
+          }
+        },
+        "additionalProperties": false
+      },
+      "HandsHubInstallRequest": {
+        "type": "object",
+        "description": "Request to install a hand from the remote HandsHub marketplace.",
+        "required": [
+          "hand_id"
+        ],
+        "properties": {
+          "hand_id": {
+            "type": "string",
+            "description": "Stable hand id in the registry index (also the download key)."
+          },
+          "registry_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Override the registry base URL (self-hosted forks, integration tests).\nFalls back to the client's compiled default when omitted."
           }
         },
         "additionalProperties": false
