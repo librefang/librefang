@@ -10678,8 +10678,12 @@ fn resolve_evolution_mode_reads_per_agent_manifest() {
     let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
 
     let free = spawn_evolution_agent(&kernel, "free-agent", EvolutionMode::Free, vec![]);
-    let controlled =
-        spawn_evolution_agent(&kernel, "controlled-agent", EvolutionMode::Controlled, vec![]);
+    let controlled = spawn_evolution_agent(
+        &kernel,
+        "controlled-agent",
+        EvolutionMode::Controlled,
+        vec![],
+    );
 
     assert_eq!(kernel.resolve_evolution_mode(free), EvolutionMode::Free);
     assert_eq!(
@@ -10741,7 +10745,10 @@ fn controlled_update_queues_pending_and_leaves_skill_untouched() {
         pending[0].kind,
         crate::skill_workshop::candidate::CandidateKind::Update
     );
-    assert_eq!(pending[0].target_skill_id.as_deref(), Some("existing-skill"));
+    assert_eq!(
+        pending[0].target_skill_id.as_deref(),
+        Some("existing-skill")
+    );
     assert_eq!(pending[0].current_version.as_deref(), Some("0.1.0"));
     assert_eq!(pending[0].proposed_version.as_deref(), Some("0.1.1"));
 
@@ -10844,9 +10851,14 @@ fn controlled_update_crosses_injection_scan() {
         Some("0.1.1".to_string()),
         "summary",
     );
-    let err =
-        LibreFangKernel::queue_reviewer_candidate(&skills_root, &kernel, agent, &malicious, "update")
-            .expect_err("malicious update body must be blocked by the injection scan");
+    let err = LibreFangKernel::queue_reviewer_candidate(
+        &skills_root,
+        &kernel,
+        agent,
+        &malicious,
+        "update",
+    )
+    .expect_err("malicious update body must be blocked by the injection scan");
     match err {
         ReviewError::Permanent(msg) => {
             assert!(
@@ -10926,10 +10938,7 @@ fn approve_create_auto_assigns_to_creator_allowlist() {
     // Idempotency: assigning the same skill again is a no-op (no duplicate).
     kernel.assign_skill_to_agent_allowlist(&agent.to_string(), "my_new_skill");
     let skills_after = kernel.agents.registry.get(agent).unwrap().manifest.skills;
-    let count = skills_after
-        .iter()
-        .filter(|s| *s == "my_new_skill")
-        .count();
+    let count = skills_after.iter().filter(|s| *s == "my_new_skill").count();
     assert_eq!(count, 1, "skill must appear exactly once after double-add");
 
     kernel.shutdown();
@@ -10964,7 +10973,9 @@ fn approve_create_leaves_all_skills_agent_unpinned() {
     let candidate_id = candidate.id.clone();
     crate::skill_workshop::storage::save_candidate(&skills_root, &candidate, 20, None)
         .expect("save");
-    kernel.approve_pending_skill(&candidate_id).expect("approve");
+    kernel
+        .approve_pending_skill(&candidate_id)
+        .expect("approve");
 
     let skills = kernel.agents.registry.get(agent).unwrap().manifest.skills;
     assert!(

@@ -427,8 +427,7 @@ impl LibreFangKernel {
         // `approve_candidate` deletes the pending file on success.
         let candidate = crate::skill_workshop::storage::load_candidate(&skills_root, id)?;
         let owner_agent_id = candidate.agent_id.clone();
-        let is_create =
-            candidate.kind == crate::skill_workshop::candidate::CandidateKind::Create;
+        let is_create = candidate.kind == crate::skill_workshop::candidate::CandidateKind::Create;
 
         let result =
             crate::skill_workshop::storage::approve_candidate(&skills_root, &skills_root, id)?;
@@ -1076,10 +1075,11 @@ impl LibreFangKernel {
                 {
                     // Read the current body from disk, falling back to the
                     // manifest's cached copy (mirrors `patch_skill`).
-                    let current_body = std::fs::read_to_string(skill.path.join("prompt_context.md"))
-                        .ok()
-                        .filter(|s| !s.is_empty())
-                        .or_else(|| skill.manifest.prompt_context.clone());
+                    let current_body =
+                        std::fs::read_to_string(skill.path.join("prompt_context.md"))
+                            .ok()
+                            .filter(|s| !s.is_empty())
+                            .or_else(|| skill.manifest.prompt_context.clone());
                     let current_body = match current_body {
                         Some(b) if !b.is_empty() => b,
                         _ => {
@@ -1104,8 +1104,8 @@ impl LibreFangKernel {
                             return Ok(());
                         }
                     };
-                    let current_version = Some(skill.manifest.skill.version.clone())
-                        .filter(|v| !v.is_empty());
+                    let current_version =
+                        Some(skill.manifest.skill.version.clone()).filter(|v| !v.is_empty());
                     let proposed_version = current_version
                         .as_deref()
                         .map(librefang_skills::evolution::bump_patch_version);
