@@ -18,10 +18,17 @@ jobs:
           LABEL: "good first issue,help wanted"
           AUTO_ASSIGN: false
           # Skip files that contain TODO markers inside string-literal code templates
-          # (e.g. plugin scaffolding) — those are placeholders for end users, not tasks.
+          # (e.g. plugin / skill scaffolding) — those are placeholders for end users,
+          # not tasks.
           #
           # After the #3710 god-crate split (#5053) the plugin_manager.rs file became
           # a directory (plugin_manager/{mod,scaffold,...}.rs); the scaffolder's TODO
           # strings now live in plugin_manager/scaffold.rs. Match the directory so
           # any future siblings (e.g. another templating module) are also covered.
-          IGNORE: crates/librefang-runtime/src/plugin_manager/
+          #
+          # The `librefang skill new` scaffolder embeds the same kind of
+          # `// TODO: Implement your skill logic here` markers in its Python / Node /
+          # WASM stub templates; those strings moved into commands/skill.rs during the
+          # cli/main.rs split (#5971), which re-triggered the false positives (#5982,
+          # #5983). Ignore that file too.
+          IGNORE: crates/librefang-runtime/src/plugin_manager/,crates/librefang-cli/src/commands/skill.rs
