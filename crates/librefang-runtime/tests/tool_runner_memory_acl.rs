@@ -17,6 +17,7 @@
 use async_trait::async_trait;
 use librefang_kernel_handle::prelude::*;
 use librefang_runtime::tool_runner::{execute_tool_raw, ToolExecContext};
+use librefang_types::tool::ToolExecutionStatus;
 use librefang_types::user_policy::UserMemoryAccess;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -373,6 +374,13 @@ async fn restricted_user_memory_store_is_denied_and_does_not_land() {
         "viewer (no writable namespaces) must be denied memory_store, got: {}",
         result.content
     );
+    // #5984: an ACL denial is a soft `Denied`, not a hard error — it must NOT
+    // count toward the agent-loop death-spiral guard (MAX_CONSECUTIVE_ALL_FAILED).
+    assert_eq!(
+        result.status,
+        ToolExecutionStatus::Denied,
+        "ACL-denied memory_store must carry the soft Denied status"
+    );
     assert!(
         result.content.contains("Access denied"),
         "denial message should be explicit, got: {}",
@@ -447,6 +455,11 @@ async fn restricted_user_memory_recall_is_denied_and_does_not_read() {
         "recall must be denied when kv read is not in the ACL: {}",
         result.content
     );
+    assert_eq!(
+        result.status,
+        ToolExecutionStatus::Denied,
+        "ACL-denied memory_recall must carry the soft Denied status (#5984)"
+    );
     assert!(
         probes.recall.lock().unwrap().is_empty(),
         "denied memory_recall must never reach the substrate (no cross-user leak)"
@@ -471,6 +484,11 @@ async fn restricted_user_memory_list_is_denied_and_does_not_enumerate() {
         result.is_error,
         "list must be denied without kv read access: {}",
         result.content
+    );
+    assert_eq!(
+        result.status,
+        ToolExecutionStatus::Denied,
+        "ACL-denied memory_list must carry the soft Denied status (#5984)"
     );
     assert!(
         probes.list.lock().unwrap().is_empty(),
@@ -540,6 +558,11 @@ async fn restricted_user_wiki_write_is_denied_and_does_not_land() {
         result.content
     );
     assert_eq!(
+        result.status,
+        ToolExecutionStatus::Denied,
+        "ACL-denied wiki_write must carry the soft Denied status (#5984)"
+    );
+    assert_eq!(
         *probes.wiki_write.lock().unwrap(),
         0,
         "denied wiki_write must never reach the vault"
@@ -569,10 +592,20 @@ async fn restricted_user_wiki_read_denied_when_wiki_not_in_acl() {
         "wiki_get must be denied: {}",
         get_res.content
     );
+    assert_eq!(
+        get_res.status,
+        ToolExecutionStatus::Denied,
+        "ACL-denied wiki_get must carry the soft Denied status (#5984)"
+    );
     assert!(
         search_res.is_error,
         "wiki_search must be denied: {}",
         search_res.content
+    );
+    assert_eq!(
+        search_res.status,
+        ToolExecutionStatus::Denied,
+        "ACL-denied wiki_search must carry the soft Denied status (#5984)"
     );
     assert_eq!(
         *probes.wiki_read.lock().unwrap(),

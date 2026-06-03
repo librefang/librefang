@@ -59,6 +59,17 @@ impl Drop for Harness {
 }
 
 async fn boot_router_with_api_key(api_key: &str) -> Harness {
+    boot_router_with_config(api_key, Vec::new()).await
+}
+
+/// Boot a router with auth + an explicit hands SSRF allowlist.
+///
+/// The marketplace-install tests stand up a mock registry on `127.0.0.1`,
+/// which the install handler's `check_ssrf` guard now rejects unless the
+/// loopback host is exempt. Threading `registry_allowed_hosts` here is how
+/// those tests keep their loopback mock reachable; pass an empty list to
+/// exercise the default public-only policy.
+async fn boot_router_with_config(api_key: &str, registry_allowed_hosts: Vec<String>) -> Harness {
     let tmp = tempfile::tempdir().expect("tempdir");
 
     // Populate the registry cache so the kernel boots without network.
@@ -80,6 +91,9 @@ async fn boot_router_with_api_key(api_key: &str) -> Harness {
             message_timeout_secs: 300,
             extra_params: std::collections::BTreeMap::new(),
             cli_profile_dirs: Vec::new(),
+        },
+        hands: librefang_types::config::HandsConfig {
+            registry_allowed_hosts,
         },
         ..KernelConfig::default()
     };
@@ -106,6 +120,13 @@ const TEST_API_KEY: &str = "test-secret-key";
 /// module-level docstring.
 async fn boot_router_open() -> Harness {
     boot_router_with_api_key(TEST_API_KEY).await
+}
+
+/// Boot a router whose hands SSRF allowlist exempts the loopback mock
+/// registry. Used by the marketplace-install tests that bind their fake
+/// HandsHub on `127.0.0.1`.
+async fn boot_router_allowing_loopback() -> Harness {
+    boot_router_with_config(TEST_API_KEY, vec!["127.0.0.1".to_string()]).await
 }
 
 async fn send(
@@ -614,4 +635,502 @@ async fn mutating_hands_routes_require_auth_when_api_key_set() {
             "{method} {path} must require auth (got {status})"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/hands/marketplace/install — install a hand from a remote registry
+//
+// We never touch the network: a local axum listener stands in for the
+// HandsHub registry, serving the two endpoints `HandsHubClient` calls —
+// `GET /api/v1/index` and `GET /api/v1/hands/{id}/bundle`. The index entry
+// advertises the real SHA-256 of the served bundle bytes so the installer's
+// checksum gate passes; the second test corrupts that digest to assert the
+// gate actually fails the install.
+// ---------------------------------------------------------------------------
+
+const MARKETPLACE_HAND_TOML: &str = r#"
+id = "remote-uptime"
+name = "Remote Uptime"
+description = "Installed from the marketplace."
+category = "data"
+
+[routing]
+aliases = []
+
+[agent]
+name = "remote-uptime-agent"
+description = "Test hand agent"
+system_prompt = "Test prompt"
+"#;
+
+/// Build the exact bundle bytes the mock registry serves for `remote-uptime`,
+/// together with their SHA-256 hex digest. The digest is what the index
+/// entry advertises, so the two must be derived from the same bytes.
+fn marketplace_bundle_bytes_and_sha() -> (Vec<u8>, String) {
+    use sha2::{Digest, Sha256};
+    let bundle = serde_json::json!({
+        "toml": MARKETPLACE_HAND_TOML,
+        "skill": "# Remote skill\n",
+    });
+    let bytes = serde_json::to_vec(&bundle).expect("serialize bundle");
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let sha = hex::encode(hasher.finalize());
+    (bytes, sha)
+}
+
+/// Spawn a mock HandsHub registry. `advertised_sha` is the digest placed in
+/// the index entry — pass the real digest for the happy path, a wrong one to
+/// exercise the checksum-mismatch rejection. Returns the base URL
+/// (`http://127.0.0.1:PORT/api/v1`) and the server task handle.
+async fn spawn_mock_registry(advertised_sha: String) -> (String, tokio::task::JoinHandle<()>) {
+    use axum::extract::State;
+    use axum::response::IntoResponse;
+    use axum::routing::get;
+    use axum::Router;
+
+    let (bundle_bytes, _) = marketplace_bundle_bytes_and_sha();
+    let state = Arc::new((bundle_bytes, advertised_sha));
+
+    async fn index_handler(State(s): State<Arc<(Vec<u8>, String)>>) -> impl IntoResponse {
+        let index = serde_json::json!({
+            "hands": [
+                {
+                    "id": "remote-uptime",
+                    "name": "Remote Uptime",
+                    "description": "Installed from the marketplace.",
+                    "category": "data",
+                    "version": "1.0.0",
+                    "expected_sha256": s.1,
+                }
+            ]
+        });
+        ([("content-type", "application/json")], index.to_string())
+    }
+
+    async fn bundle_handler(State(s): State<Arc<(Vec<u8>, String)>>) -> impl IntoResponse {
+        ([("content-type", "application/json")], s.0.clone())
+    }
+
+    let app: Router = Router::new()
+        .route("/api/v1/index", get(index_handler))
+        .route("/api/v1/hands/{id}/bundle", get(bundle_handler))
+        .with_state(state);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}/api/v1"), handle)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn marketplace_install_succeeds_and_registers_hand() {
+    let h = boot_router_allowing_loopback().await;
+
+    let (_, real_sha) = marketplace_bundle_bytes_and_sha();
+    let (registry_url, server) = spawn_mock_registry(real_sha).await;
+
+    let (status, body) = json_request(
+        &h.app,
+        Method::POST,
+        "/api/hands/marketplace/install",
+        Some(serde_json::json!({
+            "hand_id": "remote-uptime",
+            "registry_url": registry_url,
+        })),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "marketplace install must succeed: {body}"
+    );
+    assert_eq!(body["hand_id"].as_str(), Some("remote-uptime"), "{body}");
+    assert_eq!(body["version"].as_str(), Some("1.0.0"), "{body}");
+    assert_eq!(
+        body["checksum_verified"].as_bool(),
+        Some(true),
+        "index advertised a matching digest, so the checksum must be verified: {body}"
+    );
+    assert_eq!(
+        body["definition"]["id"].as_str(),
+        Some("remote-uptime"),
+        "response must carry the installed HandDefinition: {body}"
+    );
+
+    // Side-effect: the hand is now in the registry and surfaces on GET /api/hands.
+    let (list_status, list) = get_json(&h.app, "/api/hands").await;
+    assert_eq!(list_status, StatusCode::OK);
+    let found = list["items"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .any(|d| d["id"].as_str() == Some("remote-uptime"))
+        })
+        .unwrap_or(false);
+    assert!(
+        found,
+        "installed hand must appear in GET /api/hands: {list}"
+    );
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn marketplace_install_rejects_checksum_mismatch() {
+    let h = boot_router_allowing_loopback().await;
+
+    // Advertise a digest that does not match the served bundle — the download
+    // step must fail the SHA-256 check before anything is written to disk.
+    let wrong_sha = "0".repeat(64);
+    let (registry_url, server) = spawn_mock_registry(wrong_sha).await;
+
+    let (status, body) = json_request(
+        &h.app,
+        Method::POST,
+        "/api/hands/marketplace/install",
+        Some(serde_json::json!({
+            "hand_id": "remote-uptime",
+            "registry_url": registry_url,
+        })),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "checksum mismatch must be rejected with 400: {body}"
+    );
+
+    // Side-effect: nothing was installed.
+    let (_, list) = get_json(&h.app, "/api/hands").await;
+    let found = list["items"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .any(|d| d["id"].as_str() == Some("remote-uptime"))
+        })
+        .unwrap_or(false);
+    assert!(
+        !found,
+        "a rejected install must not register the hand: {list}"
+    );
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn marketplace_install_rejects_ssrf_registry_url() {
+    // The loopback exemption is present (the harness allows `127.0.0.1`), but a
+    // caller-supplied `registry_url` aimed at the cloud-metadata endpoint
+    // 169.254.169.254 must still be rejected — that range is unconditionally
+    // blocked regardless of the allowlist, and the install must not write
+    // anything to disk before the network call. This is the regression guard
+    // for the SSRF hole where `registry_url` flowed straight into
+    // `HandsHubClient::with_url`.
+    let h = boot_router_allowing_loopback().await;
+
+    let (status, body) = json_request(
+        &h.app,
+        Method::POST,
+        "/api/hands/marketplace/install",
+        Some(serde_json::json!({
+            "hand_id": "remote-uptime",
+            "registry_url": "http://169.254.169.254/api/v1",
+        })),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an SSRF registry_url must be rejected with 400: {body}"
+    );
+
+    // Side-effect: nothing was installed.
+    let (_, list) = get_json(&h.app, "/api/hands").await;
+    let found = list["items"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .any(|d| d["id"].as_str() == Some("remote-uptime"))
+        })
+        .unwrap_or(false);
+    assert!(
+        !found,
+        "an SSRF-rejected install must not register the hand: {list}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #5954 security regressions: SSRF-redirect bypass (F1), bundle id mismatch
+// (F3), and the third-party-registry checksum requirement (F4).
+//
+// These reuse the hand-rolled axum mock style (no new `wiremock` dep on the
+// api crate) but tailor each registry to one attack: a 302 on /bundle, a
+// bundle whose declared id differs from the requested one, and an index that
+// advertises no checksum.
+// ---------------------------------------------------------------------------
+
+/// Absolute on-disk path a hand with `id` would occupy once installed
+/// (`<home>/workspaces/<id>/`). Used to assert no residue after a rejection.
+fn installed_hand_dir(h: &Harness, id: &str) -> std::path::PathBuf {
+    h._tmp.path().join("workspaces").join(id)
+}
+
+/// Spawn a mock registry whose `/bundle` endpoint 302-redirects to `location`.
+/// The index still advertises a matching digest so the rejection is solely the
+/// redirect, not a checksum failure.
+async fn spawn_redirecting_registry(
+    location: &'static str,
+) -> (String, tokio::task::JoinHandle<()>) {
+    use axum::extract::State;
+    use axum::response::IntoResponse;
+    use axum::routing::get;
+    use axum::Router;
+
+    let (_, real_sha) = marketplace_bundle_bytes_and_sha();
+    let state = Arc::new(real_sha);
+
+    async fn index_handler(State(sha): State<Arc<String>>) -> impl IntoResponse {
+        let index = serde_json::json!({
+            "hands": [{
+                "id": "remote-uptime",
+                "name": "Remote Uptime",
+                "description": "Installed from the marketplace.",
+                "category": "data",
+                "version": "1.0.0",
+                "expected_sha256": *sha,
+            }]
+        });
+        ([("content-type", "application/json")], index.to_string())
+    }
+
+    let app: Router = Router::new()
+        .route("/api/v1/index", get(index_handler))
+        .route(
+            "/api/v1/hands/{id}/bundle",
+            // A 302 to `location`. `get_with_retry` refuses every 3xx, so the
+            // exact redirect status does not matter; `Redirect::temporary`
+            // gives a clean `IntoResponse` with the Location header set.
+            get(move || async move { axum::response::Redirect::temporary(location) }),
+        )
+        .with_state(state);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}/api/v1"), handle)
+}
+
+/// Spawn a mock registry that serves a bundle whose declared HAND.toml `id` is
+/// `bundle_id` (potentially different from the requested id). The index
+/// advertises the real digest of the served bytes so the checksum passes and
+/// only the id-mismatch guard can fail.
+async fn spawn_mismatched_id_registry(bundle_id: &str) -> (String, tokio::task::JoinHandle<()>) {
+    use axum::extract::State;
+    use axum::response::IntoResponse;
+    use axum::routing::get;
+    use axum::Router;
+
+    let toml =
+        MARKETPLACE_HAND_TOML.replace("id = \"remote-uptime\"", &format!("id = \"{bundle_id}\""));
+    let bundle = serde_json::json!({ "toml": toml, "skill": "" });
+    let bytes = serde_json::to_vec(&bundle).unwrap();
+    let sha = {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes);
+        hex::encode(hasher.finalize())
+    };
+    let state = Arc::new((bytes, sha));
+
+    async fn index_handler(State(s): State<Arc<(Vec<u8>, String)>>) -> impl IntoResponse {
+        let index = serde_json::json!({
+            "hands": [{
+                "id": "remote-uptime",
+                "name": "Remote Uptime",
+                "category": "data",
+                "version": "1.0.0",
+                "expected_sha256": s.1,
+            }]
+        });
+        ([("content-type", "application/json")], index.to_string())
+    }
+    async fn bundle_handler(State(s): State<Arc<(Vec<u8>, String)>>) -> impl IntoResponse {
+        ([("content-type", "application/json")], s.0.clone())
+    }
+
+    let app: Router = Router::new()
+        .route("/api/v1/index", get(index_handler))
+        .route("/api/v1/hands/{id}/bundle", get(bundle_handler))
+        .with_state(state);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}/api/v1"), handle)
+}
+
+/// Spawn a mock registry whose index advertises NO `expected_sha256`. The
+/// served bundle is otherwise valid; this exercises the F4 trust gate.
+async fn spawn_unverified_registry() -> (String, tokio::task::JoinHandle<()>) {
+    use axum::extract::State;
+    use axum::response::IntoResponse;
+    use axum::routing::get;
+    use axum::Router;
+
+    let (bundle_bytes, _) = marketplace_bundle_bytes_and_sha();
+    let state = Arc::new(bundle_bytes);
+
+    async fn index_handler() -> impl IntoResponse {
+        let index = serde_json::json!({
+            "hands": [{
+                "id": "remote-uptime",
+                "name": "Remote Uptime",
+                "category": "data",
+                "version": "1.0.0"
+                // intentionally no expected_sha256
+            }]
+        });
+        ([("content-type", "application/json")], index.to_string())
+    }
+    async fn bundle_handler(State(b): State<Arc<Vec<u8>>>) -> impl IntoResponse {
+        ([("content-type", "application/json")], (*b).clone())
+    }
+
+    let app: Router = Router::new()
+        .route("/api/v1/index", get(index_handler))
+        .route("/api/v1/hands/{id}/bundle", get(bundle_handler))
+        .with_state(state);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}/api/v1"), handle)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn marketplace_install_rejects_bundle_redirect_to_metadata_ip() {
+    // ATTACK (F1): a registry that passes the SSRF string check 302-redirects
+    // the /bundle fetch at the cloud-metadata endpoint. Auto-redirect is
+    // disabled in the HandsHub client, so the install must fail with no
+    // on-disk residue — the redirect is never followed to 169.254.169.254.
+    let h = boot_router_allowing_loopback().await;
+    let (registry_url, server) =
+        spawn_redirecting_registry("http://169.254.169.254/latest/meta-data/").await;
+
+    let (status, body) = json_request(
+        &h.app,
+        Method::POST,
+        "/api/hands/marketplace/install",
+        Some(serde_json::json!({
+            "hand_id": "remote-uptime",
+            "registry_url": registry_url,
+        })),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a /bundle redirect must be refused (auto-redirect is disabled): {body}"
+    );
+    assert!(
+        !installed_hand_dir(&h, "remote-uptime").exists(),
+        "a rejected redirect install must leave nothing on disk"
+    );
+    let (_, list) = get_json(&h.app, "/api/hands").await;
+    let found = list["items"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .any(|d| d["id"].as_str() == Some("remote-uptime"))
+        })
+        .unwrap_or(false);
+    assert!(
+        !found,
+        "a rejected redirect install must not register the hand: {list}"
+    );
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn marketplace_install_rejects_bundle_id_mismatch() {
+    // ATTACK (F3): caller asks for `remote-uptime`, registry serves a bundle
+    // whose HAND.toml declares `evil-other`. Name confusion must be refused
+    // before anything is written under either id.
+    let h = boot_router_allowing_loopback().await;
+    let (registry_url, server) = spawn_mismatched_id_registry("evil-other").await;
+
+    let (status, body) = json_request(
+        &h.app,
+        Method::POST,
+        "/api/hands/marketplace/install",
+        Some(serde_json::json!({
+            "hand_id": "remote-uptime",
+            "registry_url": registry_url,
+        })),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a bundle declaring a different id must be rejected: {body}"
+    );
+    assert!(
+        !installed_hand_dir(&h, "remote-uptime").exists()
+            && !installed_hand_dir(&h, "evil-other").exists(),
+        "an id-mismatched install must leave nothing on disk under either id"
+    );
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn marketplace_install_rejects_unverified_third_party_registry() {
+    // POLICY (F4): a caller-supplied (third-party) registry that advertises NO
+    // expected_sha256 must be refused — unverified installs are only tolerated
+    // from the compiled-in default registry. The bundle bytes are valid; the
+    // rejection is purely the missing-checksum trust gate.
+    let h = boot_router_allowing_loopback().await;
+    let (registry_url, server) = spawn_unverified_registry().await;
+
+    let (status, body) = json_request(
+        &h.app,
+        Method::POST,
+        "/api/hands/marketplace/install",
+        Some(serde_json::json!({
+            "hand_id": "remote-uptime",
+            "registry_url": registry_url,
+        })),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an unverified install from a third-party registry must be refused: {body}"
+    );
+    assert!(
+        !installed_hand_dir(&h, "remote-uptime").exists(),
+        "a refused unverified install must leave nothing on disk"
+    );
+
+    server.abort();
 }

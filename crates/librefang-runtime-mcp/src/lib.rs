@@ -72,7 +72,8 @@ pub const CALLER_CONTEXT_HEADER: &str = "X-Librefang-Caller";
 /// puts into `arguments` is stripped before transmit, and the kernel value
 /// travels out-of-band in the request `_meta` (Rmcp / SSE) or the
 /// [`CALLER_CONTEXT_HEADER`] header (HttpCompat), never in `arguments`. See
-/// `tests::inject_caller_strips_agent_supplied_key_*` for the regression.
+/// `tests::strip_caller_always_removes_agent_supplied_key` and
+/// `tests::caller_context_ships_in_meta_not_arguments_rmcp` for the regression.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CallerContext {
     /// Channel peer id that drove this turn (e.g. Telegram user id,

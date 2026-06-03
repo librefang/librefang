@@ -608,6 +608,7 @@ impl LibreFangKernel {
             model_override: None,
             messages_generation: 0,
             last_repaired_generation: None,
+            peer_id: None,
         };
 
         info!(
@@ -668,6 +669,9 @@ impl LibreFangKernel {
                 // Ephemeral /btw also starts empty — gateway pass would
                 // no-op (under threshold) so we skip it explicitly.
                 gateway_compression: None,
+                // Honour the operator's parallel-dispatch setting even for
+                // ephemeral /btw turns; default-off config is a no-op.
+                parallel_tools_config: Some(self.config.load().parallel_tools.clone()),
             },
         )
         .await
@@ -1579,7 +1583,7 @@ impl LibreFangKernel {
     /// that don't identify a sender, but a silent privacy leak for channel
     /// traffic. The HTTP `/message/stream` handler must build this from
     /// the request body (see `request_sender_context` in
-    /// `crates/librefang-api/src/routes/agents.rs`).
+    /// `crates/librefang-api/src/routes/agents/mod.rs`).
     pub async fn send_message_streaming_with_incognito(
         self: &Arc<Self>,
         agent_id: AgentId,
@@ -1612,6 +1616,7 @@ impl LibreFangKernel {
             // agent registry has been consulted — leave as None here.
             compaction_config: None,
             gateway_compression: Some(self.config.load().gateway_compression.clone()),
+            parallel_tools_config: Some(self.config.load().parallel_tools.clone()),
         };
         self.send_message_streaming_with_sender_and_opts(
             effective_id,
@@ -1807,6 +1812,7 @@ impl LibreFangKernel {
             // layer; allowed_tools is the only fork-specific override).
             compaction_config: None,
             gateway_compression: Some(self.config.load().gateway_compression.clone()),
+            parallel_tools_config: Some(self.config.load().parallel_tools.clone()),
         };
         // INVARIANT: forks must use the canonical session so the parent turn's
         // prompt-cache prefix is reused. Do NOT pass a `session_id_override`
@@ -1885,6 +1891,7 @@ impl LibreFangKernel {
             // registry has been consulted for this agent's manifest.
             compaction_config: None,
             gateway_compression: Some(self.config.load().gateway_compression.clone()),
+            parallel_tools_config: Some(self.config.load().parallel_tools.clone()),
         };
         self.send_message_streaming_with_sender_and_opts(
             agent_id,
@@ -2183,6 +2190,24 @@ impl LibreFangKernel {
             .get_session(effective_session_id)
             .map_err(KernelError::LibreFang)?;
         let session_was_new = existing_session.is_none();
+        // Derive `peer_id` for the freshly-materialised session row from the
+        // same `SenderContext.chat_id` that fed `SessionId::for_sender_scope`
+        // above. This is the field migration v16 added but `save_session`
+        // never wrote — populating it here means
+        // `idx_sessions_peer(agent_id, peer_id)` finally carries something
+        // and per-peer dashboards / cleanup queries return real rows.
+        // Canonical / cron / fork / explicit-override sessions keep `None`.
+        let peer_id_for_new_session: Option<String> = match sender_context {
+            Some(ctx)
+                if !ctx.channel.is_empty()
+                    && !ctx.use_canonical_session
+                    && session_id_override.is_none()
+                    && !loop_opts.is_fork =>
+            {
+                ctx.chat_id.clone()
+            }
+            _ => None,
+        };
         let mut session = existing_session.unwrap_or_else(|| librefang_memory::session::Session {
             id: effective_session_id,
             agent_id,
@@ -2192,7 +2217,14 @@ impl LibreFangKernel {
             model_override: None,
             messages_generation: 0,
             last_repaired_generation: None,
+            peer_id: peer_id_for_new_session.clone(),
         });
+        // Existing rows pre-date this column being written; backfill on the
+        // first touch when we have a derivable peer. We only overwrite NULL
+        // — never trample a value that was already set by a previous save.
+        if session.peer_id.is_none() && peer_id_for_new_session.is_some() {
+            session.peer_id = peer_id_for_new_session;
+        }
 
         // Lifecycle: emit SessionCreated only when get_session returned None.
         if session_was_new {

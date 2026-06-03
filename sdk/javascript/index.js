@@ -680,6 +680,10 @@ class HandsResource {
     return this._c._request("GET", `/api/hands/instances/${id}/stats`);
   }
 
+  async installHandFromMarketplace(data) {
+    return this._c._request("POST", "/api/hands/marketplace/install", data, undefined);
+  }
+
   async reloadHands() {
     return this._c._request("POST", "/api/hands/reload");
   }
