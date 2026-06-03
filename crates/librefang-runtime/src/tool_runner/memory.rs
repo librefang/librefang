@@ -53,7 +53,10 @@ pub(super) fn tool_memory_store(
     let key = input["key"]
         .as_str()
         .ok_or(ToolError::MissingParameter("key"))?;
-    validate_key(key).map_err(|reason| ToolError::InvalidParameter { name: "key", reason })?;
+    validate_key(key).map_err(|reason| ToolError::InvalidParameter {
+        name: "key",
+        reason,
+    })?;
     let value = input
         .get("value")
         .ok_or(ToolError::MissingParameter("value"))?;
