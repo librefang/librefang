@@ -188,6 +188,14 @@ class AgentsResource {
     return this._c._request("PATCH", `/api/agents/${id}`, data, undefined);
   }
 
+  async getAgentChannels(id) {
+    return this._c._request("GET", `/api/agents/${id}/channels`);
+  }
+
+  async setAgentChannels(id, data) {
+    return this._c._request("PUT", `/api/agents/${id}/channels`, data, undefined);
+  }
+
   async cloneAgent(id, data) {
     return this._c._request("POST", `/api/agents/${id}/clone`, data, undefined);
   }
@@ -670,6 +678,10 @@ class HandsResource {
 
   async handStats(id) {
     return this._c._request("GET", `/api/hands/instances/${id}/stats`);
+  }
+
+  async installHandFromMarketplace(data) {
+    return this._c._request("POST", "/api/hands/marketplace/install", data, undefined);
   }
 
   async reloadHands() {
@@ -1322,6 +1334,10 @@ class SkillsResource {
 
   async getSupportingFile(name, query) {
     return this._c._request("GET", `/api/skills/${name}/file`, undefined, query);
+  }
+
+  async proposeSkillToRegistry(name) {
+    return this._c._request("POST", `/api/skills/${name}/propose`);
   }
 
   async listTools() {

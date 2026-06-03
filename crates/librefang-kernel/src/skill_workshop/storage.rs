@@ -132,6 +132,30 @@ pub fn agent_pending_dir(skills_root: &Path, agent_id: &str) -> io::Result<PathB
 ///
 /// Returns `Ok(true)` if the candidate was written, `Ok(false)` when
 /// `max_pending = 0` or the dedup check skipped the write.
+///
+/// Per-agent serialization lock for `save_candidate`'s read-modify-write.
+///
+/// Two concurrent `capture_one` tasks for the same agent
+/// (`max_concurrent_invocations > 1` + `session_mode = "new"`) could both
+/// observe `len == max_pending - 1`, both skip eviction in `enforce_cap`,
+/// and both write — transiently breaching `max_pending`. Serializing the
+/// dedup/cap/write section per agent closes that window. A single daemon
+/// owns its skills dir, so a process-local lock (not a cross-process file
+/// lock) is sufficient; the map entry is created on first use and reused.
+fn agent_save_lock(agent_id: &str) -> std::sync::Arc<parking_lot::Mutex<()>> {
+    #[allow(clippy::type_complexity)]
+    static LOCKS: std::sync::OnceLock<
+        parking_lot::Mutex<
+            std::collections::HashMap<String, std::sync::Arc<parking_lot::Mutex<()>>>,
+        >,
+    > = std::sync::OnceLock::new();
+    let map = LOCKS.get_or_init(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+    map.lock()
+        .entry(agent_id.to_string())
+        .or_insert_with(|| std::sync::Arc::new(parking_lot::Mutex::new(())))
+        .clone()
+}
+
 pub fn save_candidate(
     skills_root: &Path,
     candidate: &CandidateSkill,
@@ -190,6 +214,13 @@ pub fn save_candidate(
     }
 
     let dir = agent_pending_dir(skills_root, &candidate.agent_id)?;
+
+    // Serialize the TTL-sweep → dedup → cap → write read-modify-write per
+    // agent so concurrent capture tasks cannot race past the `max_pending`
+    // cap (or double-write the same dedup key). Held only across local fs
+    // ops; `save_candidate` is sync, so the guard never spans an `.await`.
+    let save_lock = agent_save_lock(&candidate.agent_id);
+    let _save_guard = save_lock.lock();
 
     if let Some(days) = max_pending_age_days {
         enforce_age_ttl(&dir, days)?;
@@ -1144,5 +1175,60 @@ mod tests {
         let listed = list_pending_all(tmp.path()).unwrap();
         assert_eq!(listed.len(), 1, "non-UUID dir must be skipped");
         assert_eq!(listed[0].id, "ffffffff-0000-0000-0000-000000000099");
+    }
+
+    #[test]
+    fn agent_save_lock_is_per_agent() {
+        let a1 = agent_save_lock("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+        let a2 = agent_save_lock("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+        let b = agent_save_lock("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
+        assert!(
+            std::sync::Arc::ptr_eq(&a1, &a2),
+            "same agent must share one lock"
+        );
+        assert!(
+            !std::sync::Arc::ptr_eq(&a1, &b),
+            "different agents must not share a lock"
+        );
+    }
+
+    #[test]
+    fn concurrent_saves_respect_cap() {
+        // Many threads saving distinct candidates for the same agent must not
+        // leave more than `max_pending` files at rest. Without the per-agent
+        // serialization lock, racing enforce_cap/write pairs on the final
+        // saves can leave the cap permanently breached.
+        let tmp = tempdir().unwrap();
+        let root = std::sync::Arc::new(tmp.path().to_path_buf());
+        let agent = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+        let max_pending = 5u32;
+
+        let handles: Vec<_> = (0..24)
+            .map(|i| {
+                let root = std::sync::Arc::clone(&root);
+                let agent = agent.to_string();
+                std::thread::spawn(move || {
+                    let id = uuid::Uuid::new_v4().to_string();
+                    let mut c = fixture(&agent, &id, "# body");
+                    // Distinct name + trigger so the dedup check never skips.
+                    c.name = format!("skill_{i}");
+                    c.source = CaptureSource::ExplicitInstruction {
+                        trigger: format!("rule {i}"),
+                    };
+                    let _ = save_candidate(&root, &c, max_pending, None);
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let listed = list_pending(&root, agent).unwrap();
+        assert!(
+            listed.len() <= max_pending as usize,
+            "cap must hold at rest, got {} > {max_pending}",
+            listed.len()
+        );
+        assert!(!listed.is_empty(), "expected some candidates to survive");
     }
 }

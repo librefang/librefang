@@ -479,6 +479,30 @@ impl AgentsResource {
         .await
     }
 
+    pub async fn get_agent_channels(&self, id: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &format!("/api/agents/{}/channels", id),
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn set_agent_channels(&self, id: &str, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::PUT,
+            &format!("/api/agents/{}/channels", id),
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
     pub async fn clone_agent(&self, id: &str, data: Value) -> Result<Value> {
         do_req(
             &self.client,
@@ -1922,6 +1946,18 @@ impl HandsResource {
             reqwest::Method::GET,
             &format!("/api/hands/instances/{}/stats", id),
             None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn install_hand_from_marketplace(&self, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &"/api/hands/marketplace/install".to_string(),
+            Some(data),
             &[],
         )
         .await
@@ -3875,6 +3911,18 @@ impl SkillsResource {
             &format!("/api/skills/{}/file", name),
             None,
             &[("path", path)],
+        )
+        .await
+    }
+
+    pub async fn propose_skill_to_registry(&self, name: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &format!("/api/skills/{}/propose", name),
+            None,
+            &[],
         )
         .await
     }

@@ -140,6 +140,18 @@ pub struct LoopOptions {
     ///
     /// Kernel populates this from `KernelConfig.runtime.tool_results`.
     pub tool_results_config: Option<librefang_types::config::ToolResultsConfig>,
+    /// Parallel tool-dispatch configuration (#3129 PR-4 / PR-5).
+    ///
+    /// When `Some` and `enabled = true`, the agent loop plans each
+    /// `ToolUse` batch with [`crate::parallel_dispatch::plan_batch`] and
+    /// runs the members of every safe-to-parallelise group concurrently
+    /// (bounded by `max_concurrent`), appending the resulting
+    /// `tool_result` blocks in original tool-call index order. When `None`
+    /// or `enabled = false` (the default), the loop falls back to strictly
+    /// sequential execution — zero behaviour change.
+    ///
+    /// Kernel populates this from `KernelConfig.parallel_tools`.
+    pub parallel_tools_config: Option<librefang_types::config::ParallelToolsConfig>,
     /// Compaction config snapshot (#4976).
     ///
     /// When `Some`, the agent loop builds its

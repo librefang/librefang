@@ -857,8 +857,12 @@ pub struct ModelConfig {
     /// API request body via `#[serde(flatten)]`. If a key conflicts with a
     /// standard field (e.g. `temperature`), the `extra_params` value takes
     /// precedence because it is serialized last.
+    ///
+    /// `BTreeMap` (not `HashMap`) so the flattened key order is deterministic
+    /// across processes — this map reaches the LLM wire request, and unstable
+    /// key order silently invalidates provider prompt caches (#3298).
     #[serde(default, flatten)]
-    pub extra_params: std::collections::HashMap<String, serde_json::Value>,
+    pub extra_params: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 impl Default for ModelConfig {
@@ -873,7 +877,7 @@ impl Default for ModelConfig {
             base_url: None,
             context_window: None,
             max_output_tokens: None,
-            extra_params: std::collections::HashMap::new(),
+            extra_params: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -889,9 +893,10 @@ pub struct FallbackModel {
     #[serde(default)]
     pub base_url: Option<String>,
     /// Provider-specific extension parameters that are flattened directly
-    /// into the API request body.
+    /// into the API request body. `BTreeMap` keeps the flattened key order
+    /// deterministic for prompt-cache stability (#3298).
     #[serde(default, flatten)]
-    pub extra_params: std::collections::HashMap<String, serde_json::Value>,
+    pub extra_params: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 /// Tool configuration within an agent manifest.
@@ -1086,7 +1091,17 @@ pub struct AgentManifest {
     /// Explicitly disable all skills, overriding the empty-list = all-skills default.
     #[serde(default)]
     pub skills_disabled: bool,
-    /// MCP server allowlist (empty = all connected MCP servers available).
+    /// MCP server allowlist.
+    ///
+    /// - `[]` (empty / unset) → **no** MCP servers. The agent sees zero MCP
+    ///   tools and the MCP server summary is omitted from its prompt. This is
+    ///   a real allowlist, not a wildcard — an unconfigured agent must not
+    ///   silently inherit every globally-connected server's tools (#5855).
+    /// - `["*"]` → all connected MCP servers (explicit opt-in).
+    /// - `["a", "b"]` → only servers `a` and `b`.
+    ///
+    /// Use [`Self::mcp_disabled`] to additionally guarantee no MCP tools even
+    /// if `["*"]` or a non-empty list is set.
     #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
     pub mcp_servers: Vec<String>,
     /// Channel allowlist — restricts which configured channels this agent can
@@ -1095,7 +1110,9 @@ pub struct AgentManifest {
     #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
     pub channels: Vec<String>,
     /// Explicitly disable all MCP server tools for this agent. Mirrors
-    /// `skills_disabled` — `mcp_servers = []` means "all", this means "none".
+    /// `skills_disabled`. Since #5855, `mcp_servers = []` already means "no
+    /// servers", so this flag is the belt-and-braces guarantee: it forces zero
+    /// MCP tools even when `mcp_servers = ["*"]` or a non-empty allowlist is set.
     ///
     /// **Scope**: this flag hides MCP tools and the MCP server summary from
     /// *this agent's* LLM prompt only. MCP servers defined in `KernelConfig`
@@ -1315,6 +1332,15 @@ pub struct AgentManifest {
     /// fits-all once both agents share a daemon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction: Option<CompactionOverrides>,
+    /// Per-agent override for the kernel-global `[rl_export]` toggle
+    /// (#3331). When `enabled` is `Some`, it supersedes
+    /// `KernelConfig.rl_export.enabled` for this agent only. `None`
+    /// (the default) inherits the global. The export **target** itself
+    /// is not overridable per-agent — only whether this agent
+    /// participates — so a single deployment exports every opted-in
+    /// agent's trajectories to one configured upstream.
+    #[serde(default)]
+    pub rl_export: RlExportOverride,
     /// Declarative event triggers (#5014) — symmetric to runtime
     /// triggers created via `POST /api/triggers`. On agent spawn or
     /// reload the kernel reconciles this list against the existing
@@ -1552,6 +1578,7 @@ impl Default for AgentManifest {
             tool_exec_backend: None,
             skill_workshop: SkillWorkshopConfig::default(),
             proactive_memory: crate::memory::ProactiveMemoryOverrides::default(),
+            rl_export: RlExportOverride::default(),
             compaction: None,
             triggers: Vec::new(),
             reconcile_orphans: OrphanPolicy::default(),
@@ -1630,6 +1657,23 @@ pub struct ManifestCapabilities {
     /// Allowed OFP peer patterns.
     #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
     pub ofp_connect: Vec<String>,
+}
+
+/// Per-agent override for the kernel-global `[rl_export]` policy (#3331).
+///
+/// Only the participation toggle is overridable per-agent; the export
+/// destination is a deployment-wide concern that stays on
+/// `KernelConfig.rl_export.target`. `enabled = Some(false)` opts a single
+/// agent out of an otherwise-global export; `Some(true)` opts one agent in
+/// when the global default is off. `None` (the default) inherits the
+/// global toggle.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RlExportOverride {
+    /// Override the master `[rl_export] enabled` switch for this agent.
+    /// `None` inherits the kernel-global value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
 }
 
 /// Skill workshop configuration (#3328).
@@ -2427,7 +2471,7 @@ mod tests {
             model: "llama-3.3-70b".to_string(),
             api_key_env: Some("GROQ_API_KEY".to_string()),
             base_url: None,
-            extra_params: std::collections::HashMap::new(),
+            extra_params: std::collections::BTreeMap::new(),
         };
         let json = serde_json::to_string(&fb).unwrap();
         let back: FallbackModel = serde_json::from_str(&json).unwrap();
@@ -2445,7 +2489,7 @@ mod tests {
                 model: "llama-3.3-70b".to_string(),
                 api_key_env: None,
                 base_url: None,
-                extra_params: std::collections::HashMap::new(),
+                extra_params: std::collections::BTreeMap::new(),
             }]),
             ..Default::default()
         };
@@ -2920,7 +2964,7 @@ model = "llama-3.3-70b-versatile"
 
     #[test]
     fn test_model_config_extra_params_roundtrip() {
-        let mut extra = std::collections::HashMap::new();
+        let mut extra = std::collections::BTreeMap::new();
         extra.insert("enable_memory".to_string(), serde_json::json!(true));
         extra.insert("memory_max_window".to_string(), serde_json::json!(50));
 

@@ -50,11 +50,29 @@
 # Trixie also ships Python 3.13 natively in apt — no copy-stage workaround needed.
 FROM rust:1-trixie
 
-# ─────────────────────────────────────────────────────────────────────────────
-# System packages — three groups:
-#
-#   1. Core Rust build deps (mirrors the runtime Dockerfile builder stage)
-#   2. Tauri 2 Linux deps (see header comment above)
+# System dependencies, in two groups:
+#   1. Core build deps (also present in the runtime Dockerfile):
+#      build-essential / pkg-config / libssl-dev / libdbus-1-dev — needed
+#      for the daemon binary itself (libdbus-1-dev is dragged in by
+#      `keyring`'s sync-secret-service feature, see top-level Dockerfile
+#      comment + #3180 / #3259).
+#   2. Tauri 2 Linux deps:
+#      libwebkit2gtk-4.1-dev — Tauri 2's wry webview backend
+#      libgtk-3-dev          — gdk-sys / gtk-sys
+#      libayatana-appindicator3-dev — system tray (gated behind the
+#                                     `linux-tray` Cargo feature, but the
+#                                     dev headers are cheap to ship and
+#                                     match CI exactly)
+#      librsvg2-dev          — SVG icon rasterisation in Tauri
+#      patchelf              — Tauri bundler post-processing step
+#      mold                  — fast linker. Used via `mold -run cargo …` in
+#                              the dev wrapper, which intercepts the child
+#                              `ld` invocation WITHOUT changing RUSTFLAGS, so
+#                              it does not invalidate the cached target dir.
+#                              No effect on `cargo check` (no link step);
+#                              speeds up the link phase of `build` / `test`,
+#                              which is the per-iteration cost the cached
+#                              incremental build still pays on every change.
 #   3. WASM toolchain deps:
 #      python3.13 / python3.13-dev / python3.13-venv — Python 3.13 + pyo3 headers
 #      binaryen  — wasm-opt optimizer (Binaryen project)
@@ -81,6 +99,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.13-venv \
     binaryen \
     wabt \
+    mold \
     && rm -rf /var/lib/apt/lists/*
 
 # ── pyo3 env: point cargo to Python 3.13 when building pyo3 crates ────────────

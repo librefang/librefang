@@ -132,6 +132,8 @@ export {
   // tools
   listTools,
   getAgentTools,
+  // per-agent skill assignment — read (#4917)
+  getAgentSkills,
   getAgentTemplateToml,
   // overview
   loadDashboardSnapshot,
@@ -195,6 +197,8 @@ export {
   clearHandAgentRuntimeConfig,
   resetAgentSession,
   updateAgentTools,
+  // per-agent skill assignment — write (#4917)
+  setAgentSkills,
   createAgentSession,
   switchAgentSession,
   deleteSession,
@@ -235,12 +239,16 @@ export {
   createGoal,
   updateGoal,
   deleteGoal,
+  startGoalRun,
+  stopGoalRun,
+  getGoalRun,
   // hands
   activateHand,
   deactivateHand,
   pauseHand,
   resumeHand,
   uninstallHand,
+  installHandFromMarketplace,
   setHandSecret,
   updateHandSettings,
   sendHandMessage,
@@ -301,6 +309,7 @@ export {
   evolveDeleteSkill,
   evolveWriteFile,
   evolveRemoveFile,
+  proposeSkillToRegistry,
   installSkill,
   uninstallSkill,
   // skill workshop pending review (#3328)
@@ -373,6 +382,7 @@ export type {
   HandSessionMessage,
   HandSettingsResponse,
   HandStatsResponse,
+  ProposeSkillResult,
   McpAuthStartResponse,
   McpAuthStatusResponse,
   MemoryItem,

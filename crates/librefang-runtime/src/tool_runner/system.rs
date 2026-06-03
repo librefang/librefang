@@ -11,20 +11,16 @@
 
 use super::error::{ToolError, ToolResult};
 
+const IP_API_URL: &str = "https://ip-api.com/json/?fields=status,message,country,regionName,city,zip,lat,lon,timezone,isp,query";
+const IP_API_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Look up approximate location via ip-api.com.
 pub(super) async fn tool_location_get() -> ToolResult {
-    let client = crate::http_client::proxied_client_builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| ToolError::Upstream {
-            message: format!("Failed to create HTTP client: {e}"),
-            source: Some(Box::new(e)),
-        })?;
+    let client = crate::http_client::proxied_client();
 
-    // Use ip-api.com (free, no API key, JSON response)
     let resp = client
-        .get("https://ip-api.com/json/?fields=status,message,country,regionName,city,zip,lat,lon,timezone,isp,query")
-        .header("User-Agent", "LibreFang/0.1")
+        .get(IP_API_URL)
+        .timeout(IP_API_TIMEOUT)
         .send()
         .await
         .map_err(|e| ToolError::Upstream {
@@ -33,9 +29,13 @@ pub(super) async fn tool_location_get() -> ToolResult {
         })?;
 
     if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp
+            .text()
+            .await
+            .unwrap_or_else(|_| "<no body>".to_string());
         return Err(ToolError::upstream_msg(format!(
-            "Location API returned {}",
-            resp.status()
+            "Location API returned {status}: {body}"
         )));
     }
 

@@ -85,9 +85,7 @@ impl LibreFangKernel {
                         }
                     }
                 }
-                let timestamps = saved_hand
-                    .activated_at
-                    .and_then(|a| saved_hand.updated_at.map(|u| (a, u)));
+                let timestamps = saved_hand.activated_at.zip(saved_hand.updated_at);
                 match self.activate_hand_with_id(
                     &hand_id,
                     config,
@@ -1065,7 +1063,9 @@ impl LibreFangKernel {
     /// Periodically checks all running agents' last_active timestamps and
     /// publishes `HealthCheckFailed` events for unresponsive agents.
     fn start_heartbeat_monitor(self: &Arc<Self>) {
-        use crate::heartbeat::{check_agents, is_quiet_hours, HeartbeatConfig};
+        use crate::heartbeat::{
+            check_agents, classify_transition, is_quiet_hours, HeartbeatConfig, HeartbeatTransition,
+        };
         use std::collections::HashSet;
 
         let kernel = Arc::clone(self);
@@ -1100,9 +1100,12 @@ impl LibreFangKernel {
                         }
                     }
 
-                    if status.unresponsive {
-                        // Only warn and publish event on the *transition* to unresponsive
-                        if known_unresponsive.insert(status.agent_id) {
+                    // Fold the status into the known-unresponsive set; the
+                    // helper returns an edge only on the transition in / out
+                    // of unresponsive, so an already-known-dead agent yields
+                    // `NoChange` and is never re-published.
+                    match classify_transition(status, &mut known_unresponsive) {
+                        HeartbeatTransition::BecameUnresponsive => {
                             warn!(
                                 agent = %status.name,
                                 inactive_secs = status.inactive_secs,
@@ -1142,14 +1145,13 @@ impl LibreFangKernel {
                                 )
                                 .await;
                         }
-                    } else {
-                        // Agent recovered — remove from known-unresponsive set
-                        if known_unresponsive.remove(&status.agent_id) {
+                        HeartbeatTransition::Recovered => {
                             info!(
                                 agent = %status.name,
                                 "Agent recovered from unresponsive state"
                             );
                         }
+                        HeartbeatTransition::NoChange => {}
                     }
                 }
             }

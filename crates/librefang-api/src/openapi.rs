@@ -129,6 +129,8 @@ use crate::types;
         routes::evolve_patch_skill,
         routes::evolve_delete_skill,
         routes::evolve_rollback_skill,
+        // Propose an evolved skill back to the public registry as a PR (#5842)
+        routes::propose_skill_to_registry,
         // Skill workshop pending review (#3328)
         routes::list_pending_candidates,
         routes::show_pending_candidate,
@@ -147,6 +149,7 @@ use crate::types;
         // ── Hands ──
         routes::list_hands,
         routes::install_hand,
+        routes::install_hand_from_marketplace,
         routes::list_active_hands,
         routes::get_hand,
         routes::get_hand_manifest,

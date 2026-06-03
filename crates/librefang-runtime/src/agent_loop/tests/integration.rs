@@ -362,6 +362,7 @@ fn fresh_session() -> librefang_memory::session::Session {
         model_override: None,
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     }
 }
 
@@ -473,6 +474,7 @@ async fn test_empty_response_after_tool_use_returns_fallback() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(EmptyAfterToolUseDriver::new());
@@ -537,6 +539,7 @@ async fn test_empty_response_max_tokens_returns_fallback() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(EmptyMaxTokensDriver);
@@ -601,6 +604,7 @@ async fn test_normal_response_not_replaced_by_fallback() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(NormalDriver);
@@ -656,6 +660,7 @@ async fn test_success_response_preserves_reply_directives() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(DirectiveDriver {
@@ -716,6 +721,7 @@ async fn test_max_tokens_partial_response_preserves_reply_directives() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(DirectiveDriver {
@@ -1023,6 +1029,7 @@ async fn test_history_fold_stub_appears_in_llm_request_after_enough_tool_cycles(
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
 
@@ -1153,6 +1160,7 @@ async fn maybe_fold_stale_tool_results_persists_rewrites_to_session_messages() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     // 10 turns of (assistant, tool_result) — under fold_after=2 every
     // tool_result older than the last two assistant turns is stale.
@@ -1331,6 +1339,7 @@ async fn test_streaming_max_continuations_return_preserves_reply_directives() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(EmptyMaxTokensDriver);
@@ -1535,6 +1544,7 @@ fn cascade_leak_fixture() -> (
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     // Re-use DirectiveDriver: two structural markers (envelope + turn
     // frame) reproduce the real-incident leak shape exactly.
@@ -1648,6 +1658,7 @@ async fn cascade_leak_guard_aborts_tool_use_stop_reason_in_streaming_path() {
         model_override: None,
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     // A driver that emits two structural markers (triggering the cascade-leak
     // guard) and then signals ToolUse as the stop reason. Without the
@@ -1740,6 +1751,7 @@ async fn test_streaming_max_continuations_with_directives_preserves_reply_direct
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(DirectiveDriver {
@@ -1804,6 +1816,7 @@ async fn test_streaming_empty_response_after_tool_use_returns_fallback() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(EmptyAfterToolUseDriver::new());
@@ -1941,6 +1954,7 @@ async fn test_empty_first_response_retries_and_recovers() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(EmptyThenNormalDriver::new());
@@ -1999,6 +2013,7 @@ async fn test_empty_first_response_fallback_when_retry_also_empty() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(AlwaysEmptyDriver);
@@ -2063,6 +2078,7 @@ async fn test_streaming_empty_response_max_tokens_returns_fallback() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(EmptyMaxTokensDriver);
@@ -2191,4 +2207,274 @@ fn test_recover_text_tool_calls_empty_tools() {
     let text = r#"<function=web_search>{"query":"hello"}</function>"#;
     let calls = recover_text_tool_calls(text, &[]);
     assert!(calls.is_empty(), "No tools = no recovery");
+}
+
+// --- Parallel tool-dispatch integration (#3129 PR-4) -------------------
+//
+// These exercise the real `run_agent_loop` ToolUse branch end to end with
+// `file_read` over a tempdir, asserting that (1) the flag-off path is the
+// unchanged serial dispatch, (2) the flag-on path runs every member of a
+// safe group and (3) results land in original tool-call index order — the
+// hard provider contract that `tool_result` blocks line up positionally
+// with `tool_use` blocks.
+
+/// Driver that emits a fixed batch of `file_read` calls on the first turn,
+/// then `EndTurn` on the second.
+struct BatchFileReadDriver {
+    call_count: AtomicU32,
+    calls: Vec<(String, String)>, // (tool_use_id, relative path)
+}
+
+impl BatchFileReadDriver {
+    fn new(calls: Vec<(String, String)>) -> Self {
+        Self {
+            call_count: AtomicU32::new(0),
+            calls,
+        }
+    }
+}
+
+#[async_trait]
+impl LlmDriver for BatchFileReadDriver {
+    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        let call = self.call_count.fetch_add(1, Ordering::Relaxed);
+        if call == 0 {
+            let content: Vec<ContentBlock> = self
+                .calls
+                .iter()
+                .map(|(id, path)| ContentBlock::ToolUse {
+                    id: id.clone(),
+                    name: "file_read".to_string(),
+                    input: serde_json::json!({ "path": path }),
+                    provider_metadata: None,
+                })
+                .collect();
+            let tool_calls: Vec<ToolCall> = self
+                .calls
+                .iter()
+                .map(|(id, path)| ToolCall {
+                    id: id.clone(),
+                    name: "file_read".to_string(),
+                    input: serde_json::json!({ "path": path }),
+                })
+                .collect();
+            Ok(CompletionResponse {
+                content,
+                stop_reason: StopReason::ToolUse,
+                tool_calls,
+                usage: TokenUsage {
+                    input_tokens: 10,
+                    output_tokens: 3,
+                    ..Default::default()
+                },
+                actual_provider: None,
+            })
+        } else {
+            Ok(CompletionResponse {
+                content: vec![ContentBlock::Text {
+                    text: "All reads done.".to_string(),
+                    provider_metadata: None,
+                }],
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+                usage: TokenUsage {
+                    input_tokens: 10,
+                    output_tokens: 4,
+                    ..Default::default()
+                },
+                actual_provider: None,
+            })
+        }
+    }
+}
+
+/// Pull the committed `(tool_use_id, content)` tool-result pairs out of the
+/// session in wire order. The single user message that pairs with the
+/// assistant tool_use turn carries every result block in append order, so
+/// this directly reflects the order the provider will see.
+fn committed_tool_results(session: &librefang_memory::session::Session) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for m in &session.messages {
+        if let librefang_types::message::MessageContent::Blocks(blocks) = &m.content {
+            for b in blocks {
+                if let librefang_types::message::ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    ..
+                } = b
+                {
+                    out.push((tool_use_id.clone(), content.clone()));
+                }
+            }
+        }
+    }
+    out
+}
+
+async fn run_batch_read_loop(
+    calls: Vec<(String, String)>,
+    workspace_root: &std::path::Path,
+    parallel: Option<librefang_types::config::ParallelToolsConfig>,
+) -> librefang_memory::session::Session {
+    let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+    let mut session = fresh_session();
+    let manifest = test_manifest();
+    let driver: Arc<dyn LlmDriver> = Arc::new(BatchFileReadDriver::new(calls));
+    let file_read_def = fake_tool("file_read");
+
+    let loop_opts = LoopOptions {
+        parallel_tools_config: parallel,
+        ..LoopOptions::default()
+    };
+
+    run_agent_loop(
+        &manifest,
+        "read files",
+        &mut session,
+        &memory,
+        driver,
+        std::slice::from_ref(&file_read_def),
+        None,                 // kernel
+        None,                 // skill_registry
+        None,                 // mcp_connections
+        None,                 // web_ctx
+        None,                 // browser_ctx
+        None,                 // embedding_driver
+        Some(workspace_root), // workspace_root — enables file tools
+        None,                 // on_phase
+        None,                 // media_engine
+        None,                 // media_drivers
+        None,                 // tts_engine
+        None,                 // docker_config
+        None,                 // hooks
+        None,                 // context_window_tokens
+        None,                 // process_manager
+        None,                 // checkpoint_manager
+        None,                 // process_registry
+        None,                 // user_content_blocks
+        None,                 // proactive_memory
+        None,                 // context_engine
+        None,                 // pending_messages
+        &loop_opts,
+    )
+    .await
+    .expect("loop should complete without error");
+
+    session
+}
+
+fn enabled_parallel_cfg(max_concurrent: u32) -> librefang_types::config::ParallelToolsConfig {
+    librefang_types::config::ParallelToolsConfig {
+        enabled: true,
+        max_concurrent,
+        ..librefang_types::config::ParallelToolsConfig::default()
+    }
+}
+
+/// Flag-on: four independent read-only `file_read` calls all execute and
+/// their results are committed in original tool-call index order.
+#[tokio::test]
+async fn parallel_dispatch_runs_all_reads_in_index_order() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let mut calls = Vec::new();
+    for i in 0..4 {
+        let name = format!("f{i}.txt");
+        std::fs::write(dir.path().join(&name), format!("content-{i}")).unwrap();
+        calls.push((format!("tid_{i}"), name));
+    }
+
+    let session =
+        run_batch_read_loop(calls.clone(), dir.path(), Some(enabled_parallel_cfg(4))).await;
+
+    let results = committed_tool_results(&session);
+    assert_eq!(results.len(), 4, "every read must produce a result");
+    // Index order: result[i] pairs with tool_use tid_i and carries content-i.
+    for (i, (id, content)) in results.iter().enumerate() {
+        assert_eq!(id, &format!("tid_{i}"), "result {i} out of index order");
+        assert!(
+            content.contains(&format!("content-{i}")),
+            "result {i} content mismatch: {content:?}"
+        );
+    }
+}
+
+/// Flag-off (default): identical batch on the serial path must produce the
+/// same results in the same index order — zero behaviour change.
+#[tokio::test]
+async fn serial_dispatch_unchanged_when_flag_off() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let mut calls = Vec::new();
+    for i in 0..4 {
+        let name = format!("f{i}.txt");
+        std::fs::write(dir.path().join(&name), format!("content-{i}")).unwrap();
+        calls.push((format!("tid_{i}"), name));
+    }
+
+    // `None` (flag absent) and explicit `enabled = false` must both stay serial.
+    for cfg in [
+        None,
+        Some(librefang_types::config::ParallelToolsConfig::default()),
+    ] {
+        let session = run_batch_read_loop(calls.clone(), dir.path(), cfg).await;
+        let results = committed_tool_results(&session);
+        assert_eq!(results.len(), 4);
+        for (i, (id, content)) in results.iter().enumerate() {
+            assert_eq!(id, &format!("tid_{i}"));
+            assert!(content.contains(&format!("content-{i}")));
+        }
+    }
+}
+
+/// Flag-on with a read + write + read mix: the planner keeps disjoint
+/// reads/writes in one group, so all three run and results stay in index
+/// order. Drives `file_read` only (writes need a writable sandbox) but
+/// asserts the *plan* groups the mix as expected via `plan_batch`, then
+/// confirms the loop preserves order for the runnable reads.
+#[tokio::test]
+async fn parallel_dispatch_write_read_mix_groups_and_orders() {
+    use crate::parallel_dispatch::plan_batch;
+
+    // Planner-level assertion: read(/a) + write(/b) + read(/c) on disjoint
+    // paths collapse into one parallel group, preserving 0..3 order.
+    let mix = vec![
+        ToolCall {
+            id: "r0".into(),
+            name: "file_read".into(),
+            input: serde_json::json!({"path": "/a"}),
+        },
+        ToolCall {
+            id: "w1".into(),
+            name: "file_write".into(),
+            input: serde_json::json!({"path": "/b", "content": "x"}),
+        },
+        ToolCall {
+            id: "r2".into(),
+            name: "file_read".into(),
+            input: serde_json::json!({"path": "/c"}),
+        },
+    ];
+    let plan = plan_batch(&mix, &[]);
+    assert_eq!(
+        plan.groups,
+        vec![vec![0, 1, 2]],
+        "disjoint read/write/read must form one group"
+    );
+
+    // End-to-end ordering for the runnable subset (three reads, with the
+    // middle one on a distinct file standing in for the disjoint write):
+    // confirms the loop appends results 0..3 in order under the flag.
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let mut calls = Vec::new();
+    for (i, id) in ["a", "b", "c"].iter().enumerate() {
+        let name = format!("{id}.txt");
+        std::fs::write(dir.path().join(&name), format!("content-{i}")).unwrap();
+        calls.push((format!("tid_{i}"), name));
+    }
+    let session = run_batch_read_loop(calls, dir.path(), Some(enabled_parallel_cfg(2))).await;
+    let results = committed_tool_results(&session);
+    assert_eq!(results.len(), 3);
+    for (i, (id, content)) in results.iter().enumerate() {
+        assert_eq!(id, &format!("tid_{i}"));
+        assert!(content.contains(&format!("content-{i}")));
+    }
 }

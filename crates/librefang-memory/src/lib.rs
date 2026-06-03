@@ -38,6 +38,7 @@
 pub mod chunker;
 pub mod consolidation;
 pub mod decay;
+pub mod goal_run_store;
 pub mod http_vector_store;
 pub mod idempotency;
 pub mod knowledge;
@@ -83,6 +84,8 @@ pub use backends::SurrealSessionBackend;
 pub use backends::SurrealTaskBackend;
 #[cfg(feature = "surreal-backend")]
 pub use backends::SurrealUsageStore;
+pub use goal_run_store::{GoalRunRow, GoalRunStore};
+pub use session_store::SessionStore;
 pub use substrate::MemorySubstrate;
 pub use workflow_store::{WorkflowRunRow, WorkflowStore};
 

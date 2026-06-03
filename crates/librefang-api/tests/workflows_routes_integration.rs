@@ -51,7 +51,7 @@ async fn boot() -> Harness {
             api_key_env: "OLLAMA_API_KEY".to_string(),
             base_url: None,
             message_timeout_secs: 300,
-            extra_params: std::collections::HashMap::new(),
+            extra_params: std::collections::BTreeMap::new(),
             cli_profile_dirs: Vec::new(),
         };
     }));
@@ -955,6 +955,7 @@ async fn cron_job_get_response_has_session_size_fields() {
         model_override: None,
         messages_generation: 1,
         last_repaired_generation: None,
+        peer_id: None,
     };
     kernel
         .memory_substrate()

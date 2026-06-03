@@ -428,10 +428,13 @@ impl LibreFangKernel {
         // per-provider operator cap trips) and consumed by the LLM
         // fallback chain (`FallbackDriver` + `FallbackChain`), so an
         // exhausted primary provider falls over to a healthy slot
-        // instead of refusing the whole call. Global `[budget]` caps
-        // and per-agent quotas still apply via `reserve_global_budget`
-        // / `check_quota_and_reserve` below — only the per-provider
-        // gate that #4807 explicitly asked to remove is gone.
+        // instead of refusing the whole call. Unlike the regular
+        // `send_message_full` path, this ephemeral path does NOT pre-reserve
+        // the global `[budget]` or per-agent token quota — it enforces them
+        // only post-call via `check_all_and_record` below. That is acceptable
+        // here because an ephemeral `/btw` turn is a tool-less single shot
+        // (no loop, no concurrent-fire amplification), so the pre-call
+        // overshoot hold that #3616 added to the main path is not needed.
 
         // Ephemeral: no tools — prevents side effects (tool writes to memory/disk)
         let tools: Vec<librefang_types::tool::ToolDefinition> = vec![];
@@ -605,6 +608,7 @@ impl LibreFangKernel {
             model_override: None,
             messages_generation: 0,
             last_repaired_generation: None,
+            peer_id: None,
         };
 
         info!(
@@ -665,6 +669,9 @@ impl LibreFangKernel {
                 // Ephemeral /btw also starts empty — gateway pass would
                 // no-op (under threshold) so we skip it explicitly.
                 gateway_compression: None,
+                // Honour the operator's parallel-dispatch setting even for
+                // ephemeral /btw turns; default-off config is a no-op.
+                parallel_tools_config: Some(self.config.load().parallel_tools.clone()),
             },
         )
         .await
@@ -903,25 +910,54 @@ impl LibreFangKernel {
         // 1-hop case. Detect it *before* the lock acquisition (the only
         // place that cannot itself deadlock) and fail loudly with the held
         // chain so operators can see which agents form the cycle, instead
-        // of silently parking the worker thread. The session-scoped
-        // (`session_id_override`) path is a different key space that the
-        // re-entrant tool paths never take, so it is exempt.
-        if session_id_override.is_none() && librefang_runtime::held_agent_locks::is_held(agent_id) {
-            let mut chain: Vec<String> = librefang_runtime::held_agent_locks::held_snapshot()
-                .into_iter()
-                .map(|a| a.to_string())
-                .collect();
-            chain.push(agent_id.to_string());
-            return Err(KernelError::LibreFang(LibreFangError::InvalidInput(
-                format!(
-                    "agent_send: re-entrant message to agent {} would deadlock its \
-                     per-agent message lock (transitive A->B->A cycle). Currently-held \
-                     agent locks on this task: [{}]. Break the cycle or use the task \
-                     queue for the callback.",
-                    agent_id,
-                    chain.join(" -> "),
-                ),
-            )));
+        // of silently parking the worker thread.
+        //
+        // The session-scoped (`session_id_override`) path has the SAME
+        // hazard: `agent_send` with a `conversation_key` derives
+        // `SessionId::for_channel(agent, "agent_send:<key>")` and passes it as
+        // the override, so a transitive `A -> B -> A` cycle reusing the same
+        // key re-acquires `session_msg_locks[sid]` — also non-reentrant — on
+        // the same task. Check the held-session registry for that path rather
+        // than exempting it.
+        match session_id_override {
+            None => {
+                if librefang_runtime::held_agent_locks::is_held(agent_id) {
+                    let mut chain: Vec<String> =
+                        librefang_runtime::held_agent_locks::held_snapshot()
+                            .into_iter()
+                            .map(|a| a.to_string())
+                            .collect();
+                    chain.push(agent_id.to_string());
+                    return Err(KernelError::LibreFang(LibreFangError::InvalidInput(
+                        format!(
+                            "agent_send: re-entrant message to agent {} would deadlock its \
+                             per-agent message lock (transitive A->B->A cycle). Currently-held \
+                             agent locks on this task: [{}]. Break the cycle or use the task \
+                             queue for the callback.",
+                            agent_id,
+                            chain.join(" -> "),
+                        ),
+                    )));
+                }
+            }
+            Some(sid) if librefang_runtime::held_agent_locks::is_session_held(sid) => {
+                let mut chain: Vec<String> =
+                    librefang_runtime::held_agent_locks::held_sessions_snapshot()
+                        .into_iter()
+                        .map(|s| s.to_string())
+                        .collect();
+                chain.push(sid.to_string());
+                return Err(KernelError::LibreFang(LibreFangError::InvalidInput(
+                    format!(
+                        "agent_send: re-entrant message on session {sid} would deadlock its \
+                         per-session message lock (transitive A->B->A cycle reusing the same \
+                         conversation_key). Currently-held session locks on this task: [{}]. \
+                         Break the cycle or use a different conversation_key for the callback.",
+                        chain.join(" -> "),
+                    ),
+                )));
+            }
+            Some(_) => {}
         }
 
         // When the caller supplies an explicit session_id, scope the lock to that
@@ -964,6 +1000,16 @@ impl LibreFangKernel {
             Some(librefang_runtime::held_agent_locks::HeldLockGuard::register(agent_id))
         } else {
             None
+        };
+        // Session-scoped sibling of `_held_guard`: record the held session so
+        // a re-entrant keyed `agent_send` (same conversation_key, transitive
+        // A->B->A) is rejected above instead of deadlocking on the
+        // non-reentrant `session_msg_locks[sid]` mutex.
+        let _held_session_guard = match session_id_override {
+            Some(sid) if !agent_scoped => {
+                Some(librefang_runtime::held_agent_locks::HeldSessionLockGuard::register(sid))
+            }
+            _ => None,
         };
 
         // Pre-call global budget reservation (#3616). Estimate cost from
@@ -1537,7 +1583,7 @@ impl LibreFangKernel {
     /// that don't identify a sender, but a silent privacy leak for channel
     /// traffic. The HTTP `/message/stream` handler must build this from
     /// the request body (see `request_sender_context` in
-    /// `crates/librefang-api/src/routes/agents.rs`).
+    /// `crates/librefang-api/src/routes/agents/mod.rs`).
     pub async fn send_message_streaming_with_incognito(
         self: &Arc<Self>,
         agent_id: AgentId,
@@ -1570,6 +1616,7 @@ impl LibreFangKernel {
             // agent registry has been consulted — leave as None here.
             compaction_config: None,
             gateway_compression: Some(self.config.load().gateway_compression.clone()),
+            parallel_tools_config: Some(self.config.load().parallel_tools.clone()),
         };
         self.send_message_streaming_with_sender_and_opts(
             effective_id,
@@ -1765,6 +1812,7 @@ impl LibreFangKernel {
             // layer; allowed_tools is the only fork-specific override).
             compaction_config: None,
             gateway_compression: Some(self.config.load().gateway_compression.clone()),
+            parallel_tools_config: Some(self.config.load().parallel_tools.clone()),
         };
         // INVARIANT: forks must use the canonical session so the parent turn's
         // prompt-cache prefix is reused. Do NOT pass a `session_id_override`
@@ -1843,6 +1891,7 @@ impl LibreFangKernel {
             // registry has been consulted for this agent's manifest.
             compaction_config: None,
             gateway_compression: Some(self.config.load().gateway_compression.clone()),
+            parallel_tools_config: Some(self.config.load().parallel_tools.clone()),
         };
         self.send_message_streaming_with_sender_and_opts(
             agent_id,
@@ -1905,15 +1954,48 @@ impl LibreFangKernel {
         // to a healthy slot. See the ephemeral-path explanation
         // above for the full rationale.
 
+        // Reserve the global USD budget up front, mirroring the
+        // non-streaming path (#3616). Without this hold, N concurrent
+        // streaming turns all observe the same pre-call total and only the
+        // post-call `check_all_and_record` gate runs, so the global `[budget]`
+        // cap can be overshot under concurrency. The reservation is held for
+        // the duration of the spawned task and settled/released alongside the
+        // token reservation below.
+        let estimated_usd = {
+            let max_out = entry.manifest.model.max_tokens as u64;
+            let est_in = max_out;
+            let catalog = self.llm.model_catalog.load();
+            MeteringEngine::estimate_cost_with_catalog(
+                &catalog,
+                &entry.manifest.model.model,
+                est_in,
+                max_out,
+                0,
+                0,
+            )
+        };
+        let usd_reservation = self
+            .metering
+            .engine
+            .reserve_global_budget(&self.current_budget(), estimated_usd)
+            .map_err(KernelError::LibreFang)?;
+
         // Pre-charge the estimated token budget atomically to prevent the
         // TOCTOU race (#3736).  The reservation is settled inside the spawned
         // task after the LLM call completes.
         let estimated_tokens = entry.manifest.model.max_tokens as u64;
-        let token_reservation = self
+        let token_reservation = match self
             .agents
             .scheduler
             .check_quota_and_reserve(agent_id, estimated_tokens)
-            .map_err(KernelError::LibreFang)?;
+        {
+            Ok(r) => r,
+            Err(e) => {
+                // Roll back the USD reservation — the call never dispatched.
+                usd_reservation.release();
+                return Err(KernelError::LibreFang(e));
+            }
+        };
 
         let is_wasm = entry.manifest.module.starts_with("wasm:");
         let is_python = entry.manifest.module.starts_with("python:");
@@ -1961,6 +2043,9 @@ impl LibreFangKernel {
                             token_reservation,
                             &result.total_usage,
                         );
+                        // Release the global USD hold — non-LLM modules incur
+                        // no provider cost, so there is nothing to settle.
+                        usd_reservation.release();
                         let _ = kernel_clone
                             .agents
                             .registry
@@ -1975,6 +2060,7 @@ impl LibreFangKernel {
                             .agents
                             .scheduler
                             .release_reservation(agent_id, token_reservation);
+                        usd_reservation.release();
                         kernel_clone.agents.supervisor.record_panic();
                         warn!(agent_id = %agent_id, error = %e, "Non-LLM agent failed");
                         Err(e)
@@ -2104,6 +2190,24 @@ impl LibreFangKernel {
             .get_session(effective_session_id)
             .map_err(KernelError::LibreFang)?;
         let session_was_new = existing_session.is_none();
+        // Derive `peer_id` for the freshly-materialised session row from the
+        // same `SenderContext.chat_id` that fed `SessionId::for_sender_scope`
+        // above. This is the field migration v16 added but `save_session`
+        // never wrote — populating it here means
+        // `idx_sessions_peer(agent_id, peer_id)` finally carries something
+        // and per-peer dashboards / cleanup queries return real rows.
+        // Canonical / cron / fork / explicit-override sessions keep `None`.
+        let peer_id_for_new_session: Option<String> = match sender_context {
+            Some(ctx)
+                if !ctx.channel.is_empty()
+                    && !ctx.use_canonical_session
+                    && session_id_override.is_none()
+                    && !loop_opts.is_fork =>
+            {
+                ctx.chat_id.clone()
+            }
+            _ => None,
+        };
         let mut session = existing_session.unwrap_or_else(|| librefang_memory::session::Session {
             id: effective_session_id,
             agent_id,
@@ -2113,7 +2217,14 @@ impl LibreFangKernel {
             model_override: None,
             messages_generation: 0,
             last_repaired_generation: None,
+            peer_id: peer_id_for_new_session.clone(),
         });
+        // Existing rows pre-date this column being written; backfill on the
+        // first touch when we have a derivable peer. We only overwrite NULL
+        // — never trample a value that was already set by a previous save.
+        if session.peer_id.is_none() && peer_id_for_new_session.is_some() {
+            session.peer_id = peer_id_for_new_session;
+        }
 
         // Lifecycle: emit SessionCreated only when get_session returned None.
         if session_was_new {
@@ -2830,6 +2941,10 @@ impl LibreFangKernel {
                         token_reservation,
                         &result.total_usage,
                     );
+                    // Settle the global USD hold (#3616) — actual spend is
+                    // recorded via `check_all_and_record`; this frees the
+                    // pre-call ceiling that throttled concurrent fires.
+                    usd_reservation.settle();
                     // Record tool calls for rate limiting
                     let tool_count = result.decision_traces.len() as u32;
                     kernel_clone
@@ -3060,6 +3175,7 @@ impl LibreFangKernel {
                         .agents
                         .scheduler
                         .release_reservation(agent_id, token_reservation);
+                    usd_reservation.release();
                     kernel_clone.agents.supervisor.record_panic();
                     warn!(agent_id = %agent_id, error = %e, "Streaming agent loop failed");
                     // Lifecycle: emit TurnFailed before cleanup so subscribers

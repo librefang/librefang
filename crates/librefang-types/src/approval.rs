@@ -89,7 +89,15 @@ const MAX_TOTP_GRACE_PERIOD_SECS: u64 = 3600;
 // ---------------------------------------------------------------------------
 
 /// Risk level of an operation requiring approval.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+///
+/// Variants are declared least-to-most severe, so the derived
+/// `PartialOrd` / `Ord` compares by severity
+/// (`Low < Medium < High < Critical`). The approval gate relies on this
+/// ordering to decide which tools a trusted sender may auto-bypass: the
+/// trust escape hatch never applies to high-risk tools (`>= High`).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum RiskLevel {
     Low,

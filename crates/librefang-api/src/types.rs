@@ -223,6 +223,18 @@ impl ApiErrorResponse {
         }
     }
 
+    /// 401 Unauthorized.
+    pub fn unauthorized(msg: impl Into<String>) -> Self {
+        Self {
+            error: msg.into(),
+            code: None,
+            r#type: None,
+            details: None,
+            request_id: None,
+            status: StatusCode::UNAUTHORIZED,
+        }
+    }
+
     /// 403 Forbidden.
     pub fn forbidden(msg: impl Into<String>) -> Self {
         Self {
@@ -606,6 +618,18 @@ pub struct ClawHubInstallRequest {
     /// Install into a specific hand's workspace instead of globally.
     #[serde(default)]
     pub hand: Option<String>,
+}
+
+/// Request to install a hand from the remote HandsHub marketplace.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HandsHubInstallRequest {
+    /// Stable hand id in the registry index (also the download key).
+    pub hand_id: String,
+    /// Override the registry base URL (self-hosted forks, integration tests).
+    /// Falls back to the client's compiled default when omitted.
+    #[serde(default)]
+    pub registry_url: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

@@ -191,7 +191,7 @@ async fn start_full_router(api_key: &str) -> FullRouterHarness {
             api_key_env: "OLLAMA_API_KEY".to_string(),
             base_url: None,
             message_timeout_secs: 300,
-            extra_params: std::collections::HashMap::new(),
+            extra_params: std::collections::BTreeMap::new(),
             cli_profile_dirs: Vec::new(),
         },
         ..KernelConfig::default()
@@ -1830,7 +1830,7 @@ async fn test_agent_list_limit_clamped_to_max() {
     let body: serde_json::Value = resp.json().await.unwrap();
     // limit in response should be clamped to MAX_AGENT_LIST_LIMIT = 500
     // (the cap was bumped from 100 to 500 by a subsequent change to
-    // routes/agents.rs:939; updating the assertion to track the code).
+    // routes/agents/mod.rs (MAX_AGENT_LIST_LIMIT); updating the assertion to track the code).
     assert_eq!(body["limit"].as_u64().unwrap(), 500);
 }
 
@@ -2943,7 +2943,7 @@ async fn start_full_router_with_proactive(enabled: bool) -> FullRouterHarness {
             api_key_env: "OLLAMA_API_KEY".to_string(),
             base_url: None,
             message_timeout_secs: 300,
-            extra_params: std::collections::HashMap::new(),
+            extra_params: std::collections::BTreeMap::new(),
             cli_profile_dirs: Vec::new(),
         },
         proactive_memory: proactive,

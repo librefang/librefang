@@ -236,10 +236,20 @@ impl MediaEngine {
 
         let filename = format!("audio.{}", ext);
 
+        // Resolution order for model:
+        // 1. Explicit [media] audio_model (per-provider override)
+        // 2. [media.custom_stt] model — for custom / self-hosted providers only
+        //    (the `_other` dispatch arm below). Must NOT leak into built-in
+        //    providers (groq/openai/minimax/fireworks/together/siliconflow/
+        //    gemini/elevenlabs); otherwise an operator who sets
+        //    `[media.custom_stt] model = "large-v3"` accidentally overrides
+        //    Groq/etc.'s default model on every transcription call.
+        // 3. Built-in default for the selected provider
         let model = self
             .config
             .audio_model
             .as_deref()
+            .or(custom_stt_model_ref(provider, &self.config.custom_stt))
             .unwrap_or_else(|| default_audio_model(provider));
 
         info!(provider, model, filename = %filename, size = audio_bytes.len(), "Sending audio for transcription");
@@ -254,7 +264,11 @@ impl MediaEngine {
             "gemini" => gemini_transcribe(model, audio_bytes, &mime).await?,
             // ElevenLabs — Speech-to-Text API
             "elevenlabs" => elevenlabs_transcribe(model, audio_bytes, &mime).await?,
-            other => return Err(format!("Unsupported audio provider: {}", other)),
+            // Custom / self-hosted OpenAI-compatible Whisper endpoint
+            _other => {
+                let (api_url, api_key) = custom_stt_config(provider, &self.config.custom_stt)?;
+                whisper_transcribe(&api_url, &api_key, model, audio_bytes, &filename, &mime).await?
+            }
         };
 
         let transcription = transcription.trim().to_string();
@@ -644,6 +658,44 @@ fn whisper_provider_config(provider: &str) -> Result<(String, String), String> {
     }
 }
 
+/// Resolve URL and API key for a custom / self-hosted STT endpoint.
+///
+/// Returns `Err` when:
+/// - `custom_stt.base_url` is empty (provider is configured but no URL given).
+/// - `key_required = true` and the named env var is absent or empty.
+fn custom_stt_config(
+    provider: &str,
+    cfg: &librefang_types::media::CustomSttConfig,
+) -> Result<(String, String), String> {
+    if cfg.base_url.is_empty() {
+        return Err(format!(
+            "Audio provider '{provider}' is not a built-in provider and \
+             [media.custom_stt] base_url is not set. \
+             Add `base_url = \"http://<host>/v1/audio/transcriptions\"` \
+             to [media.custom_stt] in config.toml."
+        ));
+    }
+
+    let api_key = if cfg.api_key_env.is_empty() {
+        // No key env var specified — send no Authorization header.
+        String::new()
+    } else {
+        match std::env::var(&cfg.api_key_env) {
+            Ok(k) if !k.trim().is_empty() => k,
+            _ if cfg.key_required => {
+                return Err(format!(
+                    "Custom STT provider '{provider}' requires an API key but \
+                     env var '{}' is not set or empty.",
+                    cfg.api_key_env
+                ));
+            }
+            _ => String::new(),
+        }
+    };
+
+    Ok((cfg.base_url.clone(), api_key))
+}
+
 /// Transcribe using an OpenAI-compatible Whisper endpoint.
 async fn whisper_transcribe(
     api_url: &str,
@@ -664,20 +716,24 @@ async fn whisper_transcribe(
         .text("response_format", "text");
 
     let client = librefang_http::proxied_client();
-    let resp = client
+    // Only add Authorization header when an API key is provided. Keyless
+    // self-hosted servers (e.g. faster-whisper-server with no auth) reject
+    // or ignore an empty `Bearer ` token; omitting the header entirely is
+    // safer.
+    let mut req = client
         .post(api_url)
-        .bearer_auth(api_key)
         .multipart(form)
-        .timeout(std::time::Duration::from_secs(60))
-        .send()
-        .await
-        .map_err(|e| {
-            // Operator-facing: full error in logs. User-facing Err is
-            // sanitized to drop the underlying reqwest::Error display,
-            // which can echo URLs / request internals. See #4999.
-            tracing::warn!(error = %e, "Whisper transcription request failed");
-            "Transcription request failed".to_string()
-        })?;
+        .timeout(std::time::Duration::from_secs(60));
+    if !api_key.is_empty() {
+        req = req.bearer_auth(api_key);
+    }
+    let resp = req.send().await.map_err(|e| {
+        // Operator-facing: full error in logs. User-facing Err is
+        // sanitized to drop the underlying reqwest::Error display,
+        // which can echo URLs / request internals. See #4999.
+        tracing::warn!(error = %e, "Whisper transcription request failed");
+        "Transcription request failed".to_string()
+    })?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -961,7 +1017,27 @@ fn default_vision_model(provider: &str) -> &str {
     }
 }
 
+/// Resolve the `[media.custom_stt] model` override, but ONLY for custom /
+/// self-hosted providers (the `_other` dispatch arm). Returns `None` for every
+/// built-in provider so that an operator setting `custom_stt.model` cannot
+/// accidentally override a built-in provider's default transcription model.
+fn custom_stt_model_ref<'a>(
+    provider: &str,
+    custom_stt: &'a librefang_types::media::CustomSttConfig,
+) -> Option<&'a str> {
+    match provider {
+        "groq" | "openai" | "minimax" | "fireworks" | "together" | "siliconflow" | "gemini"
+        | "elevenlabs" => None,
+        _ => custom_stt.model.as_deref(),
+    }
+}
+
 /// Get the default audio model for a provider.
+///
+/// For custom providers the model configured in `[media.custom_stt]` takes
+/// precedence (resolved by the caller via `audio_model` / `custom_stt.model`);
+/// this function returns `"whisper-1"` as the OpenAI-compatible fallback for
+/// any unrecognised provider name.
 fn default_audio_model(provider: &str) -> &str {
     match provider {
         "groq" => "whisper-large-v3-turbo",
@@ -972,7 +1048,10 @@ fn default_audio_model(provider: &str) -> &str {
         "fireworks" => "whisper-v3-turbo",
         "together" => "whisper-large-v3-turbo",
         "siliconflow" => "FunAudioLLM/SenseVoiceSmall",
-        _ => "unknown",
+        // Custom / self-hosted providers default to the standard Whisper model
+        // name; real model can be overridden via [media.custom_stt] or
+        // audio_model in config.
+        _ => "whisper-1",
     }
 }
 
@@ -1388,5 +1467,196 @@ mod tests {
         let result = engine.transcribe_audio(&attachment).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Failed to read audio file"));
+    }
+
+    // ── Custom STT config resolution tests ───────────────────────────────
+
+    #[test]
+    fn custom_stt_config_empty_base_url_returns_err() {
+        use librefang_types::media::CustomSttConfig;
+        let cfg = CustomSttConfig::default(); // base_url is empty
+        let result = custom_stt_config("local-whisper", &cfg);
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("local-whisper"),
+            "should mention provider name"
+        );
+        assert!(msg.contains("base_url"), "should mention base_url field");
+    }
+
+    #[test]
+    fn custom_stt_config_no_key_env_returns_empty_key() {
+        use librefang_types::media::CustomSttConfig;
+        let cfg = CustomSttConfig {
+            base_url: "http://localhost:8080/v1/audio/transcriptions".to_string(),
+            api_key_env: String::new(), // no auth
+            key_required: false,
+            model: None,
+        };
+        let (url, key) = custom_stt_config("local-whisper", &cfg).unwrap();
+        assert_eq!(url, "http://localhost:8080/v1/audio/transcriptions");
+        assert!(key.is_empty(), "keyless server should produce empty key");
+    }
+
+    #[test]
+    fn custom_stt_config_key_required_missing_env_returns_err() {
+        use librefang_types::media::CustomSttConfig;
+        // Use a deliberately unusual env var name that CI will never set.
+        let cfg = CustomSttConfig {
+            base_url: "http://localhost:8080/v1/audio/transcriptions".to_string(),
+            api_key_env: "LIBREFANG_TEST_MISSING_KEY_ZXQ99".to_string(), // pragma: allowlist secret
+            key_required: true,
+            model: None,
+        };
+        let result = custom_stt_config("local-whisper", &cfg);
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("LIBREFANG_TEST_MISSING_KEY_ZXQ99"),
+            "error should name the env var"
+        );
+    }
+
+    #[test]
+    fn custom_stt_config_key_optional_missing_env_returns_empty_key() {
+        use librefang_types::media::CustomSttConfig;
+        let cfg = CustomSttConfig {
+            base_url: "http://localhost:8080/v1/audio/transcriptions".to_string(),
+            api_key_env: "LIBREFANG_TEST_MISSING_KEY_ZXQ99".to_string(), // pragma: allowlist secret
+            key_required: false, // optional — missing key is OK
+            model: None,
+        };
+        let (url, key) = custom_stt_config("local-whisper", &cfg).unwrap();
+        assert_eq!(url, "http://localhost:8080/v1/audio/transcriptions");
+        assert!(
+            key.is_empty(),
+            "missing optional key should produce empty key"
+        );
+    }
+
+    #[test]
+    fn custom_stt_model_resolution_prefers_audio_model_field() {
+        // [media] audio_model overrides [media.custom_stt] model
+        use librefang_types::media::CustomSttConfig;
+        let config = MediaConfig {
+            audio_model: Some("my-explicit-model".to_string()),
+            custom_stt: CustomSttConfig {
+                model: Some("custom-stt-model".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // Resolution: audio_model > custom_stt.model > default_audio_model(provider)
+        let resolved = config
+            .audio_model
+            .as_deref()
+            .or(config.custom_stt.model.as_deref())
+            .unwrap_or_else(|| default_audio_model("local-whisper"));
+        assert_eq!(resolved, "my-explicit-model");
+    }
+
+    #[test]
+    fn custom_stt_model_resolution_falls_back_to_custom_stt_model() {
+        use librefang_types::media::CustomSttConfig;
+        let config = MediaConfig {
+            audio_model: None, // not set
+            custom_stt: CustomSttConfig {
+                model: Some("large-v3".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let resolved = config
+            .audio_model
+            .as_deref()
+            .or(config.custom_stt.model.as_deref())
+            .unwrap_or_else(|| default_audio_model("local-whisper"));
+        assert_eq!(resolved, "large-v3");
+    }
+
+    #[test]
+    fn custom_stt_model_resolution_falls_back_to_provider_default() {
+        use librefang_types::media::CustomSttConfig;
+        let config = MediaConfig {
+            audio_model: None,
+            custom_stt: CustomSttConfig {
+                model: None,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let resolved = config
+            .audio_model
+            .as_deref()
+            .or(config.custom_stt.model.as_deref())
+            .unwrap_or_else(|| default_audio_model("local-whisper"));
+        // Unknown provider should return the OpenAI-compatible default
+        assert_eq!(resolved, "whisper-1");
+    }
+
+    #[test]
+    fn custom_stt_model_ref_does_not_leak_into_builtin_providers() {
+        use librefang_types::media::CustomSttConfig;
+        // Operator set a custom_stt.model — it must NOT override a built-in
+        // provider's default model. Exercises the production guard directly
+        // (not a reconstructed copy), so deleting the guard fails this test.
+        let custom_stt = CustomSttConfig {
+            model: Some("large-v3".to_string()),
+            ..Default::default()
+        };
+        for builtin in [
+            "groq",
+            "openai",
+            "minimax",
+            "fireworks",
+            "together",
+            "siliconflow",
+            "gemini",
+            "elevenlabs",
+        ] {
+            assert_eq!(
+                custom_stt_model_ref(builtin, &custom_stt),
+                None,
+                "custom_stt.model must not leak into built-in provider {builtin}"
+            );
+        }
+        // A custom / self-hosted provider DOES pick up custom_stt.model.
+        assert_eq!(
+            custom_stt_model_ref("local-whisper", &custom_stt),
+            Some("large-v3")
+        );
+    }
+
+    #[test]
+    fn media_config_default_has_empty_custom_stt() {
+        let config = MediaConfig::default();
+        assert!(config.custom_stt.base_url.is_empty());
+        assert!(config.custom_stt.api_key_env.is_empty());
+        assert!(!config.custom_stt.key_required);
+        assert!(config.custom_stt.model.is_none());
+    }
+
+    #[test]
+    fn media_config_round_trips_custom_stt() {
+        use librefang_types::media::CustomSttConfig;
+        let config = MediaConfig {
+            audio_provider: Some("local-whisper".to_string()),
+            custom_stt: CustomSttConfig {
+                base_url: "http://localhost:8080/v1/audio/transcriptions".to_string(),
+                api_key_env: "LOCAL_WHISPER_KEY".to_string(), // pragma: allowlist secret
+                key_required: false,
+                model: Some("large-v3".to_string()),
+            },
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: MediaConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed.custom_stt.base_url,
+            "http://localhost:8080/v1/audio/transcriptions"
+        );
+        assert_eq!(parsed.custom_stt.api_key_env, "LOCAL_WHISPER_KEY");
+        assert_eq!(parsed.custom_stt.model.as_deref(), Some("large-v3"));
     }
 }

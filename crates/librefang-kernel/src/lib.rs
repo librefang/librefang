@@ -20,6 +20,7 @@ pub mod cron;
 pub mod cron_delivery;
 pub mod error;
 pub mod event_bus;
+pub mod goal_runner;
 pub mod heartbeat;
 pub mod hooks;
 pub mod inbox;
@@ -33,6 +34,7 @@ pub use librefang_kernel_metering as metering;
 pub mod orchestration;
 pub mod pairing;
 pub mod registry;
+pub mod rl_export;
 pub use librefang_kernel_router as router;
 pub mod scheduler;
 pub mod session_lifecycle;
@@ -111,6 +113,7 @@ pub use librefang_runtime::registry_sync;
 pub use librefang_runtime::silent_response;
 pub use librefang_runtime::str_utils;
 pub use librefang_runtime::tool_runner;
+pub use librefang_runtime::web_fetch;
 
 // ---------------------------------------------------------------------------
 // Shared persist utility

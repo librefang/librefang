@@ -492,7 +492,7 @@ fn test_spawn_agent_applies_local_default_model_override() {
                     base_url: None,
                     context_window: None,
                     max_output_tokens: None,
-                    extra_params: std::collections::HashMap::new(),
+                    extra_params: std::collections::BTreeMap::new(),
                 },
                 ..Default::default()
             },
@@ -745,7 +745,7 @@ fn test_set_agent_model_clears_overrides_when_provider_changes() {
                     base_url: Some("https://cloudverse.freshworkscorp.com/api/v1".to_string()),
                     context_window: None,
                     max_output_tokens: None,
-                    extra_params: std::collections::HashMap::new(),
+                    extra_params: std::collections::BTreeMap::new(),
                 },
                 ..Default::default()
             },
@@ -2334,55 +2334,221 @@ fn test_stable_mode_freezes_registry_and_skips_review_gate() {
     kernel.shutdown();
 }
 
-#[test]
-fn test_skill_evolve_tools_default_available_to_restricted_agent() {
-    // The PR's core promise is "every agent can self-evolve skills."
-    // Verify that an agent whose manifest declares a restrictive
-    // `capabilities.tools = ["memory_store"]` still sees the full
-    // skill_evolve_* surface at tool-selection time. Without this
-    // default-available behavior, out-of-the-box agents cannot trigger
-    // the feature.
-    //
-    // Rather than spin up a kernel + spawn an agent (which requires a
-    // full boot and signed manifest), assert directly on the same
-    // filter logic the kernel's Step 1 uses: every name in
-    // `default_available` must survive a filter that declares a
-    // restrictive capabilities.tools.
+// ---------------------------------------------------------------------------
+// skill_evolve gate — flag-combination matrix
+//
+// `LibreFangKernel::is_evolve_tool` is the single source of truth for which
+// tools count as "evolution tools".  These tests exercise the gate predicate
+// `evolve_enabled = auto_evolve || skill_workshop.enabled` for all four
+// (auto_evolve, skill_workshop.enabled) combinations so that the list of
+// suppressed names never drifts from the production code.
+// ---------------------------------------------------------------------------
+
+/// Simulate kernel Step-1 filtering for a restricted agent
+/// (`capabilities.tools = ["memory_store", "memory_recall"]`) using the real
+/// `LibreFangKernel::is_evolve_tool` predicate.
+///
+/// Used by the (T,F), (F,T), and (F,F) matrix tests.  The (T,T) case uses
+/// the real kernel path via `boot_with_config` + `available_tools` — see
+/// `test_skill_evolve_tools_present_when_both_flags_true`.
+fn filter_restricted_builtins(auto_evolve: bool, workshop_enabled: bool) -> Vec<String> {
     let tools = librefang_runtime::tool_runner::builtin_tool_definitions();
     let declared: &[&str] = &["memory_store", "memory_recall"];
-    let default_available: &[&str] = &[
-        "skill_read_file",
-        "skill_evolve_create",
-        "skill_evolve_update",
-        "skill_evolve_patch",
-        "skill_evolve_delete",
-        "skill_evolve_rollback",
-        "skill_evolve_write_file",
-        "skill_evolve_remove_file",
-    ];
-
-    // Mirror kernel::mod.rs Step 1 filter exactly.
-    let filtered: Vec<String> = tools
+    let evolve_enabled = auto_evolve || workshop_enabled;
+    tools
         .iter()
         .filter(|t| {
-            declared.contains(&t.name.as_str()) || default_available.contains(&t.name.as_str())
+            declared.contains(&t.name.as_str())
+                || (evolve_enabled && LibreFangKernel::is_evolve_tool(&t.name))
         })
         .map(|t| t.name.clone())
-        .collect();
+        .collect()
+}
 
-    for required in default_available {
+// (T, T) — both flags on: evolve tools must be present.
+//
+// Uses the real kernel path (`boot_with_config` → `spawn_agent` →
+// `available_tools`) so this test catches regressions in the actual
+// `available_tools` implementation, not just the inline predicate mirror.
+#[test]
+fn test_skill_evolve_tools_present_when_both_flags_true() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-evolve-matrix-tt");
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
+
+    // Restricted agent: only memory tools declared; both evolution paths on.
+    let manifest = AgentManifest {
+        name: "matrix-tt-agent".to_string(),
+        description: "matrix (T,T) test agent".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        capabilities: ManifestCapabilities {
+            tools: vec!["memory_store".to_string(), "memory_recall".to_string()],
+            ..Default::default()
+        },
+        auto_evolve: true,
+        skill_workshop: librefang_types::agent::SkillWorkshopConfig {
+            enabled: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+    let tools = kernel.available_tools(agent_id);
+    let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+
+    let all_builtins = librefang_runtime::tool_runner::builtin_tool_definitions();
+    for t in all_builtins
+        .iter()
+        .filter(|t| LibreFangKernel::is_evolve_tool(&t.name))
+    {
         assert!(
-            filtered.iter().any(|n| n == *required),
-            "skill-evolution tool {required} must be default-available — missing from {filtered:?}"
+            names.contains(&t.name.as_str()),
+            "evolve tool {} must be present when auto_evolve=true, workshop=true; got {names:?}",
+            t.name
         );
     }
-    // Also confirm the restrictive declarations still flow through.
-    for required in declared {
+    // Declared non-evolve tools must also be present.
+    assert!(
+        names.contains(&"memory_store"),
+        "memory_store must be present; got {names:?}"
+    );
+    assert!(
+        names.contains(&"memory_recall"),
+        "memory_recall must be present; got {names:?}"
+    );
+
+    kernel.shutdown();
+}
+
+// (T, F) — auto_evolve=true, workshop=false: evolve tools must be present.
+#[test]
+fn test_skill_evolve_tools_present_when_auto_evolve_true() {
+    let filtered = filter_restricted_builtins(true, false);
+    let tools = librefang_runtime::tool_runner::builtin_tool_definitions();
+    for t in tools
+        .iter()
+        .filter(|t| LibreFangKernel::is_evolve_tool(&t.name))
+    {
         assert!(
-            filtered.iter().any(|n| n == *required),
-            "declared tool {required} missing from {filtered:?}"
+            filtered.iter().any(|n| n == &t.name),
+            "evolve tool {} must be present when auto_evolve=true, workshop=false; got {filtered:?}",
+            t.name
         );
     }
+}
+
+// (F, T) — auto_evolve=false, workshop=true: evolve tools must be present.
+#[test]
+fn test_skill_evolve_tools_present_when_workshop_enabled() {
+    let filtered = filter_restricted_builtins(false, true);
+    let tools = librefang_runtime::tool_runner::builtin_tool_definitions();
+    for t in tools
+        .iter()
+        .filter(|t| LibreFangKernel::is_evolve_tool(&t.name))
+    {
+        assert!(
+            filtered.iter().any(|n| n == &t.name),
+            "evolve tool {} must be present when auto_evolve=false, workshop=true; got {filtered:?}",
+            t.name
+        );
+    }
+}
+
+// (F, F) — both flags off: evolve tools must be suppressed, declared tools
+// must still flow through.
+#[test]
+fn test_skill_evolve_tools_suppressed_when_evolution_disabled() {
+    let filtered = filter_restricted_builtins(false, false);
+    let tools = librefang_runtime::tool_runner::builtin_tool_definitions();
+    for t in tools
+        .iter()
+        .filter(|t| LibreFangKernel::is_evolve_tool(&t.name))
+    {
+        assert!(
+            !filtered.iter().any(|n| n == &t.name),
+            "evolve tool {} must be suppressed when auto_evolve=false, workshop=false; got {filtered:?}",
+            t.name
+        );
+    }
+    // Declared tools still flow through.
+    for required in &["memory_store", "memory_recall"] {
+        assert!(
+            filtered.iter().any(|n| n == *required),
+            "declared tool {required} must not be suppressed; got {filtered:?}"
+        );
+    }
+}
+
+// Regression: post-filter must NOT strip evolve tools that the operator
+// explicitly declared in capabilities.tools, even when both auto_evolve=false
+// AND skill_workshop.enabled=false.
+//
+// The bug: the blanket `all_tools.retain(!is_evolve_tool)` ran after the
+// explicit-declaration arm had already admitted the operator-declared tools,
+// silently removing them.  The fix threads `declared_tools` into the retain
+// predicate so explicit grants are honoured regardless of the gate flags.
+#[test]
+fn test_skill_evolve_tool_survives_when_explicitly_declared_and_evolution_disabled() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp
+        .path()
+        .join("librefang-kernel-explicit-evolve-gate-test");
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
+
+    // Operator explicitly declares skill_evolve_create alongside a normal
+    // tool.  Both auto_evolve and skill_workshop are off — the gate must
+    // still honour the explicit declaration.
+    let manifest = AgentManifest {
+        name: "explicit-evolve-agent".to_string(),
+        description: "agent with explicit evolve tool and evolution disabled".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        capabilities: ManifestCapabilities {
+            tools: vec![
+                "skill_evolve_create".to_string(),
+                "memory_store".to_string(),
+            ],
+            ..Default::default()
+        },
+        auto_evolve: false,
+        skill_workshop: librefang_types::agent::SkillWorkshopConfig {
+            enabled: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+    let tools = kernel.available_tools(agent_id);
+    let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+
+    assert!(
+        names.contains(&"skill_evolve_create"),
+        "skill_evolve_create must survive when explicitly declared, even with evolution flags off; \
+         got: {names:?}"
+    );
+    assert!(
+        names.contains(&"memory_store"),
+        "memory_store must survive (declared, non-evolve tool); got: {names:?}"
+    );
+
+    kernel.shutdown();
 }
 
 // Regression test for the fix that reads peer_id from job_json.
@@ -2824,9 +2990,7 @@ system_prompt = "BASE PROMPT"
         .find(|s| s.hand_id == hand_id)
         .expect("hand_state.json must carry the persisted instance");
 
-    let timestamps = saved_hand
-        .activated_at
-        .and_then(|a| saved_hand.updated_at.map(|u| (a, u)));
+    let timestamps = saved_hand.activated_at.zip(saved_hand.updated_at);
     let instance = kernel
         .activate_hand_with_id(
             &saved_hand.hand_id,
@@ -2976,9 +3140,7 @@ system_prompt = "WORKER PROMPT"
         .into_iter()
         .find(|s| s.hand_id == hand_id)
         .expect("hand_state.json must carry the persisted instance");
-    let timestamps = saved_hand
-        .activated_at
-        .and_then(|a| saved_hand.updated_at.map(|u| (a, u)));
+    let timestamps = saved_hand.activated_at.zip(saved_hand.updated_at);
     let instance = kernel
         .activate_hand_with_id(
             &saved_hand.hand_id,
@@ -3175,9 +3337,7 @@ fn hand_runtime_override_survives_restart_via_activate_hand_with_id() {
 
     // Replay exactly what `start_background_agents` does for hand restoration,
     // minus the async prelude.
-    let timestamps = saved_hand
-        .activated_at
-        .and_then(|a| saved_hand.updated_at.map(|u| (a, u)));
+    let timestamps = saved_hand.activated_at.zip(saved_hand.updated_at);
     let restored_instance = kernel
         .activate_hand_with_id(
             &saved_hand.hand_id,
@@ -4163,6 +4323,60 @@ async fn gc_sweep_aborts_orphaned_running_task_5142() {
     kernel.shutdown();
 }
 
+/// The GC sweep must NOT reclaim a dead agent's `agent_msg_locks` entry while
+/// an in-flight turn still holds the Arc (`Arc::strong_count > 1`). Pre-fix the
+/// sweep filtered on dead-agent membership alone and dropped the slot out from
+/// under the live turn; a subsequent turn then `or_insert_with`-ed a fresh
+/// Mutex that no longer serialized against the in-flight one, silently losing
+/// mutual exclusion. This mirrors the symmetric strong_count guard already used
+/// for `session_msg_locks`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gc_sweep_preserves_agent_msg_lock_with_inflight_holder() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-gc-agent-lock");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let kernel = LibreFangKernel::boot_with_config(KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    })
+    .expect("kernel should boot");
+
+    // Agent NOT in the registry → the sweep classifies it as dead.
+    let dead_agent = AgentId(uuid::Uuid::new_v4());
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    kernel
+        .agents
+        .agent_msg_locks
+        .insert(dead_agent, lock.clone());
+
+    // `lock` simulates an in-flight turn's cloned Arc: strong_count == 2
+    // (map slot + this holder). The sweep must leave the entry in place.
+    assert_eq!(
+        Arc::strong_count(&lock),
+        2,
+        "sanity: in-flight holder present"
+    );
+    kernel.gc_sweep();
+    assert!(
+        kernel.agents.agent_msg_locks.get(&dead_agent).is_some(),
+        "GC sweep must NOT reclaim an agent_msg_locks entry whose Arc is still \
+         held by an in-flight turn (strong_count > 1)"
+    );
+
+    // Drop the in-flight holder → strong_count drops to 1 (map slot only).
+    // The next sweep must now reclaim the stale entry.
+    drop(lock);
+    kernel.gc_sweep();
+    assert!(
+        kernel.agents.agent_msg_locks.get(&dead_agent).is_none(),
+        "GC sweep must reclaim a dead agent's agent_msg_locks entry once the \
+         last in-flight holder has dropped (strong_count == 1)"
+    );
+
+    kernel.shutdown();
+}
+
 /// `/api/sessions` joins the SQLite session list with this snapshot to set
 /// the per-row `active` flag (#4290). Verify it surfaces every running
 /// session across agents and shrinks back to empty after stops.
@@ -4564,6 +4778,61 @@ fn fork_session_snapshot_is_unaffected_by_registry_mutation_4291() {
     );
 
     kernel.shutdown();
+}
+
+/// Regression guard for the houko review on #5286: the `peer_id`
+/// derivation in `execute_llm_agent` (agent_execution.rs ~340) omits the
+/// `!loop_opts.is_fork` clause that `send_message_full_inner` enforces
+/// in `messaging.rs`. The omission is safe only because forks NEVER
+/// reach `execute_llm_agent` — the fork path in
+/// `send_message_streaming_with_sender_and_opts` builds its own
+/// `LoopOptions { is_fork: true, .. }` and calls `agent_loop` directly,
+/// and the `LoopOptions` constructed *inside* `execute_llm_agent`
+/// hardcodes `is_fork: false`. This test pins both invariants by
+/// grepping the source so a future refactor that flips either side
+/// (e.g. routing forks through `execute_llm_agent`, or making `is_fork`
+/// in the local LoopOptions a parameter) trips the test and forces the
+/// author to also plumb the same skip into the peer_id match arm.
+#[test]
+fn test_execute_llm_agent_hardcodes_is_fork_false_for_peer_id_invariant() {
+    let src = include_str!("agent_execution.rs");
+
+    // Invariant 1: the local `LoopOptions` literal in execute_llm_agent
+    // hardcodes `is_fork: false`. If this string disappears the peer_id
+    // derivation a few hundred lines above needs the same guard the
+    // messaging.rs path has.
+    assert!(
+        src.contains("is_fork: false,"),
+        "execute_llm_agent must construct LoopOptions with `is_fork: false` \
+         hardcoded; if this changes, the peer_id derivation needs the \
+         `!loop_opts.is_fork` guard mirrored from send_message_full_inner."
+    );
+
+    // Invariant 2: no *code* line must contain `is_fork: true` — forks
+    // belong on the messaging.rs path.  Comments are excluded so that
+    // the explanatory prose documenting the invariant does not trip the
+    // assertion (the very comment added in this PR mentions the literal
+    // `is_fork: true` when describing the fork dispatch path).
+    let code_has_is_fork_true = src
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .any(|l| l.contains("is_fork: true"));
+    assert!(
+        !code_has_is_fork_true,
+        "execute_llm_agent must not construct a fork-shaped LoopOptions; \
+         forks dispatch through send_message_streaming_with_sender_and_opts."
+    );
+
+    // Invariant 3: the comment block above the peer_id match arm must
+    // reference the fork invariant so future readers find the rationale
+    // without re-deriving it.
+    assert!(
+        src.contains("forks never reach `execute_llm_agent`"),
+        "the peer_id derivation comment must document why the \
+         `!loop_opts.is_fork` clause is omitted here; without that \
+         comment a future contributor will re-introduce the divergence \
+         houko flagged on #5286."
+    );
 }
 
 /// Default `LoopOptions` must have `parent_session_id == None`, and
@@ -5653,7 +5922,8 @@ fn mcp_summary_is_byte_identical_across_input_orders() {
         "mcp_filesystem_list_directory".to_string(),
     ];
 
-    let allowlist: Vec<String> = Vec::new();
+    // `["*"]` = all servers; exercises the multi-server render path (#5855).
+    let allowlist: Vec<String> = vec!["*".to_string()];
     let summary_a = super::render_mcp_summary(&order_a, &configured, &allowlist);
     let summary_b = super::render_mcp_summary(&order_b, &configured, &allowlist);
 
@@ -5682,7 +5952,7 @@ fn mcp_summary_inner_tool_list_is_sorted() {
         "mcp_github_close_pr".to_string(),
     ];
 
-    let allowlist: Vec<String> = Vec::new();
+    let allowlist: Vec<String> = vec!["*".to_string()];
     let summary = super::render_mcp_summary(&tools, &configured, &allowlist);
 
     // The inner list joined with ", " must appear in alphabetical order.
@@ -5713,7 +5983,15 @@ fn mcp_summary_cache_key_is_order_independent() {
         super::mcp_summary_cache_key(&order_b),
         "cache key must be insertion-order-independent"
     );
-    assert_eq!(super::mcp_summary_cache_key(&[]), "*");
+    // #5855: empty allowlist ("no servers") gets its own sentinel key, distinct
+    // from the explicit `["*"]` wildcard ("all servers", keyed `*`).
+    assert_eq!(super::mcp_summary_cache_key(&[]), "\x1fnone\x1f");
+    assert_eq!(super::mcp_summary_cache_key(&["*".to_string()]), "*");
+    assert_ne!(
+        super::mcp_summary_cache_key(&[]),
+        super::mcp_summary_cache_key(&["*".to_string()]),
+        "empty (none) and [\"*\"] (all) must not collide in the summary cache"
+    );
 }
 
 #[test]
@@ -5736,6 +6014,9 @@ fn available_tools_mcp_section_is_sorted_across_connect_orders() {
         description: "agent for mcp order regression".to_string(),
         author: "test".to_string(),
         module: "builtin:chat".to_string(),
+        // `["*"]` opts into all servers so this test exercises the multi-server
+        // sort path; an empty allowlist now means "no MCP tools" (#5855).
+        mcp_servers: vec!["*".to_string()],
         ..Default::default()
     };
     let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
@@ -5894,6 +6175,8 @@ fn mcp_disabled_false_preserves_mcp_tools() {
         author: "test".to_string(),
         module: "builtin:chat".to_string(),
         mcp_disabled: false,
+        // `["*"]` = all servers; empty would now yield zero MCP tools (#5855).
+        mcp_servers: vec!["*".to_string()],
         ..Default::default()
     };
     let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
@@ -5926,6 +6209,210 @@ fn mcp_disabled_false_preserves_mcp_tools() {
     kernel.shutdown();
 }
 
+// ─── mcp_servers allowlist semantics (#5855) ──────────────────────────────
+//
+// Empty `mcp_servers = []` must NOT leak every globally-connected server's
+// tools into the agent. The field is a real allowlist:
+//   []        → zero MCP tools
+//   ["*"]     → all connected servers
+//   ["a"]     → only server `a`
+// Before #5855 the empty case was read as a wildcard, so an agent that never
+// opted into any MCP server saw the union of all servers' tools, attempted to
+// call them, and the streaming loop exited after 3 consecutive tool failures.
+
+/// Register a server name into the kernel's `effective_mcp_servers` snapshot
+/// so `resolve_mcp_server_from_known` can map a namespaced tool name back to
+/// its real owning server — the exact path `available_tools` and
+/// `render_mcp_summary` both take. Mirrors `seed_mcp_server` in
+/// `crates/librefang-api/tests/system_tools_sessions_test.rs`.
+fn register_mcp_server(kernel: &LibreFangKernel, server_name: &str) {
+    let entry = librefang_types::config::McpServerConfigEntry {
+        name: server_name.to_string(),
+        template_id: None,
+        transport: None,
+        timeout_secs: 30,
+        env: Vec::new(),
+        headers: Vec::new(),
+        oauth: None,
+        taint_scanning: true,
+        taint_policy: None,
+    };
+    kernel
+        .mcp
+        .effective_mcp_servers
+        .write()
+        .expect("effective_mcp_servers write lock not poisoned")
+        .push(entry);
+}
+
+/// Boot a kernel that has `servers` connected (registered in
+/// `effective_mcp_servers`) and `tools` in the global MCP tool map, spawn an
+/// agent with `mcp_servers = allowlist`, and return the agent's resolved MCP
+/// tool names.
+///
+/// Registering the servers — not just pushing tools — is load-bearing: the
+/// named-allowlist filter resolves each tool to its *real* owning server via
+/// `effective_mcp_servers`, then compares that server name to the allowlist by
+/// exact equality. An earlier revision resolved tools against the allowlist
+/// directly, which prefix-matched `mcp_server_x_*` under a `["server"]`
+/// allowlist; seeding the real servers here is what lets the test exercise the
+/// correct, summary-consistent algorithm.
+fn mcp_tool_names_for_servers(
+    test_name: &str,
+    servers: &[&str],
+    tools: &[&str],
+    allowlist: Vec<String>,
+) -> Vec<String> {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join(test_name);
+    std::fs::create_dir_all(home.join("data")).unwrap();
+    let cfg = KernelConfig {
+        home_dir: home.clone(),
+        data_dir: home.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(cfg).expect("kernel should boot");
+
+    let manifest = AgentManifest {
+        name: "allowlist-agent".to_string(),
+        description: "agent under mcp_servers allowlist test".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        mcp_disabled: false,
+        mcp_servers: allowlist,
+        ..Default::default()
+    };
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+
+    for server in servers {
+        register_mcp_server(&kernel, server);
+    }
+    {
+        let mut tool_guard = kernel.tools_ref().lock().unwrap();
+        for tool in tools {
+            tool_guard.push(librefang_types::tool::ToolDefinition {
+                name: (*tool).to_string(),
+                description: String::new(),
+                input_schema: serde_json::json!({}),
+            });
+        }
+    }
+    kernel
+        .mcp
+        .mcp_generation
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    let names: Vec<String> = kernel
+        .available_tools(agent_id)
+        .iter()
+        .filter(|t| t.name.starts_with("mcp_"))
+        .map(|t| t.name.clone())
+        .collect();
+    kernel.shutdown();
+    names
+}
+
+/// Register one tool each for two distinct global MCP servers, then assert the
+/// per-allowlist MCP tool set an agent with `mcp_servers = allowlist` resolves.
+fn mcp_tool_names_for_allowlist(test_name: &str, allowlist: Vec<String>) -> Vec<String> {
+    mcp_tool_names_for_servers(
+        test_name,
+        &["server_x", "server_y"],
+        &["mcp_server_x_do_thing", "mcp_server_y_other_thing"],
+        allowlist,
+    )
+}
+
+#[test]
+fn empty_mcp_servers_yields_no_mcp_tools() {
+    // The core leak: an unconfigured agent (mcp_servers = []) must see ZERO
+    // MCP tools even though two servers are connected globally.
+    let names = mcp_tool_names_for_allowlist("librefang-mcp-empty-allowlist-5855", vec![]);
+    assert!(
+        names.is_empty(),
+        "mcp_servers = [] must expose no MCP tools (#5855); leaked: {names:?}"
+    );
+}
+
+#[test]
+fn wildcard_mcp_servers_yields_all_mcp_tools() {
+    // ["*"] is the explicit opt-in to all connected servers.
+    let mut names = mcp_tool_names_for_allowlist(
+        "librefang-mcp-wildcard-allowlist-5855",
+        vec!["*".to_string()],
+    );
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            "mcp_server_x_do_thing".to_string(),
+            "mcp_server_y_other_thing".to_string(),
+        ],
+        "mcp_servers = [\"*\"] must expose every connected server's tools (#5855)"
+    );
+}
+
+#[test]
+fn explicit_mcp_servers_allowlist_filters_to_named_servers() {
+    // ["server_x"] selects only server_x's tools — server_y stays hidden.
+    let names = mcp_tool_names_for_allowlist(
+        "librefang-mcp-named-allowlist-5855",
+        vec!["server_x".to_string()],
+    );
+    assert_eq!(
+        names,
+        vec!["mcp_server_x_do_thing".to_string()],
+        "mcp_servers = [\"server_x\"] must expose only server_x tools; got: {names:?}"
+    );
+}
+
+#[test]
+fn named_allowlist_does_not_leak_prefix_overlapping_server() {
+    // Prefix-collision regression: server `server` and server `server_x` share
+    // the `mcp_server_` namespace prefix. An agent allowlisting only `server`
+    // must NOT see `server_x`'s tools. Resolving each tool against the agent's
+    // allowlist directly (rather than the connected-server set) would make
+    // `mcp_server_x_bar` prefix-match `mcp_server_` and leak — a narrower
+    // recurrence of the #5855 cross-agent leak. `explicit_*` above uses
+    // server_x/server_y, whose prefixes do not overlap, so it cannot catch this.
+    let names = mcp_tool_names_for_servers(
+        "librefang-mcp-prefix-overlap-5855",
+        &["server", "server_x"],
+        &["mcp_server_foo", "mcp_server_x_bar"],
+        vec!["server".to_string()],
+    );
+    assert_eq!(
+        names,
+        vec!["mcp_server_foo".to_string()],
+        "mcp_servers = [\"server\"] must expose only server's tools, never the \
+         prefix-overlapping server_x; got: {names:?}"
+    );
+}
+
+#[test]
+fn empty_mcp_allowlist_renders_empty_summary() {
+    // The prompt summary must mirror the tool list: an empty allowlist
+    // advertises no MCP servers, so the agent's prompt never names tools it
+    // cannot call (#5855).
+    let configured = vec!["filesystem".to_string(), "github".to_string()];
+    let tools = vec![
+        "mcp_filesystem_read_file".to_string(),
+        "mcp_github_create_issue".to_string(),
+    ];
+    let empty: Vec<String> = Vec::new();
+    assert_eq!(
+        super::render_mcp_summary(&tools, &configured, &empty),
+        "",
+        "empty mcp_servers must render an empty MCP summary (#5855)"
+    );
+    // Sanity: the same tools under `["*"]` DO render a non-empty summary.
+    let wildcard = vec!["*".to_string()];
+    assert!(
+        !super::render_mcp_summary(&tools, &configured, &wildcard).is_empty(),
+        "mcp_servers = [\"*\"] must render a non-empty summary"
+    );
+}
+
 #[test]
 fn mcp_disabled_hot_reload_takes_effect_without_respawn() {
     // After toggling mcp_disabled from false → true in a live manifest,
@@ -5949,6 +6436,8 @@ fn mcp_disabled_hot_reload_takes_effect_without_respawn() {
         author: "test".to_string(),
         module: "builtin:chat".to_string(),
         mcp_disabled: false,
+        // `["*"]` = all servers; empty would now yield zero MCP tools (#5855).
+        mcp_servers: vec!["*".to_string()],
         ..Default::default()
     };
     let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
@@ -6041,7 +6530,9 @@ fn mcp_disabled_produces_empty_mcp_summary() {
         "mcp_filesystem_read_file".to_string(),
         "mcp_github_create_issue".to_string(),
     ];
-    let allowlist: Vec<String> = Vec::new();
+    // `["*"]` = all servers; an empty allowlist would now render "" (#5855),
+    // which would defeat the "enabled produces non-empty summary" sanity check.
+    let allowlist: Vec<String> = vec!["*".to_string()];
 
     // Helper that mirrors the call-site gate exactly:
     //   `if mcp_tool_count > 0 && !mcp_disabled { build_mcp_summary(...) } else { "" }`
@@ -8839,7 +9330,7 @@ async fn reload_config_with_invalid_toml_preserves_live_config() {
             api_key_env: "ANTHROPIC_API_KEY".to_string(),
             base_url: None,
             message_timeout_secs: 300,
-            extra_params: HashMap::new(),
+            extra_params: std::collections::BTreeMap::new(),
             cli_profile_dirs: Vec::new(),
         },
         ..KernelConfig::default()
@@ -9464,6 +9955,7 @@ fn boot_canonical_recovery_advances_pointer_to_most_recently_active_session_5198
         model_override: None,
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     kernel1
         .memory
@@ -9489,6 +9981,7 @@ fn boot_canonical_recovery_advances_pointer_to_most_recently_active_session_5198
         model_override: None,
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     kernel1
         .memory
@@ -9602,6 +10095,7 @@ async fn test_compact_gate_passes_when_tokens_above_threshold_but_messages_below
         model_override: None,
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     kernel
         .memory
@@ -9852,7 +10346,7 @@ fn sync_default_model_agents_reports_no_failures_and_migrates() {
                     base_url: None,
                     context_window: None,
                     max_output_tokens: None,
-                    extra_params: std::collections::HashMap::new(),
+                    extra_params: std::collections::BTreeMap::new(),
                 },
                 ..Default::default()
             },

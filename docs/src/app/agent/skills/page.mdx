@@ -410,60 +410,101 @@ if __name__ == "__main__":
 
 ## WASM Skills
 
-WASM skills run inside a sandboxed Wasmtime environment. They are ideal for security-sensitive operations because the sandbox enforces resource limits and capability restrictions.
+WASM skills run inside LibreFang's in-process `WasmSandbox`: capability-gated, with per-invocation fuel, linear-memory, and wall-clock limits.
+They are ideal for security-sensitive tools because nothing outside the granted capabilities is reachable.
 
-### Building a WASM Skill
+The easiest way to write one in Rust is the `librefang-skill` SDK, which hides the raw guest ABI behind a single macro.
 
-1. Write your skill in Rust (or any language that compiles to WASM):
+### Building a WASM skill (Rust)
+
+1. Create a `cdylib` crate that depends on `librefang-skill`:
+
+```toml
+# Cargo.toml
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+librefang-skill = "0.1"
+serde_json = "1"
+
+[profile.release]
+panic = "abort"   # the guest does not unwind; also shrinks the module
+```
+
+2. Write a handler and register it with the `skill!` macro:
 
 ```rust
 // src/lib.rs
-use std::io::{self, Read};
+use librefang_skill::{skill, Request};
+use serde_json::{json, Value};
 
-#[no_mangle]
-pub extern "C" fn _start() {
-    let mut input = String::new();
-    io::stdin().read_to_string(&mut input).unwrap();
-
-    let payload: serde_json::Value = serde_json::from_str(&input).unwrap();
-    let tool = payload["tool"].as_str().unwrap_or("");
-    let input_data = &payload["input"];
-
-    let result = match tool {
+fn handle(req: Request) -> Result<Value, String> {
+    match req.tool.as_str() {
         "my_tool" => {
-            let param = input_data["param"].as_str().unwrap_or("");
-            format!("Processed: {param}")
+            let param = req.input.get("param").and_then(Value::as_str).unwrap_or("");
+            Ok(json!({ "result": format!("Processed: {param}") }))
         }
-        _ => format!("Unknown tool: {tool}"),
-    };
-
-    println!("{}", serde_json::json!({"result": result}));
+        other => Err(format!("unknown tool: {other}")),
+    }
 }
+
+skill!(handle);
 ```
 
-2. Compile to WASM:
+The handler receives the same `{tool, input, config}` envelope every runtime gets.
+Returning `Err` surfaces to the agent as `{"error": ...}`, exactly as a non-zero exit does for the subprocess runtimes.
+
+3. Build for `wasm32-unknown-unknown` and copy the artifact to the skill root:
 
 ```bash
-cargo build --target wasm32-wasi --release
+rustup target add wasm32-unknown-unknown
+cargo build --release --target wasm32-unknown-unknown
+cp target/wasm32-unknown-unknown/release/skill.wasm skill.wasm
 ```
 
-3. Reference the `.wasm` file in your manifest:
+<Note>
+  The target is `wasm32-unknown-unknown`, **not** `wasm32-wasi`.
+  The sandbox provides only the `librefang` host imports (`host_call`, `host_log`); a WASI module imports `wasi_snapshot_preview1` and would fail to instantiate.
+  Copy the artifact out of `target/` because the skill packager excludes build directories.
+</Note>
+
+4. Reference it in `skill.toml`:
 
 ```toml
 [runtime]
 type = "wasm"
-entry = "target/wasm32-wasi/release/my_skill.wasm"
+entry = "skill.wasm"
 ```
 
-### Sandbox Limits
+`librefang skill create` (choose the `wasm` runtime) scaffolds all of the above, and `librefang skill test <dir>` runs a WASM skill locally through the real sandbox.
 
-The WASM sandbox enforces:
+### Host calls
 
-- **Fuel limit**: Maximum computation steps (prevents infinite loops).
-- **Memory limit**: Maximum memory allocation.
-- **Capabilities**: Only the capabilities granted to the agent apply.
+A WASM skill reaches host functionality through `librefang_skill::host`.
+Each method requires the matching capability in `[requirements] capabilities`, and a few charge fuel against the invocation budget (denial-of-wallet guard):
 
-These are derived from the agent's `[resources]` section in its manifest.
+| function | capability | fuel |
+| --- | --- | --- |
+| `time_now`, `kv_get`, `kv_set` | — | free |
+| `env_read` | `EnvRead(<glob>)` | free |
+| `fs_read`, `fs_list` | `FileRead(<glob>)` | free |
+| `fs_write` | `FileWrite(<glob>)` | free |
+| `net_fetch` | `NetConnect(<host:port>)` | paid |
+| `shell_exec` | `ShellExec(<glob>)` | paid |
+| `agent_send` | `AgentMessage(<glob>)` | paid |
+| `agent_spawn` | `AgentSpawn` | paid |
+
+A capability string that fails to parse is dropped (deny-by-default), so a typo means "not granted" rather than a silent over-grant.
+
+### Sandbox limits
+
+The WASM sandbox enforces, per invocation:
+
+- **Fuel limit** — a CPU-instruction budget that also bounds host-call fan-out (prevents infinite loops and denial-of-wallet). Default 1,000,000.
+- **Memory limit** — maximum linear-memory growth. Default 16 MiB.
+- **Wall-clock timeout** — taken from `[requirements] timeout_secs`, else 30 seconds.
+- **Capabilities** — only those the skill declares (and that parse) are granted; everything else is denied.
 
 ---
 

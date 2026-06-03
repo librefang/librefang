@@ -35,6 +35,8 @@ TELEGRAM_BOT_TOKEN = "..."
 
 `[channels.telegram]` 配置块已不再被接受（#5241 已移除内置适配器）。请改用以上 `[[sidecar_channels]]` 声明。
 
+**Rust 版本（自 #5831 起）。** 第一方 Rust Telegram sidecar 二进制位于 `sdk/rust/librefang-sidecar-telegram/`，与 Python 版 wire 等价——同样的 `TELEGRAM_BOT_TOKEN` / `ALLOWED_USERS` 环境变量、同样的 Markdown → Telegram HTML 渲染、同样的 allowed-update 集合。下列场景适合选 Rust 版：不想在宿主装 Python 运行时、关心 supervisor 每次重启的启动延迟、~3 MB 的剥离后二进制能省下 Python 镜像的体积。用 `cargo build --release -p librefang-sidecar-telegram` 构建，然后把上面的 `command` 换成 `/abs/path/to/target/release/librefang-sidecar-telegram`。完整参考：[Rust Telegram sidecar 适配器](/zh/architecture/rust-telegram-sidecar)。
+
 6. 重启守护进程：
 
 ```bash

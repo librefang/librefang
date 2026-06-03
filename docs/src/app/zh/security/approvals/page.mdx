@@ -28,7 +28,7 @@ require_approval = ["shell_exec", "file_write", "file_delete", "apply_patch"]
 timeout_secs = 60                      # 10..=300
 auto_approve_autonomous = false        # 无人值守时自动批准
 auto_approve = false                   # 启动时清空审批列表
-trusted_senders = []                   # 可直接放行的用户 ID 列表
+trusted_senders = []                   # 对低风险工具直接放行的用户 ID 列表（高风险工具仍需审批）
 
 # 第二因子
 second_factor = "none"                 # "none" | "totp" | "login" | "both"
@@ -190,6 +190,9 @@ curl -X POST "http://127.0.0.1:4545/api/approvals/${APPROVAL_UUID}/approve" \
 1. 任何暴露到网络的部署都应将 `second_factor` 设为 `"both"`。
 2. `require_approval` 要精简但诚实——凡是写盘、执行 shell、调用变更型 API 的工具都要列进去。
 3. `trusted_senders` 只授予一方自动化 ID，切勿授予公共 webhook ID。
+   受信任发送者只对低风险工具免审批。
+   高风险工具——`shell_exec`、`file_write`、`file_delete`、`apply_patch`，以及控制面工具 `agent_spawn` / `agent_kill` / `config_set` / `kernel_reload`——始终需要显式审批，并仍受 channel deny 规则约束，即便来自受信任发送者。
+   该列表是便利性豁免，而非对代码执行或破坏性变更的全面放行。
 4. 使用 `totp_tools` 对 `shell_exec`、`file_delete`、`apply_patch` 等破坏性工具
    额外要求 TOTP——即便审批列表更宽，凭被窃取的一因子仍无法触发破坏。
 5. 生产环境优先使用 `timeout_fallback = "reject"` 而非 `"allow"`。
