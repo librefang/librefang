@@ -215,7 +215,7 @@ mod tests {
     /// on disk survive an upgrade (#5844 / #5819).
     #[test]
     fn legacy_candidate_without_update_fields_defaults_to_create() {
-        let legacy_toml = r#"
+        let legacy_toml = r##"
 id = "00000000-0000-0000-0000-000000000002"
 agent_id = "agent-x"
 captured_at = "2026-01-01T00:00:00Z"
@@ -230,7 +230,7 @@ trigger = "from now on"
 [provenance]
 user_message_excerpt = "from now on do X"
 turn_index = 1
-"#;
+"##;
         let parsed: CandidateSkill = toml::from_str(legacy_toml).expect("legacy draft must parse");
         assert_eq!(parsed.kind, CandidateKind::Create);
         assert!(parsed.target_skill_id.is_none());
