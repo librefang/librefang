@@ -308,7 +308,7 @@ fn build_sender_prefix(manifest: &AgentManifest, sender_user_id: Option<&str>) -
 ///
 /// Pure function: the caller passes a clone, so the live session history is
 /// never mutated and the vision path stays byte-identical to before.
-fn redact_images_for_text_only(mut messages: Vec<Message>, model: &str) -> Vec<Message> {
+pub(super) fn redact_images_for_text_only(mut messages: Vec<Message>, model: &str) -> Vec<Message> {
     let placeholder = format!("[image omitted: model `{model}` has no vision support]");
     for msg in &mut messages {
         if let MessageContent::Blocks(blocks) = &mut msg.content {
