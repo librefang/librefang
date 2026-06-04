@@ -640,12 +640,8 @@ async fn summarise_batch(
 /// because some providers (notably reasoning-tier models) still emit
 /// fenced output even when told not to.
 fn parse_labeled_summaries(text: &str) -> Result<BTreeMap<String, String>, String> {
-    // Thinking-by-default models (e.g. deepseek-v4-flash) prepend a
-    // `<think>…</think>` reasoning block even when the fold request sets
-    // `thinking: None` — the provider enables it server-side and we have
-    // no signal to suppress it (#6009).  Strip that preamble before the
-    // fence/JSON parse so the trailing JSON array is the parsable body
-    // instead of `<think>` arriving at column 1.
+    // Thinking-by-default models (e.g. deepseek-v4-flash) prepend a `<think>…</think>` reasoning block even when the fold request sets `thinking: None` — the provider enables it server-side and we have no signal to suppress it (#6009).
+    // Strip that preamble before the fence/JSON parse so the trailing JSON array is the parsable body instead of `<think>` arriving at column 1.
     let stripped = strip_think_preamble(text.trim());
     let body = strip_code_fence(stripped.trim()).unwrap_or_else(|| stripped.trim().to_string());
     let value: serde_json::Value =
@@ -697,17 +693,12 @@ fn strip_code_fence(s: &str) -> Option<String> {
     Some(body.trim().to_string())
 }
 
-/// Strip a single leading `<think>…</think>` reasoning preamble (and any
-/// surrounding whitespace) if present, returning the remainder.  Returns the
-/// input unchanged when there is no leading think block.
+/// Strip a single leading `<think>…</think>` reasoning preamble (and any surrounding whitespace) if present, returning the remainder.
+/// Returns the input unchanged when there is no leading think block.
 ///
-/// Thinking-by-default models emit this prefix ahead of the requested JSON
-/// even when the fold request set `thinking: None` (#6009).  The opening tag
-/// is matched case-insensitively (`<think>`, `<THINK>`) and the block may span
-/// multiple lines; matching is non-greedy (stops at the first `</think>`) so a
-/// JSON payload that happens to mention `</think>` later is unaffected.  Only a
-/// *leading* block is stripped — a `<think>` appearing after other content is
-/// left alone, since the parser only needs the body to begin with JSON.
+/// Thinking-by-default models emit this prefix ahead of the requested JSON even when the fold request set `thinking: None` (#6009).
+/// The opening tag is matched case-insensitively (`<think>`, `<THINK>`) and the block may span multiple lines; matching is non-greedy (stops at the first `</think>`) so a JSON payload that happens to mention `</think>` later is unaffected.
+/// Only a *leading* block is stripped — a `<think>` appearing after other content is left alone, since the parser only needs the body to begin with JSON.
 fn strip_think_preamble(s: &str) -> String {
     let trimmed = s.trim_start();
     let lower = trimmed.to_ascii_lowercase();
@@ -1734,9 +1725,8 @@ mod tests {
         assert_eq!(strip_think_preamble(input), input);
     }
 
-    /// Regression for #6009: thinking-by-default fold models (deepseek-v4-flash)
-    /// prepend a `<think>…</think>` block to the requested JSON. The parser
-    /// must strip it instead of degrading to the raw bulk-summary fallback.
+    /// Regression for #6009: thinking-by-default fold models (deepseek-v4-flash) prepend a `<think>…</think>` block to the requested JSON.
+    /// The parser must strip it instead of degrading to the raw bulk-summary fallback.
     #[test]
     fn parse_labeled_summaries_tolerates_think_preamble() {
         let input = "<think>\nThe tool listed files. I'll summarise each one.\n</think>\n\
