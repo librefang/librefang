@@ -1270,11 +1270,8 @@ async fn test_shell_exec_safe_bins_chained_non_safe_still_requires_approval() {
     assert_eq!(approval_requests.load(Ordering::SeqCst), 1);
 }
 
-/// #5962 hardening: a single safe base with an I/O redirect (`env > x`)
-/// passes the all-bases-∈-safe_bins check, but `validate_command_allowlist`
-/// rejects the `>` metacharacter — so the approval skip must NOT fire. Guards
-/// the strict-subset clause (skip ⊆ would-execute), independent of the
-/// execution-time re-check.
+/// #5962 hardening: a single safe base with an I/O redirect (`env > x`) passes the all-bases-∈-safe_bins check, but `validate_command_allowlist` rejects the `>` metacharacter — so the approval skip must NOT fire.
+/// Guards the strict-subset clause (skip ⊆ would-execute), independent of the execution-time re-check.
 #[tokio::test]
 async fn test_shell_exec_safe_bins_redirect_still_requires_approval() {
     let approval_requests = Arc::new(AtomicUsize::new(0));
@@ -1333,9 +1330,7 @@ async fn test_shell_exec_safe_bins_redirect_still_requires_approval() {
     assert_eq!(approval_requests.load(Ordering::SeqCst), 1);
 }
 
-/// #5962 hardening: a single safe base with command substitution
-/// (`env $(curl …)`) is likewise rejected by `validate_command_allowlist`
-/// (`$()`), so the approval skip must NOT fire.
+/// #5962 hardening: a single safe base with command substitution (`env $(curl …)`) is likewise rejected by `validate_command_allowlist` (`$()`), so the approval skip must NOT fire.
 #[tokio::test]
 async fn test_shell_exec_safe_bins_command_substitution_still_requires_approval() {
     let approval_requests = Arc::new(AtomicUsize::new(0));
