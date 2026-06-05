@@ -418,6 +418,158 @@ async fn pending_approve_name_collision_with_different_body_returns_409() {
 }
 
 // ---------------------------------------------------------------------------
+// Auto-assign promoted skill to the creating agent (#5989)
+// ---------------------------------------------------------------------------
+
+/// Register a real agent in the harness's registry so the approve path
+/// can resolve `CandidateSkill.agent_id` and append the promoted skill to
+/// its allowlist. Returns the agent's id as the canonical UUID string the
+/// candidate fixture must carry.
+fn register_agent(h: &Harness, name: &str) -> String {
+    use librefang_types::agent::{AgentEntry, AgentId};
+    let agent_id = AgentId::new();
+    let manifest = librefang_types::agent::AgentManifest {
+        name: name.to_string(),
+        // Start with an empty allowlist so the assertions exercise the
+        // append. (Empty also means "all skills" at runtime, but we
+        // assert on the raw manifest list — what the operator edits in
+        // agent.toml — so the append is observable.)
+        skills: Vec::new(),
+        skills_disabled: false,
+        ..Default::default()
+    };
+    let entry = AgentEntry {
+        id: agent_id,
+        name: name.to_string(),
+        manifest,
+        ..Default::default()
+    };
+    h.state
+        .kernel
+        .agent_registry()
+        .register(entry)
+        .expect("register agent");
+    agent_id.0.to_string()
+}
+
+fn agent_skills(h: &Harness, agent_id: &str) -> (Vec<String>, bool) {
+    let id: librefang_types::agent::AgentId = agent_id.parse().expect("parse agent id");
+    let entry = h
+        .state
+        .kernel
+        .agent_registry()
+        .get(id)
+        .expect("agent must still be registered");
+    (
+        entry.manifest.skills.clone(),
+        entry.manifest.skills_disabled,
+    )
+}
+
+/// Approving a candidate whose `agent_id` resolves to a live agent must
+/// append the promoted skill to that agent's allowlist and clear
+/// `skills_disabled`, so the workshop loop closes without a manual
+/// `agent.toml` edit.
+#[tokio::test(flavor = "multi_thread")]
+async fn pending_approve_assigns_skill_to_creating_agent() {
+    let h = boot().await;
+    let agent = register_agent(&h, "creator_agent");
+    let id = "f1f1f1f1-0000-0000-0000-000000000001";
+    let root = skills_root(&h);
+    storage::save_candidate(&root, &fixture_candidate(&agent, id), 20, None).unwrap();
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/skills/pending/{id}/approve"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(body["skill_name"], "fmt_before_commit");
+
+    let (skills, disabled) = agent_skills(&h, &agent);
+    assert!(
+        skills.contains(&"fmt_before_commit".to_string()),
+        "promoted skill must be appended to the creating agent's allowlist: {skills:?}"
+    );
+    assert!(
+        !disabled,
+        "skills_disabled must be cleared so the new skill is live"
+    );
+}
+
+/// Re-approving the same skill for the same agent (phantom-pending
+/// recovery → `already_promoted`) must be idempotent: the skill appears
+/// exactly once on the allowlist, no duplicate entry.
+#[tokio::test(flavor = "multi_thread")]
+async fn pending_approve_assignment_is_idempotent() {
+    let h = boot().await;
+    let agent = register_agent(&h, "creator_agent");
+    let first_id = "f2f2f2f2-0000-0000-0000-000000000001";
+    let second_id = "f2f2f2f2-0000-0000-0000-000000000002";
+    let root = skills_root(&h);
+
+    storage::save_candidate(&root, &fixture_candidate(&agent, first_id), 20, None).unwrap();
+    let (status, _) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/skills/pending/{first_id}/approve"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "first approve must succeed");
+
+    // Re-stage a same-named candidate to mimic the phantom-pending case
+    // (active skill already exists; pending re-approved). The assignment
+    // must not double-append the skill name.
+    storage::save_candidate(&root, &fixture_candidate(&agent, second_id), 20, None).unwrap();
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/skills/pending/{second_id}/approve"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "re-approve must succeed: {body:?}");
+
+    let (skills, _) = agent_skills(&h, &agent);
+    let occurrences = skills.iter().filter(|s| *s == "fmt_before_commit").count();
+    assert_eq!(
+        occurrences, 1,
+        "re-approval must not duplicate the skill on the allowlist: {skills:?}"
+    );
+}
+
+/// Auto-assign is best-effort: when the creating agent was deleted
+/// between capture and approval (its `agent_id` no longer resolves), the
+/// approve must still promote the skill and return 200 — assignment is a
+/// convenience, not a hard precondition.
+#[tokio::test(flavor = "multi_thread")]
+async fn pending_approve_succeeds_when_creating_agent_gone() {
+    let h = boot().await;
+    // A well-formed UUID that was never registered in the harness.
+    let agent = "deadbeef-0000-0000-0000-000000000000";
+    let id = "f3f3f3f3-0000-0000-0000-000000000001";
+    let root = skills_root(&h);
+    storage::save_candidate(&root, &fixture_candidate(agent, id), 20, None).unwrap();
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/skills/pending/{id}/approve"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "approve must succeed even when the creating agent is gone: {body:?}"
+    );
+    assert_eq!(body["status"], "approved");
+    assert!(
+        root.join("fmt_before_commit").join("skill.toml").exists(),
+        "skill must still be promoted when the agent can't be resolved"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // POST /api/skills/pending/{id}/reject
 // ---------------------------------------------------------------------------
 
