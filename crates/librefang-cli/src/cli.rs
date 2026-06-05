@@ -82,6 +82,10 @@ pub(crate) enum Commands {
         /// Internal flag used by the detached daemon child process.
         #[arg(long, hide = true)]
         spawned: bool,
+        /// Override the bind address for this run (e.g. "0.0.0.0:4545" or "127.0.0.1:9000").
+        /// Overrides LIBREFANG_LISTEN env var and api_listen in config.toml.
+        #[arg(long, value_name = "HOST:PORT", env = "LIBREFANG_LISTEN")]
+        bind: Option<String>,
     },
     /// Restart the running daemon (or start it if not running).
     #[command(
@@ -356,6 +360,12 @@ pub(crate) enum Commands {
         long_about = "Search and manage agent memory (key-value store).\n\nEach agent has its own KV namespace for persisting data across sessions.\n\nExamples:\n  librefang memory list coder          # List all keys for \"coder\" agent\n  librefang memory get coder my-key    # Get a specific value\n  librefang memory set coder my-key \"hello\"  # Set a value\n  librefang memory delete coder my-key       # Delete a key"
     )]
     Memory(MemoryCommands),
+    /// Inspect and manage the embedded SurrealDB store [*].
+    #[cfg(feature = "surreal-backend")]
+    #[command(
+        long_about = "Inspect the embedded SurrealDB store and migrate legacy SQLite\ndata into it.\n\nExamples:\n  librefang storage explore --limit 50\n  librefang storage migrate --from sqlite --to surreal --dry-run\n  librefang storage migrate --from sqlite --to surreal"
+    )]
+    Storage(StorageCommands),
     /// Device pairing and token management [*].
     #[command(
         subcommand,
@@ -1525,6 +1535,7 @@ pub(crate) enum SecurityCommands {
     /// Destructive. Use only when the chain is already broken (tampering, manual
     /// DB edits, partial restore) and you want to start a fresh chain. Requires
     /// `--confirm` and refuses to run while a daemon holds the database.
+    #[cfg(feature = "sqlite-backend")]
     #[command(
         long_about = "DESTRUCTIVE: wipe the audit trail and restart the chain from empty.\n\nOnly needed when `librefang security verify` reports a chain break that you can't recover — e.g. after a manual SQL edit, partial DB restore, or a crash that left the anchor file ahead of `audit_entries`.\n\nRefuses to run if the daemon is still holding the database. Requires `--confirm`.\n\nExamples:\n  librefang security audit-reset --confirm"
     )]
@@ -1690,4 +1701,84 @@ pub(crate) enum ServiceCommands {
         long_about = "Check whether the auto-start service is currently registered.\n\nExamples:\n  librefang service status"
     )]
     Status,
+}
+
+// ── BossFang-exclusive storage commands ─────────────────────────────────────
+
+#[cfg(all(feature = "surreal-backend", feature = "sqlite-backend"))]
+#[derive(clap::ValueEnum, Clone, Debug, PartialEq)]
+pub(crate) enum StorageMigrateSource {
+    Sqlite,
+}
+
+#[cfg(all(feature = "surreal-backend", feature = "sqlite-backend"))]
+#[derive(clap::ValueEnum, Clone, Debug, PartialEq)]
+pub(crate) enum StorageMigrateTarget {
+    Surreal,
+}
+
+/// Subcommands for `librefang storage`.
+#[cfg(feature = "surreal-backend")]
+#[derive(Subcommand)]
+pub(crate) enum StorageCommands {
+    /// Read-only inspection of the embedded SurrealDB store.
+    #[command(
+        long_about = "Read-only inspection of the embedded SurrealDB store.\n\nRefuses to run while the daemon is up (RocksDB holds an exclusive\nfile lock). Currently surfaces the `audit_entries` table.\n\nExamples:\n  librefang storage explore\n  librefang storage explore --limit 100 --json"
+    )]
+    Explore {
+        #[arg(long, default_value = "20")]
+        limit: u32,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Migrate legacy SQLite data into the configured SurrealDB instance.
+    #[cfg(feature = "sqlite-backend")]
+    #[command(
+        long_about = "Stream legacy SQLite tables into the configured SurrealDB instance.\n\nIdempotent: re-running converges via SurrealDB upserts.\n\nExamples:\n  librefang storage migrate --from sqlite --to surreal --dry-run\n  librefang storage migrate --from sqlite --to surreal"
+    )]
+    Migrate {
+        #[cfg(feature = "sqlite-backend")]
+        #[arg(long, value_enum)]
+        from: StorageMigrateSource,
+        #[arg(long, value_enum)]
+        to: StorageMigrateTarget,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Provision a UAR namespace on a shared remote SurrealDB and write [uar.remote] to config.toml.
+    #[cfg(feature = "surreal-backend")]
+    #[command(
+        long_about = "Provision a UAR namespace + least-privilege user on a shared remote SurrealDB,\nthen write [uar.remote] (and optionally share_librefang_storage) to config.toml.\n\nExamples:\n  librefang storage link-uar --remote-url ws://db:8000 --root-user root --root-pass-env ROOT_PASS --namespace uar --database main --app-user uar_app --app-pass-env APP_PASS"
+    )]
+    LinkUar {
+        #[arg(long)]
+        remote_url: String,
+        #[arg(long, default_value = "root")]
+        root_user: String,
+        #[arg(long)]
+        root_pass_env: String,
+        #[arg(long, default_value = "uar")]
+        namespace: String,
+        #[arg(long, default_value = "main")]
+        database: String,
+        #[arg(long, default_value = "uar_app")]
+        app_user: String,
+        #[arg(long)]
+        app_pass_env: String,
+        #[arg(long)]
+        also_link_memory: bool,
+    },
+    /// Remove [uar.remote] and optionally purge the application user from the remote instance.
+    #[cfg(feature = "surreal-backend")]
+    #[command(
+        long_about = "Remove [uar.remote] and share_librefang_storage from config.toml.\nOptionally drops the application user from the remote instance.\n\nExamples:\n  librefang storage unlink-uar\n  librefang storage unlink-uar --purge-user --root-user root --root-pass-env ROOT_PASS"
+    )]
+    UnlinkUar {
+        #[arg(long)]
+        purge_user: bool,
+        #[arg(long, default_value = "root")]
+        root_user: String,
+        #[arg(long)]
+        root_pass_env: Option<String>,
+    },
 }
