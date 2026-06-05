@@ -34,7 +34,7 @@ members = [
 ]
 
 [workspace.package]
-version = "2026.5.30-beta.15"
+version = "2026.5.31-beta.16"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/librefang/librefang"
@@ -357,3 +357,4 @@ codegen-units = 4
 # lint regressions.
 [workspace.lints.rust]
 warnings = "deny"
+

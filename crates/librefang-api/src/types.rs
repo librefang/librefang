@@ -620,6 +620,18 @@ pub struct ClawHubInstallRequest {
     pub hand: Option<String>,
 }
 
+/// Request to install a hand from the remote HandsHub marketplace.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HandsHubInstallRequest {
+    /// Stable hand id in the registry index (also the download key).
+    pub hand_id: String,
+    /// Override the registry base URL (self-hosted forks, integration tests).
+    /// Falls back to the client's compiled default when omitted.
+    #[serde(default)]
+    pub registry_url: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Bulk operations
 // ---------------------------------------------------------------------------

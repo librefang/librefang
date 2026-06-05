@@ -1911,9 +1911,9 @@ dependencies = [
 
 [[package]]
 name = "calamine"
-version = "0.34.0"
+version = "0.35.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "20ae05a4e39297eecf9a994210d27501318c37a9318201f8e11050add82bb6f0"
+checksum = "8822fe6253ca47aa5ad9a3be09f6fe7cd20c6a74e41b0aa42e8f4e3d523508df"
 dependencies = [
  "atoi_simd",
  "byteorder",
@@ -2236,17 +2236,6 @@ dependencies = [
  "cpufeatures 0.3.0",
  "rand_core 0.10.1",
  "zeroize",
-]
-
-[[package]]
-name = "chardetng"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13de944a44b5064ee5d3a5ceccc49a41bfec50f2580e66f82e87703acdb88b53"
-dependencies = [
- "cfg-if",
- "encoding_rs",
- "memchr",
 ]
 
 [[package]]
@@ -4804,6 +4793,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8eb564c5c7423d25c886fb561d1e4ee69f72354d16918afa32c08811f6b6a55"
 
 [[package]]
+name = "fast_image_resize"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "12dd43e5011e8d8411a3215a0d57a2ec5c68282fb90eb5d7221fab0113442174"
+dependencies = [
+ "cfg-if",
+ "document-features",
+ "num-traits",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "fastnum"
 version = "0.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4844,6 +4845,12 @@ checksum = "1e6853b52649d4ac5c0bd02320cddc5ba956bdb407c4b75a2c6b75bf51500f8c"
 dependencies = [
  "simd-adler32",
 ]
+
+[[package]]
+name = "fearless_simd"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b97b65636e5b9ef369943878ac74335ba1c55c1cb6adbf1e2c293c624248d693"
 
 [[package]]
 name = "ff"
@@ -6125,6 +6132,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "hayro-ccitt"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9f4d0e94ddd48749f06bbe4e5389fb9799a0c45bcaf00495042076ef05e3241a"
+
+[[package]]
+name = "hayro-jbig2"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69374b3668dd45aeb3d3145cda68f2c7b4f223aaa2511e67d076f1c7d741388d"
+dependencies = [
+ "hayro-ccitt",
+]
+
+[[package]]
+name = "hayro-jpeg2000"
+version = "0.3.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c75ab947623ef4ccaa7acf0579edf7cbb5a73838e3839a7be73335e522f433a1"
+dependencies = [
+ "fearless_simd",
+]
+
+[[package]]
 name = "headers"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7371,6 +7402,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kamadak-exif"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1130d80c7374efad55a117d715a3af9368f0fa7a2c54573afc15a188cd984837"
+dependencies = [
+ "mutate_once",
+]
+
+[[package]]
 name = "kasuari"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7475,8 +7515,8 @@ dependencies = [
 
 [[package]]
 name = "kreuzberg"
-version = "4.9.5"
-source = "git+ssh://git@github.com/GQAdonis/kreuzberg.git?branch=main#84b77f914738a9fe9dcaa3a05fc6ea7f637ae5f3"
+version = "4.9.8"
+source = "git+https://github.com/kreuzberg-dev/kreuzberg.git?tag=v4.9.8#eef687cce3540768844e2f50419fe9c862e09153"
 dependencies = [
  "ahash 0.8.12",
  "async-trait",
@@ -7488,22 +7528,26 @@ dependencies = [
  "bytes",
  "calamine",
  "cfb 0.14.0",
- "chardetng",
  "chrono",
  "comrak",
  "dashmap",
  "dbase",
  "dirs 6.0.0",
  "encoding_rs",
+ "fast_image_resize",
  "flate2",
  "getrandom 0.4.2",
+ "hayro-jbig2",
+ "hayro-jpeg2000",
  "hex",
  "html-to-markdown-rs",
  "image",
  "indexmap 2.14.0",
  "infer",
  "jotdown",
+ "kamadak-exif",
  "kreuzberg-pdfium-render",
+ "kreuzberg-tesseract",
  "libc",
  "log",
  "lopdf 0.40.0",
@@ -7519,10 +7563,10 @@ dependencies = [
  "pastey 0.2.3",
  "pkg-config",
  "pulldown-cmark",
- "quick-xml 0.39.4",
- "rake",
+ "quick-xml 0.40.1",
  "rayon",
  "regex",
+ "rmcp 1.7.0",
  "rmp-serde",
  "roxmltree",
  "serde",
@@ -7530,15 +7574,15 @@ dependencies = [
  "serde_toon_format",
  "serde_yaml_ng",
  "sevenz-rust2",
- "snap",
  "tar",
  "tempfile",
  "text-splitter 0.30.1",
  "thiserror 2.0.18",
+ "tiff",
  "tokio",
  "toml 1.1.2+spec-1.1.0",
+ "tower",
  "tracing",
- "unicode-normalization",
  "urlencoding",
  "v_htmlescape",
  "whatlang",
@@ -7547,8 +7591,8 @@ dependencies = [
 
 [[package]]
 name = "kreuzberg-pdfium-render"
-version = "4.9.5"
-source = "git+ssh://git@github.com/GQAdonis/kreuzberg.git?branch=main#84b77f914738a9fe9dcaa3a05fc6ea7f637ae5f3"
+version = "4.9.8"
+source = "git+https://github.com/kreuzberg-dev/kreuzberg.git?tag=v4.9.8#eef687cce3540768844e2f50419fe9c862e09153"
 dependencies = [
  "bitflags 2.11.1",
  "bytemuck",
@@ -7567,6 +7611,18 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+]
+
+[[package]]
+name = "kreuzberg-tesseract"
+version = "4.9.8"
+source = "git+https://github.com/kreuzberg-dev/kreuzberg.git?tag=v4.9.8#eef687cce3540768844e2f50419fe9c862e09153"
+dependencies = [
+ "cc",
+ "cmake",
+ "reqwest 0.13.4",
+ "thiserror 2.0.18",
+ "zip 7.2.0",
 ]
 
 [[package]]
@@ -7776,7 +7832,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-acp"
-version = "2026.5.30-beta.15"
+version = "2026.5.31-beta.16"
 dependencies = [
  "agent-client-protocol",
  "agent-client-protocol-tokio",
@@ -7798,7 +7854,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-api"
-version = "2026.5.30-beta.15"
+version = "2026.5.31-beta.16"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -7880,7 +7936,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-channels"
-version = "2026.5.30-beta.15"
+version = "2026.5.31-beta.16"
 dependencies = [
  "async-trait",
  "axum",
@@ -7918,7 +7974,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-cli"
-version = "2026.5.30-beta.15"
+version = "2026.5.31-beta.16"
 dependencies = [
  "arc-swap",
  "base64 0.22.1",
@@ -7965,7 +8021,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-desktop"
-version = "2026.5.30-beta.15"
+version = "2026.5.31-beta.16"
 dependencies = [
  "axum",
  "clap",
@@ -7996,7 +8052,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-extensions"
-version = "2026.5.30-beta.15"
+version = "2026.5.31-beta.16"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2 0.5.3",
@@ -8029,25 +8085,32 @@ dependencies = [
 
 [[package]]
 name = "librefang-hands"
-version = "2026.5.30-beta.15"
+version = "2026.5.31-beta.16"
 dependencies = [
  "chrono",
  "dashmap",
+ "futures",
+ "hex",
  "librefang-runtime",
+ "librefang-skills",
  "librefang-types",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "serial_test",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
  "toml 1.1.2+spec-1.1.0",
  "tracing",
  "uuid",
+ "wiremock",
 ]
 
 [[package]]
 name = "librefang-http"
-version = "2026.5.30-beta.15"
+version = "2026.5.31-beta.16"
 dependencies = [
  "librefang-types",
  "reqwest 0.13.4",
@@ -8059,7 +8122,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-import"
-version = "2026.5.30-beta.15"
+version = "2026.5.31-beta.16"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -8077,7 +8140,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-kernel"
-version = "2026.5.30-beta.15"
+version = "2026.5.31-beta.16"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -8101,6 +8164,7 @@ dependencies = [
  "librefang-llm-drivers",
  "librefang-memory",
  "librefang-memory-wiki",
+ "librefang-rl-export",
  "librefang-runtime",
  "librefang-skills",
  "librefang-storage",
@@ -8139,7 +8203,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-kernel-handle"
-version = "2026.5.30-beta.15"
+version = "2026.5.31-beta.16"
 dependencies = [
  "async-trait",
  "bytes",
@@ -8152,7 +8216,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-kernel-metering"
-version = "2026.5.30-beta.15"
+version = "2026.5.31-beta.16"
 dependencies = [
  "librefang-llm-driver",
  "librefang-memory",
@@ -8164,13 +8228,14 @@ dependencies = [
 
 [[package]]
 name = "librefang-kernel-router"
-version = "2026.5.30-beta.15"
+version = "2026.5.31-beta.16"
 dependencies = [
  "dirs 6.0.0",
  "librefang-hands",
  "librefang-runtime",
  "librefang-types",
  "regex-lite",
+ "serde",
  "serde_json",
  "tempfile",
  "toml 1.1.2+spec-1.1.0",
@@ -8179,7 +8244,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-llm-driver"
-version = "2026.5.30-beta.15"
+version = "2026.5.31-beta.16"
 dependencies = [
  "async-trait",
  "dashmap",
@@ -8193,7 +8258,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-llm-drivers"
-version = "2026.5.30-beta.15"
+version = "2026.5.31-beta.16"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -8228,7 +8293,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-memory"
-version = "2026.5.30-beta.15"
+version = "2026.5.31-beta.16"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -8255,7 +8320,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-memory-wiki"
-version = "2026.5.30-beta.15"
+version = "2026.5.31-beta.16"
 dependencies = [
  "chrono",
  "librefang-kernel-handle",
@@ -8271,7 +8336,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-rl-export"
-version = "2026.5.30-beta.15"
+version = "2026.5.31-beta.16"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -8290,7 +8355,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime"
-version = "2026.5.30-beta.15"
+version = "2026.5.31-beta.16"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -8362,7 +8427,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime-audit"
-version = "2026.5.30-beta.15"
+version = "2026.5.31-beta.16"
 dependencies = [
  "chrono",
  "hex",
@@ -8380,7 +8445,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime-mcp"
-version = "2026.5.30-beta.15"
+version = "2026.5.31-beta.16"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -8404,7 +8469,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime-media"
-version = "2026.5.30-beta.15"
+version = "2026.5.31-beta.16"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -8421,7 +8486,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime-sandbox-docker"
-version = "2026.5.30-beta.15"
+version = "2026.5.31-beta.16"
 dependencies = [
  "chrono",
  "dashmap",
@@ -8433,7 +8498,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-skills"
-version = "2026.5.30-beta.15"
+version = "2026.5.31-beta.16"
 dependencies = [
  "aho-corasick",
  "base64 0.22.1",
@@ -8462,7 +8527,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-storage"
-version = "2026.5.30-beta.15"
+version = "2026.5.31-beta.16"
 dependencies = [
  "async-trait",
  "chrono",
@@ -8485,7 +8550,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-subprocess"
-version = "2026.5.30-beta.15"
+version = "2026.5.31-beta.16"
 dependencies = [
  "metrics",
  "serde_json",
@@ -8497,7 +8562,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-telemetry"
-version = "2026.5.30-beta.15"
+version = "2026.5.31-beta.16"
 dependencies = [
  "librefang-types",
  "metrics",
@@ -8505,7 +8570,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-testing"
-version = "2026.5.30-beta.15"
+version = "2026.5.31-beta.16"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -8532,7 +8597,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-types"
-version = "2026.5.30-beta.15"
+version = "2026.5.31-beta.16"
 dependencies = [
  "async-trait",
  "chrono",
@@ -8559,7 +8624,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-uar-spec"
-version = "2026.5.30-beta.15"
+version = "2026.5.31-beta.16"
 dependencies = [
  "chrono",
  "librefang-types",
@@ -8572,7 +8637,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-wire"
-version = "2026.5.30-beta.15"
+version = "2026.5.31-beta.16"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -8669,8 +8734,8 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "liter-llm"
-version = "1.4.0-rc.35"
-source = "git+https://github.com/GQAdonis/liter-llm.git#f5e6ec34d1e0fb669a9b550b75129ac5802802cc"
+version = "1.4.0-rc.41"
+source = "git+https://github.com/GQAdonis/liter-llm.git?rev=6e51609797f831837ce0bfad2b43abe54ebac31c#6e51609797f831837ce0bfad2b43abe54ebac31c"
 dependencies = [
  "aws-credential-types",
  "aws-sigv4",
@@ -9398,6 +9463,12 @@ dependencies = [
  "spin 0.9.8",
  "version_check",
 ]
+
+[[package]]
+name = "mutate_once"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13d2233c9842d08cfe13f9eac96e207ca6a2ea10b80259ebe8ad0268be27d2af"
 
 [[package]]
 name = "naga"
@@ -11548,7 +11619,7 @@ dependencies = [
 [[package]]
 name = "prometheus_parking_lot"
 version = "0.1.0"
-source = "git+https://github.com/Prometheus-AGS/prometheus-parking-lot-rs?rev=32b481d6c5694545d35789894f6feecf5ac4ca3e#32b481d6c5694545d35789894f6feecf5ac4ca3e"
+source = "git+https://github.com/Prometheus-AGS/prometheus-parking-lot-rs?rev=ebb7c3ce02f7b925bc2e1b45c87ce8abf402b1f0#ebb7c3ce02f7b925bc2e1b45c87ce8abf402b1f0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11562,6 +11633,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -11809,6 +11881,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "quick-xml"
+version = "0.40.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2474bd2e5029e7ccb6abb2ba48cf2383a333851dedf495901544281590c7da7f"
+dependencies = [
+ "memchr",
+ "serde",
+]
+
+[[package]]
 name = "quick_cache"
 version = "0.6.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11963,17 +12045,6 @@ checksum = "3b4431027dcd37fc2a73ef740b5f233aa805897935b8bce0195e41bbf9a3289a"
 dependencies = [
  "endian-type 0.2.0",
  "nibble_vec",
- "serde",
-]
-
-[[package]]
-name = "rake"
-version = "0.3.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a0a7b4878cdfa9c73657cf8479a1f2430104b21991db7940e97ab000056f0a1"
-dependencies = [
- "lazy_static",
- "regex",
  "serde",
 ]
 
@@ -12586,11 +12657,13 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-rustls",
+ "hyper-tls",
  "hyper-util",
  "js-sys",
  "log",
  "mime",
  "mime_guess",
+ "native-tls",
  "percent-encoding",
  "pin-project-lite",
  "quinn",
@@ -12602,6 +12675,7 @@ dependencies = [
  "serde_urlencoded",
  "sync_wrapper",
  "tokio",
+ "tokio-native-tls",
  "tokio-rustls",
  "tokio-util",
  "tower",
@@ -12774,12 +12848,16 @@ checksum = "0810a9f717d9828f475fe1f629f4c305c8464b7f496c3a854b58d29e65f4058e"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "bytes",
  "chrono",
  "futures",
  "http 1.4.1",
+ "http-body 1.0.1",
+ "http-body-util",
  "pastey 0.2.3",
  "pin-project-lite",
  "process-wrap",
+ "rand 0.10.1",
  "reqwest 0.13.4",
  "rmcp-macros 1.7.0",
  "schemars 1.2.1",
@@ -12790,7 +12868,9 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
+ "tower-service",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -13884,6 +13964,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "serde_yaml"
+version = "0.9.34+deprecated"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a8b1a1a2ebf674015cc02edccce75287f1a0130d394307b36743c2f5d504b47"
+dependencies = [
+ "indexmap 2.14.0",
+ "itoa",
+ "ryu",
+ "serde",
+ "unsafe-libyaml",
 ]
 
 [[package]]
@@ -16168,6 +16261,7 @@ dependencies = [
  "futures-core",
  "futures-io",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]
@@ -16922,8 +17016,9 @@ checksum = "39ec24b3121d976906ece63c9daad25b85969647682eee313cb5779fdd69e14e"
 [[package]]
 name = "universal-agent-runtime"
 version = "0.1.0"
-source = "git+https://github.com/GQAdonis/universal-agent-runtime.git?branch=main#0f9385d416ec957cf4ed66d1f9e7640fb15c269a"
+source = "git+https://github.com/GQAdonis/universal-agent-runtime.git?branch=sync-gqadonis-745b4c1#23fb39db44fe627e2c25155b2e94e264fae64209"
 dependencies = [
+ "aes-gcm 0.10.3",
  "anyhow",
  "argon2 0.5.3",
  "async-stream",
@@ -16966,6 +17061,7 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
+ "serde_yaml",
  "serde_yml",
  "sha2 0.11.0",
  "surreal-memory",
@@ -17229,12 +17325,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "v_escape-base"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1212fce830b75af194b578e55b3db9049f2c8c45f58d397fb25602fdb50fb3d"
-
-[[package]]
 name = "v_frame"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -17247,12 +17337,9 @@ dependencies = [
 
 [[package]]
 name = "v_htmlescape"
-version = "0.17.0"
+version = "0.15.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "befb3d53c9e3ec641417685896cbc8cc5bd264d6a2e190c56aaef1af24740d99"
-dependencies = [
- "v_escape-base",
-]
+checksum = "4e8257fbc510f0a46eb602c10215901938b5c2a7d5e70fc11483b1d3c9b5b18c"
 
 [[package]]
 name = "valuable"
@@ -19314,7 +19401,7 @@ checksum = "3ae8337f8a065cfc972643663ea4279e04e7256de865aa66fe25cec5fb912d3f"
 
 [[package]]
 name = "xtask"
-version = "2026.5.30-beta.15"
+version = "2026.5.31-beta.16"
 dependencies = [
  "base64 0.22.1",
  "chrono",

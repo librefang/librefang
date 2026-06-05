@@ -4,7 +4,12 @@
 //! from a marketplace. Unlike regular agents (you chat with them), Hands work for
 //! you (you check in on them).
 
+pub mod hands_hub;
 pub mod registry;
+
+pub use hands_hub::{
+    HandsHubBundle, HandsHubClient, HandsHubEntry, HandsHubIndex, HandsHubInstallResult,
+};
 
 use chrono::{DateTime, Utc};
 use librefang_types::agent::{
@@ -37,6 +42,8 @@ pub enum HandError {
     Io(#[from] std::io::Error),
     #[error("Config error: {0}")]
     Config(String),
+    #[error("Hand install blocked by security scan: {0}")]
+    SecurityBlocked(String),
 }
 
 pub type HandResult<T> = Result<T, HandError>;

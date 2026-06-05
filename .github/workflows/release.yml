@@ -522,16 +522,13 @@ jobs:
             sdk/rust/librefang-sidecar-telegram
       - name: Build CLI
         run: cargo build --release --target ${{ matrix.target }} --bin bossfang
-      - name: Build Telegram sidecar
-        # Separate cargo workspace → separate target/ under the manifest dir.
-        run: cargo build --release --target ${{ matrix.target }} --manifest-path sdk/rust/librefang-sidecar-telegram/Cargo.toml
       - name: Ad-hoc codesign
         run: |
           xattr -cr target/${{ matrix.target }}/release/bossfang || true
           codesign --force --sign - target/${{ matrix.target }}/release/bossfang
-          SIDECAR=sdk/rust/librefang-sidecar-telegram/target/${{ matrix.target }}/release/librefang-sidecar-telegram
-          xattr -cr "$SIDECAR" || true
-          codesign --force --sign - "$SIDECAR"
+      - name: Build Telegram sidecar
+        # Separate cargo workspace → separate target/ under the manifest dir.
+        run: cargo build --release --target ${{ matrix.target }} --manifest-path sdk/rust/librefang-sidecar-telegram/Cargo.toml
       - name: Package
         run: |
           cp sdk/rust/librefang-sidecar-telegram/target/${{ matrix.target }}/release/librefang-sidecar-telegram target/${{ matrix.target }}/release/librefang-sidecar-telegram
@@ -848,15 +845,15 @@ jobs:
             sdk/rust/librefang-sidecar-telegram
       - name: Build CLI
         run: cargo build --release --target ${{ matrix.target }} --bin bossfang
-      - name: Build Telegram sidecar
-        # Separate cargo workspace → separate target/ under the manifest dir.
-        run: cargo build --release --target ${{ matrix.target }} --manifest-path sdk/rust/librefang-sidecar-telegram/Cargo.toml
       - name: Package
         shell: pwsh
         run: |
-          Compress-Archive -Path "target/${{ matrix.target }}/release/bossfang.exe", "sdk/rust/librefang-sidecar-telegram/target/${{ matrix.target }}/release/librefang-sidecar-telegram.exe" -DestinationPath "bossfang-${{ matrix.target }}.zip"
+          Compress-Archive -Path "target/${{ matrix.target }}/release/bossfang.exe" -DestinationPath "bossfang-${{ matrix.target }}.zip"
           $hash = (Get-FileHash "bossfang-${{ matrix.target }}.zip" -Algorithm SHA256).Hash.ToLower()
           "$hash  bossfang-${{ matrix.target }}.zip" | Out-File -Encoding ASCII "bossfang-${{ matrix.target }}.zip.sha256"
+      - name: Build Telegram sidecar
+        # Separate cargo workspace → separate target/ under the manifest dir.
+        run: cargo build --release --target ${{ matrix.target }} --manifest-path sdk/rust/librefang-sidecar-telegram/Cargo.toml
       - name: Upload to GitHub Release
         shell: bash
         env:

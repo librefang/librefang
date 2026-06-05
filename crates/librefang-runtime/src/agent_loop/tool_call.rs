@@ -451,44 +451,225 @@ pub(super) async fn execute_single_tool_call(
     result
 }
 
-pub(super) async fn execute_single_tool_call_inner(
+/// Execute one [`crate::parallel_dispatch::ParallelPlan`] group concurrently.
+///
+/// `group` is a slice of indexes into `tool_calls`; the planner guarantees
+/// the members are safe to run in parallel (no overlapping write scopes, no
+/// `WriteShared`, no `Exclusive`). Members are launched concurrently bounded
+/// by `max_concurrent` and the executed results are returned **sorted by
+/// original tool-call index** — providers match `tool_result` to `tool_use`
+/// by position, so the caller appends them in this order.
+///
+/// Ordering of side effects:
+/// - The `&mut LoopGuard` pre-checks run serially up front (the guard's
+///   repeat counters are shared batch state); a circuit break aborts the
+///   whole turn with `Err`.
+/// - The borrow-light execution cores then run concurrently against a
+///   shared `&ctx`.
+/// - `DecisionTrace`s are pushed into `ctx.decision_traces` in index order
+///   after the concurrent phase, and `record_tool_call_metric` fires once
+///   per member — matching the serial path's observability exactly.
+pub(super) async fn execute_tool_group(
     ctx: &mut ToolExecutionContext<'_>,
+    tool_calls: &[ToolCall],
+    group: &[usize],
+    max_concurrent: usize,
+) -> Result<Vec<(usize, ExecutedToolCall)>, LibreFangError> {
+    use futures::stream::{FuturesUnordered, StreamExt};
+
+    // Phase 1 — serial loop-guard pre-checks (`&mut LoopGuard` / session).
+    // Each member is either short-circuited (blocked) or proceeds with a
+    // verdict that feeds the concurrent core. A circuit break aborts here.
+    enum Member<'c> {
+        Blocked(ExecutedToolCall),
+        Proceed(&'c ToolCall, LoopGuardVerdict),
+    }
+    let mut members: Vec<(usize, Member)> = Vec::with_capacity(group.len());
+    for &idx in group {
+        let tool_call = &tool_calls[idx];
+        match precheck_loop_guard(
+            ctx.loop_guard,
+            ctx.session,
+            ctx.memory,
+            ctx.manifest,
+            ctx.hooks,
+            ctx.opts,
+            ctx.agent_id_str,
+            ctx.streaming,
+            tool_call,
+        )
+        .await
+        {
+            LoopGuardPrecheck::Proceed(verdict) => {
+                members.push((idx, Member::Proceed(tool_call, verdict)));
+            }
+            LoopGuardPrecheck::Blocked(executed) => {
+                record_tool_call_metric(&tool_call.name, executed.result.is_error);
+                members.push((idx, Member::Blocked(executed)));
+            }
+            LoopGuardPrecheck::CircuitBreak(err) => {
+                record_tool_call_metric(&tool_call.name, true);
+                return Err(err);
+            }
+        }
+    }
+
+    // Phase 2 — run the proceeding cores concurrently against a shared
+    // `&*ctx`. Blocked members are carried straight through. `max_concurrent`
+    // == 0 means "uncapped" (use the group size).
+    let cap = if max_concurrent == 0 {
+        members.len().max(1)
+    } else {
+        max_concurrent
+    };
+    let shared_ctx: &ToolExecutionContext = &*ctx;
+
+    let mut blocked: Vec<(usize, ExecutedToolCall)> = Vec::new();
+    let mut pending: Vec<(usize, &ToolCall, LoopGuardVerdict)> = Vec::new();
+    for (idx, member) in members {
+        match member {
+            Member::Blocked(executed) => blocked.push((idx, executed)),
+            Member::Proceed(tool_call, verdict) => pending.push((idx, tool_call, verdict)),
+        }
+    }
+
+    let mut results: Vec<(usize, ExecutedToolCall)> = Vec::with_capacity(group.len());
+    let mut traces: Vec<(usize, DecisionTrace)> = Vec::new();
+    let mut errored: Option<LibreFangError> = None;
+
+    let mut iter = pending.into_iter();
+    let mut in_flight = FuturesUnordered::new();
+    // Prime up to `cap` futures.
+    for (idx, tool_call, verdict) in iter.by_ref().take(cap) {
+        in_flight.push(run_core(shared_ctx, idx, tool_call, verdict));
+    }
+    while let Some((idx, name, outcome)) = in_flight.next().await {
+        match outcome {
+            Ok((executed, trace)) => {
+                record_tool_call_metric(&name, executed.result.is_error);
+                if let Some(trace) = trace {
+                    traces.push((idx, trace));
+                }
+                results.push((idx, executed));
+            }
+            Err(e) => {
+                record_tool_call_metric(&name, true);
+                // First hard error wins; keep draining in-flight futures so
+                // their side effects (decision traces, metrics) are not lost,
+                // then surface the error. The whole turn aborts on `?`.
+                if errored.is_none() {
+                    errored = Some(e);
+                }
+            }
+        }
+        // Backfill one more future as each completes to honour the cap.
+        if let Some((idx, tool_call, verdict)) = iter.next() {
+            in_flight.push(run_core(shared_ctx, idx, tool_call, verdict));
+        }
+    }
+    drop(in_flight);
+
+    if let Some(e) = errored {
+        return Err(e);
+    }
+
+    // Push traces and stitch results back into original index order.
+    traces.sort_by_key(|(idx, _)| *idx);
+    for (_, trace) in traces {
+        ctx.decision_traces.push(trace);
+    }
+    results.extend(blocked);
+    results.sort_by_key(|(idx, _)| *idx);
+    Ok(results)
+}
+
+/// Adapter that runs one execution core and tags the outcome with its
+/// original index + tool name so the concurrent collector can reorder
+/// results and record metrics without re-borrowing the tool call.
+async fn run_core<'c>(
+    ctx: &ToolExecutionContext<'c>,
+    idx: usize,
     tool_call: &ToolCall,
-) -> Result<ExecutedToolCall, LibreFangError> {
-    let verdict = ctx.loop_guard.check(&tool_call.name, &tool_call.input);
+    verdict: LoopGuardVerdict,
+) -> (
+    usize,
+    String,
+    Result<(ExecutedToolCall, Option<DecisionTrace>), LibreFangError>,
+) {
+    let name = tool_call.name.clone();
+    let outcome = execute_single_tool_call_core(ctx, tool_call, &verdict).await;
+    (idx, name, outcome)
+}
+
+/// Outcome of the loop-guard pre-check that runs before any tool body
+/// executes. Split out of `execute_single_tool_call_inner` so the parallel
+/// dispatcher can run the `&mut LoopGuard` checks serially up front (the
+/// guard's repeat-counter state is shared across the whole batch) and then
+/// run the borrow-light execution cores concurrently. See
+/// `execute_single_tool_call_core`.
+pub(super) enum LoopGuardPrecheck {
+    /// Guard allows execution. Carries the verdict so the core can append
+    /// the `[LOOP GUARD]` warning suffix on the `Warn` variant.
+    Proceed(LoopGuardVerdict),
+    /// Guard blocked this single call (soft). The call yields the carried
+    /// error result without running the tool body; the batch continues.
+    Blocked(ExecutedToolCall),
+    /// Circuit breaker tripped. The whole turn aborts with this error —
+    /// session already repaired + saved and the `AgentLoopEnd` hook fired.
+    CircuitBreak(LibreFangError),
+}
+
+/// Run the loop guard for a single call, performing the `&mut LoopGuard`
+/// check plus the circuit-break session-repair / save / hook side effects.
+/// Returns a [`LoopGuardPrecheck`] the caller acts on. Kept separate from
+/// the async execution body so the parallel dispatcher can sequence these
+/// `&mut`-bearing checks before launching concurrent execution.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn precheck_loop_guard(
+    loop_guard: &mut LoopGuard,
+    session: &mut Session,
+    memory: &MemorySubstrate,
+    manifest: &AgentManifest,
+    hooks: Option<&crate::hooks::HookRegistry>,
+    opts: &LoopOptions,
+    agent_id_str: &str,
+    streaming: bool,
+    tool_call: &ToolCall,
+) -> LoopGuardPrecheck {
+    let verdict = loop_guard.check(&tool_call.name, &tool_call.input);
     match &verdict {
         LoopGuardVerdict::CircuitBreak(msg) => {
-            if ctx.streaming {
+            if streaming {
                 warn!(tool = %tool_call.name, "Circuit breaker triggered (streaming)");
             } else {
                 warn!(tool = %tool_call.name, "Circuit breaker triggered");
             }
-            repair_session_before_save(ctx.session, ctx.agent_id_str, "circuit_breaker");
-            if !ctx.opts.is_fork && !ctx.opts.incognito {
-                if let Err(e) = ctx.memory.save_session_async(ctx.session).await {
+            repair_session_before_save(session, agent_id_str, "circuit_breaker");
+            if !opts.is_fork && !opts.incognito {
+                if let Err(e) = memory.save_session_async(session).await {
                     warn!("Failed to save session on circuit break: {e}");
                 }
             }
             let hook_ctx = crate::hooks::HookContext {
-                agent_name: &ctx.manifest.name,
-                agent_id: ctx.agent_id_str,
+                agent_name: &manifest.name,
+                agent_id: agent_id_str,
                 event: librefang_types::agent::HookEvent::AgentLoopEnd,
                 data: serde_json::json!({
                     "reason": "circuit_break",
                     "error": msg.as_str(),
-                    "is_fork": ctx.opts.is_fork,
+                    "is_fork": opts.is_fork,
                 }),
             };
-            fire_hook_best_effort(ctx.hooks, &hook_ctx);
-            return Err(LibreFangError::Internal(msg.clone()));
+            fire_hook_best_effort(hooks, &hook_ctx);
+            LoopGuardPrecheck::CircuitBreak(LibreFangError::Internal(msg.clone()))
         }
         LoopGuardVerdict::Block(msg) => {
-            if ctx.streaming {
+            if streaming {
                 warn!(tool = %tool_call.name, "Tool call blocked by loop guard (streaming)");
             } else {
                 warn!(tool = %tool_call.name, "Tool call blocked by loop guard");
             }
-            return Ok(ExecutedToolCall {
+            LoopGuardPrecheck::Blocked(ExecutedToolCall {
                 result: librefang_types::tool::ToolResult {
                     tool_use_id: tool_call.id.clone(),
                     content: msg.clone(),
@@ -497,11 +678,56 @@ pub(super) async fn execute_single_tool_call_inner(
                     ..Default::default()
                 },
                 final_content: msg.clone(),
-            });
+            })
         }
-        _ => {}
+        _ => LoopGuardPrecheck::Proceed(verdict),
     }
+}
 
+pub(super) async fn execute_single_tool_call_inner(
+    ctx: &mut ToolExecutionContext<'_>,
+    tool_call: &ToolCall,
+) -> Result<ExecutedToolCall, LibreFangError> {
+    let verdict = match precheck_loop_guard(
+        ctx.loop_guard,
+        ctx.session,
+        ctx.memory,
+        ctx.manifest,
+        ctx.hooks,
+        ctx.opts,
+        ctx.agent_id_str,
+        ctx.streaming,
+        tool_call,
+    )
+    .await
+    {
+        LoopGuardPrecheck::Proceed(verdict) => verdict,
+        LoopGuardPrecheck::Blocked(executed) => return Ok(executed),
+        LoopGuardPrecheck::CircuitBreak(err) => return Err(err),
+    };
+
+    let (executed, trace) = execute_single_tool_call_core(&*ctx, tool_call, &verdict).await?;
+    if let Some(trace) = trace {
+        ctx.decision_traces.push(trace);
+    }
+    Ok(executed)
+}
+
+/// Borrow-light execution body shared by the serial and parallel
+/// dispatch paths. Takes a **shared** `&ToolExecutionContext` (it must not
+/// mutate `loop_guard`, `session`, or `decision_traces`) so that multiple
+/// cores can run concurrently against the same context. The loop-guard
+/// pre-check (which needs `&mut LoopGuard`) has already run; its `verdict`
+/// is threaded in for the `Warn`-suffix behaviour.
+///
+/// Returns the `DecisionTrace` rather than pushing it, so the caller can
+/// append traces in original tool-call order regardless of completion
+/// order.
+pub(super) async fn execute_single_tool_call_core(
+    ctx: &ToolExecutionContext<'_>,
+    tool_call: &ToolCall,
+    verdict: &LoopGuardVerdict,
+) -> Result<(ExecutedToolCall, Option<DecisionTrace>), LibreFangError> {
     // Fork-mode runtime tool allowlist (from LoopOptions::allowed_tools).
     // The request schema wasn't filtered — that would break Anthropic prompt
     // cache alignment — so the model may try any tool in its manifest. We
@@ -521,16 +747,19 @@ pub(super) async fn execute_single_tool_call_inner(
                 is_fork = ctx.opts.is_fork,
                 "Tool call outside fork allowlist — denied"
             );
-            return Ok(ExecutedToolCall {
-                result: librefang_types::tool::ToolResult {
-                    tool_use_id: tool_call.id.clone(),
-                    content: msg.clone(),
-                    is_error: true,
-                    status: librefang_types::tool::ToolExecutionStatus::Error,
-                    ..Default::default()
+            return Ok((
+                ExecutedToolCall {
+                    result: librefang_types::tool::ToolResult {
+                        tool_use_id: tool_call.id.clone(),
+                        content: msg.clone(),
+                        is_error: true,
+                        status: librefang_types::tool::ToolExecutionStatus::Error,
+                        ..Default::default()
+                    },
+                    final_content: msg,
                 },
-                final_content: msg,
-            });
+                None,
+            ));
         }
     }
 
@@ -540,16 +769,19 @@ pub(super) async fn execute_single_tool_call_inner(
     // full-access per #4073 spec.
     if ctx.opts.incognito && tool_call.name == "memory_store" {
         tracing::debug!(target: "incognito", tool = "memory_store", "memory_store call dropped during incognito turn");
-        return Ok(ExecutedToolCall {
-            result: librefang_types::tool::ToolResult {
-                tool_use_id: tool_call.id.clone(),
-                content: "ok".to_string(),
-                is_error: false,
-                status: librefang_types::tool::ToolExecutionStatus::Completed,
-                ..Default::default()
+        return Ok((
+            ExecutedToolCall {
+                result: librefang_types::tool::ToolResult {
+                    tool_use_id: tool_call.id.clone(),
+                    content: "ok".to_string(),
+                    is_error: false,
+                    status: librefang_types::tool::ToolExecutionStatus::Completed,
+                    ..Default::default()
+                },
+                final_content: "ok".to_string(),
             },
-            final_content: "ok".to_string(),
-        });
+            None,
+        ));
     }
 
     if ctx.streaming {
@@ -582,16 +814,19 @@ pub(super) async fn execute_single_tool_call_inner(
         };
         if let Err(reason) = hook_reg.fire(&hook_ctx) {
             let content = format!("Hook blocked tool '{}': {}", tool_call.name, reason);
-            return Ok(ExecutedToolCall {
-                result: librefang_types::tool::ToolResult {
-                    tool_use_id: tool_call.id.clone(),
-                    content: content.clone(),
-                    is_error: true,
-                    status: librefang_types::tool::ToolExecutionStatus::Error,
-                    ..Default::default()
+            return Ok((
+                ExecutedToolCall {
+                    result: librefang_types::tool::ToolResult {
+                        tool_use_id: tool_call.id.clone(),
+                        content: content.clone(),
+                        is_error: true,
+                        status: librefang_types::tool::ToolExecutionStatus::Error,
+                        ..Default::default()
+                    },
+                    final_content: content,
                 },
-                final_content: content,
-            });
+                None,
+            ));
         }
     }
 
@@ -665,7 +900,7 @@ pub(super) async fn execute_single_tool_call_inner(
     let execution_ms = trace_start.elapsed().as_millis() as u64;
 
     let output_summary = librefang_types::truncate_str(&result.content, 200).to_string();
-    ctx.decision_traces.push(DecisionTrace {
+    let decision_trace = DecisionTrace {
         tool_use_id: tool_call.id.clone(),
         tool_name: tool_call.name.clone(),
         input: tool_call.input.clone(),
@@ -676,7 +911,7 @@ pub(super) async fn execute_single_tool_call_inner(
         output_summary,
         iteration: ctx.iteration,
         timestamp: trace_timestamp,
-    });
+    };
 
     let hook_ctx = crate::hooks::HookContext {
         agent_name: &ctx.manifest.name,
@@ -741,7 +976,7 @@ pub(super) async fn execute_single_tool_call_inner(
         ctx.context_engine,
         ctx.context_window_tokens,
     );
-    let final_content = if let LoopGuardVerdict::Warn(ref warn_msg) = verdict {
+    let final_content = if let LoopGuardVerdict::Warn(ref warn_msg) = *verdict {
         format!("{content}\n\n[LOOP GUARD] {warn_msg}")
     } else {
         content
@@ -773,10 +1008,13 @@ pub(super) async fn execute_single_tool_call_inner(
             final_content
         };
 
-    Ok(ExecutedToolCall {
-        result,
-        final_content,
-    })
+    Ok((
+        ExecutedToolCall {
+            result,
+            final_content,
+        },
+        Some(decision_trace),
+    ))
 }
 
 /// Emit stub `ToolResult` blocks for any tool calls in `remaining` that

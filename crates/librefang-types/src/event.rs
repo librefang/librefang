@@ -359,6 +359,13 @@ pub enum SystemEvent {
         task_id: String,
         /// Agent that claimed the task.
         claimed_by: String,
+        /// Agent that originally posted the task (if recorded).
+        ///
+        /// Threaded through from the task record so `TaskClaimed` triggers
+        /// can scope to tasks posted by a specific agent (`creator_match`).
+        /// `None` when the task was posted without a recorded creator.
+        #[serde(default)]
+        created_by: Option<String>,
     },
     /// A task was completed on the Task Board.
     TaskCompleted {
@@ -368,6 +375,13 @@ pub enum SystemEvent {
         completed_by: String,
         /// The task result/verdict.
         result: String,
+        /// Agent that originally posted the task (if recorded).
+        ///
+        /// Threaded through from the task record so `TaskCompleted` triggers
+        /// can scope to tasks posted by a specific agent (`creator_match`).
+        /// `None` when the task was posted without a recorded creator.
+        #[serde(default)]
+        created_by: Option<String>,
     },
 }
 

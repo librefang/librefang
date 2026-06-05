@@ -74,9 +74,10 @@ use self::prompt::{
 use self::retry::call_with_retry;
 use self::text_recovery::recover_text_tool_calls;
 use self::tool_call::{
-    append_skipped_tool_results, execute_single_tool_call, handle_mid_turn_signal,
-    stage_tool_use_turn, tool_use_blocks_from_calls, update_consecutive_hard_failures,
-    ToolExecutionContext, ToolResultOutcomeSummary,
+    append_skipped_tool_results, execute_single_tool_call, execute_tool_group,
+    handle_mid_turn_signal, stage_tool_use_turn, tool_use_blocks_from_calls,
+    update_consecutive_hard_failures, ExecutedToolCall, StagedToolUseTurn, ToolExecutionContext,
+    ToolResultOutcomeSummary,
 };
 use self::tool_resolution::ResolvedToolsCache;
 use self::web_augment::web_search_augment;
@@ -1365,61 +1366,80 @@ pub async fn run_agent_loop(
                 let mut iteration_outcomes = ToolResultOutcomeSummary::default();
                 let mut committed_by_signal = false;
                 let total_tool_calls = response.tool_calls.len();
-                for (call_idx, tool_call) in response.tool_calls.iter().enumerate() {
-                    let mut tool_exec_ctx = ToolExecutionContext {
-                        manifest,
-                        loop_guard: &mut loop_guard,
-                        memory,
-                        session,
-                        kernel: kernel.as_ref(),
-                        available_tool_names: &staged.allowed_tool_names,
-                        available_tools,
-                        caller_id_str: &staged.caller_id_str,
-                        skill_registry,
-                        allowed_skills: &manifest.skills,
-                        mcp_connections,
-                        web_ctx,
-                        browser_ctx,
-                        hand_allowed_env: &hand_allowed_env,
-                        workspace_root,
-                        media_engine,
-                        media_drivers,
-                        tts_engine,
-                        docker_config,
-                        hooks,
-                        process_manager,
-                        process_registry,
-                        sender_user_id: sender_user_id.as_deref(),
-                        sender_channel: sender_channel.as_deref(),
-                        sender_chat_id: sender_chat_id.as_deref(),
-                        checkpoint_manager: checkpoint_manager.as_ref(),
-                        context_budget: &context_budget,
-                        context_engine,
-                        context_window_tokens: ctx_window,
-                        on_phase,
-                        decision_traces: &mut decision_traces,
-                        rationale_text: &staged.rationale_text,
-                        tools_recovered_from_text,
-                        iteration,
-                        streaming: false,
-                        agent_id_str: agent_id_str.as_str(),
-                        opts,
-                        interrupt: opts.interrupt.clone(),
-                        dangerous_command_checker: Some(&session_checker),
-                    };
-                    let executed = execute_single_tool_call(&mut tool_exec_ctx, tool_call).await?;
 
-                    // §A — capture owner_notice side-channel from notify_owner tool.
+                // Execution-context constructor. Rebuilt at each dispatch step
+                // (per serial call, or per parallel group) so its `&mut`
+                // borrows of `session` / `decision_traces` / `staged` fields
+                // release before the between-step mid-turn-signal check, which
+                // needs those same locals mutably. Both paths feed the same
+                // `ToolExecutionContext` shape, so a macro keeps the literal in
+                // one place without an unwieldy ~35-argument builder fn.
+                macro_rules! build_tool_exec_ctx {
+                    () => {
+                        ToolExecutionContext {
+                            manifest,
+                            loop_guard: &mut loop_guard,
+                            memory,
+                            session,
+                            kernel: kernel.as_ref(),
+                            available_tool_names: &staged.allowed_tool_names,
+                            available_tools,
+                            caller_id_str: &staged.caller_id_str,
+                            skill_registry,
+                            allowed_skills: &manifest.skills,
+                            mcp_connections,
+                            web_ctx,
+                            browser_ctx,
+                            hand_allowed_env: &hand_allowed_env,
+                            workspace_root,
+                            media_engine,
+                            media_drivers,
+                            tts_engine,
+                            docker_config,
+                            hooks,
+                            process_manager,
+                            process_registry,
+                            sender_user_id: sender_user_id.as_deref(),
+                            sender_channel: sender_channel.as_deref(),
+                            sender_chat_id: sender_chat_id.as_deref(),
+                            checkpoint_manager: checkpoint_manager.as_ref(),
+                            context_budget: &context_budget,
+                            context_engine,
+                            context_window_tokens: ctx_window,
+                            on_phase,
+                            decision_traces: &mut decision_traces,
+                            rationale_text: &staged.rationale_text,
+                            tools_recovered_from_text,
+                            iteration,
+                            streaming: false,
+                            agent_id_str: agent_id_str.as_str(),
+                            opts,
+                            interrupt: opts.interrupt.clone(),
+                            dangerous_command_checker: Some(&session_checker),
+                        }
+                    };
+                }
+
+                // Side-channel + staging bookkeeping for one executed call,
+                // shared by both dispatch paths. Returns `true` when the call
+                // was a hard error (the caller stops launching further work).
+                let process_executed = |executed: &ExecutedToolCall,
+                                        tool_name: &str,
+                                        staged: &mut StagedToolUseTurn,
+                                        pending_owner_notice: &mut Option<String>,
+                                        session_loaded_tools: &mut Vec<ToolDefinition>|
+                 -> bool {
+                    // §A — capture owner_notice side-channel from notify_owner.
                     if let Some(ref notice) = executed.result.owner_notice {
-                        pending_owner_notice = Some(match pending_owner_notice.take() {
+                        *pending_owner_notice = Some(match pending_owner_notice.take() {
                             Some(prev) => format!("{prev}\n\n{notice}"),
                             None => notice.clone(),
                         });
                     }
 
-                    // Capture lazy-load side-channel from the tool_load meta-tool
-                    // (issue #3044). Tools registered this way become callable on
-                    // subsequent iterations of this loop.
+                    // Capture lazy-load side-channel from the tool_load
+                    // meta-tool (issue #3044). Tools registered this way become
+                    // callable on subsequent iterations of this loop.
                     if let Some(def) = executed.result.loaded_tool.clone() {
                         if !session_loaded_tools.iter().any(|t| t.name == def.name) {
                             session_loaded_tools.push(def);
@@ -1436,7 +1456,7 @@ pub async fn run_agent_loop(
                             );
                     staged.append_result(ContentBlock::ToolResult {
                         tool_use_id: executed.result.tool_use_id.clone(),
-                        tool_name: tool_call.name.clone(),
+                        tool_name: tool_name.to_string(),
                         content: budgeted_content,
                         is_error: executed.result.is_error,
                         status: executed.result.status,
@@ -1444,56 +1464,183 @@ pub async fn run_agent_loop(
                     });
 
                     // Stop executing remaining tool calls on failure (#948)
-                    // but not for approval denials or sandbox security rejections —
-                    // those should let the LLM recover and retry with a valid path (#1861)
-                    // Issue #2381: emit stub tool_results for the remaining unexecuted
-                    // calls so OpenAI / Anthropic see a response for every tool_call_id.
-                    // Without this the next API request returns 400 with
-                    // "tool_call_ids ... did not have response messages" and the agent
-                    // gets bricked.
+                    // but not for approval denials or sandbox security
+                    // rejections — those should let the LLM recover and retry
+                    // with a valid path (#1861).
                     let is_soft_error = executed.result.status.is_soft_error()
                         || is_soft_error_content(&executed.result.content);
-                    if executed.result.is_error && !is_soft_error {
-                        warn!(
-                            tool = %tool_call.name,
-                            "Tool execution failed — skipping remaining tool calls"
-                        );
-                        append_skipped_tool_results(
-                            &mut staged.tool_result_blocks,
-                            &response.tool_calls[call_idx + 1..],
-                            "previous tool call in the same batch failed with a hard error",
-                        );
-                        break;
-                    }
+                    executed.result.is_error && !is_soft_error
+                };
 
-                    // Mid-turn message injection (#956): check for
-                    // pending user messages between tool calls. The
-                    // handler pads missing results and commits the
-                    // staged turn BEFORE injecting the user message, so
-                    // the session never has orphan tool_use_ids.
-                    if let Some(flushed_outcomes) = handle_mid_turn_signal(
-                        pending_messages,
-                        &manifest.name,
-                        session,
-                        &mut messages,
-                        &mut staged,
-                    ) {
-                        // Same #2381 invariant: even when the batch is
-                        // interrupted by a mid-turn signal, every tool_call
-                        // must end up with a tool_result. handle_mid_turn_signal
-                        // already called pad_missing_results before committing,
-                        // so remaining ids are covered. This stub call is a
-                        // belt-and-suspenders guard for any ids not yet in staged.
-                        if call_idx + 1 < total_tool_calls {
+                // Parallel dispatch (#3129 PR-4): when enabled, plan the batch
+                // into ordered groups and run each group's members
+                // concurrently. Falls back to the serial path below when
+                // disabled — zero behaviour change.
+                let parallel_enabled = opts
+                    .parallel_tools_config
+                    .as_ref()
+                    .map(|c| c.enabled)
+                    .unwrap_or(false);
+
+                if parallel_enabled && total_tool_calls > 1 {
+                    let cfg = opts.parallel_tools_config.as_ref().unwrap();
+                    let max_concurrent = cfg.max_concurrent as usize;
+                    let plan =
+                        crate::parallel_dispatch::plan_batch(&response.tool_calls, available_tools);
+                    let mut hard_error_hit = false;
+                    'groups: for group in &plan.groups {
+                        let mut tool_exec_ctx = build_tool_exec_ctx!();
+                        let group_results = execute_tool_group(
+                            &mut tool_exec_ctx,
+                            &response.tool_calls,
+                            group,
+                            max_concurrent,
+                        )
+                        .await?;
+                        drop(tool_exec_ctx);
+                        // Append results in original index order (the helper
+                        // already sorts), running shared bookkeeping per call.
+                        for (idx, executed) in &group_results {
+                            let tool_name = &response.tool_calls[*idx].name;
+                            let is_hard_error = process_executed(
+                                executed,
+                                tool_name,
+                                &mut staged,
+                                &mut pending_owner_notice,
+                                &mut session_loaded_tools,
+                            );
+                            if is_hard_error && !hard_error_hit {
+                                warn!(
+                                    tool = %tool_name,
+                                    "Tool execution failed — skipping remaining tool calls"
+                                );
+                                hard_error_hit = true;
+                            }
+                        }
+                        // Stop launching further groups on a hard error; stub
+                        // every not-yet-executed id so the wire format stays
+                        // complete (#2381).
+                        if hard_error_hit {
+                            let executed_ids: std::collections::HashSet<&str> = staged
+                                .tool_result_blocks
+                                .iter()
+                                .filter_map(|b| match b {
+                                    ContentBlock::ToolResult { tool_use_id, .. } => {
+                                        Some(tool_use_id.as_str())
+                                    }
+                                    _ => None,
+                                })
+                                .collect();
+                            let remaining: Vec<ToolCall> = response
+                                .tool_calls
+                                .iter()
+                                .filter(|tc| !executed_ids.contains(tc.id.as_str()))
+                                .cloned()
+                                .collect();
+                            append_skipped_tool_results(
+                                &mut staged.tool_result_blocks,
+                                &remaining,
+                                "previous tool call in the same batch failed with a hard error",
+                            );
+                            break 'groups;
+                        }
+
+                        // Mid-turn message injection (#956): check between
+                        // groups, mirroring the serial path's between-call
+                        // check. The handler pads + commits the staged turn
+                        // before injecting, so no orphan tool_use_ids leak.
+                        if let Some(flushed_outcomes) = handle_mid_turn_signal(
+                            pending_messages,
+                            &manifest.name,
+                            session,
+                            &mut messages,
+                            &mut staged,
+                        ) {
+                            let executed_ids: std::collections::HashSet<&str> = staged
+                                .tool_result_blocks
+                                .iter()
+                                .filter_map(|b| match b {
+                                    ContentBlock::ToolResult { tool_use_id, .. } => {
+                                        Some(tool_use_id.as_str())
+                                    }
+                                    _ => None,
+                                })
+                                .collect();
+                            let remaining: Vec<ToolCall> = response
+                                .tool_calls
+                                .iter()
+                                .filter(|tc| !executed_ids.contains(tc.id.as_str()))
+                                .cloned()
+                                .collect();
+                            append_skipped_tool_results(
+                                &mut staged.tool_result_blocks,
+                                &remaining,
+                                "tool batch interrupted by a mid-turn user message",
+                            );
+                            iteration_outcomes.accumulate(flushed_outcomes);
+                            committed_by_signal = true;
+                            break 'groups;
+                        }
+                    }
+                } else {
+                    for (call_idx, tool_call) in response.tool_calls.iter().enumerate() {
+                        let mut tool_exec_ctx = build_tool_exec_ctx!();
+                        let executed =
+                            execute_single_tool_call(&mut tool_exec_ctx, tool_call).await?;
+                        drop(tool_exec_ctx);
+
+                        let is_hard_error = process_executed(
+                            &executed,
+                            &tool_call.name,
+                            &mut staged,
+                            &mut pending_owner_notice,
+                            &mut session_loaded_tools,
+                        );
+                        // Issue #2381: emit stub tool_results for the remaining
+                        // unexecuted calls so OpenAI / Anthropic see a response
+                        // for every tool_call_id. Without this the next API
+                        // request returns 400 with "tool_call_ids ... did not
+                        // have response messages" and the agent gets bricked.
+                        if is_hard_error {
                             append_skipped_tool_results(
                                 &mut staged.tool_result_blocks,
                                 &response.tool_calls[call_idx + 1..],
-                                "tool batch interrupted by a mid-turn user message",
+                                "previous tool call in the same batch failed with a hard error",
                             );
+                            break;
                         }
-                        iteration_outcomes.accumulate(flushed_outcomes);
-                        committed_by_signal = true;
-                        break;
+
+                        // Mid-turn message injection (#956): check for
+                        // pending user messages between tool calls. The
+                        // handler pads missing results and commits the
+                        // staged turn BEFORE injecting the user message, so
+                        // the session never has orphan tool_use_ids.
+                        if let Some(flushed_outcomes) = handle_mid_turn_signal(
+                            pending_messages,
+                            &manifest.name,
+                            session,
+                            &mut messages,
+                            &mut staged,
+                        ) {
+                            // Same #2381 invariant: even when the batch is
+                            // interrupted by a mid-turn signal, every tool_call
+                            // must end up with a tool_result.
+                            // handle_mid_turn_signal already called
+                            // pad_missing_results before committing, so
+                            // remaining ids are covered. This stub call is a
+                            // belt-and-suspenders guard for any ids not yet in
+                            // staged.
+                            if call_idx + 1 < total_tool_calls {
+                                append_skipped_tool_results(
+                                    &mut staged.tool_result_blocks,
+                                    &response.tool_calls[call_idx + 1..],
+                                    "tool batch interrupted by a mid-turn user message",
+                                );
+                            }
+                            iteration_outcomes.accumulate(flushed_outcomes);
+                            committed_by_signal = true;
+                            break;
+                        }
                     }
                 }
 

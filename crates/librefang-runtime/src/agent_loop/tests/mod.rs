@@ -655,7 +655,7 @@ fn silent_response_single_source_of_truth() {
         "claude_code.rs",          // driver-side stream suppression (cycle barrier)
         "agent.rs",                // librefang-types: doc comment only
         "channel_bridge.rs",       // librefang-api: doc comment, consumes silent flag
-        "agents.rs",               // librefang-api routes: doc comment only
+        "agents/messaging.rs",     // librefang-api routes: doc comment only (post-split)
         "ws.rs",                   // librefang-api ws: doc comment only
         "purge_sentinels.rs", // CLI binary that *removes* the literal — delegates to canonical detector
         "purge_sentinels_test.rs", // fixtures for the CLI

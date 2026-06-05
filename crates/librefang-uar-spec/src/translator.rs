@@ -189,6 +189,7 @@ pub fn artifact_to_manifest(artifact: &AgentArtifact) -> Result<AgentManifest> {
         triggers: Vec::new(),
         reconcile_orphans: librefang_types::agent::OrphanPolicy::default(),
         async_tasks: librefang_types::agent::AsyncTasksConfig::default(),
+        rl_export: librefang_types::agent::RlExportOverride::default(),
     })
 }
 

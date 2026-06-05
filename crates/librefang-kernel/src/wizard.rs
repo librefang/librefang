@@ -207,6 +207,7 @@ impl SetupWizard {
             tool_exec_backend: None,
             skill_workshop: librefang_types::agent::SkillWorkshopConfig::default(),
             proactive_memory: librefang_types::memory::ProactiveMemoryOverrides::default(),
+            rl_export: librefang_types::agent::RlExportOverride::default(),
             compaction: None,
             triggers: vec![],
             reconcile_orphans: librefang_types::agent::OrphanPolicy::default(),

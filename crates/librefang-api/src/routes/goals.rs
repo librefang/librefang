@@ -134,10 +134,17 @@ pub async fn get_goal_run(
         Err(_) => return ApiErrorResponse::bad_request("Invalid goal id").into_json_tuple(),
     };
     match state.kernel.goal_run_state(goal_id) {
-        Some(run) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "running": true, "run": run })),
-        ),
+        Some(run) => {
+            // `running` reflects the actual phase, not mere presence in the
+            // registry: a run recovered at boot is surfaced here in its
+            // terminal `Stopped` phase ("interrupted by daemon restart") so it
+            // stays observable, but it is not actively driving the agent.
+            let running = run.phase == librefang_types::goal::GoalRunPhase::Running;
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "running": running, "run": run })),
+            )
+        }
         None => (
             StatusCode::OK,
             Json(serde_json::json!({ "running": false })),
