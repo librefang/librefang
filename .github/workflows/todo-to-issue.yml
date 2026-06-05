@@ -27,8 +27,20 @@ jobs:
           # any future siblings (e.g. another templating module) are also covered.
           #
           # The `librefang skill new` scaffolder embeds the same kind of
-          # `// TODO: Implement your skill logic here` markers in its Python / Node /
+          # `// T-O-D-O: Implement your skill logic here` markers in its Python / Node /
           # WASM stub templates; those strings moved into commands/skill.rs during the
           # cli/main.rs split (#5971), which re-triggered the false positives (#5982,
           # #5983). Ignore that file too.
-          IGNORE: crates/librefang-runtime/src/plugin_manager/,crates/librefang-cli/src/commands/skill.rs
+          #
+          # NOTE on the token spelling above: it is deliberately hyphenated so this
+          # workflow's own comment never contains a literal scanner marker. The action
+          # matches its markers via `re.match` on each changed file's path, so it would
+          # otherwise scan THIS file and raise garbled false-positive issues from its own
+          # comments (#5982, #5983, #5997, #5998, #5999). The `.github/` IGNORE entry
+          # below now also excludes this file from the scan; the hyphenation is
+          # defense-in-depth in case the IGNORE list is ever edited.
+          #
+          # `.github/` ignores the workflow/config directory itself (re.match anchors at
+          # the path start, and diff paths are repo-root-relative without a leading slash,
+          # e.g. `.github/workflows/todo-to-issue.yml`).
+          IGNORE: .github/,crates/librefang-runtime/src/plugin_manager/,crates/librefang-cli/src/commands/skill.rs
