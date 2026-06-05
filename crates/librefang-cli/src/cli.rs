@@ -363,6 +363,7 @@ pub(crate) enum Commands {
     /// Inspect and manage the embedded SurrealDB store [*].
     #[cfg(feature = "surreal-backend")]
     #[command(
+        subcommand,
         long_about = "Inspect the embedded SurrealDB store and migrate legacy SQLite\ndata into it.\n\nExamples:\n  librefang storage explore --limit 50\n  librefang storage migrate --from sqlite --to surreal --dry-run\n  librefang storage migrate --from sqlite --to surreal"
     )]
     Storage(StorageCommands),

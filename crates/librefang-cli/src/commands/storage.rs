@@ -6,50 +6,6 @@
 #[allow(unused_imports)]
 use crate::commands::prelude::*;
 
-/// Dispatcher called from `main.rs` for `Commands::Storage(sub)`.
-#[cfg(feature = "surreal-backend")]
-pub(crate) fn cmd_storage(config: Option<PathBuf>, sub: crate::cli::StorageCommands) {
-    use crate::cli::StorageCommands;
-    match sub {
-        StorageCommands::Explore { limit, json } => cmd_audit_explore_surreal(config, limit, json),
-        #[cfg(feature = "sqlite-backend")]
-        StorageCommands::Migrate { from, to, dry_run } => {
-            use crate::cli::{StorageMigrateSource, StorageMigrateTarget};
-            if from != StorageMigrateSource::Sqlite || to != StorageMigrateTarget::Surreal {
-                ui::error("only `--from sqlite --to surreal` is currently supported");
-                std::process::exit(2);
-            }
-            cmd_storage_migrate(config, dry_run);
-        }
-        #[cfg(feature = "surreal-backend")]
-        StorageCommands::LinkUar {
-            remote_url,
-            root_user,
-            root_pass_env,
-            namespace,
-            database,
-            app_user,
-            app_pass_env,
-            also_link_memory,
-        } => cmd_storage_link_uar(
-            remote_url,
-            root_user,
-            root_pass_env,
-            namespace,
-            database,
-            app_user,
-            app_pass_env,
-            also_link_memory,
-        ),
-        #[cfg(feature = "surreal-backend")]
-        StorageCommands::UnlinkUar {
-            purge_user,
-            root_user,
-            root_pass_env,
-        } => cmd_storage_unlink_uar(purge_user, root_user, root_pass_env),
-    }
-}
-
 /// `librefang storage explore [--limit N] [--json]`
 ///
 /// Read-only inspection of the `audit_entries` table in the embedded
