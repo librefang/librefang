@@ -1670,9 +1670,10 @@ fn redact_images_for_text_only_replaces_image_and_imagefile_blocks() {
     ));
     // No image block of either variant may remain.
     assert!(
-        !blocks
-            .iter()
-            .any(|b| matches!(b, ContentBlock::Image { .. } | ContentBlock::ImageFile { .. })),
+        !blocks.iter().any(|b| matches!(
+            b,
+            ContentBlock::Image { .. } | ContentBlock::ImageFile { .. }
+        )),
         "all image blocks must be redacted"
     );
     // The two image slots became text placeholders mentioning the model.
