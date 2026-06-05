@@ -643,7 +643,10 @@ async fn summarise_batch(
 /// because some providers (notably reasoning-tier models) still emit
 /// fenced output even when told not to.
 fn parse_labeled_summaries(text: &str) -> Result<BTreeMap<String, String>, String> {
-    let body = strip_code_fence(text.trim()).unwrap_or_else(|| text.trim().to_string());
+    // Thinking-by-default models (e.g. deepseek-v4-flash) prepend a `<think>…</think>` reasoning block even when the fold request sets `thinking: None` — the provider enables it server-side and we have no signal to suppress it (#6009).
+    // Strip that preamble before the fence/JSON parse so the trailing JSON array is the parsable body instead of `<think>` arriving at column 1.
+    let stripped = strip_think_preamble(text.trim());
+    let body = strip_code_fence(stripped.trim()).unwrap_or_else(|| stripped.trim().to_string());
     let value: serde_json::Value =
         serde_json::from_str(&body).map_err(|e| format!("JSON parse failed: {e}"))?;
     // Accept both the documented JSON-array shape AND a bare single
@@ -691,6 +694,31 @@ fn strip_code_fence(s: &str) -> Option<String> {
     let inner = after_open.trim_start_matches(['\n', '\r', ' ']);
     let body = inner.strip_suffix("```").unwrap_or(inner);
     Some(body.trim().to_string())
+}
+
+/// Strip a single leading `<think>…</think>` reasoning preamble (and any surrounding whitespace) if present, returning the remainder.
+/// Returns the input unchanged when there is no leading think block.
+///
+/// Thinking-by-default models emit this prefix ahead of the requested JSON even when the fold request set `thinking: None` (#6009).
+/// The opening tag is matched case-insensitively (`<think>`, `<THINK>`) and the block may span multiple lines; matching is non-greedy (stops at the first `</think>`) so a JSON payload that happens to mention `</think>` later is unaffected.
+/// Only a *leading* block is stripped — a `<think>` appearing after other content is left alone, since the parser only needs the body to begin with JSON.
+fn strip_think_preamble(s: &str) -> String {
+    let trimmed = s.trim_start();
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.starts_with("<think>") {
+        return s.to_string();
+    }
+    match lower.find("</think>") {
+        Some(close) => {
+            let after = &trimmed[close + "</think>".len()..];
+            after.trim_start().to_string()
+        }
+        // Unterminated `<think>` (model was truncated before closing the
+        // tag) — nothing parsable follows, so hand the original text on and
+        // let the JSON parse surface the failure as before rather than
+        // silently swallowing everything.
+        None => s.to_string(),
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1672,6 +1700,60 @@ mod tests {
     fn strip_code_fence_returns_none_when_unfenced() {
         assert!(strip_code_fence("plain text").is_none());
         assert!(strip_code_fence("[1,2,3]").is_none());
+    }
+
+    #[test]
+    fn strip_think_preamble_removes_leading_block() {
+        let input = "<think>\nlet me reason about this...\n</think>\n[{\"id\":\"x\"}]";
+        assert_eq!(strip_think_preamble(input), "[{\"id\":\"x\"}]");
+    }
+
+    #[test]
+    fn strip_think_preamble_is_case_insensitive() {
+        let input = "<THINK>reasoning</THINK>\n{\"id\":\"x\"}";
+        assert_eq!(strip_think_preamble(input), "{\"id\":\"x\"}");
+    }
+
+    #[test]
+    fn strip_think_preamble_noop_without_block() {
+        assert_eq!(strip_think_preamble("[{\"id\":\"x\"}]"), "[{\"id\":\"x\"}]");
+        assert_eq!(strip_think_preamble("plain text"), "plain text");
+    }
+
+    #[test]
+    fn strip_think_preamble_leaves_unterminated_block() {
+        // No closing tag — return unchanged so the JSON parse surfaces the
+        // failure rather than swallowing the whole (truncated) response.
+        let input = "<think>truncated reasoning with no close";
+        assert_eq!(strip_think_preamble(input), input);
+    }
+
+    /// Regression for #6009: thinking-by-default fold models (deepseek-v4-flash) prepend a `<think>…</think>` block to the requested JSON.
+    /// The parser must strip it instead of degrading to the raw bulk-summary fallback.
+    #[test]
+    fn parse_labeled_summaries_tolerates_think_preamble() {
+        let input = "<think>\nThe tool listed files. I'll summarise each one.\n</think>\n\
+                     [{\"id\":\"toolu_1\",\"summary\":\"Listed files.\"}]";
+        let out = parse_labeled_summaries(input).expect("should parse past <think> preamble");
+        assert_eq!(
+            out.get("toolu_1").map(String::as_str),
+            Some("Listed files.")
+        );
+    }
+
+    #[test]
+    fn parse_labeled_summaries_tolerates_think_preamble_then_json_fence() {
+        let input = "<think>reasoning across\nmultiple lines</think>\n\
+                     ```json\n[{\"id\":\"toolu_2\",\"summary\":\"Read config.\"}]\n```";
+        let out = parse_labeled_summaries(input).expect("should strip think block then json fence");
+        assert_eq!(out.get("toolu_2").map(String::as_str), Some("Read config."));
+    }
+
+    #[test]
+    fn parse_labeled_summaries_still_parses_plain_json() {
+        let input = "[{\"id\":\"toolu_3\",\"summary\":\"Ran tests.\"}]";
+        let out = parse_labeled_summaries(input).expect("plain JSON should still parse");
+        assert_eq!(out.get("toolu_3").map(String::as_str), Some("Ran tests."));
     }
 
     /// Regression for #5203: a verbose-JSON fold model that pretty-prints
