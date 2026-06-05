@@ -410,7 +410,7 @@ if __name__ == "__main__":
 
 ## WASM Skills
 
-WASM skills run inside LibreFang's in-process `WasmSandbox`: capability-gated, with per-invocation fuel, linear-memory, and wall-clock limits.
+WASM skills run inside BossFang's in-process `WasmSandbox`: capability-gated, with per-invocation fuel, linear-memory, and wall-clock limits.
 They are ideal for security-sensitive tools because nothing outside the granted capabilities is reachable.
 
 The easiest way to write one in Rust is the `librefang-skill` SDK, which hides the raw guest ABI behind a single macro.

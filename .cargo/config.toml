@@ -1,15 +1,13 @@
 [alias]
 xtask = "run --package xtask --"
 
-# Source replacement: redirect kreuzberg from SSH to HTTPS so CI runners
-# (which have no SSH key) can fetch the transitive dep pulled in via
-# universal-agent-runtime → kreuzberg.  Both URLs resolve to the same public
-# GQAdonis/kreuzberg repo; the lock-file commit hash is reused verbatim.
-[source.kreuzberg-ssh]
-git = "ssh://git@github.com/GQAdonis/kreuzberg.git"
-branch = "main"
-replace-with = "kreuzberg-https"
-
-[source.kreuzberg-https]
-git = "https://github.com/GQAdonis/kreuzberg.git"
-branch = "main"
+# Skip UAR's optional build steps that require external toolchains (pnpm
+# frontend build, model catalog generation, ONNX model compilation).
+# These are only needed for a full release build of UAR itself, not when
+# building it as a transitive dep for `cargo check` or CI compile checks.
+# Full UAR builds with these enabled are done via the docker-publish workflow
+# (which sets SKIP_FRONTEND_BUILD=1 anyway via the Dockerfile SKIP_* vars).
+[env]
+SKIP_FRONTEND_BUILD = "1"
+SKIP_MODEL_BUILD = "1"
+SKIP_CATALOG_BUILD = "1"

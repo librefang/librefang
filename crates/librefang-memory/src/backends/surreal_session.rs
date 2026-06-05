@@ -88,6 +88,7 @@ impl SurrealSessionBackend {
             // will set last_repaired_generation once it runs.
             messages_generation: 0,
             last_repaired_generation: None,
+            peer_id: None,
         })
     }
 }

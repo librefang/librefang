@@ -343,7 +343,7 @@ if __name__ == "__main__":
 
 ## WASM 技能
 
-WASM 技能在 LibreFang 进程内的 `WasmSandbox` 中运行：受能力门控，并对每次调用施加燃料、线性内存和墙钟时间限制。
+WASM 技能在 BossFang 进程内的 `WasmSandbox` 中运行：受能力门控，并对每次调用施加燃料、线性内存和墙钟时间限制。
 它们非常适合安全敏感的工具，因为除已授予的能力外无法触及任何东西。
 
 用 Rust 编写时，最简单的方式是 `librefang-skill` SDK，它把底层 guest ABI 收敛到一个宏后面。

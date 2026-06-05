@@ -357,3 +357,4 @@ codegen-units = 4
 # lint regressions.
 [workspace.lints.rust]
 warnings = "deny"
+

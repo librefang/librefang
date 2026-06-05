@@ -3,7 +3,7 @@
 > **状态：** 随 #5821 发布。
 > **Crate：** `sdk/rust/librefang-sidecar/`。
 
-`sdk/rust/librefang-sidecar/` 是用 Rust 编写 LibreFang 通道适配器（独立子进程二进制）的第一方 SDK。
+`sdk/rust/librefang-sidecar/` 是用 Rust 编写 BossFang 通道适配器（独立子进程二进制）的第一方 SDK。
 它与 `sdk/python/librefang/sidecar/` 配对存在；两套实现都钉在共享的 `conformance/sidecar/corpus/` 测试语料上，对着 supervisor 的 wire 是完全可互换的——`command = "python3 -m my_adapter"` 和 `command = "/usr/local/bin/my-rust-adapter"` 对 supervisor 而言没有任何区别。
 
 要看架构层的论证（崩溃隔离、依赖链封闭、迭代回路），见 [系统架构](/zh/architecture)；要看 wire 规约，见 [OFP 链路加密](/zh/architecture/ofp-wire) 及仓库内 `docs/architecture/sidecar-protocol.md`。
@@ -117,7 +117,7 @@ Dashboard 的配置表单由你的二进制在 `--describe` 时返回的 `Schema
 
 ## 职责划分
 
-- **进程重启是 LibreFang 的事。**
+- **进程重启是 BossFang 的事。**
   `crates/librefang-channels/src/sidecar.rs` 里的 supervisor 用指数退避 + 熔断重启崩溃的子进程。
   你的适配器必须是*崩溃安全*的——不要持有跨重启不可恢复的进程内状态。
 - **平台重连是你的适配器的事。**

@@ -6,7 +6,7 @@ use super::*;
 /// Request body for cloning an agent.
 #[derive(serde::Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct CloneAgentRequest {
+pub struct CloneAgentRequest {
     pub new_name: String,
     /// Whether to copy skills from the source agent (default: true).
     #[serde(default = "default_clone_true")]

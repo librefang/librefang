@@ -496,7 +496,7 @@ pub(crate) fn cmd_skill_create() {
                 "src/main.py".to_string(),
                 format!(
                     r#"#!/usr/bin/env python3
-"""LibreFang skill: {name}"""
+"""BossFang skill: {name}"""
 import json
 import sys
 
@@ -522,7 +522,7 @@ if __name__ == "__main__":
             files: vec![(
                 "src/index.js".to_string(),
                 format!(
-                    r#"// LibreFang skill: {name}
+                    r#"// BossFang skill: {name}
 const chunks = [];
 process.stdin.on("data", (c) => chunks.push(c));
 process.stdin.on("end", () => {{
@@ -569,7 +569,7 @@ panic = "abort"
                 (
                     "src/lib.rs".to_string(),
                     format!(
-                        r#"//! LibreFang skill: {name}
+                        r#"//! BossFang skill: {name}
 use librefang_skill::{{skill, Request}};
 use serde_json::{{json, Value}};
 

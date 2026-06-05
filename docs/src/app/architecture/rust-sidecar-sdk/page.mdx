@@ -3,7 +3,7 @@
 > **Status:** shipped in #5821.
 > **Crate:** `sdk/rust/librefang-sidecar/`.
 
-`sdk/rust/librefang-sidecar/` is the first-party Rust SDK for writing LibreFang channel adapters as out-of-process binaries.
+`sdk/rust/librefang-sidecar/` is the first-party Rust SDK for writing BossFang channel adapters as out-of-process binaries.
 It pairs with the Python SDK at `sdk/python/librefang/sidecar/`; both implementations are pinned to the same shared conformance corpus at `conformance/sidecar/corpus/` and are interchangeable on the wire — the supervisor treats `command = "python3 -m my_adapter"` and `command = "/usr/local/bin/my-rust-adapter"` identically.
 
 For the architectural case (crash isolation, supply-chain confinement, iteration loop) see [System Architecture](/architecture); for the wire spec see [OFP Wire Encryption](/architecture/ofp-wire) and the in-repo `docs/architecture/sidecar-protocol.md`.
@@ -118,7 +118,7 @@ The dashboard's configure form is populated from the `Schema` your binary serves
 
 ## Responsibility split
 
-- **Process restart is LibreFang's job.**
+- **Process restart is BossFang's job.**
   The supervisor in `crates/librefang-channels/src/sidecar.rs` respawns a crashed child with exponential backoff and a circuit-breaker.
   Your adapter must be *crash-safe*: hold no irreplaceable in-process state across crashes.
 - **Platform reconnect is your adapter's job.**

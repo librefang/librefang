@@ -1,4 +1,4 @@
-//! Command-line argument definitions for the LibreFang CLI.
+//! Command-line argument definitions for the BossFang CLI.
 //!
 //! The clap derive types — the top-level [`Cli`] parser, the [`Commands`]
 //! enum, and every subcommand enum / argument struct — live here, split out
@@ -12,35 +12,35 @@ const AFTER_HELP: &str = "\
 \x1b[1mHint:\x1b[0m Commands suffixed with [*] have subcommands. Run `<command> --help` for details.
 
 \x1b[1;36mExamples:\x1b[0m
-  librefang init                 Initialize config and data directories
-  librefang start                Start the kernel daemon
-  librefang update               Update the CLI to the latest release
-  librefang tui                  Launch the interactive terminal dashboard
-  librefang chat                 Quick chat with the default agent
-  librefang agent new coder      Spawn a new agent from a template
-  librefang models list          Browse available LLM models
-  librefang mcp add github       Install the GitHub MCP server
-  librefang doctor               Run diagnostic health checks
-  librefang channel setup        Interactive channel setup wizard
-  librefang cron list            List scheduled jobs
-  librefang uninstall            Completely remove LibreFang from your system
+  bossfang init                 Initialize config and data directories
+  bossfang start                Start the kernel daemon
+  bossfang update               Update the CLI to the latest release
+  bossfang tui                  Launch the interactive terminal dashboard
+  bossfang chat                 Quick chat with the default agent
+  bossfang agent new coder      Spawn a new agent from a template
+  bossfang models list          Browse available LLM models
+  bossfang mcp add github       Install the GitHub MCP server
+  bossfang doctor               Run diagnostic health checks
+  bossfang channel setup        Interactive channel setup wizard
+  bossfang cron list            List scheduled jobs
+  bossfang uninstall            Completely remove BossFang from your system
 
 \x1b[1;36mQuick Start:\x1b[0m
-  1. librefang init              Set up config + API key
-  2. librefang start             Launch the daemon
-  3. librefang chat              Start chatting!
+  1. bossfang init              Set up config + API key
+  2. bossfang start             Launch the daemon
+  3. bossfang chat              Start chatting!
 
 \x1b[1;36mMore:\x1b[0m
-  Docs:       https://github.com/librefang/librefang
+  Docs:       https://github.com/GQAdonis/librefang
   Dashboard:  http://127.0.0.1:4545/ (when daemon is running)";
 
-/// LibreFang — the open-source Agent Operating System.
+/// BossFang — the open-source Agent Operating System.
 #[derive(Parser)]
 #[command(
-    name = "librefang",
+    name = "bossfang",
     version,
-    about = "\u{1F40D} LibreFang \u{2014} Open-source Agent Operating System",
-    long_about = "\u{1F40D} LibreFang \u{2014} Open-source Agent Operating System\n\n\
+    about = "\u{1F40D} BossFang \u{2014} Open-source Agent Operating System",
+    long_about = "\u{1F40D} BossFang \u{2014} Open-source Agent Operating System\n\n\
                   Deploy, manage, and orchestrate AI agents from your terminal.\n\
                   40 channels \u{00b7} 60 skills \u{00b7} 50+ models \u{00b7} infinite possibilities.",
     after_help = AFTER_HELP,
