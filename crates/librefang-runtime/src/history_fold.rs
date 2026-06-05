@@ -1732,15 +1732,17 @@ mod tests {
         let input = "<think>\nThe tool listed files. I'll summarise each one.\n</think>\n\
                      [{\"id\":\"toolu_1\",\"summary\":\"Listed files.\"}]";
         let out = parse_labeled_summaries(input).expect("should parse past <think> preamble");
-        assert_eq!(out.get("toolu_1").map(String::as_str), Some("Listed files."));
+        assert_eq!(
+            out.get("toolu_1").map(String::as_str),
+            Some("Listed files.")
+        );
     }
 
     #[test]
     fn parse_labeled_summaries_tolerates_think_preamble_then_json_fence() {
         let input = "<think>reasoning across\nmultiple lines</think>\n\
                      ```json\n[{\"id\":\"toolu_2\",\"summary\":\"Read config.\"}]\n```";
-        let out = parse_labeled_summaries(input)
-            .expect("should strip think block then json fence");
+        let out = parse_labeled_summaries(input).expect("should strip think block then json fence");
         assert_eq!(out.get("toolu_2").map(String::as_str), Some("Read config."));
     }
 
