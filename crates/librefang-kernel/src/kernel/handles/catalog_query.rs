@@ -26,11 +26,28 @@ impl LibreFangKernel {
             .map(|entry| entry.reasoning_echo_policy)
             .unwrap_or_default()
     }
+
+    /// Inherent mirror of [`kernel_handle::CatalogQuery::supports_vision_for`]
+    /// (#6010). Resolves the model's effective vision capability from the
+    /// catalog, honouring user capability overrides (#4745) via
+    /// `effective_capabilities`. Fails open (`true`) on a catalog miss so an
+    /// unknown / user-defined model is never silently stripped of image input.
+    pub(crate) fn lookup_supports_vision(&self, model: &str) -> bool {
+        let catalog = self.model_catalog_ref().load();
+        catalog
+            .find_model(model)
+            .map(|m| catalog.effective_capabilities(m).supports_vision)
+            .unwrap_or(true)
+    }
 }
 
 impl kernel_handle::CatalogQuery for LibreFangKernel {
     fn reasoning_echo_policy_for(&self, model: &str) -> ReasoningEchoPolicy {
         self.lookup_reasoning_echo_policy(model)
+    }
+
+    fn supports_vision_for(&self, model: &str) -> bool {
+        self.lookup_supports_vision(model)
     }
 
     /// Resolve the per-agent `extraction_model` for proactive memory
