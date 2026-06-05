@@ -52,6 +52,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     openssh-client \
     clang \
     libclang-dev \
+    cmake \
     curl \
     # binaryen: wasm-opt optimizer; wabt: wat2wasm/wasm2wat/wasm-objdump
     binaryen \
