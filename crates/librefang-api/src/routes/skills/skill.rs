@@ -354,6 +354,15 @@ pub async fn approve_pending_candidate(
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
     let skills_root = state.kernel.home_dir().join("skills");
+    // Capture the creating agent id BEFORE promotion: `approve_candidate`
+    // deletes the pending TOML on success, after which `agent_id` is no
+    // longer recoverable. Best-effort — a read failure here must not block
+    // the approve (auto-assign is a convenience, not a precondition).
+    let creator_agent_id =
+        match librefang_kernel::skill_workshop::storage::load_candidate(&skills_root, &id) {
+            Ok(c) => Some(c.agent_id),
+            Err(_) => None,
+        };
     match librefang_kernel::skill_workshop::storage::approve_candidate(
         &skills_root,
         &skills_root,
@@ -364,6 +373,12 @@ pub async fn approve_pending_candidate(
             // `skills_root`; refresh the in-memory registry so the next
             // turn's prompt build sees the new skill.
             state.kernel.reload_skills();
+            // Auto-assign the promoted skill to the agent that produced it
+            // so the workshop loop (capture → review → approve → use)
+            // closes without a manual `agent.toml` edit (#5989). Best-effort:
+            // logs and continues if the agent was deleted between capture
+            // and approval, so the approve still returns 200.
+            assign_skill_to_creator(&state, creator_agent_id.as_deref(), &result.skill_name);
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -452,17 +467,27 @@ pub async fn approve_pending_candidate(
                 // cleanup beat us to the row), not a failure.
                 match librefang_kernel::skill_workshop::storage::reject_candidate(&skills_root, &id)
                 {
-                    Ok(()) | Err(librefang_kernel::skill_workshop::WorkshopError::NotFound(_)) => (
-                        StatusCode::OK,
-                        Json(serde_json::json!({
-                            "status": "already_promoted",
-                            "candidate_id": id,
-                            "skill_name": skill_name,
-                            "message": format!(
-                                "Active skill '{skill_name}' already exists with the same body; pending entry cleared.",
-                            ),
-                        })),
-                    ),
+                    Ok(()) | Err(librefang_kernel::skill_workshop::WorkshopError::NotFound(_)) => {
+                        // Idempotent re-approval: the skill was already
+                        // promoted, but the creating agent may not have been
+                        // assigned on the first pass (e.g. it didn't exist
+                        // yet, or assignment failed). Re-run the best-effort
+                        // assign so phantom recovery converges to the same
+                        // end state — `assign_skill_to_creator` is a no-op
+                        // when the skill is already live on the allowlist.
+                        assign_skill_to_creator(&state, creator_agent_id.as_deref(), &skill_name);
+                        (
+                            StatusCode::OK,
+                            Json(serde_json::json!({
+                                "status": "already_promoted",
+                                "candidate_id": id,
+                                "skill_name": skill_name,
+                                "message": format!(
+                                    "Active skill '{skill_name}' already exists with the same body; pending entry cleared.",
+                                ),
+                            })),
+                        )
+                    }
                     Err(e) => {
                         // Scrub the raw storage error (audit:
                         // rusqlite-errors-leak); operator context in
@@ -495,6 +520,65 @@ pub async fn approve_pending_candidate(
             Json(serde_json::json!({"error": format!("promotion rejected: {e}")})),
         ),
         Err(e) => ApiErrorResponse::internal_scrub(e).into_json_tuple(),
+    }
+}
+
+/// Append a freshly-promoted workshop skill to its creating agent's
+/// allowlist (#5989). Best-effort and idempotent:
+///
+/// * `agent_id` is `None` / unparseable / no longer in the registry →
+///   log a WARN and return; the caller's approve still succeeds.
+/// * skill already on the allowlist AND not hidden by `skills_disabled`
+///   → no-op (no redundant DB write).
+/// * otherwise append the skill and route through `set_agent_skills`,
+///   which clears `skills_disabled` so the new skill is live, persists
+///   the manifest, and invalidates the agent's cached tool list.
+fn assign_skill_to_creator(state: &Arc<AppState>, agent_id: Option<&str>, skill_name: &str) {
+    let Some(agent_id) = agent_id else {
+        tracing::warn!(
+            %skill_name,
+            "skill_workshop: approved candidate had no recoverable agent_id; \
+             skipping auto-assign (skill promoted, assign manually if needed)"
+        );
+        return;
+    };
+    let Ok(agent_id) = agent_id.parse::<librefang_types::agent::AgentId>() else {
+        tracing::warn!(
+            %agent_id,
+            %skill_name,
+            "skill_workshop: candidate agent_id is not a valid AgentId; skipping auto-assign"
+        );
+        return;
+    };
+    let Some(entry) = state.kernel.agent_registry().get(agent_id) else {
+        tracing::warn!(
+            %agent_id,
+            %skill_name,
+            "skill_workshop: creating agent no longer exists; skipping auto-assign \
+             (skill promoted successfully)"
+        );
+        return;
+    };
+
+    let already_listed = entry.manifest.skills.iter().any(|s| s == skill_name);
+    // Re-run the assign when the skill is present but hidden by
+    // `skills_disabled` so the flag is cleared and the skill goes live.
+    if already_listed && !entry.manifest.skills_disabled {
+        return;
+    }
+
+    let mut skills = entry.manifest.skills.clone();
+    if !already_listed {
+        skills.push(skill_name.to_string());
+    }
+    if let Err(e) = state.kernel.set_agent_skills(agent_id, skills) {
+        tracing::warn!(
+            %agent_id,
+            %skill_name,
+            error = %e,
+            "skill_workshop: failed to auto-assign promoted skill to creating agent \
+             (skill promoted successfully; assign manually)"
+        );
     }
 }
 
