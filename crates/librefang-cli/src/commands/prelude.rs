@@ -42,6 +42,7 @@ pub(crate) use super::models::*;
 pub(crate) use super::monitoring::*;
 pub(crate) use super::skill::*;
 pub(crate) use super::status::*;
+pub(crate) use super::storage::*;
 pub(crate) use super::system::*;
 
 pub(crate) use colored::Colorize;

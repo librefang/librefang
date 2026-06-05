@@ -124,6 +124,7 @@ pub(crate) fn cmd_security_verify() {
 /// next daemon boot seeds a fresh Merkle chain. Refuses to run while the
 /// daemon holds the DB (SQLite WAL mode + writer lock) and without
 /// `--confirm`.
+#[cfg(feature = "sqlite-backend")]
 pub(crate) fn cmd_audit_reset(config: Option<PathBuf>, confirm: bool) {
     let daemon = daemon_config_context(config.as_deref());
     // `load_config` already eprintln!s the underlying parse / deserialize

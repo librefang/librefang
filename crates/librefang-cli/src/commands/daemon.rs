@@ -274,7 +274,13 @@ pub(crate) fn ensure_initialized(config: &Option<PathBuf>) {
     }
 }
 
-pub(crate) fn cmd_start(config: Option<PathBuf>, tail: bool, spawned: bool, foreground: bool) {
+pub(crate) fn cmd_start(
+    config: Option<PathBuf>,
+    tail: bool,
+    spawned: bool,
+    foreground: bool,
+    bind: Option<String>,
+) {
     ensure_initialized(&config);
 
     // Issue #5186 follow-up: `cmd_start` boots a real daemon, so a bad
@@ -436,7 +442,7 @@ pub(crate) fn cmd_start(config: Option<PathBuf>, tail: bool, spawned: bool, fore
         kernel.set_log_reloader(std::sync::Arc::new(log_filter::CliLogLevelReloader));
 
         let cfg = kernel.config_ref();
-        let listen_addr = cfg.api_listen.clone();
+        let listen_addr = bind.clone().unwrap_or_else(|| cfg.api_listen.clone());
         let daemon_info_path = kernel.home_dir().join("daemon.json");
         let provider = cfg.default_model.provider.clone();
         let model = cfg.default_model.model.clone();
@@ -589,7 +595,7 @@ pub(crate) fn cmd_restart(config: Option<PathBuf>, tail: bool, foreground: bool)
         ui::hint(&i18n::t("daemon-no-running-starting"));
     }
 
-    cmd_start(config, tail, false, foreground);
+    cmd_start(config, tail, false, foreground, None);
 }
 
 pub(crate) fn force_kill_pid(pid: u32) {

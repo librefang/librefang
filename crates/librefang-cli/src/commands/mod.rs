@@ -22,4 +22,5 @@ pub(crate) mod monitoring;
 pub(crate) mod prelude;
 pub(crate) mod skill;
 pub(crate) mod status;
+pub(crate) mod storage;
 pub(crate) mod system;
