@@ -295,6 +295,39 @@ fn build_sender_prefix(manifest: &AgentManifest, sender_user_id: Option<&str>) -
     Some(format!("[{}]: ", sanitize_sender_label(raw)))
 }
 
+/// Replace every `Image` / `ImageFile` content block in `messages` with a
+/// short text placeholder, leaving all other blocks and messages untouched
+/// (#6010).
+///
+/// Called only when the target model has no vision support. Text-only
+/// OpenAI-compatible models reject image content parts with HTTP 400
+/// (`unknown variant image_url, expected text`), which previously broke any
+/// channel/sidecar bot whose default agent ran a text-only model the moment a
+/// user sent a photo. Redacting upstream of the driver covers *every* entry
+/// path (WebUI, channels, sidecars, triggers), not just the OpenAI driver.
+///
+/// Pure function: the caller passes a clone, so the live session history is
+/// never mutated and the vision path stays byte-identical to before.
+pub(super) fn redact_images_for_text_only(mut messages: Vec<Message>, model: &str) -> Vec<Message> {
+    let placeholder = format!("[image omitted: model `{model}` has no vision support]");
+    for msg in &mut messages {
+        if let MessageContent::Blocks(blocks) = &mut msg.content {
+            for block in blocks.iter_mut() {
+                if matches!(
+                    block,
+                    ContentBlock::Image { .. } | ContentBlock::ImageFile { .. }
+                ) {
+                    *block = ContentBlock::Text {
+                        text: placeholder.clone(),
+                        provider_metadata: None,
+                    };
+                }
+            }
+        }
+    }
+    messages
+}
+
 /// Run the agent execution loop for a single user message.
 ///
 /// This is the core of LibreFang: it loads session context, recalls memories,
@@ -1008,11 +1041,27 @@ pub async fn run_agent_loop(
             .map(|k| k.reasoning_echo_policy_for(&api_model))
             .unwrap_or_default();
 
+        // Catalog-driven vision-capability gate (#6010). When the target model
+        // has no vision support, image content blocks are redacted to a text
+        // placeholder before the request is built — text-only OpenAI-compatible
+        // models otherwise reject `image_url` content parts with HTTP 400. Fails
+        // open (no kernel handle wired, or catalog miss) so vision and unknown
+        // models keep sending images unchanged.
+        let supports_vision = kernel
+            .as_ref()
+            .map(|k| k.supports_vision_for(&api_model))
+            .unwrap_or(true);
+        let request_messages = if supports_vision {
+            messages.clone()
+        } else {
+            redact_images_for_text_only(messages.clone(), &api_model)
+        };
+
         // Wrap messages once per turn — call_with_retry's `request.clone()`
         // becomes a refcount bump instead of a deep clone of the history (#3766).
         let request = CompletionRequest {
             model: api_model,
-            messages: std::sync::Arc::new(messages.clone()),
+            messages: std::sync::Arc::new(request_messages),
             tools: tools_cache.get(available_tools, &session_loaded_tools),
             max_tokens: manifest.model.max_tokens,
             temperature: manifest.model.temperature,
