@@ -460,7 +460,10 @@ fn agent_skills(h: &Harness, agent_id: &str) -> (Vec<String>, bool) {
         .agent_registry()
         .get(id)
         .expect("agent must still be registered");
-    (entry.manifest.skills.clone(), entry.manifest.skills_disabled)
+    (
+        entry.manifest.skills.clone(),
+        entry.manifest.skills_disabled,
+    )
 }
 
 /// Approving a candidate whose `agent_id` resolves to a live agent must
