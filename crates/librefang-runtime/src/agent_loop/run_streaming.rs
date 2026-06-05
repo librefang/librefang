@@ -681,10 +681,21 @@ pub async fn run_agent_loop_streaming(
             .map(|k| k.reasoning_echo_policy_for(&api_model))
             .unwrap_or_default();
 
+        // Mirror the non-streaming vision gate (#6010): redact image blocks for text-only models before building the request.
+        let supports_vision = kernel
+            .as_ref()
+            .map(|k| k.supports_vision_for(&api_model))
+            .unwrap_or(true);
+        let request_messages = if supports_vision {
+            messages.clone()
+        } else {
+            super::redact_images_for_text_only(messages.clone(), &api_model)
+        };
+
         // Same Arc-wrap as the non-streaming hot path (#3766).
         let request = CompletionRequest {
             model: api_model,
-            messages: std::sync::Arc::new(messages.clone()),
+            messages: std::sync::Arc::new(request_messages),
             tools: tools_cache.get(available_tools, &session_loaded_tools),
             max_tokens: manifest.model.max_tokens,
             temperature: manifest.model.temperature,
