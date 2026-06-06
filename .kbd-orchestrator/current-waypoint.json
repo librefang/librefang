@@ -1,13 +1,13 @@
 {
-  "active_phase": "phase-8-fixture-rebuilds",
-  "previous_phase": "phase-7-wasi-plugin-host",
-  "active_change": null,
-  "last_updated": "2026-05-29T00:00:00Z",
-  "last_updated_by": "kbd-plan",
+  "active_phase": "phase-9-config-store-migration",
+  "previous_phase": "phase-8-fixture-rebuilds",
+  "active_change": "C-002",
+  "last_updated": "2026-06-06T00:00:00Z",
+  "last_updated_by": "kbd-execute",
   "backend": "native-tool",
-  "phase_progress": "Phase 8 planned: D1..D4 decisions baked. 5 changes ordered. Critical path: C-002 + C-003 (parallel fixture rebuilds) → C-004 (remove #[ignore] markers). C-001 (surrealdb-core pin) and C-005 (KernelHandleStub) are independent.",
+  "phase_progress": "Phase 9 executing: 1/9 changes DONE. C-001 (config_store migration v31) landed and verified (check + invariants test + embedded-DB apply test + brand audit, all green). Critical path C-001 -> C-002 -> C-004 -> C-005 -> C-003 -> C-006. C-007 attaches after C-004. C-008 (prod import) and C-009 (K8s ConfigMap revert) strictly last; C-009 hard-gated on C-008 verified in prod.",
   "next_action": {
-    "command": "/kbd-execute C-001",
-    "description": "surrealdb-core =3.0.5 workspace pin (XS, independent, do first)"
+    "command": "/kbd-execute C-002",
+    "description": "ConfigStore trait + SurrealDB impl (embedded+remote, one impl) — M, depends on C-001"
   }
 }

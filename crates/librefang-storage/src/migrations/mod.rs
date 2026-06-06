@@ -178,4 +178,9 @@ pub const OPERATIONAL_MIGRATIONS: &[Migration] = &[
         name: "composite_indexes_v1",
         sql: include_str!("sql/030_composite_indexes.surql"),
     },
+    Migration {
+        version: 31,
+        name: "config_store_v1",
+        sql: include_str!("sql/031_config_store.surql"),
+    },
 ];
