@@ -24,6 +24,22 @@ pub trait CatalogQuery: Send + Sync {
         librefang_types::model_catalog::ReasoningEchoPolicy::None
     }
 
+    /// Whether the given model supports vision (image) input, resolved from
+    /// the model catalog's effective capabilities (#6010). Consulted at
+    /// request-build time to decide whether image content blocks may be sent
+    /// to the model or must be redacted to a text placeholder first —
+    /// text-only OpenAI-compatible models reject image content parts with
+    /// HTTP 400 (`unknown variant image_url, expected text`).
+    ///
+    /// Default impl returns `true` (fail open) so non-overriding mocks and
+    /// stubs keep sending images unchanged. The real kernel impl applies user
+    /// capability overrides (#4745) via `effective_capabilities` and also
+    /// fails open on a catalog miss, so vision-capable models are never
+    /// degraded.
+    fn supports_vision_for(&self, _model: &str) -> bool {
+        true
+    }
+
     /// Resolve the effective proactive-memory `extraction_model` for the
     /// agent identified by `agent_id` (#5475). Looks at the agent's
     /// manifest `[proactive_memory] extraction_model` and falls back to
