@@ -1665,13 +1665,13 @@ function CanvasPageInner() {
   // Group drag moves child nodes along
   const groupDragStart = useRef<{ id: string; x: number; y: number } | null>(null);
 
-  const onNodeDragStart = useCallback((_: React.MouseEvent, node: CanvasNode) => {
+  const onNodeDragStart = useCallback((_: MouseEvent, node: CanvasNode) => {
     if (node.type === "groupNode") {
       groupDragStart.current = { id: node.id, x: node.position.x, y: node.position.y };
     }
   }, []);
 
-  const onNodeDrag = useCallback((_: React.MouseEvent, node: CanvasNode) => {
+  const onNodeDrag = useCallback((_: MouseEvent, node: CanvasNode) => {
     if (node.type === "groupNode" && groupDragStart.current?.id === node.id) {
       // Dragging group -> move child nodes along
       const dx = node.position.x - groupDragStart.current.x;
