@@ -233,3 +233,15 @@ fn catalog_query_default_returns_none() {
         ReasoningEchoPolicy::None
     );
 }
+
+#[test]
+fn catalog_query_supports_vision_defaults_to_true() {
+    // #6010: a stub/mock that doesn't override `supports_vision_for` must
+    // report `true` (fail open), so test fixtures and any handle without a
+    // catalog wired keep sending image content blocks unchanged. Only the
+    // real kernel impl, which consults the model catalog, can return `false`.
+    let stub = StubKernel;
+    assert!(stub.supports_vision_for("deepseek-v4"));
+    assert!(stub.supports_vision_for("gpt-4o"));
+    assert!(stub.supports_vision_for("anything-else"));
+}

@@ -640,11 +640,12 @@ fn trigger_to_json(t: &Trigger) -> serde_json::Value {
 /// variants that carry optional data into empty-object form so serde
 /// deserialises the `#[serde(default)]` fields cleanly.
 ///
-/// Currently `task_posted` is the only struct variant with optional fields;
-/// extend this match when other variants gain optional fields.
+/// `task_posted` (`assignee_match`), `task_claimed` and `task_completed`
+/// (`creator_match`) are the struct variants with optional fields; extend
+/// this match when other variants gain optional fields.
 fn normalize_pattern_json(value: serde_json::Value) -> serde_json::Value {
     match value.as_str() {
-        Some(tag @ "task_posted") => {
+        Some(tag @ ("task_posted" | "task_claimed" | "task_completed")) => {
             serde_json::json!({ tag: {} })
         }
         _ => value,
