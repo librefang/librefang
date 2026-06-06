@@ -1808,10 +1808,15 @@ pub enum EvolutionMode {
     /// / `patch_skill`.
     #[default]
     Free,
-    /// All mutations — create, update, and patch — are routed to the pending
-    /// queue for explicit human approval. Updates/patches cross the same
-    /// `SkillVerifier` prompt-injection scan creates already do (#5844), and
-    /// nothing reaches the active registry without an approve.
+    /// Every **background** (`auto_evolve` / `background_skill_review`)
+    /// mutation — create, update, and patch — is routed to the pending queue
+    /// for explicit human approval; updates/patches cross the same
+    /// `SkillVerifier` prompt-injection scan creates already do (#5844).
+    ///
+    /// Scope is the background reviewer path (`resolve_evolution_mode`) only.
+    /// An agent's own explicit `skill_evolve_*` tool calls are a deliberate
+    /// surface and still apply directly — exactly as `skill_evolve_create`
+    /// always has — so this is not a blanket registry-write lock.
     Controlled,
 }
 
