@@ -69,7 +69,13 @@ export default function Search(nextConfig) {
 
 						var files = glob.sync("**/*.mdx", { cwd: appDir });
 						var data = files.map(function (file) {
-							var url = "/" + file.replace(/(^|\/)page\.mdx$/, "");
+							// Drop the trailing page.mdx and any "(group)"
+							// route-group folders (absent from the URL).
+							var url =
+								"/" +
+								file
+									.replace(/(^|\/)page\.mdx$/, "")
+									.replace(/\([^/]+\)\//g, "");
 							var mdx = fs.readFileSync(path.join(appDir, file), "utf8");
 
 							var sections = [];
