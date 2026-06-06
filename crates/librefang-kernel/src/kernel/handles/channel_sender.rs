@@ -8,6 +8,7 @@
 //! `cfg.sidecar_channels` via [`sidecar_default_agent`].
 
 use librefang_runtime::kernel_handle;
+use tracing::debug;
 
 use super::super::LibreFangKernel;
 
@@ -369,13 +370,78 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
     fn resolve_channel_owner(
         &self,
         channel: &str,
-        _chat_id: &str,
+        chat_id: &str,
     ) -> Option<librefang_types::agent::AgentId> {
-        // Every channel runs as a sidecar; the `default_agent` lookup is
-        // a single pass over `cfg.sidecar_channels`.
+        // Binding-first owner resolution (#4824 / #6022).
+        //
+        // The outbound `channel_send` mirror must land on the SAME agent that
+        // owns the inbound conversation. When a `[[bindings]]` `peer_id` rule
+        // routes a specific `(channel, chat_id)` to a non-default agent, the
+        // inbound reply is delivered to the bound agent — so the mirror has to
+        // resolve through the bindings too, not just the channel
+        // `default_agent`. Matching purely on `default_agent` (the pre-fix
+        // behaviour) wrote the mirror to the wrong session and the bound agent
+        // never saw its own outbound context — the exact gap #4824 set out to
+        // close.
+        //
+        // We reuse `BindingMatchRule::matches` — the same matcher the inbound
+        // `MessageRouter` uses — so the two paths cannot drift. For the
+        // outbound direction we only have `(channel, chat_id)`; `account_id`,
+        // `guild_id`, and `roles` are unknown, matching the
+        // inbound-for-outbound semantics already used by
+        // `bound_recipients_for_agent`. The bindings `Vec` is kept
+        // specificity-sorted on load and on mutation (`add_binding`), so the
+        // first match is the most specific.
+        let bound_agent = {
+            let bindings = self.mesh.bindings.lock().unwrap_or_else(|e| e.into_inner());
+            bindings
+                .iter()
+                .find(|b| b.match_rule.matches(channel, None, chat_id, None, &[]))
+                .map(|b| b.agent.clone())
+        };
+        if let Some(agent_name) = bound_agent {
+            if let Some(entry) = self.agents.registry.find_by_name(&agent_name) {
+                debug!(
+                    channel,
+                    chat_id,
+                    agent = %agent_name,
+                    agent_id = %entry.id,
+                    "channel_send mirror: resolved owner via binding"
+                );
+                return Some(entry.id);
+            }
+            // A binding named an agent that is not currently registered; fall
+            // through to the channel default rather than dropping the mirror.
+            debug!(
+                channel,
+                chat_id,
+                agent = %agent_name,
+                "channel_send mirror: binding matched but agent not registered, falling back to channel default_agent"
+            );
+        }
+
+        // Fallback: every channel runs as a sidecar; the `default_agent`
+        // lookup is a single pass over `cfg.sidecar_channels`.
         let cfg = self.config.load_full();
-        let agent_name = sidecar_default_agent(&cfg.sidecar_channels, channel)?;
-        self.agents.registry.find_by_name(agent_name).map(|e| e.id)
+        match sidecar_default_agent(&cfg.sidecar_channels, channel) {
+            Some(agent_name) => {
+                debug!(
+                    channel,
+                    chat_id,
+                    agent_name = %agent_name,
+                    "channel_send mirror: no binding matched, using channel default_agent"
+                );
+                self.agents.registry.find_by_name(agent_name).map(|e| e.id)
+            }
+            None => {
+                debug!(
+                    channel,
+                    chat_id,
+                    "channel_send mirror: no binding and no default_agent, owner unresolved"
+                );
+                None
+            }
+        }
     }
 }
 

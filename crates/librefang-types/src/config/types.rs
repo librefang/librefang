@@ -1764,6 +1764,61 @@ impl BindingMatchRule {
         }
         score
     }
+
+    /// Returns true when every specified (non-`None` / non-empty) field of this rule matches the supplied context.
+    /// Unset fields act as wildcards, and `roles` matches when the rule's role list is empty or intersects the provided roles.
+    /// This is the single source of truth for binding matching, shared by the inbound channel router and the outbound `channel_send` mirror's owner resolution so the two can never drift.
+    pub fn matches(
+        &self,
+        channel: &str,
+        account_id: Option<&str>,
+        peer_id: &str,
+        guild_id: Option<&str>,
+        roles: &[String],
+    ) -> bool {
+        // All specified fields must match.
+        if let Some(ref ch) = self.channel {
+            if ch.as_str() != channel {
+                return false;
+            }
+        }
+        if let Some(ref acc) = self.account_id {
+            match account_id {
+                Some(ctx_acc) => {
+                    if acc.as_str() != ctx_acc {
+                        return false;
+                    }
+                }
+                None => return false,
+            }
+        }
+        if let Some(ref pid) = self.peer_id {
+            if pid.as_str() != peer_id {
+                return false;
+            }
+        }
+        if let Some(ref gid) = self.guild_id {
+            match guild_id {
+                Some(ctx_gid) => {
+                    if gid.as_str() != ctx_gid {
+                        return false;
+                    }
+                }
+                None => return false,
+            }
+        }
+        if !self.roles.is_empty() {
+            // User must have at least one of the specified roles.
+            let has_role = self
+                .roles
+                .iter()
+                .any(|r| roles.iter().any(|cr| cr.as_str() == r.as_str()));
+            if !has_role {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 /// Broadcast config — send same message to multiple agents.
@@ -7994,5 +8049,103 @@ rule_sets = ["browser_handles", "pii_baseline"]
         .unwrap();
         assert!(hooks.allow_network);
         assert!(hooks.allow_filesystem);
+    }
+
+    // ─── BindingMatchRule::matches — shared inbound/outbound matcher ─────────
+
+    /// A channel-only rule is a wildcard over everything except the channel.
+    #[test]
+    fn binding_matches_channel_only_is_wildcard() {
+        let rule = BindingMatchRule {
+            channel: Some("matrix".into()),
+            ..Default::default()
+        };
+        assert!(rule.matches("matrix", None, "!room:server", None, &[]));
+        assert!(rule.matches("matrix", Some("acct"), "anyone", Some("g1"), &[]));
+        assert!(!rule.matches("telegram", None, "!room:server", None, &[]));
+    }
+
+    /// An all-unset rule matches any context (the empty match_rule wildcard).
+    #[test]
+    fn binding_matches_all_unset_matches_anything() {
+        let rule = BindingMatchRule::default();
+        assert!(rule.matches("matrix", None, "x", None, &[]));
+        assert!(rule.matches("discord", Some("a"), "y", Some("g"), &["admin".into()]));
+    }
+
+    /// `peer_id` must match exactly when specified.
+    #[test]
+    fn binding_matches_peer_id_match_and_mismatch() {
+        let rule = BindingMatchRule {
+            channel: Some("matrix".into()),
+            peer_id: Some("!room:server".into()),
+            ..Default::default()
+        };
+        assert!(rule.matches("matrix", None, "!room:server", None, &[]));
+        assert!(!rule.matches("matrix", None, "!other:server", None, &[]));
+    }
+
+    /// A specified `account_id` requires the context to carry a matching value;
+    /// a `None` context account_id fails the constraint.
+    #[test]
+    fn binding_matches_account_id_constraint() {
+        let rule = BindingMatchRule {
+            channel: Some("telegram".into()),
+            account_id: Some("bot-a".into()),
+            ..Default::default()
+        };
+        assert!(rule.matches("telegram", Some("bot-a"), "user1", None, &[]));
+        assert!(!rule.matches("telegram", Some("bot-b"), "user1", None, &[]));
+        assert!(!rule.matches("telegram", None, "user1", None, &[]));
+    }
+
+    /// A specified `guild_id` requires a matching context guild; absent guild fails.
+    #[test]
+    fn binding_matches_guild_id_constraint() {
+        let rule = BindingMatchRule {
+            channel: Some("discord".into()),
+            guild_id: Some("g1".into()),
+            ..Default::default()
+        };
+        assert!(rule.matches("discord", None, "u", Some("g1"), &[]));
+        assert!(!rule.matches("discord", None, "u", Some("g2"), &[]));
+        assert!(!rule.matches("discord", None, "u", None, &[]));
+    }
+
+    /// `roles` matches when the rule's role list intersects the context roles;
+    /// no intersection fails, and an empty context role set fails a non-empty rule.
+    #[test]
+    fn binding_matches_roles_intersection() {
+        let rule = BindingMatchRule {
+            channel: Some("discord".into()),
+            roles: vec!["admin".into(), "mod".into()],
+            ..Default::default()
+        };
+        assert!(rule.matches("discord", None, "u", None, &["mod".into()]));
+        assert!(rule.matches(
+            "discord",
+            None,
+            "u",
+            None,
+            &["member".into(), "admin".into()]
+        ));
+        assert!(!rule.matches("discord", None, "u", None, &["member".into()]));
+        assert!(!rule.matches("discord", None, "u", None, &[]));
+    }
+
+    /// All specified fields are ANDed together — one mismatch fails the whole rule.
+    #[test]
+    fn binding_matches_all_specified_fields_must_match() {
+        let rule = BindingMatchRule {
+            channel: Some("matrix".into()),
+            account_id: Some("acct".into()),
+            peer_id: Some("!room:server".into()),
+            ..Default::default()
+        };
+        assert!(rule.matches("matrix", Some("acct"), "!room:server", None, &[]));
+        // peer_id mismatch alone fails.
+        assert!(!rule.matches("matrix", Some("acct"), "!other:server", None, &[]));
+        // account_id mismatch alone fails.
+        assert!(!rule.matches("matrix", Some("other"), "!room:server", None, &[]));
     }
 }

@@ -469,52 +469,29 @@ impl AgentRouter {
     }
 
     /// Check if a single binding's match_rule matches the context.
+    ///
+    /// Delegates to [`BindingMatchRule::matches`] in `librefang-types` — the
+    /// single source of truth for binding semantics, shared with the kernel's
+    /// outbound `channel_send` mirror owner resolution so the two matchers can
+    /// never drift (that drift was the root cause of the #4824 mirror regression).
     #[inline]
     fn binding_matches(&self, binding: &AgentBinding, ctx: &BindingContext<'_>) -> bool {
-        let rule = &binding.match_rule;
-
-        // All specified fields must match
-        if let Some(ref ch) = rule.channel {
-            if ch.as_str() != &*ctx.channel {
-                return false;
-            }
-        }
-        if let Some(ref acc) = rule.account_id {
-            match ctx.account_id {
-                Some(ref ctx_acc) => {
-                    if acc.as_str() != &**ctx_acc {
-                        return false;
-                    }
-                }
-                None => return false,
-            }
-        }
-        if let Some(ref pid) = rule.peer_id {
-            if pid.as_str() != &*ctx.peer_id {
-                return false;
-            }
-        }
-        if let Some(ref gid) = rule.guild_id {
-            match ctx.guild_id {
-                Some(ref ctx_gid) => {
-                    if gid.as_str() != &**ctx_gid {
-                        return false;
-                    }
-                }
-                None => return false,
-            }
-        }
-        if !rule.roles.is_empty() {
-            // User must have at least one of the specified roles
-            let has_role = rule
-                .roles
-                .iter()
-                .any(|r| ctx.roles.iter().any(|cr| cr.as_ref() == r.as_str()));
-            if !has_role {
-                return false;
-            }
-        }
-        true
+        // `BindingMatchRule::matches` takes `roles` as `&[String]`; the hot
+        // dispatch path carries `Cow<str>` roles, so materialize them only
+        // when the rule actually gates on roles. The common case is an empty
+        // role list, which never allocates.
+        let roles: Vec<String> = if binding.match_rule.roles.is_empty() {
+            Vec::new()
+        } else {
+            ctx.roles.iter().map(|r| r.as_ref().to_string()).collect()
+        };
+        binding.match_rule.matches(
+            &ctx.channel,
+            ctx.account_id.as_deref(),
+            &ctx.peer_id,
+            ctx.guild_id.as_deref(),
+            &roles,
+        )
     }
 }
 

@@ -10419,3 +10419,98 @@ fn resolve_scope_channel_leaves_legitimate_channels_untouched() {
         );
     }
 }
+
+// ─── channel_send mirror owner resolution (#4824 / #6022) ────────────────────
+
+/// Register a minimal Running agent under `name` and return its id.
+fn register_named_agent(kernel: &LibreFangKernel, name: &str) -> AgentId {
+    let id = AgentId::new();
+    let entry = AgentEntry {
+        id,
+        name: name.to_string(),
+        manifest: test_manifest(name, "test agent", vec![]),
+        state: AgentState::Running,
+        mode: AgentMode::default(),
+        created_at: chrono::Utc::now(),
+        last_active: chrono::Utc::now(),
+        parent: None,
+        children: vec![],
+        session_id: SessionId::new(),
+        tags: vec![],
+        identity: Default::default(),
+        onboarding_completed: false,
+        onboarding_completed_at: None,
+        source_toml_path: None,
+        is_hand: false,
+        ..Default::default()
+    };
+    kernel.agents.registry.register(entry).unwrap();
+    id
+}
+
+/// Regression for #4824 / #6022: the outbound `channel_send` mirror's owner
+/// must resolve through `[[bindings]]` first, so a `peer_id`-bound conversation
+/// mirrors to the bound agent and not the channel `default_agent`. When no
+/// binding matches, it must fall back to the channel `default_agent`.
+#[tokio::test(flavor = "multi_thread")]
+async fn resolve_channel_owner_prefers_binding_then_default_agent() {
+    use librefang_runtime::kernel_handle::ChannelSender;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    // Channel default_agent = "default-agent"; a peer_id binding routes one
+    // matrix room to "bound-agent".
+    let sidecar: librefang_types::config::SidecarChannelConfig =
+        serde_json::from_value(serde_json::json!({
+            "name": "my-matrix",
+            "command": "python3",
+            "channel_type": "matrix",
+            "default_agent": "default-agent",
+        }))
+        .expect("valid SidecarChannelConfig");
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        sidecar_channels: vec![sidecar],
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let default_id = register_named_agent(&kernel, "default-agent");
+    let bound_id = register_named_agent(&kernel, "bound-agent");
+
+    kernel.add_binding(librefang_types::config::AgentBinding {
+        agent: "bound-agent".to_string(),
+        match_rule: librefang_types::config::BindingMatchRule {
+            channel: Some("matrix".to_string()),
+            peer_id: Some("!room:server".to_string()),
+            ..Default::default()
+        },
+    });
+
+    // (1) A matching (channel, chat_id) resolves to the BOUND agent — not the
+    //     channel default. This is the #4824 regression assertion.
+    assert_eq!(
+        kernel.resolve_channel_owner("matrix", "!room:server"),
+        Some(bound_id),
+        "bound (channel, peer_id) must resolve to the bound agent, not default_agent"
+    );
+
+    // (2) A non-matching chat_id on the same channel falls back to the channel
+    //     default_agent.
+    assert_eq!(
+        kernel.resolve_channel_owner("matrix", "!other:server"),
+        Some(default_id),
+        "unbound chat must fall back to the channel default_agent"
+    );
+
+    // (3) A channel with neither a binding nor a default_agent resolves to None.
+    assert_eq!(
+        kernel.resolve_channel_owner("telegram", "whoever"),
+        None,
+        "no binding and no default_agent must resolve to None"
+    );
+}
