@@ -1,13 +1,13 @@
 {
   "active_phase": "phase-9-config-store-migration",
   "previous_phase": "phase-8-fixture-rebuilds",
-  "active_change": "C-002",
-  "last_updated": "2026-06-06T00:00:00Z",
+  "active_change": "C-004",
+  "last_updated": "2026-06-07T00:00:00Z",
   "last_updated_by": "kbd-execute",
   "backend": "native-tool",
-  "phase_progress": "Phase 9 executing: 1/9 changes DONE. C-001 (config_store migration v31) landed and verified (check + invariants test + embedded-DB apply test + brand audit, all green). Critical path C-001 -> C-002 -> C-004 -> C-005 -> C-003 -> C-006. C-007 attaches after C-004. C-008 (prod import) and C-009 (K8s ConfigMap revert) strictly last; C-009 hard-gated on C-008 verified in prod.",
+  "phase_progress": "Phase 9 executing: 2/9 changes DONE. C-001 (config_store migration v31) + C-002 (ConfigStore trait + SurrealConfigStore impl over Surreal<Any>, content_hash, value envelope) landed and verified. Critical path C-001 -> C-002 -> C-004 -> C-005 -> C-003 -> C-006. C-007 attaches after C-004. C-008 (prod import) and C-009 (K8s ConfigMap revert) strictly last; C-009 hard-gated on C-008 verified in prod.",
   "next_action": {
-    "command": "/kbd-execute C-002",
-    "description": "ConfigStore trait + SurrealDB impl (embedded+remote, one impl) — M, depends on C-001"
+    "command": "/kbd-execute C-004",
+    "description": "Kernel effective-config read path (bootstrap ⊕ DB); populate effective_mcp_servers from the config store — M, depends on C-002"
   }
 }

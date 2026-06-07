@@ -16,7 +16,7 @@ the repo's Build & Verify rules (no `cargo build`, no workspace-wide `cargo test
 | Change | Status | Verify gate |
 |---|---|---|
 | C-001 | **DONE** | `cargo check -p librefang-storage --lib` + migration-invariants test + embedded-DB apply test |
-| C-002 | PENDING | `cargo check -p librefang-storage --lib` + round-trip unit test |
+| C-002 | **DONE** | `cargo check -p librefang-storage --lib` + round-trip unit test + clippy + sqlite-only build |
 | C-003 | PENDING | `cargo test -p librefang-kernel config_store_sync` |
 | C-004 | PENDING | `cargo test -p librefang-kernel` (effective-config) |
 | C-005 | PENDING | `cargo test -p librefang-api` (TestServer) |
@@ -51,4 +51,32 @@ the repo's Build & Verify rules (no `cargo build`, no workspace-wide `cargo test
 
 **QA gate:** skipped (2 files modified, under the 3-file artifact-refiner threshold).
 
-**Next:** C-002 — `ConfigStore` trait + SurrealDB impl.
+## C-002 — ConfigStore trait + SurrealDB impl · DONE (2026-06-07)
+
+**Files:**
+- `crates/librefang-storage/src/config_store.rs` (new)
+- `crates/librefang-storage/src/lib.rs` (module + re-exports)
+
+**What landed:**
+- `ConfigSource` (Bootstrap/Runtime), `ConfigEntry`, async `ConfigStore` trait
+  (`get`/`list`/`upsert`/`delete`), `content_hash()` (canonical, object-key-order
+  independent SHA-256), and `SurrealConfigStore` — a single impl over
+  `Surreal<Any>` covering embedded AND remote.
+- Storage details: `value` enveloped as `{ "data": <v> }` to fit the v31
+  `option<object>` column while supporting arrays/scalars; deterministic record
+  id = SHA-256(key) for idempotent upsert/delete; `list()` is `ORDER BY key ASC`
+  (determinism #3298, prepares C-007).
+- `take()` returns `Vec<serde_json::Value>` then `serde_json::from_value`
+  (SurrealDB 3.0.5 requires `SurrealValue` on `take`, same workaround as the
+  migration runner).
+
+**Verification (all green):**
+- `cargo check -p librefang-storage --lib` → exit 0.
+- `cargo test -p librefang-storage --lib config_store` → 3 passed.
+- `cargo clippy -p librefang-storage --all-targets -- -D warnings` → clean.
+- `cargo check -p librefang-storage --lib --no-default-features --features sqlite-backend` → exit 0.
+- `enforce-branding.py --check` → clean.
+
+**QA gate:** skipped (2 files modified, under threshold).
+
+**Next:** C-004 — kernel effective-config read path (bootstrap ⊕ DB).
