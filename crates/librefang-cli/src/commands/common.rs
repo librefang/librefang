@@ -222,8 +222,7 @@ pub(crate) fn should_surface_status_error(
     status: reqwest::StatusCode,
     body: &serde_json::Value,
 ) -> bool {
-    status.is_server_error()
-        || (status.is_client_error() && !body_carries_usable_error(body))
+    status.is_server_error() || (status.is_client_error() && !body_carries_usable_error(body))
 }
 
 /// Helper: send a request to the daemon and parse the JSON body.
@@ -853,12 +852,16 @@ mod tests {
 
     #[test]
     fn usable_error_requires_non_empty_error_string() {
-        assert!(body_carries_usable_error(&json!({ "error": "validation failed" })));
+        assert!(body_carries_usable_error(
+            &json!({ "error": "validation failed" })
+        ));
         // Empty / whitespace-only error strings are not usable messages.
         assert!(!body_carries_usable_error(&json!({ "error": "" })));
         assert!(!body_carries_usable_error(&json!({ "error": "   " })));
         // Non-string `error` (object/array/number/null) is not a usable message.
-        assert!(!body_carries_usable_error(&json!({ "error": { "code": 1 } })));
+        assert!(!body_carries_usable_error(
+            &json!({ "error": { "code": 1 } })
+        ));
         assert!(!body_carries_usable_error(&json!({ "error": null })));
         // Object without an `error` key, and non-object bodies.
         assert!(!body_carries_usable_error(&json!({ "ok": true })));
