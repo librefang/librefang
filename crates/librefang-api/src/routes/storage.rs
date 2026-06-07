@@ -413,7 +413,10 @@ pub async fn post_storage_migrate(
 
         let result = tokio::task::spawn_blocking(move || {
             // Open SurrealDB synchronously from within the blocking task.
-            let pool = librefang_storage::SurrealConnectionPool::new();
+            // Shared process-global pool — embedded RocksDB holds one lock per
+            // path per process, so reuse the same cached transport the
+            // boot-time config-store overlay opened (see shared_pool docs).
+            let pool = librefang_storage::shared_pool();
             let rt = tokio::runtime::Handle::current();
             let session = rt
                 .block_on(pool.open(&storage_cfg))
@@ -641,7 +644,8 @@ pub async fn post_unlink_uar(
 async fn storage_row_counts(
     storage: &librefang_storage::StorageConfig,
 ) -> Result<StorageTableCounts, String> {
-    let pool = librefang_storage::SurrealConnectionPool::new();
+    // Shared process-global pool (see shared_pool docs — embedded lock reuse).
+    let pool = librefang_storage::shared_pool();
     let session = pool.open(storage).await.map_err(|e| format!("open: {e}"))?;
 
     async fn count_table(session: &librefang_storage::SurrealSession, table: &str) -> u64 {

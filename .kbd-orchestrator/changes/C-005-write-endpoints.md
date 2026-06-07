@@ -13,9 +13,15 @@ Validation unchanged. Out-of-scope writes keep their file/env path.
 - `crates/librefang-api/src/routes/providers.rs` (`persist_default_model`)
 - `crates/librefang-api/src/routes/config.rs` (`config_set` allowlisted subset)
 
+## ARCHITECTURE NOTE (revised per D9/D10, C-004)
+Writes go through `SurrealConfigStore` opened on the **shared pool**
+(`librefang_storage::shared_pool()`), not a fresh pool. After writing, push the
+new effective list into the kernel via `replace_effective_mcp_servers` (added in
+C-004) and trigger reconnect — instead of editing TOML + `reload_config`.
+
 ## Tasks
-- [ ] Each write → `ConfigStore.upsert(..., source="runtime", ...)`. Keep allowlist,
-  transport, duplicate-name validation.
+- [ ] Each write → `ConfigStore.upsert(..., source="runtime", ...)` via the
+  shared pool. Keep allowlist, transport, duplicate-name validation.
 - [ ] Preserve `config_write_lock` serialization (or DB transaction).
 - [ ] Secrets/auth/storage writes unchanged (file/env).
 - [ ] MANDATORY `#[tokio::test]` against `TestServer` (#3721): `POST /api/mcp/servers`

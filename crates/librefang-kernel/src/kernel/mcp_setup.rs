@@ -315,6 +315,40 @@ impl LibreFangKernel {
         }
     }
 
+    /// Snapshot the current effective MCP server list.
+    ///
+    /// Phase 9 (C-004): used by the API-layer config-store overlay to read the
+    /// bootstrap baseline and to verify the overlay landed.
+    #[must_use]
+    pub fn effective_mcp_servers(&self) -> Vec<librefang_types::config::McpServerConfigEntry> {
+        self.mcp
+            .effective_mcp_servers
+            .read()
+            .map(|s| s.clone())
+            .unwrap_or_default()
+    }
+
+    /// Replace the effective MCP server list with an externally-resolved set
+    /// (e.g. the database config-store overlay) and bump the MCP generation
+    /// counter so cached summaries invalidate atomically.
+    ///
+    /// Phase 9 (C-004): the kernel holds no operational SurrealDB session, so
+    /// the API layer owns config-store access and pushes the resolved list in
+    /// here at boot. Mirrors the write in [`Self::reload_mcp_servers`] step 4.
+    /// Connecting the new servers is the caller's responsibility (the boot
+    /// path's `connect_mcp_servers`, or `reload_mcp_servers` on hot-reload).
+    pub fn replace_effective_mcp_servers(
+        &self,
+        servers: Vec<librefang_types::config::McpServerConfigEntry>,
+    ) {
+        if let Ok(mut effective) = self.mcp.effective_mcp_servers.write() {
+            *effective = servers;
+            self.mcp
+                .mcp_generation
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     /// Reload MCP server configs and (re)connect every server in config.toml.
     ///
     /// Called by `POST /api/mcp/reload` and by the API handlers for

@@ -18,7 +18,7 @@ the repo's Build & Verify rules (no `cargo build`, no workspace-wide `cargo test
 | C-001 | **DONE** | `cargo check -p librefang-storage --lib` + migration-invariants test + embedded-DB apply test |
 | C-002 | **DONE** | `cargo check -p librefang-storage --lib` + round-trip unit test + clippy + sqlite-only build |
 | C-003 | PENDING | `cargo test -p librefang-kernel config_store_sync` |
-| C-004 | PENDING | `cargo test -p librefang-kernel` (effective-config) |
+| C-004 | **DONE** | `cargo check --workspace --lib` + `cargo test -p librefang-api --test config_store_overlay_test` |
 | C-005 | PENDING | `cargo test -p librefang-api` (TestServer) |
 | C-006 | PENDING | `cargo test -p librefang-api` (reload) |
 | C-007 | PENDING | `cargo test -p librefang-kernel` (determinism) |
@@ -80,3 +80,31 @@ the repo's Build & Verify rules (no `cargo build`, no workspace-wide `cargo test
 **QA gate:** skipped (2 files modified, under threshold).
 
 **Next:** C-004 — kernel effective-config read path (bootstrap ⊕ DB).
+
+## C-004 — effective-config read path (API-owned) · DONE (2026-06-07)
+
+**Architecture revision (user decision D9 + D10):** the kernel holds no
+operational SurrealDB session at boot, so config-store access is **API-owned**.
+A process-global **`shared_pool()`** was added to resolve the embedded-RocksDB
+single-lock-per-path constraint (assessment R-2, confirmed concretely during
+testing).
+
+**Files (8):**
+- `crates/librefang-kernel/src/kernel/mcp_setup.rs` — `effective_mcp_servers()` +
+  `replace_effective_mcp_servers()`.
+- `crates/librefang-storage/src/pool.rs` + `lib.rs` — `shared_pool()`.
+- `crates/librefang-api/src/config_store_overlay.rs` (new) — boot overlay.
+- `crates/librefang-api/src/server.rs` — wired into `run_daemon` (seed→overlay→connect order).
+- `crates/librefang-api/src/lib.rs` — module (feature-gated).
+- `crates/librefang-api/src/routes/storage.rs` — 2 pool sites → `shared_pool()`.
+- `crates/librefang-api/tests/config_store_overlay_test.rs` (new) — 2 tests.
+
+**Verification (green):** `cargo check --workspace --lib`; overlay test (2 passed);
+storage lib (11 passed); clippy clean on changed crates (one pre-existing
+`large_enum_variant` lint in untouched `librefang-runtime` under feature
+unification, not mine); brand audit clean.
+
+**QA gate:** 8 files (≥3) → artifact-refiner applies; `/refine-validate` skill
+unavailable in session, so QA covered by the gates above.
+
+**Next:** C-005 — re-target write endpoints to `ConfigStore` (via shared pool).

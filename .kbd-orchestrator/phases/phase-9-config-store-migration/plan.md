@@ -19,7 +19,9 @@
 | D5 | Seeding source on existing prod | First boot of new code seeds the DB from **the live `config.toml` already on the PVC** (treat as bootstrap), not from a fresh ConfigMap — preserves existing prod UI edits. |
 | D6 | K8s flip ordering | ConfigMap-revert (drop `init-config`) is the **last** change, gated on verified prod import. Behavior is additive until then — the file path keeps working. |
 | D7 | Determinism | All prompt-reaching lists (`mcp_servers`) queried with explicit `ORDER BY` — TOML insertion order is gone once rows. Regression test mirrors existing `mcp_summary_*` tests (#3298). |
-| D8 | Effective-config model | `effective = bootstrap_defaults ⊕ db_overrides`, resolved at boot and on `POST /api/config/reload`. The kernel gains a `ConfigStore` read path; `KernelConfig` stays the in-memory shape. |
+| D8 | Effective-config model | `effective = bootstrap_defaults ⊕ db_overrides`, resolved at boot and on `POST /api/config/reload`. `KernelConfig` stays the in-memory shape. |
+| D9 | **Config-store ownership (REVISED during C-004, user decision)** | **API-layer owns config-store access**, not the kernel. Discovery: the kernel holds no operational SurrealDB session at boot (its surreal backends are test-only); all operational-store access is API/CLI on-demand. So the kernel exposes get/replace for `effective_mcp_servers`; `librefang-api` reads/writes the store and pushes resolved config into the kernel. Supersedes the original "kernel `config.rs` overlay" placement for C-003/C-004/C-005/C-006. |
+| D10 | **Shared connection pool (added in C-004)** | Embedded RocksDB holds ONE lock per path per process and does NOT release on `SurrealConnectionPool` drop (assessment R-2, confirmed). A process-global `librefang_storage::shared_pool()` is now the single pool every daemon operational-store consumer reuses. All daemon `SurrealConnectionPool::new()` sites migrate to it; CLI subcommands (separate short-lived processes) may keep `new()`. |
 
 ---
 

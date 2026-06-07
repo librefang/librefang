@@ -261,6 +261,24 @@ impl std::fmt::Debug for SurrealConnectionPool {
     }
 }
 
+/// Process-global shared connection pool.
+///
+/// Embedded RocksDB allows only **one lock per directory per process**, and the
+/// lock is **not** released when an individual [`SurrealConnectionPool`] is
+/// dropped (the embedded engine keeps the connection alive process-globally).
+/// So every daemon-side consumer of the operational store — the boot-time
+/// config-store overlay, the `/api/storage/*` routes, and config writes — MUST
+/// share one pool, reusing the per-URL cached transport instead of opening a
+/// second connection that would deadlock on the lock. Remote backends benefit
+/// too (transport reuse). Short-lived separate processes (CLI subcommands) are
+/// free to keep using a fresh [`SurrealConnectionPool::new`] — there is no
+/// long-lived second holder there.
+#[must_use]
+pub fn shared_pool() -> &'static SurrealConnectionPool {
+    static POOL: std::sync::OnceLock<SurrealConnectionPool> = std::sync::OnceLock::new();
+    POOL.get_or_init(SurrealConnectionPool::new)
+}
+
 #[cfg(all(test, feature = "surreal-backend"))]
 mod tests {
     use super::*;

@@ -1,13 +1,13 @@
 {
   "active_phase": "phase-9-config-store-migration",
   "previous_phase": "phase-8-fixture-rebuilds",
-  "active_change": "C-004",
+  "active_change": "C-005",
   "last_updated": "2026-06-07T00:00:00Z",
   "last_updated_by": "kbd-execute",
   "backend": "native-tool",
-  "phase_progress": "Phase 9 executing: 2/9 changes DONE. C-001 (config_store migration v31) + C-002 (ConfigStore trait + SurrealConfigStore impl over Surreal<Any>, content_hash, value envelope) landed and verified. Critical path C-001 -> C-002 -> C-004 -> C-005 -> C-003 -> C-006. C-007 attaches after C-004. C-008 (prod import) and C-009 (K8s ConfigMap revert) strictly last; C-009 hard-gated on C-008 verified in prod.",
+  "phase_progress": "Phase 9 executing: 3/9 changes DONE. C-004 surfaced that the kernel holds no operational SurrealDB session at boot — user decided config store is API-owned (D9); added process-global shared_pool() for the embedded RocksDB single-lock constraint (D10, assessment R-2). C-004 overlay reads the store + pushes into kernel at boot (seed→overlay→connect). Revised seams: C-003 seed + C-005 writes + C-006 reload all live in librefang-api via shared pool. Next C-005 -> C-003 -> C-006 -> C-007 -> C-008 -> C-009 (C-009 hard-gated on C-008 prod verify).",
   "next_action": {
-    "command": "/kbd-execute C-004",
-    "description": "Kernel effective-config read path (bootstrap ⊕ DB); populate effective_mcp_servers from the config store — M, depends on C-002"
+    "command": "/kbd-execute C-005",
+    "description": "Re-target MCP/model/config-set write endpoints to ConfigStore via shared_pool; push effective list into kernel + reconnect — M, depends on C-002, C-004"
   }
 }

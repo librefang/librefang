@@ -48,5 +48,5 @@ pub use config::{
 pub use config_store::SurrealConfigStore;
 pub use config_store::{content_hash, ConfigEntry, ConfigSource, ConfigStore, CONFIG_STORE_TABLE};
 pub use error::StorageError;
-pub use pool::{SurrealConnectionPool, SurrealSession};
+pub use pool::{shared_pool, SurrealConnectionPool, SurrealSession};
 pub use provision::{provision_uar_namespace, ProvisionReceipt};
