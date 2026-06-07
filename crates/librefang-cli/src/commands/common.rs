@@ -195,6 +195,37 @@ pub(crate) fn daemon_client_with_api_key(api_key: Option<&str>) -> reqwest::bloc
     builder.build().expect("Failed to build HTTP client")
 }
 
+/// True when `body` is a JSON object carrying a non-empty `error` string —
+/// the structured-error shape some commands intentionally surface with a
+/// command-specific message (e.g. validation failures returned as 4xx).
+///
+/// When this holds for a 4xx response, `daemon_json` returns the body
+/// untouched so the caller's existing `body.get("error")` handler runs.
+/// When it does not (non-JSON body, JSON without `error`, or an empty/
+/// non-string `error`), a 4xx is treated as a fatal daemon error instead
+/// of slipping through as silent success (#6019).
+pub(crate) fn body_carries_usable_error(body: &serde_json::Value) -> bool {
+    body.get("error")
+        .and_then(|e| e.as_str())
+        .is_some_and(|s| !s.trim().is_empty())
+}
+
+/// Decide whether a daemon response `status` + parsed `body` should be
+/// surfaced as a fatal error by `daemon_json`. Extracted as a pure function
+/// so the 4xx/5xx classification is unit-testable without binding sockets.
+///
+/// - 5xx → always a daemon error (historical behaviour).
+/// - 4xx → a daemon error *unless* the body carries a usable `error` field,
+///   in which case the caller surfaces its own command-specific message.
+/// - 2xx/3xx → never surfaced here.
+pub(crate) fn should_surface_status_error(
+    status: reqwest::StatusCode,
+    body: &serde_json::Value,
+) -> bool {
+    status.is_server_error()
+        || (status.is_client_error() && !body_carries_usable_error(body))
+}
+
 /// Helper: send a request to the daemon and parse the JSON body.
 /// Exits with error on connection failure.
 pub(crate) fn daemon_json(
@@ -204,7 +235,7 @@ pub(crate) fn daemon_json(
         Ok(r) => {
             let status = r.status();
             let body = r.json::<serde_json::Value>().unwrap_or_default();
-            if status.is_server_error() {
+            if should_surface_status_error(status, &body) {
                 ui::error_with_fix(
                     &i18n::t_args("error-daemon-returned", &[("status", &status.to_string())]),
                     &i18n::t("error-daemon-returned-fix"),
@@ -812,4 +843,85 @@ pub(crate) fn resolve_agent_id(base: &str, name_or_id: &str) -> String {
         }
     }
     name_or_id.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reqwest::StatusCode;
+    use serde_json::json;
+
+    #[test]
+    fn usable_error_requires_non_empty_error_string() {
+        assert!(body_carries_usable_error(&json!({ "error": "validation failed" })));
+        // Empty / whitespace-only error strings are not usable messages.
+        assert!(!body_carries_usable_error(&json!({ "error": "" })));
+        assert!(!body_carries_usable_error(&json!({ "error": "   " })));
+        // Non-string `error` (object/array/number/null) is not a usable message.
+        assert!(!body_carries_usable_error(&json!({ "error": { "code": 1 } })));
+        assert!(!body_carries_usable_error(&json!({ "error": null })));
+        // Object without an `error` key, and non-object bodies.
+        assert!(!body_carries_usable_error(&json!({ "ok": true })));
+        assert!(!body_carries_usable_error(&json!("plain string")));
+        // Null is what `unwrap_or_default()` yields for a non-JSON body.
+        assert!(!body_carries_usable_error(&serde_json::Value::Null));
+    }
+
+    #[test]
+    fn server_error_is_always_surfaced() {
+        // 5xx is a daemon error regardless of body shape (historical behaviour).
+        let null = serde_json::Value::Null;
+        assert!(should_surface_status_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &null
+        ));
+        assert!(should_surface_status_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &json!({ "error": "boom" })
+        ));
+    }
+
+    #[test]
+    fn client_error_without_usable_body_is_surfaced() {
+        // #6019 / #6017: a 405 (PUT-only route POSTed) with a non-JSON body
+        // deserializes to Null; previously this slipped through as success.
+        let null = serde_json::Value::Null;
+        assert!(should_surface_status_error(
+            StatusCode::METHOD_NOT_ALLOWED,
+            &null
+        ));
+        // 404/400 with an `error`-less JSON object are equally surfaced.
+        assert!(should_surface_status_error(
+            StatusCode::NOT_FOUND,
+            &json!({ "message": "not found" })
+        ));
+        assert!(should_surface_status_error(
+            StatusCode::BAD_REQUEST,
+            &json!({ "error": "" })
+        ));
+    }
+
+    #[test]
+    fn client_error_with_usable_body_is_left_for_caller() {
+        // A 4xx that carries a real `error` key is returned for the caller's
+        // own command-specific handler — not hard-errored here.
+        assert!(!should_surface_status_error(
+            StatusCode::BAD_REQUEST,
+            &json!({ "error": "schedule expression is invalid" })
+        ));
+        assert!(!should_surface_status_error(
+            StatusCode::CONFLICT,
+            &json!({ "error": "already exists" })
+        ));
+    }
+
+    #[test]
+    fn success_status_is_never_surfaced() {
+        let null = serde_json::Value::Null;
+        assert!(!should_surface_status_error(StatusCode::OK, &null));
+        assert!(!should_surface_status_error(
+            StatusCode::CREATED,
+            &json!({ "error": "ignored on 2xx" })
+        ));
+    }
 }
