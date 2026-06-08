@@ -102,13 +102,14 @@ pub(crate) fn cmd_audit_explore_surreal(config: Option<PathBuf>, limit: u32, jso
     }
 }
 
-/// Core of `config-import` (real mode): import both in-scope keys from the given
-/// config values as `source = runtime`, reusing the daemon's own seed/merge.
-/// Idempotent and **non-destructive** — a pre-existing `runtime` (UI) row is
-/// never overwritten. Writing `runtime` (not `bootstrap`) is the cutover-safety
-/// property (C-009): after the K8s ConfigMap revert, the next boot-seed keeps
-/// these values (`RuntimeProtected`) instead of overwriting them with the empty
-/// ConfigMap baseline. Returns `(mcp_outcome, default_model_outcome)`.
+/// Core of `config-import` (real mode): ensure both in-scope keys are
+/// `source = runtime`, **preserving the store's current value** (or seeding
+/// config.toml's when absent). Idempotent and value-preserving. Promoting an
+/// existing `bootstrap` row (e.g. one the daemon's boot-seed wrote) to `runtime`
+/// is the cutover-safety property (C-009b): after the K8s ConfigMap revert the
+/// next boot-seed reports `RuntimeProtected` and keeps it, instead of
+/// `BootstrapUpdated` overwriting it with the empty ConfigMap baseline.
+/// Returns `(mcp_outcome, default_model_outcome)`.
 #[cfg(feature = "surreal-backend")]
 pub(crate) async fn import_config_values(
     storage_cfg: &librefang_storage::StorageConfig,
@@ -116,8 +117,8 @@ pub(crate) async fn import_config_values(
     default_model: &librefang_types::config::DefaultModelConfig,
 ) -> Result<
     (
-        librefang_api::config_store_overlay::SeedOutcome,
-        librefang_api::config_store_overlay::SeedOutcome,
+        librefang_api::config_store_overlay::ImportOutcome,
+        librefang_api::config_store_overlay::ImportOutcome,
     ),
     String,
 > {
@@ -129,25 +130,27 @@ pub(crate) async fn import_config_values(
 
 /// `librefang storage config-import [--from <path>] [--dry-run]`
 ///
-/// One-time, idempotent, **non-destructive** import of the in-scope `config.toml`
-/// values (`mcp_servers`, `default_model`) into the database config store as
-/// `source = runtime` (phase 9 / C-008 + C-009). Run this on the production PVC
-/// BEFORE reverting the mounted `config.toml` to a read-only Kubernetes
-/// ConfigMap, so pre-existing values survive the cutover (assessment R-1).
+/// One-time, idempotent, **value-preserving** import that ensures the in-scope
+/// config-store rows (`mcp_servers`, `default_model`) are `source = runtime`
+/// (phase 9 / C-008 + C-009 + C-009b). Run this on the production PVC BEFORE
+/// reverting the mounted `config.toml` to a read-only Kubernetes ConfigMap, so
+/// pre-existing values survive the cutover (assessment R-1).
 ///
-/// Importing as `runtime` (not `bootstrap`) is the load-bearing safety property:
-/// after the ConfigMap revert, the next boot reads the empty ConfigMap baseline
-/// as bootstrap, and a `runtime` row is reported `RuntimeProtected` — kept —
-/// rather than `BootstrapUpdated` — overwritten with the empty baseline. Reuses
-/// the daemon's own seed/merge so behaviour can't drift; an existing `runtime`
-/// row is never overwritten; re-running converges (idempotent).
+/// For each key it **preserves the store's current value** (the post-deploy
+/// source of truth, which already equals config.toml for a boot-seeded row) and
+/// re-stamps it `runtime`; if no row exists it seeds config.toml's value as
+/// `runtime`. This is the load-bearing safety property: a `runtime` row is kept
+/// (`RuntimeProtected`) by the next boot-seed against the empty ConfigMap
+/// baseline, whereas a `bootstrap` row would be `BootstrapUpdated` — overwritten
+/// with empty. Crucially this also **promotes a row the daemon already boot-seeded
+/// as `bootstrap`** (the real deployed state), which a value-equal seed would skip.
 #[cfg(feature = "surreal-backend")]
 pub(crate) fn cmd_storage_config_import(
     config: Option<PathBuf>,
     from: Option<PathBuf>,
     dry_run: bool,
 ) {
-    use librefang_api::config_store_overlay::{SeedOutcome, DEFAULT_MODEL_KEY, MCP_SERVERS_KEY};
+    use librefang_api::config_store_overlay::{ImportOutcome, DEFAULT_MODEL_KEY, MCP_SERVERS_KEY};
     use librefang_storage::{shared_pool, ConfigStore, StorageConfig, SurrealConfigStore};
 
     // Source config.toml: --from overrides the otherwise-resolved config path.
@@ -170,13 +173,13 @@ pub(crate) fn cmd_storage_config_import(
         std::process::exit(1);
     }
 
-    let describe = |o: SeedOutcome| -> &'static str {
+    let describe = |o: ImportOutcome| -> &'static str {
         match o {
-            SeedOutcome::Seeded => "imported (new runtime row)",
-            SeedOutcome::BootstrapUpdated => "updated existing bootstrap row",
-            SeedOutcome::Unchanged => "already up to date (no change)",
-            SeedOutcome::RuntimeProtected => "kept existing UI edit (runtime) — NOT overwritten",
-            SeedOutcome::RevisionOverride => "overrode runtime row via bootstrap revision",
+            ImportOutcome::Seeded => "imported config.toml value (new runtime row)",
+            ImportOutcome::Promoted => {
+                "promoted existing bootstrap row to runtime (value preserved)"
+            }
+            ImportOutcome::AlreadyRuntime => "already runtime (no change)",
         }
     };
 
@@ -658,7 +661,8 @@ pub(crate) fn cmd_storage_unlink_uar(
 mod tests {
     use super::import_config_values;
     use librefang_api::config_store_overlay::{
-        seed_default_model, seed_mcp_servers, write_default_model, write_mcp_servers, SeedOutcome,
+        seed_default_model, seed_mcp_servers, write_default_model, write_mcp_servers,
+        ImportOutcome, SeedOutcome,
     };
     use librefang_storage::{
         shared_pool, ConfigSource, ConfigStore, StorageConfig, SurrealConfigStore,
@@ -668,6 +672,17 @@ mod tests {
         let session = shared_pool().open(storage).await.unwrap();
         let store = SurrealConfigStore::open(&session).await.unwrap();
         store.get(key).await.unwrap().unwrap().source
+    }
+
+    async fn mcp_names(storage: &StorageConfig) -> Vec<String> {
+        let session = shared_pool().open(storage).await.unwrap();
+        let store = SurrealConfigStore::open(&session).await.unwrap();
+        let row = store.get("mcp_servers").await.unwrap().unwrap();
+        serde_json::from_value::<Vec<librefang_types::config::McpServerConfigEntry>>(row.value)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect()
     }
 
     fn rt() -> tokio::runtime::Runtime {
@@ -699,12 +714,12 @@ mod tests {
         let storage = StorageConfig::embedded_default(tmp.path().join("op"));
         let rt = rt();
 
-        // Fresh PVC import seeds both keys — as RUNTIME (cutover safety).
+        // Fresh PVC import (empty store) seeds both keys — as RUNTIME.
         let (m, d) = rt
             .block_on(import_config_values(&storage, &[mcp("fs")], &dm("openai")))
             .unwrap();
-        assert_eq!(m, SeedOutcome::Seeded);
-        assert_eq!(d, SeedOutcome::Seeded);
+        assert_eq!(m, ImportOutcome::Seeded);
+        assert_eq!(d, ImportOutcome::Seeded);
         assert_eq!(
             rt.block_on(stored_source(&storage, "mcp_servers")),
             ConfigSource::Runtime,
@@ -715,12 +730,12 @@ mod tests {
             ConfigSource::Runtime
         );
 
-        // Re-running converges (idempotent).
+        // Re-running is idempotent (rows already runtime).
         let (m, d) = rt
             .block_on(import_config_values(&storage, &[mcp("fs")], &dm("openai")))
             .unwrap();
-        assert_eq!(m, SeedOutcome::Unchanged);
-        assert_eq!(d, SeedOutcome::Unchanged);
+        assert_eq!(m, ImportOutcome::AlreadyRuntime);
+        assert_eq!(d, ImportOutcome::AlreadyRuntime);
 
         // A later UI edit (runtime) must NOT be clobbered by a re-import, even
         // when the on-disk config.toml differs from the UI value.
@@ -741,13 +756,74 @@ mod tests {
             .unwrap();
         assert_eq!(
             m,
-            SeedOutcome::RuntimeProtected,
+            ImportOutcome::AlreadyRuntime,
             "UI mcp_servers must survive re-import"
         );
         assert_eq!(
             d,
-            SeedOutcome::RuntimeProtected,
+            ImportOutcome::AlreadyRuntime,
             "UI default_model must survive re-import"
+        );
+        assert_eq!(
+            rt.block_on(mcp_names(&storage)),
+            vec!["ui"],
+            "re-import must preserve the UI value, not overwrite with config.toml"
+        );
+    }
+
+    /// C-009b — the REAL deployed state: the daemon booted the new code first, so
+    /// its boot-seed wrote prod's config.toml values as `source=bootstrap`. A
+    /// value-equal seed would no-op and leave them bootstrap (→ wiped on revert).
+    /// The import must PROMOTE them to runtime (value preserved) so they survive.
+    #[test]
+    fn import_promotes_boot_seeded_bootstrap_rows_to_runtime() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = StorageConfig::embedded_default(tmp.path().join("op"));
+        let rt = rt();
+
+        // Simulate the daemon's boot-seed of the existing config.toml (bootstrap).
+        let prod = [mcp("prod-a"), mcp("prod-b")];
+        assert_eq!(
+            rt.block_on(seed_mcp_servers(&storage, &prod, 0)).unwrap(),
+            SeedOutcome::Seeded
+        );
+        assert_eq!(
+            rt.block_on(seed_default_model(&storage, &dm("anthropic"), 0))
+                .unwrap(),
+            SeedOutcome::Seeded
+        );
+        assert_eq!(
+            rt.block_on(stored_source(&storage, "mcp_servers")),
+            ConfigSource::Bootstrap
+        );
+
+        // Import reads the SAME config.toml values (value-equal) — must still
+        // PROMOTE the bootstrap rows to runtime, not skip them.
+        let (m, d) = rt
+            .block_on(import_config_values(&storage, &prod, &dm("anthropic")))
+            .unwrap();
+        assert_eq!(m, ImportOutcome::Promoted);
+        assert_eq!(d, ImportOutcome::Promoted);
+        assert_eq!(
+            rt.block_on(stored_source(&storage, "mcp_servers")),
+            ConfigSource::Runtime
+        );
+        assert_eq!(
+            rt.block_on(mcp_names(&storage)),
+            vec!["prod-a", "prod-b"],
+            "value preserved"
+        );
+
+        // Now the post-revert boot-seed against the EMPTY ConfigMap baseline
+        // keeps them (RuntimeProtected), instead of wiping them.
+        assert_eq!(
+            rt.block_on(seed_mcp_servers(&storage, &[], 0)).unwrap(),
+            SeedOutcome::RuntimeProtected
+        );
+        assert_eq!(
+            rt.block_on(mcp_names(&storage)),
+            vec!["prod-a", "prod-b"],
+            "survived revert"
         );
     }
 
