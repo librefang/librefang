@@ -1,13 +1,13 @@
 {
   "active_phase": "phase-9-config-store-migration",
   "previous_phase": "phase-8-fixture-rebuilds",
-  "active_change": "C-008",
+  "active_change": "C-009",
   "last_updated": "2026-06-08T00:00:00Z",
   "last_updated_by": "kbd-execute",
   "backend": "native-tool",
-  "phase_progress": "Phase 9 executing: 8/11 changes DONE. C-005b landed: provider-default (default_model) now persists to the store via the override-RwLock pattern (write/overlay/seed); MockKernelBuilder isolates test storage to a tempdir; full-router HTTP CRUD test added. Generic config_set deferred to C-005c (needs a kernel config-override merge layer). MCP + provider-default config is now fully DB-authoritative and read-only-config.toml-safe. Next C-008 (one-time prod config.toml -> DB import CLI + HUMAN cluster verify) -> C-009 (K8s ConfigMap revert, HARD-GATED on C-008 prod verify). C-005c is a future follow-up.",
+  "phase_progress": "Phase 9 executing: 9/11 changes DONE (C-008 code done; HUMAN cluster verify pending). C-008 added `librefang storage config-import` (reuses the daemon boot-seed: idempotent, non-destructive; --dry-run; refuses while daemon up) + a passing idempotent/non-destructive unit test; incidentally fixed a pre-existing stale bin-test call that blocked the cli test target. C-009 (revert K8s mounted config.toml to a read-only ConfigMap) is HARD-GATED: the human must run the C-008 prod import + confirm MCP servers/provider-default resolve from the DB before C-009 lands. C-005c (generic config_set) remains a future follow-up.",
   "next_action": {
-    "command": "/kbd-execute C-008",
-    "description": "Add `librefang storage config-import` CLI to seed the existing prod config.toml into the DB store; HUMAN runs + verifies it on the cluster before C-009 — M"
+    "command": "HUMAN runs C-008 prod import + verify, THEN /kbd-execute C-009",
+    "description": "C-008 code is merge-ready; the cluster import+verify is human-only (daemon-down on prod PVC). C-009 reverts the K8s overlay's config.toml mount to a read-only ConfigMap once the import is confirmed — HARD-GATED on that verify to avoid prod data loss (R-1)."
   }
 }

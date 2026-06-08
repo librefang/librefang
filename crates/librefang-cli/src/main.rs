@@ -633,6 +633,10 @@ fn main() {
             StorageCommands::Explore { limit, json } => {
                 cmd_audit_explore_surreal(cli.config, limit, json)
             }
+            #[cfg(feature = "surreal-backend")]
+            StorageCommands::ConfigImport { from, dry_run } => {
+                cmd_storage_config_import(cli.config, from, dry_run)
+            }
             #[cfg(feature = "sqlite-backend")]
             StorageCommands::Migrate { from, to, dry_run } => {
                 if from != StorageMigrateSource::Sqlite || to != StorageMigrateTarget::Surreal {
@@ -914,7 +918,7 @@ mod tests {
 
     #[test]
     fn test_detached_daemon_args_include_config_and_spawned_flag() {
-        let args = detached_daemon_args(Some(Path::new("/tmp/librefang.toml")), None);
+        let args = detached_daemon_args(Some(Path::new("/tmp/librefang.toml")));
         assert_eq!(
             args,
             vec![

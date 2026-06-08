@@ -24,7 +24,7 @@ the repo's Build & Verify rules (no `cargo build`, no workspace-wide `cargo test
 | C-005c | PENDING | generic config_set (needs kernel config-override merge layer) |
 | C-006 | **DONE** | `cargo test -p librefang-api --test config_store_overlay_test` (8 passed) |
 | C-007 | **DONE** | `cargo test -p librefang-storage --lib config_store` (4 passed) |
-| C-008 | PENDING | HUMAN cluster verify |
+| C-008 | **CODE DONE** | `cargo test -p librefang-cli --features surreal-backend config_import` (1) · HUMAN cluster verify pending |
 | C-009 | PENDING | HUMAN deploy, gated on C-008 |
 
 ## C-001 — config_store SurrealDB migration · DONE (2026-06-06)
@@ -216,5 +216,30 @@ CWD-relative). New full-router `mcp_http_crud_test` (POST→GET→DELETE→GET).
 
 ---
 
-**Core migration + provider-default COMPLETE.** Remaining: C-005c (deferred config_set +
+## C-008 — prod config.toml → DB import CLI · CODE DONE (2026-06-08)
+
+**What landed:** `librefang storage config-import [--from <path>] [--dry-run]`
+(`cmd_storage_config_import` + testable `import_config_values`). Reuses the
+daemon boot-seed (`seed_mcp_servers`/`seed_default_model`) — idempotent +
+non-destructive (runtime/UI rows reported `RuntimeProtected`, never clobbered);
+refuses while the daemon holds the embedded lock. Incidentally fixed a
+pre-existing stale `detached_daemon_args(.., None)` bin-test call that blocked
+the cli test target.
+
+**Files (4):** `commands/storage.rs`, `cli.rs`, `main.rs` (+stale-test fix).
+
+**Verification (code, green):** `cargo test -p librefang-cli --features
+surreal-backend config_import` (1 passed); `cargo check`/`clippy -p
+librefang-cli --features surreal-backend`; brand clean.
+
+**HUMAN cluster verify PENDING** — daemon-down import on the prod PVC, then
+confirm MCP servers/provider-default resolve from the DB (runbook in the change
+doc). **C-009 is hard-gated on this.**
+
+**Next:** HUMAN runs the import + verify → then `/kbd-execute C-009`.
+
+---
+
+**Core migration + provider-default + import CLI COMPLETE.** Remaining: C-009
+(ConfigMap revert, human-gated on C-008 verify); C-005c (deferred config_set +
 HTTP route tests), C-008 (prod import), C-009 (K8s revert, gated on C-008).
