@@ -113,6 +113,14 @@ pub struct AutonomousConfig {
     pub heartbeat_keep_recent: Option<usize>,
     /// Channel to send heartbeat status to (e.g., "telegram", "discord").
     pub heartbeat_channel: Option<String>,
+    /// After this many consecutive *block-only* iterations (every tool result
+    /// a soft loop-guard block, no success, no hard error, no assistant prose)
+    /// the agent loop forces one tools-stripped completion so the model emits
+    /// a real reply instead of looping silently to `max_iterations` (#5979).
+    /// `Some(0)` or `None` disables the behaviour; defaults to
+    /// `Some(DEFAULT_BLOCK_STALL_DEGRADE_AFTER)`.
+    #[serde(default = "AutonomousConfig::default_block_stall_degrade_after")]
+    pub block_stall_degrade_after: Option<u32>,
 }
 
 impl AutonomousConfig {
@@ -121,6 +129,16 @@ impl AutonomousConfig {
     /// which re-exports this value so the runtime's own fallback path
     /// stays in lockstep with the manifest default.
     pub const DEFAULT_MAX_ITERATIONS: u32 = 50;
+
+    /// Default number of consecutive block-only iterations tolerated before
+    /// the loop degrades to one tools-stripped completion (#5979). Two means
+    /// the model gets one chance to self-correct after the first block stall;
+    /// the second triggers the graceful reply.
+    pub const DEFAULT_BLOCK_STALL_DEGRADE_AFTER: u32 = 2;
+
+    fn default_block_stall_degrade_after() -> Option<u32> {
+        Some(Self::DEFAULT_BLOCK_STALL_DEGRADE_AFTER)
+    }
 }
 
 impl Default for AutonomousConfig {
@@ -133,6 +151,7 @@ impl Default for AutonomousConfig {
             heartbeat_timeout_secs: None,
             heartbeat_keep_recent: None,
             heartbeat_channel: None,
+            block_stall_degrade_after: Some(Self::DEFAULT_BLOCK_STALL_DEGRADE_AFTER),
         }
     }
 }

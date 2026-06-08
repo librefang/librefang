@@ -526,6 +526,7 @@ fn test_handle_mid_turn_signal_mixed_flush_resets_consecutive_all_failed() {
         ToolResultOutcomeSummary {
             hard_error_count: 1,
             success_count: 1,
+            soft_error_count: 0,
         }
     );
     assert_eq!(session.messages.len(), 3);
@@ -677,6 +678,7 @@ fn test_handle_mid_turn_signal_approval_resolved_updates_waiting_result_and_rese
         ToolResultOutcomeSummary {
             hard_error_count: 1,
             success_count: 1,
+            soft_error_count: 0,
         }
     );
     // After commit + approval_resolution + inject:

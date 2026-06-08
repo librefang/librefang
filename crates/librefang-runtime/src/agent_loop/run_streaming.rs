@@ -351,6 +351,19 @@ pub async fn run_agent_loop_streaming(
         .or(opts.max_iterations)
         .unwrap_or(MAX_ITERATIONS);
 
+    // Block-stall degrade threshold (#5979). Resolution: a present autonomous
+    // block uses its (possibly-disabled) value; a non-autonomous agent gets the
+    // default-on behaviour. `Some(0)`/`None` disables. `.map` keeps the inner
+    // Option so an explicit `None` in the manifest stays disabled rather than
+    // being overwritten by the default.
+    let block_stall_degrade_after: Option<u32> = manifest
+        .autonomous
+        .as_ref()
+        .map(|a| a.block_stall_degrade_after)
+        .unwrap_or(Some(
+            librefang_types::agent::AutonomousConfig::DEFAULT_BLOCK_STALL_DEGRADE_AFTER,
+        ));
+
     // Initialize loop guard — scale circuit breaker for autonomous agents
     let loop_guard_config = {
         let mut cfg = LoopGuardConfig::default();
@@ -408,6 +421,13 @@ pub async fn run_agent_loop_streaming(
     let mut hallucination_retried = false;
     let mut action_nudge_retried = false;
     let mut consecutive_all_failed: u32 = 0;
+    // Consecutive block-only iterations (#5979): see `block_stall_degrade_after`.
+    let mut consecutive_block_only: u32 = 0;
+    // When set, the NEXT completion is issued with an empty tools vec so the
+    // model is forced to emit prose (a real reply) instead of re-issuing the
+    // call the loop guard keeps blocking. Reset to false right after the
+    // request is built — it governs exactly one completion.
+    let mut force_tools_stripped = false;
     // Seed with a pre-loop estimate so that should_compress fires on the very
     // first iteration even for single-turn conversations.  Without this, the
     // check is always `0 < threshold`, which is always false.
@@ -696,7 +716,15 @@ pub async fn run_agent_loop_streaming(
         let request = CompletionRequest {
             model: api_model,
             messages: std::sync::Arc::new(request_messages),
-            tools: tools_cache.get(available_tools, &session_loaded_tools),
+            // Block-stall degrade (#5979): strip tools for this single
+            // completion so `tool_choice` resolves to None and the model must
+            // answer in prose. The flag is reset below so only one turn is
+            // affected.
+            tools: if force_tools_stripped {
+                std::sync::Arc::new(Vec::new())
+            } else {
+                tools_cache.get(available_tools, &session_loaded_tools)
+            },
             max_tokens: manifest.model.max_tokens,
             temperature: manifest.model.temperature,
             // Clone from pre-built snapshot (same rationale as non-streaming loop).
@@ -717,6 +745,9 @@ pub async fn run_agent_loop_streaming(
             step_id: Some(iteration.to_string()),
             reasoning_echo_policy,
         };
+        // The stripped-tools request has been built; restore tools for any
+        // subsequent iteration (the degrade is a single forced prose turn).
+        force_tools_stripped = false;
 
         // Notify phase: on first iteration emit Streaming; on subsequent
         // iterations (after tool execution) emit Thinking so the UI shows
@@ -1120,6 +1151,10 @@ pub async fn run_agent_loop_streaming(
                 // Buffer is capped at ACCUMULATED_TEXT_MAX_BYTES — see
                 // push_accumulated_text.
                 let intermediate_text = response.text();
+                // Whether this tool-use turn carried any assistant prose. A
+                // block stall only counts as *silent* when the model produced
+                // no text the user could see (#5979).
+                let assistant_text_empty = intermediate_text.trim().is_empty();
                 if !intermediate_text.trim().is_empty() {
                     push_accumulated_text(&mut accumulated_text, intermediate_text.trim());
                 }
@@ -1454,6 +1489,36 @@ pub async fn run_agent_loop_streaming(
                         iterations: consecutive_all_failed,
                         error_count: hard_error_count,
                     });
+                }
+
+                // Block-stall graceful degrade (#5979). A block-only iteration
+                // is one whose every tool result is a soft loop-guard block
+                // (no success, no hard error) and which carried no assistant
+                // prose. Left alone, the model re-issues the blocked call every
+                // iteration until `max_iterations`, which the channel bridge
+                // sanitizes into user-visible SILENCE. After
+                // `block_stall_degrade_after` such iterations, force one
+                // tools-stripped completion so the model is compelled to emit a
+                // real reply (openai.rs sets tool_choice=None on empty tools).
+                // The natural EndTurn path then finalizes it normally —
+                // preserving the tool_use/tool_result pairing invariant.
+                if iteration_outcomes.is_block_only() && assistant_text_empty {
+                    consecutive_block_only += 1;
+                } else {
+                    consecutive_block_only = 0;
+                }
+                if let Some(threshold) = block_stall_degrade_after {
+                    if threshold > 0 && consecutive_block_only >= threshold && !force_tools_stripped
+                    {
+                        warn!(
+                            agent = %manifest.name,
+                            consecutive_block_only,
+                            threshold,
+                            "Persistent loop-guard block stall — forcing one tools-stripped completion so the user gets a reply (#5979)"
+                        );
+                        force_tools_stripped = true;
+                        consecutive_block_only = 0;
+                    }
                 }
             }
             StopReason::MaxTokens => {
