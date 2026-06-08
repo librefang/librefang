@@ -3,7 +3,9 @@
 **Phase:** phase-9-config-store-migration
 **Reflected:** 2026-06-08
 **Backend:** native-tool
-**Outcome PR:** GQAdonis/librefang **#74** — MERGED to `main` (2026-06-08), 10 commits (C-001…C-008)
+**Outcome PRs:** GQAdonis/librefang **#74** (C-001…C-008, 10 commits) + **#75**
+(C-009 + a C-008 cutover-safety fix) — both MERGED to `main` (2026-06-08).
+**Revised after C-009** to record the data-loss bug found+fixed during the cutover.
 
 ## Goal
 
@@ -23,8 +25,8 @@ read-only from a Kubernetes ConfigMap — eliminating the
 | G-5 | Write endpoints → DB store | C-005 (MCP), C-005b (provider-default) | **MET** (MCP + provider); `config_set` → **C-005c** |
 | G-6 | Reload re-resolves from store | C-006 | **MET** |
 | G-7 | Determinism `ORDER BY` (#3298) | C-007 | **MET** |
-| G-9 | One-time prod `config.toml` → DB import | C-008 | **CODE MET** · prod run = HUMAN pending |
-| G-8 | K8s ConfigMap revert (read-only) | C-009 | **NOT STARTED** — hard-gated on G-9 prod verify |
+| G-9 | One-time prod `config.toml` → DB import | C-008 (+C-009 fix) | **CODE MET** · prod run = HUMAN pending |
+| G-8 | K8s ConfigMap revert (read-only) | C-009 | **CODE MET** (PR #75) · apply = HUMAN, gated on G-9 |
 
 **Assessment design FLAWs (all corrected in the build):**
 - FLAW 1 (mtime unreliable in K8s) → C-003 compares **content hashes, never mtime**.
@@ -33,7 +35,22 @@ read-only from a Kubernetes ConfigMap — eliminating the
 - FLAW 3 ("all settings" impossible/unsafe) → scope held to MCP + provider-default;
   secrets/auth/storage stay in file+env; generic `config_set` consciously deferred.
 
-**Goal achievement: ~83% of gaps MET (7/9 fully; G-9 code-complete/prod-pending; G-8 intentionally sequenced last).** The headline objective — UI config writes survive a read-only `config.toml` for the high-value paths (MCP servers + provider default) — is **shipped and merged**. The remainder is sequenced human/ops work, not unmet engineering.
+**Goal achievement: all 9 gaps CODE-MET and merged (#74 + #75).** The headline
+objective — UI config writes survive a read-only `config.toml` for the high-value
+paths (MCP servers + provider default) — is shipped. The only remaining work is
+the **human prod cutover** (run C-008 import, then `kubectl apply` the C-009
+revert, in that order) and the deferred **C-005c** (generic `config_set`).
+
+### Late finding (C-009): a data-loss bug in the merged C-008
+Planning the cutover surfaced that C-008's import wrote prod's live values as
+`source=bootstrap`. Because the prod ConfigMap baseline is empty for these keys,
+the first post-revert boot-seed would have taken `BootstrapUpdated` and
+**overwritten prod's MCP/provider config with empty** (R-1 realized). Fixed in
+#75: the import now writes `source=runtime` (→ `RuntimeProtected` on boot-seed),
+with a `imported_values_survive_post_cutover_boot_seed` regression test.
+**Lesson:** trace the *first boot after* a destructive ops change end-to-end
+before shipping the change that triggers it — the bug was invisible until the two
+halves (import provenance + revert) were considered together.
 
 ## Delivered Changes
 
@@ -92,10 +109,14 @@ None recorded (no refiner run). No clippy/brand violations survived any change.
 2. **`api_integration_test` doesn't compile on the base** (`sync_registry`
    3-vs-4 arg). Pre-existing; not in scope. Worth a separate fix.
 3. **C-005c not done:** `POST /api/config/set` still writes `config.toml` →
-   still breaks under a read-only mount for those (lower-value) paths. Needs a
-   kernel config-override merge layer (see Next Phase).
-4. **`.kbd-orchestrator` reflection/merge-tracking edits** made after PR #74
-   merged are uncommitted local resume-state; fold into the C-009 PR.
+   it will fail under the C-009 read-only mount for those (lower-value) paths
+   until a kernel config-override merge layer lands (see Next Phase). Documented
+   for operators in the C-009 change doc + PR #75.
+4. **Generic-vs-specific test-name filters:** the C-009 cutover-survival test
+   (`imported_values_survive_*`) was silently skipped by a `config_import`
+   name-filter on first run — caught only by re-running the whole test module.
+   Filter on the module path, not a substring, when adding differently-named
+   tests to an existing module.
 
 ## Lessons Captured
 
