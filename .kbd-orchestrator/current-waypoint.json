@@ -1,13 +1,13 @@
 {
   "active_phase": "phase-9-config-store-migration",
   "previous_phase": "phase-8-fixture-rebuilds",
-  "active_change": "C-005",
-  "last_updated": "2026-06-07T00:00:00Z",
+  "active_change": "C-003",
+  "last_updated": "2026-06-08T00:00:00Z",
   "last_updated_by": "kbd-execute",
   "backend": "native-tool",
-  "phase_progress": "Phase 9 executing: 3/9 changes DONE. C-004 surfaced that the kernel holds no operational SurrealDB session at boot — user decided config store is API-owned (D9); added process-global shared_pool() for the embedded RocksDB single-lock constraint (D10, assessment R-2). C-004 overlay reads the store + pushes into kernel at boot (seed→overlay→connect). Revised seams: C-003 seed + C-005 writes + C-006 reload all live in librefang-api via shared pool. Next C-005 -> C-003 -> C-006 -> C-007 -> C-008 -> C-009 (C-009 hard-gated on C-008 prod verify).",
+  "phase_progress": "Phase 9 executing: 4/10 changes DONE. C-005 (MCP write path) landed: handlers + extension install/uninstall write the DB store (source=runtime) via apply_mcp_mutation; kernel replace_mcp_servers syncs both config.mcp_servers + effective so existing read sites stay correct; legacy config.toml helpers gated to sqlite-only fallback. Provider-default + config_set writes deferred to C-005b (user chose MCP-only scope). Next C-003 (seed) -> C-006 (reload) -> C-007 (determinism) -> C-005b -> C-008 -> C-009 (C-009 hard-gated on C-008 prod verify).",
   "next_action": {
-    "command": "/kbd-execute C-005",
-    "description": "Re-target MCP/model/config-set write endpoints to ConfigStore via shared_pool; push effective list into kernel + reconnect — M, depends on C-002, C-004"
+    "command": "/kbd-execute C-003",
+    "description": "Seed-once + content-hash/revision/provenance merge in librefang-api: write bootstrap config.mcp_servers into the store as source=bootstrap on first boot, before the overlay — M, depends on C-002"
   }
 }

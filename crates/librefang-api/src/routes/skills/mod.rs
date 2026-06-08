@@ -4,6 +4,8 @@ pub(crate) use super::agents;
 pub(crate) use super::resolve_lang;
 // `super::channels::FieldType` import removed alongside
 // the channel-config write helpers that consumed it.
+// Only the legacy config.toml MCP-write fallback (sqlite-only builds) uses this.
+#[cfg(not(feature = "surreal-backend"))]
 use super::config::json_to_toml_value;
 use super::AppState;
 use super::RequestLanguage;
@@ -732,6 +734,11 @@ pub(crate) struct PatchMcpTaintRequest {
 ///
 /// If an entry with the same name already exists it is replaced; otherwise a
 /// new entry is appended.
+///
+/// Legacy fallback: with `surreal-backend` (the default), MCP writes go to the
+/// database config store instead (phase 9 / C-005), so this is only compiled
+/// for sqlite-only builds.
+#[cfg(not(feature = "surreal-backend"))]
 fn upsert_mcp_server_config(
     config_path: &std::path::Path,
     entry: &librefang_types::config::McpServerConfigEntry,
@@ -774,6 +781,9 @@ fn upsert_mcp_server_config(
 }
 
 /// Remove an MCP server entry from config.toml's `[[mcp_servers]]` array by name.
+///
+/// Legacy fallback (sqlite-only builds); see [`upsert_mcp_server_config`].
+#[cfg(not(feature = "surreal-backend"))]
 fn remove_mcp_server_config(config_path: &std::path::Path, name: &str) -> Result<(), String> {
     validate_static_file_path(config_path, "config.toml")?;
     let mut table: toml::value::Table = if config_path.exists() {
@@ -1243,6 +1253,7 @@ mod tests {
     /// hit the catch-all in `json_to_toml_value` and got stringified. After
     /// the fix, the on-disk file must round-trip back into a real
     /// `McpServerConfigEntry` via `toml::from_str`.
+    #[cfg(not(feature = "surreal-backend"))]
     #[test]
     fn upsert_mcp_server_writes_inline_table_not_stringified_json() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1303,6 +1314,7 @@ mod tests {
     /// A second upsert for the same name must replace the entry in-place,
     /// not produce a second row — this is how the user ended up with three
     /// stale duplicate blobs in the bug report.
+    #[cfg(not(feature = "surreal-backend"))]
     #[test]
     fn upsert_mcp_server_replaces_existing_entry_with_same_name() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1364,6 +1376,7 @@ mod tests {
     /// and re-serialises. This test confirms the round-trip preserves each
     /// server's independent taint_scanning field so the two-server scenario
     /// reported in #5799 (one disabled, one still enabled) survives a write.
+    #[cfg(not(feature = "surreal-backend"))]
     #[test]
     fn upsert_mcp_server_taint_scanning_false_does_not_affect_other_servers() {
         let tmp = tempfile::tempdir().unwrap();

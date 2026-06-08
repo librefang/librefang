@@ -19,7 +19,8 @@ the repo's Build & Verify rules (no `cargo build`, no workspace-wide `cargo test
 | C-002 | **DONE** | `cargo check -p librefang-storage --lib` + round-trip unit test + clippy + sqlite-only build |
 | C-003 | PENDING | `cargo test -p librefang-kernel config_store_sync` |
 | C-004 | **DONE** | `cargo check --workspace --lib` + `cargo test -p librefang-api --test config_store_overlay_test` |
-| C-005 | PENDING | `cargo test -p librefang-api` (TestServer) |
+| C-005 | **DONE** | `cargo test -p librefang-api --test config_store_overlay_test` + `cargo check --workspace --lib` |
+| C-005b | PENDING | provider-default + config_set + route-level HTTP TestServer |
 | C-006 | PENDING | `cargo test -p librefang-api` (reload) |
 | C-007 | PENDING | `cargo test -p librefang-kernel` (determinism) |
 | C-008 | PENDING | HUMAN cluster verify |
@@ -108,3 +109,35 @@ unification, not mine); brand audit clean.
 unavailable in session, so QA covered by the gates above.
 
 **Next:** C-005 — re-target write endpoints to `ConfigStore` (via shared pool).
+
+## C-005 — MCP write path → config store · DONE (2026-06-08)
+
+**Scope (user decision):** MCP write path only; provider-default + `config_set`
+deferred to **C-005b**.
+
+**What landed:**
+- kernel: `replace_mcp_servers()` now syncs BOTH `config.mcp_servers` (via
+  `ArcSwap::rcu`) and the effective list → existing read sites (dup-checks, GET
+  list, uninstall lookup) stay correct unchanged; added to the `KernelApi` trait.
+- api: `write_mcp_servers()` helper + feature-gated `apply_mcp_mutation()`
+  (surreal → store write + sync + bg reconnect; sqlite → legacy config.toml +
+  `reload_config`). All 4 `mcp.rs` handlers + both `extensions.rs` install/
+  uninstall sites converted. Legacy `upsert/remove_mcp_server_config` helpers +
+  3 tests + `json_to_toml_value` import gated `not(surreal-backend)`.
+
+**Files (6 src + 1 test):** `mcp_setup.rs`, `kernel_api.rs`,
+`config_store_overlay.rs`, `routes/skills/{mcp,extensions,mod}.rs`,
+`tests/config_store_overlay_test.rs`.
+
+**Verification (green):** `config_store_overlay_test` 3 passed (incl.
+`runtime_write_persists_and_survives_restart`); `cargo check --workspace --lib`;
+clippy (changed crates); brand audit.
+
+**Deferred (tracked as C-005b):** provider-default + `config_set` write paths;
+route-level HTTP TestServer coverage (needs a temp-storage `start_full_router`
+variant — the existing harness uses CWD-relative storage). Sqlite-only api build
+is pre-existing-broken (`open_trace_store` cfg mismatch, untouched), so the
+fallback path is gated correct-by-construction but not full-build-verified.
+
+**Next:** C-003 — seed-once (write bootstrap `config.mcp_servers` into the store
+as `source=bootstrap` on first boot, before the overlay).

@@ -1,14 +1,37 @@
-//! Phase 9 (C-004): the database config-store overlay replaces the kernel's
-//! effective MCP server list at boot.
+//! Phase 9: the database config-store overlay (C-004) replaces the kernel's
+//! effective MCP server list at boot, and runtime writes (C-005) persist to the
+//! store and survive a restart.
 #![cfg(feature = "surreal-backend")]
 
-use librefang_api::config_store_overlay::overlay_mcp_servers;
+use librefang_api::config_store_overlay::{
+    overlay_mcp_servers, write_mcp_servers, MCP_SERVERS_KEY,
+};
 use librefang_kernel::LibreFangKernel;
 use librefang_storage::migrations::{apply_pending, OPERATIONAL_MIGRATIONS};
 use librefang_storage::{
     content_hash, shared_pool, ConfigSource, ConfigStore, StorageConfig, SurrealConfigStore,
 };
 use librefang_types::config::{DefaultModelConfig, KernelConfig};
+
+/// Build a minimal KernelConfig pointing at an isolated embedded store.
+fn test_config(tmp: &std::path::Path, storage: StorageConfig) -> KernelConfig {
+    KernelConfig {
+        home_dir: tmp.to_path_buf(),
+        data_dir: tmp.join("data"),
+        storage,
+        mcp_servers: Vec::new(),
+        default_model: DefaultModelConfig {
+            provider: "ollama".to_string(),
+            model: "test-model".to_string(),
+            api_key_env: "OLLAMA_API_KEY".to_string(),
+            base_url: None,
+            message_timeout_secs: 300,
+            extra_params: std::collections::BTreeMap::new(),
+            cli_profile_dirs: Vec::new(),
+        },
+        ..KernelConfig::default()
+    }
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn overlay_replaces_effective_mcp_servers_from_db() {
@@ -105,4 +128,63 @@ async fn overlay_is_noop_when_store_has_no_mcp_servers() {
     let effective = kernel.effective_mcp_servers();
     assert_eq!(effective.len(), 1, "bootstrap list must be preserved");
     assert_eq!(effective[0].name, "boot-server");
+}
+
+// ── C-005: runtime writes persist to the store and survive a restart ────────
+
+/// A runtime MCP write (the path POST/PUT/DELETE /api/mcp/servers takes) lands
+/// in the config store with `source = runtime`, syncs BOTH kernel views
+/// (`config.mcp_servers` + the effective list), and is re-applied on the next
+/// boot's overlay — i.e. it survives a restart without touching config.toml.
+#[tokio::test(flavor = "multi_thread")]
+async fn runtime_write_persists_and_survives_restart() {
+    let tmp = tempfile::tempdir().unwrap();
+    let storage = StorageConfig::embedded_default(tmp.path().join("operational"));
+
+    // Boot a kernel with NO bootstrap servers.
+    let kernel =
+        LibreFangKernel::boot_with_config(test_config(tmp.path(), storage.clone())).expect("boots");
+    assert!(kernel.effective_mcp_servers().is_empty());
+
+    // Simulate the handler write path: persist the new full list to the store
+    // (source = runtime), then sync it into the kernel.
+    let entry: librefang_types::config::McpServerConfigEntry =
+        serde_json::from_value(serde_json::json!({ "name": "ui-server", "transport": null }))
+            .unwrap();
+    let servers = vec![entry];
+    write_mcp_servers(&storage, &servers, ConfigSource::Runtime)
+        .await
+        .expect("write");
+    kernel.replace_mcp_servers(servers);
+
+    // Both kernel views reflect the write (so dup-checks / GET list stay correct).
+    assert_eq!(kernel.effective_mcp_servers().len(), 1);
+    assert_eq!(kernel.config_ref().mcp_servers.len(), 1);
+    assert_eq!(kernel.config_ref().mcp_servers[0].name, "ui-server");
+
+    // The store row is tagged runtime (so a later bootstrap re-sync won't clobber it).
+    {
+        let session = shared_pool().open(&storage).await.expect("open");
+        let store = SurrealConfigStore::open(&session).await.expect("store");
+        let row = store
+            .get(MCP_SERVERS_KEY)
+            .await
+            .expect("read")
+            .expect("present");
+        assert_eq!(row.source, ConfigSource::Runtime);
+    }
+
+    // Restart: a fresh kernel at the same storage boots empty, then the overlay
+    // re-applies the persisted write — no config.toml involved.
+    drop(kernel);
+    let kernel2 =
+        LibreFangKernel::boot_with_config(test_config(tmp.path(), storage.clone())).expect("boots");
+    assert!(
+        kernel2.effective_mcp_servers().is_empty(),
+        "fresh boot is empty"
+    );
+    overlay_mcp_servers(&kernel2).await;
+    let after = kernel2.effective_mcp_servers();
+    assert_eq!(after.len(), 1, "runtime write survives restart");
+    assert_eq!(after[0].name, "ui-server");
 }

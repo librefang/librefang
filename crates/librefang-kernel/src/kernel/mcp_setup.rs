@@ -328,19 +328,28 @@ impl LibreFangKernel {
             .unwrap_or_default()
     }
 
-    /// Replace the effective MCP server list with an externally-resolved set
-    /// (e.g. the database config-store overlay) and bump the MCP generation
-    /// counter so cached summaries invalidate atomically.
+    /// Replace the MCP server list with an externally-resolved set (the
+    /// database config-store overlay at boot, or a UI/API write) and bump the
+    /// MCP generation counter so cached summaries invalidate atomically.
     ///
-    /// Phase 9 (C-004): the kernel holds no operational SurrealDB session, so
-    /// the API layer owns config-store access and pushes the resolved list in
-    /// here at boot. Mirrors the write in [`Self::reload_mcp_servers`] step 4.
+    /// Phase 9 (C-004/C-005): the kernel holds no operational SurrealDB session,
+    /// so the API layer owns config-store access and pushes the resolved list in
+    /// here. Updates BOTH in-memory views so every reader stays consistent:
+    /// - `config.mcp_servers` (the `ArcSwap<KernelConfig>` field read by the
+    ///   API's duplicate-name checks, the GET list, and uninstall lookups), and
+    /// - `effective_mcp_servers` (read by connection logic).
+    ///
     /// Connecting the new servers is the caller's responsibility (the boot
-    /// path's `connect_mcp_servers`, or `reload_mcp_servers` on hot-reload).
-    pub fn replace_effective_mcp_servers(
-        &self,
-        servers: Vec<librefang_types::config::McpServerConfigEntry>,
-    ) {
+    /// path's `connect_mcp_servers`, or an explicit reconnect after a write).
+    pub fn replace_mcp_servers(&self, servers: Vec<librefang_types::config::McpServerConfigEntry>) {
+        // Keep config.mcp_servers in sync so reads that still consult the
+        // ArcSwap config (duplicate checks, list, uninstall lookup) reflect
+        // the DB-authoritative list without each call site changing.
+        self.config.rcu(|current| {
+            let mut next = (**current).clone();
+            next.mcp_servers = servers.clone();
+            std::sync::Arc::new(next)
+        });
         if let Ok(mut effective) = self.mcp.effective_mcp_servers.write() {
             *effective = servers;
             self.mcp

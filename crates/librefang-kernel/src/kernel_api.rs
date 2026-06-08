@@ -392,6 +392,9 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     async fn retry_mcp_connection(self: Arc<Self>, server_name: &str);
     async fn reload_mcp_servers(self: Arc<Self>) -> Result<usize, String>;
     async fn reconnect_mcp_server(self: Arc<Self>, id: &str) -> Result<usize, String>;
+    /// Replace the MCP server list (DB config-store overlay or UI/API write),
+    /// keeping `config.mcp_servers` and the effective list in sync. Phase 9.
+    fn replace_mcp_servers(&self, servers: Vec<librefang_types::config::McpServerConfigEntry>);
 
     // ====================================================================
     // Triggers / workflows / events
@@ -1283,6 +1286,9 @@ impl KernelApi for LibreFangKernel {
         &self,
     ) -> &std::sync::RwLock<Vec<librefang_types::config::McpServerConfigEntry>> {
         <Self as crate::McpSubsystemApi>::effective_servers_ref(self)
+    }
+    fn replace_mcp_servers(&self, servers: Vec<librefang_types::config::McpServerConfigEntry>) {
+        Self::replace_mcp_servers(self, servers)
     }
     fn embedding(
         &self,

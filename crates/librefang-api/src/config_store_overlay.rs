@@ -17,11 +17,50 @@
 //! (UI / API edits) lands in C-005.
 
 use librefang_kernel::LibreFangKernel;
-use librefang_storage::{shared_pool, ConfigStore, SurrealConfigStore};
+use librefang_storage::migrations::{apply_pending, OPERATIONAL_MIGRATIONS};
+use librefang_storage::{
+    content_hash, shared_pool, ConfigSource, ConfigStore, StorageConfig, SurrealConfigStore,
+};
 use librefang_types::config::McpServerConfigEntry;
 
 /// Config-store key under which the MCP server list is stored.
 pub const MCP_SERVERS_KEY: &str = "mcp_servers";
+
+/// Persist the full MCP server list to the config store under
+/// [`MCP_SERVERS_KEY`], stamping `source` (C-005: UI/API writes use
+/// [`ConfigSource::Runtime`]).
+///
+/// Opens via the shared pool and applies pending migrations first so the call
+/// is self-contained — it works whether or not the boot-time overlay has run
+/// (e.g. in tests that build the router directly without `run_daemon`).
+///
+/// # Errors
+/// Returns a scrubbed message on any storage failure (open / migrate / write).
+pub async fn write_mcp_servers(
+    storage_cfg: &StorageConfig,
+    servers: &[McpServerConfigEntry],
+    source: ConfigSource,
+) -> Result<(), String> {
+    let session = shared_pool()
+        .open(storage_cfg)
+        .await
+        .map_err(|e| format!("open storage session: {e}"))?;
+    apply_pending(session.client(), OPERATIONAL_MIGRATIONS)
+        .await
+        .map_err(|e| format!("apply migrations: {e}"))?;
+    let store = SurrealConfigStore::open(&session)
+        .await
+        .map_err(|e| format!("open config store: {e}"))?;
+    let value = serde_json::to_value(servers).map_err(|e| e.to_string())?;
+    let hash = content_hash(&value);
+    // revision is only meaningful for bootstrap precedence (C-003); runtime
+    // rows are never overwritten by a bootstrap re-sync on a mere hash diff.
+    store
+        .upsert(MCP_SERVERS_KEY, value, source, &hash, 0)
+        .await
+        .map_err(|e| format!("write config store: {e}"))?;
+    Ok(())
+}
 
 /// Overlay the database config store's MCP server list onto the kernel's
 /// effective list at boot. Best-effort: any failure (SurrealDB unreachable,
@@ -75,7 +114,7 @@ pub async fn overlay_mcp_servers(kernel: &LibreFangKernel) {
         Ok(Some(entry)) => match serde_json::from_value::<Vec<McpServerConfigEntry>>(entry.value) {
             Ok(servers) => {
                 let count = servers.len();
-                kernel.replace_effective_mcp_servers(servers);
+                kernel.replace_mcp_servers(servers);
                 tracing::info!(
                     count,
                     source = entry.source.as_str(),
