@@ -17,7 +17,7 @@ the repo's Build & Verify rules (no `cargo build`, no workspace-wide `cargo test
 |---|---|---|
 | C-001 | **DONE** | `cargo check -p librefang-storage --lib` + migration-invariants test + embedded-DB apply test |
 | C-002 | **DONE** | `cargo check -p librefang-storage --lib` + round-trip unit test + clippy + sqlite-only build |
-| C-003 | PENDING | `cargo test -p librefang-kernel config_store_sync` |
+| C-003 | **DONE** | `cargo test -p librefang-api --test config_store_overlay_test` (7 passed) |
 | C-004 | **DONE** | `cargo check --workspace --lib` + `cargo test -p librefang-api --test config_store_overlay_test` |
 | C-005 | **DONE** | `cargo test -p librefang-api --test config_store_overlay_test` + `cargo check --workspace --lib` |
 | C-005b | PENDING | provider-default + config_set + route-level HTTP TestServer |
@@ -141,3 +141,20 @@ fallback path is gated correct-by-construction but not full-build-verified.
 
 **Next:** C-003 — seed-once (write bootstrap `config.mcp_servers` into the store
 as `source=bootstrap` on first boot, before the overlay).
+
+## C-003 — seed-once + provenance merge · DONE (2026-06-08)
+
+**What landed:** `seed_mcp_servers` + `SeedOutcome` + `bootstrap_revision()` +
+`seed_config_store(kernel)` in `config_store_overlay.rs`; wired into `run_daemon`
+before the overlay (seed → overlay → connect). Content-hash + provenance merge,
+**never mtime**; a `runtime` row is only overridden when the operator advances
+`BOSSFANG_CONFIG_BOOTSTRAP_REVISION` past the stored revision.
+
+**Files (3):** `config_store_overlay.rs`, `server.rs`,
+`tests/config_store_overlay_test.rs`.
+
+**Verification (green):** `config_store_overlay_test` 7 passed (4 new seed
+tests: fresh/unchanged, bootstrap-update, runtime-protected, revision-override);
+clippy `-p librefang-api` clean; brand audit clean.
+
+**Next:** C-006 — reload path re-resolves `effective_mcp_servers` from the store.

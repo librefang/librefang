@@ -188,3 +188,102 @@ async fn runtime_write_persists_and_survives_restart() {
     assert_eq!(after.len(), 1, "runtime write survives restart");
     assert_eq!(after[0].name, "ui-server");
 }
+
+// ── C-003: seed-once + provenance/content-hash merge ────────────────────────
+
+use librefang_api::config_store_overlay::{seed_mcp_servers, SeedOutcome};
+
+fn entry(name: &str) -> librefang_types::config::McpServerConfigEntry {
+    serde_json::from_value(serde_json::json!({ "name": name, "transport": null })).unwrap()
+}
+
+async fn stored_servers(storage: &StorageConfig) -> (Vec<String>, ConfigSource, i64) {
+    let session = shared_pool().open(storage).await.expect("open");
+    let store = SurrealConfigStore::open(&session).await.expect("store");
+    let row = store
+        .get("mcp_servers")
+        .await
+        .expect("read")
+        .expect("present");
+    let names =
+        serde_json::from_value::<Vec<librefang_types::config::McpServerConfigEntry>>(row.value)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+    (names, row.source, row.revision)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn seed_writes_bootstrap_on_fresh_store() {
+    let tmp = tempfile::tempdir().unwrap();
+    let storage = StorageConfig::embedded_default(tmp.path().join("operational"));
+
+    let outcome = seed_mcp_servers(&storage, &[entry("a")], 0).await.unwrap();
+    assert_eq!(outcome, SeedOutcome::Seeded);
+
+    let (names, source, rev) = stored_servers(&storage).await;
+    assert_eq!(names, vec!["a"]);
+    assert_eq!(source, ConfigSource::Bootstrap);
+    assert_eq!(rev, 0);
+
+    // Re-seeding identical bootstrap is a no-op.
+    let again = seed_mcp_servers(&storage, &[entry("a")], 0).await.unwrap();
+    assert_eq!(again, SeedOutcome::Unchanged);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn seed_updates_changed_bootstrap_row() {
+    let tmp = tempfile::tempdir().unwrap();
+    let storage = StorageConfig::embedded_default(tmp.path().join("operational"));
+
+    seed_mcp_servers(&storage, &[entry("a")], 0).await.unwrap();
+    // config.toml changed (bootstrap row), no UI edit in between → update.
+    let outcome = seed_mcp_servers(&storage, &[entry("a"), entry("b")], 0)
+        .await
+        .unwrap();
+    assert_eq!(outcome, SeedOutcome::BootstrapUpdated);
+    let (names, source, _) = stored_servers(&storage).await;
+    assert_eq!(names, vec!["a", "b"]);
+    assert_eq!(source, ConfigSource::Bootstrap);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn seed_never_clobbers_runtime_row_without_revision_bump() {
+    let tmp = tempfile::tempdir().unwrap();
+    let storage = StorageConfig::embedded_default(tmp.path().join("operational"));
+
+    // A UI write lands first (source = runtime).
+    write_mcp_servers(&storage, &[entry("ui")], ConfigSource::Runtime)
+        .await
+        .unwrap();
+
+    // Operator edits config.toml but does NOT bump the revision → UI wins.
+    let outcome = seed_mcp_servers(&storage, &[entry("boot")], 0)
+        .await
+        .unwrap();
+    assert_eq!(outcome, SeedOutcome::RuntimeProtected);
+    let (names, source, _) = stored_servers(&storage).await;
+    assert_eq!(names, vec!["ui"], "UI edit must be preserved");
+    assert_eq!(source, ConfigSource::Runtime);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn seed_revision_bump_overrides_runtime_row() {
+    let tmp = tempfile::tempdir().unwrap();
+    let storage = StorageConfig::embedded_default(tmp.path().join("operational"));
+
+    write_mcp_servers(&storage, &[entry("ui")], ConfigSource::Runtime)
+        .await
+        .unwrap();
+
+    // Operator bumps the bootstrap revision past the stored row (0) → override.
+    let outcome = seed_mcp_servers(&storage, &[entry("boot")], 1)
+        .await
+        .unwrap();
+    assert_eq!(outcome, SeedOutcome::RevisionOverride);
+    let (names, source, rev) = stored_servers(&storage).await;
+    assert_eq!(names, vec!["boot"], "operator-forced bootstrap wins");
+    assert_eq!(source, ConfigSource::Bootstrap);
+    assert_eq!(rev, 1);
+}

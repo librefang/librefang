@@ -1,13 +1,13 @@
 {
   "active_phase": "phase-9-config-store-migration",
   "previous_phase": "phase-8-fixture-rebuilds",
-  "active_change": "C-003",
+  "active_change": "C-006",
   "last_updated": "2026-06-08T00:00:00Z",
   "last_updated_by": "kbd-execute",
   "backend": "native-tool",
-  "phase_progress": "Phase 9 executing: 4/10 changes DONE. C-005 (MCP write path) landed: handlers + extension install/uninstall write the DB store (source=runtime) via apply_mcp_mutation; kernel replace_mcp_servers syncs both config.mcp_servers + effective so existing read sites stay correct; legacy config.toml helpers gated to sqlite-only fallback. Provider-default + config_set writes deferred to C-005b (user chose MCP-only scope). Next C-003 (seed) -> C-006 (reload) -> C-007 (determinism) -> C-005b -> C-008 -> C-009 (C-009 hard-gated on C-008 prod verify).",
+  "phase_progress": "Phase 9 executing: 5/10 changes DONE. C-003 (seed-once) landed: seed_config_store runs before the overlay in run_daemon (seed → overlay → connect); content-hash + provenance merge, never mtime; only BOSSFANG_CONFIG_BOOTSTRAP_REVISION bump can override a runtime row. Boot pipeline now persists bootstrap into the store and never clobbers UI edits. Next C-006 (reload reads store) -> C-007 (determinism test) -> C-005b (provider/config_set + HTTP route tests) -> C-008 (prod import) -> C-009 (K8s ConfigMap revert, hard-gated on C-008).",
   "next_action": {
-    "command": "/kbd-execute C-003",
-    "description": "Seed-once + content-hash/revision/provenance merge in librefang-api: write bootstrap config.mcp_servers into the store as source=bootstrap on first boot, before the overlay — M, depends on C-002"
+    "command": "/kbd-execute C-006",
+    "description": "Reload path re-runs the API-layer seed+overlay so POST /api/config/reload re-resolves effective_mcp_servers from the store — M, depends on C-004"
   }
 }

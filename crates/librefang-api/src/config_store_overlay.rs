@@ -12,9 +12,11 @@
 //! never holding the embedded RocksDB lock, matching the existing on-demand
 //! pattern (assessment R-2).
 //!
-//! This is the read half. The seed-once + provenance merge that populates the
-//! store from `config.toml` bootstrap defaults lands in C-003; the write half
-//! (UI / API edits) lands in C-005.
+//! Boot order in [`crate::server::run_daemon`] is **seed → overlay → connect**:
+//! [`seed_config_store`] (C-003) populates the store from `config.toml`
+//! bootstrap defaults, [`overlay_mcp_servers`] (C-004) reads the store back into
+//! the kernel, then the MCP-connect task runs. The write half (UI / API edits)
+//! is C-005 ([`write_mcp_servers`]).
 
 use librefang_kernel::LibreFangKernel;
 use librefang_storage::migrations::{apply_pending, OPERATIONAL_MIGRATIONS};
@@ -25,6 +27,141 @@ use librefang_types::config::McpServerConfigEntry;
 
 /// Config-store key under which the MCP server list is stored.
 pub const MCP_SERVERS_KEY: &str = "mcp_servers";
+
+/// Env var holding the operator-controlled bootstrap revision. Bumping it is the
+/// ONLY way a `config.toml` change can override a `runtime` (UI-written) store
+/// row — a content change alone never clobbers UI edits (assessment FLAW 2).
+pub const BOOTSTRAP_REVISION_ENV: &str = "BOSSFANG_CONFIG_BOOTSTRAP_REVISION";
+
+/// Outcome of a [`seed_mcp_servers`] call. Returned for logging and tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeedOutcome {
+    /// No row existed; the bootstrap list was seeded.
+    Seeded,
+    /// A `bootstrap` row existed and its content changed; it was updated.
+    BootstrapUpdated,
+    /// A `runtime` row existed but the bootstrap revision was bumped past it;
+    /// the operator-forced bootstrap value overrode the UI edit.
+    RevisionOverride,
+    /// A `runtime` row existed and the bootstrap revision did NOT advance; the
+    /// UI edit was left intact (the common steady-state after a UI change).
+    RuntimeProtected,
+    /// The stored content already matches the bootstrap value; nothing written.
+    Unchanged,
+}
+
+impl SeedOutcome {
+    fn wrote(self) -> bool {
+        matches!(
+            self,
+            Self::Seeded | Self::BootstrapUpdated | Self::RevisionOverride
+        )
+    }
+}
+
+/// Read the operator-controlled bootstrap revision from the environment
+/// ([`BOOTSTRAP_REVISION_ENV`]); defaults to 0 when unset or unparseable.
+#[must_use]
+pub fn bootstrap_revision() -> i64 {
+    std::env::var(BOOTSTRAP_REVISION_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// Seed / merge the bootstrap MCP server list into the config store
+/// (phase 9 / C-003).
+///
+/// Provenance- and content-hash-aware; **never reads a file mtime** (a
+/// ConfigMap-projected file's mtime changes on every kubelet sync even when the
+/// content is identical — assessment FLAW 1). Per-key, not whole-file
+/// (FLAW 2): a `runtime` (UI-written) row is only overridden when the operator
+/// explicitly advances `bootstrap_revision` past the stored revision.
+///
+/// Decision table given the on-disk bootstrap value vs the stored row:
+/// - no row                      → seed (`source = bootstrap`)
+/// - same content hash           → unchanged (no write)
+/// - changed, stored = bootstrap → update (bootstrap owns its own value)
+/// - changed, stored = runtime, `revision > stored.revision` → override
+/// - changed, stored = runtime, otherwise                    → protected (keep UI)
+///
+/// # Errors
+/// Returns a scrubbed message on any storage failure.
+pub async fn seed_mcp_servers(
+    storage_cfg: &StorageConfig,
+    bootstrap: &[McpServerConfigEntry],
+    bootstrap_revision: i64,
+) -> Result<SeedOutcome, String> {
+    let session = shared_pool()
+        .open(storage_cfg)
+        .await
+        .map_err(|e| format!("open storage session: {e}"))?;
+    apply_pending(session.client(), OPERATIONAL_MIGRATIONS)
+        .await
+        .map_err(|e| format!("apply migrations: {e}"))?;
+    let store = SurrealConfigStore::open(&session)
+        .await
+        .map_err(|e| format!("open config store: {e}"))?;
+
+    let value = serde_json::to_value(bootstrap).map_err(|e| e.to_string())?;
+    let hash = content_hash(&value);
+
+    let existing = store
+        .get(MCP_SERVERS_KEY)
+        .await
+        .map_err(|e| format!("read config store: {e}"))?;
+
+    let outcome = match existing {
+        None => SeedOutcome::Seeded,
+        Some(row) if row.content_hash == hash => SeedOutcome::Unchanged,
+        Some(row) => match row.source {
+            ConfigSource::Bootstrap => SeedOutcome::BootstrapUpdated,
+            ConfigSource::Runtime => {
+                if bootstrap_revision > row.revision {
+                    SeedOutcome::RevisionOverride
+                } else {
+                    SeedOutcome::RuntimeProtected
+                }
+            }
+        },
+    };
+
+    if outcome.wrote() {
+        store
+            .upsert(
+                MCP_SERVERS_KEY,
+                value,
+                ConfigSource::Bootstrap,
+                &hash,
+                bootstrap_revision,
+            )
+            .await
+            .map_err(|e| format!("write config store: {e}"))?;
+    }
+
+    Ok(outcome)
+}
+
+/// Seed the config store from the kernel's bootstrap config at daemon boot.
+/// Best-effort: failures log and leave the store untouched (never block boot).
+/// Runs BEFORE [`overlay_mcp_servers`] so the overlay reads a populated store.
+pub async fn seed_config_store(kernel: &LibreFangKernel) {
+    let storage_cfg = kernel.config_ref().storage.clone();
+    let bootstrap = kernel.config_ref().mcp_servers.clone();
+    let revision = bootstrap_revision();
+    match seed_mcp_servers(&storage_cfg, &bootstrap, revision).await {
+        Ok(outcome) => tracing::info!(
+            ?outcome,
+            bootstrap_revision = revision,
+            count = bootstrap.len(),
+            "config-store seed: bootstrap MCP servers reconciled"
+        ),
+        Err(e) => tracing::warn!(
+            error = %e,
+            "config-store seed failed; leaving store untouched"
+        ),
+    }
+}
 
 /// Persist the full MCP server list to the config store under
 /// [`MCP_SERVERS_KEY`], stamping `source` (C-005: UI/API writes use
