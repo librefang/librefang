@@ -1,13 +1,13 @@
 {
-  "active_phase": "phase-8-fixture-rebuilds",
-  "previous_phase": "phase-7-wasi-plugin-host",
-  "active_change": null,
-  "last_updated": "2026-05-29T00:00:00Z",
-  "last_updated_by": "kbd-plan",
+  "active_phase": "phase-9-config-store-migration",
+  "previous_phase": "phase-8-fixture-rebuilds",
+  "active_change": "C-009",
+  "last_updated": "2026-06-08T00:00:00Z",
+  "last_updated_by": "kbd-execute",
   "backend": "native-tool",
-  "phase_progress": "Phase 8 planned: D1..D4 decisions baked. 5 changes ordered. Critical path: C-002 + C-003 (parallel fixture rebuilds) → C-004 (remove #[ignore] markers). C-001 (surrealdb-core pin) and C-005 (KernelHandleStub) are independent.",
+  "phase_progress": "Phase 9 executing: 9/11 changes DONE (C-008 code done; HUMAN cluster verify pending). C-008 added `librefang storage config-import` (reuses the daemon boot-seed: idempotent, non-destructive; --dry-run; refuses while daemon up) + a passing idempotent/non-destructive unit test; incidentally fixed a pre-existing stale bin-test call that blocked the cli test target. C-009 (revert K8s mounted config.toml to a read-only ConfigMap) is HARD-GATED: the human must run the C-008 prod import + confirm MCP servers/provider-default resolve from the DB before C-009 lands. C-005c (generic config_set) remains a future follow-up.",
   "next_action": {
-    "command": "/kbd-execute C-001",
-    "description": "surrealdb-core =3.0.5 workspace pin (XS, independent, do first)"
+    "command": "HUMAN runs C-008 prod import + verify, THEN /kbd-execute C-009",
+    "description": "C-008 code is merge-ready; the cluster import+verify is human-only (daemon-down on prod PVC). C-009 reverts the K8s overlay's config.toml mount to a read-only ConfigMap once the import is confirmed — HARD-GATED on that verify to avoid prod data loss (R-1)."
   }
 }

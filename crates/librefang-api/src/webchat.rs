@@ -417,8 +417,7 @@ pub async fn react_asset(
     if asset_path.is_empty() {
         let home_dir = Some(state.kernel.home_dir().to_path_buf());
         if let Some(index) = resolve_dashboard_file(home_dir.as_deref(), "index.html") {
-            return ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], index)
-                .into_response();
+            return ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], index).into_response();
         }
         return (StatusCode::NOT_FOUND, "dashboard not available").into_response();
     }

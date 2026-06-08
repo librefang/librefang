@@ -863,6 +863,24 @@ pub async fn config_reload(
                 }
             }
 
+            // Phase 9 (C-006): reload_config re-read config.toml and, via its
+            // ReloadMcpServers hot action, transiently set the MCP list back to
+            // the bootstrap file values — which would clobber DB-resolved state
+            // (UI edits). Re-run the same seed → overlay → reconcile pipeline as
+            // boot so the config store stays authoritative: seed picks up any
+            // genuine config.toml change (provenance-aware, never clobbering a
+            // runtime row), overlay pushes the store-resolved list back into the
+            // kernel, and reload_mcp_servers reconciles live connections to it.
+            #[cfg(feature = "surreal-backend")]
+            {
+                crate::config_store_overlay::seed_config_store(state.kernel.as_ref()).await;
+                crate::config_store_overlay::overlay_mcp_servers(state.kernel.as_ref()).await;
+                crate::config_store_overlay::overlay_default_model(state.kernel.as_ref()).await;
+                if let Err(e) = state.kernel.clone().reload_mcp_servers().await {
+                    tracing::warn!(error = %e, "config reload: MCP reconcile after overlay failed");
+                }
+            }
+
             let status = if plan.restart_required {
                 "partial"
             } else if plan.has_changes() {

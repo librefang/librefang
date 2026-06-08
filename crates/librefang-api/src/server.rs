@@ -1761,6 +1761,21 @@ pub async fn run_daemon(
     // Idempotent; safe to call once per process.
     kernel
         .set_oauth_cache_invalidator(std::sync::Arc::new(crate::oauth::OauthCacheInvalidatorImpl));
+
+    // Phase 9: reconcile the database config store BEFORE start_background_agents
+    // spawns the MCP-connect task, so the connect task sees the database-resolved
+    // set. Order is seed → overlay:
+    //   C-003 seed   — populate the store from config.toml bootstrap defaults
+    //                  (provenance/content-hash aware; never clobbers UI edits).
+    //   C-004 overlay — read the (now-populated) store back into the kernel.
+    // Both best-effort; neither blocks boot.
+    #[cfg(feature = "surreal-backend")]
+    {
+        crate::config_store_overlay::seed_config_store(kernel.as_ref()).await;
+        crate::config_store_overlay::overlay_mcp_servers(kernel.as_ref()).await;
+        crate::config_store_overlay::overlay_default_model(kernel.as_ref()).await;
+    }
+
     kernel.start_background_agents().await;
 
     // Auto-start observability stack (OTLP collector + Prometheus + Grafana)

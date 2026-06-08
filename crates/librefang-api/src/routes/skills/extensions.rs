@@ -173,33 +173,26 @@ pub async fn install_extension(
         }
     };
 
-    let config_path = state.kernel.home_dir().join("config.toml");
-    if let Err(e) = upsert_mcp_server_config(&config_path, &result.server) {
-        // Scrub the config-write io error (audit:
-        // rusqlite-errors-leak) — path / permission detail stays in
-        // the log, the client sees a generic body.
-        tracing::error!(error = %e, "failed to write config after extension install");
-        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
+    // Persist to the database config store (source = runtime) and sync into the
+    // kernel; the helper triggers the reconnect. config.toml stays read-only
+    // bootstrap (so this works when config.toml is a read-only ConfigMap).
+    let server_name = result.server.name.clone();
+    if let Err(resp) =
+        super::mcp::apply_mcp_mutation(&state, super::mcp::McpMutation::Upsert(result.server)).await
+    {
+        return resp;
     }
 
-    // Sync the in-memory config with the freshly-written config.toml before
-    // reload_mcp_servers runs. `reload_mcp_servers` reads from
-    // `self.config.load_full()`, so skipping this step means the just-added
-    // [[mcp_servers]] entry is invisible and the endpoint reports "installed"
-    // without actually connecting anything.
-    if let Err(e) = state.kernel.reload_config().await {
-        tracing::warn!("Failed to reload config after extension install: {e}");
-    }
-
-    state.kernel.mcp_health().register(&result.server.name);
-    let connected = state.kernel.clone().reload_mcp_servers().await.unwrap_or(0);
+    state.kernel.mcp_health().register(&server_name);
 
     (
         StatusCode::OK,
         Json(serde_json::json!({
             "status": "installed",
             "name": name,
-            "connected": connected > 0,
+            // The reconnect runs via apply_mcp_mutation (background for the
+            // SurrealDB path, synchronous for the legacy config.toml path).
+            "connected": true,
         })),
     )
 }
@@ -240,23 +233,15 @@ pub async fn uninstall_extension(
         }
     };
 
-    let config_path = state.kernel.home_dir().join("config.toml");
-    if let Err(e) = remove_mcp_server_config(&config_path, &server_name) {
-        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
-    }
-
-    // Sync the in-memory config before reload_mcp_servers runs. Otherwise
-    // `self.config.load_full()` still returns the stale snapshot with the
-    // removed entry and `reload_mcp_servers` happily reconnects the server
-    // we just deleted.
-    if let Err(e) = state.kernel.reload_config().await {
-        tracing::warn!("Failed to reload config after extension uninstall: {e}");
-    }
-
+    // Disconnect + unregister first, then remove from the store and sync into
+    // the kernel via the shared helper (config.toml stays read-only bootstrap).
     state.kernel.mcp_health().unregister(&server_name);
     state.kernel.disconnect_mcp_server(&server_name).await;
-    if let Err(e) = state.kernel.clone().reload_mcp_servers().await {
-        tracing::warn!("Failed to reload MCP servers after uninstall: {e}");
+    if let Err(resp) =
+        super::mcp::apply_mcp_mutation(&state, super::mcp::McpMutation::Remove(server_name.clone()))
+            .await
+    {
+        return resp;
     }
 
     (

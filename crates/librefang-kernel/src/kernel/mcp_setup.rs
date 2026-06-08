@@ -315,6 +315,49 @@ impl LibreFangKernel {
         }
     }
 
+    /// Snapshot the current effective MCP server list.
+    ///
+    /// Phase 9 (C-004): used by the API-layer config-store overlay to read the
+    /// bootstrap baseline and to verify the overlay landed.
+    #[must_use]
+    pub fn effective_mcp_servers(&self) -> Vec<librefang_types::config::McpServerConfigEntry> {
+        self.mcp
+            .effective_mcp_servers
+            .read()
+            .map(|s| s.clone())
+            .unwrap_or_default()
+    }
+
+    /// Replace the MCP server list with an externally-resolved set (the
+    /// database config-store overlay at boot, or a UI/API write) and bump the
+    /// MCP generation counter so cached summaries invalidate atomically.
+    ///
+    /// Phase 9 (C-004/C-005): the kernel holds no operational SurrealDB session,
+    /// so the API layer owns config-store access and pushes the resolved list in
+    /// here. Updates BOTH in-memory views so every reader stays consistent:
+    /// - `config.mcp_servers` (the `ArcSwap<KernelConfig>` field read by the
+    ///   API's duplicate-name checks, the GET list, and uninstall lookups), and
+    /// - `effective_mcp_servers` (read by connection logic).
+    ///
+    /// Connecting the new servers is the caller's responsibility (the boot
+    /// path's `connect_mcp_servers`, or an explicit reconnect after a write).
+    pub fn replace_mcp_servers(&self, servers: Vec<librefang_types::config::McpServerConfigEntry>) {
+        // Keep config.mcp_servers in sync so reads that still consult the
+        // ArcSwap config (duplicate checks, list, uninstall lookup) reflect
+        // the DB-authoritative list without each call site changing.
+        self.config.rcu(|current| {
+            let mut next = (**current).clone();
+            next.mcp_servers = servers.clone();
+            std::sync::Arc::new(next)
+        });
+        if let Ok(mut effective) = self.mcp.effective_mcp_servers.write() {
+            *effective = servers;
+            self.mcp
+                .mcp_generation
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     /// Reload MCP server configs and (re)connect every server in config.toml.
     ///
     /// Called by `POST /api/mcp/reload` and by the API handlers for

@@ -1158,22 +1158,20 @@ pub async fn set_provider_key(
             catalog.default_model_for_provider(&name)
         };
         if let Some(model_id) = default_model {
-            // Update config.toml to persist the switch
-            let config_path = state.kernel.home_dir().join("config.toml");
-            if let Err(e) = persist_default_model(&config_path, &name, &model_id, &env_var) {
-                tracing::warn!("Failed to persist default_model to config.toml: {e}");
-            }
+            let new_dm = librefang_types::config::DefaultModelConfig {
+                provider: name.clone(),
+                model: model_id,
+                api_key_env: env_var.clone(),
+                base_url: None,
+                ..Default::default()
+            };
+            // Persist durably (DB store under surreal-backend; config.toml
+            // fallback) so the auto-switch survives a restart.
+            let _ = persist_default_model_durable(&state, &new_dm).await;
 
             // Hot-update the in-memory default model override so resolve_driver()
             // immediately creates drivers for the new provider — no restart needed.
             {
-                let new_dm = librefang_types::config::DefaultModelConfig {
-                    provider: name.clone(),
-                    model: model_id,
-                    api_key_env: env_var.clone(),
-                    base_url: None,
-                    ..Default::default()
-                };
                 let mut guard = state
                     .kernel
                     .default_model_override_ref()
@@ -1898,15 +1896,20 @@ pub async fn set_default_provider(
         }
     };
 
-    // Update config.toml to persist the switch
-    let config_path = state.kernel.home_dir().join("config.toml");
-    let persisted = match persist_default_model(&config_path, &name, &model_id, &env_var) {
-        Ok(()) => true,
-        Err(e) => {
-            tracing::warn!("Failed to persist default_model to config.toml: {e}");
-            false
-        }
+    // The new default-model selection.
+    let new_dm = librefang_types::config::DefaultModelConfig {
+        provider: name.clone(),
+        model: model_id.clone(),
+        api_key_env: env_var.clone(),
+        base_url: None,
+        ..Default::default()
     };
+
+    // Persist durably so the switch survives a restart. With surreal-backend
+    // this writes the database config store (works under a read-only
+    // config.toml ConfigMap in Kubernetes); otherwise it falls back to
+    // config.toml.
+    let persisted = persist_default_model_durable(&state, &new_dm).await;
 
     // Read old default before updating, so sync_default_model_agents knows what to migrate
     let old_provider = {
@@ -1921,14 +1924,7 @@ pub async fn set_default_provider(
         }
     };
 
-    // Hot-update the in-memory default model override
-    let new_dm = librefang_types::config::DefaultModelConfig {
-        provider: name.clone(),
-        model: model_id.clone(),
-        api_key_env: env_var.clone(),
-        base_url: None,
-        ..Default::default()
-    };
+    // Hot-update the in-memory default model override.
     {
         let mut guard = state
             .kernel
@@ -1963,8 +1959,55 @@ pub async fn set_default_provider(
     }
 }
 
+/// Persist the default-model selection durably so it survives a restart
+/// (phase 9 / C-005b).
+///
+/// With `surreal-backend` (the default) the value goes to the database config
+/// store (`source = runtime`), which works even when `config.toml` is mounted
+/// read-only (a Kubernetes ConfigMap) — the boot/reload overlay re-applies it
+/// onto the kernel's `default_model_override`. Without `surreal-backend`
+/// (sqlite-only builds) it falls back to the legacy config.toml writer.
+/// Returns `true` on success. Callers still set the in-memory override and run
+/// the agent sync regardless of persistence outcome.
+async fn persist_default_model_durable(
+    state: &AppState,
+    dm: &librefang_types::config::DefaultModelConfig,
+) -> bool {
+    #[cfg(feature = "surreal-backend")]
+    {
+        let storage = state.kernel.config_ref().storage.clone();
+        match crate::config_store_overlay::write_default_model(
+            &storage,
+            dm,
+            librefang_storage::ConfigSource::Runtime,
+        )
+        .await
+        {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to persist default_model to config store");
+                false
+            }
+        }
+    }
+    #[cfg(not(feature = "surreal-backend"))]
+    {
+        let config_path = state.kernel.home_dir().join("config.toml");
+        match persist_default_model(&config_path, &dm.provider, &dm.model, &dm.api_key_env) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to persist default_model to config.toml");
+                false
+            }
+        }
+    }
+}
+
 /// Safely persist the `[default_model]` section into config.toml using proper
 /// TOML serialization (avoids format-string injection).
+///
+/// Legacy fallback used by [`persist_default_model_durable`] on sqlite-only
+/// builds; with `surreal-backend` the database config store is authoritative.
 ///
 /// Read failures other than `NotFound` are propagated rather than silently
 /// degrading to an empty config — the previous `unwrap_or_default()` path
@@ -1974,6 +2017,7 @@ pub async fn set_default_provider(
 /// `[default_model]`. See #5116. The on-disk replacement still goes through
 /// [`crate::atomic_write`] so a crash between the temp-write and the rename
 /// can never leave a partially-written `config.toml`.
+#[cfg(not(feature = "surreal-backend"))]
 fn persist_default_model(
     config_path: &std::path::Path,
     provider: &str,

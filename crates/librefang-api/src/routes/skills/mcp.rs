@@ -1,5 +1,77 @@
 use super::*;
 
+/// A single mutation to the MCP server set, applied by [`apply_mcp_mutation`].
+pub(super) enum McpMutation {
+    /// Insert or replace the entry with this name.
+    Upsert(librefang_types::config::McpServerConfigEntry),
+    /// Remove the entry with this name.
+    Remove(String),
+}
+
+/// Persist an MCP server mutation and sync it into the running kernel
+/// (phase 9 / C-005).
+///
+/// With `surreal-backend` (the default), the full server list is written to the
+/// database config store (`source = runtime`) and pushed into the kernel via
+/// `replace_mcp_servers` (which updates both `config.mcp_servers` and the
+/// effective list), then a background reconnect runs. config.toml is NOT
+/// touched — it is read-only bootstrap defaults, which is what lets the web UI
+/// persist changes when config.toml is mounted read-only in Kubernetes.
+///
+/// Without `surreal-backend` (legacy sqlite-only builds), it falls back to the
+/// historical config.toml write + `reload_config` path.
+///
+/// On success the caller still handles any pre-write disconnect and the audit
+/// record. Returns a scrubbed error tuple on storage failure.
+pub(super) async fn apply_mcp_mutation(
+    state: &AppState,
+    mutation: McpMutation,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    #[cfg(feature = "surreal-backend")]
+    {
+        // Compute the new full list from the current (DB-synced) list.
+        let mut servers = state.kernel.config_ref().mcp_servers.clone();
+        match &mutation {
+            McpMutation::Upsert(entry) => {
+                servers.retain(|s| s.name != entry.name);
+                servers.push(entry.clone());
+            }
+            McpMutation::Remove(name) => servers.retain(|s| &s.name != name),
+        }
+        let storage_cfg = state.kernel.config_ref().storage.clone();
+        if let Err(e) = crate::config_store_overlay::write_mcp_servers(
+            &storage_cfg,
+            &servers,
+            librefang_storage::ConfigSource::Runtime,
+        )
+        .await
+        {
+            return Err(ApiErrorResponse::internal_scrub(e).into_json_tuple());
+        }
+        state.kernel.replace_mcp_servers(servers);
+        let kernel = std::sync::Arc::clone(&state.kernel);
+        librefang_kernel::supervised_spawn::spawn_supervised(
+            "connect_mcp_servers_after_write",
+            async move { kernel.connect_mcp_servers().await },
+        );
+    }
+    #[cfg(not(feature = "surreal-backend"))]
+    {
+        let config_path = state.kernel.home_dir().join("config.toml");
+        let res = match &mutation {
+            McpMutation::Upsert(entry) => upsert_mcp_server_config(&config_path, entry),
+            McpMutation::Remove(name) => remove_mcp_server_config(&config_path, name),
+        };
+        if let Err(e) = res {
+            return Err(ApiErrorResponse::internal_scrub(e).into_json_tuple());
+        }
+        // reload_config re-reads config.toml into config.mcp_servers and, via the
+        // ReloadMcpServers hot action, updates the effective list and reconnects.
+        let _ = state.kernel.reload_config().await;
+    }
+    Ok(())
+}
+
 /// GET /api/mcp/taint-rules — List configured `[[taint_rules]]`.
 ///
 /// Issue #3050 follow-up: the dashboard `TaintPolicyEditor` references
@@ -322,34 +394,13 @@ pub async fn add_mcp_server(
             .into_json_tuple();
     }
 
-    // Persist to config.toml
-    let config_path = state.kernel.home_dir().join("config.toml");
-    if let Err(e) = upsert_mcp_server_config(&config_path, &entry) {
-        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
+    // Persist to the database config store (source = runtime) and sync into the
+    // kernel. config.toml is read-only bootstrap; the store is authoritative for
+    // runtime edits (the connect runs in the background inside the helper).
+    let template_id = entry.template_id.clone();
+    if let Err(resp) = apply_mcp_mutation(&state, McpMutation::Upsert(entry)).await {
+        return resp;
     }
-
-    // Trigger config reload
-    let reload_status = match state.kernel.reload_config().await {
-        Ok(plan) => {
-            if plan.restart_required {
-                "applied_partial"
-            } else {
-                "applied"
-            }
-        }
-        Err(_) => "saved_reload_failed",
-    };
-
-    // Establish connection to the newly added server in the background.
-    // Wrap in `spawn_supervised` so a panic inside `connect_mcp_servers`
-    // (e.g. parse failure, OAuth handshake, tool list deserialization) is
-    // logged at `error!` rather than silently aborting the detached task
-    // and leaving the new server stuck in a half-connecting state.
-    let kernel = std::sync::Arc::clone(&state.kernel);
-    librefang_kernel::supervised_spawn::spawn_supervised(
-        "connect_mcp_servers_after_add",
-        async move { kernel.connect_mcp_servers().await },
-    );
 
     state.kernel.audit().record(
         "system",
@@ -363,8 +414,8 @@ pub async fn add_mcp_server(
         Json(serde_json::json!({
             "status": "added",
             "name": name,
-            "template_id": entry.template_id,
-            "reload": reload_status,
+            "template_id": template_id,
+            "reload": "applied",
         })),
     )
 }
@@ -428,36 +479,16 @@ pub async fn update_mcp_server(
         }
     };
 
-    // Persist — upsert replaces an existing entry with the same name
-    let config_path = state.kernel.home_dir().join("config.toml");
-    if let Err(e) = upsert_mcp_server_config(&config_path, &entry) {
-        // Scrub the config-write error (audit: rusqlite-errors-leak):
-        // the helper string carries io / TOML-parse detail. Full error
-        // logged; client sees the generic body.
-        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
-    }
     // Drop ErrorTranslator before .await — FluentBundle is !Send and cannot
     // be held across an async suspension point.
     drop(t);
 
-    let reload_status = match state.kernel.reload_config().await {
-        Ok(plan) => {
-            if plan.restart_required {
-                "applied_partial"
-            } else {
-                "applied"
-            }
-        }
-        Err(_) => "saved_reload_failed",
-    };
-
-    // Disconnect the old connection so connect_mcp_servers picks up the new config.
+    // Disconnect the old connection first so the post-write reconnect picks up
+    // the new config, then persist to the store + sync into the kernel.
     state.kernel.disconnect_mcp_server(&name).await;
-    let kernel = std::sync::Arc::clone(&state.kernel);
-    librefang_kernel::supervised_spawn::spawn_supervised(
-        "connect_mcp_servers_after_update",
-        async move { kernel.connect_mcp_servers().await },
-    );
+    if let Err(resp) = apply_mcp_mutation(&state, McpMutation::Upsert(entry)).await {
+        return resp;
+    }
 
     state.kernel.audit().record(
         "system",
@@ -471,7 +502,7 @@ pub async fn update_mcp_server(
         Json(serde_json::json!({
             "status": "updated",
             "name": name,
-            "reload": reload_status,
+            "reload": "applied",
         })),
     )
 }
@@ -523,37 +554,17 @@ pub async fn patch_mcp_server_taint(
         entry.taint_policy = Some(policy);
     }
 
-    let config_path = state.kernel.home_dir().join("config.toml");
-    if let Err(e) = upsert_mcp_server_config(&config_path, &entry) {
-        // Scrub the config-write error (audit: rusqlite-errors-leak):
-        // the helper string carries io / TOML-parse detail. Full error
-        // logged; client sees the generic body.
-        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
-    }
     // Drop ErrorTranslator before .await — FluentBundle is !Send and cannot
     // be held across an async suspension point.
     drop(t);
 
-    let reload_status = match state.kernel.reload_config().await {
-        Ok(plan) => {
-            if plan.restart_required {
-                "applied_partial"
-            } else {
-                "applied"
-            }
-        }
-        Err(_) => "saved_reload_failed",
-    };
-
     // Reconnect so the new taint_policy snapshot reaches the live
-    // `McpServerConfig.taint_policy` field. The shared `taint_rules_swap`
-    // already updates via `reload_config` without a reconnect.
+    // `McpServerConfig.taint_policy` field. Disconnect first, then persist +
+    // reconnect via the helper.
     state.kernel.disconnect_mcp_server(&name).await;
-    let kernel = std::sync::Arc::clone(&state.kernel);
-    librefang_kernel::supervised_spawn::spawn_supervised(
-        "connect_mcp_servers_after_taint_patch",
-        async move { kernel.connect_mcp_servers().await },
-    );
+    if let Err(resp) = apply_mcp_mutation(&state, McpMutation::Upsert(entry)).await {
+        return resp;
+    }
 
     state.kernel.audit().record(
         "system",
@@ -567,7 +578,7 @@ pub async fn patch_mcp_server_taint(
         Json(serde_json::json!({
             "status": "updated",
             "name": name,
-            "reload": reload_status,
+            "reload": "applied",
         })),
     )
 }
@@ -617,13 +628,9 @@ pub async fn delete_mcp_server(
             _ => None,
         });
 
-    let config_path = state.kernel.home_dir().join("config.toml");
-    if let Err(e) = remove_mcp_server_config(&config_path, &name) {
-        // Scrub the config-write error (audit: rusqlite-errors-leak):
-        // the helper string carries io / TOML-parse detail. Full error
-        // logged; client sees the generic body.
-        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
-    }
+    // Drop ErrorTranslator before any .await — FluentBundle is !Send. The
+    // store removal + kernel sync happens after the vault/auth/connection
+    // cleanup below (server_url was resolved above, before removal).
     drop(t);
 
     // Clean up OAuth vault tokens, auth state, and live connections.
@@ -672,16 +679,10 @@ pub async fn delete_mcp_server(
         .await
         .retain(|c| c.name() != name);
 
-    let reload_status = match state.kernel.reload_config().await {
-        Ok(plan) => {
-            if plan.restart_required {
-                "applied_partial"
-            } else {
-                "applied"
-            }
-        }
-        Err(_) => "saved_reload_failed",
-    };
+    // Remove from the store + sync into the kernel (config.toml untouched).
+    if let Err(resp) = apply_mcp_mutation(&state, McpMutation::Remove(name.clone())).await {
+        return resp;
+    }
 
     state.kernel.audit().record(
         "system",
@@ -695,7 +696,7 @@ pub async fn delete_mcp_server(
         Json(serde_json::json!({
             "status": "removed",
             "name": name,
-            "reload": reload_status,
+            "reload": "applied",
         })),
     )
 }

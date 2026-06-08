@@ -102,6 +102,156 @@ pub(crate) fn cmd_audit_explore_surreal(config: Option<PathBuf>, limit: u32, jso
     }
 }
 
+/// Core of `config-import` (real mode): seed both in-scope keys from the given
+/// config values as `source = bootstrap`, revision 0, reusing the daemon's own
+/// boot-seed. Idempotent and **non-destructive** — a pre-existing `runtime`
+/// (UI) row is never overwritten. Returns `(mcp_outcome, default_model_outcome)`.
+#[cfg(feature = "surreal-backend")]
+pub(crate) async fn import_config_values(
+    storage_cfg: &librefang_storage::StorageConfig,
+    mcp: &[librefang_types::config::McpServerConfigEntry],
+    default_model: &librefang_types::config::DefaultModelConfig,
+) -> Result<
+    (
+        librefang_api::config_store_overlay::SeedOutcome,
+        librefang_api::config_store_overlay::SeedOutcome,
+    ),
+    String,
+> {
+    use librefang_api::config_store_overlay::{seed_default_model, seed_mcp_servers};
+    let mcp_outcome = seed_mcp_servers(storage_cfg, mcp, 0).await?;
+    let dm_outcome = seed_default_model(storage_cfg, default_model, 0).await?;
+    Ok((mcp_outcome, dm_outcome))
+}
+
+/// `librefang storage config-import [--from <path>] [--dry-run]`
+///
+/// One-time, idempotent, **non-destructive** import of the in-scope `config.toml`
+/// values (`mcp_servers`, `default_model`) into the database config store as
+/// `source = bootstrap` (phase 9 / C-008). Run this on the production PVC BEFORE
+/// reverting the mounted `config.toml` to a read-only Kubernetes ConfigMap, so
+/// any pre-existing values survive the cutover (assessment R-1).
+///
+/// Reuses the daemon's own boot-seed logic
+/// ([`librefang_api::config_store_overlay::seed_mcp_servers`] /
+/// `seed_default_model`), so behaviour can never drift from boot: an existing
+/// `runtime` (UI-written) row is **never** overwritten — it is reported as
+/// protected. Re-running converges (idempotent).
+#[cfg(feature = "surreal-backend")]
+pub(crate) fn cmd_storage_config_import(
+    config: Option<PathBuf>,
+    from: Option<PathBuf>,
+    dry_run: bool,
+) {
+    use librefang_api::config_store_overlay::{SeedOutcome, DEFAULT_MODEL_KEY, MCP_SERVERS_KEY};
+    use librefang_storage::{shared_pool, ConfigStore, StorageConfig, SurrealConfigStore};
+
+    // Source config.toml: --from overrides the otherwise-resolved config path.
+    let source = from.clone().or_else(|| config.clone());
+    let kernel_config = match load_config(source.as_deref()) {
+        Ok(cfg) => cfg,
+        Err(_) => std::process::exit(1),
+    };
+    let storage_cfg: StorageConfig = kernel_config.storage.clone();
+    let mcp = kernel_config.mcp_servers.clone();
+    let default_model = kernel_config.default_model.clone();
+
+    // Refuse if the daemon is running — embedded RocksDB holds an exclusive lock.
+    let daemon = daemon_config_context(config.as_deref());
+    if let Some(base) = find_daemon_in_home(&daemon.home_dir) {
+        ui::error_with_fix(
+            &format!("daemon is running at {base}; refusing to open the embedded SurrealDB store"),
+            "stop the daemon first: `librefang stop`",
+        );
+        std::process::exit(1);
+    }
+
+    let describe = |o: SeedOutcome| -> &'static str {
+        match o {
+            SeedOutcome::Seeded => "seeded (new bootstrap row)",
+            SeedOutcome::BootstrapUpdated => "updated existing bootstrap row",
+            SeedOutcome::Unchanged => "already up to date (no change)",
+            SeedOutcome::RuntimeProtected => "kept existing UI edit (runtime) — NOT overwritten",
+            SeedOutcome::RevisionOverride => "overrode runtime row via bootstrap revision",
+        }
+    };
+
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            ui::error(&format!("failed to start tokio runtime: {e}"));
+            std::process::exit(1);
+        }
+    };
+
+    let result: Result<(), String> = rt.block_on(async move {
+        if dry_run {
+            // Read-only preview: report what is already in the store so the
+            // operator can confirm the import is safe before writing.
+            let session = shared_pool()
+                .open(&storage_cfg)
+                .await
+                .map_err(|e| format!("open surreal: {e}"))?;
+            librefang_storage::migrations::apply_pending(
+                session.client(),
+                librefang_storage::migrations::OPERATIONAL_MIGRATIONS,
+            )
+            .await
+            .map_err(|e| format!("apply schema migrations: {e}"))?;
+            let store = SurrealConfigStore::open(&session)
+                .await
+                .map_err(|e| format!("open config store: {e}"))?;
+            let mcp_row = store
+                .get(MCP_SERVERS_KEY)
+                .await
+                .map_err(|e| format!("read mcp_servers: {e}"))?;
+            let dm_row = store
+                .get(DEFAULT_MODEL_KEY)
+                .await
+                .map_err(|e| format!("read default_model: {e}"))?;
+            let fmt_existing = |row: &Option<librefang_storage::ConfigEntry>| match row {
+                None => "absent (would seed)".to_string(),
+                Some(r) => format!("present, source={}", r.source.as_str()),
+            };
+            ui::hint("Dry run — no changes written. Would import from config.toml:");
+            println!(
+                "  mcp_servers    {} entr(ies) → store currently {}",
+                mcp.len(),
+                fmt_existing(&mcp_row)
+            );
+            println!(
+                "  default_model  provider={} → store currently {}",
+                default_model.provider,
+                fmt_existing(&dm_row)
+            );
+            return Ok(());
+        }
+
+        let (mcp_outcome, dm_outcome) =
+            import_config_values(&storage_cfg, &mcp, &default_model).await?;
+        ui::success("Imported config.toml values into the database config store.");
+        println!(
+            "  mcp_servers    {} entr(ies): {}",
+            mcp.len(),
+            describe(mcp_outcome)
+        );
+        println!(
+            "  default_model  provider={}: {}",
+            default_model.provider,
+            describe(dm_outcome)
+        );
+        Ok(())
+    });
+
+    if let Err(e) = result {
+        ui::error(&e);
+        std::process::exit(1);
+    }
+}
+
 /// `librefang storage migrate --from sqlite --to surreal [--dry-run]`
 ///
 /// Streams the legacy SQLite tables into the configured embedded or remote
@@ -496,5 +646,87 @@ pub(crate) fn cmd_storage_unlink_uar(
         ui::check_warn("Daemon is running — restart to activate: `librefang restart`");
     } else {
         ui::hint("Changes take effect on next daemon start.");
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "surreal-backend")]
+mod tests {
+    use super::import_config_values;
+    use librefang_api::config_store_overlay::{
+        write_default_model, write_mcp_servers, SeedOutcome,
+    };
+    use librefang_storage::{ConfigSource, StorageConfig};
+
+    fn rt() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    fn mcp(name: &str) -> librefang_types::config::McpServerConfigEntry {
+        serde_json::from_value(serde_json::json!({ "name": name, "transport": null })).unwrap()
+    }
+
+    fn dm(provider: &str) -> librefang_types::config::DefaultModelConfig {
+        librefang_types::config::DefaultModelConfig {
+            provider: provider.to_string(),
+            model: "m".to_string(),
+            api_key_env: "X_API_KEY".to_string(),
+            base_url: None,
+            message_timeout_secs: 300,
+            extra_params: std::collections::BTreeMap::new(),
+            cli_profile_dirs: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn config_import_is_idempotent_and_non_destructive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = StorageConfig::embedded_default(tmp.path().join("op"));
+        let rt = rt();
+
+        // Fresh PVC import seeds both keys as bootstrap.
+        let (m, d) = rt
+            .block_on(import_config_values(&storage, &[mcp("fs")], &dm("openai")))
+            .unwrap();
+        assert_eq!(m, SeedOutcome::Seeded);
+        assert_eq!(d, SeedOutcome::Seeded);
+
+        // Re-running converges (idempotent).
+        let (m, d) = rt
+            .block_on(import_config_values(&storage, &[mcp("fs")], &dm("openai")))
+            .unwrap();
+        assert_eq!(m, SeedOutcome::Unchanged);
+        assert_eq!(d, SeedOutcome::Unchanged);
+
+        // A later UI edit (runtime) must NOT be clobbered by a re-import, even
+        // when the on-disk config.toml differs from the UI value.
+        rt.block_on(write_mcp_servers(
+            &storage,
+            &[mcp("ui")],
+            ConfigSource::Runtime,
+        ))
+        .unwrap();
+        rt.block_on(write_default_model(
+            &storage,
+            &dm("groq"),
+            ConfigSource::Runtime,
+        ))
+        .unwrap();
+        let (m, d) = rt
+            .block_on(import_config_values(&storage, &[mcp("fs")], &dm("openai")))
+            .unwrap();
+        assert_eq!(
+            m,
+            SeedOutcome::RuntimeProtected,
+            "UI mcp_servers must survive re-import"
+        );
+        assert_eq!(
+            d,
+            SeedOutcome::RuntimeProtected,
+            "UI default_model must survive re-import"
+        );
     }
 }

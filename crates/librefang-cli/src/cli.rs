@@ -1732,6 +1732,19 @@ pub(crate) enum StorageCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Import config.toml values (mcp_servers, default_model) into the DB config store.
+    #[cfg(feature = "surreal-backend")]
+    #[command(
+        long_about = "One-time, idempotent, non-destructive import of in-scope config.toml\nvalues (mcp_servers, default_model) into the database config store as\nsource=bootstrap. Run this on the production PVC BEFORE reverting the\nmounted config.toml to a read-only Kubernetes ConfigMap, so pre-existing\nvalues survive the cutover. Never overwrites a UI-written (runtime) row.\nRefuses to run while the daemon is up.\n\nExamples:\n  librefang storage config-import --dry-run\n  librefang storage config-import\n  librefang storage config-import --from /data/config.toml"
+    )]
+    ConfigImport {
+        /// Read the source config.toml from this path instead of the resolved one.
+        #[arg(long)]
+        from: Option<PathBuf>,
+        /// Preview what would be imported without writing.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Migrate legacy SQLite data into the configured SurrealDB instance.
     #[cfg(feature = "sqlite-backend")]
     #[command(

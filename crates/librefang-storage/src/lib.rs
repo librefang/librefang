@@ -33,6 +33,7 @@
 #![warn(rust_2018_idioms)]
 
 pub mod config;
+pub mod config_store;
 pub mod error;
 pub mod migrate;
 pub mod migrations;
@@ -43,6 +44,9 @@ pub use config::{
     RemoteSurrealConfig, StorageBackendKind, StorageConfig, DEFAULT_DATABASE_NAME,
     DEFAULT_NAMESPACE_NAME,
 };
+#[cfg(feature = "surreal-backend")]
+pub use config_store::SurrealConfigStore;
+pub use config_store::{content_hash, ConfigEntry, ConfigSource, ConfigStore, CONFIG_STORE_TABLE};
 pub use error::StorageError;
-pub use pool::{SurrealConnectionPool, SurrealSession};
+pub use pool::{shared_pool, SurrealConnectionPool, SurrealSession};
 pub use provision::{provision_uar_namespace, ProvisionReceipt};

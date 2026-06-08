@@ -74,7 +74,11 @@ impl PtySession {
                 // A missing cwd causes the forked child to fail with ENOENT before
                 // exec'ing the shell.
                 let h = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-                if std::path::Path::new(&h).is_dir() { h } else { "/tmp".to_string() }
+                if std::path::Path::new(&h).is_dir() {
+                    h
+                } else {
+                    "/tmp".to_string()
+                }
             }
         };
         cmd.cwd(home_dir);
