@@ -46,21 +46,17 @@ async fn open_config_store(storage_cfg: &StorageConfig) -> Result<SurrealConfigS
         .map_err(|e| format!("open config store: {e}"))
 }
 
-/// Generic seed/merge for one config-store key (shared by mcp_servers and
-/// default_model). See [`seed_mcp_servers`] for the decision table.
-///
-/// `write_source` is the provenance stamped on the row WHEN this call writes.
-/// Boot-seed uses [`ConfigSource::Bootstrap`]; the one-time prod import (C-008)
-/// uses [`ConfigSource::Runtime`] so prod's live values are protected against a
-/// later boot's ConfigMap baseline (a `runtime` row → `RuntimeProtected`).
-/// The merge DECISION still keys off the EXISTING row's source, so a non-empty
-/// store is never clobbered regardless of `write_source`.
+/// Generic boot-seed/merge for one config-store key (shared by mcp_servers and
+/// default_model). Writes are always stamped [`ConfigSource::Bootstrap`]; the
+/// merge DECISION keys off the EXISTING row's source, so a `runtime` row is
+/// never clobbered (`RuntimeProtected`) unless the operator bumps the bootstrap
+/// revision. The one-time prod import takes a different path
+/// ([`promote_or_seed`]) that writes `runtime`.
 async fn seed_value(
     store: &SurrealConfigStore,
     key: &str,
     value: serde_json::Value,
     bootstrap_revision: i64,
-    write_source: ConfigSource,
 ) -> Result<SeedOutcome, String> {
     let hash = content_hash(&value);
     let existing = store
@@ -83,7 +79,13 @@ async fn seed_value(
     };
     if outcome.wrote() {
         store
-            .upsert(key, value, write_source, &hash, bootstrap_revision)
+            .upsert(
+                key,
+                value,
+                ConfigSource::Bootstrap,
+                &hash,
+                bootstrap_revision,
+            )
             .await
             .map_err(|e| format!("write config store: {e}"))?;
     }
@@ -121,6 +123,54 @@ impl SeedOutcome {
     }
 }
 
+/// Outcome of a one-time prod import ([`import_mcp_servers`] /
+/// [`import_default_model`]). Returned for logging and tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportOutcome {
+    /// No store row existed; the config.toml value was written as `runtime`.
+    Seeded,
+    /// A `bootstrap` row existed (e.g. written by the daemon's boot-seed); its
+    /// value was **preserved** and re-stamped `runtime` so the later ConfigMap
+    /// revert cannot overwrite it.
+    Promoted,
+    /// The row was already `runtime` (a UI edit); left untouched.
+    AlreadyRuntime,
+}
+
+/// Ensure the in-scope `key` ends up `source = runtime`, **preserving the
+/// store's current value** (the post-deploy source of truth), falling back to
+/// the supplied `config_value` only when no row exists. This is the load-bearing
+/// cutover-safety operation (C-009): every in-scope row must be `runtime` before
+/// the K8s ConfigMap revert, or the next boot-seed would overwrite a `bootstrap`
+/// row with the empty ConfigMap baseline (`BootstrapUpdated`) and wipe prod
+/// config. Idempotent and value-preserving — it never changes a stored value.
+async fn promote_or_seed(
+    store: &SurrealConfigStore,
+    key: &str,
+    config_value: serde_json::Value,
+) -> Result<ImportOutcome, String> {
+    let existing = store
+        .get(key)
+        .await
+        .map_err(|e| format!("read config store: {e}"))?;
+    let (value, outcome) = match existing {
+        Some(row) if row.source == ConfigSource::Runtime => {
+            return Ok(ImportOutcome::AlreadyRuntime)
+        }
+        // Preserve the store's current value (it is the post-deploy truth, and
+        // already equals config.toml for a boot-seeded row); only the provenance
+        // changes to `runtime`.
+        Some(row) => (row.value, ImportOutcome::Promoted),
+        None => (config_value, ImportOutcome::Seeded),
+    };
+    let hash = content_hash(&value);
+    store
+        .upsert(key, value, ConfigSource::Runtime, &hash, 0)
+        .await
+        .map_err(|e| format!("write config store: {e}"))?;
+    Ok(outcome)
+}
+
 /// Read the operator-controlled bootstrap revision from the environment
 /// ([`BOOTSTRAP_REVISION_ENV`]); defaults to 0 when unset or unparseable.
 #[must_use]
@@ -156,14 +206,7 @@ pub async fn seed_mcp_servers(
 ) -> Result<SeedOutcome, String> {
     let store = open_config_store(storage_cfg).await?;
     let value = serde_json::to_value(bootstrap).map_err(|e| e.to_string())?;
-    seed_value(
-        &store,
-        MCP_SERVERS_KEY,
-        value,
-        bootstrap_revision,
-        ConfigSource::Bootstrap,
-    )
-    .await
+    seed_value(&store, MCP_SERVERS_KEY, value, bootstrap_revision).await
 }
 
 /// Seed / merge the bootstrap default-model selection into the config store
@@ -178,50 +221,38 @@ pub async fn seed_default_model(
 ) -> Result<SeedOutcome, String> {
     let store = open_config_store(storage_cfg).await?;
     let value = serde_json::to_value(bootstrap).map_err(|e| e.to_string())?;
-    seed_value(
-        &store,
-        DEFAULT_MODEL_KEY,
-        value,
-        bootstrap_revision,
-        ConfigSource::Bootstrap,
-    )
-    .await
+    seed_value(&store, DEFAULT_MODEL_KEY, value, bootstrap_revision).await
 }
 
-/// One-time prod **import** of the MCP server list (C-008 / C-009). Identical
-/// merge semantics to [`seed_mcp_servers`] but stamps a newly-written row
-/// `source = runtime` instead of `bootstrap`. This is the load-bearing
-/// cutover-safety property: prod's live `config.toml` values are effective (UI)
-/// values, so after the K8s ConfigMap revert (C-009) the next boot's seed —
-/// which reads the empty ConfigMap baseline as `bootstrap` — reports
-/// `RuntimeProtected` and **keeps** them, instead of `BootstrapUpdated`
-/// overwriting them with the baseline (which would wipe prod's servers).
-/// Idempotent and non-destructive: an existing `runtime` row is never clobbered.
+/// One-time prod **import** of the MCP server list (C-008 / C-009 / C-009b).
+/// Ensures the `mcp_servers` row is `source = runtime`, preserving the store's
+/// current value (or seeding config.toml's when absent) — see [`promote_or_seed`].
+/// This protects prod's MCP servers across the K8s ConfigMap revert regardless
+/// of whether the daemon already boot-seeded them as `bootstrap`.
 ///
 /// # Errors
 /// Returns a scrubbed message on any storage failure.
 pub async fn import_mcp_servers(
     storage_cfg: &StorageConfig,
     servers: &[McpServerConfigEntry],
-) -> Result<SeedOutcome, String> {
+) -> Result<ImportOutcome, String> {
     let store = open_config_store(storage_cfg).await?;
     let value = serde_json::to_value(servers).map_err(|e| e.to_string())?;
-    seed_value(&store, MCP_SERVERS_KEY, value, 0, ConfigSource::Runtime).await
+    promote_or_seed(&store, MCP_SERVERS_KEY, value).await
 }
 
-/// One-time prod **import** of the default-model selection (C-008 / C-009).
-/// `source = runtime` for the same cutover-safety reason as
-/// [`import_mcp_servers`].
+/// One-time prod **import** of the default-model selection (C-008 / C-009 /
+/// C-009b). Same value-preserving `runtime` promotion as [`import_mcp_servers`].
 ///
 /// # Errors
 /// Returns a scrubbed message on any storage failure.
 pub async fn import_default_model(
     storage_cfg: &StorageConfig,
     default_model: &DefaultModelConfig,
-) -> Result<SeedOutcome, String> {
+) -> Result<ImportOutcome, String> {
     let store = open_config_store(storage_cfg).await?;
     let value = serde_json::to_value(default_model).map_err(|e| e.to_string())?;
-    seed_value(&store, DEFAULT_MODEL_KEY, value, 0, ConfigSource::Runtime).await
+    promote_or_seed(&store, DEFAULT_MODEL_KEY, value).await
 }
 
 /// Seed the config store from the kernel's bootstrap config at daemon boot.
