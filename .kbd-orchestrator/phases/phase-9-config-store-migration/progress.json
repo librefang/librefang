@@ -7,7 +7,7 @@
   "assessment_date": "2026-06-06",
   "verdict": "proceed-with-corrected-mechanism",
   "changes_total": 10,
-  "changes_completed": 6,
+  "changes_completed": 7,
   "architecture_revision": "C-004 discovery: kernel holds no operational SurrealDB session at boot. User decision (D9): config store is API-owned — kernel exposes get/replace for effective_mcp_servers; librefang-api reads/writes the store. D10: process-global shared_pool() added (embedded RocksDB single-lock per path, assessment R-2 confirmed). C-003/C-005/C-006 placements revised accordingly.",
   "changes": {
     "C-001": { "status": "DONE", "completed": "2026-06-06", "files": 2, "qa": "skipped-under-3-files" },
@@ -18,11 +18,11 @@
     "C-005b": { "status": "PENDING", "note": "provider-default (persist_default_model) + generic config_set writes; + route-level HTTP TestServer coverage with temp-storage harness" },
     "C-003": { "status": "DONE", "completed": "2026-06-08", "files": 3, "qa": "integration-tests(7)+clippy+brand" },
     "C-006": { "status": "DONE", "completed": "2026-06-08", "files": 3, "qa": "integration-tests(8)+clippy+brand" },
-    "C-007": { "status": "PENDING" },
+    "C-007": { "status": "DONE", "completed": "2026-06-08", "files": 1, "qa": "skipped-under-3-files", "note": "single-row array + render_mcp_summary sort already guarantee prompt determinism; added config_store list() ORDER BY guard test" },
     "C-008": { "status": "PENDING" },
     "C-009": { "status": "PENDING" }
   },
   "suggested_order": ["C-001","C-002","C-004","C-005","C-003","C-006","C-007","C-005b","C-008","C-009"],
   "k8s_revert_gated_on": "C-008 verified one-time import of existing prod config.toml",
-  "next_command": "/kbd-execute C-007"
+  "next_command": "/kbd-execute C-005b"
 }

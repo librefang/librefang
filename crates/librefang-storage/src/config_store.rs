@@ -473,4 +473,50 @@ mod tests {
         assert!(ConfigSource::parse("nonsense").is_err());
         assert_eq!(ConfigSource::Bootstrap.as_str(), "bootstrap");
     }
+
+    /// Determinism guard (#3298): `list()` returns entries sorted by key
+    /// regardless of insertion order. Config values can reach an LLM prompt, so
+    /// any list derived from the store must be byte-stable across runs — the
+    /// `ORDER BY key` in the impl is load-bearing, not cosmetic.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_is_sorted_by_key_regardless_of_insertion_order() {
+        let dir = tempdir().unwrap();
+        let store = open_store(dir.path()).await;
+
+        // Insert in deliberately non-sorted order.
+        for key in ["z_last", "a_first", "m_middle"] {
+            let v = serde_json::json!({ "k": key });
+            store
+                .upsert(
+                    key,
+                    v.clone(),
+                    ConfigSource::Bootstrap,
+                    &content_hash(&v),
+                    0,
+                )
+                .await
+                .unwrap();
+        }
+
+        // `ORDER BY key` makes this independent of RocksDB iteration order:
+        // drop the ORDER BY and the rows would come back in insertion order
+        // (z, a, m), failing this assertion.
+        let keys: Vec<String> = store
+            .list("")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| e.key)
+            .collect();
+        assert_eq!(
+            keys,
+            vec!["a_first", "m_middle", "z_last"],
+            "list() must be sorted by key (insertion-order-independent)"
+        );
+
+        // A prefix query is likewise sorted.
+        let m = store.list("m").await.unwrap();
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].key, "m_middle");
+    }
 }

@@ -22,7 +22,7 @@ the repo's Build & Verify rules (no `cargo build`, no workspace-wide `cargo test
 | C-005 | **DONE** | `cargo test -p librefang-api --test config_store_overlay_test` + `cargo check --workspace --lib` |
 | C-005b | PENDING | provider-default + config_set + route-level HTTP TestServer |
 | C-006 | **DONE** | `cargo test -p librefang-api --test config_store_overlay_test` (8 passed) |
-| C-007 | PENDING | `cargo test -p librefang-kernel` (determinism) |
+| C-007 | **DONE** | `cargo test -p librefang-storage --lib config_store` (4 passed) |
 | C-008 | PENDING | HUMAN cluster verify |
 | C-009 | PENDING | HUMAN deploy, gated on C-008 |
 
@@ -175,3 +175,20 @@ never reverts a DB `runtime` value to the bootstrap file. Widened
 clean; brand audit clean.
 
 **Next:** C-007 — determinism `ORDER BY` + regression test (#3298).
+
+## C-007 — determinism guard · DONE (2026-06-08)
+
+**Structural finding:** `mcp_servers` is a single ordered row (not row-per-server),
+and `render_mcp_summary` already sorts servers + tools — so prompt output is
+byte-stable regardless of stored order (existing kernel `mcp_summary_*` tests
+cover it). No kernel change needed. Added a config-store `list()` ORDER-BY guard
+test (`list_is_sorted_by_key_regardless_of_insertion_order`) for the future
+multi-key prompt-reaching path.
+
+**Files (1):** `crates/librefang-storage/src/config_store.rs`.
+
+**Verification (green):** `cargo test -p librefang-storage --lib config_store`
+4 passed; clippy `-p librefang-storage --all-targets` clean; brand clean.
+
+**Core migration COMPLETE.** Remaining: C-005b (deferred provider/config_set +
+HTTP route tests), C-008 (prod import), C-009 (K8s revert, gated on C-008).
