@@ -7,7 +7,7 @@
   "assessment_date": "2026-06-06",
   "verdict": "proceed-with-corrected-mechanism",
   "changes_total": 11,
-  "changes_completed": 9,
+  "changes_completed": 10,
   "architecture_revision": "C-004 discovery: kernel holds no operational SurrealDB session at boot. User decision (D9): config store is API-owned — kernel exposes get/replace for effective_mcp_servers; librefang-api reads/writes the store. D10: process-global shared_pool() added (embedded RocksDB single-lock per path, assessment R-2 confirmed). C-003/C-005/C-006 placements revised accordingly.",
   "changes": {
     "C-001": { "status": "DONE", "completed": "2026-06-06", "files": 2, "qa": "skipped-under-3-files" },
@@ -20,10 +20,11 @@
     "C-003": { "status": "DONE", "completed": "2026-06-08", "files": 3, "qa": "integration-tests(7)+clippy+brand" },
     "C-006": { "status": "DONE", "completed": "2026-06-08", "files": 3, "qa": "integration-tests(8)+clippy+brand" },
     "C-007": { "status": "DONE", "completed": "2026-06-08", "files": 1, "qa": "skipped-under-3-files", "note": "single-row array + render_mcp_summary sort already guarantee prompt determinism; added config_store list() ORDER BY guard test" },
-    "C-008": { "status": "CODE_DONE", "completed": "2026-06-08", "files": 4, "qa": "cli-unit-test+clippy+brand", "note": "import CLI done + tested; HUMAN cluster verify pending (daemon-down import on prod PVC). C-009 hard-gated on that verify." },
-    "C-009": { "status": "PENDING" }
+    "C-008": { "status": "CODE_DONE", "completed": "2026-06-08", "files": 4, "qa": "cli-unit-test+clippy+brand", "note": "import CLI (merged in PR #74). NOTE: C-009 found+fixed a data-loss bug here — the import wrote source=bootstrap; now source=runtime so prod values survive the ConfigMap revert. Deploy the fixed image BEFORE running the prod import." },
+    "C-009": { "status": "CODE_DONE", "completed": "2026-06-08", "files": 6, "qa": "cli-cutover-survival-test+api-overlay-tests+kustomize-render+clippy+brand", "note": "manifest revert (read-only ConfigMap subPath mount, init-config removed) + the C-008 source=runtime fix. APPLY hard-gated: deploy fixed image -> run C-008 import -> verify -> apply revert (R-1)." }
   },
+  "merged_pr": { "repo": "GQAdonis/librefang", "number": 74, "base": "main", "merged_at": "2026-06-08", "scope": "C-001..C-008 code" },
   "suggested_order": ["C-001","C-002","C-004","C-005","C-003","C-006","C-007","C-005b","C-008","C-009","C-005c"],
-  "k8s_revert_gated_on": "C-008 verified one-time import of existing prod config.toml",
-  "next_command": "HUMAN: run C-008 prod import + verify, THEN /kbd-execute C-009"
+  "k8s_revert_gated_on": "C-008 verified one-time import of existing prod config.toml (on the C-009-fixed image)",
+  "next_command": "HUMAN: deploy C-009 image -> run C-008 import + verify -> apply C-009 revert. Future: /kbd-execute C-005c"
 }

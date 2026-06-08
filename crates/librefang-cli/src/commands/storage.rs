@@ -102,10 +102,13 @@ pub(crate) fn cmd_audit_explore_surreal(config: Option<PathBuf>, limit: u32, jso
     }
 }
 
-/// Core of `config-import` (real mode): seed both in-scope keys from the given
-/// config values as `source = bootstrap`, revision 0, reusing the daemon's own
-/// boot-seed. Idempotent and **non-destructive** — a pre-existing `runtime`
-/// (UI) row is never overwritten. Returns `(mcp_outcome, default_model_outcome)`.
+/// Core of `config-import` (real mode): import both in-scope keys from the given
+/// config values as `source = runtime`, reusing the daemon's own seed/merge.
+/// Idempotent and **non-destructive** — a pre-existing `runtime` (UI) row is
+/// never overwritten. Writing `runtime` (not `bootstrap`) is the cutover-safety
+/// property (C-009): after the K8s ConfigMap revert, the next boot-seed keeps
+/// these values (`RuntimeProtected`) instead of overwriting them with the empty
+/// ConfigMap baseline. Returns `(mcp_outcome, default_model_outcome)`.
 #[cfg(feature = "surreal-backend")]
 pub(crate) async fn import_config_values(
     storage_cfg: &librefang_storage::StorageConfig,
@@ -118,9 +121,9 @@ pub(crate) async fn import_config_values(
     ),
     String,
 > {
-    use librefang_api::config_store_overlay::{seed_default_model, seed_mcp_servers};
-    let mcp_outcome = seed_mcp_servers(storage_cfg, mcp, 0).await?;
-    let dm_outcome = seed_default_model(storage_cfg, default_model, 0).await?;
+    use librefang_api::config_store_overlay::{import_default_model, import_mcp_servers};
+    let mcp_outcome = import_mcp_servers(storage_cfg, mcp).await?;
+    let dm_outcome = import_default_model(storage_cfg, default_model).await?;
     Ok((mcp_outcome, dm_outcome))
 }
 
@@ -128,15 +131,16 @@ pub(crate) async fn import_config_values(
 ///
 /// One-time, idempotent, **non-destructive** import of the in-scope `config.toml`
 /// values (`mcp_servers`, `default_model`) into the database config store as
-/// `source = bootstrap` (phase 9 / C-008). Run this on the production PVC BEFORE
-/// reverting the mounted `config.toml` to a read-only Kubernetes ConfigMap, so
-/// any pre-existing values survive the cutover (assessment R-1).
+/// `source = runtime` (phase 9 / C-008 + C-009). Run this on the production PVC
+/// BEFORE reverting the mounted `config.toml` to a read-only Kubernetes
+/// ConfigMap, so pre-existing values survive the cutover (assessment R-1).
 ///
-/// Reuses the daemon's own boot-seed logic
-/// ([`librefang_api::config_store_overlay::seed_mcp_servers`] /
-/// `seed_default_model`), so behaviour can never drift from boot: an existing
-/// `runtime` (UI-written) row is **never** overwritten — it is reported as
-/// protected. Re-running converges (idempotent).
+/// Importing as `runtime` (not `bootstrap`) is the load-bearing safety property:
+/// after the ConfigMap revert, the next boot reads the empty ConfigMap baseline
+/// as bootstrap, and a `runtime` row is reported `RuntimeProtected` — kept —
+/// rather than `BootstrapUpdated` — overwritten with the empty baseline. Reuses
+/// the daemon's own seed/merge so behaviour can't drift; an existing `runtime`
+/// row is never overwritten; re-running converges (idempotent).
 #[cfg(feature = "surreal-backend")]
 pub(crate) fn cmd_storage_config_import(
     config: Option<PathBuf>,
@@ -168,7 +172,7 @@ pub(crate) fn cmd_storage_config_import(
 
     let describe = |o: SeedOutcome| -> &'static str {
         match o {
-            SeedOutcome::Seeded => "seeded (new bootstrap row)",
+            SeedOutcome::Seeded => "imported (new runtime row)",
             SeedOutcome::BootstrapUpdated => "updated existing bootstrap row",
             SeedOutcome::Unchanged => "already up to date (no change)",
             SeedOutcome::RuntimeProtected => "kept existing UI edit (runtime) — NOT overwritten",
@@ -654,9 +658,17 @@ pub(crate) fn cmd_storage_unlink_uar(
 mod tests {
     use super::import_config_values;
     use librefang_api::config_store_overlay::{
-        write_default_model, write_mcp_servers, SeedOutcome,
+        seed_default_model, seed_mcp_servers, write_default_model, write_mcp_servers, SeedOutcome,
     };
-    use librefang_storage::{ConfigSource, StorageConfig};
+    use librefang_storage::{
+        shared_pool, ConfigSource, ConfigStore, StorageConfig, SurrealConfigStore,
+    };
+
+    async fn stored_source(storage: &StorageConfig, key: &str) -> ConfigSource {
+        let session = shared_pool().open(storage).await.unwrap();
+        let store = SurrealConfigStore::open(&session).await.unwrap();
+        store.get(key).await.unwrap().unwrap().source
+    }
 
     fn rt() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_multi_thread()
@@ -687,12 +699,21 @@ mod tests {
         let storage = StorageConfig::embedded_default(tmp.path().join("op"));
         let rt = rt();
 
-        // Fresh PVC import seeds both keys as bootstrap.
+        // Fresh PVC import seeds both keys — as RUNTIME (cutover safety).
         let (m, d) = rt
             .block_on(import_config_values(&storage, &[mcp("fs")], &dm("openai")))
             .unwrap();
         assert_eq!(m, SeedOutcome::Seeded);
         assert_eq!(d, SeedOutcome::Seeded);
+        assert_eq!(
+            rt.block_on(stored_source(&storage, "mcp_servers")),
+            ConfigSource::Runtime,
+            "import must stamp source=runtime so values survive the ConfigMap revert"
+        );
+        assert_eq!(
+            rt.block_on(stored_source(&storage, "default_model")),
+            ConfigSource::Runtime
+        );
 
         // Re-running converges (idempotent).
         let (m, d) = rt
@@ -728,5 +749,49 @@ mod tests {
             SeedOutcome::RuntimeProtected,
             "UI default_model must survive re-import"
         );
+    }
+
+    /// R-1 regression (C-009 cutover): after the one-time import, the next boot
+    /// reads the EMPTY ConfigMap baseline as bootstrap. The imported values must
+    /// survive that boot-seed (`RuntimeProtected`), NOT be wiped (`BootstrapUpdated`).
+    #[test]
+    fn imported_values_survive_post_cutover_boot_seed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = StorageConfig::embedded_default(tmp.path().join("op"));
+        let rt = rt();
+
+        // Prod import of live config.toml values.
+        rt.block_on(import_config_values(&storage, &[mcp("prod")], &dm("groq")))
+            .unwrap();
+
+        // Post-cutover boot: config.toml is now the empty read-only ConfigMap
+        // baseline (no mcp_servers, default compiled model). Boot-seed runs.
+        let m = rt.block_on(seed_mcp_servers(&storage, &[], 0)).unwrap();
+        let d = rt
+            .block_on(seed_default_model(&storage, &dm("compiled-default"), 0))
+            .unwrap();
+        assert_eq!(
+            m,
+            SeedOutcome::RuntimeProtected,
+            "prod mcp_servers must NOT be wiped"
+        );
+        assert_eq!(
+            d,
+            SeedOutcome::RuntimeProtected,
+            "prod default_model must NOT be wiped"
+        );
+
+        // The store still holds the prod values, still runtime.
+        let session = rt.block_on(shared_pool().open(&storage)).unwrap();
+        let store = rt.block_on(SurrealConfigStore::open(&session)).unwrap();
+        let row = rt.block_on(store.get("mcp_servers")).unwrap().unwrap();
+        let names: Vec<String> =
+            serde_json::from_value::<Vec<librefang_types::config::McpServerConfigEntry>>(row.value)
+                .unwrap()
+                .into_iter()
+                .map(|e| e.name)
+                .collect();
+        assert_eq!(names, vec!["prod"]);
+        assert_eq!(row.source, ConfigSource::Runtime);
     }
 }

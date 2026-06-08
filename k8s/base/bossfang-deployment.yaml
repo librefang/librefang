@@ -53,41 +53,14 @@ spec:
                 sleep 2
               done
               echo "SurrealDB reachable."
-        # Seed config.toml onto the writable PVC from the ConfigMap baseline
-        # on first boot only.  If /data/config.toml already exists (the user
-        # has edited it via the web UI, or a prior seed ran) the copy is
-        # skipped so live edits survive pod restarts.
-        #
-        # Why: the daemon writes config changes (POST /api/mcp/servers,
-        # default-model, provider config, etc.) directly to config.toml at
-        # $BOSSFANG_HOME/config.toml (/data/config.toml).  A read-only
-        # ConfigMap mount causes those writes to fail with os error 30
-        # (Read-only file system).  By seeding the file onto the PVC once
-        # and letting the main container own it from there, the web UI can
-        # persist configuration normally.
-        #
-        # The ConfigMap (bossfang-config) remains the canonical baseline for
-        # fresh cluster deployments; edit it to change the defaults that a
-        # brand-new pod will start with.
-        - name: init-config
-          image: busybox:1.37
-          command:
-            - sh
-            - -c
-            - |
-              if [ ! -f /data/config.toml ]; then
-                echo "Seeding config.toml from ConfigMap baseline..."
-                cp /config-seed/config.toml /data/config.toml
-                echo "Seed complete."
-              else
-                echo "config.toml already exists on PVC — skipping seed."
-              fi
-          volumeMounts:
-            - name: data
-              mountPath: /data
-            - name: config-seed
-              mountPath: /config-seed
-              readOnly: true
+        # NOTE (phase 9 / C-009): the old `init-config` initContainer that
+        # copied config.toml onto the writable PVC is GONE. Runtime-mutable
+        # configuration (MCP server registrations, default-model/provider) now
+        # persists to the SurrealDB config store on the PVC, not config.toml —
+        # so config.toml is mounted read-only directly from the ConfigMap below.
+        # The web UI no longer writes config.toml for those paths (no more
+        # `os error 30`). See k8s/README.md and the C-008 import runbook;
+        # the import MUST have run before this revert (assessment R-1).
       containers:
         - name: bossfang
           # Pinned in overlay. Build & push from this repo's root
@@ -99,11 +72,13 @@ spec:
               containerPort: 4545
               protocol: TCP
           env:
-            # Tell the daemon to put all of $HOME state here. The PVC
-            # mounts at /data; config.toml is seeded there by init-config
-            # on first boot and is writable so the web UI can modify it.
-            # npm/uv caches (/data/.npm, /data/.cache/uv) land here too,
-            # providing on-disk storage for npx/uvx stdio MCP server pkgs.
+            # Tell the daemon to put all of $HOME state here. The PVC mounts
+            # at /data and holds runtime state — the SurrealDB embedded store
+            # (config + memory + audit), workspaces, the vault, and npm/uv
+            # caches (/data/.npm, /data/.cache/uv) for npx/uvx stdio MCP pkgs.
+            # config.toml is mounted read-only at /data/config.toml from the
+            # ConfigMap (baseline defaults); runtime config changes go to the
+            # DB store, not the file.
             - name: BOSSFANG_HOME
               value: /data
             # The pod is only reachable through Envoy Gateway, which
@@ -178,17 +153,22 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
-              # config.toml lives at /data/config.toml on the writable PVC.
-              # It is seeded from the ConfigMap by init-config on first boot
-              # and is fully writable thereafter so the web UI can persist
-              # MCP server registrations, default-model changes, etc.
+            # config.toml is mounted READ-ONLY from the ConfigMap, overlaying
+            # the PVC at /data/config.toml (subPath = single-file mount). It is
+            # the baseline-defaults source only; the daemon never writes it —
+            # runtime config (MCP servers, default-model) persists to the DB
+            # store on the PVC. subPath means ConfigMap edits need a pod restart
+            # to take effect (fine for baseline defaults).
+            - name: config
+              mountPath: /data/config.toml
+              subPath: config.toml
+              readOnly: true
       volumes:
         - name: data
           persistentVolumeClaim:
             claimName: bossfang-data
-        # Read-only seed source used only by the init-config initContainer.
-        # The main bossfang container never mounts this volume directly.
-        - name: config-seed
+        # Baseline config.toml, mounted read-only into the main container above.
+        - name: config
           configMap:
             name: bossfang-config
             items:

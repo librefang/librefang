@@ -5,9 +5,9 @@
   "last_updated": "2026-06-08T00:00:00Z",
   "last_updated_by": "kbd-execute",
   "backend": "native-tool",
-  "phase_progress": "Phase 9 executing: 9/11 changes DONE (C-008 code done; HUMAN cluster verify pending). C-008 added `librefang storage config-import` (reuses the daemon boot-seed: idempotent, non-destructive; --dry-run; refuses while daemon up) + a passing idempotent/non-destructive unit test; incidentally fixed a pre-existing stale bin-test call that blocked the cli test target. C-009 (revert K8s mounted config.toml to a read-only ConfigMap) is HARD-GATED: the human must run the C-008 prod import + confirm MCP servers/provider-default resolve from the DB before C-009 lands. C-005c (generic config_set) remains a future follow-up.",
+  "phase_progress": "Phase 9: code 10/11 DONE. C-001..C-008 merged via PR #74. C-009 CODE DONE on branch kbd/phase-9-c009-configmap-revert: (a) manifest revert — removed init-config initContainer, config.toml now a read-only subPath ConfigMap mount at /data/config.toml (kustomize render verified); (b) FIXED a data-loss bug found in merged C-008 — the import wrote source=bootstrap, which the post-revert boot-seed would overwrite with the empty ConfigMap baseline; import now writes source=runtime (RuntimeProtected), with a cutover-survival regression test. APPLY is HUMAN + hard-gated, strict order: deploy the C-009-fixed image -> run C-008 import daemon-down on prod PVC -> verify values resolve from DB -> kubectl apply -k the revert. C-005c (generic config_set) remains future.",
   "next_action": {
-    "command": "HUMAN runs C-008 prod import + verify, THEN /kbd-execute C-009",
-    "description": "C-008 code is merge-ready; the cluster import+verify is human-only (daemon-down on prod PVC). C-009 reverts the K8s overlay's config.toml mount to a read-only ConfigMap once the import is confirmed — HARD-GATED on that verify to avoid prod data loss (R-1)."
+    "command": "Open C-009 PR; HUMAN executes the cutover runbook (deploy fixed image -> import -> verify -> apply revert)",
+    "description": "C-009 code (manifest revert + C-008 source=runtime fix) is ready for PR. The cluster cutover is human-only and strictly ordered to avoid prod data loss (R-1). Apply the ConfigMap revert ONLY after the import is verified on the fixed image."
   }
 }

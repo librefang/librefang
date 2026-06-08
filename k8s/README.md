@@ -31,8 +31,12 @@ namespace, resource sizing, and GKE StorageClass mapping.
   in the same namespace. No second SurrealDB or sidecar required.
 - **BossFang**: one `Deployment` replica running the daemon
   (`librefang start --foreground`). Port `4545`. Persistent volume at
-  `/data` for `BOSSFANG_HOME` (config.toml, vault, logs, daemon.lock,
-  registry cache). Probes `/api/health`.
+  `/data` for `BOSSFANG_HOME` (the SurrealDB embedded store — runtime config +
+  memory + audit — vault, logs, daemon.lock, registry cache). `config.toml` is
+  mounted **read-only** at `/data/config.toml` from the `bossfang-config`
+  ConfigMap (baseline defaults only); runtime-mutable config (MCP servers,
+  default-model) persists to the DB store, so the web UI works without a
+  writable config.toml. Probes `/api/health`.
 - **Gateway**: `bossfang-gateway` in `envoy-gateway-system`, using the
   existing `prometheusags-wildcard-tls` wildcard cert. Matches the cluster
   pattern (docuseal-gateway, document-designer-gateway, etc.). Two listeners:
