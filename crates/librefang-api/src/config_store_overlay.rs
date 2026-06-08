@@ -18,7 +18,7 @@
 //! the kernel, then the MCP-connect task runs. The write half (UI / API edits)
 //! is C-005 ([`write_mcp_servers`]).
 
-use librefang_kernel::LibreFangKernel;
+use librefang_kernel::KernelApi;
 use librefang_storage::migrations::{apply_pending, OPERATIONAL_MIGRATIONS};
 use librefang_storage::{
     content_hash, shared_pool, ConfigSource, ConfigStore, StorageConfig, SurrealConfigStore,
@@ -145,7 +145,7 @@ pub async fn seed_mcp_servers(
 /// Seed the config store from the kernel's bootstrap config at daemon boot.
 /// Best-effort: failures log and leave the store untouched (never block boot).
 /// Runs BEFORE [`overlay_mcp_servers`] so the overlay reads a populated store.
-pub async fn seed_config_store(kernel: &LibreFangKernel) {
+pub async fn seed_config_store(kernel: &dyn KernelApi) {
     let storage_cfg = kernel.config_ref().storage.clone();
     let bootstrap = kernel.config_ref().mcp_servers.clone();
     let revision = bootstrap_revision();
@@ -203,7 +203,7 @@ pub async fn write_mcp_servers(
 /// effective list at boot. Best-effort: any failure (SurrealDB unreachable,
 /// missing entry, malformed value) logs and leaves the bootstrap list intact —
 /// it must never block daemon startup.
-pub async fn overlay_mcp_servers(kernel: &LibreFangKernel) {
+pub async fn overlay_mcp_servers(kernel: &dyn KernelApi) {
     let storage_cfg = kernel.config_ref().storage.clone();
 
     // Shared process-global pool — embedded RocksDB holds one lock per path per

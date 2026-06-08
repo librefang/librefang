@@ -287,3 +287,46 @@ async fn seed_revision_bump_overrides_runtime_row() {
     assert_eq!(source, ConfigSource::Bootstrap);
     assert_eq!(rev, 1);
 }
+
+// ── C-006: a config reload re-resolves from the store (no clobber) ───────────
+
+use librefang_api::config_store_overlay::seed_config_store;
+
+/// The config-reload path re-runs seed → overlay, so a reload that re-reads
+/// config.toml does NOT revert a DB-resolved `runtime` (UI) value back to the
+/// bootstrap file value. We simulate `reload_config`'s effect (it transiently
+/// resets the kernel's MCP list to the bootstrap file) and assert the C-006
+/// re-resolve restores the runtime value from the store.
+#[tokio::test(flavor = "multi_thread")]
+async fn reload_reresolve_preserves_runtime_over_bootstrap() {
+    let tmp = tempfile::tempdir().unwrap();
+    let storage = StorageConfig::embedded_default(tmp.path().join("operational"));
+
+    let kernel =
+        LibreFangKernel::boot_with_config(test_config(tmp.path(), storage.clone())).expect("boots");
+
+    // A prior UI edit lives in the store as a runtime value.
+    write_mcp_servers(&storage, &[entry("ui-server")], ConfigSource::Runtime)
+        .await
+        .unwrap();
+
+    // Simulate reload_config re-reading config.toml: it resets the kernel's MCP
+    // list to the bootstrap file values (here, a different server).
+    kernel.replace_mcp_servers(vec![entry("boot-server")]);
+    assert_eq!(kernel.effective_mcp_servers()[0].name, "boot-server");
+
+    // C-006 re-resolve (exactly what config_reload runs after reload_config):
+    seed_config_store(&kernel).await;
+    overlay_mcp_servers(&kernel).await;
+
+    // The runtime value wins — the reload did not clobber the UI edit.
+    let effective = kernel.effective_mcp_servers();
+    assert_eq!(effective.len(), 1);
+    assert_eq!(
+        effective[0].name, "ui-server",
+        "reload must not revert a DB runtime value to the config.toml bootstrap"
+    );
+    // And the store row stayed runtime (seed left it protected).
+    let (_, source, _) = stored_servers(&storage).await;
+    assert_eq!(source, ConfigSource::Runtime);
+}

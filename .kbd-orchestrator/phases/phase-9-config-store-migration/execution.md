@@ -21,7 +21,7 @@ the repo's Build & Verify rules (no `cargo build`, no workspace-wide `cargo test
 | C-004 | **DONE** | `cargo check --workspace --lib` + `cargo test -p librefang-api --test config_store_overlay_test` |
 | C-005 | **DONE** | `cargo test -p librefang-api --test config_store_overlay_test` + `cargo check --workspace --lib` |
 | C-005b | PENDING | provider-default + config_set + route-level HTTP TestServer |
-| C-006 | PENDING | `cargo test -p librefang-api` (reload) |
+| C-006 | **DONE** | `cargo test -p librefang-api --test config_store_overlay_test` (8 passed) |
 | C-007 | PENDING | `cargo test -p librefang-kernel` (determinism) |
 | C-008 | PENDING | HUMAN cluster verify |
 | C-009 | PENDING | HUMAN deploy, gated on C-008 |
@@ -158,3 +158,20 @@ tests: fresh/unchanged, bootstrap-update, runtime-protected, revision-override);
 clippy `-p librefang-api` clean; brand audit clean.
 
 **Next:** C-006 — reload path re-resolves `effective_mcp_servers` from the store.
+
+## C-006 — reload re-resolves from the store · DONE (2026-06-08)
+
+**What landed:** `config_reload` re-runs **seed → overlay → reload_mcp_servers**
+after `reload_config()` (surreal-gated), so a reload that re-reads config.toml
+never reverts a DB `runtime` value to the bootstrap file. Widened
+`seed_config_store`/`overlay_mcp_servers` to `&dyn KernelApi` (handler holds
+`Arc<dyn KernelApi>`); boot call sites coerce automatically.
+
+**Files (3):** `routes/config/manage.rs`, `config_store_overlay.rs`,
+`tests/config_store_overlay_test.rs`.
+
+**Verification (green):** `config_store_overlay_test` 8 passed (new
+`reload_reresolve_preserves_runtime_over_bootstrap`); clippy `-p librefang-api`
+clean; brand audit clean.
+
+**Next:** C-007 — determinism `ORDER BY` + regression test (#3298).
