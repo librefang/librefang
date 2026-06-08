@@ -223,6 +223,14 @@ impl MockKernelBuilder {
         self.config.home_dir = home_dir;
         self.config.data_dir = data_dir;
         self.config.network_enabled = false;
+        // Isolate the operational SurrealDB store under the tempdir. The default
+        // StorageConfig points at a CWD-relative `.librefang/` path; without this
+        // override, tests that touch the config store (MCP / default-model
+        // writes) would pollute the repo working directory and contend on the
+        // process-global embedded lock (phase 9 / C-005b).
+        self.config.storage = librefang_types::config::StorageConfig::embedded_default(
+            self.config.data_dir.join("operational"),
+        );
         // Use in-memory SQLite (setting path to :memory: doesn't work; boot_with_config uses file paths)
         // So we use a file path under the temp directory instead
         self.config.memory.sqlite_path = Some(self.config.data_dir.join("test.db"));

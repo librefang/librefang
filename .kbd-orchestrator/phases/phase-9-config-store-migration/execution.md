@@ -20,7 +20,8 @@ the repo's Build & Verify rules (no `cargo build`, no workspace-wide `cargo test
 | C-003 | **DONE** | `cargo test -p librefang-api --test config_store_overlay_test` (7 passed) |
 | C-004 | **DONE** | `cargo check --workspace --lib` + `cargo test -p librefang-api --test config_store_overlay_test` |
 | C-005 | **DONE** | `cargo test -p librefang-api --test config_store_overlay_test` + `cargo check --workspace --lib` |
-| C-005b | PENDING | provider-default + config_set + route-level HTTP TestServer |
+| C-005b | **DONE** | overlay test (10) + `mcp_http_crud_test` (1) + `providers_routes_test` (37) |
+| C-005c | PENDING | generic config_set (needs kernel config-override merge layer) |
 | C-006 | **DONE** | `cargo test -p librefang-api --test config_store_overlay_test` (8 passed) |
 | C-007 | **DONE** | `cargo test -p librefang-storage --lib config_store` (4 passed) |
 | C-008 | PENDING | HUMAN cluster verify |
@@ -190,5 +191,30 @@ multi-key prompt-reaching path.
 **Verification (green):** `cargo test -p librefang-storage --lib config_store`
 4 passed; clippy `-p librefang-storage --all-targets` clean; brand clean.
 
-**Core migration COMPLETE.** Remaining: C-005b (deferred provider/config_set +
+## C-005b — provider-default → store + HTTP route tests · DONE (2026-06-08)
+
+**Scope (user):** provider-default + HTTP route test; generic config_set deferred
+to C-005c (needs a kernel config-override merge layer).
+
+**What landed:** `default_model` write/overlay/seed reusing the
+`default_model_override_ref()` RwLock pattern; both default-model writers
+(`set_default_provider`, `set_provider_key`) route through
+`persist_default_model_durable` (store under surreal; config.toml fallback under
+sqlite). `overlay_default_model` added to boot + reload pipelines.
+`MockKernelBuilder` now isolates `config.storage` to a tempdir (the default is
+CWD-relative). New full-router `mcp_http_crud_test` (POST→GET→DELETE→GET).
+
+**Files (8):** `config_store_overlay.rs`, `server.rs`, `routes/config/manage.rs`,
+`routes/providers.rs`, `librefang-testing/mock_kernel.rs`, +3 test files.
+
+**Verification (green):** overlay 10, http-crud 1, providers 37; `cargo check
+--workspace --lib`; clippy `-p librefang-api -p librefang-testing`; brand clean.
+(Pre-existing, unrelated: `api_integration_test` doesn't compile on base —
+`sync_registry` arity — untouched.)
+
+**Next:** C-008 — one-time prod config.toml → DB import CLI + HUMAN verify.
+
+---
+
+**Core migration + provider-default COMPLETE.** Remaining: C-005c (deferred config_set +
 HTTP route tests), C-008 (prod import), C-009 (K8s revert, gated on C-008).

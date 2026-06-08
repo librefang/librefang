@@ -6,8 +6,8 @@
   "backend": "native-tool",
   "assessment_date": "2026-06-06",
   "verdict": "proceed-with-corrected-mechanism",
-  "changes_total": 10,
-  "changes_completed": 7,
+  "changes_total": 11,
+  "changes_completed": 8,
   "architecture_revision": "C-004 discovery: kernel holds no operational SurrealDB session at boot. User decision (D9): config store is API-owned — kernel exposes get/replace for effective_mcp_servers; librefang-api reads/writes the store. D10: process-global shared_pool() added (embedded RocksDB single-lock per path, assessment R-2 confirmed). C-003/C-005/C-006 placements revised accordingly.",
   "changes": {
     "C-001": { "status": "DONE", "completed": "2026-06-06", "files": 2, "qa": "skipped-under-3-files" },
@@ -15,14 +15,15 @@
     "C-003": { "status": "PENDING" },
     "C-004": { "status": "DONE", "completed": "2026-06-07", "files": 8, "qa": "compile+clippy+integration-test+brand (refine-validate skill unavailable)" },
     "C-005": { "status": "DONE", "completed": "2026-06-08", "files": 6, "scope": "MCP write path only (user decision); provider-default + config_set deferred to C-005b", "qa": "compile+integration-test+clippy+brand" },
-    "C-005b": { "status": "PENDING", "note": "provider-default (persist_default_model) + generic config_set writes; + route-level HTTP TestServer coverage with temp-storage harness" },
+    "C-005b": { "status": "DONE", "completed": "2026-06-08", "files": 8, "scope": "provider-default -> store + HTTP route tests + MockKernelBuilder temp-storage isolation; generic config_set deferred to C-005c", "qa": "overlay(10)+http-crud(1)+providers(37)+clippy+brand" },
+    "C-005c": { "status": "PENDING", "note": "generic config_set store migration: needs a kernel config-override merge layer applied at load/reload + security review for section-wholesale writes" },
     "C-003": { "status": "DONE", "completed": "2026-06-08", "files": 3, "qa": "integration-tests(7)+clippy+brand" },
     "C-006": { "status": "DONE", "completed": "2026-06-08", "files": 3, "qa": "integration-tests(8)+clippy+brand" },
     "C-007": { "status": "DONE", "completed": "2026-06-08", "files": 1, "qa": "skipped-under-3-files", "note": "single-row array + render_mcp_summary sort already guarantee prompt determinism; added config_store list() ORDER BY guard test" },
     "C-008": { "status": "PENDING" },
     "C-009": { "status": "PENDING" }
   },
-  "suggested_order": ["C-001","C-002","C-004","C-005","C-003","C-006","C-007","C-005b","C-008","C-009"],
+  "suggested_order": ["C-001","C-002","C-004","C-005","C-003","C-006","C-007","C-005b","C-008","C-009","C-005c"],
   "k8s_revert_gated_on": "C-008 verified one-time import of existing prod config.toml",
-  "next_command": "/kbd-execute C-005b"
+  "next_command": "/kbd-execute C-008"
 }

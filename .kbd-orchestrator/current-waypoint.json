@@ -1,13 +1,13 @@
 {
   "active_phase": "phase-9-config-store-migration",
   "previous_phase": "phase-8-fixture-rebuilds",
-  "active_change": "C-005b",
+  "active_change": "C-008",
   "last_updated": "2026-06-08T00:00:00Z",
   "last_updated_by": "kbd-execute",
   "backend": "native-tool",
-  "phase_progress": "Phase 9 executing: 7/10 changes DONE. C-007 (determinism) landed: structural finding — mcp_servers is a single ordered row + render_mcp_summary already sorts, so prompt output is byte-stable (existing kernel mcp_summary_* tests cover it, unchanged); added a config_store list() ORDER BY guard test. The core MCP config-store migration (storage + trait + overlay + writes + seed + reload + determinism) is COMPLETE and fully tested. Next C-005b (provider-default + config_set write paths + route-level HTTP TestServer) -> C-008 (prod config.toml import CLI + human verify) -> C-009 (K8s ConfigMap revert, hard-gated on C-008 prod verify).",
+  "phase_progress": "Phase 9 executing: 8/11 changes DONE. C-005b landed: provider-default (default_model) now persists to the store via the override-RwLock pattern (write/overlay/seed); MockKernelBuilder isolates test storage to a tempdir; full-router HTTP CRUD test added. Generic config_set deferred to C-005c (needs a kernel config-override merge layer). MCP + provider-default config is now fully DB-authoritative and read-only-config.toml-safe. Next C-008 (one-time prod config.toml -> DB import CLI + HUMAN cluster verify) -> C-009 (K8s ConfigMap revert, HARD-GATED on C-008 prod verify). C-005c is a future follow-up.",
   "next_action": {
-    "command": "/kbd-execute C-005b",
-    "description": "Deferred from C-005: provider-default (persist_default_model) + generic config_set writes to the store; + a temp-storage full-router HTTP TestServer test for the MCP CRUD endpoints — M"
+    "command": "/kbd-execute C-008",
+    "description": "Add `librefang storage config-import` CLI to seed the existing prod config.toml into the DB store; HUMAN runs + verifies it on the cluster before C-009 — M"
   }
 }

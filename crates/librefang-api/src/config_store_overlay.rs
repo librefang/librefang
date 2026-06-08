@@ -23,10 +23,70 @@ use librefang_storage::migrations::{apply_pending, OPERATIONAL_MIGRATIONS};
 use librefang_storage::{
     content_hash, shared_pool, ConfigSource, ConfigStore, StorageConfig, SurrealConfigStore,
 };
-use librefang_types::config::McpServerConfigEntry;
+use librefang_types::config::{DefaultModelConfig, McpServerConfigEntry};
 
 /// Config-store key under which the MCP server list is stored.
 pub const MCP_SERVERS_KEY: &str = "mcp_servers";
+
+/// Config-store key under which the default-model selection is stored (C-005b).
+pub const DEFAULT_MODEL_KEY: &str = "default_model";
+
+/// Open the config store via the shared pool, ensuring the schema is applied.
+/// Self-contained so callers work whether or not the boot overlay has run.
+async fn open_config_store(storage_cfg: &StorageConfig) -> Result<SurrealConfigStore, String> {
+    let session = shared_pool()
+        .open(storage_cfg)
+        .await
+        .map_err(|e| format!("open storage session: {e}"))?;
+    apply_pending(session.client(), OPERATIONAL_MIGRATIONS)
+        .await
+        .map_err(|e| format!("apply migrations: {e}"))?;
+    SurrealConfigStore::open(&session)
+        .await
+        .map_err(|e| format!("open config store: {e}"))
+}
+
+/// Generic seed/merge for one config-store key (shared by mcp_servers and
+/// default_model). See [`seed_mcp_servers`] for the decision table.
+async fn seed_value(
+    store: &SurrealConfigStore,
+    key: &str,
+    value: serde_json::Value,
+    bootstrap_revision: i64,
+) -> Result<SeedOutcome, String> {
+    let hash = content_hash(&value);
+    let existing = store
+        .get(key)
+        .await
+        .map_err(|e| format!("read config store: {e}"))?;
+    let outcome = match existing {
+        None => SeedOutcome::Seeded,
+        Some(row) if row.content_hash == hash => SeedOutcome::Unchanged,
+        Some(row) => match row.source {
+            ConfigSource::Bootstrap => SeedOutcome::BootstrapUpdated,
+            ConfigSource::Runtime => {
+                if bootstrap_revision > row.revision {
+                    SeedOutcome::RevisionOverride
+                } else {
+                    SeedOutcome::RuntimeProtected
+                }
+            }
+        },
+    };
+    if outcome.wrote() {
+        store
+            .upsert(
+                key,
+                value,
+                ConfigSource::Bootstrap,
+                &hash,
+                bootstrap_revision,
+            )
+            .await
+            .map_err(|e| format!("write config store: {e}"))?;
+    }
+    Ok(outcome)
+}
 
 /// Env var holding the operator-controlled bootstrap revision. Bumping it is the
 /// ONLY way a `config.toml` change can override a `runtime` (UI-written) store
@@ -92,74 +152,52 @@ pub async fn seed_mcp_servers(
     bootstrap: &[McpServerConfigEntry],
     bootstrap_revision: i64,
 ) -> Result<SeedOutcome, String> {
-    let session = shared_pool()
-        .open(storage_cfg)
-        .await
-        .map_err(|e| format!("open storage session: {e}"))?;
-    apply_pending(session.client(), OPERATIONAL_MIGRATIONS)
-        .await
-        .map_err(|e| format!("apply migrations: {e}"))?;
-    let store = SurrealConfigStore::open(&session)
-        .await
-        .map_err(|e| format!("open config store: {e}"))?;
-
+    let store = open_config_store(storage_cfg).await?;
     let value = serde_json::to_value(bootstrap).map_err(|e| e.to_string())?;
-    let hash = content_hash(&value);
+    seed_value(&store, MCP_SERVERS_KEY, value, bootstrap_revision).await
+}
 
-    let existing = store
-        .get(MCP_SERVERS_KEY)
-        .await
-        .map_err(|e| format!("read config store: {e}"))?;
-
-    let outcome = match existing {
-        None => SeedOutcome::Seeded,
-        Some(row) if row.content_hash == hash => SeedOutcome::Unchanged,
-        Some(row) => match row.source {
-            ConfigSource::Bootstrap => SeedOutcome::BootstrapUpdated,
-            ConfigSource::Runtime => {
-                if bootstrap_revision > row.revision {
-                    SeedOutcome::RevisionOverride
-                } else {
-                    SeedOutcome::RuntimeProtected
-                }
-            }
-        },
-    };
-
-    if outcome.wrote() {
-        store
-            .upsert(
-                MCP_SERVERS_KEY,
-                value,
-                ConfigSource::Bootstrap,
-                &hash,
-                bootstrap_revision,
-            )
-            .await
-            .map_err(|e| format!("write config store: {e}"))?;
-    }
-
-    Ok(outcome)
+/// Seed / merge the bootstrap default-model selection into the config store
+/// (C-005b). Same provenance/content-hash semantics as [`seed_mcp_servers`].
+///
+/// # Errors
+/// Returns a scrubbed message on any storage failure.
+pub async fn seed_default_model(
+    storage_cfg: &StorageConfig,
+    bootstrap: &DefaultModelConfig,
+    bootstrap_revision: i64,
+) -> Result<SeedOutcome, String> {
+    let store = open_config_store(storage_cfg).await?;
+    let value = serde_json::to_value(bootstrap).map_err(|e| e.to_string())?;
+    seed_value(&store, DEFAULT_MODEL_KEY, value, bootstrap_revision).await
 }
 
 /// Seed the config store from the kernel's bootstrap config at daemon boot.
 /// Best-effort: failures log and leave the store untouched (never block boot).
-/// Runs BEFORE [`overlay_mcp_servers`] so the overlay reads a populated store.
+/// Runs BEFORE the overlays so they read a populated store.
 pub async fn seed_config_store(kernel: &dyn KernelApi) {
     let storage_cfg = kernel.config_ref().storage.clone();
-    let bootstrap = kernel.config_ref().mcp_servers.clone();
     let revision = bootstrap_revision();
-    match seed_mcp_servers(&storage_cfg, &bootstrap, revision).await {
+
+    let mcp = kernel.config_ref().mcp_servers.clone();
+    match seed_mcp_servers(&storage_cfg, &mcp, revision).await {
         Ok(outcome) => tracing::info!(
             ?outcome,
             bootstrap_revision = revision,
-            count = bootstrap.len(),
+            count = mcp.len(),
             "config-store seed: bootstrap MCP servers reconciled"
         ),
-        Err(e) => tracing::warn!(
-            error = %e,
-            "config-store seed failed; leaving store untouched"
+        Err(e) => tracing::warn!(error = %e, "config-store seed (mcp_servers) failed"),
+    }
+
+    let dm = kernel.config_ref().default_model.clone();
+    match seed_default_model(&storage_cfg, &dm, revision).await {
+        Ok(outcome) => tracing::info!(
+            ?outcome,
+            bootstrap_revision = revision,
+            "config-store seed: bootstrap default_model reconciled"
         ),
+        Err(e) => tracing::warn!(error = %e, "config-store seed (default_model) failed"),
     }
 }
 
@@ -178,22 +216,33 @@ pub async fn write_mcp_servers(
     servers: &[McpServerConfigEntry],
     source: ConfigSource,
 ) -> Result<(), String> {
-    let session = shared_pool()
-        .open(storage_cfg)
-        .await
-        .map_err(|e| format!("open storage session: {e}"))?;
-    apply_pending(session.client(), OPERATIONAL_MIGRATIONS)
-        .await
-        .map_err(|e| format!("apply migrations: {e}"))?;
-    let store = SurrealConfigStore::open(&session)
-        .await
-        .map_err(|e| format!("open config store: {e}"))?;
+    let store = open_config_store(storage_cfg).await?;
     let value = serde_json::to_value(servers).map_err(|e| e.to_string())?;
     let hash = content_hash(&value);
     // revision is only meaningful for bootstrap precedence (C-003); runtime
     // rows are never overwritten by a bootstrap re-sync on a mere hash diff.
     store
         .upsert(MCP_SERVERS_KEY, value, source, &hash, 0)
+        .await
+        .map_err(|e| format!("write config store: {e}"))?;
+    Ok(())
+}
+
+/// Persist the default-model selection to the config store under
+/// [`DEFAULT_MODEL_KEY`] (C-005b). UI/API writes use [`ConfigSource::Runtime`].
+///
+/// # Errors
+/// Returns a scrubbed message on any storage failure.
+pub async fn write_default_model(
+    storage_cfg: &StorageConfig,
+    default_model: &DefaultModelConfig,
+    source: ConfigSource,
+) -> Result<(), String> {
+    let store = open_config_store(storage_cfg).await?;
+    let value = serde_json::to_value(default_model).map_err(|e| e.to_string())?;
+    let hash = content_hash(&value);
+    store
+        .upsert(DEFAULT_MODEL_KEY, value, source, &hash, 0)
         .await
         .map_err(|e| format!("write config store: {e}"))?;
     Ok(())
@@ -279,4 +328,45 @@ pub async fn overlay_mcp_servers(kernel: &dyn KernelApi) {
         }
     }
     // `session` / `pool` drop here → embedded RocksDB lock released.
+}
+
+/// Overlay the database config store's default-model selection onto the
+/// kernel's runtime override (C-005b). Best-effort: any failure logs and leaves
+/// the bootstrap `default_model` intact — it must never block daemon startup.
+pub async fn overlay_default_model(kernel: &dyn KernelApi) {
+    let storage_cfg = kernel.config_ref().storage.clone();
+    let store = match open_config_store(&storage_cfg).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "config-store overlay (default_model): open failed");
+            return;
+        }
+    };
+    match store.get(DEFAULT_MODEL_KEY).await {
+        Ok(Some(entry)) => match serde_json::from_value::<DefaultModelConfig>(entry.value) {
+            Ok(dm) => {
+                let provider = dm.provider.clone();
+                if let Ok(mut guard) = kernel.default_model_override_ref().write() {
+                    *guard = Some(dm);
+                }
+                tracing::info!(
+                    %provider,
+                    source = entry.source.as_str(),
+                    "config-store overlay: applied default_model from database"
+                );
+            }
+            Err(e) => tracing::warn!(
+                error = %e,
+                "config-store overlay: '{DEFAULT_MODEL_KEY}' entry malformed; keeping bootstrap"
+            ),
+        },
+        Ok(None) => {
+            tracing::debug!(
+                "config-store overlay: no '{DEFAULT_MODEL_KEY}' entry; keeping bootstrap"
+            )
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "config-store overlay (default_model): read failed")
+        }
+    }
 }

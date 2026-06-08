@@ -1125,6 +1125,10 @@ async fn list_providers_exposes_suppression_state() {
 // then assert the sibling section survives the rewrite.
 // ---------------------------------------------------------------------------
 
+// Gated to sqlite-only: under surreal-backend the default-model write goes to
+// the DB config store and config.toml is never rewritten, so the #5116
+// rewrite-preservation path this guards does not execute (phase 9 / C-005b).
+#[cfg(not(feature = "surreal-backend"))]
 #[tokio::test(flavor = "multi_thread")]
 async fn set_default_provider_preserves_other_config_sections() {
     let h = boot();
@@ -1237,17 +1241,35 @@ async fn set_default_provider_when_config_toml_absent_creates_it_with_default_mo
     assert_eq!(status, StatusCode::OK, "unexpected body: {body}");
     assert_eq!(body["persisted"].as_bool(), Some(true));
 
-    let after = std::fs::read_to_string(&config_path).expect("config.toml created");
-    let parsed: toml::Value = toml::from_str(&after).expect("new config.toml parses");
-    let dm = parsed
-        .get("default_model")
-        .and_then(|v| v.as_table())
-        .expect("[default_model] missing from freshly-created config.toml");
-    assert_eq!(dm.get("provider").and_then(|v| v.as_str()), Some("openai"));
-    assert_eq!(
-        dm.get("model").and_then(|v| v.as_str()),
-        Some("gpt-4o-mini")
-    );
+    // Phase 9 / C-005b: under surreal-backend the selection persists to the DB
+    // config store, NOT config.toml — so the switch works when config.toml is
+    // mounted read-only (a Kubernetes ConfigMap). The runtime override is set
+    // immediately; the store row survives a restart via the boot overlay.
+    #[cfg(feature = "surreal-backend")]
+    {
+        assert!(
+            !config_path.exists(),
+            "default-model write must not create config.toml under surreal-backend",
+        );
+        let guard = h._state.kernel.default_model_override_ref().read().unwrap();
+        let dm = guard.as_ref().expect("runtime override must be set");
+        assert_eq!(dm.provider, "openai");
+        assert_eq!(dm.model, "gpt-4o-mini");
+    }
+    #[cfg(not(feature = "surreal-backend"))]
+    {
+        let after = std::fs::read_to_string(&config_path).expect("config.toml created");
+        let parsed: toml::Value = toml::from_str(&after).expect("new config.toml parses");
+        let dm = parsed
+            .get("default_model")
+            .and_then(|v| v.as_table())
+            .expect("[default_model] missing from freshly-created config.toml");
+        assert_eq!(dm.get("provider").and_then(|v| v.as_str()), Some("openai"));
+        assert_eq!(
+            dm.get("model").and_then(|v| v.as_str()),
+            Some("gpt-4o-mini")
+        );
+    }
 }
 
 /// #5137: `set_default_provider` now surfaces a per-agent partial-failure

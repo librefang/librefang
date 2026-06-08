@@ -330,3 +330,83 @@ async fn reload_reresolve_preserves_runtime_over_bootstrap() {
     let (_, source, _) = stored_servers(&storage).await;
     assert_eq!(source, ConfigSource::Runtime);
 }
+
+// ── C-005b: default_model write → store → overlay → kernel override ──────────
+
+use librefang_api::config_store_overlay::{
+    overlay_default_model, seed_default_model, write_default_model,
+};
+use librefang_kernel::KernelApi as _;
+
+fn dm(provider: &str) -> librefang_types::config::DefaultModelConfig {
+    librefang_types::config::DefaultModelConfig {
+        provider: provider.to_string(),
+        model: "m".to_string(),
+        api_key_env: "X_API_KEY".to_string(),
+        base_url: None,
+        message_timeout_secs: 300,
+        extra_params: std::collections::BTreeMap::new(),
+        cli_profile_dirs: Vec::new(),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn default_model_write_overlays_into_kernel_override() {
+    let tmp = tempfile::tempdir().unwrap();
+    let storage = StorageConfig::embedded_default(tmp.path().join("operational"));
+    let kernel =
+        LibreFangKernel::boot_with_config(test_config(tmp.path(), storage.clone())).expect("boots");
+
+    // No runtime override at boot.
+    assert!(kernel
+        .default_model_override_ref()
+        .read()
+        .unwrap()
+        .is_none());
+
+    // A UI provider switch persists to the store as runtime…
+    write_default_model(&storage, &dm("anthropic"), ConfigSource::Runtime)
+        .await
+        .unwrap();
+    // …and the boot overlay applies it onto the kernel's runtime override.
+    overlay_default_model(&kernel).await;
+
+    let guard = kernel.default_model_override_ref().read().unwrap();
+    assert_eq!(
+        guard.as_ref().expect("override set").provider,
+        "anthropic",
+        "overlay must push the stored default_model into the kernel override"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn default_model_seed_then_runtime_write_survives_and_is_protected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let storage = StorageConfig::embedded_default(tmp.path().join("operational"));
+
+    // Fresh seed from bootstrap.
+    let outcome = seed_default_model(&storage, &dm("ollama"), 0)
+        .await
+        .unwrap();
+    assert_eq!(outcome, SeedOutcome::Seeded);
+
+    // A UI switch overwrites it as runtime.
+    write_default_model(&storage, &dm("groq"), ConfigSource::Runtime)
+        .await
+        .unwrap();
+
+    // A later boot re-seeds bootstrap (unchanged config.toml) — must NOT clobber
+    // the runtime switch.
+    let outcome = seed_default_model(&storage, &dm("ollama"), 0)
+        .await
+        .unwrap();
+    assert_eq!(outcome, SeedOutcome::RuntimeProtected);
+
+    let session = shared_pool().open(&storage).await.unwrap();
+    let store = SurrealConfigStore::open(&session).await.unwrap();
+    let row = store.get("default_model").await.unwrap().unwrap();
+    let stored: librefang_types::config::DefaultModelConfig =
+        serde_json::from_value(row.value).unwrap();
+    assert_eq!(stored.provider, "groq", "UI switch must survive re-seed");
+    assert_eq!(row.source, ConfigSource::Runtime);
+}

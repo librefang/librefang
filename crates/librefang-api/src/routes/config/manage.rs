@@ -875,6 +875,7 @@ pub async fn config_reload(
             {
                 crate::config_store_overlay::seed_config_store(state.kernel.as_ref()).await;
                 crate::config_store_overlay::overlay_mcp_servers(state.kernel.as_ref()).await;
+                crate::config_store_overlay::overlay_default_model(state.kernel.as_ref()).await;
                 if let Err(e) = state.kernel.clone().reload_mcp_servers().await {
                     tracing::warn!(error = %e, "config reload: MCP reconcile after overlay failed");
                 }
