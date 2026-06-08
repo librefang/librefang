@@ -25,7 +25,7 @@ the repo's Build & Verify rules (no `cargo build`, no workspace-wide `cargo test
 | C-006 | **DONE** | `cargo test -p librefang-api --test config_store_overlay_test` (8 passed) |
 | C-007 | **DONE** | `cargo test -p librefang-storage --lib config_store` (4 passed) |
 | C-008 | **CODE DONE** | `cargo test -p librefang-cli --features surreal-backend config_import` (1) · HUMAN cluster verify pending |
-| C-009 | PENDING | HUMAN deploy, gated on C-008 |
+| C-009 | **CODE DONE** | cli cutover-survival test + api overlay (10) + `kubectl kustomize` render · HUMAN apply gated on C-008 |
 
 ## C-001 — config_store SurrealDB migration · DONE (2026-06-06)
 
@@ -240,6 +240,34 @@ doc). **C-009 is hard-gated on this.**
 
 ---
 
-**Core migration + provider-default + import CLI COMPLETE.** Remaining: C-009
-(ConfigMap revert, human-gated on C-008 verify); C-005c (deferred config_set +
-HTTP route tests), C-008 (prod import), C-009 (K8s revert, gated on C-008).
+## C-009 — K8s ConfigMap revert + C-008 cutover-safety fix · CODE DONE (2026-06-08)
+
+**Two coupled parts** (branch `kbd/phase-9-c009-configmap-revert`, off merged main):
+- **Manifest revert** (`k8s/base/bossfang-deployment.yaml`, `k8s/README.md`):
+  removed the `init-config` initContainer + `config-seed` volume; `config.toml`
+  now a **read-only `subPath` ConfigMap mount** at `/data/config.toml`; kept
+  `wait-for-surrealdb`. `kubectl kustomize` render verified (only
+  `wait-for-surrealdb`; read-only config mount; `config`→ConfigMap volume).
+- **Data-loss fix in merged C-008** (`config_store_overlay.rs`, CLI
+  `storage.rs`/`cli.rs`): the import wrote `source=bootstrap`; the empty prod
+  ConfigMap baseline would then `BootstrapUpdated`-overwrite it on the first
+  post-revert boot, **wiping prod MCP/provider config**. Import now writes
+  `source=runtime` (`import_mcp_servers`/`import_default_model`), so the
+  boot-seed reports `RuntimeProtected`. Regression test
+  `imported_values_survive_post_cutover_boot_seed`.
+
+**Files (6):** `config_store_overlay.rs`, `cli/cli.rs`, `cli/commands/storage.rs`,
+`k8s/base/bossfang-deployment.yaml`, `k8s/README.md`, C-009 change doc.
+
+**Verification (code, green):** cli storage tests (2, incl. cutover survival);
+api `config_store_overlay_test` (10); clippy api+cli; brand; `kubectl kustomize`
+renders clean.
+
+**APPLY = HUMAN, strict order (R-1):** deploy C-009-fixed image → run C-008
+import daemon-down on prod PVC → verify values resolve from DB → `kubectl apply -k`
+the revert. `config_set` paths still need C-005c (documented limitation).
+
+---
+
+**Phase 9 code COMPLETE (10/11).** Remaining: human cutover (C-008 import +
+C-009 apply); C-005c (generic config_set) is a future follow-up.
