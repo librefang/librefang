@@ -15,10 +15,11 @@ use futures::stream::{SplitSink, SplitStream};
 use futures::{SinkExt, StreamExt};
 use librefang_types::config::BrowserConfig;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tempfile::TempDir;
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::{oneshot, Mutex};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
@@ -35,6 +36,23 @@ const PAGE_LOAD_POLL_INTERVAL_MS: u64 = 200;
 const PAGE_LOAD_MAX_POLLS: u32 = 150; // 30 seconds
 #[allow(dead_code)]
 const MAX_CONTENT_CHARS: usize = 50_000;
+const BROWSER_ENV_ALLOWLIST: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USERPROFILE",
+    "SYSTEMROOT",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "XDG_CONFIG_HOME",
+    "XDG_CACHE_HOME",
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "XDG_RUNTIME_DIR",
+];
 
 // ── Public types ───────────────────────────────────────────────────────────
 
@@ -238,6 +256,7 @@ struct BrowserSession {
     cdp: CdpConnection,
     #[allow(dead_code)]
     last_active: Instant,
+    _user_data_dir: Option<TempDir>,
     /// Target ID of a tab created via `/json/new` during attach mode.
     /// `None` for local-launch sessions or direct WS attach.
     attached_target_id: Option<String>,
@@ -249,28 +268,11 @@ impl BrowserSession {
         let chrome_path = find_chromium(config)?;
         debug!(path = %chrome_path.display(), "Launching Chromium");
 
-        let mut args = vec![
-            "--remote-debugging-port=0".to_string(),
-            "--remote-debugging-host=127.0.0.1".to_string(),
-            "--no-first-run".to_string(),
-            "--no-default-browser-check".to_string(),
-            "--disable-extensions".to_string(),
-            "--disable-background-networking".to_string(),
-            "--disable-sync".to_string(),
-            "--disable-translate".to_string(),
-            "--disable-features=TranslateUI".to_string(),
-            "--metrics-recording-only".to_string(),
-            format!(
-                "--window-size={},{}",
-                config.viewport_width, config.viewport_height
-            ),
-            "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36".to_string(),
-            "about:blank".to_string(),
-        ];
-        if config.headless {
-            args.insert(0, "--headless=new".to_string());
-            args.push("--disable-gpu".to_string());
-        }
+        let user_data_dir = tempfile::Builder::new()
+            .prefix("librefang-chrome-")
+            .tempdir()
+            .map_err(|e| format!("Failed to create Chromium user-data-dir: {e}"))?;
+        let mut args = chromium_launch_args(config, user_data_dir.path());
 
         // On Linux, Chromium refuses to start as root without --no-sandbox.
         // This is common in Docker containers and server installs.
@@ -294,21 +296,7 @@ impl BrowserSession {
 
         // SECURITY: clear environment, pass only essentials
         cmd.env_clear();
-        for key in &[
-            "PATH",
-            "HOME",
-            "USERPROFILE",
-            "SYSTEMROOT",
-            "TEMP",
-            "TMP",
-            "TMPDIR",
-            "APPDATA",
-            "LOCALAPPDATA",
-            "XDG_CONFIG_HOME",
-            "XDG_CACHE_HOME",
-            "DISPLAY",
-            "WAYLAND_DISPLAY",
-        ] {
+        for key in BROWSER_ENV_ALLOWLIST {
             if let Ok(val) = std::env::var(key) {
                 cmd.env(key, val);
             }
@@ -365,6 +353,7 @@ impl BrowserSession {
             process: Some(child),
             cdp,
             last_active: Instant::now(),
+            _user_data_dir: Some(user_data_dir),
             attached_target_id: None,
         })
     }
@@ -432,6 +421,7 @@ impl BrowserSession {
             process: None,
             cdp,
             last_active: Instant::now(),
+            _user_data_dir: None,
             attached_target_id: target_id,
         })
     }
@@ -802,6 +792,33 @@ impl Drop for BrowserSession {
     }
 }
 
+fn chromium_launch_args(config: &BrowserConfig, user_data_dir: &Path) -> Vec<String> {
+    let mut args = vec![
+        "--remote-debugging-port=0".to_string(),
+        "--remote-debugging-host=127.0.0.1".to_string(),
+        format!("--user-data-dir={}", user_data_dir.display()),
+        "--no-first-run".to_string(),
+        "--no-default-browser-check".to_string(),
+        "--disable-extensions".to_string(),
+        "--disable-background-networking".to_string(),
+        "--disable-sync".to_string(),
+        "--disable-translate".to_string(),
+        "--disable-features=TranslateUI".to_string(),
+        "--metrics-recording-only".to_string(),
+        format!(
+            "--window-size={},{}",
+            config.viewport_width, config.viewport_height
+        ),
+        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36".to_string(),
+        "about:blank".to_string(),
+    ];
+    if config.headless {
+        args.insert(0, "--headless=new".to_string());
+        args.push("--disable-gpu".to_string());
+    }
+    args
+}
+
 // ── Chromium discovery ─────────────────────────────────────────────────────
 
 /// Find a Chromium-based browser binary on this system.
@@ -1121,6 +1138,23 @@ mod tests {
         assert_eq!(config.idle_timeout_secs, 300);
         assert_eq!(config.max_sessions, 5);
         assert!(config.chromium_path.is_none());
+    }
+
+    #[test]
+    fn test_chromium_launch_args_include_user_data_dir() {
+        let config = BrowserConfig {
+            headless: false,
+            ..Default::default()
+        };
+        let args = chromium_launch_args(&config, Path::new("/tmp/librefang-profile"));
+        assert!(args.iter().any(|a| a.starts_with("--user-data-dir=")));
+        assert!(args.iter().all(|a| a != "--headless=new"));
+    }
+
+    #[test]
+    fn test_browser_env_allowlist_includes_dbus_runtime_vars() {
+        assert!(BROWSER_ENV_ALLOWLIST.contains(&"DBUS_SESSION_BUS_ADDRESS"));
+        assert!(BROWSER_ENV_ALLOWLIST.contains(&"XDG_RUNTIME_DIR"));
     }
 
     #[test]
