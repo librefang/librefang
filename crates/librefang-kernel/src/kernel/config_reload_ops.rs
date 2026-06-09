@@ -141,6 +141,72 @@ impl LibreFangKernel {
         Ok(plan)
     }
 
+    /// Replace the live config with an already-constructed `KernelConfig`
+    /// (phase 9 / C-005c). This is [`Self::reload_config`] WITHOUT the on-disk
+    /// read: the API layer resolves `effective = config.toml ⊕ DB overrides`
+    /// in-memory and hands the merged config (plus its serialized TOML, for the
+    /// raw-config snapshot) here. Validation, the reload-plan diff, hot-action
+    /// dispatch, and the ordered atomic swap are identical to `reload_config`,
+    /// so hot-vs-restart classification is unchanged.
+    ///
+    /// # Errors
+    /// Returns a `live config unchanged` message if validation fails.
+    pub async fn replace_config(
+        &self,
+        mut new_config: librefang_types::config::KernelConfig,
+        raw_toml: String,
+    ) -> Result<crate::config_reload::ReloadPlan, String> {
+        use crate::config_reload::validate_config_for_reload;
+
+        let old_cfg = self.config.load();
+        new_config.clamp_bounds();
+        if let Err(errors) = validate_config_for_reload(&new_config) {
+            return Err(format!(
+                "Config replace failed; live config unchanged: validation: {}",
+                errors.join("; ")
+            ));
+        }
+
+        let caps = crate::config_reload::ReloadCapabilities {
+            log_reloader_installed: self.log_reloader.get().is_some(),
+        };
+        let plan = crate::config_reload::build_reload_plan_with_caps(&old_cfg, &new_config, caps);
+        plan.log_summary();
+
+        // Unlike `reload_config` (file-watcher driven, gated by `reload.mode`),
+        // this is an EXPLICIT API-resolved swap — the boot/reload overlay and
+        // `config_set` already decided to make this config live, so it always
+        // swaps. `reload.mode` governs auto-reload of on-disk edits, not an
+        // explicit replace; gating here would make DB overrides never apply
+        // under the default `Off` mode. Restart-required fields still take full
+        // effect only on restart (their hot action is a no-op), exactly as in a
+        // hot-mode `reload_config` swap.
+        {
+            let _write_guard = self.config_reload_lock.write().await;
+            self.apply_hot_actions_inner(&plan, &new_config);
+            self.taint_rules_swap
+                .store(std::sync::Arc::new(new_config.taint_rules.clone()));
+            // Parse the merged TOML for the raw-config snapshot (skill config
+            // injection reads `[skills.config.*]` from this). Empty table on the
+            // unreachable parse failure — the string came from a valid document.
+            let raw_value: toml::Value = toml::from_str(&raw_toml)
+                .unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new()));
+            self.raw_config_toml.store(std::sync::Arc::new(raw_value));
+            let new_config_arc = std::sync::Arc::new(new_config);
+            self.config.store(std::sync::Arc::clone(&new_config_arc));
+            let mut new_aux = librefang_runtime::aux_client::AuxClient::new(
+                new_config_arc,
+                Arc::clone(&self.llm.default_driver),
+            );
+            if let Some(store) = self.metering.engine.exhaustion_store() {
+                new_aux = new_aux.with_exhaustion_store(store);
+            }
+            self.llm.aux_client.store(std::sync::Arc::new(new_aux));
+        }
+
+        Ok(plan)
+    }
+
     /// Apply hot-reload actions to the running kernel.
     ///
     /// **Caller must hold `config_reload_lock` write guard** so that the

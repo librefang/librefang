@@ -578,7 +578,7 @@ pub fn ui_options_overlay(
 /// Each entry is matched against the dot-separated path the caller supplies.
 /// Trailing `.*` wildcards permit any single key under a section (used for
 /// per-channel toggles like `channels.telegram.enabled`).
-fn is_writable_config_path(path: &str) -> bool {
+pub(crate) fn is_writable_config_path(path: &str) -> bool {
     // Exact-match list — single user-tunable scalars.
     const EXACT: &[&str] = &[
         // UI / locale (no security impact).
@@ -855,7 +855,7 @@ fn is_writable_config_path(path: &str) -> bool {
 }
 
 /// Convert a serde_json::Value to a toml_edit::Value (format-preserving).
-fn json_to_toml_edit_value(value: &serde_json::Value) -> toml_edit::Value {
+pub(crate) fn json_to_toml_edit_value(value: &serde_json::Value) -> toml_edit::Value {
     match value {
         serde_json::Value::String(s) => s.as_str().into(),
         serde_json::Value::Number(n) => {
@@ -885,6 +885,66 @@ fn json_to_toml_edit_value(value: &serde_json::Value) -> toml_edit::Value {
         // null is handled by the caller (remove key) — fallback to empty string
         serde_json::Value::Null => "".into(),
     }
+}
+
+/// Apply a dotted `config.toml` path to a `toml_edit` document: a JSON `null`
+/// value removes the key, anything else sets it. Supports up to 3 levels.
+/// Shared by `POST /api/config/set` and the C-005c override-resolution path so
+/// the on-disk write and the in-memory store-overlay merge behave identically.
+///
+/// # Errors
+/// Returns `Err` if the path is deeper than 3 levels.
+pub(crate) fn apply_toml_override(
+    doc: &mut toml_edit::DocumentMut,
+    path: &str,
+    value: &serde_json::Value,
+) -> Result<(), String> {
+    let is_remove = value.is_null();
+    let parts: Vec<&str> = path.split('.').collect();
+    match parts.len() {
+        1 => {
+            if is_remove {
+                doc.remove(parts[0]);
+            } else {
+                doc[parts[0]] = toml_edit::Item::Value(json_to_toml_edit_value(value));
+            }
+        }
+        2 => {
+            if is_remove {
+                if let Some(t) = doc[parts[0]].as_table_mut() {
+                    t.remove(parts[1]);
+                }
+            } else {
+                if !doc.contains_table(parts[0]) {
+                    doc[parts[0]] = toml_edit::Item::Table(toml_edit::Table::new());
+                }
+                doc[parts[0]][parts[1]] = toml_edit::Item::Value(json_to_toml_edit_value(value));
+            }
+        }
+        3 => {
+            if is_remove {
+                if let Some(t) = doc[parts[0]].as_table_mut() {
+                    if let Some(t2) = t.get_mut(parts[1]).and_then(|i| i.as_table_mut()) {
+                        t2.remove(parts[2]);
+                    }
+                }
+            } else {
+                if !doc.contains_table(parts[0]) {
+                    doc[parts[0]] = toml_edit::Item::Table(toml_edit::Table::new());
+                }
+                if !doc[parts[0]]
+                    .as_table()
+                    .is_some_and(|t| t.contains_table(parts[1]))
+                {
+                    doc[parts[0]][parts[1]] = toml_edit::Item::Table(toml_edit::Table::new());
+                }
+                doc[parts[0]][parts[1]][parts[2]] =
+                    toml_edit::Item::Value(json_to_toml_edit_value(value));
+            }
+        }
+        _ => return Err("path too deep (max 3 levels)".to_string()),
+    }
+    Ok(())
 }
 
 /// Convert a serde_json::Value to a toml::Value.

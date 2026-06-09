@@ -410,3 +410,93 @@ async fn default_model_seed_then_runtime_write_survives_and_is_protected() {
     assert_eq!(stored.provider, "groq", "UI switch must survive re-seed");
     assert_eq!(row.source, ConfigSource::Runtime);
 }
+
+// ── C-005c: generic config_set overrides (config.toml ⊕ store) ───────────────
+
+use librefang_api::config_store_overlay::{
+    overlay_config_overrides, read_config_overrides, resolve_config_with_overrides,
+    write_config_overrides,
+};
+use std::collections::BTreeMap;
+
+#[test]
+fn config_overrides_resolve_applies_allowlisted_and_skips_blocked() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg_path = tmp.path().join("config.toml");
+    std::fs::write(
+        &cfg_path,
+        "log_level = \"info\"\n\
+         [default_model]\n\
+         provider = \"openai\"\n\
+         model = \"gpt-4o\"\n\
+         api_key_env = \"OPENAI_API_KEY\"\n",
+    )
+    .unwrap();
+
+    let mut overrides = BTreeMap::new();
+    // allowlisted scalar — must apply
+    overrides.insert("log_level".to_string(), serde_json::json!("debug"));
+    // blocked by the `_env` suffix rule (credential redirect) — must be skipped
+    // even though it is hand-planted in the store (defense in depth).
+    overrides.insert(
+        "default_model.api_key_env".to_string(),
+        serde_json::json!("EVIL_KEY_ENV"),
+    );
+
+    let (merged, _raw) = resolve_config_with_overrides(&cfg_path, &overrides).unwrap();
+    assert_eq!(merged.log_level, "debug", "allowlisted override applied");
+    assert_eq!(
+        merged.default_model.api_key_env, "OPENAI_API_KEY",
+        "blocked override path (_env suffix) must be ignored at apply (defense in depth)"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn config_overrides_store_round_trip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let storage = StorageConfig::embedded_default(tmp.path().join("operational"));
+
+    assert!(read_config_overrides(&storage).await.unwrap().is_empty());
+
+    let mut map = BTreeMap::new();
+    map.insert("log_level".to_string(), serde_json::json!("debug"));
+    map.insert("ui.theme".to_string(), serde_json::json!("dark"));
+    write_config_overrides(&storage, &map).await.unwrap();
+
+    let read = read_config_overrides(&storage).await.unwrap();
+    assert_eq!(read.get("log_level"), Some(&serde_json::json!("debug")));
+    assert_eq!(read.get("ui.theme"), Some(&serde_json::json!("dark")));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn config_overrides_overlay_applies_to_live_kernel() {
+    let tmp = tempfile::tempdir().unwrap();
+    let storage = StorageConfig::embedded_default(tmp.path().join("operational"));
+    // config.toml baseline the overlay merges onto (kernel reads it at home_dir).
+    std::fs::write(
+        tmp.path().join("config.toml"),
+        "log_level = \"info\"\n\
+         [default_model]\n\
+         provider = \"ollama\"\n\
+         model = \"test-model\"\n\
+         api_key_env = \"OLLAMA_API_KEY\"\n",
+    )
+    .unwrap();
+
+    let kernel =
+        LibreFangKernel::boot_with_config(test_config(tmp.path(), storage.clone())).expect("boots");
+    assert_eq!(kernel.config_ref().log_level, "info");
+
+    // A UI config_set lands in the store…
+    let mut map = BTreeMap::new();
+    map.insert("log_level".to_string(), serde_json::json!("debug"));
+    write_config_overrides(&storage, &map).await.unwrap();
+    // …and the overlay applies it to the LIVE config via replace_config.
+    overlay_config_overrides(&kernel).await;
+
+    assert_eq!(
+        kernel.config_ref().log_level,
+        "debug",
+        "config_set override must reach the live kernel config"
+    );
+}
