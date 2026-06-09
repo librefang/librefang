@@ -279,9 +279,6 @@ pub(crate) fn chrono_lite_date() -> String {
     date_from_unix_secs(secs)
 }
 
-/// Convert Unix seconds (UTC) to a `YYYY-MM-DD` string. Split out from
-/// [`chrono_lite_date`] so the calendar math is unit-testable against fixed
-/// timestamps rather than the wall clock.
 pub(crate) fn date_from_unix_secs(secs: u64) -> String {
     let days = secs / 86400;
     let mut year = 1970;
@@ -868,23 +865,20 @@ mod tests {
 
     #[test]
     fn date_from_unix_secs_matches_known_dates() {
-        // Epoch and day-of-year < 28 always worked; the bug surfaced for any
-        // date whose day-of-year >= 28 (January was treated as a 28/29-day
-        // month), so cover month boundaries and year-end explicitly.
         assert_eq!(date_from_unix_secs(0), "1970-01-01");
-        // 2026-01-15 (day-of-year 15) — pre-bug path, still correct.
+        // day-of-year 15 — within January
         assert_eq!(date_from_unix_secs(1_768_435_200), "2026-01-15");
-        // 2026-01-31 — previously rolled forward to "2026-02-03".
+        // last day of January
         assert_eq!(date_from_unix_secs(1_769_817_600), "2026-01-31");
-        // 2026-03-01 — previously "2026-03-04".
+        // first day of March (cross-February boundary)
         assert_eq!(date_from_unix_secs(1_772_323_200), "2026-03-01");
-        // 2026-06-10 — previously "2026-06-13".
+        // mid-year
         assert_eq!(date_from_unix_secs(1_781_049_600), "2026-06-10");
-        // 2026-12-31 — previously the invalid "2026-13-03".
+        // year-end
         assert_eq!(date_from_unix_secs(1_798_675_200), "2026-12-31");
-        // 2024-02-29 (leap day) — previously "2024-03-03".
+        // leap day
         assert_eq!(date_from_unix_secs(1_709_164_800), "2024-02-29");
-        // 2024-12-31 (leap year, year-end) — exercises the 366th day.
+        // year-end in a leap year (366th day)
         assert_eq!(date_from_unix_secs(1_735_603_200), "2024-12-31");
     }
 
