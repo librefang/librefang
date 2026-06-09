@@ -215,17 +215,35 @@ impl SurrealConnectionPool {
         };
 
         let session = transport.clone();
-        session
-            .signin(surrealdb::opt::auth::Namespace {
-                namespace: remote.namespace.clone(),
-                username: remote.username.clone(),
-                password: password.clone(),
-            })
-            .await
-            .map_err(|e| StorageError::AuthFailed {
-                username: remote.username.clone(),
-                message: e.to_string(),
-            })?;
+        // SurrealDB authentication is LEVEL-scoped: the `root` system user
+        // (defined `ON ROOT`) must sign in via `Root`, whereas a namespace user
+        // (`DEFINE USER ... ON NAMESPACE`) signs in via `Namespace`. Signing the
+        // root user in at the namespace level is rejected with "authentication
+        // failed for user 'root'". BossFang deployments commonly point
+        // `[storage.backend]` at the `root` user (and `surreal-memory` likewise
+        // signs in as root), so use the matching auth level for it; any other
+        // username is treated as a namespace-scoped user (the least-privilege
+        // path the pool was originally written for).
+        let signin = if remote.username == "root" {
+            session
+                .signin(surrealdb::opt::auth::Root {
+                    username: remote.username.clone(),
+                    password: password.clone(),
+                })
+                .await
+        } else {
+            session
+                .signin(surrealdb::opt::auth::Namespace {
+                    namespace: remote.namespace.clone(),
+                    username: remote.username.clone(),
+                    password: password.clone(),
+                })
+                .await
+        };
+        signin.map_err(|e| StorageError::AuthFailed {
+            username: remote.username.clone(),
+            message: e.to_string(),
+        })?;
         session
             .use_ns(&remote.namespace)
             .use_db(&remote.database)
