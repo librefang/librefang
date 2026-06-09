@@ -266,6 +266,11 @@ pub struct DecisionTrace {
     pub timestamp: DateTime<Utc>,
 }
 
+// Maximum schema-nesting / `$ref`-expansion depth processed by the provider normalizers.
+// Tool schemas come from untrusted MCP servers and marketplace skills, so a maliciously deep (or, before the cycle guard, self-referential) schema could otherwise overflow the stack.
+// Real tool schemas nest only a handful of levels; this bound is far above any legitimate use.
+const MAX_SCHEMA_DEPTH: usize = 128;
+
 /// Normalize a JSON Schema for cross-provider compatibility.
 ///
 /// Several providers (Gemini, Groq, OpenAI strict mode, …) ship strict JSON
@@ -280,12 +285,6 @@ pub struct DecisionTrace {
 ///
 /// Anthropic is short-circuited at the top — its API accepts the schema as-is.
 /// Every other provider goes through `normalize_schema_for_strict_validators`.
-/// Maximum schema-nesting / `$ref`-expansion depth processed by the provider
-/// normalizers. Tool schemas come from untrusted MCP servers and marketplace
-/// skills, so a maliciously deep (or, before the cycle guard, self-referential)
-/// schema could otherwise overflow the stack. Real tool schemas nest only a
-/// handful of levels; this bound is far above any legitimate use.
-const MAX_SCHEMA_DEPTH: usize = 128;
 
 pub fn normalize_schema_for_provider(
     schema: &serde_json::Value,
@@ -309,9 +308,8 @@ fn normalize_schema_for_strict_validators(
     schema: &serde_json::Value,
     depth: usize,
 ) -> serde_json::Value {
-    // Stack-overflow backstop for maliciously deep schemas from untrusted MCP
-    // servers / skills. Return a valid empty object schema so providers accept
-    // the (truncated) tool rather than the daemon crashing.
+    // Stack-overflow backstop for maliciously deep schemas from untrusted MCP servers / skills.
+    // Return a valid empty object schema so providers accept the (truncated) tool rather than the daemon crashing.
     if depth >= MAX_SCHEMA_DEPTH {
         return serde_json::json!({"type": "object", "properties": {}});
     }
@@ -478,13 +476,9 @@ fn resolve_refs(
 
     // Recursively replace $ref in the schema.
     //
-    // `active` holds the `$ref` names currently being expanded on this path; if
-    // a ref re-enters one that is already active the schema is cyclic
-    // (`Node -> Node`, or a mutually-recursive `A -> B -> A`), so we stop and
-    // leave a permissive `{"type":"object"}` instead of recursing forever.
-    // `depth` is an independent backstop so a maliciously deep (but acyclic)
-    // schema cannot overflow the stack either. Both matter because schemas come
-    // from untrusted MCP servers / marketplace skills.
+    // `active` holds the `$ref` names currently being expanded on this path; if a ref re-enters one that is already active the schema is cyclic (`Node -> Node`, or a mutually-recursive `A -> B -> A`), so we stop and leave a permissive `{"type":"object"}` instead of recursing forever.
+    // `depth` is an independent backstop so a maliciously deep (but acyclic) schema cannot overflow the stack either.
+    // Both matter because schemas come from untrusted MCP servers / marketplace skills.
     fn inline_refs(
         val: &mut serde_json::Value,
         defs: &serde_json::Map<String, serde_json::Value>,
