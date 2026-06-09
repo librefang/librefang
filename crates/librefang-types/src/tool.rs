@@ -280,6 +280,13 @@ pub struct DecisionTrace {
 ///
 /// Anthropic is short-circuited at the top — its API accepts the schema as-is.
 /// Every other provider goes through `normalize_schema_for_strict_validators`.
+/// Maximum schema-nesting / `$ref`-expansion depth processed by the provider
+/// normalizers. Tool schemas come from untrusted MCP servers and marketplace
+/// skills, so a maliciously deep (or, before the cycle guard, self-referential)
+/// schema could otherwise overflow the stack. Real tool schemas nest only a
+/// handful of levels; this bound is far above any legitimate use.
+const MAX_SCHEMA_DEPTH: usize = 128;
+
 pub fn normalize_schema_for_provider(
     schema: &serde_json::Value,
     provider: &str,
@@ -288,7 +295,7 @@ pub fn normalize_schema_for_provider(
     if provider == "anthropic" {
         return schema.clone();
     }
-    normalize_schema_for_strict_validators(schema)
+    normalize_schema_for_strict_validators(schema, 0)
 }
 
 /// Recursive worker for `normalize_schema_for_provider`.
@@ -298,7 +305,16 @@ pub fn normalize_schema_for_provider(
 /// vertex, …) because they all share strict-validator semantics. Any change
 /// here affects all of them; verify against each driver before tightening
 /// behaviour.
-fn normalize_schema_for_strict_validators(schema: &serde_json::Value) -> serde_json::Value {
+fn normalize_schema_for_strict_validators(
+    schema: &serde_json::Value,
+    depth: usize,
+) -> serde_json::Value {
+    // Stack-overflow backstop for maliciously deep schemas from untrusted MCP
+    // servers / skills. Return a valid empty object schema so providers accept
+    // the (truncated) tool rather than the daemon crashing.
+    if depth >= MAX_SCHEMA_DEPTH {
+        return serde_json::json!({"type": "object", "properties": {}});
+    }
     let obj = match schema.as_object() {
         Some(o) => o,
         None => {
@@ -307,7 +323,7 @@ fn normalize_schema_for_strict_validators(schema: &serde_json::Value) -> serde_j
             if let Some(s) = schema.as_str() {
                 if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s) {
                     if parsed.is_object() {
-                        return normalize_schema_for_strict_validators(&parsed);
+                        return normalize_schema_for_strict_validators(&parsed, depth + 1);
                     }
                 }
             }
@@ -319,7 +335,7 @@ fn normalize_schema_for_strict_validators(schema: &serde_json::Value) -> serde_j
 
     // Resolve $ref references before processing.
     // If the schema has $defs and $ref, inline the referenced definition.
-    let resolved = resolve_refs(obj);
+    let resolved = resolve_refs(obj, depth);
     let obj = resolved.as_object().unwrap_or(obj);
 
     let mut result = serde_json::Map::new();
@@ -400,7 +416,7 @@ fn normalize_schema_for_strict_validators(schema: &serde_json::Value) -> serde_j
                 for (prop_name, prop_schema) in props {
                     new_props.insert(
                         prop_name.clone(),
-                        normalize_schema_for_strict_validators(prop_schema),
+                        normalize_schema_for_strict_validators(prop_schema, depth + 1),
                     );
                 }
                 result.insert(key.clone(), serde_json::Value::Object(new_props));
@@ -410,7 +426,10 @@ fn normalize_schema_for_strict_validators(schema: &serde_json::Value) -> serde_j
 
         // Recurse into items
         if key == "items" {
-            result.insert(key.clone(), normalize_schema_for_strict_validators(value));
+            result.insert(
+                key.clone(),
+                normalize_schema_for_strict_validators(value, depth + 1),
+            );
             continue;
         }
 
@@ -445,7 +464,10 @@ fn normalize_schema_for_strict_validators(schema: &serde_json::Value) -> serde_j
 /// If the schema has `$defs` and any property uses `$ref: "#/$defs/Foo"`,
 /// replace the `$ref` with the actual definition. This is needed because
 /// Gemini and most providers don't support `$ref`/`$defs`.
-fn resolve_refs(obj: &serde_json::Map<String, serde_json::Value>) -> serde_json::Value {
+fn resolve_refs(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    depth: usize,
+) -> serde_json::Value {
     let defs = match obj.get("$defs").and_then(|d| d.as_object()) {
         Some(d) => d.clone(),
         None => return serde_json::Value::Object(obj.clone()),
@@ -454,32 +476,56 @@ fn resolve_refs(obj: &serde_json::Map<String, serde_json::Value>) -> serde_json:
     let mut result = obj.clone();
     result.remove("$defs");
 
-    // Recursively replace $ref in the schema
-    fn inline_refs(val: &mut serde_json::Value, defs: &serde_json::Map<String, serde_json::Value>) {
+    // Recursively replace $ref in the schema.
+    //
+    // `active` holds the `$ref` names currently being expanded on this path; if
+    // a ref re-enters one that is already active the schema is cyclic
+    // (`Node -> Node`, or a mutually-recursive `A -> B -> A`), so we stop and
+    // leave a permissive `{"type":"object"}` instead of recursing forever.
+    // `depth` is an independent backstop so a maliciously deep (but acyclic)
+    // schema cannot overflow the stack either. Both matter because schemas come
+    // from untrusted MCP servers / marketplace skills.
+    fn inline_refs(
+        val: &mut serde_json::Value,
+        defs: &serde_json::Map<String, serde_json::Value>,
+        active: &mut Vec<String>,
+        depth: usize,
+    ) {
+        if depth >= MAX_SCHEMA_DEPTH {
+            return;
+        }
         match val {
             serde_json::Value::Object(map) => {
                 // If this object is a $ref, replace it with the definition
                 if let Some(ref_val) = map.get("$ref").and_then(|r| r.as_str()) {
                     let ref_name = ref_val
                         .strip_prefix("#/$defs/")
-                        .or_else(|| ref_val.strip_prefix("#/definitions/"));
+                        .or_else(|| ref_val.strip_prefix("#/definitions/"))
+                        .map(|s| s.to_string());
                     if let Some(name) = ref_name {
-                        if let Some(def) = defs.get(name) {
+                        // Cycle: this ref is already being expanded above us.
+                        if active.iter().any(|n| n == &name) {
+                            *val = serde_json::json!({"type": "object"});
+                            return;
+                        }
+                        if let Some(def) = defs.get(&name) {
                             *val = def.clone();
+                            active.push(name);
                             // Recurse into the inlined definition
-                            inline_refs(val, defs);
+                            inline_refs(val, defs, active, depth + 1);
+                            active.pop();
                             return;
                         }
                     }
                 }
                 // Recurse into all values
                 for v in map.values_mut() {
-                    inline_refs(v, defs);
+                    inline_refs(v, defs, active, depth + 1);
                 }
             }
             serde_json::Value::Array(arr) => {
                 for item in arr.iter_mut() {
-                    inline_refs(item, defs);
+                    inline_refs(item, defs, active, depth + 1);
                 }
             }
             _ => {}
@@ -487,7 +533,8 @@ fn resolve_refs(obj: &serde_json::Map<String, serde_json::Value>) -> serde_json:
     }
 
     let mut resolved = serde_json::Value::Object(result);
-    inline_refs(&mut resolved, &defs);
+    let mut active = Vec::new();
+    inline_refs(&mut resolved, &defs, &mut active, depth);
     resolved
 }
 
@@ -549,6 +596,62 @@ fn try_flatten_any_of(any_of: &serde_json::Value) -> Option<Vec<(String, serde_j
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn self_referential_ref_does_not_overflow() {
+        // Before the cycle guard, `inline_refs` cloned `Node` (which still
+        // references `Node`) and recursed into it forever, overflowing the
+        // stack. Untrusted MCP servers / skills can supply such a schema.
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "child": { "$ref": "#/$defs/Node" } },
+            "$defs": { "Node": {
+                "type": "object",
+                "properties": { "child": { "$ref": "#/$defs/Node" } }
+            } }
+        });
+        let result = normalize_schema_for_provider(&schema, "gemini");
+        let s = result.to_string();
+        assert!(
+            !s.contains("$ref"),
+            "all $ref must be resolved/stripped: {s}"
+        );
+        assert!(!s.contains("$defs"), "$defs must be stripped: {s}");
+        // One level was inlined; the recursive child collapsed to a placeholder.
+        assert!(result["properties"]["child"].is_object());
+    }
+
+    #[test]
+    fn mutually_recursive_refs_do_not_overflow() {
+        // A -> B -> A is the same hazard as a direct self-reference.
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "a": { "$ref": "#/$defs/A" } },
+            "$defs": {
+                "A": { "type": "object", "properties": { "b": { "$ref": "#/$defs/B" } } },
+                "B": { "type": "object", "properties": { "a": { "$ref": "#/$defs/A" } } }
+            }
+        });
+        let result = normalize_schema_for_provider(&schema, "openai");
+        let s = result.to_string();
+        assert!(
+            !s.contains("$ref"),
+            "all $ref must be resolved/stripped: {s}"
+        );
+        assert!(!s.contains("$defs"), "$defs must be stripped: {s}");
+    }
+
+    #[test]
+    fn deeply_nested_schema_is_truncated_not_overflowed() {
+        // A maliciously deep (but acyclic) schema must hit the depth backstop
+        // and terminate rather than overflow the stack.
+        let mut schema = serde_json::json!({"type": "string"});
+        for _ in 0..(MAX_SCHEMA_DEPTH + 50) {
+            schema = serde_json::json!({"type": "object", "properties": {"x": schema}});
+        }
+        let result = normalize_schema_for_provider(&schema, "gemini");
+        assert_eq!(result["type"], "object");
+    }
 
     #[test]
     fn test_decision_trace_serialization_roundtrip() {
