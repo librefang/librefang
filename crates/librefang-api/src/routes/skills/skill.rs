@@ -523,6 +523,9 @@ pub async fn approve_pending_candidate(
 ///
 /// * `agent_id` is `None` / unparseable / no longer in the registry →
 ///   log a WARN and return; the caller's approve still succeeds.
+/// * agent's allowlist is empty (which already grants every skill) →
+///   no-op, mirroring the kernel's `assign_skill_to_agent_allowlist`;
+///   appending here would narrow an all-skills agent to just this one.
 /// * skill already on the allowlist AND not hidden by `skills_disabled`
 ///   → no-op (no redundant DB write).
 /// * otherwise append the skill and route through `set_agent_skills`,
@@ -554,6 +557,15 @@ fn assign_skill_to_creator(state: &Arc<AppState>, agent_id: Option<&str>, skill_
         );
         return;
     };
+
+    // An empty allowlist already grants the agent every skill; appending
+    // would narrow it to just this one. Match the kernel's
+    // `assign_skill_to_agent_allowlist` and leave all-skills agents
+    // untouched, so this phantom-recovery path behaves identically to the
+    // create path (which skips the same case kernel-side).
+    if entry.manifest.skills.is_empty() {
+        return;
+    }
 
     let already_listed = entry.manifest.skills.iter().any(|s| s == skill_name);
     // Re-run the assign when the skill is present but hidden by

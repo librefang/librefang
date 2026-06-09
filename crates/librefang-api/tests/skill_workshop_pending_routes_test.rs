@@ -436,11 +436,13 @@ fn register_agent(h: &Harness, name: &str) -> String {
     let agent_id = AgentId::new();
     let manifest = librefang_types::agent::AgentManifest {
         name: name.to_string(),
-        // Start with an empty allowlist so the assertions exercise the
-        // append. (Empty also means "all skills" at runtime, but we
-        // assert on the raw manifest list — what the operator edits in
-        // agent.toml — so the append is observable.)
-        skills: Vec::new(),
+        // Start with a NON-EMPTY allowlist so the append is observable.
+        // An empty allowlist means "all skills", and the approve path
+        // (kernel `assign_skill_to_agent_allowlist`) deliberately leaves
+        // an all-skills agent untouched rather than narrowing it to the
+        // single promoted skill — so a pre-existing entry is required for
+        // the append to be a real, non-destructive addition.
+        skills: vec!["pre_existing_skill".to_string()],
         skills_disabled: false,
         ..Default::default()
     };
