@@ -111,6 +111,128 @@ impl kernel_handle::AgentControl for LibreFangKernel {
         Ok(result.response)
     }
 
+    /// Non-blocking `agent_send` (#6043). Registers a
+    /// [`TaskKind::Delegation`] on the async-task tracker (#4983), spawns the
+    /// callee loop detached via `self_handle`, and returns the task id
+    /// immediately. On completion the spawned task calls
+    /// [`complete_async_task`](crate::kernel::LibreFangKernel::complete_async_task),
+    /// which injects the reply back into the caller's session (mid-turn or
+    /// wake-idle). Mirrors `start_workflow_async_tracked`.
+    async fn send_to_agent_async_tracked(
+        &self,
+        agent_id: &str,
+        message: &str,
+        caller_agent_id: &str,
+        caller_session_id: Option<&str>,
+        conversation_key: Option<&str>,
+    ) -> Result<String, kernel_handle::KernelOpError> {
+        use kernel_handle::KernelOpError;
+        use librefang_types::task::{TaskKind, TaskStatus};
+
+        // Resolve target + caller up front so a bad id fails fast (before
+        // any registration or spawn). Parent resolution mirrors
+        // `send_to_agent_as`: name/alias first, bare UUID fallback so a
+        // caller that left the registry mid-flight still resolves.
+        let target_id = self.resolve_agent_identifier(agent_id)?;
+        let parent_id = self
+            .resolve_agent_identifier(caller_agent_id)
+            .or_else(|_| {
+                caller_agent_id
+                    .parse::<AgentId>()
+                    .map_err(|e| format!("bad caller_agent_id: {e}"))
+            })?;
+
+        // The tracker keys completion delivery on the originating
+        // `(agent, session)`. Without a parseable caller session there is
+        // nowhere to deliver the reply, so fall back to a blocking send
+        // (caller still gets the answer, just inline) rather than spawning
+        // an orphaned delegation whose result is dropped.
+        let session_id = match caller_session_id.and_then(|s| s.parse::<SessionId>().ok()) {
+            Some(sid) => sid,
+            None => {
+                tracing::debug!(
+                    agent = %agent_id,
+                    "send_to_agent_async_tracked: no parseable caller session; falling back to blocking send"
+                );
+                // Await inside each arm — the two async fns return distinct
+                // opaque future types that can't unify as a single match value.
+                let result = match conversation_key {
+                    Some(key) => {
+                        self.send_message_as_with_key(target_id, message, parent_id, key)
+                            .await
+                    }
+                    None => self.send_message_as(target_id, message, parent_id).await,
+                }
+                .map_err(|e| format!("Send failed: {e}"))?;
+                return Ok(result.response);
+            }
+        };
+
+        // Opaque, deterministic prompt hash so callers can dedup repeat
+        // delegations without the kernel storing the full prompt (the field
+        // is documented as caller's-choice / opaque to the kernel).
+        let prompt_hash = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            message.hash(&mut h);
+            format!("{:016x}", h.finish())
+        };
+
+        let handle = self.register_async_task(
+            parent_id,
+            session_id,
+            TaskKind::Delegation {
+                agent_id: target_id,
+                prompt_hash,
+            },
+        );
+        let task_id = handle.id;
+
+        // Spawn the callee loop detached through the upgraded self-handle,
+        // same as the async workflow path.
+        let kernel_arc = self
+            .self_handle
+            .get()
+            .and_then(|w| w.upgrade())
+            .ok_or_else(|| {
+                KernelOpError::Internal(
+                    "kernel not yet initialised for async agent_send spawn".to_string(),
+                )
+            })?;
+
+        let msg = message.to_string();
+        let conv_key = conversation_key.map(String::from);
+        tokio::spawn(async move {
+            let exec = match &conv_key {
+                Some(key) => {
+                    kernel_arc
+                        .send_message_as_with_key(target_id, &msg, parent_id, key)
+                        .await
+                }
+                None => kernel_arc.send_message_as(target_id, &msg, parent_id).await,
+            };
+            let terminal_status = match exec {
+                Ok(result) => TaskStatus::Completed(serde_json::json!({
+                    "agent_id": target_id.to_string(),
+                    "response": result.response,
+                })),
+                Err(e) => TaskStatus::Failed(format!("agent_send delegation failed: {e}")),
+            };
+            if let Err(err) = kernel_arc
+                .complete_async_task(task_id, terminal_status)
+                .await
+            {
+                tracing::warn!(
+                    task_id = %task_id,
+                    target = %target_id,
+                    "Failed to inject delegation TaskCompletionEvent: {err}"
+                );
+            }
+        });
+
+        Ok(task_id.to_string())
+    }
+
     fn list_agents(&self) -> Vec<kernel_handle::AgentInfo> {
         self.agents
             .registry

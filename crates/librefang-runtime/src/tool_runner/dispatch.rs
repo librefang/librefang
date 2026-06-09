@@ -944,7 +944,7 @@ pub async fn execute_tool_raw(
         }
 
         // Inter-agent tools (require kernel handle).
-        "agent_send" => tool_agent_send(input, *kernel, *caller_agent_id).await,
+        "agent_send" => tool_agent_send(input, *kernel, *caller_agent_id, *session_id).await,
         "agent_spawn" => tool_agent_spawn(input, *kernel, *caller_agent_id, *allowed_tools).await,
         "agent_list" => tool_agent_list(*kernel),
         "agent_kill" => tool_agent_kill(input, *kernel),

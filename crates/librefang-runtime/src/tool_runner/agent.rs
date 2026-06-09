@@ -42,6 +42,7 @@ pub(super) async fn tool_agent_send(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
     caller_agent_id: Option<&str>,
+    caller_session_id: Option<librefang_types::agent::SessionId>,
 ) -> ToolResult {
     let kh = require_kernel_typed(kernel)?;
     let agent_id = input["agent_id"]
@@ -51,6 +52,11 @@ pub(super) async fn tool_agent_send(
         .as_str()
         .ok_or(ToolError::MissingParameter("message"))?;
     let conversation_key = input["conversation_key"].as_str();
+    // Non-blocking mode (#6043): when true, register the delegation on the
+    // kernel async-task tracker and return a task id immediately instead of
+    // blocking this agent's loop until the callee replies (which otherwise
+    // trips `tool_timeout_secs` for any long delegation).
+    let async_mode = input["async"].as_bool().unwrap_or(false);
 
     if let Some(caller) = caller_agent_id {
         if caller == agent_id {
@@ -89,6 +95,41 @@ pub(super) async fn tool_agent_send(
             "Inter-agent call depth exceeded (max {max_depth}). \
              A->B->C chain is too deep. Use the task queue instead."
         )));
+    }
+
+    // Non-blocking path (#6043). Register the delegation on the kernel's
+    // async-task tracker and return a task id immediately; the callee's reply
+    // is injected back into this session when it finishes (mid-turn or
+    // wake-idle). The depth guard above still applies — a too-deep chain is
+    // rejected before it can fire asynchronously — but the synchronous
+    // `AGENT_CALL_DEPTH` scope is intentionally NOT carried across the async
+    // boundary: the callee runs in a detached task and starts its own depth
+    // chain, so async delegation breaks the synchronous A->B->C accumulation
+    // by design. Requires a known caller so the tracker can route completion.
+    if async_mode {
+        let caller = caller_agent_id.ok_or(ToolError::InvalidParameter {
+            name: "async",
+            reason: "async agent_send requires a known caller agent context".to_string(),
+        })?;
+        let session_str = caller_session_id.map(|s| s.0.to_string());
+        let task_id = kh
+            .send_to_agent_async_tracked(
+                agent_id,
+                message,
+                caller,
+                session_str.as_deref(),
+                conversation_key,
+            )
+            .await
+            .map_err(ToolError::upstream)?;
+        return Ok(serde_json::json!({
+            "task_id": task_id,
+            "status": "delegated",
+            "note": "Delegation started asynchronously; the target's reply will be \
+                     delivered to this session when it completes. Do not wait — \
+                     continue or end your turn.",
+        })
+        .to_string());
     }
 
     AGENT_CALL_DEPTH

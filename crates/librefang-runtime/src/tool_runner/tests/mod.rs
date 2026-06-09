@@ -651,6 +651,23 @@ impl AgentControl for DispatchCapture {
         Ok(format!("as-keyed:{conversation_key}"))
     }
 
+    async fn send_to_agent_async_tracked(
+        &self,
+        _agent_id: &str,
+        _message: &str,
+        _caller_agent_id: &str,
+        caller_session_id: Option<&str>,
+        _conversation_key: Option<&str>,
+    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+        // Record that the async path was taken and echo back whether a caller
+        // session was threaded through (the tool must forward it).
+        self.calls.lock().unwrap().push(format!(
+            "async_tracked:session={}",
+            caller_session_id.unwrap_or("none")
+        ));
+        Ok("task-fake-1234".into())
+    }
+
     fn list_agents(&self) -> Vec<AgentInfo> {
         vec![]
     }
@@ -835,7 +852,7 @@ async fn agent_send_no_key_no_caller_routes_to_send_to_agent() {
     let kernel: Arc<dyn KernelHandle> = cap.clone();
     let input = serde_json::json!({ "agent_id": "target", "message": "hi" });
 
-    let result = super::agent::tool_agent_send(&input, Some(&kernel), None).await;
+    let result = super::agent::tool_agent_send(&input, Some(&kernel), None, None).await;
 
     assert_eq!(result.unwrap(), "no-key-no-parent");
     let calls = cap.calls.lock().unwrap();
@@ -850,7 +867,8 @@ async fn agent_send_no_key_with_caller_routes_to_send_to_agent_as() {
     let kernel: Arc<dyn KernelHandle> = cap.clone();
     let input = serde_json::json!({ "agent_id": "target", "message": "hi" });
 
-    let result = super::agent::tool_agent_send(&input, Some(&kernel), Some("parent-agent")).await;
+    let result =
+        super::agent::tool_agent_send(&input, Some(&kernel), Some("parent-agent"), None).await;
 
     assert_eq!(result.unwrap(), "no-key-with-parent");
     let calls = cap.calls.lock().unwrap();
@@ -870,7 +888,7 @@ async fn agent_send_same_key_routes_to_as_with_key_both_calls() {
         "conversation_key": "thread-abc",
     });
 
-    super::agent::tool_agent_send(&input, Some(&kernel), Some("parent-agent"))
+    super::agent::tool_agent_send(&input, Some(&kernel), Some("parent-agent"), None)
         .await
         .unwrap();
 
@@ -879,7 +897,7 @@ async fn agent_send_same_key_routes_to_as_with_key_both_calls() {
         "message": "turn two",
         "conversation_key": "thread-abc",
     });
-    super::agent::tool_agent_send(&input2, Some(&kernel), Some("parent-agent"))
+    super::agent::tool_agent_send(&input2, Some(&kernel), Some("parent-agent"), None)
         .await
         .unwrap();
 
@@ -906,7 +924,7 @@ async fn agent_send_distinct_keys_produce_isolated_dispatch() {
                 "message": "msg",
                 "conversation_key": key,
             });
-            super::agent::tool_agent_send(&input, Some(&kernel), Some("parent-agent"))
+            super::agent::tool_agent_send(&input, Some(&kernel), Some("parent-agent"), None)
                 .await
                 .unwrap()
         }
@@ -920,6 +938,68 @@ async fn agent_send_distinct_keys_produce_isolated_dispatch() {
         &*calls,
         &["as_with_key:key-alpha", "as_with_key:key-beta"],
         "distinct keys must produce distinct dispatch entries"
+    );
+}
+
+/// `async: true` routes to the non-blocking tracker path
+/// (`send_to_agent_async_tracked`) instead of the blocking `send_to_agent_as`,
+/// returns a `task_id` JSON payload, and forwards the caller session so the
+/// kernel can route the eventual completion back. Issue #6043.
+#[tokio::test]
+async fn agent_send_async_routes_to_tracked_path_and_returns_task_id() {
+    use librefang_types::agent::SessionId;
+
+    let cap = Arc::new(DispatchCapture::default());
+    let kernel: Arc<dyn KernelHandle> = cap.clone();
+    let input = serde_json::json!({
+        "agent_id": "target",
+        "message": "do a long research task",
+        "async": true,
+    });
+    let session = SessionId(uuid::Uuid::new_v4());
+
+    let out =
+        super::agent::tool_agent_send(&input, Some(&kernel), Some("parent-agent"), Some(session))
+            .await
+            .unwrap();
+
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["task_id"], "task-fake-1234");
+    assert_eq!(v["status"], "delegated");
+
+    let calls = cap.calls.lock().unwrap();
+    assert_eq!(
+        &*calls,
+        &[format!("async_tracked:session={}", session.0)],
+        "async=true must hit the tracker path and forward the caller session, \
+         not the blocking send_to_agent_as"
+    );
+}
+
+/// `async: true` without a known caller is rejected — the tracker needs a
+/// `(caller_agent, session)` to deliver the completion to.
+#[tokio::test]
+async fn agent_send_async_without_caller_is_invalid_parameter() {
+    use super::error::ToolError;
+
+    let cap = Arc::new(DispatchCapture::default());
+    let kernel: Arc<dyn KernelHandle> = cap.clone();
+    let input = serde_json::json!({
+        "agent_id": "target",
+        "message": "hi",
+        "async": true,
+    });
+
+    let err = super::agent::tool_agent_send(&input, Some(&kernel), None, None)
+        .await
+        .expect_err("async without a caller must be rejected");
+    assert!(matches!(
+        err,
+        ToolError::InvalidParameter { name: "async", .. }
+    ));
+    assert!(
+        cap.calls.lock().unwrap().is_empty(),
+        "must reject before dispatching anything"
     );
 }
 
@@ -943,7 +1023,7 @@ async fn agent_send_depth_exceeded_is_permission_denied() {
     // task-local depth to 10 reaches the `>= max_depth` branch.
     let result = AGENT_CALL_DEPTH
         .scope(std::cell::Cell::new(10), async {
-            super::agent::tool_agent_send(&input, Some(&kernel), Some("parent-agent")).await
+            super::agent::tool_agent_send(&input, Some(&kernel), Some("parent-agent"), None).await
         })
         .await;
 
