@@ -1774,6 +1774,7 @@ pub async fn run_daemon(
         crate::config_store_overlay::seed_config_store(kernel.as_ref()).await;
         crate::config_store_overlay::overlay_mcp_servers(kernel.as_ref()).await;
         crate::config_store_overlay::overlay_default_model(kernel.as_ref()).await;
+        crate::config_store_overlay::overlay_config_overrides(kernel.as_ref()).await;
     }
 
     kernel.start_background_agents().await;

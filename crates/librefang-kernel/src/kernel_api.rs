@@ -180,6 +180,14 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     fn relocate_legacy_agent_dirs(&self);
     fn validate_config_for_reload(&self, config: &KernelConfig) -> Result<(), Vec<String>>;
     async fn reload_config(&self) -> Result<ReloadPlan, String>;
+    /// Replace the live config with an already-resolved `KernelConfig`
+    /// (C-005c: `config.toml` ⊕ DB overrides). `raw_toml` is the merged
+    /// serialized TOML for the raw-config snapshot.
+    async fn replace_config(
+        &self,
+        config: KernelConfig,
+        raw_toml: String,
+    ) -> Result<ReloadPlan, String>;
 
     // ====================================================================
     // Vault — sensitive secret read/write/recovery.
@@ -908,6 +916,13 @@ impl KernelApi for LibreFangKernel {
     }
     async fn reload_config(&self) -> Result<ReloadPlan, String> {
         Self::reload_config(self).await
+    }
+    async fn replace_config(
+        &self,
+        config: KernelConfig,
+        raw_toml: String,
+    ) -> Result<ReloadPlan, String> {
+        Self::replace_config(self, config, raw_toml).await
     }
 
     // -- Vault --

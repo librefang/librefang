@@ -23,13 +23,19 @@ use librefang_storage::migrations::{apply_pending, OPERATIONAL_MIGRATIONS};
 use librefang_storage::{
     content_hash, shared_pool, ConfigSource, ConfigStore, StorageConfig, SurrealConfigStore,
 };
-use librefang_types::config::{DefaultModelConfig, McpServerConfigEntry};
+use librefang_types::config::{DefaultModelConfig, KernelConfig, McpServerConfigEntry};
+use std::collections::BTreeMap;
 
 /// Config-store key under which the MCP server list is stored.
 pub const MCP_SERVERS_KEY: &str = "mcp_servers";
 
 /// Config-store key under which the default-model selection is stored (C-005b).
 pub const DEFAULT_MODEL_KEY: &str = "default_model";
+
+/// Config-store key under which the generic `config_set` override map is stored
+/// (C-005c): a `{ "dotted.path": value }` object of UI-tunable settings layered
+/// on top of `config.toml`.
+pub const CONFIG_OVERRIDES_KEY: &str = "config_overrides";
 
 /// Open the config store via the shared pool, ensuring the schema is applied.
 /// Self-contained so callers work whether or not the boot overlay has run.
@@ -451,5 +457,120 @@ pub async fn overlay_default_model(kernel: &dyn KernelApi) {
         Err(e) => {
             tracing::warn!(error = %e, "config-store overlay (default_model): read failed")
         }
+    }
+}
+
+// ── C-005c: generic config_set overrides (config.toml ⊕ store) ───────────────
+
+/// Read the stored `config_set` override map (path → value). Returns an empty
+/// map when no row exists.
+///
+/// # Errors
+/// Returns a scrubbed message on any storage failure.
+pub async fn read_config_overrides(
+    storage_cfg: &StorageConfig,
+) -> Result<BTreeMap<String, serde_json::Value>, String> {
+    let store = open_config_store(storage_cfg).await?;
+    match store
+        .get(CONFIG_OVERRIDES_KEY)
+        .await
+        .map_err(|e| format!("read config store: {e}"))?
+    {
+        Some(row) => {
+            serde_json::from_value(row.value).map_err(|e| format!("decode config_overrides: {e}"))
+        }
+        None => Ok(BTreeMap::new()),
+    }
+}
+
+/// Persist the full `config_set` override map (`source = runtime`).
+///
+/// # Errors
+/// Returns a scrubbed message on any storage failure.
+pub async fn write_config_overrides(
+    storage_cfg: &StorageConfig,
+    overrides: &BTreeMap<String, serde_json::Value>,
+) -> Result<(), String> {
+    let store = open_config_store(storage_cfg).await?;
+    let value = serde_json::to_value(overrides).map_err(|e| e.to_string())?;
+    let hash = content_hash(&value);
+    store
+        .upsert(CONFIG_OVERRIDES_KEY, value, ConfigSource::Runtime, &hash, 0)
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("write config store: {e}"))
+}
+
+/// Resolve `effective = config.toml ⊕ overrides`: parse `config.toml` at
+/// `config_path`, apply each **allowlisted** override path, and deserialize the
+/// result. Returns `(merged KernelConfig, merged raw TOML)`.
+///
+/// Defense in depth: every override path is re-checked against
+/// [`crate::routes::config::is_writable_config_path`] at apply time, so a
+/// directly-tampered store row cannot inject a blocked path (e.g.
+/// `channels.*.token_env`) — such entries are skipped with a `WARN`.
+///
+/// # Errors
+/// Returns a scrubbed message if `config.toml` is unreadable/unparseable or the
+/// merged document fails to deserialize into a `KernelConfig`.
+pub fn resolve_config_with_overrides(
+    config_path: &std::path::Path,
+    overrides: &BTreeMap<String, serde_json::Value>,
+) -> Result<(KernelConfig, String), String> {
+    let raw = match std::fs::read_to_string(config_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("read config.toml: {e}")),
+    };
+    let mut doc: toml_edit::DocumentMut =
+        raw.parse().map_err(|e| format!("parse config.toml: {e}"))?;
+
+    for (path, value) in overrides {
+        if !crate::routes::config::is_writable_config_path(path) {
+            tracing::warn!(
+                %path,
+                "config-store overlay: stored override path is not allowlisted; skipping"
+            );
+            continue;
+        }
+        if let Err(e) = crate::routes::config::apply_toml_override(&mut doc, path, value) {
+            tracing::warn!(%path, error = %e, "config-store overlay: skipping invalid override");
+        }
+    }
+
+    let merged_raw = doc.to_string();
+    let config = toml::from_str::<KernelConfig>(&merged_raw)
+        .map_err(|e| format!("deserialize merged config: {e}"))?;
+    Ok((config, merged_raw))
+}
+
+/// Overlay the stored `config_set` overrides onto the kernel's live config
+/// (C-005c). Best-effort: any failure logs and leaves the current config in
+/// place. Runs after the MCP/default-model overlays at boot and on reload.
+pub async fn overlay_config_overrides(kernel: &dyn KernelApi) {
+    let storage_cfg = kernel.config_ref().storage.clone();
+    let config_path = kernel.home_dir().join("config.toml");
+
+    let overrides = match read_config_overrides(&storage_cfg).await {
+        Ok(o) if o.is_empty() => return,
+        Ok(o) => o,
+        Err(e) => {
+            tracing::warn!(error = %e, "config-store overlay (config_set): read failed");
+            return;
+        }
+    };
+    let (config, raw) = match resolve_config_with_overrides(&config_path, &overrides) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "config-store overlay (config_set): resolve failed");
+            return;
+        }
+    };
+    match kernel.replace_config(config, raw).await {
+        Ok(_) => tracing::info!(
+            count = overrides.len(),
+            "config-store overlay: applied config_set overrides from database"
+        ),
+        Err(e) => tracing::warn!(error = %e, "config-store overlay (config_set): replace failed"),
     }
 }
