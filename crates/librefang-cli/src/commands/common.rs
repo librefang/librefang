@@ -276,6 +276,13 @@ pub(crate) fn chrono_lite_date() -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
+    date_from_unix_secs(secs)
+}
+
+/// Convert Unix seconds (UTC) to a `YYYY-MM-DD` string. Split out from
+/// [`chrono_lite_date`] so the calendar math is unit-testable against fixed
+/// timestamps rather than the wall clock.
+pub(crate) fn date_from_unix_secs(secs: u64) -> String {
     let days = secs / 86400;
     let mut year = 1970;
     let mut remaining_days = days as i64;
@@ -288,16 +295,25 @@ pub(crate) fn chrono_lite_date() -> String {
         year += 1;
     }
     let month_days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    // Length of month `m` (1-based), accounting for a leap-year February.
+    let month_len = |m: u64| -> i64 {
+        let base = month_days
+            .get((m.saturating_sub(1)) as usize)
+            .copied()
+            .unwrap_or(28) as i64;
+        if m == 2 && is_leap_year(year) {
+            29
+        } else {
+            base
+        }
+    };
     let mut month: u64 = 1;
     let mut day: i64 = remaining_days + 1;
-    let mut md: i64 = if is_leap_year(year) { 29 } else { 28 };
+    let mut md: i64 = month_len(month);
     while day > md {
         day -= md;
         month += 1;
-        md = month_days
-            .get((month.saturating_sub(1)) as usize)
-            .copied()
-            .unwrap_or(28) as i64;
+        md = month_len(month);
     }
     format!("{:04}-{:02}-{:02}", year, month, day)
 }
@@ -849,6 +865,28 @@ mod tests {
     use super::*;
     use reqwest::StatusCode;
     use serde_json::json;
+
+    #[test]
+    fn date_from_unix_secs_matches_known_dates() {
+        // Epoch and day-of-year < 28 always worked; the bug surfaced for any
+        // date whose day-of-year >= 28 (January was treated as a 28/29-day
+        // month), so cover month boundaries and year-end explicitly.
+        assert_eq!(date_from_unix_secs(0), "1970-01-01");
+        // 2026-01-15 (day-of-year 15) — pre-bug path, still correct.
+        assert_eq!(date_from_unix_secs(1_768_435_200), "2026-01-15");
+        // 2026-01-31 — previously rolled forward to "2026-02-03".
+        assert_eq!(date_from_unix_secs(1_769_817_600), "2026-01-31");
+        // 2026-03-01 — previously "2026-03-04".
+        assert_eq!(date_from_unix_secs(1_772_323_200), "2026-03-01");
+        // 2026-06-10 — previously "2026-06-13".
+        assert_eq!(date_from_unix_secs(1_781_049_600), "2026-06-10");
+        // 2026-12-31 — previously the invalid "2026-13-03".
+        assert_eq!(date_from_unix_secs(1_798_675_200), "2026-12-31");
+        // 2024-02-29 (leap day) — previously "2024-03-03".
+        assert_eq!(date_from_unix_secs(1_709_164_800), "2024-02-29");
+        // 2024-12-31 (leap year, year-end) — exercises the 366th day.
+        assert_eq!(date_from_unix_secs(1_735_603_200), "2024-12-31");
+    }
 
     #[test]
     fn usable_error_requires_non_empty_error_string() {
