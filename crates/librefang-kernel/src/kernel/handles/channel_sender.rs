@@ -389,15 +389,40 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
         // outbound direction we only have `(channel, chat_id)`; `account_id`,
         // `guild_id`, and `roles` are unknown, matching the
         // inbound-for-outbound semantics already used by
-        // `bound_recipients_for_agent`. The bindings `Vec` is kept
-        // specificity-sorted on load and on mutation (`add_binding`), so the
-        // first match is the most specific.
+        // `bound_recipients_for_agent`.
+        //
+        // We must NOT rely on the kernel binding store being
+        // specificity-sorted: only the runtime `add_binding` path sorts
+        // (`bindings_and_handle.rs`), while the config-boot store
+        // (`MeshSubsystem::new`, populated from `config.bindings` in file
+        // order) is left unsorted. The inbound `MessageRouter` keeps its own
+        // separately-sorted copy (`router.rs::load_bindings`), so taking the
+        // *first* match here would resolve the outbound mirror to a broad
+        // binding declared earlier in config while the inbound reply routes to
+        // a more-specific one — re-opening the exact cross-agent leak #6022 set
+        // out to close. Select the highest-specificity match explicitly so the
+        // result is independent of store order.
+        //
+        // Tie-break to mirror the inbound router exactly: `load_bindings`
+        // (`router.rs`) does a *stable* descending sort by specificity and
+        // takes the first match, so among bindings of equal specificity the
+        // one declared earliest in config wins. We therefore fold with a
+        // strict `>` (replace only on strictly-greater specificity), keeping
+        // the first equal-specificity match — `max_by_key` would keep the
+        // *last*, drifting from inbound on a tie.
         let bound_agent = {
             let bindings = self.mesh.bindings.lock().unwrap_or_else(|e| e.into_inner());
-            bindings
+            let mut best: Option<&librefang_types::config::AgentBinding> = None;
+            for b in bindings
                 .iter()
-                .find(|b| b.match_rule.matches(channel, None, chat_id, None, &[]))
-                .map(|b| b.agent.clone())
+                .filter(|b| b.match_rule.matches(channel, None, chat_id, None, &[]))
+            {
+                if best.is_none_or(|cur| b.match_rule.specificity() > cur.match_rule.specificity())
+                {
+                    best = Some(b);
+                }
+            }
+            best.map(|b| b.agent.clone())
         };
         if let Some(agent_name) = bound_agent {
             if let Some(entry) = self.agents.registry.find_by_name(&agent_name) {

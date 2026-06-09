@@ -10514,3 +10514,123 @@ async fn resolve_channel_owner_prefers_binding_then_default_agent() {
         "no binding and no default_agent must resolve to None"
     );
 }
+
+/// Regression for the binding-layer ordering gap (#6022 follow-up): the mirror
+/// owner must resolve correctly when bindings come from `KernelConfig.bindings`
+/// at boot — the path that `add_binding` (and the inbound router's own
+/// `load_bindings`) sorts, but `MeshSubsystem::new` does NOT. The earlier test
+/// injects via `kernel.add_binding(...)`, which sorts the store; this one
+/// exercises the unsorted config-boot store directly.
+#[tokio::test(flavor = "multi_thread")]
+async fn resolve_channel_owner_uses_unsorted_config_boot_bindings() {
+    use librefang_runtime::kernel_handle::ChannelSender;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let sidecar: librefang_types::config::SidecarChannelConfig =
+        serde_json::from_value(serde_json::json!({
+            "name": "my-matrix",
+            "command": "python3",
+            "channel_type": "matrix",
+            "default_agent": "default-agent",
+        }))
+        .expect("valid SidecarChannelConfig");
+
+    // The binding is supplied through `config.bindings` (boot-from-config),
+    // NOT via `add_binding` — so the kernel store is left in file order, never
+    // specificity-sorted. `resolve_channel_owner` must still find it.
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        sidecar_channels: vec![sidecar],
+        bindings: vec![librefang_types::config::AgentBinding {
+            agent: "bound-agent".to_string(),
+            match_rule: librefang_types::config::BindingMatchRule {
+                channel: Some("matrix".to_string()),
+                peer_id: Some("!room:server".to_string()),
+                ..Default::default()
+            },
+        }],
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let _default_id = register_named_agent(&kernel, "default-agent");
+    let bound_id = register_named_agent(&kernel, "bound-agent");
+
+    assert_eq!(
+        kernel.resolve_channel_owner("matrix", "!room:server"),
+        Some(bound_id),
+        "a config-boot (unsorted-store) binding must still resolve the mirror \
+         owner to the bound agent"
+    );
+}
+
+/// Regression for the binding-layer ordering gap (#6022 follow-up): when two
+/// bindings match the same `(channel, chat_id)` — a broad `channel`-only rule
+/// and a specific `peer_id` rule — the mirror must resolve to the MORE specific
+/// one regardless of declaration order. Here the broad rule is declared FIRST
+/// in `config.bindings`; with the previous `find`-based (first-match) logic on
+/// the unsorted config-boot store this resolved to the broad agent, mirroring
+/// outbound context onto the wrong agent while the inbound router (which sorts)
+/// routed the reply to the specific agent — the exact #6022 split.
+#[tokio::test(flavor = "multi_thread")]
+async fn resolve_channel_owner_prefers_specific_binding_over_broad_in_config_order() {
+    use librefang_runtime::kernel_handle::ChannelSender;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let sidecar: librefang_types::config::SidecarChannelConfig =
+        serde_json::from_value(serde_json::json!({
+            "name": "my-matrix",
+            "command": "python3",
+            "channel_type": "matrix",
+            "default_agent": "default-agent",
+        }))
+        .expect("valid SidecarChannelConfig");
+
+    // Broad `channel`-only binding (agent D) declared FIRST, specific
+    // `peer_id` binding (agent B) SECOND — the order that defeats a
+    // first-match read of the unsorted store.
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        sidecar_channels: vec![sidecar],
+        bindings: vec![
+            librefang_types::config::AgentBinding {
+                agent: "broad-agent".to_string(),
+                match_rule: librefang_types::config::BindingMatchRule {
+                    channel: Some("matrix".to_string()),
+                    ..Default::default()
+                },
+            },
+            librefang_types::config::AgentBinding {
+                agent: "specific-agent".to_string(),
+                match_rule: librefang_types::config::BindingMatchRule {
+                    channel: Some("matrix".to_string()),
+                    peer_id: Some("!room:server".to_string()),
+                    ..Default::default()
+                },
+            },
+        ],
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let _default_id = register_named_agent(&kernel, "default-agent");
+    let _broad_id = register_named_agent(&kernel, "broad-agent");
+    let specific_id = register_named_agent(&kernel, "specific-agent");
+
+    // The specific `peer_id` binding must win even though it is declared
+    // second and the store is unsorted.
+    assert_eq!(
+        kernel.resolve_channel_owner("matrix", "!room:server"),
+        Some(specific_id),
+        "the more-specific peer_id binding must win over a broad channel-only \
+         binding declared earlier in config"
+    );
+}
