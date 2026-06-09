@@ -91,10 +91,9 @@ const REFRESH_BUFFER_SECS: u64 = 3600; // 1 hour
 /// Hard timeout for OAuth refresh requests after explicit auth failures.
 const TOKEN_REFRESH_TIMEOUT_SECS: u64 = 15;
 
-/// Upper bound on streamed tool-call slots a single response may allocate. The
-/// accumulator is grown densely up to the SSE `output_index`; without a cap a
-/// hostile or buggy endpoint (or proxy) could send an enormous index and OOM
-/// the daemon. No real response carries this many parallel tool calls.
+/// Upper bound on streamed tool-call slots a single response may allocate.
+/// The accumulator is grown densely up to the SSE `output_index`; without a cap a hostile or buggy endpoint (or proxy) could send an enormous index and OOM the daemon.
+/// No real response carries this many parallel tool calls.
 const MAX_STREAMED_TOOL_CALLS: usize = 256;
 
 // ── Responses API request/response types ──────────────────────────────
@@ -635,10 +634,7 @@ impl ChatGptDriver {
                                     .and_then(|v| v.as_u64())
                                     .unwrap_or(tool_accum.len() as u64)
                                     as usize;
-                                // Cap attacker-controlled index before growing
-                                // the dense accumulator (OOM guard). `line_buf`
-                                // is already advanced, so skipping this event is
-                                // safe.
+                                // skip: line_buf is already past this event so `continue` is safe
                                 if output_index >= MAX_STREAMED_TOOL_CALLS {
                                     warn!(
                                         output_index,

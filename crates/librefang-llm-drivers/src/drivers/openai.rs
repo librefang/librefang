@@ -16,12 +16,9 @@ use std::collections::{BTreeMap, HashMap};
 use tracing::{debug, warn};
 use zeroize::Zeroizing;
 
-/// Upper bound on the number of streamed tool-call slots a single response may
-/// allocate. The accumulator is grown densely up to the `index` reported in
-/// each SSE delta, and this driver talks to arbitrary user-configured base URLs
-/// (Ollama, LiteLLM, custom gateways), so a hostile or buggy endpoint could
-/// send an enormous `index` and OOM the daemon. No real response carries
-/// anywhere near this many parallel tool calls.
+/// Upper bound on the number of streamed tool-call slots a single response may allocate.
+/// The accumulator is grown densely up to the `index` reported in each SSE delta, and this driver talks to arbitrary user-configured base URLs (Ollama, LiteLLM, custom gateways), so a hostile or buggy endpoint could send an enormous `index` and OOM the daemon.
+/// No real response carries anywhere near this many parallel tool calls.
 const MAX_STREAMED_TOOL_CALLS: usize = 256;
 
 /// OpenAI-compatible API driver.
@@ -1980,8 +1977,6 @@ impl LlmDriver for OpenAIDriver {
                         if let Some(calls) = delta["tool_calls"].as_array() {
                             for call in calls {
                                 let idx = call["index"].as_u64().unwrap_or(0) as usize;
-                                // Cap attacker-controlled index before growing
-                                // the dense accumulator (OOM guard).
                                 if idx >= MAX_STREAMED_TOOL_CALLS {
                                     warn!(
                                         index = idx,
@@ -4203,8 +4198,7 @@ mod tests {
         format!("http://{addr}")
     }
 
-    /// Spawn a minimal server that answers any request with the given raw SSE
-    /// body as `text/event-stream`, then closes the socket.
+    /// Spawn a minimal server that answers any request with the given raw SSE body as `text/event-stream`, then closes the socket.
     async fn spawn_sse_server(sse_body: String) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
@@ -4227,10 +4221,6 @@ mod tests {
         format!("http://{addr}")
     }
 
-    // A hostile/buggy endpoint can put any `index` on a streamed tool_call
-    // delta. The accumulator is grown densely up to that index, so an enormous
-    // value would OOM the daemon. The driver must drop deltas whose index is
-    // out of range (>= MAX_STREAMED_TOOL_CALLS) rather than allocate up to it.
     #[tokio::test]
     async fn streamed_tool_call_with_out_of_range_index_is_dropped() {
         let bad_index = MAX_STREAMED_TOOL_CALLS; // first out-of-range value
