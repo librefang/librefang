@@ -26,7 +26,7 @@ images:
     # Matches the image that ran SurrealDB schema migrations to v42.
     # Keep in sync with the live deployment so `kubectl apply -k` never
     # reverts the cluster to an older image.
-    newTag: 7c0d220ce79bc65ee884f7825f77b82f88212ff4
+    newTag: 8f94f2323fdf8efc0e80083cea8a1a9a320e654b
 
 patches:
   - path: patches/deployment-resources.yaml
