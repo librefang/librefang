@@ -158,6 +158,20 @@ pub fn load_config(path: Option<&Path>) -> Result<KernelConfig, String> {
                         );
                     }
 
+                    // Targeted warning for pre-sidecar `[channels.<vendor>]` blocks.
+                    // Every channel adapter migrated out-of-process (#5317–#5459); the in-process per-vendor fields were removed from `ChannelsConfig`, so an old block parses into nothing and the configured channel silently disappears on upgrade.
+                    // The generic unknown-field pass already names `channels.<vendor>`, but does not tell the operator the channel moved to `[[sidecar_channels]]`.
+                    for vendor in KernelConfig::detect_legacy_channel_blocks(&root_value) {
+                        tracing::warn!(
+                            channel = %vendor,
+                            "[channels.{vendor}] in config.toml is ignored: in-process \
+                             channels migrated to out-of-process sidecars. Re-add it under \
+                             [[sidecar_channels]] (Dashboard → Channels → Add, or hand-edit \
+                             config.toml) and install the sidecar SDK ('pip install \
+                             librefang-sdk') — see docs/architecture/sidecar-channels.md"
+                        );
+                    }
+
                     match root_value.try_into::<KernelConfig>() {
                         Ok(config) => {
                             // Write migrated config back to disk so future loads skip migration
@@ -324,6 +338,18 @@ pub fn try_load_config(path: &Path) -> Result<KernelConfig, String> {
              per-agent overrides live in {{workspace}}/agent.toml's \
              top-level [{key}] block (or the [agents.{agent}] section of \
              a HAND.toml), not in config.toml — see #5476"
+        );
+    }
+
+    // Same legacy `[channels.<vendor>]` migration warning as `load_config`, applied on hot-reload so an operator who pastes their old block back and `POST /api/config/reload`s still gets the actionable hint instead of a silent no-op.
+    for vendor in KernelConfig::detect_legacy_channel_blocks(&root_value) {
+        tracing::warn!(
+            channel = %vendor,
+            "[channels.{vendor}] in config.toml is ignored on reload: in-process \
+             channels migrated to out-of-process sidecars. Re-add it under \
+             [[sidecar_channels]] (Dashboard → Channels → Add, or hand-edit \
+             config.toml) and install the sidecar SDK ('pip install \
+             librefang-sdk') — see docs/architecture/sidecar-channels.md"
         );
     }
 

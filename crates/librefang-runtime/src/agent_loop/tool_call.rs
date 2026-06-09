@@ -127,6 +127,14 @@ pub(super) fn append_tool_result_guidance_blocks(tool_result_blocks: &mut Vec<Co
 pub(super) struct ToolResultOutcomeSummary {
     pub(super) hard_error_count: u32,
     pub(super) success_count: u32,
+    /// Tool results that errored softly — `status.is_soft_error()` (loop-guard
+    /// block `Skipped`, approval `Denied`, `ModifyAndRetry`) or soft-error
+    /// content. These do NOT count toward the hard-failure panic-exit, but a
+    /// run of iterations producing *only* soft errors (no success, no hard
+    /// error, no assistant prose) is a silent stall the loop must break out of
+    /// gracefully — see `is_block_only` and the block-stall degrade in
+    /// `run_streaming`/`run_agent_loop` (#5979).
+    pub(super) soft_error_count: u32,
 }
 
 impl ToolResultOutcomeSummary {
@@ -141,6 +149,13 @@ impl ToolResultOutcomeSummary {
                     ..
                 } if !status.is_soft_error() && !is_soft_error_content(content) => {
                     summary.hard_error_count += 1;
+                }
+                // Any remaining `is_error: true` result failed the hard guard
+                // above, so it is soft (soft status or soft content): a
+                // loop-guard block, approval denial, sandbox rejection, or
+                // truncation.
+                ContentBlock::ToolResult { is_error: true, .. } => {
+                    summary.soft_error_count += 1;
                 }
                 ContentBlock::ToolResult {
                     is_error: false, ..
@@ -157,6 +172,17 @@ impl ToolResultOutcomeSummary {
     pub(super) fn accumulate(&mut self, other: Self) {
         self.hard_error_count += other.hard_error_count;
         self.success_count += other.success_count;
+        self.soft_error_count += other.soft_error_count;
+    }
+
+    /// True when this iteration produced only soft errors — at least one soft
+    /// error, and no success and no hard error. The dominant producer is a
+    /// loop-guard `Block` (`Skipped`): the model keeps re-issuing a call the
+    /// guard keeps blocking. Combined with an empty assistant turn (no prose),
+    /// a sustained run of these is the silent loop-to-`max_iterations` death
+    /// (#5979) that the block-stall degrade converts into one real reply.
+    pub(super) fn is_block_only(&self) -> bool {
+        self.soft_error_count > 0 && self.hard_error_count == 0 && self.success_count == 0
     }
 }
 
@@ -669,12 +695,20 @@ pub(super) async fn precheck_loop_guard(
             } else {
                 warn!(tool = %tool_call.name, "Tool call blocked by loop guard");
             }
+            // A loop-guard block is a soft outcome, not a hard failure: its
+            // whole purpose is to stop a repeating call and let the model pick a
+            // different action. Marking it `Error` made it a hard error that
+            // aborted the remaining tool batch and counted toward
+            // MAX_CONSECUTIVE_ALL_FAILED, killing the turn after three blocks
+            // (#5979). `Skipped` is soft (`is_soft_error()`), so the turn
+            // survives and the block message steers the model; the genuinely
+            // fatal runaway is still caught by the CircuitBreak arm above.
             LoopGuardPrecheck::Blocked(ExecutedToolCall {
                 result: librefang_types::tool::ToolResult {
                     tool_use_id: tool_call.id.clone(),
                     content: msg.clone(),
                     is_error: true,
-                    status: librefang_types::tool::ToolExecutionStatus::Error,
+                    status: librefang_types::tool::ToolExecutionStatus::Skipped,
                     ..Default::default()
                 },
                 final_content: msg.clone(),
@@ -1401,4 +1435,178 @@ pub(super) fn apply_approval_resolution_signal(
         }
     }
     matched
+}
+
+#[cfg(test)]
+mod loop_guard_block_tests {
+    use super::*;
+    use librefang_types::tool::ToolExecutionStatus;
+
+    fn block_result(status: ToolExecutionStatus) -> ContentBlock {
+        // Mirrors the result the `LoopGuardVerdict::Block` arm produces.
+        ContentBlock::ToolResult {
+            tool_use_id: "toolu_1".to_string(),
+            tool_name: "memory_recall".to_string(),
+            content: "Blocked: tool 'memory_recall' called 5 times with identical \
+                      parameters. Try a different approach or different parameters."
+                .to_string(),
+            is_error: true,
+            status,
+            approval_request_id: None,
+        }
+    }
+
+    #[test]
+    fn blocked_call_is_soft_and_does_not_count_as_hard_failure() {
+        // The fix (#5979): a loop-guard block is `Skipped` (soft), so it must
+        // NOT be tallied as a hard error.
+        let summary =
+            ToolResultOutcomeSummary::from_blocks(&[block_result(ToolExecutionStatus::Skipped)]);
+        assert_eq!(summary.hard_error_count, 0);
+        assert_eq!(summary.success_count, 0);
+    }
+
+    #[test]
+    fn consecutive_blocked_only_iterations_do_not_trip_the_panic_exit() {
+        // Three block-only iterations previously reached MAX_CONSECUTIVE_ALL_FAILED
+        // (3) and killed the turn with a recorded panic. With `Skipped`, the
+        // counter never climbs.
+        let mut consecutive_all_failed = 0u32;
+        for _ in 0..5 {
+            let summary = ToolResultOutcomeSummary::from_blocks(&[block_result(
+                ToolExecutionStatus::Skipped,
+            )]);
+            update_consecutive_hard_failures(&mut consecutive_all_failed, summary);
+        }
+        assert_eq!(consecutive_all_failed, 0);
+    }
+
+    #[test]
+    fn pre_fix_error_status_would_have_counted_as_hard_failure() {
+        // Documents the regression guard: had the block kept `Error`, it would
+        // be a hard failure and three of them would trip the exit.
+        let mut consecutive_all_failed = 0u32;
+        for _ in 0..3 {
+            let summary =
+                ToolResultOutcomeSummary::from_blocks(&[block_result(ToolExecutionStatus::Error)]);
+            update_consecutive_hard_failures(&mut consecutive_all_failed, summary);
+        }
+        assert_eq!(consecutive_all_failed, 3);
+    }
+
+    fn success_result() -> ContentBlock {
+        ContentBlock::ToolResult {
+            tool_use_id: "toolu_ok".to_string(),
+            tool_name: "memory_recall".to_string(),
+            content: "here are your memories".to_string(),
+            is_error: false,
+            status: ToolExecutionStatus::Completed,
+            approval_request_id: None,
+        }
+    }
+
+    #[test]
+    fn soft_block_counts_toward_soft_error_total() {
+        // Part B (#5979): a loop-guard `Skipped` is tallied as a soft error so
+        // the block-stall detector can see it — without inflating the hard
+        // panic-exit counter.
+        let summary =
+            ToolResultOutcomeSummary::from_blocks(&[block_result(ToolExecutionStatus::Skipped)]);
+        assert_eq!(summary.hard_error_count, 0);
+        assert_eq!(summary.success_count, 0);
+        assert_eq!(summary.soft_error_count, 1);
+    }
+
+    #[test]
+    fn block_only_iteration_is_detected() {
+        // Every result a soft block, no success, no hard error ⇒ block-only.
+        let summary = ToolResultOutcomeSummary::from_blocks(&[
+            block_result(ToolExecutionStatus::Skipped),
+            block_result(ToolExecutionStatus::Skipped),
+        ]);
+        assert!(summary.is_block_only());
+    }
+
+    #[test]
+    fn a_success_alongside_a_block_is_not_block_only() {
+        // A productive call in the same turn means the agent is making progress
+        // — the degrade must NOT fire.
+        let summary = ToolResultOutcomeSummary::from_blocks(&[
+            block_result(ToolExecutionStatus::Skipped),
+            success_result(),
+        ]);
+        assert!(!summary.is_block_only());
+    }
+
+    #[test]
+    fn a_hard_error_alongside_a_block_is_not_block_only() {
+        // A hard failure routes through the MAX_CONSECUTIVE_ALL_FAILED exit
+        // instead; it must not be misclassified as a soft block stall.
+        let summary = ToolResultOutcomeSummary::from_blocks(&[
+            block_result(ToolExecutionStatus::Skipped),
+            block_result(ToolExecutionStatus::Error),
+        ]);
+        assert!(!summary.is_block_only());
+    }
+
+    #[test]
+    fn no_results_is_not_block_only() {
+        // An empty turn (no tool results at all) is not a block stall.
+        let summary = ToolResultOutcomeSummary::default();
+        assert!(!summary.is_block_only());
+    }
+
+    #[test]
+    fn consecutive_block_only_reaches_degrade_threshold_then_resets_on_progress() {
+        // Models the run_streaming/run_agent_loop counter: two consecutive
+        // block-only iterations reach the default degrade threshold (2); a
+        // subsequent productive iteration resets it.
+        const THRESHOLD: u32 = 2;
+        let mut consecutive_block_only = 0u32;
+        let mut degrades = 0u32;
+
+        let tick = |summary: ToolResultOutcomeSummary,
+                    assistant_text_empty: bool,
+                    consecutive_block_only: &mut u32,
+                    degrades: &mut u32| {
+            if summary.is_block_only() && assistant_text_empty {
+                *consecutive_block_only += 1;
+            } else {
+                *consecutive_block_only = 0;
+            }
+            if *consecutive_block_only >= THRESHOLD {
+                *degrades += 1;
+                *consecutive_block_only = 0;
+            }
+        };
+
+        let block =
+            || ToolResultOutcomeSummary::from_blocks(&[block_result(ToolExecutionStatus::Skipped)]);
+
+        // First block stall: counter climbs to 1, no degrade yet.
+        tick(block(), true, &mut consecutive_block_only, &mut degrades);
+        assert_eq!(consecutive_block_only, 1);
+        assert_eq!(degrades, 0);
+
+        // Second consecutive block stall: hits threshold, degrades, resets.
+        tick(block(), true, &mut consecutive_block_only, &mut degrades);
+        assert_eq!(consecutive_block_only, 0);
+        assert_eq!(degrades, 1);
+
+        // A block stall WITH assistant prose does not count (user got text).
+        tick(block(), false, &mut consecutive_block_only, &mut degrades);
+        assert_eq!(consecutive_block_only, 0);
+
+        // One block, then a success: progress resets the counter — no degrade.
+        tick(block(), true, &mut consecutive_block_only, &mut degrades);
+        assert_eq!(consecutive_block_only, 1);
+        tick(
+            ToolResultOutcomeSummary::from_blocks(&[success_result()]),
+            true,
+            &mut consecutive_block_only,
+            &mut degrades,
+        );
+        assert_eq!(consecutive_block_only, 0);
+        assert_eq!(degrades, 1);
+    }
 }
