@@ -582,7 +582,7 @@ impl UsageStore {
         }
 
         // Helper closure: run one combined SUM query for a given time window.
-        // `where_clause` selects the rows for the window (e.g. `timestamp > datetime(...)`).
+        // `where_clause` selects the rows for the window (e.g. `datetime(timestamp) > datetime(...)`).
         let window_costs = |where_clause: &str| -> LibreFangResult<WindowCosts> {
             let sql = format!(
                 "SELECT \
