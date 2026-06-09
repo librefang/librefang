@@ -144,6 +144,9 @@ export interface ChannelItem {
   /** Schema-driven configure form for a sidecar adapter (returned by
    *  `python -m <module> --describe` and cached daemon-side). */
   fields?: ChannelField[];
+  /** Set on an unconfigured sidecar row when `--describe` failed at daemon boot and there is no static fallback — i.e. `fields` is empty and the configure form would otherwise be a blank drawer.
+   *  Carries the actionable reason (typically: the Python sidecar SDK is not installed), surfaced in the configure form so the operator knows why the form is empty and how to fix it. */
+  schema_error?: string;
   /** Read-only TOML snippet the operator can copy into config.toml
    *  if they prefer hand-editing over the configure drawer. Emitted
    *  by the backend on every row. */
