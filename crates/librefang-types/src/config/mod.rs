@@ -1552,6 +1552,67 @@ admin_role = "admin"
         );
     }
 
+    #[test]
+    fn detect_legacy_channel_blocks_flags_pre_sidecar_vendor_tables() {
+        // Old single-table (`[channels.wechat]`) and array-of-tables
+        // (`[[channels.telegram]]`, the old `OneOrMany`) per-vendor
+        // blocks both flag. The known scalar `[channels]` settings do not.
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [channels]
+            file_download_max_bytes = 1024
+
+            [channels.wechat]
+            bot_token = "secret"
+
+            [[channels.telegram]]
+            bot_token = "123:abc"
+            "#,
+        )
+        .expect("toml parse");
+        assert_eq!(
+            KernelConfig::detect_legacy_channel_blocks(&raw),
+            vec!["telegram".to_string(), "wechat".to_string()]
+        );
+    }
+
+    #[test]
+    fn detect_legacy_channel_blocks_empty_without_channels_section() {
+        let raw: toml::Value = toml::from_str(r#"log_level = "debug""#).expect("toml parse");
+        assert!(KernelConfig::detect_legacy_channel_blocks(&raw).is_empty());
+    }
+
+    #[test]
+    fn detect_legacy_channel_blocks_ignores_known_scalar_settings() {
+        // The surviving `ChannelsConfig` scalar fields must never be
+        // mislabelled as legacy vendor blocks.
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [channels]
+            file_download_max_bytes = 1024
+            file_upload_max_bytes = 2048
+            file_download_dir = "/tmp/dl"
+            "#,
+        )
+        .expect("toml parse");
+        assert!(KernelConfig::detect_legacy_channel_blocks(&raw).is_empty());
+    }
+
+    #[test]
+    fn detect_legacy_channel_blocks_leaves_scalar_typo_to_generic_pass() {
+        // A scalar typo under `[channels]` is NOT a vendor block — it is
+        // left to the generic unknown-nested-field warning rather than
+        // being mislabelled a migrated channel.
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [channels]
+            file_downlod_max_bytes = 1024
+            "#,
+        )
+        .expect("toml parse");
+        assert!(KernelConfig::detect_legacy_channel_blocks(&raw).is_empty());
+    }
+
     /// Drift guard (#6): every `AgentManifest` field that acts as a
     /// per-agent override of a global `KernelConfig` section must be listed
     /// in `PER_AGENT_OVERRIDE_KEYS`, so `detect_misplaced_per_agent_overrides`
