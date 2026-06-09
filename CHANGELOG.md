@@ -669,6 +669,11 @@ _308 PRs from 7 contributors since v2026.5.17-beta.12._
   Both agent loops (streaming and non-streaming) now detect a *block-only* iteration — every tool result a soft loop-guard block, no success, no hard error, no assistant prose — and after `block_stall_degrade_after` consecutive such iterations (new `AutonomousConfig.block_stall_degrade_after`, default `2`, `None`/`0` disables) force a single tools-stripped completion so the model is compelled to answer in prose. The user gets the model's best reply instead of silence; tool_use/tool_result pairing is preserved because the forced turn finalizes through the normal end-turn path.
   Tests: `tool_call::loop_guard_block_tests::{soft_block_counts_toward_soft_error_total, block_only_iteration_is_detected, a_success_alongside_a_block_is_not_block_only, a_hard_error_alongside_a_block_is_not_block_only, no_results_is_not_block_only, consecutive_block_only_reaches_degrade_threshold_then_resets_on_progress}`.
 
+- **kernel(triggers): the evaluator no longer self-deadlocks when a per-event trigger budget is exhausted** (#5977) (@DaBlitzStein).
+  `evaluate_event` snapshots the registered-trigger count with a lock-free `ids.len()` before the match loop, instead of calling `self.triggers.len()` inside the loop's budget-exhausted `warn!` branch.
+  `DashMap::len()` read-locks every shard, so calling it while a `self.triggers.get_mut(&id)` `RefMut` still held that shard's write-lock self-deadlocked the evaluator on a single thread the first time a high-fan-out event hit `max_triggers_per_event`.
+  The bug had been live in `origin/main` since the per-trigger cooldown feature landed (2026-03-26).
+
 - **kernel(cron): day-of-week now follows the POSIX convention (`0` and `7` both mean Sunday)** instead of the `cron` crate's 1-7 mapping (#5966) (@DaBlitzStein).
   Sunday-only schedules like `0 16 * * 0` were previously rejected as unschedulable, and numeric weekday ranges such as `1-5` silently shifted by one day (firing Sun-Thu instead of Mon-Fri).
   The 5/6-field expression is now remapped at the single conversion site before it reaches the crate, so `0`/`7` resolve to Sunday and `1-5` fires Monday through Friday as written.
