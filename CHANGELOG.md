@@ -808,6 +808,11 @@ _308 PRs from 7 contributors since v2026.5.17-beta.12._
   (2) When `--describe` fails with no static fallback, the daemon now caches the actionable reason and rides it along as `schema_error` on the channel's discovery row, so the dashboard configure drawer shows "Setup form unavailable — install the sidecar SDK and reload" with the install hint instead of a blank form, and disables Save.
   Regression tests: `detect_legacy_channel_blocks_*` (librefang-types), `discovery_row_surfaces_schema_error_only_when_schema_missing` (librefang-api), and a `ChannelsPage` vitest case asserting the reason renders and Save is disabled.
 
+- **fix(api): accept the dashboard's `version` field in `ClawHubInstallRequest` so ClawHub skill install stops returning 422** (#6038) (@DaBlitzStein).
+  The dashboard's `clawhubInstall` posts `{slug, version, hand}`, but `ClawHubInstallRequest` used `#[serde(deny_unknown_fields)]` without a `version` field, so the axum `Json` extractor rejected every install with `422 Unprocessable Entity` ("unknown field `version`").
+  Added `version: Option<String>` with `#[serde(default)]`; the installer still resolves to the latest published version, so the field is accepted to keep the request well-formed rather than driving version selection yet.
+  Regression tests: `clawhub_install_request_accepts_dashboard_body_with_version` and `clawhub_install_request_slug_only_still_works`.
+
 - **security(channels): propagate per-sidecar `account_id` so multi-bot Telegram isolation actually engages** (#5955) (@nevgenov).
   Multi-instance sidecar setups (several `[[sidecar_channels]]` of `channel_type = "telegram"`) regressed the #5688 per-bot isolation because the daemon never propagated the operator-known `SidecarChannelConfig::name` as `account_id`, leaving the #5688 guards as dead code for sidecars.
   Two manifestations, one root: the daemon registration hardcoded `account_id = None`, so every sidecar's `default_agent` collided on the bare `channel_defaults["telegram"]` key (last-booted bot answered in every bot); and the sidecar reader loop stamped `channel_id` / `platform` / `sender_username` into per-message metadata but never `account_id`, so `dispatch_message` always took the global `set_user_default` branch and a `/agent <name>` selection in bot-A leaked to bot-B for the same platform user.
