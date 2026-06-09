@@ -332,30 +332,14 @@ impl KernelConfig {
         found
     }
 
-    /// Detect pre-sidecar in-process channel blocks (`[channels.<vendor>]`)
-    /// left in `config.toml` after the channel → sidecar migration
-    /// (#5317–#5459).
+    /// Detect pre-sidecar in-process channel blocks (`[channels.<vendor>]`) left in `config.toml` after the channel → sidecar migration (#5317–#5459).
     ///
-    /// Every channel adapter that used to be configured under
-    /// `[channels.telegram]` / `[channels.wechat]` / … now runs as an
-    /// out-of-process sidecar configured under `[[sidecar_channels]]`.
-    /// The per-vendor fields were removed from [`ChannelsConfig`], so an
-    /// upgraded operator's old block deserialises into nothing — the
-    /// generic unknown-nested-field warning fires (`channels.wechat`) but
-    /// never tells the operator their channel moved to a sidecar, so the
-    /// configuration silently vanishes from the dashboard on upgrade.
+    /// Every channel adapter that used to be configured under `[channels.telegram]` / `[channels.wechat]` / … now runs as an out-of-process sidecar configured under `[[sidecar_channels]]`.
+    /// The per-vendor fields were removed from [`ChannelsConfig`], so an upgraded operator's old block deserialises into nothing — the generic unknown-nested-field warning fires (`channels.wechat`) but never tells the operator their channel moved to a sidecar, so the configuration silently vanishes from the dashboard on upgrade.
     ///
-    /// This helper returns the vendor sub-keys present under `[channels]`
-    /// whose value is a table or array-of-tables (the old
-    /// `OneOrMany<VendorConfig>` shape) and that are not recognised
-    /// [`ChannelsConfig`] scalar fields, so the caller can emit a targeted
-    /// migration WARN. The known-field set is derived from the same
-    /// schemars allowlist as [`detect_unknown_nested_fields`], so adding a
-    /// real scalar field to `ChannelsConfig` will not be misreported as a
-    /// legacy block; a scalar typo under `[channels]` (e.g.
-    /// `file_downlod_max_bytes`) is left to the generic unknown-field
-    /// warning rather than being mislabelled a channel. Returned sorted,
-    /// deterministic.
+    /// This helper returns the vendor sub-keys present under `[channels]` whose value is a table or array-of-tables (the old `OneOrMany<VendorConfig>` shape) and that are not recognised [`ChannelsConfig`] scalar fields, so the caller can emit a targeted migration WARN.
+    /// The known-field set is derived from the same schemars allowlist as [`detect_unknown_nested_fields`], so adding a real scalar field to `ChannelsConfig` will not be misreported as a legacy block; a scalar typo under `[channels]` (e.g. `file_downlod_max_bytes`) is left to the generic unknown-field warning rather than being mislabelled a channel.
+    /// Returned sorted, deterministic.
     pub fn detect_legacy_channel_blocks(raw: &toml::Value) -> Vec<String> {
         let Some(channels_tbl) = raw
             .as_table()

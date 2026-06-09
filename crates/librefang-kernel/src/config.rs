@@ -158,14 +158,9 @@ pub fn load_config(path: Option<&Path>) -> Result<KernelConfig, String> {
                         );
                     }
 
-                    // Targeted warning for pre-sidecar `[channels.<vendor>]`
-                    // blocks. Every channel adapter migrated out-of-process
-                    // (#5317–#5459); the in-process per-vendor fields were
-                    // removed from `ChannelsConfig`, so an old block parses
-                    // into nothing and the configured channel silently
-                    // disappears on upgrade. The generic unknown-field pass
-                    // already names `channels.<vendor>`, but does not tell
-                    // the operator the channel moved to `[[sidecar_channels]]`.
+                    // Targeted warning for pre-sidecar `[channels.<vendor>]` blocks.
+                    // Every channel adapter migrated out-of-process (#5317–#5459); the in-process per-vendor fields were removed from `ChannelsConfig`, so an old block parses into nothing and the configured channel silently disappears on upgrade.
+                    // The generic unknown-field pass already names `channels.<vendor>`, but does not tell the operator the channel moved to `[[sidecar_channels]]`.
                     for vendor in KernelConfig::detect_legacy_channel_blocks(&root_value) {
                         tracing::warn!(
                             channel = %vendor,
@@ -346,10 +341,7 @@ pub fn try_load_config(path: &Path) -> Result<KernelConfig, String> {
         );
     }
 
-    // Same legacy `[channels.<vendor>]` migration warning as `load_config`,
-    // applied on hot-reload so an operator who pastes their old block back
-    // and `POST /api/config/reload`s still gets the actionable hint instead
-    // of a silent no-op.
+    // Same legacy `[channels.<vendor>]` migration warning as `load_config`, applied on hot-reload so an operator who pastes their old block back and `POST /api/config/reload`s still gets the actionable hint instead of a silent no-op.
     for vendor in KernelConfig::detect_legacy_channel_blocks(&root_value) {
         tracing::warn!(
             channel = %vendor,

@@ -528,16 +528,9 @@ fn schema_cache() -> &'static RwLock<HashMap<&'static str, SidecarSchema>> {
     SIDECAR_SCHEMA_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
-/// Process-wide cache of the *reason* a catalog adapter has no usable
-/// schema, keyed by `SidecarCatalogEntry::name`. Populated alongside
-/// [`SIDECAR_SCHEMA_CACHE`] in [`populate_sidecar_schema_cache`] when
-/// `--describe` fails AND the entry has no `static_fields` fallback —
-/// i.e. exactly the case where the dashboard would otherwise render an
-/// empty configure form with no explanation. The string is the
-/// already-actionable hint from `describe_sidecar` (e.g. the
-/// `pip install librefang-sdk` install hint), surfaced verbatim as the
-/// row's `schema_error` so the operator learns *why* the form is empty
-/// and how to fix it instead of staring at a blank drawer.
+/// Process-wide cache of the *reason* a catalog adapter has no usable schema, keyed by `SidecarCatalogEntry::name`.
+/// Populated alongside [`SIDECAR_SCHEMA_CACHE`] in [`populate_sidecar_schema_cache`] when `--describe` fails AND the entry has no `static_fields` fallback — i.e. exactly the case where the dashboard would otherwise render an empty configure form with no explanation.
+/// The string is the already-actionable hint from `describe_sidecar` (e.g. the `pip install librefang-sdk` install hint), surfaced verbatim as the row's `schema_error` so the operator learns *why* the form is empty and how to fix it instead of staring at a blank drawer.
 static SIDECAR_SCHEMA_ERROR_CACHE: OnceLock<RwLock<HashMap<&'static str, String>>> =
     OnceLock::new();
 
@@ -601,9 +594,7 @@ pub async fn populate_sidecar_schema_cache() {
                         error = %e,
                         "sidecar --describe failed; discovery card will have no form fields"
                     );
-                    // Stash the actionable failure reason so the discovery
-                    // row can tell the operator *why* the form is empty
-                    // (typically: Python sidecar SDK not installed).
+                    // Stash the failure reason so the discovery row can tell the operator *why* the form is empty (typically: Python sidecar SDK not installed).
                     schema_error_cache().write().unwrap().insert(entry.name, e);
                 }
             }
@@ -626,10 +617,9 @@ pub fn __test_seed_sidecar_schema_cache(entries: &[(&'static str, SidecarSchema)
     }
 }
 
-/// Test-only seeder for the sidecar schema-error cache. Mirrors
-/// [`__test_seed_sidecar_schema_cache`] so integration tests can assert
-/// the `schema_error` field on discovery rows without a failing live
-/// `--describe`. `#[doc(hidden)]` for the same reason.
+/// Test-only seeder for the sidecar schema-error cache.
+/// Mirrors [`__test_seed_sidecar_schema_cache`] so integration tests can assert the `schema_error` field on discovery rows without a failing live `--describe`.
+/// `#[doc(hidden)]` for the same reason.
 #[doc(hidden)]
 pub fn __test_seed_sidecar_schema_error_cache(entries: &[(&'static str, String)]) {
     let mut guard = schema_error_cache().write().unwrap();
@@ -708,11 +698,8 @@ fn sidecar_discovery_rows(
                  (secrets) and ~/.librefang/config.toml (non-secrets)",
             ],
         });
-        // When `--describe` failed at boot and there is no static fallback,
-        // `fields` is empty and the configure form would be a blank drawer.
-        // Surface the cached failure reason (typically the
-        // `pip install librefang-sdk` install hint) so the dashboard can
-        // explain why instead of showing nothing.
+        // When `--describe` failed at boot and there is no static fallback, `fields` is empty and the configure form would be a blank drawer.
+        // Surface the cached failure reason (typically the `pip install librefang-sdk` install hint) so the dashboard can explain why instead of showing nothing.
         if let Some(reason) = err_guard.get(entry.name) {
             row["schema_error"] = serde_json::json!(reason);
         }
@@ -1353,9 +1340,7 @@ mod schema_error_discovery_tests {
         sidecar_discovery_rows, SidecarSchema, SidecarSchemaField,
     };
 
-    // Both assertions live in ONE test: the schema / error caches are
-    // process-wide, and the seeders clear-then-set, so running the two
-    // halves as separate (parallel) tests would race on the shared maps.
+    // Both assertions live in ONE test: the schema / error caches are process-wide, and the seeders clear-then-set, so running the two halves as separate (parallel) tests would race on the shared maps.
     #[test]
     fn discovery_row_surfaces_schema_error_only_when_schema_missing() {
         const HINT: &str = "librefang-sdk is not installed (test hint)";

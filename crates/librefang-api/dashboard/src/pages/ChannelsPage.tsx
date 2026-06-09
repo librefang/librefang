@@ -401,9 +401,8 @@ function SidecarForm({
   const advanced = allFields.filter((f) => f.advanced);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const visible = showAdvanced ? [...fields, ...advanced] : fields;
-  // `--describe` failed at boot and there's no static fallback, so the
-  // schema is empty. Show the actionable reason (typically: install the
-  // Python sidecar SDK) instead of a blank drawer + dead Save button.
+  // `--describe` failed at boot and there's no static fallback, so the schema is empty.
+  // Show the actionable reason (typically: install the Python sidecar SDK) instead of a blank drawer + dead Save button.
   const schemaUnavailable = allFields.length === 0 && !!channel.schema_error;
 
   // Pre-populate from the schema:
