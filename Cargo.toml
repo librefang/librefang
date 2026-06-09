@@ -252,7 +252,7 @@ regex = "1"
 regex-lite = "0.1"
 
 # Socket options (SO_REUSEADDR)
-socket2 = "0.6.3"
+socket2 = "0.6.4"
 
 # Zip archive extraction
 zip = { version = "8", default-features = false, features = ["deflate"] }
