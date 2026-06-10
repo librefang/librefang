@@ -10881,7 +10881,8 @@ fn controlled_update_crosses_injection_scan() {
 }
 
 /// Approving a pending CREATE appends the new skill to the creating agent's
-/// allowlist, and is idempotent (re-approving / an already-listed skill never
+/// allowlist, persists it to the substrate so it survives a daemon restart,
+/// and is idempotent (re-approving / an already-listed skill never
 /// duplicates).
 #[test]
 fn approve_create_auto_assigns_to_creator_allowlist() {
@@ -10890,6 +10891,10 @@ fn approve_create_auto_assigns_to_creator_allowlist() {
     std::fs::create_dir_all(home_dir.join("data")).unwrap();
     let skills_root = home_dir.join("skills");
     std::fs::create_dir_all(&skills_root).unwrap();
+    // The pre-existing allowlist entry must be a real installed skill:
+    // the assign now routes through `set_agent_skills`, which validates
+    // every name on the list against the live skill registry.
+    install_test_skill(&skills_root, "preexisting-skill", &[]);
 
     let config = KernelConfig {
         home_dir: home_dir.clone(),
@@ -10935,11 +10940,98 @@ fn approve_create_auto_assigns_to_creator_allowlist() {
         "pre-existing allowlist entry must be preserved; got: {skills:?}"
     );
 
+    // Persistence: the assign must reach the substrate (not just the
+    // in-memory registry) so it survives a daemon restart — the original
+    // #5844 symptom was exactly an in-memory-only assign evaporating.
+    let saved = kernel
+        .memory
+        .substrate
+        .load_agent(agent)
+        .expect("substrate read")
+        .expect("agent persisted");
+    assert!(
+        saved.manifest.skills.contains(&"my_new_skill".to_string()),
+        "auto-assigned skill must be persisted to the substrate; got: {:?}",
+        saved.manifest.skills
+    );
+
     // Idempotency: assigning the same skill again is a no-op (no duplicate).
     kernel.assign_skill_to_agent_allowlist(&agent.to_string(), "my_new_skill");
     let skills_after = kernel.agents.registry.get(agent).unwrap().manifest.skills;
     let count = skills_after.iter().filter(|s| *s == "my_new_skill").count();
     assert_eq!(count, 1, "skill must appear exactly once after double-add");
+
+    kernel.shutdown();
+}
+
+/// An already-listed skill hidden by `skills_disabled` is re-enabled by the
+/// auto-assign (mirroring the route-level `assign_skill_to_creator`), and the
+/// cleared flag is persisted to the substrate.
+#[test]
+fn assign_skill_clears_skills_disabled_for_already_listed_skill() {
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let skills_root = home_dir.join("skills");
+    std::fs::create_dir_all(&skills_root).unwrap();
+    install_test_skill(&skills_root, "listed-skill", &[]);
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
+    let agent = spawn_evolution_agent(
+        &kernel,
+        "disabled-skills-agent",
+        EvolutionMode::Free,
+        vec!["listed-skill".to_string()],
+    );
+
+    // Flip skills_disabled on while keeping the skill listed.
+    kernel
+        .agents
+        .registry
+        .restore_skills_state(agent, vec!["listed-skill".to_string()], true)
+        .expect("set skills_disabled");
+    assert!(
+        kernel
+            .agents
+            .registry
+            .get(agent)
+            .unwrap()
+            .manifest
+            .skills_disabled,
+        "precondition: skills_disabled must be set"
+    );
+
+    kernel.assign_skill_to_agent_allowlist(&agent.to_string(), "listed-skill");
+
+    let entry = kernel.agents.registry.get(agent).unwrap();
+    assert!(
+        !entry.manifest.skills_disabled,
+        "assign must clear skills_disabled for an already-listed skill"
+    );
+    let count = entry
+        .manifest
+        .skills
+        .iter()
+        .filter(|s| *s == "listed-skill")
+        .count();
+    assert_eq!(count, 1, "re-enable must not duplicate the skill");
+
+    // The cleared flag is persisted, not just flipped in memory.
+    let saved = kernel
+        .memory
+        .substrate
+        .load_agent(agent)
+        .expect("substrate read")
+        .expect("agent persisted");
+    assert!(
+        !saved.manifest.skills_disabled,
+        "cleared skills_disabled must be persisted to the substrate"
+    );
 
     kernel.shutdown();
 }

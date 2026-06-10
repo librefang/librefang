@@ -445,8 +445,13 @@ impl LibreFangKernel {
     /// Append `skill_name` to `agent_id_str`'s skill allowlist if (a) the agent
     /// exists, (b) its allowlist is non-empty (an empty list means "all skills",
     /// so there is nothing to add — pinning it would REDUCE the agent's access),
-    /// and (c) the skill is not already listed. Best-effort: parse / registry
-    /// errors are logged, not propagated.
+    /// and (c) the skill is not already listed and live. Routes through
+    /// [`Self::set_agent_skills`] so the change is persisted to the substrate
+    /// (with rollback on persist failure — the #3499 pattern) and survives a
+    /// daemon restart, and so an already-listed skill hidden by
+    /// `skills_disabled` is re-enabled, mirroring the route-level
+    /// `assign_skill_to_creator` (#5989). Best-effort: parse / registry /
+    /// persist errors are logged, not propagated.
     pub(crate) fn assign_skill_to_agent_allowlist(&self, agent_id_str: &str, skill_name: &str) {
         let agent_id = match agent_id_str.parse::<AgentId>() {
             Ok(id) => id,
@@ -477,8 +482,11 @@ impl LibreFangKernel {
             );
             return;
         }
-        // Guard against double-add (idempotent re-approve).
-        if current.iter().any(|s| s == skill_name) {
+        // Guard against double-add (idempotent re-approve) — but re-run the
+        // assign when the skill is present yet hidden by `skills_disabled`,
+        // so the flag is cleared and the skill goes live.
+        let already_listed = current.iter().any(|s| s == skill_name);
+        if already_listed && !entry.manifest.skills_disabled {
             tracing::debug!(
                 agent = %agent_id,
                 skill = skill_name,
@@ -487,8 +495,14 @@ impl LibreFangKernel {
             return;
         }
         let mut updated = current.clone();
-        updated.push(skill_name.to_string());
-        if let Err(e) = self.agents.registry.update_skills(agent_id, updated) {
+        if !already_listed {
+            updated.push(skill_name.to_string());
+        }
+        // `set_agent_skills` validates names against the live skill registry
+        // (the approve path calls `reload_skills()` first, so the promoted
+        // skill is visible), persists via `save_agent` with rollback on
+        // failure, and invalidates the agent's cached tool list.
+        if let Err(e) = self.set_agent_skills(agent_id, updated) {
             tracing::warn!(
                 agent = %agent_id,
                 skill = skill_name,
