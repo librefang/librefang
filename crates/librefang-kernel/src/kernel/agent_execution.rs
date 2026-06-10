@@ -12,6 +12,7 @@
 //! visibility surgery.
 
 use super::*;
+use crate::kernel::llm_drivers::resolve_effective_fallbacks;
 use crate::MeteringSubsystemApi;
 
 /// Detect + strip the cron `[SILENT]` marker at the start of a message.
@@ -260,38 +261,62 @@ impl LibreFangKernel {
     ///
     /// Evaluates the operator-set `[budget.providers.<id>]` cap for
     /// `provider` against the rolling-window usage *before* the LLM call is
-    /// dispatched. This does NOT hard-error the call — #4807 deliberately
-    /// removed the synchronous `QuotaExceeded` pre-dispatch gate so the LLM
-    /// fallback chain can still route to a healthy provider. Instead we let
-    /// `MeteringEngine::check_provider_budget` run purely for its side
-    /// effect: when the cap is breached it flags the provider as
-    /// `BudgetExceeded` in the shared `ProviderExhaustionStore`. The
-    /// `FallbackDriver` / `FallbackChain` then `record_skip`s that slot on
-    /// dispatch and fails over to the next provider, so the rolling counter
-    /// cannot run multiples past the cap (the previous bug: the only
-    /// enforcement was post-call `check_all_and_record`, which recorded the
-    /// usage row anyway and never flagged the store).
+    /// dispatched. The primary effect is a side effect: when the cap is
+    /// breached, `MeteringEngine::check_provider_budget` flags the provider
+    /// as `BudgetExceeded` in the shared `ProviderExhaustionStore`. A
+    /// multi-provider agent's `FallbackDriver` (built store-aware in
+    /// `resolve_driver`) then `record_skip`s that slot on dispatch and fails
+    /// over to the next provider, so the rolling counter cannot run multiples
+    /// past the cap.
+    ///
+    /// Returns `true` when the provider is now over its cap (flagged
+    /// exhausted), `false` otherwise. The caller uses this to hard-return
+    /// `QuotaExceeded` for the single-provider case (#5980): an agent with no
+    /// viable fallback chain has nowhere to skip to, so the store flag alone
+    /// is a no-op and the call would otherwise dispatch past the cap anyway.
+    /// When a fallback chain exists the caller must NOT hard-return — it
+    /// relies on the store-aware `FallbackDriver` to skip the exhausted slot,
+    /// preserving the #4807 philosophy.
     ///
     /// A zero cap is "unlimited" and short-circuits inside
-    /// `check_provider_budget`, so this is a cheap no-op for the common
-    /// unconfigured case. The returned `Err(QuotaExceeded)` is intentionally
-    /// swallowed: the store flag is the load-bearing output, not the error.
-    pub(crate) fn flag_provider_budget_if_exhausted(&self, provider: &str) {
+    /// `check_provider_budget`, so this is a cheap `false`-returning no-op for
+    /// the common unconfigured case.
+    pub(crate) fn flag_provider_budget_if_exhausted(&self, provider: &str) -> bool {
         if provider.is_empty() {
-            return;
+            return false;
         }
         let budget = self.current_budget();
         let Some(provider_budget) = budget.providers.get(provider) else {
-            return;
+            return false;
         };
-        // Side effect only: flags the shared `ProviderExhaustionStore` when
-        // the cap is already crossed. We deliberately ignore the returned
-        // `Err(QuotaExceeded)` — re-adding a hard pre-call error would
-        // regress #4807.
-        let _ = self
-            .metering
-            .engine
-            .check_provider_budget(provider, provider_budget);
+        // Flags the shared `ProviderExhaustionStore` as a side effect when the
+        // cap is already crossed (the multi-provider path consumes this).
+        // `Err(QuotaExceeded)` ⇒ over cap ⇒ `true`; `Ok(())` ⇒ within cap.
+        matches!(
+            self.metering
+                .engine
+                .check_provider_budget(provider, provider_budget),
+            Err(LibreFangError::QuotaExceeded(_))
+        )
+    }
+
+    /// Decide whether a budget-exhausted provider must hard-block the call.
+    ///
+    /// Pure helper factored out for unit-testing the call-site decision
+    /// (#5980). A provider that is over its per-provider cap blocks the
+    /// dispatch only when the agent has no viable fallback chain — i.e. the
+    /// effective fallback list is empty (single-provider agent). When
+    /// fallbacks exist the store-aware `FallbackDriver` skips the exhausted
+    /// slot instead, so we do not hard-return.
+    pub(crate) fn provider_exhausted_blocks_call(
+        &self,
+        exhausted: bool,
+        manifest: &librefang_types::agent::AgentManifest,
+        cfg: &librefang_types::config::KernelConfig,
+    ) -> bool {
+        exhausted
+            && resolve_effective_fallbacks(&manifest.fallback_models, &cfg.fallback_providers)
+                .is_empty()
     }
 
     #[instrument(
@@ -949,10 +974,20 @@ impl LibreFangKernel {
         // #5980: pre-dispatch per-provider budget gate. The provider name is
         // now finalized (model routing + key-availability fallback above), so
         // flag the shared `ProviderExhaustionStore` if this provider's
-        // operator cap is already crossed. The `FallbackDriver` built by
-        // `resolve_driver` reads the same store and skips the exhausted slot,
-        // failing over to a healthy provider instead of spending past the cap.
-        self.flag_provider_budget_if_exhausted(&manifest.model.provider);
+        // operator cap is already crossed. A multi-provider agent's
+        // `FallbackDriver` (built store-aware in `resolve_driver`) skips the
+        // exhausted slot and fails over; a single-provider agent has nowhere
+        // to skip to, so we hard-return `QuotaExceeded` rather than dispatch
+        // past the cap.
+        let provider = manifest.model.provider.clone();
+        let exhausted = self.flag_provider_budget_if_exhausted(&provider);
+        if self.provider_exhausted_blocks_call(exhausted, &manifest, &cfg) {
+            return Err(KernelError::LibreFang(LibreFangError::QuotaExceeded(
+                format!(
+                    "Provider '{provider}' hourly budget exhausted and the agent has no fallback chain"
+                ),
+            )));
+        }
 
         let driver = self.resolve_driver(&manifest)?;
 
