@@ -50,15 +50,7 @@ pub(crate) async fn run_bridge<K: AcpKernel>(
     loop {
         match rx.recv().await {
             Ok(ApprovalEvent::Created(approval)) => {
-                // Dispatch each approval in its OWN task so the up-to-60s editor
-                // round-trip inside `dispatch_pending` does not block this recv
-                // loop. The bridge is one task per connection serving ALL
-                // multiplexed ACP sessions; if it blocked here, other sessions'
-                // `Created` events would pile up in the kernel broadcast (cap
-                // 256) and be dropped on lag — and the kernel fires `Created`
-                // exactly once per approval, so a dropped event hangs that
-                // session's approval indefinitely. `approval` is `Box`, unboxed
-                // into the task.
+                // Created fires once per approval; spawn so the ≤60s editor wait never stalls this drain loop.
                 let kernel = Arc::clone(&kernel);
                 let sessions = Arc::clone(&sessions);
                 let cx = cx.clone();
@@ -194,12 +186,6 @@ async fn dispatch_pending<K: AcpKernel>(
     })
     .map_err(AcpError::Transport)?;
 
-    // Serialize approvals — wait inline before processing the next
-    // broadcast event. Phase 1 prefers correctness over throughput;
-    // pending approvals queue in the broadcast (capacity 256). The
-    // serial path keeps tests deterministic and avoids spawning
-    // detached tasks whose runtime context (LocalSet vs not) can
-    // diverge between production and test harnesses.
     let (decision, remember) = match tokio::time::timeout(PERMISSION_TIMEOUT, rx).await {
         Ok(Ok(Ok(resp))) => decision_from_outcome(resp.outcome),
         Ok(Ok(Err(e))) => {
