@@ -130,12 +130,19 @@ pub(crate) fn validate_egress_url(url_str: &str, mode: EgressMode) -> Result<(),
 /// helpers reject the same shapes.
 fn host_is_blocked(host: &str) -> bool {
     let lower = host.trim_end_matches('.').to_lowercase();
-    // IMDS hostnames are never a legitimate exporter backend. Kept in step with
+    // IMDS hostnames are never a legitimate exporter backend, and
+    // `localhost` / `ip6-localhost` / `ip6-loopback` are loopback
+    // aliases. Kept in step with
     // `librefang_runtime_mcp::mcp_oauth::is_ssrf_blocked_host` and
-    // `librefang_runtime::web_fetch::check_ssrf`, which block all three.
+    // `librefang_runtime::web_fetch::check_ssrf`, which block all of these.
     if matches!(
         lower.as_str(),
-        "localhost" | "metadata.google.internal" | "metadata.aws.internal" | "instance-data"
+        "localhost"
+            | "ip6-localhost"
+            | "ip6-loopback"
+            | "metadata.google.internal"
+            | "metadata.aws.internal"
+            | "instance-data"
     ) {
         return true;
     }
@@ -164,7 +171,10 @@ fn host_is_blocked(host: &str) -> bool {
 /// `host_is_blocked` — link-local is excluded.)
 fn host_is_private_class(host: &str) -> bool {
     let lower = host.trim_end_matches('.').to_lowercase();
-    if lower == "localhost" {
+    if matches!(
+        lower.as_str(),
+        "localhost" | "ip6-localhost" | "ip6-loopback"
+    ) {
         return true;
     }
     let ip_str = host
@@ -250,6 +260,12 @@ mod tests {
         assert!(validate_egress_url("http://localhost:8000", EgressMode::Public).is_err());
         assert!(validate_egress_url("http://127.0.0.1:8000", EgressMode::Public).is_err());
         assert!(validate_egress_url("http://[::1]:8000", EgressMode::Public).is_err());
+        // ip6-localhost / ip6-loopback are loopback aliases (shipped in
+        // /etc/hosts on common distros) that resolve to ::1 at request
+        // time. The mirror (`librefang_runtime_mcp::mcp_oauth::
+        // is_ssrf_blocked_host`) blocks both; this module must too.
+        assert!(validate_egress_url("http://ip6-localhost:8000", EgressMode::Public).is_err());
+        assert!(validate_egress_url("http://ip6-loopback:8000", EgressMode::Public).is_err());
     }
 
     #[test]
@@ -314,6 +330,16 @@ mod tests {
         );
         assert!(
             validate_egress_url("http://192.168.1.42:8000/", EgressMode::LoopbackOrPrivate).is_ok()
+        );
+        // The ::1 aliases are loopback-class like `localhost`, so the
+        // Atropos loopback path accepts them (matching the mirror's
+        // non-metadata classification).
+        assert!(
+            validate_egress_url("http://ip6-localhost:8000/", EgressMode::LoopbackOrPrivate)
+                .is_ok()
+        );
+        assert!(
+            validate_egress_url("http://ip6-loopback:8000/", EgressMode::LoopbackOrPrivate).is_ok()
         );
     }
 
