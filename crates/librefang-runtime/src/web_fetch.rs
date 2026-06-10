@@ -338,8 +338,8 @@ impl SsrfResolution {
 /// `allowed_hosts` is a list of CIDRs (e.g. `"10.0.0.0/8"`), glob hostname
 /// patterns (e.g. `"*.internal.example.com"`), or literal IPs/hostnames that
 /// are exempt from the private-IP block.  Cloud metadata ranges
-/// (`169.254.0.0/16`, `100.64.0.0/10`) remain unconditionally blocked even
-/// when an entry matches.
+/// (`169.254.0.0/16`, `100.64.0.0/10`, `192.0.0.192`) remain unconditionally
+/// blocked even when an entry matches.
 ///
 /// Returns the resolved addresses on success so that callers can pin DNS
 /// and avoid TOCTOU / DNS-rebinding attacks.
@@ -408,7 +408,17 @@ pub fn check_ssrf(url: &str, allowed_hosts: &[String]) -> Result<SsrfResolution,
                 // v6-only branches of is_private_ip / is_cloud_metadata_ip
                 // do not recognise.
                 let ip = canonical_ip(&addr.ip());
-                if ip.is_loopback() || ip.is_unspecified() || is_private_ip(&ip) {
+                // is_cloud_metadata_ip must be consulted here, not only inside
+                // the allowlist branch: 192.0.0.192 (Azure IMDS alternative,
+                // IETF protocol-assignment space) and 100.64.0.0/10 (CGNAT /
+                // Alibaba IMDS) are not private ranges, so a hostname that
+                // DNS-resolves to them would otherwise be accepted outright.
+                // The literal-host blocklist above only catches literal URLs.
+                if ip.is_loopback()
+                    || ip.is_unspecified()
+                    || is_private_ip(&ip)
+                    || is_cloud_metadata_ip(&ip)
+                {
                     // Before rejecting, check the allowlist — but cloud metadata
                     // ranges are unconditionally blocked regardless of allowlist.
                     if !is_cloud_metadata_ip(&ip) && is_host_allowed(hostname, &ip, allowed_hosts) {
@@ -1009,6 +1019,29 @@ mod tests {
         assert!(check_ssrf("http://100.100.100.200/latest/meta-data/", &[]).is_err());
         // Azure IMDS alternative
         assert!(check_ssrf("http://192.0.0.192/metadata/instance", &[]).is_err());
+    }
+
+    #[test]
+    fn test_ssrf_blocks_resolved_cloud_metadata_ips() {
+        // The literal forms above are caught by the hostname blocklist before
+        // resolution. These bracket-literal IPv6 forms skip that list and
+        // exercise the resolved-IP gate, which must reject metadata IPs even
+        // though 192.0.0.0/24 and 100.64.0.0/10 are not private ranges
+        // (is_private_ip matches neither) — the same shape as a hostname that
+        // DNS-resolves to a metadata IP.
+        // Azure IMDS alternative (192.0.0.192) via IPv4-mapped IPv6:
+        assert!(check_ssrf("http://[::ffff:192.0.0.192]/metadata/instance", &[]).is_err());
+        // Alibaba Cloud IMDS (100.100.100.200) via IPv4-mapped IPv6:
+        assert!(check_ssrf("http://[::ffff:100.100.100.200]/latest/meta-data/", &[]).is_err());
+        // Plain CGNAT-range literal not in the hostname blocklist — exercises
+        // the IPv4 resolved path directly:
+        assert!(check_ssrf("http://100.64.0.5/", &[]).is_err());
+        // ...and the allowlist must not override the metadata block:
+        assert!(check_ssrf(
+            "http://[::ffff:192.0.0.192]/",
+            &["192.0.0.192".to_string(), "100.64.0.0/10".to_string()]
+        )
+        .is_err());
     }
 
     #[test]
