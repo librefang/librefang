@@ -976,9 +976,22 @@ impl Drop for CredentialVault {
 }
 
 /// Derive a 256-bit key from master key + salt using Argon2id.
+///
+/// Parameters are pinned to m=19456 KiB, t=2, p=1 — the same OWASP values as
+/// `derive_wrapping_key` and `password_hash.rs`. These are exactly the argon2
+/// 0.5.x defaults, so this is byte-identical to the previous `Argon2::default()`
+/// for every existing `vault.enc` (no re-encryption needed). Pinning matters
+/// because the on-disk format stores no KDF parameters: if a future argon2
+/// crate bump changed the default, `Argon2::default()` would derive a different
+/// key and silently fail to decrypt existing vaults, with nothing on disk to
+/// recover the old derivation. `derive_wrapping_key` was already hardened this
+/// way; this closes the same gap on the master-key path.
 fn derive_key(master_key: &[u8; 32], salt: &[u8]) -> ExtensionResult<Zeroizing<[u8; 32]>> {
+    let params = Params::new(19_456, 2, 1, None)
+        .map_err(|e| ExtensionError::Vault(format!("Argon2 params error: {e}")))?;
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut derived = Zeroizing::new([0u8; 32]);
-    Argon2::default()
+    argon2
         .hash_password_into(master_key, salt, derived.as_mut())
         .map_err(|e| ExtensionError::Vault(format!("Key derivation failed: {e}")))?;
     Ok(derived)
@@ -2048,6 +2061,27 @@ fn derive_wrapping_key(fingerprint: &[u8], salt: &[u8]) -> Result<Zeroizing<[u8;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn derive_key_stays_byte_identical_to_the_argon2_default() {
+        // The pinned params MUST equal argon2's current default so every
+        // existing vault.enc (encrypted under Argon2::default()) still decrypts.
+        // This also fails loudly if a future argon2 bump moves the default away
+        // from m=19456/t=2/p=1 — which is exactly the silent-lockout the pin
+        // protects against.
+        let master = [7u8; 32];
+        let salt = b"0123456789abcdef";
+        let pinned = derive_key(&master, salt).unwrap();
+        let mut default_derived = [0u8; 32];
+        Argon2::default()
+            .hash_password_into(&master, salt, &mut default_derived)
+            .unwrap();
+        assert_eq!(
+            &pinned[..],
+            &default_derived[..],
+            "pinned Argon2 params must equal the crate default for vault compatibility"
+        );
+    }
 
     fn test_vault() -> (tempfile::TempDir, CredentialVault) {
         let dir = tempfile::tempdir().unwrap();
