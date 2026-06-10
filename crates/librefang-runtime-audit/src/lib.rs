@@ -1129,12 +1129,33 @@ impl AuditLog {
             // caller) re-anchors against the chain_anchor we set below.
             entries[total - 1].seq + 1
         };
+        // Persist-before-mutate: only drop the in-memory prefix if the DB
+        // delete actually succeeded. If `db.get()` or the `DELETE` fails and we
+        // trimmed memory anyway, a restart would reload the un-deleted rows —
+        // resurrecting the entries retention was supposed to remove and
+        // desyncing the anchor seq from the DB. On failure, keep memory intact
+        // and report nothing dropped so the trim retries on the next tick.
         if let Some(ref db) = self.db {
-            if let Ok(conn) = db.get() {
-                let _ = conn.execute(
-                    "DELETE FROM audit_entries WHERE seq < ?1",
-                    rusqlite::params![first_survivor_seq as i64],
-                );
+            match db.get() {
+                Ok(conn) => {
+                    if let Err(e) = conn.execute(
+                        "DELETE FROM audit_entries WHERE seq < ?1",
+                        rusqlite::params![first_survivor_seq as i64],
+                    ) {
+                        tracing::error!(
+                            "Audit trim DELETE failed ({e}); keeping the in-memory window \
+                             consistent with the DB — retrying on the next trim tick"
+                        );
+                        return TrimReport::default();
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Audit trim could not acquire a DB connection ({e}); keeping the \
+                         in-memory window consistent with the DB — retrying on the next tick"
+                    );
+                    return TrimReport::default();
+                }
             }
         }
 
@@ -1228,12 +1249,30 @@ impl AuditLog {
         } else {
             entries[total - 1].seq + 1
         };
+        // Persist-before-mutate: keep the in-memory window only if the DB
+        // delete succeeded (see AuditLog::trim). On failure, leave memory and
+        // the DB consistent and report nothing pruned so the next prune retries.
         if let Some(ref db) = self.db {
-            if let Ok(conn) = db.get() {
-                let _ = conn.execute(
-                    "DELETE FROM audit_entries WHERE seq < ?1",
-                    rusqlite::params![first_survivor_seq as i64],
-                );
+            match db.get() {
+                Ok(conn) => {
+                    if let Err(e) = conn.execute(
+                        "DELETE FROM audit_entries WHERE seq < ?1",
+                        rusqlite::params![first_survivor_seq as i64],
+                    ) {
+                        tracing::error!(
+                            "Audit prune DELETE failed ({e}); keeping the in-memory window \
+                             consistent with the DB — retrying on the next prune"
+                        );
+                        return 0;
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Audit prune could not acquire a DB connection ({e}); keeping the \
+                         in-memory window consistent with the DB — retrying on the next prune"
+                    );
+                    return 0;
+                }
             }
         }
 
