@@ -271,6 +271,12 @@ pub struct DecisionTrace {
 // Real tool schemas nest only a handful of levels; this bound is far above any legitimate use.
 const MAX_SCHEMA_DEPTH: usize = 128;
 
+// Total `$ref`-expansion budget shared across one schema normalization.
+// The path-scoped cycle set and the depth cap bound *chain length*, not *total work*: an acyclic schema of ~40 chained `$defs` where each definition holds two `$ref`s to the next (A1 → {2×A2}, A2 → {2×A3}, …) stays under `MAX_SCHEMA_DEPTH` yet forces ~2^40 definition clones — a kilobyte-sized tool definition from a malicious MCP server could still hang/OOM the daemon.
+// Once the budget is spent, further `$ref`s collapse to the same `{"type":"object"}` placeholder used for cycles.
+// Real tool schemas expand at most a few dozen refs, so 4096 is comfortably above any legitimate use while keeping worst-case work small (each expansion clones one definition from the input).
+const MAX_SCHEMA_EXPANSIONS: usize = 4096;
+
 /// Normalize a JSON Schema for cross-provider compatibility.
 ///
 /// Several providers (Gemini, Groq, OpenAI strict mode, …) ship strict JSON
@@ -293,7 +299,8 @@ pub fn normalize_schema_for_provider(
     if provider == "anthropic" {
         return schema.clone();
     }
-    normalize_schema_for_strict_validators(schema, 0)
+    let mut expansions = 0usize;
+    normalize_schema_for_strict_validators(schema, 0, &mut expansions)
 }
 
 /// Recursive worker for `normalize_schema_for_provider`.
@@ -306,6 +313,7 @@ pub fn normalize_schema_for_provider(
 fn normalize_schema_for_strict_validators(
     schema: &serde_json::Value,
     depth: usize,
+    expansions: &mut usize,
 ) -> serde_json::Value {
     // Stack-overflow backstop for maliciously deep schemas from untrusted MCP servers / skills.
     // Return a valid empty object schema so providers accept the (truncated) tool rather than the daemon crashing.
@@ -320,7 +328,11 @@ fn normalize_schema_for_strict_validators(
             if let Some(s) = schema.as_str() {
                 if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s) {
                     if parsed.is_object() {
-                        return normalize_schema_for_strict_validators(&parsed, depth + 1);
+                        return normalize_schema_for_strict_validators(
+                            &parsed,
+                            depth + 1,
+                            expansions,
+                        );
                     }
                 }
             }
@@ -332,7 +344,7 @@ fn normalize_schema_for_strict_validators(
 
     // Resolve $ref references before processing.
     // If the schema has $defs and $ref, inline the referenced definition.
-    let resolved = resolve_refs(obj, depth);
+    let resolved = resolve_refs(obj, depth, expansions);
     let obj = resolved.as_object().unwrap_or(obj);
 
     let mut result = serde_json::Map::new();
@@ -413,7 +425,7 @@ fn normalize_schema_for_strict_validators(
                 for (prop_name, prop_schema) in props {
                     new_props.insert(
                         prop_name.clone(),
-                        normalize_schema_for_strict_validators(prop_schema, depth + 1),
+                        normalize_schema_for_strict_validators(prop_schema, depth + 1, expansions),
                     );
                 }
                 result.insert(key.clone(), serde_json::Value::Object(new_props));
@@ -425,7 +437,7 @@ fn normalize_schema_for_strict_validators(
         if key == "items" {
             result.insert(
                 key.clone(),
-                normalize_schema_for_strict_validators(value, depth + 1),
+                normalize_schema_for_strict_validators(value, depth + 1, expansions),
             );
             continue;
         }
@@ -464,6 +476,7 @@ fn normalize_schema_for_strict_validators(
 fn resolve_refs(
     obj: &serde_json::Map<String, serde_json::Value>,
     depth: usize,
+    expansions: &mut usize,
 ) -> serde_json::Value {
     let defs = match obj.get("$defs").and_then(|d| d.as_object()) {
         Some(d) => d.clone(),
@@ -477,12 +490,14 @@ fn resolve_refs(
     //
     // `active` holds the `$ref` names currently being expanded on this path; if a ref re-enters one that is already active the schema is cyclic (`Node -> Node`, or a mutually-recursive `A -> B -> A`), so we stop and leave a permissive `{"type":"object"}` instead of recursing forever.
     // `depth` is an independent backstop so a maliciously deep (but acyclic) schema cannot overflow the stack either.
-    // Both matter because schemas come from untrusted MCP servers / marketplace skills.
+    // `expansions` is the shared `MAX_SCHEMA_EXPANSIONS` budget bounding *total* work: cycle set and depth cap alone still admit an acyclic exponential fan-out (see the constant's comment).
+    // All three matter because schemas come from untrusted MCP servers / marketplace skills.
     fn inline_refs(
         val: &mut serde_json::Value,
         defs: &serde_json::Map<String, serde_json::Value>,
         active: &mut Vec<String>,
         depth: usize,
+        expansions: &mut usize,
     ) {
         if depth >= MAX_SCHEMA_DEPTH {
             return;
@@ -502,10 +517,17 @@ fn resolve_refs(
                             return;
                         }
                         if let Some(def) = defs.get(&name) {
+                            // Total-expansion budget exhausted: collapse to the
+                            // same placeholder used for cycles and stop.
+                            if *expansions >= MAX_SCHEMA_EXPANSIONS {
+                                *val = serde_json::json!({"type": "object"});
+                                return;
+                            }
+                            *expansions += 1;
                             *val = def.clone();
                             active.push(name);
                             // Recurse into the inlined definition
-                            inline_refs(val, defs, active, depth + 1);
+                            inline_refs(val, defs, active, depth + 1, expansions);
                             active.pop();
                             return;
                         }
@@ -513,12 +535,12 @@ fn resolve_refs(
                 }
                 // Recurse into all values
                 for v in map.values_mut() {
-                    inline_refs(v, defs, active, depth + 1);
+                    inline_refs(v, defs, active, depth + 1, expansions);
                 }
             }
             serde_json::Value::Array(arr) => {
                 for item in arr.iter_mut() {
-                    inline_refs(item, defs, active, depth + 1);
+                    inline_refs(item, defs, active, depth + 1, expansions);
                 }
             }
             _ => {}
@@ -527,7 +549,7 @@ fn resolve_refs(
 
     let mut resolved = serde_json::Value::Object(result);
     let mut active = Vec::new();
-    inline_refs(&mut resolved, &defs, &mut active, depth);
+    inline_refs(&mut resolved, &defs, &mut active, depth, expansions);
     resolved
 }
 
@@ -636,14 +658,95 @@ mod tests {
 
     #[test]
     fn deeply_nested_schema_is_truncated_not_overflowed() {
-        // A maliciously deep (but acyclic) schema must hit the depth backstop
-        // and terminate rather than overflow the stack.
+        // A maliciously deep (but acyclic) schema must hit the depth backstop and terminate rather than overflow the stack.
+        // Build a schema nested well past the cap, then walk the *result* down to the cap and assert the empty-object placeholder was substituted exactly where the backstop fired — a top-level `type == "object"` check alone would pass even without the cap.
         let mut schema = serde_json::json!({"type": "string"});
-        for _ in 0..(MAX_SCHEMA_DEPTH + 50) {
+        for _ in 0..(MAX_SCHEMA_DEPTH * 2) {
             schema = serde_json::json!({"type": "object", "properties": {"x": schema}});
         }
         let result = normalize_schema_for_provider(&schema, "gemini");
-        assert_eq!(result["type"], "object");
+
+        // Levels 0..MAX_SCHEMA_DEPTH-1 are processed normally and keep their `x` property.
+        let mut node = &result;
+        for level in 0..MAX_SCHEMA_DEPTH {
+            node = node
+                .get("properties")
+                .and_then(|p| p.get("x"))
+                .unwrap_or_else(|| panic!("missing properties.x at level {level}"));
+        }
+        // The node at the cap is the truncated placeholder: the input continued
+        // another MAX_SCHEMA_DEPTH levels here, so non-empty properties would
+        // mean the depth backstop never fired.
+        assert_eq!(node["type"], "object");
+        assert_eq!(
+            node["properties"],
+            serde_json::json!({}),
+            "depth cap must replace the remaining subtree with the empty-object placeholder: {node}"
+        );
+    }
+
+    #[test]
+    fn ref_fanout_bomb_is_budget_limited() {
+        // Acyclic fan-out bomb: D0 → {2×D1}, D1 → {2×D2}, … D39 → leaf.
+        // No cycle ever forms and the chain length (~40) stays far under
+        // MAX_SCHEMA_DEPTH, so the cycle set and depth cap alone admit it —
+        // yet full inlining would clone ~2^40 nodes and hang/OOM the daemon.
+        // The shared MAX_SCHEMA_EXPANSIONS budget must make this return
+        // promptly with placeholder nodes where the budget ran out.
+        const LEVELS: usize = 40;
+        let mut defs = serde_json::Map::new();
+        for i in 0..LEVELS {
+            let child = if i + 1 < LEVELS {
+                serde_json::json!({"$ref": format!("#/$defs/D{}", i + 1)})
+            } else {
+                serde_json::json!({"type": "string"})
+            };
+            defs.insert(
+                format!("D{i}"),
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {"a": child.clone(), "b": child}
+                }),
+            );
+        }
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"root": {"$ref": "#/$defs/D0"}},
+            "$defs": serde_json::Value::Object(defs)
+        });
+
+        let result = normalize_schema_for_provider(&schema, "gemini");
+
+        let s = result.to_string();
+        assert!(
+            !s.contains("$ref"),
+            "all $ref must be resolved/stripped: result is {} bytes",
+            s.len()
+        );
+        // Each budgeted expansion clones one (small) definition, so the output
+        // stays far below the ~2^40 nodes full inlining would produce.
+        assert!(
+            s.len() < 5_000_000,
+            "output must be budget-bounded, got {} bytes",
+            s.len()
+        );
+
+        // Budget exhaustion leaves the bare `{"type":"object"}` placeholder
+        // (4096 expansions cannot cover 2^40 refs, so at least one must exist).
+        fn contains_placeholder(v: &serde_json::Value) -> bool {
+            match v {
+                serde_json::Value::Object(m) => {
+                    (m.len() == 1 && m.get("type").and_then(|t| t.as_str()) == Some("object"))
+                        || m.values().any(contains_placeholder)
+                }
+                serde_json::Value::Array(a) => a.iter().any(contains_placeholder),
+                _ => false,
+            }
+        }
+        assert!(
+            contains_placeholder(&result),
+            "expansion budget must substitute placeholder nodes where it runs out"
+        );
     }
 
     #[test]
