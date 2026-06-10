@@ -301,6 +301,28 @@ pub const MAX_MESSAGE_SIZE: u32 = 16 * 1024 * 1024;
 /// inter-agent message and well below the transport-layer `MAX_MESSAGE_SIZE`.
 pub const MAX_PEER_MESSAGE_BYTES: usize = 65_536; // 64 KiB
 
+/// SECURITY: Maximum time to wait for the inbound handshake frame.
+///
+/// `handle_inbound` reads the handshake as the very first thing on every
+/// accepted connection, before any HMAC / identity check, and `read_message`
+/// eagerly allocates a body buffer sized from the attacker-controlled length
+/// header (up to [`MAX_PREHANDSHAKE_MESSAGE_SIZE`], see below) and then blocks
+/// in `read_exact`. Without a deadline an unauthenticated client could declare
+/// a frame, never send the body, and pin that allocation indefinitely —
+/// opening many such connections exhausts memory. Bounding the pre-handshake
+/// read frees the connection (and its buffer) after this timeout. A real
+/// handshake completes in well under a second.
+pub const HANDSHAKE_READ_TIMEOUT_SECS: u64 = 10;
+
+/// SECURITY: Maximum frame length accepted on a pre-handshake read.
+///
+/// The handshake timeout above bounds how *long* an unauthenticated client can pin a buffer, but not how *large* that buffer is: the body allocation is sized from the attacker-declared length header, up to `MAX_MESSAGE_SIZE` (16 MiB) per connection.
+/// Handshake / HandshakeAck frames are small — node IDs, a UUID nonce, a 64-char HMAC, base64 Ed25519 / X25519 keys, and the advertised `Vec<RemoteAgentInfo>` — roughly 1 KiB typical, and only a node advertising hundreds of richly-described agents approaches tens of KiB.
+/// 64 KiB therefore leaves generous headroom for legitimate handshakes while shrinking the worst-case pre-auth allocation 256×.
+/// Deliberately a separate constant from `MAX_PEER_MESSAGE_BYTES` (same value today): that cap guards the post-auth kernel/LLM payload boundary, this one guards pre-auth transport framing, and the two may diverge independently.
+/// Post-handshake reads keep the full `MAX_MESSAGE_SIZE` limit.
+pub const MAX_PREHANDSHAKE_MESSAGE_SIZE: u32 = 64 * 1024;
+
 /// Configuration for a PeerNode.
 #[derive(Debug, Clone)]
 pub struct PeerConfig {
@@ -1078,8 +1100,28 @@ impl PeerNode {
     ) -> Result<(), WireError> {
         let (mut reader, mut writer) = stream.into_split();
 
-        // Read the incoming handshake request
-        let msg = read_message(&mut reader).await?;
+        // Read the incoming handshake request under a deadline. This runs
+        // before any authentication and `read_message` allocates a body buffer
+        // from the wire length header, so an unauthenticated client must not be
+        // able to claim a large frame and then stall, pinning the allocation
+        // indefinitely (pre-handshake memory-exhaustion DoS). Two bounds apply:
+        // `read_message` caps the declared frame length at
+        // MAX_PREHANDSHAKE_MESSAGE_SIZE before allocating (size), and the
+        // timeout below frees whatever was allocated if the body never
+        // arrives (duration).
+        let msg = match tokio::time::timeout(
+            std::time::Duration::from_secs(HANDSHAKE_READ_TIMEOUT_SECS),
+            read_message(&mut reader),
+        )
+        .await
+        {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(WireError::HandshakeFailed(format!(
+                    "handshake not received within {HANDSHAKE_READ_TIMEOUT_SECS}s"
+                )));
+            }
+        };
         let (peer_node_id, session_key) = match &msg.kind {
             WireMessageKind::Request(WireRequest::Handshake {
                 node_id,
@@ -1572,11 +1614,13 @@ pub async fn write_message_authenticated(
     Ok(())
 }
 
-/// Read a framed message (4-byte length + JSON) from a TCP stream.
+/// Read a framed message (4-byte length + JSON) from a TCP stream, pre-handshake.
+///
+/// SECURITY: this is the entry point for every read that happens *before* the peer has authenticated (inbound `Handshake`, outbound `HandshakeAck`), so the declared frame length is capped at [`MAX_PREHANDSHAKE_MESSAGE_SIZE`] — the cap is enforced before the body buffer is allocated, so an unauthenticated peer cannot pin a `MAX_MESSAGE_SIZE`-sized allocation by claiming a huge frame and stalling.
 pub async fn read_message(
     reader: &mut tokio::net::tcp::OwnedReadHalf,
 ) -> Result<WireMessage, WireError> {
-    read_message_observed(reader, "<pre-handshake>").await
+    read_message_bounded(reader, "<pre-handshake>", MAX_PREHANDSHAKE_MESSAGE_SIZE).await
 }
 
 /// Read a framed message and additionally emit a `warn!` on the
@@ -1585,11 +1629,25 @@ pub async fn read_message(
 /// structured field so operators can spot which peer is sending
 /// unrecognised tags (audit: wire-message-other-variant-silent).
 /// Pre-handshake reads (where the peer identity isn't yet known)
-/// pass `"<pre-handshake>"` via the existing [`read_message`]
-/// wrapper.
+/// go through the [`read_message`] wrapper instead, which passes
+/// `"<pre-handshake>"` and enforces the tighter
+/// [`MAX_PREHANDSHAKE_MESSAGE_SIZE`] frame cap. This function is
+/// for the post-handshake message loop and keeps the full
+/// [`MAX_MESSAGE_SIZE`] limit.
 pub async fn read_message_observed(
     reader: &mut tokio::net::tcp::OwnedReadHalf,
     peer_node_id: &str,
+) -> Result<WireMessage, WireError> {
+    read_message_bounded(reader, peer_node_id, MAX_MESSAGE_SIZE).await
+}
+
+/// Shared body of [`read_message`] / [`read_message_observed`] with an
+/// explicit frame-length cap. The cap is checked against the wire length
+/// header *before* the body buffer is allocated.
+async fn read_message_bounded(
+    reader: &mut tokio::net::tcp::OwnedReadHalf,
+    peer_node_id: &str,
+    max_size: u32,
 ) -> Result<WireMessage, WireError> {
     let mut header = [0u8; 4];
     match reader.read_exact(&mut header).await {
@@ -1601,10 +1659,10 @@ pub async fn read_message_observed(
     }
 
     let len = decode_length(&header);
-    if len > MAX_MESSAGE_SIZE {
+    if len > max_size {
         return Err(WireError::MessageTooLarge {
             size: len,
-            max: MAX_MESSAGE_SIZE,
+            max: max_size,
         });
     }
 
@@ -2196,6 +2254,149 @@ mod tests {
                 );
             }
             other => panic!("Expected AgentResponse, got {other:?}"),
+        }
+    }
+
+    // ── Pre-handshake frame-length cap (unauthenticated allocation DoS) ──
+
+    /// SECURITY TEST: a pre-handshake read must reject an attacker-declared
+    /// length above MAX_PREHANDSHAKE_MESSAGE_SIZE from the 4-byte header
+    /// alone — before allocating the body buffer and before waiting for any
+    /// body bytes. The client sends only the header (declaring the old
+    /// 16 MiB worst case) and never sends a body; if the cap were enforced
+    /// after allocation, this read would park in `read_exact` and trip the
+    /// surrounding timeout.
+    #[tokio::test]
+    async fn test_prehandshake_oversized_length_header_rejected() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (server_stream, _) = listener.accept().await.unwrap();
+        let (mut server_reader, _server_writer) = server_stream.into_split();
+        let (_client_reader, mut client_writer) = client.into_split();
+
+        // Declare a 16 MiB frame (the transport-layer MAX_MESSAGE_SIZE,
+        // which the pre-fix code would have allocated) and send no body.
+        client_writer
+            .write_all(&MAX_MESSAGE_SIZE.to_be_bytes())
+            .await
+            .unwrap();
+        client_writer.flush().await.unwrap();
+
+        let result = tokio::time::timeout(Duration::from_secs(5), read_message(&mut server_reader))
+            .await
+            .expect("capped read must reject from the header alone, not wait for a body");
+        match result {
+            Err(WireError::MessageTooLarge { size, max }) => {
+                assert_eq!(size, MAX_MESSAGE_SIZE);
+                assert_eq!(max, MAX_PREHANDSHAKE_MESSAGE_SIZE);
+            }
+            other => panic!("Expected MessageTooLarge, got {other:?}"),
+        }
+    }
+
+    /// SECURITY TEST: end-to-end through `handle_inbound` — an
+    /// unauthenticated client that connects to a live PeerNode and declares
+    /// an oversized frame gets its connection dropped promptly (well inside
+    /// the 10s handshake timeout), instead of pinning a 16 MiB allocation.
+    #[tokio::test]
+    async fn test_inbound_oversized_prehandshake_frame_drops_connection() {
+        let registry = PeerRegistry::new();
+        let handle = Arc::new(TestHandle::new());
+        let config = PeerConfig {
+            listen_addr: "127.0.0.1:0".parse().unwrap(),
+            node_id: "server".to_string(),
+            node_name: "server-node".to_string(),
+            shared_secret: "test-secret-for-unit-tests".to_string(),
+            max_messages_per_peer_per_minute: 0,
+            max_llm_tokens_per_peer_per_hour: None,
+        };
+        let (node, _task) = PeerNode::start(config, registry, handle).await.unwrap();
+
+        let stream = TcpStream::connect(node.local_addr()).await.unwrap();
+        let (mut reader, mut writer) = stream.into_split();
+        writer
+            .write_all(&MAX_MESSAGE_SIZE.to_be_bytes())
+            .await
+            .unwrap();
+        writer.flush().await.unwrap();
+
+        // The server must reject from the header alone and close — the
+        // client observes EOF long before the 10s handshake deadline.
+        let mut buf = [0u8; 16];
+        let n = tokio::time::timeout(Duration::from_secs(5), reader.read(&mut buf))
+            .await
+            .expect("server must drop the connection promptly, not park in read_exact")
+            .unwrap();
+        assert_eq!(n, 0, "expected EOF after oversized pre-handshake header");
+    }
+
+    /// A representative handshake frame (UUID nonce, hex HMAC, base64-sized
+    /// key material, advertised agents) must fit the pre-handshake cap with
+    /// generous headroom, so legitimate peers are never rejected.
+    #[test]
+    fn test_real_handshake_frame_fits_prehandshake_cap() {
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let auth_hmac = hmac_sign("test-secret-for-unit-tests", nonce.as_bytes());
+        let handshake = WireMessage {
+            id: uuid::Uuid::new_v4().to_string(),
+            kind: WireMessageKind::Request(WireRequest::Handshake {
+                node_id: "node-with-a-reasonably-long-name".to_string(),
+                node_name: "kernel-with-a-reasonably-long-name".to_string(),
+                protocol_version: PROTOCOL_VERSION,
+                agents: TestHandle::new().local_agents(),
+                nonce,
+                auth_hmac,
+                public_key: Some("A".repeat(44)), // base64 Ed25519 pubkey
+                identity_signature: Some("B".repeat(88)), // base64 Ed25519 signature
+                ephemeral_pubkey: Some("C".repeat(44)), // base64 X25519 pubkey
+            }),
+        };
+        let encoded = serde_json::to_vec(&handshake).unwrap();
+        assert!(
+            (encoded.len() as u32) < MAX_PREHANDSHAKE_MESSAGE_SIZE / 4,
+            "handshake frame ({} bytes) should be far below the {} byte pre-handshake cap",
+            encoded.len(),
+            MAX_PREHANDSHAKE_MESSAGE_SIZE
+        );
+    }
+
+    /// Post-handshake reads keep the full MAX_MESSAGE_SIZE limit: a frame
+    /// larger than the pre-handshake cap must still be readable through the
+    /// message-loop path (`read_message_observed`).
+    #[tokio::test]
+    async fn test_posthandshake_read_allows_frames_above_prehandshake_cap() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (server_stream, _) = listener.accept().await.unwrap();
+        let (mut server_reader, _server_writer) = server_stream.into_split();
+        let (_client_reader, mut client_writer) = client.into_split();
+
+        // Build a frame comfortably above MAX_PREHANDSHAKE_MESSAGE_SIZE but
+        // below MAX_MESSAGE_SIZE.
+        let big = "x".repeat(2 * MAX_PREHANDSHAKE_MESSAGE_SIZE as usize);
+        let msg = WireMessage {
+            id: "big-1".to_string(),
+            kind: WireMessageKind::Request(WireRequest::AgentMessage {
+                agent: "echo".to_string(),
+                message: big.clone(),
+                sender: None,
+            }),
+        };
+        let writer_task = tokio::spawn(async move {
+            write_message(&mut client_writer, &msg).await.unwrap();
+        });
+
+        let received = read_message_observed(&mut server_reader, "test-peer")
+            .await
+            .expect("post-handshake read must keep the full MAX_MESSAGE_SIZE limit");
+        writer_task.await.unwrap();
+        match received.kind {
+            WireMessageKind::Request(WireRequest::AgentMessage { message, .. }) => {
+                assert_eq!(message.len(), big.len());
+            }
+            other => panic!("Expected AgentMessage, got {other:?}"),
         }
     }
 

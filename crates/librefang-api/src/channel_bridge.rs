@@ -40,7 +40,7 @@ fn sanitize_channel_error(err: &str) -> String {
     } else {
         format!(
             "Something went wrong: please try again. (ref: {})",
-            &err[..err.len().min(80)]
+            safe_truncate_str(err, 80)
         )
     }
 }
@@ -2898,6 +2898,20 @@ mod tests {
         assert!(
             msg.contains("No pending approval matching 'deadbeef'"),
             "no-audit-hit branch must surface the not-found message verbatim, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn sanitize_channel_error_does_not_panic_on_multibyte_boundary() {
+        // The generic fallback used to slice the error at byte 80, which panics
+        // when byte 80 lands inside a multi-byte UTF-8 codepoint (localized
+        // provider errors, CJK, emoji). Build an error that hits the fallback
+        // branch, exceeds 80 bytes, and has a 2-byte char straddling byte 80.
+        let err = format!("{}é末", "x".repeat(79));
+        let out = sanitize_channel_error(&err);
+        assert!(
+            out.starts_with("Something went wrong"),
+            "must hit the fallback branch, got: {out}"
         );
     }
 

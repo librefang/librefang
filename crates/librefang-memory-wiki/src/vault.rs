@@ -202,6 +202,11 @@ impl WikiVault {
         force: bool,
     ) -> WikiResult<WikiWriteOutcome> {
         validate_topic(topic)?;
+        // Cheap early reject on the raw input. `rewrite_links` only ever grows
+        // the body (placeholder expansion), so anything already over the cap
+        // here will also be over it after rewrite — but the authoritative check
+        // below is on the materialised `chosen_body`, since that is what lands
+        // on disk.
         if body_with_placeholders.len() > MAX_BODY_BYTES {
             return Err(WikiError::BodyTooLarge {
                 topic: topic.to_string(),
@@ -241,6 +246,20 @@ impl WikiVault {
         } else {
             self.render_mode.rewrite_links(body_with_placeholders)
         };
+
+        // Authoritative body-size cap: enforced on the MATERIALISED body that is
+        // about to be written. In `Native` render mode `rewrite_links` expands
+        // each `[[topic]]` (5 bytes) into `[topic](topic.md)` (9+ bytes), so a
+        // body sized just under the cap before rewrite can exceed it on disk —
+        // the pre-rewrite check alone left the documented on-disk guard
+        // unenforced.
+        if chosen_body.len() > MAX_BODY_BYTES {
+            return Err(WikiError::BodyTooLarge {
+                topic: topic.to_string(),
+                size: chosen_body.len(),
+                cap: MAX_BODY_BYTES,
+            });
+        }
 
         let mut frontmatter_out = match existing {
             Some(WikiPage {
@@ -325,7 +344,7 @@ impl WikiVault {
             if score <= 0.0 {
                 continue;
             }
-            let snippet = build_snippet(body, &body_lc, &query_lc);
+            let snippet = build_snippet(body, &query_lc);
             hits.push(SearchHit {
                 topic,
                 snippet,
@@ -595,10 +614,33 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> WikiResult<()> {
     Ok(())
 }
 
-fn build_snippet(body: &str, body_lc: &str, query_lc: &str) -> String {
+fn build_snippet(body: &str, query_lc: &str) -> String {
+    // Build a lowercased copy of `body` together with a map from each byte of
+    // that copy back to the byte offset of the originating char in `body`.
+    // `to_lowercase()` is NOT length-preserving (e.g. `İ` U+0130 → `i̇` grows
+    // 2→3 bytes; some chars lowercase to several chars), so a byte offset into
+    // the lowercased text is not a valid offset into `body`. Previously the
+    // match offset was taken from the lowercased copy and used to slice `body`
+    // directly, so any page whose body contains such a character before the
+    // match returned a misaligned / garbled snippet. Building both in lockstep
+    // keeps the match offsets aligned with `body`.
+    let mut body_lc = String::with_capacity(body.len());
+    let mut lc_to_body = Vec::with_capacity(body.len() + 1);
+    for (byte_idx, ch) in body.char_indices() {
+        for lc in ch.to_lowercase() {
+            body_lc.push(lc);
+            for _ in 0..lc.len_utf8() {
+                lc_to_body.push(byte_idx);
+            }
+        }
+    }
+    lc_to_body.push(body.len()); // sentinel for offsets at end-of-string
+
     if let Some(pos) = body_lc.find(query_lc) {
-        let start = char_floor(body, pos.saturating_sub(60));
-        let end = char_ceil(body, (pos + query_lc.len() + 60).min(body.len()));
+        let match_start = lc_to_body[pos];
+        let match_end = lc_to_body[(pos + query_lc.len()).min(body_lc.len())];
+        let start = char_floor(body, match_start.saturating_sub(60));
+        let end = char_ceil(body, (match_end + 60).min(body.len()));
         let mut snippet = body[start..end].replace('\n', " ");
         if start > 0 {
             snippet.insert(0, '…');
@@ -663,6 +705,45 @@ mod tests {
         assert_eq!(page.topic, "widgets");
         assert_eq!(page.body.trim(), "the widget body");
         assert_eq!(page.frontmatter.provenance.len(), 1);
+    }
+
+    #[test]
+    fn build_snippet_offsets_align_on_non_ascii_body() {
+        // `İ` (U+0130, 2 bytes) lowercases to `i̇` (3 bytes), so a byte offset
+        // into the lowercased copy is not a valid offset into the original
+        // body. The snippet must still cover the matched query rather than an
+        // unrelated (or empty) region. The prefix uses 80 `İ` (80 bytes of
+        // lowercase drift) so the misalignment exceeds the ±60-byte context
+        // window — with fewer characters the old, misaligned slice would
+        // still happen to include the needle and mask the bug.
+        let body = format!("{} the needle is right here İİİ", "İ".repeat(80));
+        let snippet = build_snippet(&body, "needle");
+        assert!(
+            snippet.contains("needle"),
+            "snippet must cover the match, got: {snippet:?}"
+        );
+    }
+
+    #[test]
+    fn write_rejects_body_exceeding_cap_after_link_rewrite() {
+        let (vault, _dir) = fresh_vault(RenderMode::Native);
+        // Each `[[a]]` (5 bytes) expands to `[a](a.md)` (9 bytes) in Native
+        // mode. Size the raw body just under the 1 MiB cap so the old
+        // pre-rewrite check passed, while the rewritten on-disk body is well
+        // over it.
+        let n = 150_000; // raw 750 KB < 1 MiB; rewritten ~1.35 MB > 1 MiB
+        let body = "[[a]]".repeat(n);
+        assert!(
+            body.len() < MAX_BODY_BYTES,
+            "raw body must be under the cap"
+        );
+        let err = vault
+            .write("big", &body, provenance("a"), false)
+            .expect_err("rewritten body over the cap must be rejected");
+        assert!(
+            matches!(err, WikiError::BodyTooLarge { .. }),
+            "expected BodyTooLarge, got {err:?}"
+        );
     }
 
     #[test]

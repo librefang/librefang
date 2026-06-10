@@ -7,7 +7,7 @@
       "name": "MIT",
       "url": "https://opensource.org/licenses/MIT"
     },
-    "version": "2026.5.31-beta.16"
+    "version": "2026.6.10-beta.17"
   },
   "paths": {
     "/.well-known/agent.json": {
@@ -10564,6 +10564,16 @@
           },
           "409": {
             "description": "Promotion blocked (security scan or naming collision)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Update candidate targets a skill that no longer exists",
             "content": {
               "application/json": {
                 "schema": {

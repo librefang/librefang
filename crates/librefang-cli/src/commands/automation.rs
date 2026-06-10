@@ -485,10 +485,15 @@ pub(crate) fn cmd_cron_delete(id: &str) {
 pub(crate) fn cmd_cron_toggle(id: &str, enable: bool) {
     let base = require_daemon("cron");
     let client = daemon_client();
+    // The daemon exposes a single `PUT /api/cron/jobs/{id}/enable` route that
+    // toggles in either direction via the `enabled` bool in the request body —
+    // there is no `/disable` route. `endpoint` is only the action label used in
+    // user-facing messages below.
     let endpoint = if enable { "enable" } else { "disable" };
     let body = daemon_json(
         client
-            .post(format!("{base}/api/cron/jobs/{id}/{endpoint}"))
+            .put(format!("{base}/api/cron/jobs/{id}/enable"))
+            .json(&serde_json::json!({ "enabled": enable }))
             .send(),
     );
     if body.get("error").is_some() {

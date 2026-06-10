@@ -837,6 +837,13 @@ impl TriggerEngine {
         // *which* matches drop deterministic.
         let mut ids: Vec<TriggerId> = self.triggers.iter().map(|e| *e.key()).collect();
         ids.sort();
+        // Snapshot the registered-trigger count *before* the loop takes any
+        // shard write-lock. `DashMap::len()` read-locks every shard, so calling
+        // it inside the loop — while a `self.triggers.get_mut(&id)` `RefMut`
+        // holds that same shard's write-lock — self-deadlocks the evaluator the
+        // first time the per-event budget is exhausted (it lands in the `warn!`
+        // branch below). `ids.len()` is the same total, taken lock-free.
+        let total_registered = ids.len();
         for id in ids {
             let Some(mut entry) = self.triggers.get_mut(&id) else {
                 continue;
@@ -918,7 +925,7 @@ impl TriggerEngine {
                     warn!(
                         trigger_id = %trigger.id,
                         budget = self.max_triggers_per_event,
-                        total_registered = self.triggers.len(),
+                        total_registered,
                         "Per-event trigger budget exhausted, skipping remaining matches — \
                          consider increasing max_triggers_per_event if too many triggers are starved"
                     );
@@ -1506,7 +1513,11 @@ fn describe_event(event: &Event) -> String {
                 let summary = {
                     let s = val.to_string();
                     if s.len() > 300 {
-                        format!("{}...", &s[..300])
+                        // `&s[..300]` panics when byte 300 lands inside a
+                        // multi-byte UTF-8 codepoint; Custom payloads are
+                        // operator/attacker-controlled. truncate_str snaps to a
+                        // char boundary (used the same way at line ~1404).
+                        format!("{}...", librefang_types::truncate_str(&s, 300))
                     } else {
                         s
                     }

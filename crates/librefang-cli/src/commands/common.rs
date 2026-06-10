@@ -195,6 +195,36 @@ pub(crate) fn daemon_client_with_api_key(api_key: Option<&str>) -> reqwest::bloc
     builder.build().expect("Failed to build HTTP client")
 }
 
+/// True when `body` is a JSON object carrying a non-empty `error` string —
+/// the structured-error shape some commands intentionally surface with a
+/// command-specific message (e.g. validation failures returned as 4xx).
+///
+/// When this holds for a 4xx response, `daemon_json` returns the body
+/// untouched so the caller's existing `body.get("error")` handler runs.
+/// When it does not (non-JSON body, JSON without `error`, or an empty/
+/// non-string `error`), a 4xx is treated as a fatal daemon error instead
+/// of slipping through as silent success (#6019).
+pub(crate) fn body_carries_usable_error(body: &serde_json::Value) -> bool {
+    body.get("error")
+        .and_then(|e| e.as_str())
+        .is_some_and(|s| !s.trim().is_empty())
+}
+
+/// Decide whether a daemon response `status` + parsed `body` should be
+/// surfaced as a fatal error by `daemon_json`. Extracted as a pure function
+/// so the 4xx/5xx classification is unit-testable without binding sockets.
+///
+/// - 5xx → always a daemon error (historical behaviour).
+/// - 4xx → a daemon error *unless* the body carries a usable `error` field,
+///   in which case the caller surfaces its own command-specific message.
+/// - 2xx/3xx → never surfaced here.
+pub(crate) fn should_surface_status_error(
+    status: reqwest::StatusCode,
+    body: &serde_json::Value,
+) -> bool {
+    status.is_server_error() || (status.is_client_error() && !body_carries_usable_error(body))
+}
+
 /// Helper: send a request to the daemon and parse the JSON body.
 /// Exits with error on connection failure.
 pub(crate) fn daemon_json(
@@ -204,7 +234,7 @@ pub(crate) fn daemon_json(
         Ok(r) => {
             let status = r.status();
             let body = r.json::<serde_json::Value>().unwrap_or_default();
-            if status.is_server_error() {
+            if should_surface_status_error(status, &body) {
                 ui::error_with_fix(
                     &i18n::t_args("error-daemon-returned", &[("status", &status.to_string())]),
                     &i18n::t("error-daemon-returned-fix"),
@@ -246,6 +276,10 @@ pub(crate) fn chrono_lite_date() -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
+    date_from_unix_secs(secs)
+}
+
+pub(crate) fn date_from_unix_secs(secs: u64) -> String {
     let days = secs / 86400;
     let mut year = 1970;
     let mut remaining_days = days as i64;
@@ -258,16 +292,25 @@ pub(crate) fn chrono_lite_date() -> String {
         year += 1;
     }
     let month_days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    // Length of month `m` (1-based), accounting for a leap-year February.
+    let month_len = |m: u64| -> i64 {
+        let base = month_days
+            .get((m.saturating_sub(1)) as usize)
+            .copied()
+            .unwrap_or(28) as i64;
+        if m == 2 && is_leap_year(year) {
+            29
+        } else {
+            base
+        }
+    };
     let mut month: u64 = 1;
     let mut day: i64 = remaining_days + 1;
-    let mut md: i64 = if is_leap_year(year) { 29 } else { 28 };
+    let mut md: i64 = month_len(month);
     while day > md {
         day -= md;
         month += 1;
-        md = month_days
-            .get((month.saturating_sub(1)) as usize)
-            .copied()
-            .unwrap_or(28) as i64;
+        md = month_len(month);
     }
     format!("{:04}-{:02}-{:02}", year, month, day)
 }
@@ -812,4 +855,108 @@ pub(crate) fn resolve_agent_id(base: &str, name_or_id: &str) -> String {
         }
     }
     name_or_id.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reqwest::StatusCode;
+    use serde_json::json;
+
+    #[test]
+    fn date_from_unix_secs_matches_known_dates() {
+        assert_eq!(date_from_unix_secs(0), "1970-01-01");
+        // day-of-year 15 — within January
+        assert_eq!(date_from_unix_secs(1_768_435_200), "2026-01-15");
+        // last day of January
+        assert_eq!(date_from_unix_secs(1_769_817_600), "2026-01-31");
+        // first day of March (cross-February boundary)
+        assert_eq!(date_from_unix_secs(1_772_323_200), "2026-03-01");
+        // mid-year
+        assert_eq!(date_from_unix_secs(1_781_049_600), "2026-06-10");
+        // year-end
+        assert_eq!(date_from_unix_secs(1_798_675_200), "2026-12-31");
+        // leap day
+        assert_eq!(date_from_unix_secs(1_709_164_800), "2024-02-29");
+        // year-end in a leap year (366th day)
+        assert_eq!(date_from_unix_secs(1_735_603_200), "2024-12-31");
+    }
+
+    #[test]
+    fn usable_error_requires_non_empty_error_string() {
+        assert!(body_carries_usable_error(
+            &json!({ "error": "validation failed" })
+        ));
+        // Empty / whitespace-only error strings are not usable messages.
+        assert!(!body_carries_usable_error(&json!({ "error": "" })));
+        assert!(!body_carries_usable_error(&json!({ "error": "   " })));
+        // Non-string `error` (object/array/number/null) is not a usable message.
+        assert!(!body_carries_usable_error(
+            &json!({ "error": { "code": 1 } })
+        ));
+        assert!(!body_carries_usable_error(&json!({ "error": null })));
+        // Object without an `error` key, and non-object bodies.
+        assert!(!body_carries_usable_error(&json!({ "ok": true })));
+        assert!(!body_carries_usable_error(&json!("plain string")));
+        // Null is what `unwrap_or_default()` yields for a non-JSON body.
+        assert!(!body_carries_usable_error(&serde_json::Value::Null));
+    }
+
+    #[test]
+    fn server_error_is_always_surfaced() {
+        // 5xx is a daemon error regardless of body shape (historical behaviour).
+        let null = serde_json::Value::Null;
+        assert!(should_surface_status_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &null
+        ));
+        assert!(should_surface_status_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &json!({ "error": "boom" })
+        ));
+    }
+
+    #[test]
+    fn client_error_without_usable_body_is_surfaced() {
+        // #6019 / #6017: a 405 (PUT-only route POSTed) with a non-JSON body
+        // deserializes to Null; previously this slipped through as success.
+        let null = serde_json::Value::Null;
+        assert!(should_surface_status_error(
+            StatusCode::METHOD_NOT_ALLOWED,
+            &null
+        ));
+        // 404/400 with an `error`-less JSON object are equally surfaced.
+        assert!(should_surface_status_error(
+            StatusCode::NOT_FOUND,
+            &json!({ "message": "not found" })
+        ));
+        assert!(should_surface_status_error(
+            StatusCode::BAD_REQUEST,
+            &json!({ "error": "" })
+        ));
+    }
+
+    #[test]
+    fn client_error_with_usable_body_is_left_for_caller() {
+        // A 4xx that carries a real `error` key is returned for the caller's
+        // own command-specific handler — not hard-errored here.
+        assert!(!should_surface_status_error(
+            StatusCode::BAD_REQUEST,
+            &json!({ "error": "schedule expression is invalid" })
+        ));
+        assert!(!should_surface_status_error(
+            StatusCode::CONFLICT,
+            &json!({ "error": "already exists" })
+        ));
+    }
+
+    #[test]
+    fn success_status_is_never_surfaced() {
+        let null = serde_json::Value::Null;
+        assert!(!should_surface_status_error(StatusCode::OK, &null));
+        assert!(!should_surface_status_error(
+            StatusCode::CREATED,
+            &json!({ "error": "ignored on 2xx" })
+        ));
+    }
 }

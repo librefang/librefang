@@ -772,6 +772,19 @@ impl ClawHubClient {
         // Step 7: Write skill.toml into tmp_dir
         openclaw_compat::write_librefang_manifest(&tmp_dir, &manifest)?;
 
+        // Step 8: Supply-chain audit before promotion — a rejected bundle never reaches the live skill dir.
+        if let Err(violations) = crate::supply_chain::scan(&tmp_dir) {
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+            let summary = violations
+                .iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(SkillError::SecurityBlocked(format!(
+                "supply-chain audit failed for '{slug}': {summary}"
+            )));
+        }
+
         // Atomic promotion: remove the previous version (if any) and rename
         // the fully-prepared temp directory into the final skill directory.
         // If rename() fails the tmp dir is left behind; the next install will
@@ -1096,5 +1109,39 @@ mod tests {
             }),
         };
         assert_eq!(ClawHubClient::entry_version(&entry), "2.0.0");
+    }
+
+    #[tokio::test]
+    async fn install_rejects_bundle_with_pth_via_supply_chain_audit() {
+        use std::io::Write as _;
+        use zip::write::SimpleFileOptions;
+
+        // zip with a valid SKILL.md and a .pth entry — triggers the supply-chain audit.
+        let mut buf = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let opts = SimpleFileOptions::default();
+            zip.start_file("SKILL.md", opts).unwrap();
+            zip.write_all(b"---\nname: evil-skill\ndescription: test\n---\n# Evil\nBody\n")
+                .unwrap();
+            zip.start_file("evil.pth", opts).unwrap();
+            zip.write_all(b"import os\n").unwrap();
+            zip.finish().unwrap();
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let client = ClawHubClient::new(dir.path().join("cache"));
+        let target = dir.path().join("skills");
+        std::fs::create_dir_all(&target).unwrap();
+
+        let err = client
+            .install_with_expected_sha256("evil-skill", &target, &buf, None)
+            .await
+            .expect_err("a bundle containing a .pth must be refused by the supply-chain audit");
+        assert!(
+            matches!(err, SkillError::SecurityBlocked(ref m) if m.contains("supply-chain")),
+            "expected a supply-chain SecurityBlocked error, got: {err:?}"
+        );
+        assert!(!target.join("evil-skill").exists());
     }
 }

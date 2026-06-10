@@ -603,6 +603,66 @@ fn test_trim_drops_old_entries_by_action() {
 }
 
 #[test]
+fn trim_keeps_memory_consistent_when_db_delete_fails() {
+    let pool = Pool::builder()
+        .max_size(1)
+        .build(SqliteConnectionManager::memory())
+        .unwrap();
+    {
+        let conn = pool.get().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE audit_entries (
+                seq INTEGER PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                detail TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                user_id TEXT,
+                channel TEXT,
+                prev_hash TEXT NOT NULL,
+                hash TEXT NOT NULL
+            )",
+        )
+        .unwrap();
+    }
+
+    let log = AuditLog::with_db(pool.clone());
+    let now = chrono::Utc::now();
+    let old = now - chrono::Duration::days(2);
+    push_aged_entry(&log, "a", AuditAction::ToolInvoke, "old1", "ok", old);
+    push_aged_entry(&log, "a", AuditAction::ToolInvoke, "old2", "ok", old);
+    push_aged_entry(&log, "a", AuditAction::ToolInvoke, "recent", "ok", now);
+    assert_eq!(log.len(), 3);
+
+    // Break the DB so the trim's DELETE fails.
+    pool.get()
+        .unwrap()
+        .execute_batch("DROP TABLE audit_entries")
+        .unwrap();
+
+    let mut policy = AuditRetentionConfig::default();
+    policy
+        .retention_days_by_action
+        .insert("ToolInvoke".to_string(), 1);
+    let report = log.trim(&policy, now);
+
+    // The DELETE failed, so nothing is trimmed and the in-memory window is
+    // preserved — memory and DB stay consistent and the trim retries next tick.
+    // Before the fix, memory was drained anyway and the anchor advanced, so a
+    // restart resurrected the "dropped" rows and verify_integrity broke.
+    assert_eq!(
+        report.total_dropped, 0,
+        "no rows should be dropped when the DB delete fails"
+    );
+    assert_eq!(
+        log.len(),
+        3,
+        "in-memory window must be preserved on DB failure"
+    );
+}
+
+#[test]
 fn test_trim_preserves_chain_via_anchor() {
     let log = AuditLog::new();
     let now = chrono::Utc::now();
@@ -1161,6 +1221,67 @@ fn test_prune_drops_all_persists_consistently_across_restart() {
     assert!(
         log2.verify_integrity().is_ok(),
         "verify_integrity must succeed after restart when prune dropped every prior entry"
+    );
+}
+
+#[test]
+fn prune_keeps_memory_consistent_when_db_delete_fails() {
+    let pool = Pool::builder()
+        .max_size(1)
+        .build(SqliteConnectionManager::memory())
+        .unwrap();
+    {
+        let conn = pool.get().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE audit_entries (
+                seq INTEGER PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                detail TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                user_id TEXT,
+                channel TEXT,
+                prev_hash TEXT NOT NULL,
+                hash TEXT NOT NULL
+            )",
+        )
+        .unwrap();
+    }
+
+    let log = AuditLog::with_db(pool.clone());
+    let now = chrono::Utc::now();
+    let old = now - chrono::Duration::days(2);
+    push_aged_entry(&log, "a", AuditAction::ToolInvoke, "old1", "ok", old);
+    push_aged_entry(&log, "a", AuditAction::ToolInvoke, "old2", "ok", old);
+    push_aged_entry(&log, "a", AuditAction::ToolInvoke, "recent", "ok", now);
+    assert_eq!(log.len(), 3);
+
+    // Break the DB so the prune's DELETE fails.
+    pool.get()
+        .unwrap()
+        .execute_batch("DROP TABLE audit_entries")
+        .unwrap();
+
+    let pruned = log.prune(1);
+
+    // The DELETE failed, so nothing is pruned and the in-memory window is
+    // preserved — memory and DB stay consistent and the prune retries next time.
+    assert_eq!(
+        pruned, 0,
+        "no rows should be pruned when the DB delete fails"
+    );
+    assert_eq!(
+        log.len(),
+        3,
+        "in-memory window must be preserved on DB failure"
+    );
+    // Regression: prune used to advance chain_anchor BEFORE the DB delete, so
+    // a failed DELETE left the entries un-drained but the anchor pointing past
+    // them — verify_integrity then raised a spurious "chain break" forever.
+    assert!(
+        log.verify_integrity().is_ok(),
+        "verify_integrity must still pass after a failed prune (anchor must not advance)"
     );
 }
 
