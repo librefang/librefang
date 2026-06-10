@@ -850,11 +850,19 @@ impl CredentialVault {
         output.extend_from_slice(VAULT_MAGIC);
         output.extend_from_slice(content.as_bytes());
 
-        // Atomic write to .tmp (mode 0600 on Unix) then rename over target.
-        let temp_path = self.path.with_extension("tmp");
-        {
+        // Atomic write to a PER-PROCESS staging file (mode 0600 on Unix) then
+        // rename over target. The in-process RwLock only serialises writers
+        // within one process; a fixed `vault.tmp` shared by two processes (e.g.
+        // a `librefang vault …` CLI run while the daemon is up) could truncate /
+        // clobber each other's half-written staging file before the rename,
+        // leaving a torn `vault.enc`. Mirror write_keyring_file: a unique
+        // per-process name opened with `create_new`, cleaned up on error.
+        let temp_path = self
+            .path
+            .with_extension(format!("tmp.{}", std::process::id()));
+        let write_result = (|| -> std::io::Result<()> {
             let mut opts = OpenOptions::new();
-            opts.write(true).create(true).truncate(true);
+            opts.write(true).create_new(true);
             #[cfg(unix)]
             {
                 use std::os::unix::fs::OpenOptionsExt;
@@ -863,8 +871,13 @@ impl CredentialVault {
             let mut f = opts.open(&temp_path)?;
             f.write_all(&output)?;
             f.sync_all()?;
+            drop(f);
+            std::fs::rename(&temp_path, &self.path)
+        })();
+        if let Err(e) = write_result {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(e.into());
         }
-        std::fs::rename(&temp_path, &self.path)?;
         // Enforce 0600 if a pre-existing file had looser perms.
         #[cfg(unix)]
         {
@@ -2096,6 +2109,31 @@ mod tests {
         // Remove
         assert!(vault2.remove("GITHUB_TOKEN").unwrap());
         assert!(vault2.get("GITHUB_TOKEN").is_none());
+    }
+
+    #[test]
+    fn save_uses_per_process_temp_and_leaves_no_staging_file() {
+        let (dir, mut vault) = test_vault();
+        let key = random_key();
+        vault.init_with_key(key.clone()).unwrap();
+        vault
+            .set("K".to_string(), Zeroizing::new("v".to_string()))
+            .unwrap();
+
+        assert!(vault.exists());
+        // No staging file is left behind — neither the old fixed `vault.tmp`
+        // (which two processes would collide on) nor this process's unique
+        // `vault.tmp.<pid>`, which must be renamed onto the target.
+        let leftovers: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("vault.tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "no staging files should remain, found {leftovers:?}"
+        );
     }
 
     #[test]
