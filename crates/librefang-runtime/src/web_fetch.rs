@@ -454,6 +454,11 @@ pub(crate) fn is_cloud_metadata_ip(ip: &IpAddr) -> bool {
             o[0] == 169 && o[1] == 254
             // 100.64.0.0/10: first octet 100, second octet 64..=127
             || o[0] == 100 && (o[1] & 0xC0) == 64
+            // 192.0.0.192 — Azure's alternative IMDS endpoint. 192.0.0.0/24 is
+            // IETF protocol-assignment space (not RFC1918), so it is not caught
+            // by is_private_ip; this specific host must still be blocked, in
+            // step with mcp_oauth::is_ssrf_blocked_host and rl-export's mirror.
+            || (o[0] == 192 && o[1] == 0 && o[2] == 0 && o[3] == 192)
         }
         IpAddr::V6(_) => false,
     }
@@ -1070,6 +1075,19 @@ mod tests {
         assert!(is_cloud_metadata_ip(&mapped_imds));
         let mapped_cgnat: IpAddr = "::ffff:100.64.0.1".parse().unwrap();
         assert!(is_cloud_metadata_ip(&mapped_cgnat));
+    }
+
+    #[test]
+    fn test_is_cloud_metadata_ip_recognises_azure_imds() {
+        use std::net::IpAddr;
+        // 192.0.0.192 — Azure's alternative IMDS endpoint. Not RFC-1918, so it
+        // must be caught here (not by is_private_ip). The WASM host path relies
+        // on this classifier, so the addition closes that path too.
+        let azure_imds: IpAddr = "192.0.0.192".parse().unwrap();
+        assert!(is_cloud_metadata_ip(&azure_imds));
+        // ...including via an IPv4-mapped IPv6 form.
+        let mapped: IpAddr = "::ffff:192.0.0.192".parse().unwrap();
+        assert!(is_cloud_metadata_ip(&mapped));
     }
 
     #[test]
