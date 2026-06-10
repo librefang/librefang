@@ -10571,6 +10571,16 @@
                 }
               }
             }
+          },
+          "422": {
+            "description": "Update candidate targets a skill that no longer exists",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
           }
         }
       }
