@@ -1513,7 +1513,11 @@ fn describe_event(event: &Event) -> String {
                 let summary = {
                     let s = val.to_string();
                     if s.len() > 300 {
-                        format!("{}...", &s[..300])
+                        // `&s[..300]` panics when byte 300 lands inside a
+                        // multi-byte UTF-8 codepoint; Custom payloads are
+                        // operator/attacker-controlled. truncate_str snaps to a
+                        // char boundary (used the same way at line ~1404).
+                        format!("{}...", librefang_types::truncate_str(&s, 300))
                     } else {
                         s
                     }

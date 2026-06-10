@@ -266,7 +266,7 @@ impl UsageStore {
             let cost: f64 = tx
                 .query_row(
                     "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
-                     WHERE agent_id = ?1 AND timestamp > datetime('now', '-1 hour')",
+                     WHERE agent_id = ?1 AND datetime(timestamp) > datetime('now', '-1 hour')",
                     rusqlite::params![&agent_str],
                     |row| row.get(0),
                 )
@@ -284,7 +284,7 @@ impl UsageStore {
             let cost: f64 = tx
                 .query_row(
                     "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
-                     WHERE agent_id = ?1 AND timestamp > datetime('now', 'start of day')",
+                     WHERE agent_id = ?1 AND datetime(timestamp) > datetime('now', 'start of day')",
                     rusqlite::params![&agent_str],
                     |row| row.get(0),
                 )
@@ -302,7 +302,7 @@ impl UsageStore {
             let cost: f64 = tx
                 .query_row(
                     "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
-                     WHERE agent_id = ?1 AND timestamp > datetime('now', 'start of month')",
+                     WHERE agent_id = ?1 AND datetime(timestamp) > datetime('now', 'start of month')",
                     rusqlite::params![&agent_str],
                     |row| row.get(0),
                 )
@@ -346,7 +346,7 @@ impl UsageStore {
             let cost: f64 = tx
                 .query_row(
                     "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
-                     WHERE timestamp > datetime('now', '-1 hour')",
+                     WHERE datetime(timestamp) > datetime('now', '-1 hour')",
                     [],
                     |row| row.get(0),
                 )
@@ -364,7 +364,7 @@ impl UsageStore {
             let cost: f64 = tx
                 .query_row(
                     "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
-                     WHERE timestamp > datetime('now', 'start of day')",
+                     WHERE datetime(timestamp) > datetime('now', 'start of day')",
                     [],
                     |row| row.get(0),
                 )
@@ -382,7 +382,7 @@ impl UsageStore {
             let cost: f64 = tx
                 .query_row(
                     "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
-                     WHERE timestamp > datetime('now', 'start of month')",
+                     WHERE datetime(timestamp) > datetime('now', 'start of month')",
                     [],
                     |row| row.get(0),
                 )
@@ -431,7 +431,7 @@ impl UsageStore {
             let cost: f64 = tx
                 .query_row(
                     "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
-                     WHERE agent_id = ?1 AND timestamp > datetime('now', '-1 hour')",
+                     WHERE agent_id = ?1 AND datetime(timestamp) > datetime('now', '-1 hour')",
                     rusqlite::params![&agent_str],
                     |row| row.get(0),
                 )
@@ -448,7 +448,7 @@ impl UsageStore {
             let cost: f64 = tx
                 .query_row(
                     "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
-                     WHERE agent_id = ?1 AND timestamp > datetime('now', 'start of day')",
+                     WHERE agent_id = ?1 AND datetime(timestamp) > datetime('now', 'start of day')",
                     rusqlite::params![&agent_str],
                     |row| row.get(0),
                 )
@@ -465,7 +465,7 @@ impl UsageStore {
             let cost: f64 = tx
                 .query_row(
                     "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
-                     WHERE agent_id = ?1 AND timestamp > datetime('now', 'start of month')",
+                     WHERE agent_id = ?1 AND datetime(timestamp) > datetime('now', 'start of month')",
                     rusqlite::params![&agent_str],
                     |row| row.get(0),
                 )
@@ -483,7 +483,7 @@ impl UsageStore {
             let cost: f64 = tx
                 .query_row(
                     "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
-                     WHERE timestamp > datetime('now', '-1 hour')",
+                     WHERE datetime(timestamp) > datetime('now', '-1 hour')",
                     [],
                     |row| row.get(0),
                 )
@@ -500,7 +500,7 @@ impl UsageStore {
             let cost: f64 = tx
                 .query_row(
                     "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
-                     WHERE timestamp > datetime('now', 'start of day')",
+                     WHERE datetime(timestamp) > datetime('now', 'start of day')",
                     [],
                     |row| row.get(0),
                 )
@@ -517,7 +517,7 @@ impl UsageStore {
             let cost: f64 = tx
                 .query_row(
                     "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
-                     WHERE timestamp > datetime('now', 'start of month')",
+                     WHERE datetime(timestamp) > datetime('now', 'start of month')",
                     [],
                     |row| row.get(0),
                 )
@@ -582,7 +582,7 @@ impl UsageStore {
         }
 
         // Helper closure: run one combined SUM query for a given time window.
-        // `where_clause` selects the rows for the window (e.g. `timestamp > datetime(...)`).
+        // `where_clause` selects the rows for the window (e.g. `datetime(timestamp) > datetime(...)`).
         let window_costs = |where_clause: &str| -> LibreFangResult<WindowCosts> {
             let sql = format!(
                 "SELECT \
@@ -609,7 +609,7 @@ impl UsageStore {
             || global_max_hourly > 0.0
             || (has_provider && provider_max_hourly > 0.0);
         if need_hourly {
-            let costs = window_costs("timestamp > datetime('now', '-1 hour')")?;
+            let costs = window_costs("datetime(timestamp) > datetime('now', '-1 hour')")?;
             if agent_max_hourly > 0.0 && costs.agent + record.cost_usd >= agent_max_hourly {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Agent {} exceeded hourly cost quota: ${:.4} + ${:.4} / ${:.4}",
@@ -637,7 +637,7 @@ impl UsageStore {
             || global_max_daily > 0.0
             || (has_provider && provider_max_daily > 0.0);
         if need_daily {
-            let costs = window_costs("timestamp > datetime('now', 'start of day')")?;
+            let costs = window_costs("datetime(timestamp) > datetime('now', 'start of day')")?;
             if agent_max_daily > 0.0 && costs.agent + record.cost_usd >= agent_max_daily {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Agent {} exceeded daily cost quota: ${:.4} + ${:.4} / ${:.4}",
@@ -665,7 +665,7 @@ impl UsageStore {
             || global_max_monthly > 0.0
             || (has_provider && provider_max_monthly > 0.0);
         if need_monthly {
-            let costs = window_costs("timestamp > datetime('now', 'start of month')")?;
+            let costs = window_costs("datetime(timestamp) > datetime('now', 'start of month')")?;
             if agent_max_monthly > 0.0 && costs.agent + record.cost_usd >= agent_max_monthly {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Agent {} exceeded monthly cost quota: ${:.4} + ${:.4} / ${:.4}",
@@ -695,7 +695,7 @@ impl UsageStore {
             let tokens: i64 = tx
                 .query_row(
                     "SELECT COALESCE(SUM(input_tokens) + SUM(output_tokens), 0) FROM usage_events
-                     WHERE provider = ?1 AND timestamp > datetime('now', '-1 hour')",
+                     WHERE provider = ?1 AND datetime(timestamp) > datetime('now', '-1 hour')",
                     rusqlite::params![&record.provider],
                     |row| row.get(0),
                 )
@@ -723,7 +723,7 @@ impl UsageStore {
         let cost: f64 = conn
             .query_row(
                 "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
-                 WHERE agent_id = ?1 AND timestamp > datetime('now', '-1 hour')",
+                 WHERE agent_id = ?1 AND datetime(timestamp) > datetime('now', '-1 hour')",
                 rusqlite::params![agent_id.0.to_string()],
                 |row| row.get(0),
             )
@@ -737,7 +737,7 @@ impl UsageStore {
         let cost: f64 = conn
             .query_row(
                 "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
-                 WHERE agent_id = ?1 AND timestamp > datetime('now', 'start of day')",
+                 WHERE agent_id = ?1 AND datetime(timestamp) > datetime('now', 'start of day')",
                 rusqlite::params![agent_id.0.to_string()],
                 |row| row.get(0),
             )
@@ -751,7 +751,7 @@ impl UsageStore {
         let cost: f64 = conn
             .query_row(
                 "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
-                 WHERE agent_id = ?1 AND timestamp > datetime('now', 'start of month')",
+                 WHERE agent_id = ?1 AND datetime(timestamp) > datetime('now', 'start of month')",
                 rusqlite::params![agent_id.0.to_string()],
                 |row| row.get(0),
             )
@@ -765,7 +765,7 @@ impl UsageStore {
         let cost: f64 = conn
             .query_row(
                 "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
-                 WHERE provider = ?1 AND timestamp > datetime('now', '-1 hour')",
+                 WHERE provider = ?1 AND datetime(timestamp) > datetime('now', '-1 hour')",
                 rusqlite::params![provider],
                 |row| row.get(0),
             )
@@ -779,7 +779,7 @@ impl UsageStore {
         let cost: f64 = conn
             .query_row(
                 "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
-                 WHERE provider = ?1 AND timestamp > datetime('now', 'start of day')",
+                 WHERE provider = ?1 AND datetime(timestamp) > datetime('now', 'start of day')",
                 rusqlite::params![provider],
                 |row| row.get(0),
             )
@@ -793,7 +793,7 @@ impl UsageStore {
         let cost: f64 = conn
             .query_row(
                 "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
-                 WHERE provider = ?1 AND timestamp > datetime('now', 'start of month')",
+                 WHERE provider = ?1 AND datetime(timestamp) > datetime('now', 'start of month')",
                 rusqlite::params![provider],
                 |row| row.get(0),
             )
@@ -807,7 +807,7 @@ impl UsageStore {
         let tokens: i64 = conn
             .query_row(
                 "SELECT COALESCE(SUM(input_tokens) + SUM(output_tokens), 0) FROM usage_events
-                 WHERE provider = ?1 AND timestamp > datetime('now', '-1 hour')",
+                 WHERE provider = ?1 AND datetime(timestamp) > datetime('now', '-1 hour')",
                 rusqlite::params![provider],
                 |row| row.get(0),
             )
@@ -834,7 +834,7 @@ impl UsageStore {
             .prepare(
                 "SELECT DISTINCT provider FROM usage_events
                  WHERE provider IS NOT NULL AND provider <> ''
-                   AND timestamp > datetime('now', 'start of month')
+                   AND datetime(timestamp) > datetime('now', 'start of month')
                  ORDER BY provider ASC",
             )
             .map_err(LibreFangError::memory)?;
@@ -874,7 +874,7 @@ impl UsageStore {
         let cost: f64 = conn
             .query_row(
                 "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
-                 WHERE user_id = ?1 AND timestamp > datetime('now', '-1 hour')",
+                 WHERE user_id = ?1 AND datetime(timestamp) > datetime('now', '-1 hour')",
                 rusqlite::params![user_id.to_string()],
                 |row| row.get(0),
             )
@@ -888,7 +888,7 @@ impl UsageStore {
         let cost: f64 = conn
             .query_row(
                 "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
-                 WHERE user_id = ?1 AND timestamp > datetime('now', 'start of day')",
+                 WHERE user_id = ?1 AND datetime(timestamp) > datetime('now', 'start of day')",
                 rusqlite::params![user_id.to_string()],
                 |row| row.get(0),
             )
@@ -902,7 +902,7 @@ impl UsageStore {
         let cost: f64 = conn
             .query_row(
                 "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
-                 WHERE user_id = ?1 AND timestamp > datetime('now', 'start of month')",
+                 WHERE user_id = ?1 AND datetime(timestamp) > datetime('now', 'start of month')",
                 rusqlite::params![user_id.to_string()],
                 |row| row.get(0),
             )
@@ -927,9 +927,9 @@ impl UsageStore {
         // future copy-paste from this site landing on user-controlled
         // input.
         const RANKING_SQL: &str = "SELECT user_id, \
-                COALESCE(SUM(CASE WHEN timestamp > datetime('now', '-1 hour') THEN cost_usd ELSE 0 END), 0.0) AS hourly, \
-                COALESCE(SUM(CASE WHEN timestamp > datetime('now', 'start of day') THEN cost_usd ELSE 0 END), 0.0) AS daily, \
-                COALESCE(SUM(CASE WHEN timestamp > datetime('now', 'start of month') THEN cost_usd ELSE 0 END), 0.0) AS monthly, \
+                COALESCE(SUM(CASE WHEN datetime(timestamp) > datetime('now', '-1 hour') THEN cost_usd ELSE 0 END), 0.0) AS hourly, \
+                COALESCE(SUM(CASE WHEN datetime(timestamp) > datetime('now', 'start of day') THEN cost_usd ELSE 0 END), 0.0) AS daily, \
+                COALESCE(SUM(CASE WHEN datetime(timestamp) > datetime('now', 'start of month') THEN cost_usd ELSE 0 END), 0.0) AS monthly, \
                 COUNT(*) AS calls \
              FROM usage_events \
              WHERE user_id IS NOT NULL \
@@ -965,7 +965,7 @@ impl UsageStore {
         let cost: f64 = conn
             .query_row(
                 "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
-                 WHERE timestamp > datetime('now', '-1 hour')",
+                 WHERE datetime(timestamp) > datetime('now', '-1 hour')",
                 [],
                 |row| row.get(0),
             )
@@ -979,7 +979,7 @@ impl UsageStore {
         let cost: f64 = conn
             .query_row(
                 "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
-                 WHERE timestamp > datetime('now', 'start of month')",
+                 WHERE datetime(timestamp) > datetime('now', 'start of month')",
                 [],
                 |row| row.get(0),
             )
@@ -1118,7 +1118,7 @@ impl UsageStore {
                             COALESCE(SUM(input_tokens) + SUM(output_tokens), 0),
                             COUNT(*)
                      FROM usage_events
-                     WHERE timestamp > datetime('now', '-{days} days')
+                     WHERE datetime(timestamp) > datetime('now', '-{days} days')
                      GROUP BY day
                      ORDER BY day ASC"
             ))
@@ -1159,7 +1159,7 @@ impl UsageStore {
         let cost: f64 = conn
             .query_row(
                 "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
-                 WHERE timestamp > datetime('now', 'start of day')",
+                 WHERE datetime(timestamp) > datetime('now', 'start of day')",
                 [],
                 |row| row.get(0),
             )
@@ -1179,7 +1179,7 @@ impl UsageStore {
             .prepare(
                 "SELECT agent_id, SUM(cost_usd) as total_cost
                  FROM usage_events
-                 WHERE timestamp > datetime('now', 'start of day')
+                 WHERE datetime(timestamp) > datetime('now', 'start of day')
                  GROUP BY agent_id
                  ORDER BY total_cost DESC",
             )
@@ -1280,7 +1280,7 @@ impl UsageStore {
         let deleted = conn
             .execute(
                 &format!(
-                    "DELETE FROM usage_events WHERE timestamp < datetime('now', '-{days} days')"
+                    "DELETE FROM usage_events WHERE datetime(timestamp) < datetime('now', '-{days} days')"
                 ),
                 [],
             )
@@ -1340,6 +1340,53 @@ mod tests {
         assert_eq!(summary.total_output_tokens, 250);
         assert!((summary.total_cost_usd - 0.011).abs() < 0.0001);
         assert_eq!(summary.total_tool_calls, 3);
+    }
+
+    #[test]
+    fn hourly_window_excludes_records_older_than_one_hour() {
+        // Regression: `usage_events.timestamp` is RFC3339 TEXT (`T`-separated,
+        // offset) while `datetime('now', ...)` yields a space-separated,
+        // offset-less string. A bare `timestamp > datetime('now','-1 hour')`
+        // compared the two lexicographically, so once the date prefix matched
+        // the `T` (0x54) > space (0x20) mismatch at index 10 meant the
+        // time-of-day was never reached — the hour window degraded to a
+        // same-day check and counted records well outside the hour. Wrapping
+        // the column in `datetime(timestamp)` parses both sides first.
+        let store = setup();
+        let agent_id = AgentId::new();
+        let conn = store.pool.get().unwrap();
+        let insert = |ts: String, cost: f64| {
+            conn.execute(
+                "INSERT INTO usage_events \
+                 (id, agent_id, timestamp, model, provider, input_tokens, output_tokens, cost_usd, tool_calls, latency_ms) \
+                 VALUES (?1, ?2, ?3, 'm', '', 0, 0, ?4, 0, 0)",
+                rusqlite::params![
+                    uuid::Uuid::new_v4().to_string(),
+                    agent_id.0.to_string(),
+                    ts,
+                    cost
+                ],
+            )
+            .unwrap();
+        };
+        // 30 minutes old → inside the 1-hour window.
+        insert(
+            (Utc::now() - chrono::Duration::minutes(30)).to_rfc3339(),
+            0.01,
+        );
+        // 90 minutes old → outside it. Before the fix this row was wrongly
+        // summed into the hourly total whenever it shared the calendar day.
+        insert(
+            (Utc::now() - chrono::Duration::minutes(90)).to_rfc3339(),
+            100.0,
+        );
+        drop(conn);
+
+        let hourly = store.query_hourly(agent_id).unwrap();
+        assert!(
+            (hourly - 0.01).abs() < 1e-9,
+            "hourly window must exclude the 90-min-old record; got {hourly}"
+        );
     }
 
     #[test]
