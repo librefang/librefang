@@ -5,6 +5,117 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.6.10] - 2026-06-10
+
+_78 PRs from 6 contributors since v2026.5.31-beta.16._
+
+### Highlights
+
+- **Parallel tool-call dispatch** — agents can now execute multiple tools concurrently (opt-in via config flag), reducing round-trip latency for multi-tool turns.
+- **Remote Hand marketplace installs** — Hands can be installed directly from the remote marketplace without manual packaging.
+- **Skill evolution approval gate** — `auto_evolve` updates now flow through an approval step, and a new `evolution_mode` gives you control over how skills self-improve.
+- **Shell execution trusted-binary shortcut** — opt into `safe_bins_skip_approval` to skip approval prompts for a strict allowlisted set of shell commands.
+- **Security hardening across the board** — fixes for SSRF allowlist gaps (IMDS/CGNAT addresses), TOML/query-string injection in agent manifests, OOM vectors in streamed tool calls and sidecar stderr, DNS-rebinding in WASM `net_fetch`, supply-chain audit bypass in zip installs, and a pre-handshake memory-exhaustion DoS; plus credential-redaction and vault KDF correctness fixes.
+
+### Added
+
+- Externalize template routing rules to an overridable TOML (#5946) (@houko)
+- Persist goal runs and recover stale runs at boot (#5947) (@houko)
+- Activate parallel tool-call dispatch behind config flag (#5948) (@houko)
+- Wire RL rollout export producer into AgentLoopEnd hook (#5950) (@houko)
+- Execute WASM hooks in the sandbox as pure-compute (#5951) (@houko)
+- Remote marketplace install for Hands (#5954) (@houko)
+- Opt-in safe_bins_skip_approval for shell_exec (#6000) (@houko)
+- Creator_match filter for TaskClaimed / TaskCompleted triggers (#5960) (#6001) (@houko)
+- Skill evolution_mode + gate auto_evolve updates through approval (#5844, #5819) (#6003) (@houko)
+- Emit cron-fire and auto-disable observability metrics (#6029) (@neo-wanderer)
+
+### Fixed
+
+- Gate skill_evolve_* tools on auto_evolve + skill_workshop flags (#5678) (@DaBlitzStein)
+- Correct stale openapi.sha256 baseline to repair main red (#5945) (#5953) (@houko)
+- Stop Cargo.lock changes from busting the rust-cache (cold compile) (#5958) (@houko)
+- Pre-flight hand role spawns before reactivation teardown (#5959) (@houko)
+- Cron day-of-week follows POSIX convention (0 and 7 = Sunday) (#5967) (@DaBlitzStein)
+- Atomic compare-and-swap in task_claim to prevent double-claim (#5961) (#5968) (@houko)
+- Ship MCP caller context via _meta instead of arguments (#5965) (#5969) (@houko)
+- Retry past lost CAS race in task_claim + post-review nits (#5961, #5965) (#5973) (@houko)
+- Memory/wiki ACL denials degrade gracefully instead of killing the turn (#5984) (@houko)
+- Trigger evaluator self-deadlocks when per-event budget is exhausted (#5977) (#5987) (@DaBlitzStein)
+- History fold preserves tool-result content on omit AND parse failure (#5978) (#5991) (@DaBlitzStein)
+- Loop-guard block is soft, and a persistent block stall degrades to a real reply (#5979) (#5992) (@DaBlitzStein)
+- Propagate per-sidecar account_id for multi-bot isolation (#5955) (#5996) (@houko)
+- Make safe_bins_skip_approval a strict subset of the allowlist gate (#6004) (@houko)
+- Tolerate <think> preamble in history_fold summary parsing (#6009) (#6011) (@houko)
+- Redact images for text-only models via catalog supports_vision (#6010) (#6013) (@houko)
+- Assign approved workshop skill to the creating agent (#5989) (#6014) (@houko)
+- Cron enable/disable now PUTs with an {enabled} body instead of POSTing a PUT-only route (#6018) (@neo-wanderer)
+- Resolve channel_send mirror owner via bindings, not just default_agent (#6023) (@neo-wanderer)
+- Daemon_json surfaces error-less 4xx instead of silent success (#6019) (#6024) (@houko)
+- Stabilize non-headless Chrome startup under env isolation (#6028) (@app/copilot-swe-agent)
+- Explain empty sidecar form + warn on legacy [channels.*] config (#6030) (@houko)
+- Chrono_lite_date() returns wrong dates for most of the year (#6048) (@houko)
+- Quota/budget time windows compare RFC3339 text lexicographically, ignoring time-of-day (#6049) (@houko)
+- Unbounded Vec growth from attacker-controlled streamed tool-call index (OOM) (#6050) (@houko)
+- Self-referential $ref in a tool schema overflows the stack (DoS from untrusted MCP/skill schemas) (#6051) (@houko)
+- Redact_secrets leaks a real token that follows a short match (#6052) (@houko)
+- SSRF allowlist omits 0.0.0.0, CGNAT/Alibaba IMDS, 192.0.0.192, and AWS IMDS hostnames (#6053) (@houko)
+- Single-quote dotenv value panics credential resolution (#6054) (@houko)
+- WASM net_fetch follows redirects without per-hop SSRF re-validation (DNS-rebinding); misses Azure IMDS (#6055) (@houko)
+- TOML injection via unescaped system_prompt / name / tags in generated agent manifests (#6056) (@houko)
+- Unauthenticated pre-handshake read can pin a 16 MiB buffer (memory-exhaustion DoS) (#6057) (@houko)
+- Non-ASCII snippet offset misalignment; body cap not enforced on rendered bytes (#6058) (@houko)
+- Query-string injection via unescaped MiniMax task_id/file_id (#6059) (@houko)
+- Apply_patch files_moved counter incremented before the move write succeeds (#6060) (@houko)
+- Vault staging-file race across processes; OAuth deny hangs 5 minutes (#6061) (@houko)
+- Trim/prune drop in-memory entries even when the SQLite DELETE fails (#6062) (@houko)
+- Exec timeout leaks docker process; bind-mount validation never runs (#6063) (@houko)
+- Taint_scanning=false silently disables documented always-on credential key-name blocking (#6064) (@houko)
+- Auto-update script TOCTOU/symlink exec; skill-install path traversal (#6065) (@houko)
+- ClawHub/Skillhub zip install bypasses the supply-chain audit (.pth RCE) (#6066) (@houko)
+- Permission bridge serializes all sessions, dropping approval events on broadcast lag (#6067) (@houko)
+- Channel error truncation panics on multi-byte UTF-8 boundary (#6068) (@houko)
+- Sidecar stderr read is unbounded — same OOM vector already capped for stdout (#6069) (@houko)
+- Describe_event panics on multi-byte Custom payload; correct false test-env safety claim (#6070) (@houko)
+- Vault KDF uses volatile Argon2::default() while on-disk format stores no params (#6071) (@houko)
+- Allow unused_mut on chromium launch args off-Linux (#6072) (@houko)
+
+### Changed
+
+- Split role-trait god-file into per-domain modules (#5970) (@houko)
+- Split the 14.6k-line main.rs into per-command modules (#5971) (@houko)
+- Derive task_claim retry budget from pool size (#5974) (@houko)
+- Split routes/agents.rs into per-concern modules (#5975) (@houko)
+- Split routes/workflows.rs into per-concern modules (#5985) (@houko)
+- Split routes/skills.rs into per-concern modules (#5986) (@houko)
+- Split routes/config.rs into per-concern modules (#5993) (@houko)
+
+<details>
+<summary>Documentation, maintenance, and other internal changes</summary>
+
+### Documentation
+
+- Guard against editing a re-created worktree on a stale base (#6002) (@houko)
+
+### Maintenance
+
+- Populate sessions.peer_id on save (#5286) (@f-liva)
+- Make required-status-checks enforceable — CI Gate, aarch64 lane, openapi-drift fix (#5943) (@houko)
+- Merge_group support (prereq for merge queue) [stacked on #5943] (#5944) (@houko)
+- Extract heartbeat de-dup transition into a testable helper (#5949) (@houko)
+- Faster + reliable docker dev iteration — mold linker + per-worktree target (#5952) (@houko)
+- Auto-commit regenerated codegen on same-repo PRs (#5994) (@houko)
+- Ignore skill scaffolder template TODOs (#5982, #5983) (#5995) (@houko)
+- Bump the cargo-minor-patch group with 11 updates (#6006) (@app/dependabot)
+- Bump the web-minor-patch group in /web with 9 updates (#6007) (@app/dependabot)
+- Bump the dashboard-minor-patch group in /crates/librefang-api/dashboard with 12 updates (#6008) (@app/dependabot)
+- Ignore .github self-scan that spawns false-positive issues (#6012) (@houko)
+- Bump the docs-minor-patch group in /docs with 6 updates (#6015) (@app/dependabot)
+- Bump next from 15.5.18 to 16.2.7 in /docs (#6016) (@app/dependabot)
+
+</details>
+
+
 ## [2026.5.31] - 2026-05-31
 
 _16 PRs from 2 contributors since v2026.5.30-beta.15._
