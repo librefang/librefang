@@ -285,7 +285,6 @@ const MAX_SCHEMA_DEPTH: usize = 128;
 ///
 /// Anthropic is short-circuited at the top — its API accepts the schema as-is.
 /// Every other provider goes through `normalize_schema_for_strict_validators`.
-
 pub fn normalize_schema_for_provider(
     schema: &serde_json::Value,
     provider: &str,
