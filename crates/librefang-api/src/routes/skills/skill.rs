@@ -346,50 +346,46 @@ pub async fn show_pending_candidate(
     responses(
         (status = 200, description = "Candidate promoted to active skill", body = crate::types::JsonObject),
         (status = 404, description = "Candidate not found", body = crate::types::JsonObject),
-        (status = 409, description = "Promotion blocked (security scan or naming collision)", body = crate::types::JsonObject)
+        (status = 409, description = "Promotion blocked (security scan or naming collision)", body = crate::types::JsonObject),
+        (status = 422, description = "Update candidate targets a skill that no longer exists", body = crate::types::JsonObject)
     )
 )]
 pub async fn approve_pending_candidate(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
+    // `skills_root` is still needed by the `AlreadyInstalled` phantom-vs-collision
+    // disambiguation branch below, which reads the candidate + active skill body
+    // directly off disk.
     let skills_root = state.kernel.home_dir().join("skills");
-    // Capture the creating agent id BEFORE promotion: `approve_candidate`
-    // deletes the pending TOML on success, after which `agent_id` is no
-    // longer recoverable. Best-effort — a read failure here must not block
-    // the approve (auto-assign is a convenience, not a precondition).
+    // Capture the creating agent id BEFORE promotion: the kernel approve
+    // deletes the pending TOML on success, and the phantom-recovery arm
+    // below (AlreadyInstalled) still needs it to converge the best-effort
+    // auto-assign. A read failure here must not block the approve.
     let creator_agent_id =
         match librefang_kernel::skill_workshop::storage::load_candidate(&skills_root, &id) {
             Ok(c) => Some(c.agent_id),
             Err(_) => None,
         };
-    match librefang_kernel::skill_workshop::storage::approve_candidate(
-        &skills_root,
-        &skills_root,
-        &id,
-    ) {
-        Ok(result) => {
-            // Successful promotion landed a new directory under
-            // `skills_root`; refresh the in-memory registry so the next
-            // turn's prompt build sees the new skill.
-            state.kernel.reload_skills();
-            // Auto-assign the promoted skill to the agent that produced it
-            // so the workshop loop (capture → review → approve → use)
-            // closes without a manual `agent.toml` edit (#5989). Best-effort:
-            // logs and continues if the agent was deleted between capture
-            // and approval, so the approve still returns 200.
-            assign_skill_to_creator(&state, creator_agent_id.as_deref(), &result.skill_name);
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "status": "approved",
-                    "candidate_id": id,
-                    "skill_name": result.skill_name,
-                    "version": result.version,
-                    "message": result.message,
-                })),
-            )
-        }
+    // Promote through the kernel so a CREATE is also auto-assigned to the
+    // creating agent's allowlist (#5844 / #5989): the kernel method loads
+    // the candidate, calls approve_candidate (re-running the injection
+    // scan), reloads the registry, and appends the new skill to the owner
+    // agent's allowlist when the candidate is a create, clearing
+    // skills_disabled so it goes live. The AlreadyInstalled arm below
+    // handles phantom recovery, where the kernel errored and did not
+    // assign, so it re-runs the route-level best-effort assign itself.
+    match state.kernel.approve_pending_skill(&id) {
+        Ok(result) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "approved",
+                "candidate_id": id,
+                "skill_name": result.skill_name,
+                "version": result.version,
+                "message": result.message,
+            })),
+        ),
         Err(librefang_kernel::skill_workshop::WorkshopError::InvalidId(_)) => (
             StatusCode::BAD_REQUEST,
             Json(
@@ -515,6 +511,27 @@ pub async fn approve_pending_candidate(
                 )
             }
         }
+        Err(librefang_kernel::skill_workshop::WorkshopError::Skill(
+            librefang_skills::SkillError::NotFound(detail),
+        )) => {
+            // Update candidates can outlive their target: the skill may be
+            // deleted between candidate capture and approval. 409 would
+            // mislead the client into a rename-and-retry; the candidate is
+            // unprocessable until the target skill exists again.
+            // `NotFound`'s payload is a human-readable detail string (not a
+            // bare skill name), so embed it as-is.
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({
+                    "error": format!(
+                        "target skill no longer exists ({detail}); \
+                         reject this candidate and re-capture once the skill is reinstalled"
+                    ),
+                    "kind": "target_skill_missing",
+                    "candidate_id": id,
+                })),
+            )
+        }
         Err(librefang_kernel::skill_workshop::WorkshopError::Skill(e)) => (
             StatusCode::CONFLICT,
             Json(serde_json::json!({"error": format!("promotion rejected: {e}")})),
@@ -528,6 +545,9 @@ pub async fn approve_pending_candidate(
 ///
 /// * `agent_id` is `None` / unparseable / no longer in the registry →
 ///   log a WARN and return; the caller's approve still succeeds.
+/// * agent's allowlist is empty (which already grants every skill) →
+///   no-op, mirroring the kernel's `assign_skill_to_agent_allowlist`;
+///   appending here would narrow an all-skills agent to just this one.
 /// * skill already on the allowlist AND not hidden by `skills_disabled`
 ///   → no-op (no redundant DB write).
 /// * otherwise append the skill and route through `set_agent_skills`,
@@ -559,6 +579,15 @@ fn assign_skill_to_creator(state: &Arc<AppState>, agent_id: Option<&str>, skill_
         );
         return;
     };
+
+    // An empty allowlist already grants the agent every skill; appending
+    // would narrow it to just this one. Match the kernel's
+    // `assign_skill_to_agent_allowlist` and leave all-skills agents
+    // untouched, so this phantom-recovery path behaves identically to the
+    // create path (which skips the same case kernel-side).
+    if entry.manifest.skills.is_empty() {
+        return;
+    }
 
     let already_listed = entry.manifest.skills.iter().any(|s| s == skill_name);
     // Re-run the assign when the skill is present but hidden by
