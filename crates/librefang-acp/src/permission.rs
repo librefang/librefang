@@ -50,11 +50,23 @@ pub(crate) async fn run_bridge<K: AcpKernel>(
     loop {
         match rx.recv().await {
             Ok(ApprovalEvent::Created(approval)) => {
-                // `approval` is now `Box<ApprovalRequest>`; unbox so
-                // `dispatch_pending`'s by-value signature still works.
-                if let Err(e) = dispatch_pending(&kernel, &sessions, &cx, *approval).await {
-                    warn!(error = %e, "ACP permission bridge: dispatch_pending failed");
-                }
+                // Dispatch each approval in its OWN task so the up-to-60s editor
+                // round-trip inside `dispatch_pending` does not block this recv
+                // loop. The bridge is one task per connection serving ALL
+                // multiplexed ACP sessions; if it blocked here, other sessions'
+                // `Created` events would pile up in the kernel broadcast (cap
+                // 256) and be dropped on lag — and the kernel fires `Created`
+                // exactly once per approval, so a dropped event hangs that
+                // session's approval indefinitely. `approval` is `Box`, unboxed
+                // into the task.
+                let kernel = Arc::clone(&kernel);
+                let sessions = Arc::clone(&sessions);
+                let cx = cx.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = dispatch_pending(&kernel, &sessions, &cx, *approval).await {
+                        warn!(error = %e, "ACP permission bridge: dispatch_pending failed");
+                    }
+                });
             }
             // `Resolved` events are emitted as a courtesy to other
             // subscribers (dashboards / TUI). The ACP side has nothing to
