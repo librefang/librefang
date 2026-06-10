@@ -424,6 +424,114 @@ async fn pending_approve_name_collision_with_different_body_returns_409() {
 }
 
 // ---------------------------------------------------------------------------
+// Update-kind candidates over HTTP (#5844 / #6003)
+// ---------------------------------------------------------------------------
+
+/// Approving an `Update` candidate over HTTP must route through
+/// `evolution::update_skill` (not `create_skill`, which would 409 with
+/// `AlreadyInstalled`): the target skill's `prompt_context.md` is rewritten
+/// with the candidate body, the patch version is bumped, and the pending
+/// file is dropped.
+#[tokio::test(flavor = "multi_thread")]
+async fn pending_approve_update_rewrites_target_skill_body() {
+    let h = boot().await;
+    let agent = "11111111-1111-1111-1111-111111111111";
+    let create_id = "cdcdcdcd-0000-0000-0000-000000000001";
+    let update_id = "cdcdcdcd-0000-0000-0000-000000000002";
+    let root = skills_root(&h);
+
+    // Plant the target through the real create-approve flow so skill.toml
+    // is a genuine `evolution::create_skill` manifest (version 0.1.0).
+    storage::save_candidate(&root, &fixture_candidate(agent, create_id), 20, None).unwrap();
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/skills/pending/{create_id}/approve"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "seed create must succeed: {body:?}");
+
+    // Stage an UPDATE candidate carrying a new body for the same skill.
+    let new_body = "# Cargo fmt before commit (v2)\n\nRun `cargo fmt --all` and `cargo clippy`.\n";
+    let mut candidate = fixture_candidate(agent, update_id);
+    candidate.kind = CandidateKind::Update;
+    candidate.target_skill_id = Some("fmt_before_commit".to_string());
+    candidate.prompt_context = new_body.to_string();
+    storage::save_candidate(&root, &candidate, 20, None).unwrap();
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/skills/pending/{update_id}/approve"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "update approve must succeed: {body:?}"
+    );
+    assert_eq!(body["status"], "approved");
+    assert_eq!(body["skill_name"], "fmt_before_commit");
+    assert_eq!(
+        body["version"], "0.1.1",
+        "update must bump the patch version: {body:?}"
+    );
+
+    let on_disk =
+        std::fs::read_to_string(root.join("fmt_before_commit").join("prompt_context.md")).unwrap();
+    assert_eq!(
+        on_disk, new_body,
+        "approved update must rewrite the target skill's body"
+    );
+    assert!(
+        storage::load_candidate(&root, update_id).is_err(),
+        "pending file must be removed after a successful update approve"
+    );
+}
+
+/// An `Update` candidate whose target skill was deleted between capture and
+/// approval is unprocessable, not a naming conflict: the route must return
+/// 422 with `kind: "target_skill_missing"` (409 would mislead the client
+/// into a rename-and-retry) and keep the pending file so the reviewer can
+/// reject it deliberately.
+#[tokio::test(flavor = "multi_thread")]
+async fn pending_approve_update_missing_target_returns_422() {
+    let h = boot().await;
+    let agent = "11111111-1111-1111-1111-111111111111";
+    let id = "cdcdcdcd-0000-0000-0000-000000000003";
+    let root = skills_root(&h);
+
+    let mut candidate = fixture_candidate(agent, id);
+    candidate.kind = CandidateKind::Update;
+    candidate.target_skill_id = Some("vanished_skill".to_string());
+    storage::save_candidate(&root, &candidate, 20, None).unwrap();
+    let pending_path = root.join("pending").join(agent).join(format!("{id}.toml"));
+    assert!(pending_path.exists(), "pending file must be staged");
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/skills/pending/{id}/approve"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "missing update target must surface as 422: {body:?}"
+    );
+    assert_eq!(body["kind"], "target_skill_missing");
+    assert_eq!(body["candidate_id"], id);
+    assert!(body["error"]
+        .as_str()
+        .unwrap_or("")
+        .contains("no longer exists"));
+    assert!(
+        pending_path.exists(),
+        "pending file must survive a 422 so the reviewer can reject deliberately"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Auto-assign promoted skill to the creating agent (#5989)
 // ---------------------------------------------------------------------------
 

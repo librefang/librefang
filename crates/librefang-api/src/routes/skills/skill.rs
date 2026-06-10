@@ -346,7 +346,8 @@ pub async fn show_pending_candidate(
     responses(
         (status = 200, description = "Candidate promoted to active skill", body = crate::types::JsonObject),
         (status = 404, description = "Candidate not found", body = crate::types::JsonObject),
-        (status = 409, description = "Promotion blocked (security scan or naming collision)", body = crate::types::JsonObject)
+        (status = 409, description = "Promotion blocked (security scan or naming collision)", body = crate::types::JsonObject),
+        (status = 422, description = "Update candidate targets a skill that no longer exists", body = crate::types::JsonObject)
     )
 )]
 pub async fn approve_pending_candidate(
@@ -509,6 +510,27 @@ pub async fn approve_pending_candidate(
                     })),
                 )
             }
+        }
+        Err(librefang_kernel::skill_workshop::WorkshopError::Skill(
+            librefang_skills::SkillError::NotFound(detail),
+        )) => {
+            // Update candidates can outlive their target: the skill may be
+            // deleted between candidate capture and approval. 409 would
+            // mislead the client into a rename-and-retry; the candidate is
+            // unprocessable until the target skill exists again.
+            // `NotFound`'s payload is a human-readable detail string (not a
+            // bare skill name), so embed it as-is.
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({
+                    "error": format!(
+                        "target skill no longer exists ({detail}); \
+                         reject this candidate and re-capture once the skill is reinstalled"
+                    ),
+                    "kind": "target_skill_missing",
+                    "candidate_id": id,
+                })),
+            )
         }
         Err(librefang_kernel::skill_workshop::WorkshopError::Skill(e)) => (
             StatusCode::CONFLICT,
