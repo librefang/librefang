@@ -50,11 +50,15 @@ pub(crate) async fn run_bridge<K: AcpKernel>(
     loop {
         match rx.recv().await {
             Ok(ApprovalEvent::Created(approval)) => {
-                // `approval` is now `Box<ApprovalRequest>`; unbox so
-                // `dispatch_pending`'s by-value signature still works.
-                if let Err(e) = dispatch_pending(&kernel, &sessions, &cx, *approval).await {
-                    warn!(error = %e, "ACP permission bridge: dispatch_pending failed");
-                }
+                // Created fires once per approval; spawn so the ≤60s editor wait never stalls this drain loop.
+                let kernel = Arc::clone(&kernel);
+                let sessions = Arc::clone(&sessions);
+                let cx = cx.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = dispatch_pending(&kernel, &sessions, &cx, *approval).await {
+                        warn!(error = %e, "ACP permission bridge: dispatch_pending failed");
+                    }
+                });
             }
             // `Resolved` events are emitted as a courtesy to other
             // subscribers (dashboards / TUI). The ACP side has nothing to
@@ -182,12 +186,6 @@ async fn dispatch_pending<K: AcpKernel>(
     })
     .map_err(AcpError::Transport)?;
 
-    // Serialize approvals — wait inline before processing the next
-    // broadcast event. Phase 1 prefers correctness over throughput;
-    // pending approvals queue in the broadcast (capacity 256). The
-    // serial path keeps tests deterministic and avoids spawning
-    // detached tasks whose runtime context (LocalSet vs not) can
-    // diverge between production and test harnesses.
     let (decision, remember) = match tokio::time::timeout(PERMISSION_TIMEOUT, rx).await {
         Ok(Ok(Ok(resp))) => decision_from_outcome(resp.outcome),
         Ok(Ok(Err(e))) => {

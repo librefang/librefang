@@ -638,15 +638,23 @@ fn redact_secrets(s: &str) -> String {
     // Common key prefixes: sk-..., key-..., Bearer ...
     // Replace sequences that look like keys (long alphanumeric after prefix).
     for prefix in &["sk-", "key-", "Bearer ", "bearer "] {
-        while let Some(start) = result.find(prefix) {
+        // Scan from a moving cursor rather than always re-searching from index
+        // 0. A short (non-key) match must not abandon the whole prefix — a real
+        // secret can appear later in the same string. Advancing `from` past
+        // every match also guarantees termination.
+        let mut from = 0;
+        while let Some(rel) = result[from..].find(prefix) {
+            let start = from + rel;
             let end = result[start + prefix.len()..]
                 .find(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
                 .map(|i| start + prefix.len() + i)
                 .unwrap_or(result.len());
             if end > start + prefix.len() + 4 {
                 result.replace_range(start..end, "<redacted>");
+                from = start + "<redacted>".len();
             } else {
-                break; // Avoid infinite loop on short matches
+                // Too short to be a key — skip past it and keep scanning.
+                from = start + prefix.len();
             }
         }
     }
@@ -1104,6 +1112,25 @@ mod tests {
 
         let msg = sanitize_raw_excerpt("Bearer eyJhbGciOiJIUzI1NiJ9 was rejected");
         assert!(!msg.contains("eyJhbGciOiJIUzI1NiJ9"));
+    }
+
+    #[test]
+    fn redact_secrets_redacts_key_after_a_short_token() {
+        // Regression: a short non-key match (`sk-x`) used to `break` out of the
+        // whole prefix scan, leaking any real key that appeared later.
+        let out = redact_secrets("sk-x and the key is sk-proj-abcdefghij1234567890");
+        assert!(
+            !out.contains("sk-proj-abcdefghij1234567890"),
+            "later key leaked: {out}"
+        );
+        assert!(out.contains("<redacted>"));
+
+        // Same for Bearer: short token first, real token second.
+        let out = redact_secrets("Bearer x then Bearer eyJhbGciOiJIUzI1NiJ9abcdef rejected");
+        assert!(
+            !out.contains("eyJhbGciOiJIUzI1NiJ9abcdef"),
+            "later bearer token leaked: {out}"
+        );
     }
 
     #[test]

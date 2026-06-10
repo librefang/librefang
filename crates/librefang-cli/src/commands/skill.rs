@@ -9,6 +9,26 @@ use crate::commands::prelude::*;
 // Skill commands
 // ---------------------------------------------------------------------------
 
+/// Validate that a skill name from an (untrusted) manifest is safe to use as a
+/// single path component under the skills directory.
+///
+/// `dest = skills_dir.join(name)` with `Path::join` treats an absolute `name`
+/// as a full replacement and lets `..` escape the base, so a package with
+/// `name = "../../.librefang/config.toml"` would write outside `skills_dir`.
+/// Require the name to be exactly one normal path component.
+fn validate_skill_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("skill name is empty".to_string());
+    }
+    let mut comps = std::path::Path::new(name).components();
+    match (comps.next(), comps.next()) {
+        (Some(std::path::Component::Normal(c)), None) if c == std::ffi::OsStr::new(name) => Ok(()),
+        _ => Err(format!(
+            "unsafe skill name '{name}': must be a single path component (no '/', '\\', '..' or absolute path)"
+        )),
+    }
+}
+
 /// Resolve the skills directory: global or per-hand workspace.
 pub(crate) fn resolve_skills_dir(hand: Option<&str>) -> PathBuf {
     let home = librefang_home();
@@ -42,6 +62,10 @@ pub(crate) fn cmd_skill_install(source: &str, hand: Option<&str>) {
                 println!("Detected OpenClaw skill format. Converting...");
                 match librefang_skills::openclaw_compat::convert_openclaw_skill(&source_path) {
                     Ok(manifest) => {
+                        if let Err(e) = validate_skill_name(&manifest.skill.name) {
+                            eprintln!("Refusing to install skill: {e}");
+                            std::process::exit(1);
+                        }
                         let dest = skills_dir.join(&manifest.skill.name);
                         // Copy skill directory
                         copy_dir_recursive(&source_path, &dest);
@@ -82,6 +106,10 @@ pub(crate) fn cmd_skill_install(source: &str, hand: Option<&str>) {
                 std::process::exit(1);
             });
 
+        if let Err(e) = validate_skill_name(&manifest.skill.name) {
+            eprintln!("Refusing to install skill: {e}");
+            std::process::exit(1);
+        }
         let dest = skills_dir.join(&manifest.skill.name);
         copy_dir_recursive(&source_path, &dest);
         if let Some(h) = hand {
@@ -981,5 +1009,27 @@ pub(crate) fn cmd_skill_pending(sub: PendingCommands) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_skill_name;
+
+    #[test]
+    fn validate_skill_name_accepts_plain_names() {
+        assert!(validate_skill_name("my-skill").is_ok());
+        assert!(validate_skill_name("Skill_1.2").is_ok());
+    }
+
+    #[test]
+    fn validate_skill_name_rejects_path_traversal_and_absolute() {
+        // These would let `skills_dir.join(name)` escape the skills directory.
+        assert!(validate_skill_name("").is_err());
+        assert!(validate_skill_name("..").is_err());
+        assert!(validate_skill_name("../../.librefang/config.toml").is_err());
+        assert!(validate_skill_name("a/b").is_err());
+        assert!(validate_skill_name("/etc/passwd").is_err());
+        assert!(validate_skill_name("foo/").is_err());
     }
 }

@@ -288,8 +288,12 @@ pub async fn create_sandbox(
         cmd.arg("--tmpfs").arg(tmpfs_mount);
     }
 
-    // Mount workspace read-only
+    // Mount workspace read-only. SECURITY: validate the host path against the
+    // symlink-escape and blocked-path checks BEFORE handing it to `docker run`.
+    // Without this gate the checks were dead code and a `workspace` resolving
+    // through a symlink into e.g. /etc would still be mounted into the sandbox.
     let ws_str = workspace.display().to_string();
+    validate_bind_mount(&ws_str, &config.blocked_mounts)?;
     cmd.arg("-v").arg(format!("{ws_str}:{}:ro", config.workdir));
 
     // Working directory
@@ -339,6 +343,13 @@ pub async fn exec_in_sandbox(
 
     cmd.stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+
+    // SIGKILL the `docker exec` client when the future is dropped — tokio does
+    // NOT kill the child on drop by default, so without this a timeout would
+    // leave the host-side `docker exec` process running past the deadline and
+    // leak one per timed-out call. (The in-container workload is bounded
+    // separately by the caller destroying the container.)
+    cmd.kill_on_drop(true);
 
     debug!(container = %container.container_id, "Executing in Docker sandbox");
 
@@ -780,6 +791,22 @@ mod tests {
         assert!(config.cap_add.is_empty());
         assert_eq!(config.tmpfs, vec!["/tmp:size=64m"]);
         assert_eq!(config.pids_limit, 100);
+    }
+
+    #[tokio::test]
+    async fn create_sandbox_rejects_blocked_workspace_mount() {
+        // `/etc` is a default blocked mount path. `create_sandbox` must refuse a
+        // workspace under it — and because `validate_bind_mount` runs before any
+        // `docker run`, this returns an error without shelling out to docker.
+        // The check used to be dead code: never invoked on the creation path.
+        let config = DockerSandboxConfig::default();
+        let err = create_sandbox(&config, "agent-1", std::path::Path::new("/etc/secret"))
+            .await
+            .expect_err("a blocked workspace mount must be rejected");
+        assert!(
+            err.contains("blocked"),
+            "expected a blocked-mount error, got: {err}"
+        );
     }
 
     #[test]
