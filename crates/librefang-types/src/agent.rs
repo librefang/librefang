@@ -1327,6 +1327,14 @@ pub struct AgentManifest {
     /// per agent via `[skill_workshop]` in `agent.toml`.
     #[serde(default)]
     pub skill_workshop: SkillWorkshopConfig,
+    /// Owner-notification triage gate (#5471): cheap pre-turn aux-LLM
+    /// classification that decides whether an inbound message from a
+    /// non-owner sender warrants notifying the owner before / instead
+    /// of replying. Designed for receptionist / butler-style agents.
+    /// Default disabled — opt-in per agent via `[owner_notify_gate]`
+    /// in `agent.toml`. See [`OwnerNotifyGateConfig`].
+    #[serde(default)]
+    pub owner_notify_gate: OwnerNotifyGateConfig,
     /// Per-agent override for the kernel-global `[proactive_memory]`
     /// policy (#4870). Each field of
     /// [`crate::memory::ProactiveMemoryOverrides`] is an `Option<bool>`
@@ -1596,6 +1604,7 @@ impl Default for AgentManifest {
             cache_context: false,
             tool_exec_backend: None,
             skill_workshop: SkillWorkshopConfig::default(),
+            owner_notify_gate: OwnerNotifyGateConfig::default(),
             proactive_memory: crate::memory::ProactiveMemoryOverrides::default(),
             rl_export: RlExportOverride::default(),
             compaction: None,
@@ -1772,6 +1781,74 @@ impl Default for SkillWorkshopConfig {
             // No TTL by default — the cap is the only aging mechanism
             // unless the operator opts in.
             max_pending_age_days: None,
+        }
+    }
+}
+
+/// Owner-notification triage gate (#5471) per-agent configuration.
+///
+/// When enabled, the agent loop runs a cheap auxiliary-LLM classification
+/// BEFORE the primary turn for every inbound message whose `sender_user_id`
+/// is NOT in [`OwnerNotifyGateConfig::owner_user_ids`]. The classifier
+/// decides whether the request lies outside the agent's autonomous-reply
+/// envelope and the owner should be notified via the `notify_owner` tool
+/// before / instead of replying.
+///
+/// Default disabled (opt-in).
+///
+/// # Financial safety
+///
+/// **The gate is a no-op until a cheap-tier aux slot is wired.** When no
+/// explicit `[llm.auxiliary] owner_notify_triage` chain is configured,
+/// `AuxClient::resolve` returns the primary driver with
+/// `used_primary = true`. Because the gate fires on every inbound stranger
+/// message (an attacker-controllable path on a public receptionist agent),
+/// billing the primary provider here would be a financial-DoS amplifier.
+/// The gate mirrors the `SkillWorkshopReview` precedent (#3328) and returns
+/// `TriageVerdict::skip` when `used_primary` is true. **Operators must wire
+/// a cheap-tier slot before enabling the gate:**
+///
+/// ```toml
+/// # config.toml
+/// [llm.auxiliary]
+/// owner_notify_triage = ["anthropic:claude-haiku-4.5"]
+/// ```
+///
+/// ```toml
+/// # agent.toml
+/// [owner_notify_gate]
+/// enabled = true
+/// owner_user_ids = ["393511083257@s.whatsapp.net", "393511083257@lid"]
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OwnerNotifyGateConfig {
+    /// Master switch. When `false`, the gate is a no-op for this agent —
+    /// the agent loop never calls the aux model, the primary turn runs
+    /// exactly as it did pre-#5471.
+    pub enabled: bool,
+    /// Sender IDs (channel-qualified) that are recognised as the owner
+    /// and therefore skip the gate. Each entry is matched verbatim
+    /// (case-sensitive) against the `sender_user_id` metadata field on
+    /// the agent turn. Typically a WhatsApp JID, an `@username`, a
+    /// Slack `U…` ID, etc. — whichever shape the channel adapter
+    /// stamps. Multiple entries are allowed so the same person can be
+    /// recognised across multiple channels or after a number change.
+    pub owner_user_ids: Vec<String>,
+}
+
+impl OwnerNotifyGateConfig {
+    /// `true` when the gate should run for an inbound message from
+    /// `sender_user_id`. Returns `false` when the gate is disabled,
+    /// when `sender_user_id` is `None` (anonymous / dashboard turn),
+    /// or when `sender_user_id` matches a configured owner entry.
+    pub fn should_evaluate(&self, sender_user_id: Option<&str>) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        match sender_user_id {
+            None | Some("") => false,
+            Some(id) => !self.owner_user_ids.iter().any(|owner| owner == id),
         }
     }
 }
@@ -3825,5 +3902,94 @@ model = "claude-3-haiku-20240307"
             err.to_string().contains("unknown variant"),
             "explicit `session_mode = \"New\"` must error, not fall back to None / Persistent: {err}"
         );
+    }
+
+    // ----- OwnerNotifyGateConfig -----
+
+    #[test]
+    fn owner_notify_gate_defaults_disabled_with_empty_owner_list() {
+        let cfg = OwnerNotifyGateConfig::default();
+        assert!(!cfg.enabled);
+        assert!(cfg.owner_user_ids.is_empty());
+    }
+
+    #[test]
+    fn owner_notify_gate_disabled_never_evaluates() {
+        let cfg = OwnerNotifyGateConfig {
+            enabled: false,
+            owner_user_ids: vec![],
+        };
+        assert!(!cfg.should_evaluate(Some("anyone@s.whatsapp.net")));
+        assert!(!cfg.should_evaluate(None));
+        assert!(!cfg.should_evaluate(Some("")));
+    }
+
+    #[test]
+    fn owner_notify_gate_enabled_skips_owner_sender() {
+        let cfg = OwnerNotifyGateConfig {
+            enabled: true,
+            owner_user_ids: vec!["owner@lid".to_string(), "owner@s.whatsapp.net".to_string()],
+        };
+        assert!(!cfg.should_evaluate(Some("owner@lid")));
+        assert!(!cfg.should_evaluate(Some("owner@s.whatsapp.net")));
+    }
+
+    #[test]
+    fn owner_notify_gate_enabled_evaluates_non_owner_sender() {
+        let cfg = OwnerNotifyGateConfig {
+            enabled: true,
+            owner_user_ids: vec!["owner@lid".to_string()],
+        };
+        assert!(cfg.should_evaluate(Some("stranger@lid")));
+        assert!(cfg.should_evaluate(Some("123456@s.whatsapp.net")));
+    }
+
+    #[test]
+    fn owner_notify_gate_enabled_skips_when_sender_id_missing_or_empty() {
+        let cfg = OwnerNotifyGateConfig {
+            enabled: true,
+            owner_user_ids: vec!["owner@lid".to_string()],
+        };
+        assert!(
+            !cfg.should_evaluate(None),
+            "anonymous turn (no sender_user_id) must not trip the gate"
+        );
+        assert!(
+            !cfg.should_evaluate(Some("")),
+            "empty sender_user_id must not trip the gate"
+        );
+    }
+
+    #[test]
+    fn owner_notify_gate_match_is_case_sensitive_byte_exact() {
+        let cfg = OwnerNotifyGateConfig {
+            enabled: true,
+            owner_user_ids: vec!["Owner@LID".to_string()],
+        };
+        assert!(
+            cfg.should_evaluate(Some("owner@lid")),
+            "lowercase form should NOT match the upper-case configured owner — \
+             gate treats sender IDs verbatim so operators don't accidentally \
+             collapse two distinct platform IDs into one"
+        );
+    }
+
+    #[test]
+    fn owner_notify_gate_toml_round_trip() {
+        let toml_src = r#"
+enabled = true
+owner_user_ids = ["a@x", "b@y", "c@z"]
+"#;
+        let cfg: OwnerNotifyGateConfig = toml::from_str(toml_src).unwrap();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.owner_user_ids, vec!["a@x", "b@y", "c@z"]);
+    }
+
+    #[test]
+    fn owner_notify_gate_missing_fields_use_defaults() {
+        // Empty TOML must yield the disabled default (no panic, no required-field error).
+        let cfg: OwnerNotifyGateConfig = toml::from_str("").unwrap();
+        assert!(!cfg.enabled);
+        assert!(cfg.owner_user_ids.is_empty());
     }
 }

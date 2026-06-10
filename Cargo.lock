@@ -4923,6 +4923,7 @@ dependencies = [
  "librefang-runtime-sandbox-docker",
  "librefang-skills",
  "librefang-subprocess",
+ "librefang-testing",
  "librefang-types",
  "metrics",
  "metrics-util",

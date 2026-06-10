@@ -1139,6 +1139,16 @@ pub enum AuxTask {
     /// chain resolves, the kernel falls back to the historical trivial
     /// summary and logs a WARN so operators see the degraded path.
     SessionSummary,
+    /// Owner-notification triage gate (#5471). Cheap pre-turn classification
+    /// call invoked when an inbound message reaches an agent from a sender
+    /// that is NOT the configured owner. Decides whether the request lies
+    /// outside the agent's autonomous-reply envelope and the owner should
+    /// be notified (`notify_owner`) before / instead of replying. Default
+    /// behaviour when no chain resolves: skip the gate and let the primary
+    /// agent decide (safe default = no extra notify, no behaviour change).
+    /// Designed for use cases like a butler / receptionist agent that
+    /// fields requests from strangers on behalf of its owner.
+    OwnerNotifyTriage,
 }
 
 impl AuxTask {
@@ -1154,6 +1164,7 @@ impl AuxTask {
             AuxTask::SkillReview => "skill_review",
             AuxTask::SkillWorkshopReview => "skill_workshop_review",
             AuxTask::SessionSummary => "session_summary",
+            AuxTask::OwnerNotifyTriage => "owner_notify_triage",
         }
     }
 }
@@ -8011,6 +8022,79 @@ rule_sets = ["browser_handles", "pii_baseline"]
     fn default_burst_ratio_defaults_to_zero_when_missing() {
         let cfg: BudgetConfig = toml::from_str("").unwrap();
         assert_eq!(cfg.default_burst_ratio, 0.0);
+    }
+
+    // ----- AuxTask::OwnerNotifyTriage -----
+
+    #[test]
+    fn aux_task_owner_notify_triage_str_slug_is_stable() {
+        assert_eq!(AuxTask::OwnerNotifyTriage.as_str(), "owner_notify_triage");
+        assert_eq!(
+            format!("{}", AuxTask::OwnerNotifyTriage),
+            "owner_notify_triage"
+        );
+    }
+
+    #[test]
+    fn aux_task_owner_notify_triage_serde_round_trip_snake_case() {
+        let serialized = serde_json::to_string(&AuxTask::OwnerNotifyTriage).unwrap();
+        assert_eq!(serialized, "\"owner_notify_triage\"");
+        let parsed: AuxTask = serde_json::from_str("\"owner_notify_triage\"").unwrap();
+        assert_eq!(parsed, AuxTask::OwnerNotifyTriage);
+    }
+
+    #[test]
+    fn aux_task_owner_notify_triage_resolves_through_auxiliary_config_chain_for() {
+        let mut cfg = AuxiliaryConfig::empty();
+        cfg.tasks.insert(
+            AuxTask::OwnerNotifyTriage,
+            vec!["anthropic:claude-haiku-4.5".to_string()],
+        );
+        let chain = cfg.chain_for(AuxTask::OwnerNotifyTriage).unwrap();
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0], "anthropic:claude-haiku-4.5");
+    }
+
+    #[test]
+    fn aux_task_owner_notify_triage_toml_decodes_under_llm_auxiliary_namespace() {
+        // `AuxiliaryConfig` is `#[serde(transparent)]` over its
+        // `BTreeMap<AuxTask, Vec<String>>` so the TOML key is `[auxiliary]`
+        // directly and each entry is an `AuxTask` slug.
+        let toml_src = r#"
+[auxiliary]
+owner_notify_triage = ["anthropic:claude-haiku-4.5", "groq:llama-3.3-70b-versatile"]
+"#;
+        let llm: LlmConfig = toml::from_str(toml_src).unwrap();
+        let chain = llm
+            .auxiliary
+            .chain_for(AuxTask::OwnerNotifyTriage)
+            .expect("owner_notify_triage chain must round-trip from TOML");
+        assert_eq!(
+            chain,
+            &[
+                "anthropic:claude-haiku-4.5".to_string(),
+                "groq:llama-3.3-70b-versatile".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn aux_task_owner_notify_triage_distinct_from_session_summary_in_btreemap() {
+        assert_ne!(AuxTask::OwnerNotifyTriage, AuxTask::SessionSummary);
+        let mut cfg = AuxiliaryConfig::empty();
+        cfg.tasks
+            .insert(AuxTask::SessionSummary, vec!["a:b".to_string()]);
+        cfg.tasks
+            .insert(AuxTask::OwnerNotifyTriage, vec!["c:d".to_string()]);
+        assert_eq!(cfg.tasks.len(), 2);
+        assert_eq!(
+            cfg.chain_for(AuxTask::OwnerNotifyTriage).unwrap(),
+            &["c:d".to_string()]
+        );
+        assert_eq!(
+            cfg.chain_for(AuxTask::SessionSummary).unwrap(),
+            &["a:b".to_string()]
+        );
     }
 
     // -------- Plugin sandbox secure-by-default (#2) --------

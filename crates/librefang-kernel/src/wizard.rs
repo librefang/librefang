@@ -206,6 +206,7 @@ impl SetupWizard {
             cache_context: false,
             tool_exec_backend: None,
             skill_workshop: librefang_types::agent::SkillWorkshopConfig::default(),
+            owner_notify_gate: librefang_types::agent::OwnerNotifyGateConfig::default(),
             proactive_memory: librefang_types::memory::ProactiveMemoryOverrides::default(),
             rl_export: librefang_types::agent::RlExportOverride::default(),
             compaction: None,
