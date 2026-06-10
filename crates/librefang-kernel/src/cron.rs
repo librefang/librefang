@@ -21,6 +21,64 @@ use tracing::{debug, info, warn};
 const MAX_CONSECUTIVE_ERRORS: u32 = 5;
 
 // ---------------------------------------------------------------------------
+// Observability metrics (cron health)
+// ---------------------------------------------------------------------------
+//
+// Emitted from the scheduler's outcome-recording methods rather than the
+// tick loop's per-action match arms, so every cron action type (AgentTurn,
+// Workflow, payload-encode failures, wake-gate no-ops) funnels through one
+// place and future tick-loop refactors can't silently drop a metric.
+
+/// Classify a cron failure message into a metric `outcome` label.
+///
+/// Best-effort: the tick loop formats timeout failures as
+/// `"timed out after {n}s"` / `"workflow timed out after {n}s"`, so a
+/// substring match is sufficient to separate model/workflow hangs (the
+/// failure mode that silently auto-disabled a job in practice) from
+/// genuine job errors. A non-timeout error whose text happens to contain
+/// `"timed out"` is mislabeled — acceptable for an aggregate health signal.
+fn classify_cron_failure_outcome(error_msg: &str) -> &'static str {
+    if error_msg.contains("timed out") {
+        "timeout"
+    } else {
+        "error"
+    }
+}
+
+/// Emit the cron-fire outcome counter. Labeled by `agent` and `outcome`
+/// (`ok` | `error` | `timeout`).
+///
+/// We deliberately do NOT label by cron job id: one-shot jobs
+/// (`At`-schedule, manual one-shots) mint a fresh id on every fire, which
+/// would make the in-process metric series set grow without bound. The
+/// agent roster is bounded, mirroring the existing
+/// `librefang_tool_call_total{tool,outcome}` cardinality budget.
+fn record_cron_fire_metric(agent: &AgentId, outcome: &str) {
+    metrics::counter!(
+        "librefang_cron_fires_total",
+        "agent" => agent.to_string(),
+        "outcome" => outcome.to_string(),
+    )
+    .increment(1);
+}
+
+/// Emit the auto-disable counter. Labeled by `agent`.
+///
+/// Increments exactly once each time the scheduler turns a job off on its
+/// own — after `MAX_CONSECUTIVE_ERRORS` consecutive failures/timeouts
+/// (`record_failure`) or schedule-fallback misses (`due_jobs`, #5113).
+/// Alert on any increase: a job has stopped firing and will not resume
+/// until re-enabled. Unlike an `enabled` gauge this ignores *intentional*
+/// manual disables and has no stale-series problem when a job is deleted.
+fn record_cron_auto_disabled_metric(agent: &AgentId) {
+    metrics::counter!(
+        "librefang_cron_auto_disabled_total",
+        "agent" => agent.to_string(),
+    )
+    .increment(1);
+}
+
+// ---------------------------------------------------------------------------
 // JobMeta — extra runtime state not stored in CronJob itself
 // ---------------------------------------------------------------------------
 
@@ -665,6 +723,7 @@ impl CronScheduler {
                             );
                             meta.job.enabled = false;
                             meta.auto_disabled = true;
+                            record_cron_auto_disabled_metric(&meta.job.agent_id);
                             // Push next_run far into the future so the disabled
                             // job is never even considered on subsequent ticks
                             // (matches the `At` far-future convention).
@@ -795,6 +854,7 @@ impl CronScheduler {
                 meta.last_status = Some("ok".to_string());
                 meta.consecutive_errors = 0;
                 meta.consecutive_fallbacks = 0;
+                record_cron_fire_metric(&meta.job.agent_id, "ok");
                 // one_shot jobs get removed; recurring jobs keep the next_run
                 // already pre-advanced by due_jobs() — no recompute needed.
                 meta.one_shot
@@ -845,6 +905,7 @@ impl CronScheduler {
                 librefang_types::truncate_str(error_msg, 256)
             ));
             meta.consecutive_errors += 1;
+            record_cron_fire_metric(&meta.job.agent_id, classify_cron_failure_outcome(error_msg));
             if meta.one_shot {
                 // one_shot jobs (e.g. At-schedule) are removed after the first
                 // failure too — there is no meaningful retry for a one-time job
@@ -858,6 +919,7 @@ impl CronScheduler {
                 );
                 meta.job.enabled = false;
                 meta.auto_disabled = true;
+                record_cron_auto_disabled_metric(&meta.job.agent_id);
                 false
             } else {
                 // Use the opt-returning variant so a wedged cron schedule
@@ -1232,6 +1294,29 @@ mod tests {
     use super::*;
     use chrono::{Duration, TimeZone, Timelike};
     use librefang_types::scheduler::{CronAction, CronDelivery};
+
+    #[test]
+    fn classify_cron_failure_outcome_separates_timeouts() {
+        // Tick-loop timeout messages (AgentTurn + Workflow) → "timeout".
+        assert_eq!(
+            classify_cron_failure_outcome("timed out after 180s"),
+            "timeout"
+        );
+        assert_eq!(
+            classify_cron_failure_outcome("workflow timed out after 300s"),
+            "timeout"
+        );
+        // Genuine job/logic errors → "error".
+        assert_eq!(
+            classify_cron_failure_outcome("payload encode failed: x"),
+            "error"
+        );
+        assert_eq!(
+            classify_cron_failure_outcome("workflow not found: nightly"),
+            "error"
+        );
+        assert_eq!(classify_cron_failure_outcome(""), "error");
+    }
 
     #[test]
     fn fire_session_override_persistent_returns_none() {

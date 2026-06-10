@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
     name="bossfang-sdk",
-    version="2026.5.30b15",
+    version="2026.6.10b17",
     description="Official Python client for the BossFang Agent OS REST API",
     # BossFang fork: PyPI package renamed to `bossfang-sdk` but the Python
     # module names stay `librefang_sdk` / `librefang_client` to match the
