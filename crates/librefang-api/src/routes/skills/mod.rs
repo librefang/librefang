@@ -1245,6 +1245,9 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Used only by the sqlite-only config.toml MCP-write tests below; under
+    // surreal-backend those tests (and this import) are gated out (C-005).
+    #[cfg(not(feature = "surreal-backend"))]
     use librefang_types::config::{McpServerConfigEntry, McpTransportEntry};
 
     /// Regression for #2319: adding an MCP server through the UI wrote each
