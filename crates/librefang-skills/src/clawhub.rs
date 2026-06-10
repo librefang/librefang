@@ -772,14 +772,7 @@ impl ClawHubClient {
         // Step 7: Write skill.toml into tmp_dir
         openclaw_compat::write_librefang_manifest(&tmp_dir, &manifest)?;
 
-        // Step 8: Supply-chain audit on the staged bundle BEFORE promotion.
-        // The marketplace path runs this (marketplace.rs) but the ClawHub /
-        // Skillhub zip path previously did not, so a published bundle could ship
-        // e.g. an `evil.pth` (Python site-packages auto-exec → RCE) or a
-        // symlink escape and reach the live skill dir on install. Scanning
-        // `tmp_dir` keeps the stage-then-promote invariant: a malicious bundle
-        // is deleted and never promoted. (The audit honours
-        // LIBREFANG_SKIP_SUPPLY_CHAIN_AUDIT=1 internally for dev-mode.)
+        // Step 8: Supply-chain audit before promotion — a rejected bundle never reaches the live skill dir.
         if let Err(violations) = crate::supply_chain::scan(&tmp_dir) {
             let _ = std::fs::remove_dir_all(&tmp_dir);
             let summary = violations
@@ -1123,11 +1116,7 @@ mod tests {
         use std::io::Write as _;
         use zip::write::SimpleFileOptions;
 
-        // Build an in-memory zip: a valid SKILL.md plus a malicious `.pth`
-        // (Python site-packages auto-exec → RCE). The ClawHub/Skillhub zip
-        // path previously skipped the supply-chain audit the marketplace path
-        // runs, so this bundle reached disk. It must now be refused before the
-        // staged dir is promoted to the live skill directory.
+        // zip with a valid SKILL.md and a .pth entry — triggers the supply-chain audit.
         let mut buf = Vec::new();
         {
             let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
@@ -1153,7 +1142,6 @@ mod tests {
             matches!(err, SkillError::SecurityBlocked(ref m) if m.contains("supply-chain")),
             "expected a supply-chain SecurityBlocked error, got: {err:?}"
         );
-        // The malicious bundle must NOT have been promoted to the live dir.
         assert!(!target.join("evil-skill").exists());
     }
 }
