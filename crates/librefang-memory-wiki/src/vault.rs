@@ -712,9 +712,12 @@ mod tests {
         // `İ` (U+0130, 2 bytes) lowercases to `i̇` (3 bytes), so a byte offset
         // into the lowercased copy is not a valid offset into the original
         // body. The snippet must still cover the matched query rather than an
-        // unrelated (or empty) region.
-        let body = "İİİİİİİİİİ the needle is right here İİİ";
-        let snippet = build_snippet(body, "needle");
+        // unrelated (or empty) region. The prefix uses 80 `İ` (80 bytes of
+        // lowercase drift) so the misalignment exceeds the ±60-byte context
+        // window — with fewer characters the old, misaligned slice would
+        // still happen to include the needle and mask the bug.
+        let body = format!("{} the needle is right here İİİ", "İ".repeat(80));
+        let snippet = build_snippet(&body, "needle");
         assert!(
             snippet.contains("needle"),
             "snippet must cover the match, got: {snippet:?}"
