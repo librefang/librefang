@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock, RwLock};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
 use tracing::{debug, error, info, warn};
@@ -817,9 +817,13 @@ async fn spawn_once(
     let stderr_name = ctx.name.clone();
     let mut stderr_translator = StderrTranslator::new(&ctx.command);
     tokio::spawn(async move {
-        let reader = BufReader::new(child_stderr);
-        let mut lines = reader.lines();
-        while let Ok(Some(line)) = lines.next_line().await {
+        // Read stderr with the SAME bounded reader as stdout. The unbounded
+        // `lines()` let a runaway adapter that writes to stderr without a
+        // newline grow the buffer without bound and OOM the daemon — the exact
+        // hazard the stdout path was capped against (MAX_EVENT_LINE_BYTES).
+        let mut reader = BufReader::new(child_stderr);
+        let mut line_buf: Vec<u8> = Vec::new();
+        while let Ok(Some(line)) = read_event_line(&mut reader, &mut line_buf).await {
             match stderr_translator.handle_line(&line) {
                 StderrAction::Warn(msg) => {
                     warn!(adapter = %stderr_name, "{msg}");

@@ -16,6 +16,11 @@ use std::collections::{BTreeMap, HashMap};
 use tracing::{debug, warn};
 use zeroize::Zeroizing;
 
+/// Upper bound on the number of streamed tool-call slots a single response may allocate.
+/// The accumulator is grown densely up to the `index` reported in each SSE delta, and this driver talks to arbitrary user-configured base URLs (Ollama, LiteLLM, custom gateways), so a hostile or buggy endpoint could send an enormous `index` and OOM the daemon.
+/// No real response carries anywhere near this many parallel tool calls.
+const MAX_STREAMED_TOOL_CALLS: usize = 256;
+
 /// OpenAI-compatible API driver.
 pub struct OpenAIDriver {
     api_key: Zeroizing<String>,
@@ -1972,6 +1977,13 @@ impl LlmDriver for OpenAIDriver {
                         if let Some(calls) = delta["tool_calls"].as_array() {
                             for call in calls {
                                 let idx = call["index"].as_u64().unwrap_or(0) as usize;
+                                if idx >= MAX_STREAMED_TOOL_CALLS {
+                                    warn!(
+                                        index = idx,
+                                        "Ignoring tool_call delta with out-of-range index"
+                                    );
+                                    continue;
+                                }
 
                                 // Ensure tool_accum has enough entries
                                 while tool_accum.len() <= idx {
@@ -4184,6 +4196,69 @@ mod tests {
             }
         });
         format!("http://{addr}")
+    }
+
+    /// Spawn a minimal server that answers any request with the given raw SSE body as `text/event-stream`, then closes the socket.
+    async fn spawn_sse_server(sse_body: String) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 8192];
+                let _ = sock.read(&mut buf).await;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    sse_body.len(),
+                    sse_body
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.flush().await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn streamed_tool_call_with_out_of_range_index_is_dropped() {
+        let bad_index = MAX_STREAMED_TOOL_CALLS; // first out-of-range value
+        let sse_body = format!(
+            "data: {{\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":{bad_index},\"id\":\"call_evil\",\"function\":{{\"name\":\"evil\",\"arguments\":\"{{}}\"}}}}]}}}}]}}\n\
+             data: {{\"choices\":[{{\"delta\":{{\"content\":\"ok\"}}}}]}}\n\
+             data: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"stop\"}}],\"usage\":{{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}}}\n\
+             data: [DONE]\n"
+        );
+        let base = spawn_sse_server(sse_body).await;
+        let driver = OpenAIDriver::new("test-key".to_string(), base);
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let resp = driver
+            .stream(transport_retry_request(), tx)
+            .await
+            .expect("stream must complete instead of OOMing on a huge tool index");
+
+        let mut events = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            events.push(ev);
+        }
+        // The out-of-range tool call is dropped: no ToolUseStart is emitted and
+        // the final response carries no tool-call content block.
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, StreamEvent::ToolUseStart { .. })),
+            "out-of-range tool index must not start a tool call"
+        );
+        assert!(
+            !resp
+                .content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::ToolUse { .. })),
+            "out-of-range tool index must not appear in the response"
+        );
+        assert_eq!(resp.text(), "ok");
     }
 
     fn transport_retry_request() -> librefang_llm_driver::CompletionRequest {

@@ -451,7 +451,7 @@ fn apply_rule_set_action(
 /// Recursion is hard-capped at [`MCP_TAINT_SCAN_MAX_DEPTH`].
 #[cfg(test)]
 fn scan_mcp_arguments_for_taint(value: &serde_json::Value) -> Option<String> {
-    scan_mcp_arguments_for_taint_with_policy(value, None, &[], "")
+    scan_mcp_arguments_for_taint_with_policy(value, None, &[], "", true)
 }
 
 fn scan_mcp_arguments_for_taint_with_policy(
@@ -459,6 +459,9 @@ fn scan_mcp_arguments_for_taint_with_policy(
     taint_policy: Option<&McpTaintPolicy>,
     rule_set_registry: &[NamedTaintRuleSet],
     tool_name: &str,
+    // `false` disables the value-content heuristic only; sensitive-key-name
+    // blocking always runs (the documented `taint_scanning` contract).
+    content_scanning: bool,
 ) -> Option<String> {
     // Tool-level kill switch: `default = "skip"` bypasses scanning for the
     // entire tool, including sensitive object-key blocking. This is the
@@ -484,9 +487,14 @@ fn scan_mcp_arguments_for_taint_with_policy(
         taint_policy,
         rule_set_registry,
         tool_name,
+        content_scanning,
     )
 }
 
+// Threads scan context (policy / rule sets / tool name / content-scan flag)
+// plus the recursion cursor; the extra `content_scanning` flag pushes it one
+// past clippy's arg threshold, which is not worth a context-struct refactor.
+#[allow(clippy::too_many_arguments)]
 fn walk_taint(
     v: &serde_json::Value,
     sink: &TaintSink,
@@ -495,6 +503,10 @@ fn walk_taint(
     policy: Option<&McpTaintPolicy>,
     rule_set_registry: &[NamedTaintRuleSet],
     tool_name: &str,
+    // When false (`taint_scanning = false`), the value-content heuristic is
+    // skipped, but the always-on sensitive-key-name blocking still runs — see
+    // the contract documented on `McpServerConfig::taint_scanning`.
+    content_scanning: bool,
 ) -> Option<String> {
     if depth > MCP_TAINT_SCAN_MAX_DEPTH {
         return Some(format!(
@@ -515,12 +527,18 @@ fn walk_taint(
             // mask an unauthorized rule B that fires in the same payload
             // (e.g. a Secret-rule warn downgrade masking a PII-rule fire).
             // We block as soon as any fired rule is not downgraded.
-            for rule in detect_outbound_text_violation_rules_with_skip(s, sink, &skip) {
-                if apply_rule_set_action(policy, tool_name, &rule, path, rule_set_registry) {
-                    return Some(format!(
-                        "taint violation: sensitive value in MCP argument '{}' (blocked by sink '{}')",
-                        path, sink.name
-                    ));
+            //
+            // This value-content heuristic is the part disabled by
+            // `taint_scanning = false`; the sensitive-key-name check in the
+            // Object branch below stays active regardless.
+            if content_scanning {
+                for rule in detect_outbound_text_violation_rules_with_skip(s, sink, &skip) {
+                    if apply_rule_set_action(policy, tool_name, &rule, path, rule_set_registry) {
+                        return Some(format!(
+                            "taint violation: sensitive value in MCP argument '{}' (blocked by sink '{}')",
+                            path, sink.name
+                        ));
+                    }
                 }
             }
             None
@@ -536,6 +554,7 @@ fn walk_taint(
                     policy,
                     rule_set_registry,
                     tool_name,
+                    content_scanning,
                 ) {
                     return Some(v);
                 }
@@ -579,6 +598,7 @@ fn walk_taint(
                     policy,
                     rule_set_registry,
                     tool_name,
+                    content_scanning,
                 ) {
                     return Some(v);
                 }
@@ -2287,7 +2307,11 @@ impl McpConnection {
         // information-flow tracker. Copy-pasted obfuscation still bypasses
         // it. Per-tool, per-path exemptions in `taint_policy` let operators
         // disable specific rules for known-safe fields.
-        if self.config.taint_scanning {
+        // Always run the scan: sensitive-key-name blocking (`Authorization`,
+        // `secret`, …) is documented as always-on, even with
+        // `taint_scanning = false` — only the value-content heuristic is gated
+        // by that flag, which is passed through as `content_scanning`.
+        {
             let policy = self.config.taint_policy.as_ref();
             // Take a `.load()` snapshot at scan start so config reloads
             // mid-walk can't change the rule set under us. The snapshot
@@ -2298,6 +2322,7 @@ impl McpConnection {
                 policy,
                 rule_sets_guard.as_slice(),
                 &raw_name,
+                self.config.taint_scanning,
             ) {
                 // `violation` is already a redacted rule description from
                 // the scanner — do NOT concatenate the raw payload or the
@@ -3342,7 +3367,7 @@ mod tests {
             "must block without policy"
         );
         assert!(
-            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &[], "navigate")
+            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &[], "navigate", true)
                 .is_none(),
             "OpaqueToken skip must allow browser tab ID under navigate.tabId"
         );
@@ -3382,16 +3407,56 @@ mod tests {
 
         // With SensitiveKeyName skipped for "$.authorization": allowed.
         assert!(
-            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &[], "send_request")
-                .is_none(),
+            scan_mcp_arguments_for_taint_with_policy(
+                &args,
+                Some(&policy),
+                &[],
+                "send_request",
+                true
+            )
+            .is_none(),
             "SensitiveKeyName skip at child path must allow the key"
         );
 
         // Policy on different tool must NOT apply.
         assert!(
-            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &[], "other_tool")
+            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &[], "other_tool", true)
                 .is_some(),
             "skip for send_request must not affect other_tool"
+        );
+    }
+
+    #[test]
+    fn key_name_blocking_stays_active_when_content_scanning_disabled() {
+        // Regression: `taint_scanning = false` is documented to disable only the
+        // value-content heuristic; sensitive-key-name blocking stays always-on.
+        // The bug gated the ENTIRE scan behind the flag, so `taint_scanning =
+        // false` (the "trusted local server" escape hatch) silently let
+        // `Authorization` / `secret` / `api_key` object keys through.
+
+        // Sensitive object key with a non-empty value — blocked even with
+        // content scanning OFF.
+        let sensitive_key = serde_json::json!({ "authorization": "some-non-empty-value" });
+        assert!(
+            scan_mcp_arguments_for_taint_with_policy(&sensitive_key, None, &[], "call", false)
+                .is_some(),
+            "sensitive key name must still be blocked with content scanning off"
+        );
+
+        // Content-only violation (opaque token under a NON-sensitive key) — NOT
+        // blocked with content scanning off...
+        let content_only =
+            serde_json::json!({ "tabId": "xAbCdEfGhIjKlMnOpQrStUvWxYz1234567890AB" });
+        assert!(
+            scan_mcp_arguments_for_taint_with_policy(&content_only, None, &[], "call", false)
+                .is_none(),
+            "content heuristic must be disabled with content scanning off"
+        );
+        // ...but IS blocked with content scanning on.
+        assert!(
+            scan_mcp_arguments_for_taint_with_policy(&content_only, None, &[], "call", true)
+                .is_some(),
+            "content heuristic must fire with content scanning on"
         );
     }
 
@@ -3421,7 +3486,8 @@ mod tests {
 
         let args = serde_json::json!({ "token": "api_key=sk-not-real" });
         assert!(
-            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &[], "call").is_some(),
+            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &[], "call", true)
+                .is_some(),
             "non-skipped KeyValueSecret must still fire even when OpaqueToken is skipped"
         );
     }
@@ -3452,7 +3518,7 @@ mod tests {
             "must block without policy"
         );
         assert!(
-            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &[], "navigate")
+            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &[], "navigate", true)
                 .is_none(),
             "tool-level default=skip must bypass scanning entirely"
         );
@@ -3476,8 +3542,14 @@ mod tests {
         // does NOT have a skip policy — must still block.
         let args = serde_json::json!({ "Authorization": "Bearer sk-not-real-token-12345" });
         assert!(
-            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &[], "send_request")
-                .is_some(),
+            scan_mcp_arguments_for_taint_with_policy(
+                &args,
+                Some(&policy),
+                &[],
+                "send_request",
+                true
+            )
+            .is_some(),
             "default=skip on `navigate` must not affect `send_request`"
         );
     }
@@ -3512,8 +3584,14 @@ mod tests {
             "must block without policy"
         );
         assert!(
-            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &registry, "navigate")
-                .is_none(),
+            scan_mcp_arguments_for_taint_with_policy(
+                &args,
+                Some(&policy),
+                &registry,
+                "navigate",
+                true
+            )
+            .is_none(),
             "rule_set with action=warn must allow the call through"
         );
     }
@@ -3542,8 +3620,14 @@ mod tests {
 
         let args = serde_json::json!({ "to": "alice@example.com" });
         assert!(
-            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &registry, "audit_tool")
-                .is_none(),
+            scan_mcp_arguments_for_taint_with_policy(
+                &args,
+                Some(&policy),
+                &registry,
+                "audit_tool",
+                true
+            )
+            .is_none(),
             "rule_set with action=log must allow the call through"
         );
     }
@@ -3572,8 +3656,14 @@ mod tests {
 
         let args = serde_json::json!({ "tabId": "xAbCdEfGhIjKlMnOpQrStUvWxYz1234567890AB" });
         assert!(
-            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &registry, "navigate")
-                .is_some(),
+            scan_mcp_arguments_for_taint_with_policy(
+                &args,
+                Some(&policy),
+                &registry,
+                "navigate",
+                true
+            )
+            .is_some(),
             "rule_set with action=block must keep the call blocked"
         );
     }
@@ -3603,8 +3693,14 @@ mod tests {
 
         let args = serde_json::json!({ "blob": "api_key=sk-not-real" });
         assert!(
-            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &registry, "do_thing")
-                .is_some(),
+            scan_mcp_arguments_for_taint_with_policy(
+                &args,
+                Some(&policy),
+                &registry,
+                "do_thing",
+                true
+            )
+            .is_some(),
             "rule_set covering OpaqueToken must not exempt KeyValueSecret"
         );
     }
@@ -3641,8 +3737,14 @@ mod tests {
 
         let args = serde_json::json!({ "tabId": "xAbCdEfGhIjKlMnOpQrStUvWxYz1234567890AB" });
         assert!(
-            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &registry, "navigate")
-                .is_none(),
+            scan_mcp_arguments_for_taint_with_policy(
+                &args,
+                Some(&policy),
+                &registry,
+                "navigate",
+                true
+            )
+            .is_none(),
             "warn must override block when both sets cover the same rule"
         );
     }
@@ -3676,7 +3778,8 @@ mod tests {
                 &args,
                 Some(&policy),
                 &registry,
-                "send_request"
+                "send_request",
+                true
             )
             .is_none(),
             "rule_set warn covering SensitiveKeyName must allow object key through"
@@ -3730,7 +3833,7 @@ mod tests {
                 &args,
                 Some(&policy),
                 &registry,
-                "post_message"
+                "post_message", true
             )
             .is_some(),
             "rule_set warn for Secret must NOT mask an unauthorized PII rule firing on the same payload"
@@ -3905,7 +4008,7 @@ mod tests {
             "metadata": { "api_key": "x", "etag": "y" }
         });
         assert!(
-            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &[], "read_file")
+            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &[], "read_file", true)
                 .is_none(),
             "wildcard $.metadata.* must exempt all direct children"
         );

@@ -810,12 +810,38 @@ pub(crate) fn write_update_script(contents: &str, extension: &str) -> Result<Pat
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    let path = std::env::temp_dir().join(format!(
+    // SECURITY: this script is `sh`-exec'd right after. Stage it in a per-user
+    // 0700 directory instead of the world-writable shared temp dir, and create
+    // the file atomically with `create_new` + mode 0600. The previous
+    // `fs::write` + later `restrict_file_permissions` (a) followed a pre-planted
+    // symlink at the predictable `librefang-update-<pid>-<millis>` path and
+    // (b) left a default-umask window a local attacker on a shared host could
+    // race to swap the contents before they ran. `create_new` refuses an
+    // existing path / dangling symlink and never follows one.
+    let dir = cli_librefang_home().join("updates");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create updater dir: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+    let path = dir.join(format!(
         "librefang-update-{}-{unique}.{extension}",
         std::process::id()
     ));
-    std::fs::write(&path, contents).map_err(|e| format!("Failed to write updater script: {e}"))?;
-    restrict_file_permissions(&path);
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts
+        .open(&path)
+        .map_err(|e| format!("Failed to create updater script: {e}"))?;
+    use std::io::Write as _;
+    f.write_all(contents.as_bytes())
+        .map_err(|e| format!("Failed to write updater script: {e}"))?;
     Ok(path)
 }
 

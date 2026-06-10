@@ -272,6 +272,8 @@ impl BrowserSession {
             .prefix("librefang-chrome-")
             .tempdir()
             .map_err(|e| format!("Failed to create Chromium user-data-dir: {e}"))?;
+        // `mut` is only exercised by the Linux root/--no-sandbox branch below.
+        #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
         let mut args = chromium_launch_args(config, user_data_dir.path());
 
         // On Linux, Chromium refuses to start as root without --no-sandbox.

@@ -79,14 +79,18 @@ impl Drop for EnvVarGuard {
 }
 
 fn set_test_env(key: &'static str, value: &str) -> EnvVarGuard {
-    // SAFETY: tests use unique env-var names per test function and are
-    // serialised by the single-threaded default test runner.  The guard
-    // removes the variable on drop so it never persists across tests.
+    // SAFETY: every caller is annotated `#[serial_test::serial(librefang_vault_key)]`,
+    // so no two env-mutating tests in this file run concurrently — process-global
+    // `set_var`/`remove_var` cannot race a `getenv` on another test thread. The
+    // guard removes the variable on drop so it never persists across tests.
+    // (The earlier claim that the default test runner is single-threaded was
+    // incorrect: `cargo test` runs tests across multiple threads in one process.)
     unsafe { std::env::set_var(key, value) };
     EnvVarGuard { key }
 }
 
 #[test]
+#[serial_test::serial(librefang_vault_key)]
 fn test_collect_rotation_key_specs_dedupes_primary_profile_key() {
     let _primary = set_test_env("LIBREFANG_TEST_ROTATION_PRIMARY_KEY_A", "key-1");
     let _secondary = set_test_env("LIBREFANG_TEST_ROTATION_SECONDARY_KEY_A", "key-2");
@@ -123,6 +127,7 @@ fn test_collect_rotation_key_specs_dedupes_primary_profile_key() {
 }
 
 #[test]
+#[serial_test::serial(librefang_vault_key)]
 fn test_collect_rotation_key_specs_prepends_distinct_primary_and_skips_missing_profiles() {
     let _secondary = set_test_env("LIBREFANG_TEST_ROTATION_SECONDARY_KEY_B", "key-2");
     let profiles = [

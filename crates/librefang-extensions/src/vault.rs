@@ -850,11 +850,19 @@ impl CredentialVault {
         output.extend_from_slice(VAULT_MAGIC);
         output.extend_from_slice(content.as_bytes());
 
-        // Atomic write to .tmp (mode 0600 on Unix) then rename over target.
-        let temp_path = self.path.with_extension("tmp");
-        {
+        // Atomic write to a PER-PROCESS staging file (mode 0600 on Unix) then
+        // rename over target. The in-process RwLock only serialises writers
+        // within one process; a fixed `vault.tmp` shared by two processes (e.g.
+        // a `librefang vault …` CLI run while the daemon is up) could truncate /
+        // clobber each other's half-written staging file before the rename,
+        // leaving a torn `vault.enc`. Mirror write_keyring_file: a unique
+        // per-process name opened with `create_new`, cleaned up on error.
+        let temp_path = self
+            .path
+            .with_extension(format!("tmp.{}", std::process::id()));
+        let write_result = (|| -> std::io::Result<()> {
             let mut opts = OpenOptions::new();
-            opts.write(true).create(true).truncate(true);
+            opts.write(true).create_new(true);
             #[cfg(unix)]
             {
                 use std::os::unix::fs::OpenOptionsExt;
@@ -863,8 +871,13 @@ impl CredentialVault {
             let mut f = opts.open(&temp_path)?;
             f.write_all(&output)?;
             f.sync_all()?;
+            drop(f);
+            std::fs::rename(&temp_path, &self.path)
+        })();
+        if let Err(e) = write_result {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(e.into());
         }
-        std::fs::rename(&temp_path, &self.path)?;
         // Enforce 0600 if a pre-existing file had looser perms.
         #[cfg(unix)]
         {
@@ -976,9 +989,22 @@ impl Drop for CredentialVault {
 }
 
 /// Derive a 256-bit key from master key + salt using Argon2id.
+///
+/// Parameters are pinned to m=19456 KiB, t=2, p=1 — the same OWASP values as
+/// `derive_wrapping_key` and `password_hash.rs`. These are exactly the argon2
+/// 0.5.x defaults, so this is byte-identical to the previous `Argon2::default()`
+/// for every existing `vault.enc` (no re-encryption needed). Pinning matters
+/// because the on-disk format stores no KDF parameters: if a future argon2
+/// crate bump changed the default, `Argon2::default()` would derive a different
+/// key and silently fail to decrypt existing vaults, with nothing on disk to
+/// recover the old derivation. `derive_wrapping_key` was already hardened this
+/// way; this closes the same gap on the master-key path.
 fn derive_key(master_key: &[u8; 32], salt: &[u8]) -> ExtensionResult<Zeroizing<[u8; 32]>> {
+    let params = Params::new(19_456, 2, 1, None)
+        .map_err(|e| ExtensionError::Vault(format!("Argon2 params error: {e}")))?;
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut derived = Zeroizing::new([0u8; 32]);
-    Argon2::default()
+    argon2
         .hash_password_into(master_key, salt, derived.as_mut())
         .map_err(|e| ExtensionError::Vault(format!("Key derivation failed: {e}")))?;
     Ok(derived)
@@ -2049,6 +2075,27 @@ fn derive_wrapping_key(fingerprint: &[u8], salt: &[u8]) -> Result<Zeroizing<[u8;
 mod tests {
     use super::*;
 
+    #[test]
+    fn derive_key_stays_byte_identical_to_the_argon2_default() {
+        // The pinned params MUST equal argon2's current default so every
+        // existing vault.enc (encrypted under Argon2::default()) still decrypts.
+        // This also fails loudly if a future argon2 bump moves the default away
+        // from m=19456/t=2/p=1 — which is exactly the silent-lockout the pin
+        // protects against.
+        let master = [7u8; 32];
+        let salt = b"0123456789abcdef";
+        let pinned = derive_key(&master, salt).unwrap();
+        let mut default_derived = [0u8; 32];
+        Argon2::default()
+            .hash_password_into(&master, salt, &mut default_derived)
+            .unwrap();
+        assert_eq!(
+            &pinned[..],
+            &default_derived[..],
+            "pinned Argon2 params must equal the crate default for vault compatibility"
+        );
+    }
+
     fn test_vault() -> (tempfile::TempDir, CredentialVault) {
         let dir = tempfile::tempdir().unwrap();
         let vault_path = dir.path().join("vault.enc");
@@ -2096,6 +2143,31 @@ mod tests {
         // Remove
         assert!(vault2.remove("GITHUB_TOKEN").unwrap());
         assert!(vault2.get("GITHUB_TOKEN").is_none());
+    }
+
+    #[test]
+    fn save_uses_per_process_temp_and_leaves_no_staging_file() {
+        let (dir, mut vault) = test_vault();
+        let key = random_key();
+        vault.init_with_key(key.clone()).unwrap();
+        vault
+            .set("K".to_string(), Zeroizing::new("v".to_string()))
+            .unwrap();
+
+        assert!(vault.exists());
+        // No staging file is left behind — neither the old fixed `vault.tmp`
+        // (which two processes would collide on) nor this process's unique
+        // `vault.tmp.<pid>`, which must be renamed onto the target.
+        let leftovers: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("vault.tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "no staging files should remain, found {leftovers:?}"
+        );
     }
 
     #[test]
