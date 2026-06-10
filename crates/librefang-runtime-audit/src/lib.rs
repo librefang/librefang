@@ -1230,14 +1230,7 @@ impl AuditLog {
             return 0;
         }
 
-        // Update the in-memory chain anchor BEFORE draining so a verify
-        // racing against this prune (blocked on the entries lock) sees a
-        // consistent (anchor, first_survivor) pair on the next acquire.
         let new_anchor = entries[drop_count - 1].hash.clone();
-        {
-            let mut anchor = self.chain_anchor.lock().unwrap_or_else(|e| e.into_inner());
-            *anchor = Some(new_anchor);
-        }
 
         // Persist: delete the same prefix from SQLite using `seq` rather
         // than `timestamp` so DB and in-memory share one source of truth
@@ -1276,6 +1269,18 @@ impl AuditLog {
             }
         }
 
+        // Mutate in-memory state only after the DB delete succeeded
+        // (mirrors `AuditLog::trim`). Order matters: anchor before drain
+        // so a verify racing against this prune (blocked on the entries
+        // lock) sees a consistent (anchor, first_survivor) pair on the
+        // next acquire. Advancing the anchor before the DB block would
+        // leave a failed DELETE with un-drained entries whose
+        // `entries[0].prev_hash` no longer matches the anchor —
+        // verify_integrity would then raise a spurious "chain break".
+        {
+            let mut anchor = self.chain_anchor.lock().unwrap_or_else(|e| e.into_inner());
+            *anchor = Some(new_anchor);
+        }
         entries.drain(..drop_count);
 
         // Refresh the external anchor file's `seq` column so the next
