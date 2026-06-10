@@ -88,6 +88,32 @@ async fn json_request(h: &Harness, method: Method, path: &str) -> (StatusCode, s
     (status, value)
 }
 
+/// Install a minimal valid active skill at `<root>/<name>/skill.toml` so the
+/// registry's `load_skill` accepts it on the approve path's `reload_skills()`.
+/// Needed because the auto-assign routes through `set_agent_skills`, which
+/// validates EVERY name on the agent's allowlist against the live registry —
+/// a phantom pre-existing entry would fail validation and skip the assign.
+fn install_active_skill(root: &std::path::Path, name: &str) {
+    let dir = root.join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    let toml = format!(
+        "[skill]\n\
+         name = \"{name}\"\n\
+         version = \"0.1.0\"\n\
+         description = \"test skill\"\n\
+         author = \"test\"\n\
+         tags = []\n\
+         \n\
+         [runtime]\n\
+         type = \"promptonly\"\n\
+         \n\
+         [source]\n\
+         type = \"local\"\n"
+    );
+    std::fs::write(dir.join("skill.toml"), toml).unwrap();
+    std::fs::write(dir.join("prompt_context.md"), "# Test\n\nstub").unwrap();
+}
+
 fn fixture_candidate(agent_id: &str, id: &str) -> CandidateSkill {
     CandidateSkill {
         id: id.to_string(),
@@ -592,6 +618,9 @@ async fn pending_approve_assigns_skill_to_creating_agent() {
     let agent = register_agent(&h, "creator_agent");
     let id = "f1f1f1f1-0000-0000-0000-000000000001";
     let root = skills_root(&h);
+    // The pre-existing allowlist entry must be a real installed skill —
+    // `set_agent_skills` validates the whole list.
+    install_active_skill(&root, "pre_existing_skill");
     storage::save_candidate(&root, &fixture_candidate(&agent, id), 20, None).unwrap();
 
     let (status, body) = json_request(
@@ -624,6 +653,7 @@ async fn pending_approve_assignment_is_idempotent() {
     let first_id = "f2f2f2f2-0000-0000-0000-000000000001";
     let second_id = "f2f2f2f2-0000-0000-0000-000000000002";
     let root = skills_root(&h);
+    install_active_skill(&root, "pre_existing_skill");
 
     storage::save_candidate(&root, &fixture_candidate(&agent, first_id), 20, None).unwrap();
     let (status, _) = json_request(
@@ -920,6 +950,10 @@ async fn approve_create_auto_assigns_skill_to_creator_allowlist() {
 
     let (kernel, _tmp) = MockKernelBuilder::new().build();
     let skills_root = kernel.home_dir().join("skills");
+    // The pre-existing allowlist entry must be a real installed skill —
+    // the auto-assign routes through `set_agent_skills`, which validates
+    // the whole list against the reloaded registry.
+    install_active_skill(&skills_root, "preexisting");
 
     let agent_id = AgentId::new();
     let session_id = SessionId::new();
