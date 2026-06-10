@@ -301,6 +301,19 @@ pub const MAX_MESSAGE_SIZE: u32 = 16 * 1024 * 1024;
 /// inter-agent message and well below the transport-layer `MAX_MESSAGE_SIZE`.
 pub const MAX_PEER_MESSAGE_BYTES: usize = 65_536; // 64 KiB
 
+/// SECURITY: Maximum time to wait for the inbound handshake frame.
+///
+/// `handle_inbound` reads the handshake as the very first thing on every
+/// accepted connection, before any HMAC / identity check, and `read_message`
+/// eagerly allocates a body buffer sized from the attacker-controlled length
+/// header (up to `MAX_MESSAGE_SIZE`) and then blocks in `read_exact`. Without a
+/// deadline an unauthenticated client could send a 4-byte header claiming
+/// 16 MiB, never send the body, and pin that allocation indefinitely — opening
+/// many such connections exhausts memory. Bounding the pre-handshake read frees
+/// the connection (and its buffer) after this timeout. A real handshake
+/// completes in well under a second.
+pub const HANDSHAKE_READ_TIMEOUT_SECS: u64 = 10;
+
 /// Configuration for a PeerNode.
 #[derive(Debug, Clone)]
 pub struct PeerConfig {
@@ -1078,8 +1091,24 @@ impl PeerNode {
     ) -> Result<(), WireError> {
         let (mut reader, mut writer) = stream.into_split();
 
-        // Read the incoming handshake request
-        let msg = read_message(&mut reader).await?;
+        // Read the incoming handshake request under a deadline. This runs
+        // before any authentication and `read_message` allocates a body buffer
+        // from the wire length header, so an unauthenticated client must not be
+        // able to claim a large frame and then stall, pinning the allocation
+        // indefinitely (pre-handshake memory-exhaustion DoS).
+        let msg = match tokio::time::timeout(
+            std::time::Duration::from_secs(HANDSHAKE_READ_TIMEOUT_SECS),
+            read_message(&mut reader),
+        )
+        .await
+        {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(WireError::HandshakeFailed(format!(
+                    "handshake not received within {HANDSHAKE_READ_TIMEOUT_SECS}s"
+                )));
+            }
+        };
         let (peer_node_id, session_key) = match &msg.kind {
             WireMessageKind::Request(WireRequest::Handshake {
                 node_id,
