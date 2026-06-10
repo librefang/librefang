@@ -272,9 +272,7 @@ impl BrowserSession {
             .prefix("librefang-chrome-")
             .tempdir()
             .map_err(|e| format!("Failed to create Chromium user-data-dir: {e}"))?;
-        // `mut` is only exercised by the Linux-only root check below; allow
-        // the lint elsewhere so non-Linux builds stay warning-clean under the
-        // workspace `warnings = "deny"` policy.
+        // `mut` is only exercised by the Linux root/--no-sandbox branch below.
         #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
         let mut args = chromium_launch_args(config, user_data_dir.path());
 
