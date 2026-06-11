@@ -910,7 +910,8 @@ def test_qr_login_emits_expired_on_platform_expiry(monkeypatch):
     monkeypatch.setattr(
         wc, "_http_request",
         _make_qr_responses(
-            (200, {"qrcode": "opaque-token"}),
+            (200, {"qrcode": "opaque-token",
+                   "qrcode_img_content": "https://login.weixin.qq.com/l/AbC123"}),
             (200, {"status": "expired"}),
         ),
     )
@@ -962,7 +963,8 @@ def test_qr_login_never_logs_full_bot_token(monkeypatch, capsys):
     monkeypatch.setattr(
         wc, "_http_request",
         _make_qr_responses(
-            (200, {"qrcode": "opaque-token"}),
+            (200, {"qrcode": "opaque-token",
+                   "qrcode_img_content": "https://login.weixin.qq.com/l/AbC123"}),
             (200, {"status": "confirmed", "bot_token": secret}),
         ),
     )
@@ -991,7 +993,8 @@ def test_qr_login_without_emit_still_returns_token(monkeypatch):
     monkeypatch.setattr(
         wc, "_http_request",
         _make_qr_responses(
-            (200, {"qrcode": "opaque-token"}),
+            (200, {"qrcode": "opaque-token",
+                   "qrcode_img_content": "https://login.weixin.qq.com/l/AbC123"}),
             (200, {"status": "confirmed", "bot_token": "tok_live"}),
         ),
     )
