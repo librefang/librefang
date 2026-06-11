@@ -721,11 +721,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      # ubuntu-latest leaves only ~14 GB free; a full-workspace `cargo nextest
-      # run --workspace` debug-compiles every lib+bin target (librefang-desktop's
-      # static archive alone is large) and overruns it — the linker dies with
-      # "No space left on device". Reclaim ~25 GB by removing preinstalled
-      # toolchains this job never uses, mirroring the nix-build job's fix (#6081).
+      # ubuntu-latest leaves only ~14 GB free; a full-workspace `cargo nextest run --workspace` debug-compiles every lib+bin target (librefang-desktop's static archive alone is large) and overruns it — the linker dies with "No space left on device".
+      # Reclaim ~25 GB by removing preinstalled toolchains this job never uses, mirroring the nix-build job's fix (#6081).
       - name: Free runner disk space
         run: |
           df -h /
