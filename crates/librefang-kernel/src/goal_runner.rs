@@ -245,8 +245,13 @@ impl GoalRunner {
     /// Snapshot the observable state of a goal's run, if one exists.
     pub fn state(&self, goal_id: GoalId) -> Option<GoalRunState> {
         let handle = self.runs.get(&goal_id)?;
-        // try_lock avoids blocking the caller (an async HTTP handler) on a tick;
-        // a momentary contention just yields no snapshot this call.
+        // try_lock avoids blocking the caller (an async HTTP handler) on a tick.
+        // A `None` here is rendered by `GET /run` as `running:false`, which is
+        // indistinguishable from "no run exists" — so the loop MUST keep its
+        // hold on this lock to a few synchronous field writes and never span an
+        // `.await` or blocking I/O (see `run_loop`, where `persist_run` runs
+        // *outside* the lock). With that discipline the hold is sub-microsecond
+        // and this `try_lock` does not realistically contend.
         handle.state.try_lock().ok().map(|s| s.clone())
     }
 
@@ -555,7 +560,14 @@ async fn run_loop<F, Fut>(
                 };
                 patch_goal(&substrate, goal_id, new_progress, new_status);
 
-                {
+                // Hold the state lock only for the in-memory field update, then
+                // drop it before the blocking SQLite `persist_run`. Readers go
+                // through `state()`'s `try_lock`, which yields `None` (rendered
+                // by `GET /run` as `running:false`, indistinguishable from "no
+                // run") whenever the lock is held — so the hold must never span
+                // I/O. `state` is written only by this single loop task, so the
+                // cloned snapshot stays consistent after the lock is released.
+                let snapshot = {
                     let mut s = state.lock().await;
                     s.iteration = iteration + 1;
                     if let Some(p) = new_progress {
@@ -563,10 +575,11 @@ async fn run_loop<F, Fut>(
                     }
                     s.last_error = None;
                     s.updated_at = Utc::now();
-                    // Mirror the post-iteration state to the durable store so a
-                    // crash before the next tick still leaves a recoverable row.
-                    persist_run(&store, &s);
-                }
+                    s.clone()
+                };
+                // Mirror the post-iteration state to the durable store so a
+                // crash before the next tick still leaves a recoverable row.
+                persist_run(&store, &snapshot);
 
                 if parsed.done {
                     break GoalRunPhase::Finished;
@@ -590,12 +603,15 @@ async fn run_loop<F, Fut>(
                         rate_limit_streak = 0;
                     }
                 }
-                {
+                // Same lock discipline as the success path: update in memory,
+                // release the lock, then persist outside it.
+                let snapshot = {
                     let mut s = state.lock().await;
                     s.last_error = Some(e);
                     s.updated_at = Utc::now();
-                    persist_run(&store, &s);
-                }
+                    s.clone()
+                };
+                persist_run(&store, &snapshot);
                 if rate_limit_streak >= MAX_RATE_LIMIT_STREAK {
                     break GoalRunPhase::RateLimited;
                 }
