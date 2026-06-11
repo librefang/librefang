@@ -615,6 +615,12 @@ pub struct MigrateScanRequest {
 pub struct ClawHubInstallRequest {
     /// ClawHub skill slug (e.g., "github-helper").
     pub slug: String,
+    /// Requested version (e.g., "latest"). The dashboard always sends this;
+    /// the installer currently resolves to the latest published version, so
+    /// the field is accepted to keep the request well-formed under
+    /// `deny_unknown_fields` rather than driving version selection yet.
+    #[serde(default)]
+    pub version: Option<String>,
     /// Install into a specific hand's workspace instead of globally.
     #[serde(default)]
     pub hand: Option<String>,
@@ -826,6 +832,28 @@ mod tests {
         let json = r#"{"name": "github"}"#;
         let req: ExtensionInstallRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.name, "github");
+    }
+
+    #[test]
+    fn clawhub_install_request_accepts_dashboard_body_with_version() {
+        // Regression: the dashboard posts `{slug, version, hand}`, but the
+        // struct used `deny_unknown_fields` without a `version` field, so the
+        // axum Json extractor rejected every ClawHub install with 422
+        // ("unknown field `version`"). The body must now deserialize.
+        let json = r#"{"slug": "github-helper", "version": "latest", "hand": null}"#;
+        let req: ClawHubInstallRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.slug, "github-helper");
+        assert_eq!(req.version.as_deref(), Some("latest"));
+        assert_eq!(req.hand, None);
+    }
+
+    #[test]
+    fn clawhub_install_request_slug_only_still_works() {
+        let req: ClawHubInstallRequest =
+            serde_json::from_str(r#"{"slug": "github-helper"}"#).unwrap();
+        assert_eq!(req.slug, "github-helper");
+        assert_eq!(req.version, None);
+        assert_eq!(req.hand, None);
     }
 
     #[test]
