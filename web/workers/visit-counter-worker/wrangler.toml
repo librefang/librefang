@@ -5,4 +5,4 @@ compatibility_date = "2025-01-01"
 [[d1_databases]]
 binding = "DB"
 database_name = "librefang-marketplace"
-database_id = "91df0bc6-e658-4463-9eba-22d5476d420a"
+database_id = "1bbf40ca-963b-4b94-b65d-062b9e7bbb42"
