@@ -41,11 +41,9 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      # ubuntu-latest leaves only ~14 GB free; the full workspace build plus
-      # its /nix/store closure exceeds that, the disk fills, and the
-      # nix-daemon gets killed mid-build ("Nix daemon disconnected
-      # unexpectedly"). Drop the preinstalled toolchains this job never
-      # touches (~25 GB) before building. See #6081.
+      # ubuntu-latest leaves only ~14 GB free; the full workspace build plus its /nix/store closure exceeds that, the disk fills, and the nix-daemon gets killed mid-build ("Nix daemon disconnected unexpectedly").
+      # Drop the preinstalled toolchains this job never touches (~25 GB) before building.
+      # See #6081.
       - name: Free runner disk space
         run: |
           df -h /
