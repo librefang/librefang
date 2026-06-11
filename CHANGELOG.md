@@ -5,6 +5,30 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.6.11] - 2026-06-11
+
+_8 PRs from 2 contributors since v2026.6.10-beta.17._
+
+### Fixed
+
+- Persist run state outside the state lock so GET /run never spuriously reports running:false (#6083) (@houko)
+- Inject embedded SDK into the sidecar --describe probe so the configure form isn't empty without pip install (#6085) (@houko)
+- Encode qrcode_img_content so the login QR is scannable (#6086) (@houko)
+
+<details>
+<summary>Documentation, maintenance, and other internal changes</summary>
+
+### Maintenance
+
+- Bump @whiskeysockets/baileys from 6.7.21 to 6.7.22 in /packages/whatsapp-gateway (#6077) (@app/dependabot)
+- Bump @types/react from 19.2.16 to 19.2.17 in /web in the web-minor-patch group (#6079) (@app/dependabot)
+- Bump the dashboard-minor-patch group in /crates/librefang-api/dashboard with 3 updates (#6080) (@app/dependabot)
+- Free runner disk space before nix build (#6082) (@houko)
+- Free runner disk space before the unit-test build (fixes ENOSPC on main) (#6089) (@houko)
+
+</details>
+
+
 ## [2026.6.10] - 2026-06-10
 
 _78 PRs from 6 contributors since v2026.5.31-beta.16._
