@@ -198,12 +198,11 @@ struct SidecarCatalogEntry {
     /// Module / script arguments passed to `command`. `--describe` is appended
     /// by `describe_sidecar()` at probe time.
     args: &'static [&'static str],
-    /// Compile-time fallback schema used when `--describe` fails at daemon
-    /// boot (e.g. Python sidecar SDK not installed). When `Some`, the fields
-    /// are seeded into the schema cache so the dashboard configure form and
-    /// the `POST /api/channels/sidecar/{name}/configure` endpoint work even
-    /// without a live Python interpreter. When `None`, the adapter shows an
-    /// empty form until the SDK is installed and the daemon is restarted.
+    /// Last-resort fallback schema for the configure form. `describe_sidecar`
+    /// injects the embedded SDK onto PYTHONPATH, so a `python3`-only host (no
+    /// `pip install`) normally gets the adapter's live schema; this is used only
+    /// when that probe fails outright (no usable `python3`, or the embedded
+    /// extract errored). `None` ⇒ empty form in that rare case.
     static_fields: Option<&'static [StaticSidecarField]>,
 }
 
