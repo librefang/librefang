@@ -2,11 +2,6 @@ use librefang_api::routes::sidecar_describe::{describe_sidecar, SidecarSchema};
 
 #[tokio::test]
 async fn describe_telegram_returns_schema_or_skips_when_sdk_missing() {
-    // `describe_sidecar` injects the binary-embedded librefang-sdk onto
-    // PYTHONPATH, so on any host with `python3` (CI Linux/macOS) the probe
-    // succeeds without `pip install`. The Err arm covers hosts with no usable
-    // `python3` at all (e.g. some Windows runners), where we skip rather than
-    // fail.
     let home = tempfile::tempdir().unwrap();
     let result = describe_sidecar(
         "python3",

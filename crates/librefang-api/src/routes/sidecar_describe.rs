@@ -40,12 +40,7 @@ pub struct SidecarSchema {
 /// Timeout is 5s — describe should be sub-second; if it hangs (the
 /// adapter's __init__ blocks on a network call before reading argv,
 /// for example) we'd rather skip than block daemon boot.
-///
-/// `home_dir` is the kernel's authoritative `KernelConfig.home_dir`. It is
-/// only used to locate / extract the binary-embedded `librefang-sdk` for the
-/// PYTHONPATH fallback below — pass `KernelApi::home_dir()`, never a recomputed
-/// `LIBREFANG_HOME` default (see `routes/channels.rs` for why that distinction
-/// matters).
+/// `home_dir`: pass `KernelApi::home_dir()`, never a recomputed `LIBREFANG_HOME`.
 pub async fn describe_sidecar(
     command: &str,
     args: &[String],
@@ -65,16 +60,7 @@ pub async fn describe_sidecar(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    // Embedded-SDK fallback, identical to the live spawn path in
-    // `librefang-channels::sidecar`: when `command` is a Python interpreter
-    // that cannot already `import librefang.sidecar`, put the daemon-bundled
-    // SDK copy on PYTHONPATH so `--describe` succeeds for a fresh user with
-    // only `python3` on PATH. Without it `--describe` fails with
-    // ModuleNotFoundError and the dashboard configure form renders empty for
-    // every adapter that lacks a hand-maintained `static_fields` fallback
-    // (telegram, ntfy, gotify, …) — even though the adapter source is embedded
-    // in the binary. No-op when a real SDK install already wins or for
-    // non-Python commands.
+    // Inject the bundled SDK onto PYTHONPATH so --describe succeeds on python3-only hosts; no-op for non-Python commands or when a real install already wins.
     let existing_pythonpath = std::env::var("PYTHONPATH").ok();
     if let Some(composed) =
         pythonpath_with_embedded(command, home_dir, existing_pythonpath.as_deref())

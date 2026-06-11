@@ -1217,13 +1217,7 @@ pub async fn build_router(
     let (bridge, initial_webhook_router) =
         channel_bridge::start_channel_bridge(kernel.clone()).await;
 
-    // Probe first-party sidecar adapters (`telegram`, `ntfy`) with
-    // `--describe` and cache their schemas so `GET /api/channels`
-    // can emit `fields[]` for unconfigured discovery rows. Runs once
-    // at boot. The probe injects the binary-embedded librefang-sdk onto
-    // PYTHONPATH, so it succeeds with just `python3` on PATH (no pip
-    // install); a genuine failure is logged at WARN and the entry falls
-    // back to its `static_fields` (or an empty form).
+    // Probe adapters with --describe at boot to populate GET /api/channels fields[]; injects embedded SDK so python3-only hosts work without pip install.
     routes::channels::populate_sidecar_schema_cache(kernel.home_dir()).await;
 
     // Initialize Prometheus metrics recorder if telemetry feature is enabled
