@@ -955,7 +955,7 @@ pub async fn execute_tool_raw(
 
         // Inter-agent tools (require kernel handle). #3576: return
         // Result<String, ToolError>; narrow to Result<String, String> here.
-        "agent_send" => tool_agent_send(input, *kernel, *caller_agent_id)
+        "agent_send" => tool_agent_send(input, *kernel, *caller_agent_id, *session_id)
             .await
             .map_err(|e| e.to_string()),
         "agent_spawn" => tool_agent_spawn(input, *kernel, *caller_agent_id, *allowed_tools)
