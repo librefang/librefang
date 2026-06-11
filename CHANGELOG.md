@@ -5,6 +5,30 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.6.11] - 2026-06-11
+
+_8 PRs from 2 contributors since v2026.6.10-beta.17._
+
+### Fixed
+
+- Persist run state outside the state lock so GET /run never spuriously reports running:false (#6083) (@houko)
+- Inject embedded SDK into the sidecar --describe probe so the configure form isn't empty without pip install (#6085) (@houko)
+- Encode qrcode_img_content so the login QR is scannable (#6086) (@houko)
+
+<details>
+<summary>Documentation, maintenance, and other internal changes</summary>
+
+### Maintenance
+
+- Bump @whiskeysockets/baileys from 6.7.21 to 6.7.22 in /packages/whatsapp-gateway (#6077) (@app/dependabot)
+- Bump @types/react from 19.2.16 to 19.2.17 in /web in the web-minor-patch group (#6079) (@app/dependabot)
+- Bump the dashboard-minor-patch group in /crates/librefang-api/dashboard with 3 updates (#6080) (@app/dependabot)
+- Free runner disk space before nix build (#6082) (@houko)
+- Free runner disk space before the unit-test build (fixes ENOSPC on main) (#6089) (@houko)
+
+</details>
+
+
 ## [2026.6.10] - 2026-06-10
 
 _78 PRs from 6 contributors since v2026.5.31-beta.16._
@@ -767,6 +791,17 @@ _308 PRs from 7 contributors since v2026.5.17-beta.12._
   `describe_sidecar` now injects the embedded SDK exactly like the spawn path (`librefang_channels::embedded_sdk::pythonpath_with_embedded`, now `pub`), so the probe succeeds with just `python3` on PATH and the dashboard gets each adapter's authoritative live schema with zero setup.
   `static_fields` drops back to a true last resort (no usable `python3`, or the embedded extract errored).
   First-party adapter `--describe` is dependency-free (stdlib + the embedded `librefang.sidecar` only — telegram talks to the Bot API over `urllib`), so no third-party install is needed to populate the form.
+- **channels(wechat): the dashboard QR code was not scannable for login — WeChat decoded it as plain text instead of a login prompt** (@houko).
+  The WeChat sidecar's `_qr_login` encoded the iLink `qrcode` field into the dashboard QR canvas, but that field is only the opaque status-poll key; the payload the WeChat app actually decodes on scan is `qrcode_img_content`.
+  The pre-migration in-process Rust adapter surfaced `qrcode_img_content` as the QR payload (the original fix in #1560 / #1572: "use iLink qr_url … so WeChat can recognise the scan"), but the sidecar migration (#5421) dropped that field and fell back to encoding the poll token, so scanning showed a meaningless string instead of logging in.
+  `_qr_login` now encodes `qrcode_img_content` (falling back to the token with a WARN only if iLink ever omits it), while still polling status with the `qrcode` token.
+- **kernel(goal-runner): an active goal run could intermittently report `running: false` via `GET /api/goals/{id}/run`** (@houko).
+  `GoalRunner::state()` snapshots the run with a non-blocking `try_lock()` (so an async HTTP handler never parks on a tick), and the route renders a `None` snapshot as `{"running": false}` — indistinguishable from "no run exists".
+  The run loop, however, held that same `state` mutex across `persist_run()`, a synchronous SQLite write (plus a potentially-blocking connection-pool checkout).
+  Under load a `GET /run` landing inside that write window lost the `try_lock` and surfaced a live run as not running — a dashboard `/run` poll would flicker "stopped", and the `goal_run_start_then_stop_with_agent` integration test flaked on it.
+  The loop now updates the in-memory state under the lock, releases it, and persists the cloned snapshot outside the lock; `state` is written only by the single loop task, so the snapshot stays consistent.
+  This shrinks the lock hold to a few synchronous field writes, so `try_lock` no longer realistically contends.
+- **channels: stop silently swallowing an upgraded operator's channel config, and explain why the WeChat/etc. configure form is empty** (@houko).
   After the channel → sidecar migration (#5317–#5459) the in-process `[channels.<vendor>]` config blocks were removed from `ChannelsConfig`, so an operator upgrading from a pre-migration build lost every configured channel on first boot: the old block deserialised into nothing, the dashboard channels page (which only renders `configured` rows) showed the WeChat card vanishing, and the only signal was a generic "Unknown config field (ignored)" log that never mentioned sidecars.
   Re-adding the channel then failed just as quietly — the configure form is schema-driven off `python3 -m librefang.sidecar.adapters.<name> --describe`, which fails when the Python sidecar SDK is not installed (and a pre-migration WeChat ran in-process Rust, so an upgrader never had it), leaving the Add-picker drawer blank with no inputs and no explanation.
   Two targeted fixes: (1) `KernelConfig::detect_legacy_channel_blocks` now flags pre-sidecar `[channels.<vendor>]` tables at boot and on `POST /api/config/reload`, emitting an actionable WARN that points at `[[sidecar_channels]]` + `pip install librefang-sdk` instead of the generic unknown-field line (mirrors the #5476 `detect_misplaced_per_agent_overrides` pattern); a scalar typo under `[channels]` still falls through to the generic pass.
