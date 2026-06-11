@@ -801,6 +801,10 @@ _308 PRs from 7 contributors since v2026.5.17-beta.12._
   Under load a `GET /run` landing inside that write window lost the `try_lock` and surfaced a live run as not running — a dashboard `/run` poll would flicker "stopped", and the `goal_run_start_then_stop_with_agent` integration test flaked on it.
   The loop now updates the in-memory state under the lock, releases it, and persists the cloned snapshot outside the lock; `state` is written only by the single loop task, so the snapshot stays consistent.
   This shrinks the lock hold to a few synchronous field writes, so `try_lock` no longer realistically contends.
+- **fix(dashboard/agents): stage agent Skills-tab edits behind a Save button instead of persisting on every click** (#6041) (@DaBlitzStein).
+  The Skills tab fired `PUT /api/agents/{id}/skills` immediately on every add / remove / Customize / Reset-to-all, with no Save button and no way to back out — unlike the Tools tab, which stages a draft and only writes on Save.
+  Skills now mirrors Tools: edits stage into a local `skillsDraft`, a Save button (disabled until dirty) issues the single PUT, and switching tabs discards the draft.
+
 - **channels: stop silently swallowing an upgraded operator's channel config, and explain why the WeChat/etc. configure form is empty** (@houko).
   After the channel → sidecar migration (#5317–#5459) the in-process `[channels.<vendor>]` config blocks were removed from `ChannelsConfig`, so an operator upgrading from a pre-migration build lost every configured channel on first boot: the old block deserialised into nothing, the dashboard channels page (which only renders `configured` rows) showed the WeChat card vanishing, and the only signal was a generic "Unknown config field (ignored)" log that never mentioned sidecars.
   Re-adding the channel then failed just as quietly — the configure form is schema-driven off `python3 -m librefang.sidecar.adapters.<name> --describe`, which fails when the Python sidecar SDK is not installed (and a pre-migration WeChat ran in-process Rust, so an upgrader never had it), leaving the Add-picker drawer blank with no inputs and no explanation.
