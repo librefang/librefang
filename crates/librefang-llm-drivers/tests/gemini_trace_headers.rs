@@ -20,21 +20,11 @@ fn request_with_trace_ids(
     CompletionRequest {
         model: "gemini-test".to_string(),
         messages: std::sync::Arc::new(vec![Message::user("hello")]),
-        tools: std::sync::Arc::new(Vec::new()),
         max_tokens: 16,
-        temperature: 0.0,
-        system: None,
-        thinking: None,
-        prompt_caching: false,
-        cache_ttl: None,
-        prompt_cache_strategy: None,
-        response_format: None,
-        timeout_secs: None,
-        extra_body: None,
         agent_id: agent_id.map(String::from),
         session_id: session_id.map(String::from),
         step_id: step_id.map(String::from),
-        reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+        ..Default::default()
     }
 }
 

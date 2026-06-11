@@ -1232,6 +1232,9 @@ async fn build_session_summary(
         session_id: Some(session_id.0.to_string()),
         step_id: None,
         reasoning_echo_policy: echo_policy,
+        sender_user_id: None,
+        sender_channel: None,
+        sender_chat_id: None,
     };
 
     invoke_summary_driver(
@@ -1696,6 +1699,9 @@ mod session_summary_tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: Default::default(),
+            sender_user_id: None,
+            sender_channel: None,
+            sender_chat_id: None,
         }
     }
 

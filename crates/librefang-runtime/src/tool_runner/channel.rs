@@ -128,6 +128,8 @@ pub(super) async fn tool_channel_send(
     kernel: Option<&Arc<dyn KernelHandle>>,
     workspace_root: Option<&Path>,
     sender_id: Option<&str>,
+    sender_channel: Option<&str>,
+    sender_chat_id: Option<&str>,
     caller_agent_id: Option<&str>,
     additional_roots: &[&Path],
 ) -> Result<String, String> {
@@ -149,6 +151,30 @@ pub(super) async fn tool_channel_send(
 
     if recipient.is_empty() {
         return Err("Recipient cannot be empty".to_string());
+    }
+
+    // Cross-chat dispatch guard (audio cross-chat leak 2026-05-19). The
+    // comparison key is the **conversation id** (`sender_chat_id` —
+    // Telegram chat_id, group JID, …), not the individual `sender_id`
+    // who spoke: in group chats the legitimate reply target is the
+    // group, not the speaker. When the bridge does not have a distinct
+    // chat id (DM path) we fall back to `sender_id` so DMs still
+    // enforce the guard. Out-of-band callers (external MCP, cron,
+    // automation triggers) pass both `None` and skip it.
+    let expected_chat = sender_chat_id.or(sender_id);
+    if let (Some(expected), Some(turn_channel)) = (expected_chat, sender_channel) {
+        if !expected.is_empty()
+            && !turn_channel.is_empty()
+            && turn_channel.eq_ignore_ascii_case(&channel)
+            && recipient != expected
+        {
+            return Err(format!(
+                "channel_send recipient '{recipient}' does not match the current chat \
+                 '{expected}' on channel '{channel}'. Cross-chat dispatch is forbidden — \
+                 to reach a different contact, use notify_owner (kernel-mediated) or wait for \
+                 that contact's inbound message."
+            ));
+        }
     }
 
     let thread_id = trim_opt_string(input["thread_id"].as_str());

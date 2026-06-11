@@ -246,9 +246,18 @@ async fn test_tool_channel_send_blocks_secret_in_text_message() {
         "recipient": "@user",
         "message": "here is the api_key=sk-abcdefghijklmnop",
     });
-    let err = tool_channel_send(&input, Some(&kernel), None, Some("test_user_id"), None, &[])
-        .await
-        .expect_err("channel_send must reject tainted message");
+    let err = tool_channel_send(
+        &input,
+        Some(&kernel),
+        None,
+        Some("test_user_id"),
+        None,
+        None,
+        None,
+        &[],
+    )
+    .await
+    .expect_err("channel_send must reject tainted message");
     assert!(
         err.contains("taint") || err.contains("violation"),
         "expected taint violation, got: {err}"
@@ -267,9 +276,18 @@ async fn test_tool_channel_send_blocks_secret_in_image_caption() {
         "image_url": "https://example.com/cat.png",
         "message": "see attached. token=sk-abcdefghijklmnop",
     });
-    let err = tool_channel_send(&input, Some(&kernel), None, Some("test_user_id"), None, &[])
-        .await
-        .expect_err("image caption must be sink-checked");
+    let err = tool_channel_send(
+        &input,
+        Some(&kernel),
+        None,
+        Some("test_user_id"),
+        None,
+        None,
+        None,
+        &[],
+    )
+    .await
+    .expect_err("image caption must be sink-checked");
     assert!(
         err.contains("taint") || err.contains("violation"),
         "expected taint violation, got: {err}"
@@ -288,9 +306,18 @@ async fn test_tool_channel_send_blocks_secret_in_poll_question() {
         "poll_question": "guess my api_key=sk-abcdefghijklmnop",
         "poll_options": ["yes", "no"],
     });
-    let err = tool_channel_send(&input, Some(&kernel), None, Some("test_user_id"), None, &[])
-        .await
-        .expect_err("poll question must be sink-checked");
+    let err = tool_channel_send(
+        &input,
+        Some(&kernel),
+        None,
+        Some("test_user_id"),
+        None,
+        None,
+        None,
+        &[],
+    )
+    .await
+    .expect_err("poll question must be sink-checked");
     assert!(
         err.contains("taint") || err.contains("violation"),
         "expected taint violation, got: {err}"
@@ -318,6 +345,8 @@ async fn test_tool_channel_send_auto_fills_recipient_from_sender_id() {
         None,
         Some("12345_telegram"),
         None,
+        None,
+        None,
         &[],
     )
     .await;
@@ -341,12 +370,255 @@ async fn test_tool_channel_send_requires_recipient_without_sender_id() {
         // recipient intentionally omitted
         "message": "Hello!",
     });
-    let err = tool_channel_send(&input, Some(&kernel), None, None, None, &[])
+    let err = tool_channel_send(&input, Some(&kernel), None, None, None, None, None, &[])
         .await
         .expect_err("channel_send must require recipient without sender_id");
     assert!(
         err.contains("Missing 'recipient'"),
         "Expected missing recipient error, got: {err}"
+    );
+}
+
+// ── cross-chat dispatch guard (audio leak 2026-05-19) ──────────────────────
+//
+// Refs: the MCP bridge feeds `sender_id` / `sender_channel` from the
+// `X-LibreFang-Current-Peer-Jid` / `X-LibreFang-Current-Channel` headers
+// the `claude-code` driver writes per invocation. `channel_send` must
+// reject dispatches that try to retarget a *different* recipient on the
+// *same* channel as the inbound turn — that's the cross-chat leak
+// pattern. Different-channel dispatches and "no peer scope" callers
+// stay allowed.
+
+#[tokio::test]
+async fn test_channel_send_rejects_recipient_mismatch_on_same_channel() {
+    let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+        approval_requests: Arc::new(AtomicUsize::new(0)),
+        user_gate_override: None,
+    });
+    let input = serde_json::json!({
+        "channel": "whatsapp",
+        // Different from the turn's peer JID — would dispatch to the
+        // wrong contact on the same channel.
+        "recipient": "999999@s.whatsapp.net",
+        "message": "leaked content",
+    });
+    let err = tool_channel_send(
+        &input,
+        Some(&kernel),
+        None,
+        Some("393760105565@s.whatsapp.net"),
+        Some("whatsapp"),
+        None,
+        None,
+        &[],
+    )
+    .await
+    .expect_err("cross-chat dispatch must be rejected");
+    assert!(
+        err.contains("does not match the current chat")
+            && err.contains("Cross-chat dispatch is forbidden"),
+        "expected cross-chat guard error, got: {err}"
+    );
+    // Diagnostic clarity — the offending recipient and expected peer
+    // must both appear so the model gets actionable feedback.
+    assert!(err.contains("999999@s.whatsapp.net"));
+    assert!(err.contains("393760105565@s.whatsapp.net"));
+    // Channel match is case-insensitive: "whatsapp" vs "WhatsApp" must
+    // still trigger. Probe explicitly.
+    let input_upper = serde_json::json!({
+        "channel": "WhatsApp",
+        "recipient": "999999@s.whatsapp.net",
+        "message": "leaked content",
+    });
+    let err_upper = tool_channel_send(
+        &input_upper,
+        Some(&kernel),
+        None,
+        Some("393760105565@s.whatsapp.net"),
+        Some("whatsapp"),
+        None,
+        None,
+        &[],
+    )
+    .await
+    .expect_err("case-mixed channel must still trip the guard");
+    assert!(err_upper.contains("Cross-chat dispatch is forbidden"));
+}
+
+#[tokio::test]
+async fn test_channel_send_allows_recipient_mismatch_on_different_channel() {
+    // Cross-*channel* escalation is legitimate (e.g. agent wants to
+    // send an email reply while replying to a WhatsApp peer). The
+    // guard must only fire on intra-channel re-targeting.
+    let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+        approval_requests: Arc::new(AtomicUsize::new(0)),
+        user_gate_override: None,
+    });
+    let input = serde_json::json!({
+        "channel": "email",
+        "recipient": "ops@example.com",
+        "message": "FYI from the agent",
+    });
+    let result = tool_channel_send(
+        &input,
+        Some(&kernel),
+        None,
+        Some("393760105565@s.whatsapp.net"),
+        Some("whatsapp"),
+        None,
+        None,
+        &[],
+    )
+    .await;
+    // We do not actually want the dispatch to succeed in this test —
+    // the mock kernel doesn't implement send_channel_message — but the
+    // error must NOT be the cross-chat guard. Any other failure (mock
+    // "not implemented", missing channel adapter, etc.) means the
+    // guard correctly let the call through.
+    if let Err(err) = result {
+        assert!(
+            !err.contains("Cross-chat dispatch is forbidden"),
+            "different-channel dispatch must NOT trip the cross-chat guard; got: {err}"
+        );
+        assert!(
+            !err.contains("does not match the current chat"),
+            "different-channel dispatch must NOT trip the cross-chat guard; got: {err}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_channel_send_allows_when_sender_id_unset() {
+    // Backward compat: out-of-band callers (cron, automation triggers
+    // with no inbound peer, external MCP clients without the new
+    // headers) must keep working with no peer scope enforced.
+    let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+        approval_requests: Arc::new(AtomicUsize::new(0)),
+        user_gate_override: None,
+    });
+    let input = serde_json::json!({
+        "channel": "whatsapp",
+        "recipient": "393760105565@s.whatsapp.net",
+        "message": "scheduled greeting from cron",
+    });
+    let result = tool_channel_send(
+        &input,
+        Some(&kernel),
+        None,
+        None, // sender_id unset → no peer scope
+        None, // sender_channel unset → no peer scope
+        None, // sender_chat_id unset → no peer scope
+        None,
+        &[],
+    )
+    .await;
+    if let Err(err) = result {
+        assert!(
+            !err.contains("Cross-chat dispatch is forbidden"),
+            "unset peer scope must NOT trip the cross-chat guard; got: {err}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_channel_send_allows_matching_recipient_same_channel() {
+    // Positive case: same recipient as the turn's peer on the same
+    // channel — the normal "agent replies to who messaged it" flow
+    // must pass the guard.
+    let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+        approval_requests: Arc::new(AtomicUsize::new(0)),
+        user_gate_override: None,
+    });
+    let input = serde_json::json!({
+        "channel": "whatsapp",
+        "recipient": "393760105565@s.whatsapp.net",
+        "message": "ok",
+    });
+    let result = tool_channel_send(
+        &input,
+        Some(&kernel),
+        None,
+        Some("393760105565@s.whatsapp.net"),
+        Some("whatsapp"),
+        None,
+        None,
+        &[],
+    )
+    .await;
+    if let Err(err) = result {
+        assert!(
+            !err.contains("Cross-chat dispatch is forbidden"),
+            "matching recipient on same channel must NOT trip the guard; got: {err}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_tool_channel_send_group_chat_reply_to_chat_id_passes() {
+    // Regression for the houko 2026-05-22 review on #5282: in a group
+    // chat, the legitimate `recipient` is the **conversation id**
+    // (chat_id / group jid), NOT the individual speaker (sender_id).
+    // The guard must compare against `sender_chat_id` and let group
+    // replies through; comparing against `sender_id` would block every
+    // group reply (the recipient field is the group, not the speaker).
+    let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+        approval_requests: Arc::new(AtomicUsize::new(0)),
+        user_gate_override: None,
+    });
+    let input = serde_json::json!({
+        "channel": "whatsapp",
+        "recipient": "120363999999@g.us",  // group jid (chat_id)
+        "message": "reply to the group",
+    });
+    let result = tool_channel_send(
+        &input,
+        Some(&kernel),
+        None,
+        Some("393760105565@s.whatsapp.net"), // sender_id: individual speaker
+        Some("whatsapp"),
+        Some("120363999999@g.us"), // sender_chat_id: group
+        None,
+        &[],
+    )
+    .await;
+    if let Err(err) = result {
+        assert!(
+            !err.contains("Cross-chat dispatch is forbidden"),
+            "reply to group chat_id must NOT trip the cross-chat guard \
+             (chat_id is the conversation, sender_id is the speaker); got: {err}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_tool_channel_send_group_chat_cross_dispatch_rejected() {
+    // Companion to the positive group-chat test: when sender_chat_id is
+    // populated (group context) but the recipient targets a *different*
+    // chat on the same channel, the guard must still fire.
+    let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+        approval_requests: Arc::new(AtomicUsize::new(0)),
+        user_gate_override: None,
+    });
+    let input = serde_json::json!({
+        "channel": "whatsapp",
+        "recipient": "120363888888@g.us",  // different group
+        "message": "cross-chat attempt",
+    });
+    let err = tool_channel_send(
+        &input,
+        Some(&kernel),
+        None,
+        Some("393760105565@s.whatsapp.net"),
+        Some("whatsapp"),
+        Some("120363999999@g.us"), // current group
+        None,
+        &[],
+    )
+    .await
+    .expect_err("cross-group dispatch on same channel must be rejected");
+    assert!(
+        err.contains("Cross-chat dispatch is forbidden"),
+        "expected cross-chat guard error, got: {err}"
     );
 }
 
@@ -987,6 +1259,8 @@ async fn test_channel_send_mirrors_to_channel_owner_session() {
         Some(&kernel),
         None,
         Some("99999"),
+        None,
+        None,
         Some("caller-agent-id"),
         &[],
     )
@@ -1038,6 +1312,8 @@ async fn test_channel_send_mirrors_when_caller_is_channel_owner() {
         Some(&kernel),
         None,
         Some("42"),
+        None,
+        None,
         Some("same-agent"),
         &[],
     )
@@ -1076,6 +1352,8 @@ async fn test_channel_send_succeeds_even_when_mirror_fails() {
         Some(&kernel),
         None,
         Some("77"),
+        None,
+        None,
         Some("caller-id"),
         &[],
     )

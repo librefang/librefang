@@ -826,6 +826,9 @@ impl LibreFangKernel {
                 session_id: None,
                 step_id: None,
                 reasoning_echo_policy: echo_policy,
+                sender_user_id: None,
+                sender_channel: None,
+                sender_chat_id: None,
             };
             let (complexity, routed_model) = router.select_model(&probe);
             // Check if the routed model's provider has a valid API key.

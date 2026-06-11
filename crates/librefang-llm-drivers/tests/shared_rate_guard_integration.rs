@@ -89,21 +89,8 @@ fn simple_request(model: &str) -> CompletionRequest {
     CompletionRequest {
         model: model.to_string(),
         messages: std::sync::Arc::new(vec![Message::user("hello")]),
-        tools: std::sync::Arc::new(Vec::new()),
         max_tokens: 16,
-        temperature: 0.0,
-        system: None,
-        thinking: None,
-        prompt_caching: false,
-        cache_ttl: None,
-        prompt_cache_strategy: None,
-        response_format: None,
-        timeout_secs: None,
-        extra_body: None,
-        agent_id: None,
-        session_id: None,
-        step_id: None,
-        reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+        ..Default::default()
     }
 }
 

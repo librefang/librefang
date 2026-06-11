@@ -1107,6 +1107,9 @@ pub async fn run_agent_loop(
             session_id: Some(session.id.to_string()),
             step_id: Some(iteration.to_string()),
             reasoning_echo_policy,
+            sender_user_id: sender_user_id.clone(),
+            sender_channel: sender_channel.clone(),
+            sender_chat_id: sender_chat_id.clone(),
         };
         // The stripped-tools request has been built; restore tools for any
         // subsequent iteration (the degrade is a single forced prose turn).

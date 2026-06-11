@@ -196,10 +196,13 @@ pub async fn execute_tool_raw(
         process_registry,
         sender_id,
         channel,
-        // Previously bound to `_` (only consumed by `execute_tool` upstream
-        // to thread into `DeferredToolExecution.chat_id`). Now also consumed
-        // by the MCP dispatch arm to populate `CallerContext.chat_id`
-        // (#5699), so it's a real binding.
+        // A real binding (no longer `_`) with three consumers:
+        // `execute_tool` upstream threads it into
+        // `DeferredToolExecution.chat_id` for approval-resume routing; the
+        // MCP dispatch arm populates `CallerContext.chat_id` (#5699); and
+        // `channel_send` uses it for the cross-chat dispatch guard (group
+        // reply must compare against the conversation id, not the individual
+        // sender).
         chat_id,
         session_id,
         spill_threshold_bytes,
@@ -1178,6 +1181,8 @@ pub async fn execute_tool_raw(
                 *kernel,
                 *workspace_root,
                 *sender_id,
+                *channel,
+                *chat_id,
                 *caller_agent_id,
                 &extra_refs,
             )

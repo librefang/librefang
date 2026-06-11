@@ -1419,6 +1419,31 @@ pub async fn mcp_http(
         .and_then(|s| s.parse::<librefang_types::agent::AgentId>().ok())
         .and_then(|id| state.kernel.agent_registry().get(id));
 
+    // Peer scope of the current turn — forwarded by subprocess drivers
+    // (e.g. `claude-code`) so `channel_send` can reject same-channel
+    // recipient mismatches (cross-chat audio leak 2026-05-19). External
+    // MCP clients without these headers run unguarded.
+    let current_peer_jid = headers
+        .get("x-librefang-current-peer-jid")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty());
+    let current_channel = headers
+        .get("x-librefang-current-channel")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty());
+    // Platform conversation id (Telegram chat_id, group jid, …). Distinct
+    // from `current_peer_jid` for group chats; coincides in DMs. The
+    // cross-chat guard in `tool_runner::channel` compares against this
+    // (not the individual sender) so legitimate group replies pass while
+    // cross-chat sends are still rejected.
+    let current_chat_id = headers
+        .get("x-librefang-current-chat-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty());
+
     // Check if this is a tools/call that needs real execution
     let method = request["method"].as_str().unwrap_or("");
     if method == "tools/call" {
@@ -1517,9 +1542,9 @@ pub async fn mcp_http(
             docker_opt,
             Some(state.kernel.processes()),
             None, // process_registry (network bridge doesn't run agent tools)
-            None, // sender_id (MCP HTTP has no sender context)
-            None, // channel
-            None, // chat_id (MCP HTTP has no conversation context either)
+            current_peer_jid.as_deref(), // sender_id (X-LibreFang-Current-Peer-Jid)
+            current_channel.as_deref(), // channel (X-LibreFang-Current-Channel)
+            current_chat_id.as_deref(), // chat_id (X-LibreFang-Current-Chat-Id)
             None, // checkpoint_manager (network bridge doesn't run agent tools)
             None, // interrupt (MCP HTTP calls have no session-scoped cancellation)
             None, // session_id (MCP HTTP is not tied to a live session)

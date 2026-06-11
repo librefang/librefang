@@ -678,6 +678,9 @@ async fn summarise_batch(
         session_id: None,
         step_id: None,
         reasoning_echo_policy,
+        sender_user_id: None,
+        sender_channel: None,
+        sender_chat_id: None,
     };
 
     let response = driver

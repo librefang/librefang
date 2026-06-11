@@ -119,6 +119,9 @@ async fn test_mock_llm_driver_recording() {
         session_id: None,
         step_id: None,
         reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+        sender_user_id: None,
+        sender_channel: None,
+        sender_chat_id: None,
     };
 
     // First call
@@ -301,6 +304,9 @@ async fn test_mock_llm_driver_custom_tokens_and_stop_reason() {
         session_id: None,
         step_id: None,
         reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+        sender_user_id: None,
+        sender_channel: None,
+        sender_chat_id: None,
     };
 
     let resp = driver.complete(request).await.unwrap();
@@ -347,6 +353,9 @@ async fn test_failing_llm_driver() {
         session_id: None,
         step_id: None,
         reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+        sender_user_id: None,
+        sender_channel: None,
+        sender_chat_id: None,
     };
 
     let result = driver.complete(request).await;

@@ -1014,7 +1014,11 @@ fn build_channel_section(
                  with channel=\"{channel}\" and recipient=\"{id}\". Set `image_url` for photos, \
                  `file_url` or `file_path` for file attachments, `poll_question` + `poll_options` \
                  to create a poll (add `poll_is_quiz` and `poll_correct_option` for a quiz). \
-                 Your normal text replies are sent automatically — only use `channel_send` when you need to send media.",
+                 Your normal text replies are sent automatically — only use `channel_send` when you need to send media.\n\n\
+                 The `recipient` MUST be \"{id}\" for this turn. NEVER substitute another contact's id \
+                 on the same channel — that is a cross-chat dispatch and will be refused by the \
+                 runtime. To reach a different contact, use `notify_owner` (kernel-mediated) or wait \
+                 for that contact's inbound message.",
             ));
         } else {
             section.push_str(
