@@ -2965,7 +2965,7 @@ mod tests {
     fn sidecar_default_agent_roundtrip_5294() {
         // Absent → None (no-op for deployments that don't need routing pin).
         let minimal = cfg("telegram", "python3", vec![]);
-        assert!(minimal.default_agent.is_none());
+        assert!(minimal.agent.is_none());
 
         // Explicit value round-trips so channel_bridge.rs can seed the router.
         let c: librefang_types::config::SidecarChannelConfig =
@@ -2976,7 +2976,7 @@ mod tests {
                 "default_agent": "fandangorodelo",
             }))
             .unwrap();
-        assert_eq!(c.default_agent.as_deref(), Some("fandangorodelo"));
+        assert_eq!(c.agent.as_deref(), Some("fandangorodelo"));
     }
 
     // #5841 — command-policy + message-coalescing ported to sidecars.
