@@ -2561,7 +2561,7 @@ pub async fn start_channel_bridge_with_config(
         // the sidecar reader loop stamps from the same `name`.
         adapters.push((
             adapter,
-            sidecar_config.default_agent.clone(),
+            sidecar_config.agent.clone(),
             Some(sidecar_config.name.clone()),
         ));
     }
