@@ -43,8 +43,7 @@ struct ProviderCatalogFile {
 /// `registry_mirror` is forwarded to `registry_sync` (GitHub proxy prefix
 /// for CN / air-gapped users).
 ///
-/// `registry_host` is forwarded to `registry_sync` (full base URL of the
-/// forge hosting the registry; `None` = GitHub).
+/// `registry_host` is forwarded to `registry_sync` (full base URL of the forge hosting the registry; `None` = GitHub).
 pub async fn sync_catalog_to(
     home_dir: &std::path::Path,
     registry_mirror: &str,

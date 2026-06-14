@@ -18,9 +18,7 @@ const REGISTRY_REPO_PATH: &str = "librefang/librefang-registry";
 /// Branch the registry sync tracks.
 const REGISTRY_BRANCH: &str = "main";
 
-/// The three forge-specific URLs/strings the sync needs: where to download the
-/// tarball, where to `git clone`, and the top-level directory name inside the
-/// downloaded tarball (which the extractor strips).
+/// The three forge-specific URLs/strings the sync needs: where to download the tarball, where to `git clone`, and the top-level directory name inside the downloaded tarball (which the extractor strips).
 struct RegistryUrls {
     /// HTTP tarball URL (no auth required).
     tarball_url: String,
@@ -30,22 +28,18 @@ struct RegistryUrls {
     tarball_prefix: String,
 }
 
-/// Derive the tarball / clone / prefix values from the configured registry
-/// host.
+/// Derive the tarball / clone / prefix values from the configured registry host.
 ///
-/// `registry_host` is the full base URL of the forge hosting the registry
-/// (e.g. `"https://codeberg.org"`). When `None`, the values are byte-identical
-/// to the GitHub defaults shipped in earlier releases.
+/// `registry_host` is the full base URL of the forge hosting the registry (e.g. `"https://codeberg.org"`).
+/// When `None`, the values are byte-identical to the GitHub defaults shipped in earlier releases.
 ///
-/// GitHub and Forgejo (which Codeberg runs) disagree on both the archive path
-/// and the tarball's top-level directory:
+/// GitHub and Forgejo (which Codeberg runs) disagree on both the archive path and the tarball's top-level directory:
 ///
 /// - GitHub: `…/archive/refs/heads/{branch}.tar.gz`, prefix `{repo}-{branch}/`.
 /// - Forgejo/Codeberg: `…/archive/{branch}.tar.gz`, prefix `{repo}/`.
 ///
-/// The git clone URL is `{host}/{repo}.git` on both. We branch on whether a
-/// host override is set: `None` keeps the GitHub scheme, any explicit host uses
-/// the Forgejo scheme (the only non-GitHub forge this slice targets).
+/// The git clone URL is `{host}/{repo}.git` on both.
+/// We branch on whether a host override is set: `None` keeps the GitHub scheme, any explicit host uses the Forgejo scheme (the only non-GitHub forge this slice targets).
 fn registry_urls(registry_host: Option<&str>) -> RegistryUrls {
     let repo_name = REGISTRY_REPO_PATH
         .rsplit('/')
@@ -144,9 +138,8 @@ pub fn refresh_registry_checkout(
 /// `"https://ghproxy.cn"` rewrites `https://github.com/...` to
 /// `https://ghproxy.cn/https://github.com/...`).
 ///
-/// `registry_host` is the optional full base URL of the forge hosting the
-/// registry (e.g. `Some("https://codeberg.org")`). `None` keeps the GitHub
-/// defaults — see [`registry_urls`].
+/// `registry_host` is the optional full base URL of the forge hosting the registry (e.g. `Some("https://codeberg.org")`).
+/// `None` keeps the GitHub defaults — see [`registry_urls`].
 pub fn sync_registry(
     home_dir: &Path,
     cache_ttl_secs: u64,

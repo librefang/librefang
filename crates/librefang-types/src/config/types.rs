@@ -5319,12 +5319,9 @@ pub struct RegistryConfig {
     /// `https://github.com/...` → `https://ghproxy.cn/https://github.com/...`
     #[serde(default)]
     pub registry_mirror: String,
-    /// Full base URL of the forge hosting the registry repository
-    /// (`librefang/librefang-registry`). When `None` (the default), the
-    /// registry is fetched from GitHub, producing byte-identical URLs to
-    /// previous releases. Set to a full base URL such as
-    /// `"https://codeberg.org"` to consume a Codeberg-hosted registry; the
-    /// tarball, git-clone, and tarball-prefix values are all derived from it.
+    /// Full base URL of the forge hosting the registry repository (`librefang/librefang-registry`).
+    /// When `None` (the default), the registry is fetched from GitHub, producing byte-identical URLs to previous releases.
+    /// Set to a full base URL such as `"https://codeberg.org"` to consume a Codeberg-hosted registry; the tarball, git-clone, and tarball-prefix values are all derived from it.
     #[serde(default)]
     pub registry_host: Option<String>,
 }
