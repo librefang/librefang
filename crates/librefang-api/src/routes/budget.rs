@@ -597,85 +597,126 @@ async fn persist_budget(
         ));
     }
 
-    // Read the existing file. A read failure on an existing file MUST
-    // abort — falling back to "" would silently drop every other section
-    // (`[[users]]`, `[mcp_servers]`, `[[taint_rules]]`, …) on the next
-    // write, exactly the failure mode `persist_users` documents.
-    //
-    // Async-native I/O so we don't block the tokio worker while reading
-    // config.toml — refs `docs/issues/blocking-fs-on-executor.md`.
-    let raw = match tokio::fs::read_to_string(&config_path).await {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => {
-            return Err(PersistBudgetError::Internal(format!(
-                "could not read existing config.toml: {e}"
+    // Phase 9 settings-to-store: under surreal-backend, persist the validated
+    // `[budget]` section to the DB config store (as one `config_overrides`
+    // entry) and apply it via replace_config — so budget edits work under a
+    // read-only config.toml (K8s ConfigMap). The sqlite-only fallback keeps the
+    // legacy config.toml write + reload below.
+    #[cfg(feature = "surreal-backend")]
+    {
+        use crate::config_store_overlay::{
+            read_config_overrides, resolve_config_with_overrides, write_config_overrides,
+        };
+        let storage = state.kernel.config_ref().storage.clone();
+        let mut overrides = read_config_overrides(&storage)
+            .await
+            .map_err(PersistBudgetError::Internal)?;
+        overrides.insert(
+            "budget".to_string(),
+            serde_json::to_value(new_budget)
+                .map_err(|e| PersistBudgetError::Internal(e.to_string()))?,
+        );
+        let (mut merged, raw) = resolve_config_with_overrides(&config_path, &overrides)
+            .map_err(|e| PersistBudgetError::Internal(format!("invalid config after edit: {e}")))?;
+        merged.clamp_bounds();
+        if let Err(errors) = state.kernel.validate_config_for_reload(&merged) {
+            return Err(PersistBudgetError::BadRequest(format!(
+                "invalid config: {}",
+                errors.join("; ")
             )));
         }
-    };
-    let mut doc: toml_edit::DocumentMut = raw.parse().map_err(|e| {
-        PersistBudgetError::Internal(format!(
-            "config.toml is not valid TOML — refusing to overwrite: {e}"
-        ))
-    })?;
-
-    // Serialise `BudgetConfig` to a TOML table and replace the existing
-    // `[budget]` table. `toml_edit::ser::to_document` reorders mixed
-    // scalar/table layouts that the strict `toml` crate rejects with
-    // `ValueAfterTable`, which matters here because `providers` is a
-    // nested map sitting alongside scalar f64 fields.
-    let serialised = toml_edit::ser::to_document(new_budget)
-        .map_err(|e| PersistBudgetError::Internal(format!("serialize budget: {e}")))?;
-    doc.insert(
-        "budget",
-        toml_edit::Item::Table(serialised.as_table().clone()),
-    );
-
-    let new_toml = doc.to_string();
-    let mut parsed: librefang_types::config::KernelConfig = toml::from_str(&new_toml)
-        .map_err(|e| PersistBudgetError::Internal(format!("invalid config after edit: {e}")))?;
-    parsed.clamp_bounds();
-    if let Err(errors) = state.kernel.validate_config_for_reload(&parsed) {
-        // The operator's submitted budget produced a config the kernel
-        // refuses to hot-reload (e.g. it would touch a restart-only
-        // field). That's a client-fixable input problem, not a server
-        // failure — surface as `BadRequest` so the handler returns 400.
-        return Err(PersistBudgetError::BadRequest(format!(
-            "invalid config: {}",
-            errors.join("; ")
-        )));
+        write_config_overrides(&storage, &overrides)
+            .await
+            .map_err(PersistBudgetError::Internal)?;
+        state
+            .kernel
+            .replace_config(merged, raw)
+            .await
+            .map_err(|e| PersistBudgetError::Internal(format!("apply failed: {e}")))?;
     }
 
-    // Snapshot the prior config to `backups/config.toml.prev` before we
-    // overwrite, so an operator can hand-restore if a budget edit
-    // produces an unexpected reload outcome. Best-effort: a failure
-    // here is logged and ignored, the primary write below is the
-    // authoritative path. Async-native (`tokio::fs`) to keep the
-    // executor free during the dotfile copy.
-    if let Some(home_dir) = config_path.parent() {
-        let backups_dir = home_dir.join("backups");
-        if tokio::fs::create_dir_all(&backups_dir).await.is_ok() {
-            let _ = tokio::fs::copy(&config_path, backups_dir.join("config.toml.prev")).await;
+    #[cfg(not(feature = "surreal-backend"))]
+    {
+        // Read the existing file. A read failure on an existing file MUST
+        // abort — falling back to "" would silently drop every other section
+        // (`[[users]]`, `[mcp_servers]`, `[[taint_rules]]`, …) on the next
+        // write, exactly the failure mode `persist_users` documents.
+        //
+        // Async-native I/O so we don't block the tokio worker while reading
+        // config.toml — refs `docs/issues/blocking-fs-on-executor.md`.
+        let raw = match tokio::fs::read_to_string(&config_path).await {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => {
+                return Err(PersistBudgetError::Internal(format!(
+                    "could not read existing config.toml: {e}"
+                )));
+            }
+        };
+        let mut doc: toml_edit::DocumentMut = raw.parse().map_err(|e| {
+            PersistBudgetError::Internal(format!(
+                "config.toml is not valid TOML — refusing to overwrite: {e}"
+            ))
+        })?;
+
+        // Serialise `BudgetConfig` to a TOML table and replace the existing
+        // `[budget]` table. `toml_edit::ser::to_document` reorders mixed
+        // scalar/table layouts that the strict `toml` crate rejects with
+        // `ValueAfterTable`, which matters here because `providers` is a
+        // nested map sitting alongside scalar f64 fields.
+        let serialised = toml_edit::ser::to_document(new_budget)
+            .map_err(|e| PersistBudgetError::Internal(format!("serialize budget: {e}")))?;
+        doc.insert(
+            "budget",
+            toml_edit::Item::Table(serialised.as_table().clone()),
+        );
+
+        let new_toml = doc.to_string();
+        let mut parsed: librefang_types::config::KernelConfig = toml::from_str(&new_toml)
+            .map_err(|e| PersistBudgetError::Internal(format!("invalid config after edit: {e}")))?;
+        parsed.clamp_bounds();
+        if let Err(errors) = state.kernel.validate_config_for_reload(&parsed) {
+            // The operator's submitted budget produced a config the kernel
+            // refuses to hot-reload (e.g. it would touch a restart-only
+            // field). That's a client-fixable input problem, not a server
+            // failure — surface as `BadRequest` so the handler returns 400.
+            return Err(PersistBudgetError::BadRequest(format!(
+                "invalid config: {}",
+                errors.join("; ")
+            )));
         }
+
+        // Snapshot the prior config to `backups/config.toml.prev` before we
+        // overwrite, so an operator can hand-restore if a budget edit
+        // produces an unexpected reload outcome. Best-effort: a failure
+        // here is logged and ignored, the primary write below is the
+        // authoritative path. Async-native (`tokio::fs`) to keep the
+        // executor free during the dotfile copy.
+        if let Some(home_dir) = config_path.parent() {
+            let backups_dir = home_dir.join("backups");
+            if tokio::fs::create_dir_all(&backups_dir).await.is_ok() {
+                let _ = tokio::fs::copy(&config_path, backups_dir.join("config.toml.prev")).await;
+            }
+        }
+
+        // `atomic_write` is synchronous because it relies on
+        // `std::fs::File::sync_all` for the fsync-then-rename durability
+        // guarantee. Dispatch via `spawn_blocking` so the fsync syscall
+        // doesn't stall the axum worker (refs
+        // `docs/issues/blocking-fs-on-executor.md`).
+        let bytes = new_toml.clone().into_bytes();
+        let write_path = config_path.clone();
+        tokio::task::spawn_blocking(move || crate::atomic_write(&write_path, &bytes))
+            .await
+            .map_err(|e| PersistBudgetError::Internal(format!("write task join: {e}")))?
+            .map_err(|e| PersistBudgetError::Internal(format!("write failed: {e}")))?;
+
+        state
+            .kernel
+            .reload_config()
+            .await
+            .map_err(|e| PersistBudgetError::Internal(format!("reload failed: {e}")))?;
     }
-
-    // `atomic_write` is synchronous because it relies on
-    // `std::fs::File::sync_all` for the fsync-then-rename durability
-    // guarantee. Dispatch via `spawn_blocking` so the fsync syscall
-    // doesn't stall the axum worker (refs
-    // `docs/issues/blocking-fs-on-executor.md`).
-    let bytes = new_toml.clone().into_bytes();
-    let write_path = config_path.clone();
-    tokio::task::spawn_blocking(move || crate::atomic_write(&write_path, &bytes))
-        .await
-        .map_err(|e| PersistBudgetError::Internal(format!("write task join: {e}")))?
-        .map_err(|e| PersistBudgetError::Internal(format!("write failed: {e}")))?;
-
-    state
-        .kernel
-        .reload_config()
-        .await
-        .map_err(|e| PersistBudgetError::Internal(format!("reload failed: {e}")))?;
 
     Ok(())
 }

@@ -617,6 +617,17 @@ pub(crate) fn is_writable_config_path(path: &str) -> bool {
         "mode",
         "agent_max_iterations",
         "max_cron_jobs",
+        // ── Whole-section override written by a dedicated typed handler ──
+        // `[budget]` carries NO credential fields (cost limits + a
+        // provider→limit map), so routes/budget.rs persists the entire
+        // validated section as one DB config-override entry (phase 9
+        // settings-to-store). Listed here so `resolve_config_with_overrides`
+        // applies it; the typed `deserialize → validate_config_for_reload`
+        // pass at resolve time is the real guard. `memory` and `channels` are
+        // deliberately NOT here — they carry credential-redirect fields
+        // (embedding_api_key_env, token_env/secret_env) that need per-field
+        // handling preserving the _env / depth-2 protections (follow-up).
+        "budget",
         // ── Collection-typed sections, primitive-valued only (#4678) ──
         // The dashboard's StringMapEditor / NumberMapEditor saves the
         // entire collection as one JSON value posted at the section's
