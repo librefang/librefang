@@ -785,6 +785,8 @@ _308 PRs from 7 contributors since v2026.5.17-beta.12._
 
 ### Fixed
 
+- **channels: `channel_send` no longer lowercases the caller-supplied channel name, so capitalized sidecars are reachable again** (@houko). The `channel` tool argument was force-lowercased before the kernel's case-sensitive `send_channel_*` lookup, while channel adapters register under their config name with original case — so an agent calling `channel_send(channel="bot-A", …)` looked up `bot-a` and failed with a not-found error for any sidecar whose name carried uppercase (a latent regression since the case-preserving registration in #5996). The name is now passed through verbatim (still trimmed). Closes #6078.
+
 - **channels: the dashboard configure form is no longer empty for sidecar adapters when `librefang-sdk` is not pip-installed** (@houko).
   The Add-a-channel form is schema-driven off `python3 -m librefang.sidecar.adapters.<name> --describe`, but the boot-time probe (`routes/sidecar_describe.rs::describe_sidecar`) spawned the interpreter without the binary-embedded SDK on `PYTHONPATH` — unlike the live channel-spawn path, which has injected the embedded copy since the SDK was bundled.
   So on a fresh host with only `python3` (no `pip install librefang-sdk`), `--describe` failed with `ModuleNotFoundError`, and every adapter without a hand-maintained `static_fields` fallback (telegram, ntfy, gotify, mastodon, …) rendered a blank configure drawer — even though the adapter source ships embedded in the daemon binary.

@@ -133,11 +133,16 @@ pub(super) async fn tool_channel_send(
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
 
+    // Preserve the caller-supplied channel name verbatim (#6078). Channel
+    // adapters register under their config name with original case
+    // (`channel_bridge`), and the kernel's `send_channel_*` lookups are
+    // case-sensitive. Lowercasing here broke `channel_send` for any sidecar
+    // whose name carries uppercase (e.g. `bot-A`).
     let channel = input["channel"]
         .as_str()
         .ok_or("Missing 'channel' parameter")?
         .trim()
-        .to_lowercase();
+        .to_string();
 
     let recipient = input["recipient"]
         .as_str()
