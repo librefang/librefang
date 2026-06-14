@@ -841,7 +841,10 @@ def test_qr_login_emits_ready_then_confirmed_without_token_on_wire(monkeypatch):
     monkeypatch.setattr(
         wc, "_http_request",
         _make_qr_responses(
-            (200, {"qrcode": "opaque-token"}),                        # GET qrcode
+            # iLink returns the opaque poll token AND the scannable image
+            # content; the QR must encode the latter.
+            (200, {"qrcode": "opaque-token",
+                   "qrcode_img_content": "https://login.weixin.qq.com/l/AbC123"}),
             (200, {"status": "confirmed", "bot_token": "tok_live"}),  # poll → confirmed
         ),
     )
@@ -858,7 +861,11 @@ def test_qr_login_emits_ready_then_confirmed_without_token_on_wire(monkeypatch):
     assert methods == ["qr_ready", "qr_status"], f"unexpected order: {methods}"
 
     ready = captured[0]["params"]
-    assert ready["qr_code"] == "opaque-token"
+    # The scannable payload must be `qrcode_img_content` (what the WeChat app
+    # decodes on scan), NOT the opaque `qrcode` poll token. Encoding the token
+    # makes WeChat show plain text instead of a login prompt — the #1560 / #1572
+    # regression the sidecar migration (#5421) re-introduced.
+    assert ready["qr_code"] == "https://login.weixin.qq.com/l/AbC123"
     # Sidecar passes expires_at as ISO 8601; format is wall-clock
     # derived, so just shape-check.
     assert "expires_at" in ready and "T" in ready["expires_at"]
@@ -876,11 +883,35 @@ def test_qr_login_emits_ready_then_confirmed_without_token_on_wire(monkeypatch):
     assert "secrets.env" in (confirmed.get("message") or "")
 
 
+def test_qr_login_qr_payload_falls_back_to_token_when_img_content_absent(
+    monkeypatch, capsys
+):
+    # Degraded path: if iLink ever omits `qrcode_img_content`, the sidecar must
+    # still emit a `qr_ready` (rather than crash) and warn the operator that the
+    # rendered QR may not be scannable, falling back to the opaque token.
+    monkeypatch.setattr(
+        wc, "_http_request",
+        _make_qr_responses(
+            (200, {"qrcode": "opaque-token"}),  # no qrcode_img_content
+            (200, {"status": "confirmed", "bot_token": "tok_live"}),
+        ),
+    )
+    a = _adapter(WECHAT_BOT_TOKEN="")
+    captured: list = []
+    token = a._qr_login(emit=captured.append)
+    assert token == "tok_live"
+
+    ready = captured[0]["params"]
+    assert ready["qr_code"] == "opaque-token"  # degraded fallback
+    assert "qrcode_img_content" in capsys.readouterr().err
+
+
 def test_qr_login_emits_expired_on_platform_expiry(monkeypatch):
     monkeypatch.setattr(
         wc, "_http_request",
         _make_qr_responses(
-            (200, {"qrcode": "opaque-token"}),
+            (200, {"qrcode": "opaque-token",
+                   "qrcode_img_content": "https://login.weixin.qq.com/l/AbC123"}),
             (200, {"status": "expired"}),
         ),
     )
@@ -932,7 +963,8 @@ def test_qr_login_never_logs_full_bot_token(monkeypatch, capsys):
     monkeypatch.setattr(
         wc, "_http_request",
         _make_qr_responses(
-            (200, {"qrcode": "opaque-token"}),
+            (200, {"qrcode": "opaque-token",
+                   "qrcode_img_content": "https://login.weixin.qq.com/l/AbC123"}),
             (200, {"status": "confirmed", "bot_token": secret}),
         ),
     )
@@ -961,7 +993,8 @@ def test_qr_login_without_emit_still_returns_token(monkeypatch):
     monkeypatch.setattr(
         wc, "_http_request",
         _make_qr_responses(
-            (200, {"qrcode": "opaque-token"}),
+            (200, {"qrcode": "opaque-token",
+                   "qrcode_img_content": "https://login.weixin.qq.com/l/AbC123"}),
             (200, {"status": "confirmed", "bot_token": "tok_live"}),
         ),
     )

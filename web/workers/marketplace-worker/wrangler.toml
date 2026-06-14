@@ -1,12 +1,12 @@
 name = "librefang-marketplace"
 main = "index.js"
 compatibility_date = "2025-01-01"
-account_id = "3ee9bb524a4fb2a9d685ce1f82b52581"
+account_id = "57449de851e4289a4407a73e66baaac9"
 
 [[d1_databases]]
 binding = "DB"
 database_name = "librefang-marketplace"
-database_id = "91df0bc6-e658-4463-9eba-22d5476d420a"
+database_id = "1bbf40ca-963b-4b94-b65d-062b9e7bbb42"
 
 [vars]
 GITHUB_CLIENT_ID = "Iv1.3683b4ad4a41e982"
@@ -17,7 +17,7 @@ GITHUB_CLIENT_ID = "Iv1.3683b4ad4a41e982"
 # Until both are set, /v1/pubkey and /v1/download/.../signature return 503,
 # new versions are stored without bundle_sig (NULL), and existing endpoints
 # remain fully functional.
-REGISTRY_PUBLIC_KEY = "ClGa0Ucap8NdrKAy1rw9Tt6A9I8eg4zJ53+xIuKMuq0="
+REGISTRY_PUBLIC_KEY = "joY8IYrUbbACfKRyp2CTcEbcEty8wcBwP1MTxU+vjaM="
 
 # Weekly stats aggregation
 [triggers]
