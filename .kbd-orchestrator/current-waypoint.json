@@ -1,13 +1,13 @@
 {
   "active_phase": "phase-9-config-store-migration",
   "previous_phase": "phase-8-fixture-rebuilds",
-  "active_change": "C-009",
-  "last_updated": "2026-06-08T00:00:00Z",
-  "last_updated_by": "kbd-execute",
+  "active_change": "C-005d.1",
+  "last_updated": "2026-06-14T00:00:00Z",
+  "last_updated_by": "kbd-plan",
   "backend": "native-tool",
-  "phase_progress": "Phase 9: code 10/11 DONE. C-001..C-008 merged via PR #74. C-009 CODE DONE on branch kbd/phase-9-c009-configmap-revert: (a) manifest revert — removed init-config initContainer, config.toml now a read-only subPath ConfigMap mount at /data/config.toml (kustomize render verified); (b) FIXED a data-loss bug found in merged C-008 — the import wrote source=bootstrap, which the post-revert boot-seed would overwrite with the empty ConfigMap baseline; import now writes source=runtime (RuntimeProtected), with a cutover-survival regression test. APPLY is HUMAN + hard-gated, strict order: deploy the C-009-fixed image -> run C-008 import daemon-down on prod PVC -> verify values resolve from DB -> kubectl apply -k the revert. C-005c (generic config_set) remains future.",
+  "phase_progress": "Phase 9 production cutover COMPLETE (C-001..C-009 merged + deployed; root-signin auth fix PR #78; budget migrated PR #84). New sub-phase C-005d planned: migrate the last two file-writing settings handlers (memory + channels) to the SurrealDB config store, reusing the C-005c config_overrides infra. Assessment verdict: proceed; secret VALUES stay out of the DB (secrets.env / env vars only). Three ordered changes planned: C-005d.1 trusted-section resolve path (TRUSTED_SECTION_KEYS, folds budget off the config_set allowlist), C-005d.2 memory handler (memory + proactive_memory overrides), C-005d.3 channels handler (sidecar_channels override; secrets.env untouched; include-shadow guard preserved).",
   "next_action": {
-    "command": "Open C-009 PR; HUMAN executes the cutover runbook (deploy fixed image -> import -> verify -> apply revert)",
-    "description": "C-009 code (manifest revert + C-008 source=runtime fix) is ready for PR. The cluster cutover is human-only and strictly ordered to avoid prod data loss (R-1). Apply the ConfigMap revert ONLY after the import is verified on the fixed image."
+    "command": "/kbd-execute C-005d.1",
+    "description": "Implement the trusted-section apply path in resolve_config_with_overrides (add TRUSTED_SECTION_KEYS, OR-gate, remove the budget config_set allowlist entry), with config_store_overlay_test coverage. Then C-005d.2 (memory) and C-005d.3 (channels). No secret VALUE may enter the store at any step."
   }
 }
