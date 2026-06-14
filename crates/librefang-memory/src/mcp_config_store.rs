@@ -1,54 +1,22 @@
-//! SQLite-backed MCP server config store (#6021).
-//!
-//! Persists `McpServerConfigEntry` records so MCP servers can be added or
-//! edited at runtime without writing to `config.toml`. The motivating case is
-//! Kubernetes: the config file can stay a read-only ConfigMap (or a baked-in
-//! image layer) while the mutable set of MCP servers lives in the database,
-//! which is far easier to manage than an attached writable volume.
-//!
-//! The store is a thin CRUD layer. Each row holds the full entry serialised as
-//! JSON in `entry_json`, keyed on the server `name` (the same uniqueness key
-//! the file-backed `[[mcp_servers]]` array already enforces by name). Storing
-//! the whole entry as one JSON blob — rather than one column per field —
-//! tracks the entry struct without a schema migration every time a field is
-//! added, which mirrors how the runtime already round-trips the entry through
-//! `serde_json` for the TOML write-back path.
-//!
-//! Boot-time precedence (decided in the kernel, not here): DB entries override
-//! file entries with the same name, and DB-only names are appended. An empty
-//! table is a no-op, so a deployment that never touches the DB keeps exactly
-//! today's file-only behaviour.
+//! SQLite-backed MCP server config store; each entry is JSON-encoded so the schema doesn't migrate on field additions (#6021).
 
 use librefang_types::config::McpServerConfigEntry;
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 
-/// Persistent MCP server config store backed by SQLite.
-///
-/// Shares the same r2d2 connection pool as every other store in
-/// `MemorySubstrate`. The `mcp_server_configs` table is created by
-/// `migration::migrate_v43`, which runs before this store is constructed.
 #[derive(Clone)]
 pub struct McpConfigStore {
     pool: Pool<SqliteConnectionManager>,
 }
 
 impl McpConfigStore {
-    /// Wrap an existing connection pool.
-    ///
-    /// The caller must ensure `migration::run_migrations` has already executed
-    /// so the `mcp_server_configs` table exists.
+    /// Caller must have run `migration::run_migrations` first so `mcp_server_configs` exists.
     pub fn new(pool: Pool<SqliteConnectionManager>) -> Self {
         Self { pool }
     }
 
-    /// Insert or update an MCP server config, keyed on `entry.name`.
-    ///
-    /// Uses `ON CONFLICT DO UPDATE` (not `INSERT OR REPLACE`) so `created_at`
-    /// survives an update — the schema default fires once on first insert and
-    /// is preserved across later upserts, while `updated_at` is refreshed every
-    /// write.
+    /// `ON CONFLICT DO UPDATE` (not `INSERT OR REPLACE`) so `created_at` survives updates.
     pub fn upsert(&self, entry: &McpServerConfigEntry) -> LibreFangResult<()> {
         let entry_json = serde_json::to_string(entry).map_err(|e| {
             LibreFangError::memory_msg(format!("mcp config serialize failed: {e}"))
@@ -66,11 +34,7 @@ impl McpConfigStore {
         Ok(())
     }
 
-    /// Get a single MCP server config by name.
-    ///
-    /// Returns `Ok(None)` when no row exists. A row whose `entry_json` fails to
-    /// deserialize is surfaced as an error rather than silently skipped, so a
-    /// corrupt write does not look like a missing server.
+    /// Deserialization failure surfaces as `Err`, not `Ok(None)`, so a corrupt entry is visible.
     pub fn get(&self, name: &str) -> LibreFangResult<Option<McpServerConfigEntry>> {
         let c = self.pool.get().map_err(LibreFangError::memory)?;
         let json: Option<String> = c
@@ -99,8 +63,7 @@ impl McpConfigStore {
         }
     }
 
-    /// Load all MCP server configs, ordered by `name` so the boot-time merge is
-    /// deterministic across processes.
+    /// Ordered by `name` so the boot-time merge is deterministic across processes.
     pub fn load_all(&self) -> LibreFangResult<Vec<McpServerConfigEntry>> {
         let c = self.pool.get().map_err(LibreFangError::memory)?;
         let mut stmt = c

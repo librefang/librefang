@@ -207,12 +207,7 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // workflow_runs table (v37) so long-horizon goal runs survive a daemon
     // restart instead of vanishing from the in-memory DashMap.
     run_step!(42, migrate_v42);
-    // v43 (#6021): SQLite-backed MCP server configs. Stores each
-    // `McpServerConfigEntry` as a JSON blob keyed on `name` so MCP servers
-    // can be added/edited at runtime without writing to `config.toml`. On
-    // Kubernetes the file can stay a read-only ConfigMap while the DB holds
-    // the mutable set. DB entries are merged over the file entries at boot
-    // (override-by-name); a DB-only name is appended.
+    // v43 (#6021): mcp_server_configs table for SQLite-backed MCP server config.
     run_step!(43, migrate_v43);
 
     // Audit-trail consistency (#3538): user_version must match the count

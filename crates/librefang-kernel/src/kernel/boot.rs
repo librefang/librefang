@@ -962,15 +962,7 @@ impl LibreFangKernel {
         } else {
             config
         };
-        // Merge DB-backed MCP server configs over the file-backed set (#6021).
-        //
-        // The file (`[[mcp_servers]]` in config.toml) stays authoritative for
-        // anything it declares; the DB augments and overrides it by name so a
-        // deployment can keep config.toml as a read-only ConfigMap and manage
-        // the mutable MCP set in the database instead of an attached writable
-        // volume. Precedence: a DB row with the same `name` replaces the file
-        // entry; a DB-only name is appended. An empty table is a no-op, so the
-        // file-only path is byte-for-byte unchanged.
+        // DB rows override file entries by name; empty table is a no-op (supports K8s read-only ConfigMaps, #6021).
         let mut all_mcp_servers = config.mcp_servers.clone();
         {
             let mcp_config_store =
