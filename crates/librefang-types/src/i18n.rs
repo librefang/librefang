@@ -242,7 +242,6 @@ mod tests {
         assert_eq!(t.t("api-error-agent-not-found"), "Агент не знайдений");
     }
 
-
     #[test]
     fn translation_with_args() {
         let t = ErrorTranslator::new("en");

@@ -225,7 +225,6 @@ pub async fn locale_uk() -> impl IntoResponse {
     )
 }
 
-
 /// GET / — Serve the React dashboard shell.
 pub async fn webchat_page(State(state): State<Arc<crate::routes::AppState>>) -> impl IntoResponse {
     let home_dir = Some(state.kernel.home_dir().to_path_buf());
