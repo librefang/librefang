@@ -651,7 +651,6 @@ pub async fn execute_tool_raw(
                 let (threshold, max_artifact) =
                     resolve_spill_config(*spill_threshold_bytes, *max_artifact_bytes);
                 if let Some(ctx) = web_ctx {
-                    // #3576: search() returns Result<String, ToolError>; narrow here.
                     ctx.search
                         .search(query, max_results)
                         .await

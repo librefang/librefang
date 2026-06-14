@@ -1110,8 +1110,6 @@ mod tests {
             .search_searxng("test", 5, None, 1)
             .await
             .expect_err("empty SearXNG URL must fail");
-        // #3576: now a typed `ToolError::Unavailable("SearXNG URL")` whose
-        // Display is the variant form, not the legacy free-form string.
         assert_eq!(err.to_string(), "SearXNG URL unavailable");
     }
 
@@ -1124,7 +1122,6 @@ mod tests {
             .list_searxng_categories()
             .await
             .expect_err("empty SearXNG URL must fail");
-        // #3576: typed `ToolError::Unavailable("SearXNG URL")` Display form.
         assert_eq!(err.to_string(), "SearXNG URL unavailable");
     }
 
@@ -1141,8 +1138,6 @@ mod tests {
             .search_searxng("test", 5, None, 0)
             .await
             .expect_err("pageno=0 must be rejected");
-        // #3576: now a typed `ToolError::InvalidParameter` whose Display is the
-        // structured variant form.
         assert_eq!(
             err.to_string(),
             "Invalid parameter 'pageno': must be >= 1 (pages are 1-indexed)"
