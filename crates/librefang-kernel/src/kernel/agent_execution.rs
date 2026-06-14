@@ -595,10 +595,10 @@ impl LibreFangKernel {
             let peer_id = sender_context
                 .map(|s| s.user_id.as_str())
                 .filter(|s| !s.is_empty());
-            // peer_scoped_key now rejects colon-bearing / empty peer_ids
-            // (#5119); on a malformed peer_id we skip the user_name lookup
-            // with a WARN so prompt assembly stays best-effort rather than
-            // failing the turn.
+            // peer_scoped_key escapes colon-bearing peer_ids and rejects only
+            // empty ones (#5119 / #6100); on a malformed peer_id we skip the
+            // user_name lookup with a WARN so prompt assembly stays
+            // best-effort rather than failing the turn.
             let user_name = match peer_scoped_key("user_name", peer_id) {
                 Ok(user_name_key) => self
                     .memory
