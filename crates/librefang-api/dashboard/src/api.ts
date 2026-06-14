@@ -2010,6 +2010,13 @@ export interface PendingProvenance {
   turn_index: number;
 }
 
+/**
+ * Whether a pending candidate creates a brand-new skill or proposes an
+ * update/patch to an existing one (#5844 / #5819). Defaults to `"create"`
+ * for drafts written before this field existed.
+ */
+export type PendingCandidateKind = "create" | "update";
+
 export interface PendingCandidate {
   id: string;
   agent_id: string;
@@ -2021,6 +2028,14 @@ export interface PendingCandidate {
   description: string;
   prompt_context: string;
   provenance: PendingProvenance;
+  /** Create vs update/patch. Absent on legacy drafts → treat as `"create"`. */
+  kind?: PendingCandidateKind;
+  /** For an update: the existing skill this draft proposes to replace. */
+  target_skill_id?: string | null;
+  /** For an update: the current on-disk version of `target_skill_id`. */
+  current_version?: string | null;
+  /** For an update: the version the reviewer proposes bumping to on approval. */
+  proposed_version?: string | null;
 }
 
 // Discriminated on `status`:
@@ -2066,6 +2081,20 @@ export async function approvePendingCandidate(id: string): Promise<PendingApprov
 export async function rejectPendingCandidate(id: string): Promise<{ status: "rejected"; candidate_id: string }> {
   return post<{ status: "rejected"; candidate_id: string }>(
     `/api/skills/pending/${encodeURIComponent(id)}/reject`,
+    {},
+  );
+}
+
+/**
+ * Open a PR contributing a *pending* candidate to the configured registry
+ * repo, without first approving it into the active registry (#5819). Shares
+ * the `ProposeSkillResult` shape with {@link proposeSkillToRegistry}. Requires
+ * a GitHub token (env or vault) on the daemon side; a 401 is returned when
+ * none is configured.
+ */
+export async function proposePendingToRegistry(id: string): Promise<ProposeSkillResult> {
+  return post<ProposeSkillResult>(
+    `/api/skills/pending/${encodeURIComponent(id)}/propose-to-registry`,
     {},
   );
 }
