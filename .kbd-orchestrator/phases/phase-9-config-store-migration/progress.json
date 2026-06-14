@@ -8,29 +8,128 @@
   "verdict": "proceed-with-corrected-mechanism",
   "changes_total": 11,
   "changes_completed": 10,
-  "architecture_revision": "C-004 discovery: kernel holds no operational SurrealDB session at boot. User decision (D9): config store is API-owned — kernel exposes get/replace for effective_mcp_servers; librefang-api reads/writes the store. D10: process-global shared_pool() added (embedded RocksDB single-lock per path, assessment R-2 confirmed). C-003/C-005/C-006 placements revised accordingly.",
+  "architecture_revision": "C-004 discovery: kernel holds no operational SurrealDB session at boot. User decision (D9): config store is API-owned \u2014 kernel exposes get/replace for effective_mcp_servers; librefang-api reads/writes the store. D10: process-global shared_pool() added (embedded RocksDB single-lock per path, assessment R-2 confirmed). C-003/C-005/C-006 placements revised accordingly.",
   "changes": {
-    "C-001": { "status": "DONE", "completed": "2026-06-06", "files": 2, "qa": "skipped-under-3-files" },
-    "C-002": { "status": "DONE", "completed": "2026-06-07", "files": 2, "qa": "skipped-under-3-files" },
-    "C-003": { "status": "PENDING" },
-    "C-004": { "status": "DONE", "completed": "2026-06-07", "files": 8, "qa": "compile+clippy+integration-test+brand (refine-validate skill unavailable)" },
-    "C-005": { "status": "DONE", "completed": "2026-06-08", "files": 6, "scope": "MCP write path only (user decision); provider-default + config_set deferred to C-005b", "qa": "compile+integration-test+clippy+brand" },
-    "C-005b": { "status": "DONE", "completed": "2026-06-08", "files": 8, "scope": "provider-default -> store + HTTP route tests + MockKernelBuilder temp-storage isolation; generic config_set deferred to C-005c", "qa": "overlay(10)+http-crud(1)+providers(37)+clippy+brand" },
-    "C-005c": { "status": "PENDING", "note": "generic config_set store migration: needs a kernel config-override merge layer applied at load/reload + security review for section-wholesale writes" },
-    "C-003": { "status": "DONE", "completed": "2026-06-08", "files": 3, "qa": "integration-tests(7)+clippy+brand" },
-    "C-006": { "status": "DONE", "completed": "2026-06-08", "files": 3, "qa": "integration-tests(8)+clippy+brand" },
-    "C-007": { "status": "DONE", "completed": "2026-06-08", "files": 1, "qa": "skipped-under-3-files", "note": "single-row array + render_mcp_summary sort already guarantee prompt determinism; added config_store list() ORDER BY guard test" },
-    "C-008": { "status": "CODE_DONE", "completed": "2026-06-08", "files": 4, "qa": "cli-unit-test+clippy+brand", "note": "import CLI (merged in PR #74). NOTE: C-009 found+fixed a data-loss bug here — the import wrote source=bootstrap; now source=runtime so prod values survive the ConfigMap revert. Deploy the fixed image BEFORE running the prod import." },
-    "C-009": { "status": "CODE_DONE", "completed": "2026-06-08", "files": 6, "qa": "cli-cutover-survival-test+api-overlay-tests+kustomize-render+clippy+brand", "note": "manifest revert (read-only ConfigMap subPath mount, init-config removed) + a first C-008 source=runtime fix. Import logic superseded by C-009b. PR #75 merged." },
-    "C-009b": { "status": "CODE_DONE", "completed": "2026-06-08", "files": 3, "qa": "cli-promote-tests(3)+api-overlay(10)+clippy+brand", "note": "Found during live deploy: merged C-009 import used seed semantics (Unchanged no-op) so it would NOT convert the daemon's boot-seeded BOOTSTRAP rows to runtime -> the revert would still wipe prod. Fixed: import now promote_or_seed (preserves store value, forces runtime, promotes bootstrap rows). Deploy this image BEFORE running the import." }
+    "C-001": {
+      "status": "DONE",
+      "completed": "2026-06-06",
+      "files": 2,
+      "qa": "skipped-under-3-files"
+    },
+    "C-002": {
+      "status": "DONE",
+      "completed": "2026-06-07",
+      "files": 2,
+      "qa": "skipped-under-3-files"
+    },
+    "C-003": {
+      "status": "DONE",
+      "completed": "2026-06-08",
+      "files": 3,
+      "qa": "integration-tests(7)+clippy+brand"
+    },
+    "C-004": {
+      "status": "DONE",
+      "completed": "2026-06-07",
+      "files": 8,
+      "qa": "compile+clippy+integration-test+brand (refine-validate skill unavailable)"
+    },
+    "C-005": {
+      "status": "DONE",
+      "completed": "2026-06-08",
+      "files": 6,
+      "scope": "MCP write path only (user decision); provider-default + config_set deferred to C-005b",
+      "qa": "compile+integration-test+clippy+brand"
+    },
+    "C-005b": {
+      "status": "DONE",
+      "completed": "2026-06-08",
+      "files": 8,
+      "scope": "provider-default -> store + HTTP route tests + MockKernelBuilder temp-storage isolation; generic config_set deferred to C-005c",
+      "qa": "overlay(10)+http-crud(1)+providers(37)+clippy+brand"
+    },
+    "C-005c": {
+      "status": "PENDING",
+      "note": "generic config_set store migration: needs a kernel config-override merge layer applied at load/reload + security review for section-wholesale writes"
+    },
+    "C-006": {
+      "status": "DONE",
+      "completed": "2026-06-08",
+      "files": 3,
+      "qa": "integration-tests(8)+clippy+brand"
+    },
+    "C-007": {
+      "status": "DONE",
+      "completed": "2026-06-08",
+      "files": 1,
+      "qa": "skipped-under-3-files",
+      "note": "single-row array + render_mcp_summary sort already guarantee prompt determinism; added config_store list() ORDER BY guard test"
+    },
+    "C-008": {
+      "status": "CODE_DONE",
+      "completed": "2026-06-08",
+      "files": 4,
+      "qa": "cli-unit-test+clippy+brand",
+      "note": "import CLI (merged in PR #74). NOTE: C-009 found+fixed a data-loss bug here \u2014 the import wrote source=bootstrap; now source=runtime so prod values survive the ConfigMap revert. Deploy the fixed image BEFORE running the prod import."
+    },
+    "C-009": {
+      "status": "CODE_DONE",
+      "completed": "2026-06-08",
+      "files": 6,
+      "qa": "cli-cutover-survival-test+api-overlay-tests+kustomize-render+clippy+brand",
+      "note": "manifest revert (read-only ConfigMap subPath mount, init-config removed) + a first C-008 source=runtime fix. Import logic superseded by C-009b. PR #75 merged."
+    },
+    "C-009b": {
+      "status": "CODE_DONE",
+      "completed": "2026-06-08",
+      "files": 3,
+      "qa": "cli-promote-tests(3)+api-overlay(10)+clippy+brand",
+      "note": "Found during live deploy: merged C-009 import used seed semantics (Unchanged no-op) so it would NOT convert the daemon's boot-seeded BOOTSTRAP rows to runtime -> the revert would still wipe prod. Fixed: import now promote_or_seed (preserves store value, forces runtime, promotes bootstrap rows). Deploy this image BEFORE running the import."
+    },
+    "C-005d": {
+      "status": "ASSESSED",
+      "assessed": "2026-06-14",
+      "note": "Migrate memory + channels settings to the DB store. Reuse C-005c config_overrides + a trusted-section apply path; secret VALUES stay out of the DB. See assessment.md C-005d addendum."
+    }
   },
   "merged_pr": [
-    { "repo": "GQAdonis/librefang", "number": 74, "base": "main", "merged_at": "2026-06-08", "scope": "C-001..C-008 code" },
-    { "repo": "GQAdonis/librefang", "number": 75, "base": "main", "merged_at": "2026-06-08", "scope": "C-009 revert + C-008 fix" },
-    { "repo": "GQAdonis/librefang", "number": 76, "base": "main", "merged_at": "2026-06-08", "scope": "reflection" }
+    {
+      "repo": "GQAdonis/librefang",
+      "number": 74,
+      "base": "main",
+      "merged_at": "2026-06-08",
+      "scope": "C-001..C-008 code"
+    },
+    {
+      "repo": "GQAdonis/librefang",
+      "number": 75,
+      "base": "main",
+      "merged_at": "2026-06-08",
+      "scope": "C-009 revert + C-008 fix"
+    },
+    {
+      "repo": "GQAdonis/librefang",
+      "number": 76,
+      "base": "main",
+      "merged_at": "2026-06-08",
+      "scope": "reflection"
+    }
   ],
-  "suggested_order": ["C-001","C-002","C-004","C-005","C-003","C-006","C-007","C-005b","C-008","C-009","C-009b","C-005c"],
+  "suggested_order": [
+    "C-001",
+    "C-002",
+    "C-004",
+    "C-005",
+    "C-003",
+    "C-006",
+    "C-007",
+    "C-005b",
+    "C-008",
+    "C-009",
+    "C-009b",
+    "C-005c"
+  ],
   "deploy_state": "image bdf5fc802 (pre-C-009b) running on GKE; C-009 manifest NOT applied (init-config still present). Cutover blocked until the C-009b image is deployed.",
   "k8s_revert_gated_on": "C-009b image deployed + C-008 import run/verified on prod PVC",
-  "next_command": "HUMAN cutover: roll to C-009b image -> librefang storage config-import (daemon-down) -> verify -> kubectl apply -k (C-009 revert). Future: /kbd-execute C-005c"
+  "next_command": "/kbd-plan or /kbd-execute C-005d (memory+channels settings migration)"
 }
