@@ -231,12 +231,14 @@ fn test_memory_recall_falls_back_to_legacy_shared_namespace() {
 }
 
 // ---------------------------------------------------------------------------
-// SECURITY (#5119 + #5120) — colon-bearing / empty peer_id + `peer:` key
-// prefix are rejected at the kernel-handle boundary so the tool layer can't
-// (a) plant rows that surface to `memory_list(Some("victim"))` as if "victim"
-// wrote them, or (b) split a peer namespace across two distinct peer_ids that
-// happen to share a colon prefix. Every test asserts the SIDE EFFECT (the
-// victim's list stays empty), not just the returned error variant.
+// SECURITY (#5119 + #5120 + #6100) — empty peer_id + `peer:` key prefix are
+// rejected at the kernel-handle boundary so the tool layer can't (a) plant rows
+// that surface to `memory_list(Some("victim"))` as if "victim" wrote them, or
+// (b) split the global namespace via an empty peer. Colon-bearing peer_ids are
+// no longer rejected (they locked out Matrix, #6100); instead they are
+// percent-encoded so two distinct peer_ids that share a colon prefix still map
+// to disjoint namespaces. Tests assert the SIDE EFFECT (the victim's list stays
+// empty / the foreign peer's rows never surface), not just the error variant.
 // ---------------------------------------------------------------------------
 
 use librefang_kernel::MemorySubsystemApi;
@@ -297,30 +299,42 @@ fn test_memory_recall_rejects_peer_prefix_key() {
 }
 
 #[test]
-fn test_memory_list_rejects_peer_id_with_colon() {
+fn test_memory_colon_peer_id_round_trips_and_stays_isolated() {
+    // (#6100) Colon-bearing peer_ids (Matrix `@user:matrix.org`, Slack
+    // `T1:U2`) must work end-to-end now: store, recall, and list all succeed,
+    // and a peer whose id is a colon-prefix of another must NOT see its rows.
     let (kernel, _tmp) = boot();
     let kh: &dyn KernelHandle = &kernel;
 
-    let err = kh
-        .memory_list(None, Some("u:42"))
-        .expect_err("colon-bearing peer_id must be rejected on list (#5119)");
-    assert!(
-        matches!(err, KernelOpError::InvalidInput(_)),
-        "expected InvalidInput, got {err:?}"
+    // Matrix-style peer round-trips.
+    kh.memory_store(
+        "car",
+        serde_json::json!("blue"),
+        None,
+        Some("@user:matrix.org"),
+    )
+    .expect("colon-bearing (Matrix) peer_id must be accepted on store (#6100)");
+    assert_eq!(
+        kh.memory_recall("car", None, Some("@user:matrix.org"))
+            .expect("recall colon peer"),
+        Some(serde_json::json!("blue"))
     );
-}
+    assert_eq!(
+        kh.memory_list(None, Some("@user:matrix.org"))
+            .expect("list colon peer"),
+        vec!["car".to_string()]
+    );
 
-#[test]
-fn test_memory_store_rejects_peer_id_with_colon() {
-    let (kernel, _tmp) = boot();
-    let kh: &dyn KernelHandle = &kernel;
-
-    let err = kh
-        .memory_store("user_name", serde_json::json!("alice"), None, Some("T1:U2"))
-        .expect_err("Slack-style colon-bearing peer_id must be rejected (#5119)");
+    // Isolation: peer `T1:U2` writes; the colon-prefix peer `T1` must not see
+    // it (the escaped `peer:T1%3AU2:` prefix can't be stripped by `peer:T1:`).
+    kh.memory_store("secret", serde_json::json!("x"), None, Some("T1:U2"))
+        .expect("colon-bearing (Slack) peer_id must be accepted on store (#6100)");
+    let t1_keys = kh
+        .memory_list(None, Some("T1"))
+        .expect("list as T1 must succeed");
     assert!(
-        matches!(err, KernelOpError::InvalidInput(_)),
-        "expected InvalidInput, got {err:?}"
+        !t1_keys.contains(&"secret".to_string()),
+        "peer T1:U2's row leaked to colon-prefix peer T1: {t1_keys:?}"
     );
 }
 
@@ -402,11 +416,11 @@ fn test_prefix_planted_rows_not_enumerable_via_tool_memory_list() {
         )
         .expect("plant nested pre-fix row");
 
-    // (2) Colon-collision plant (#5119): a pre-fix Slack peer "victim:sub"
-    //     writing `car` produced `peer:victim:sub:car`. An attacker peer
-    //     "victim" listing must not strip `peer:victim:` and recover
-    //     `sub:car`. The colon-bearing query is rejected outright; this row
-    //     is parked here to prove the rejection happens before any recovery.
+    // (2) Colon-collision plant (#5119 / #6100): a pre-fix Slack peer
+    //     "victim:sub" writing `car` produced the raw key `peer:victim:sub:car`.
+    //     Post-#6100 the same peer would store under the *escaped* prefix
+    //     `peer:victim%3Asub:`, so listing as "victim:sub" must NOT strip the
+    //     legacy raw row into view.
     substrate
         .structured_set(
             agent_id,
@@ -432,12 +446,16 @@ fn test_prefix_planted_rows_not_enumerable_via_tool_memory_list() {
         "double-scoped plant leaked: {victim_keys:?}"
     );
 
-    // The colon-collision attacker query is rejected before recovery runs,
-    // so the foreign peer's `sub:car` can never be stripped into view.
-    let collision = kh.memory_list(None, Some("victim:sub"));
+    // The colon-bearing query is now accepted, but it lists under the escaped
+    // prefix `peer:victim%3Asub:`, which never matches the raw legacy plant
+    // `peer:victim:sub:car`. So the foreign/legacy row is still not stripped
+    // into view — isolation is preserved by escaping rather than rejection.
+    let collision = kh
+        .memory_list(None, Some("victim:sub"))
+        .expect("colon-bearing list query is accepted post-#6100");
     assert!(
-        matches!(collision, Err(KernelOpError::InvalidInput(_))),
-        "colon-bearing list query must be rejected outright, got {collision:?}"
+        collision.is_empty(),
+        "legacy raw plant `peer:victim:sub:car` leaked to escaped peer victim:sub: {collision:?}"
     );
 }
 
