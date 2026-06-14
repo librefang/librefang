@@ -122,7 +122,7 @@ librefang-extensions        25 темплейтів MCP, сховище AES-256-
 librefang-wire              Протокол P2P OFP, взаємна автентифікація HMAC-SHA256 (див. примітку)
 librefang-cli               CLI, керування демоном, панель приладів TUI, режим MCP-сервера
 librefang-desktop           Нативний додаток Tauri 2.0 (трей, сповіщення, гарячі клавіші)
-librefang-import            Движок імпорту/міграції з OpenClaw, LangChain, AutoGPT
+librefang-import            Рушій імпорту/міграції з OpenClaw, LangChain, AutoGPT
 librefang-http              Спільний HTTP-клієнт builder, проксі, TLS-резервування
 librefang-testing           Тестова інфраструктура: mock-ядро, mock-драйвер LLM та утиліти тестування маршрутів API
 librefang-telemetry         Інструментування метрик OpenTelemetry + Prometheus для LibreFang
@@ -130,7 +130,7 @@ librefang-llm-driver        Трейт LLM-драйвера та спільні 
 librefang-llm-drivers       Конкретні драйвери провайдерів LLM (anthropic, openai, gemini, …), що реалізують трейт librefang-llm-driver
 librefang-runtime-mcp       Клієнт MCP (Model Context Protocol) для рантайму LibreFang
 librefang-kernel-handle     Трейт KernelHandle для викликів ядра LibreFang всередині процесу
-librefang-kernel-router     Движок маршрутизації Hands/Темплейтів для ядра LibreFang
+librefang-kernel-router     Рушій маршрутизації Hands/Темплейтів для ядра LibreFang
 librefang-kernel-metering   Облік витрат, застосування квот для ядра LibreFang
 xtask                       Автоматизація збірки
 ```
