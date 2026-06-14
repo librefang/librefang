@@ -92,8 +92,9 @@ fn run_pnpm_audit(dir: &Path, label: &str) -> bool {
     }
 
     println!("--- pnpm audit: {} ---", label);
+    // --prod: devDependencies (vite, esbuild) never ship to users; their advisories are not runtime exposures.
     let status = Command::new("pnpm")
-        .args(["audit"])
+        .args(["audit", "--prod"])
         .current_dir(dir)
         .status();
     println!();
