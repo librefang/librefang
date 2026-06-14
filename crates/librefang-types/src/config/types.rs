@@ -2344,7 +2344,11 @@ pub enum SidecarCommandPolicy {
 /// command = "python3"
 /// args = ["-m", "librefang.sidecar.adapters.telegram"]
 /// env = { TELEGRAM_BOT_TOKEN = "xxx" }
+/// agent = "coder"                  # default agent for this channel
+/// available_agents = ["coder", "triage"]  # optional /agent whitelist
 /// ```
+///
+/// The `agent` key was previously named `default_agent`; the old name is still accepted as a deserialization alias so existing configs keep loading unchanged (#5671).
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SidecarChannelConfig {
     /// Display name for this adapter.
@@ -2370,8 +2374,18 @@ pub struct SidecarChannelConfig {
     /// through to the non-deterministic "first available agent" branch in
     /// `resolve_or_fallback`, which silently routes traffic to a different
     /// agent whenever a new agent is spawned.
+    ///
+    /// Renamed from `default_agent` in #5671; the old key is still accepted via `#[serde(alias = "default_agent")]` so existing configs keep deserializing.
+    /// Remains `Option<String>` for now — mandatory enforcement is a later boot-validation PR.
+    #[serde(default, alias = "default_agent")]
+    pub agent: Option<String>,
+    /// Whitelist of agent names this channel is allowed to route to.
+    ///
+    /// Reserved for the forthcoming `/agent` command (#5671): when non-empty it gates which agents an inbound `/agent <name>` switch may select on this channel.
+    /// Empty (the default) means "no whitelist" — the `/agent` gate is open, preserving today's behaviour.
+    /// Not yet consulted anywhere; this PR only lands the schema field.
     #[serde(default)]
-    pub default_agent: Option<String>,
+    pub available_agents: Vec<String>,
     /// Restart the subprocess automatically when it exits unexpectedly.
     #[serde(default = "default_sidecar_restart")]
     pub restart: bool,
@@ -7284,6 +7298,52 @@ mod tests {
         assert!(cfg.allowed_commands.is_empty());
         assert!(cfg.blocked_commands.is_empty());
         assert_eq!(cfg.message_coalesce_window_ms, 0);
+    }
+
+    /// #5671 — the `default_agent` field was renamed to `agent`, kept as a
+    /// serde alias. Both spellings must deserialize into `agent`, and the new
+    /// `available_agents` whitelist must default to empty.
+    #[test]
+    fn sidecar_agent_field_accepts_legacy_and_new_keys() {
+        // Legacy `default_agent` key still loads into `agent` via the alias.
+        let legacy = r#"
+            name = "telegram"
+            command = "python3"
+            default_agent = "x"
+        "#;
+        let cfg: SidecarChannelConfig = toml::from_str(legacy).unwrap();
+        assert_eq!(cfg.agent.as_deref(), Some("x"));
+        assert!(cfg.available_agents.is_empty());
+
+        // New `agent` key loads directly.
+        let new = r#"
+            name = "telegram"
+            command = "python3"
+            agent = "x"
+        "#;
+        let cfg: SidecarChannelConfig = toml::from_str(new).unwrap();
+        assert_eq!(cfg.agent.as_deref(), Some("x"));
+        assert!(cfg.available_agents.is_empty());
+
+        // Absent → None, and the whitelist defaults to empty.
+        let minimal = r#"
+            name = "telegram"
+            command = "python3"
+        "#;
+        let cfg: SidecarChannelConfig = toml::from_str(minimal).unwrap();
+        assert!(cfg.agent.is_none());
+        assert!(cfg.available_agents.is_empty());
+
+        // The whitelist round-trips when present.
+        let with_list = r#"
+            name = "telegram"
+            command = "python3"
+            agent = "coder"
+            available_agents = ["coder", "triage"]
+        "#;
+        let cfg: SidecarChannelConfig = toml::from_str(with_list).unwrap();
+        assert_eq!(cfg.agent.as_deref(), Some("coder"));
+        assert_eq!(cfg.available_agents, vec!["coder", "triage"]);
     }
 
     #[test]
