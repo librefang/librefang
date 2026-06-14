@@ -2348,9 +2348,7 @@ pub enum SidecarCommandPolicy {
 /// available_agents = ["coder", "triage"]  # optional /agent whitelist
 /// ```
 ///
-/// The `agent` key was previously named `default_agent`; the old name is
-/// still accepted as a deserialization alias so existing configs keep
-/// loading unchanged (#5671).
+/// The `agent` key was previously named `default_agent`; the old name is still accepted as a deserialization alias so existing configs keep loading unchanged (#5671).
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SidecarChannelConfig {
     /// Display name for this adapter.
@@ -2377,19 +2375,15 @@ pub struct SidecarChannelConfig {
     /// `resolve_or_fallback`, which silently routes traffic to a different
     /// agent whenever a new agent is spawned.
     ///
-    /// Renamed from `default_agent` in #5671; the old key is still accepted
-    /// via `#[serde(alias = "default_agent")]` so existing configs keep
-    /// deserializing. Remains `Option<String>` for now — mandatory
-    /// enforcement is a later boot-validation PR.
+    /// Renamed from `default_agent` in #5671; the old key is still accepted via `#[serde(alias = "default_agent")]` so existing configs keep deserializing.
+    /// Remains `Option<String>` for now — mandatory enforcement is a later boot-validation PR.
     #[serde(default, alias = "default_agent")]
     pub agent: Option<String>,
     /// Whitelist of agent names this channel is allowed to route to.
     ///
-    /// Reserved for the forthcoming `/agent` command (#5671): when
-    /// non-empty it gates which agents an inbound `/agent <name>` switch may
-    /// select on this channel. Empty (the default) means "no whitelist" —
-    /// the `/agent` gate is open, preserving today's behaviour. Not yet
-    /// consulted anywhere; this PR only lands the schema field.
+    /// Reserved for the forthcoming `/agent` command (#5671): when non-empty it gates which agents an inbound `/agent <name>` switch may select on this channel.
+    /// Empty (the default) means "no whitelist" — the `/agent` gate is open, preserving today's behaviour.
+    /// Not yet consulted anywhere; this PR only lands the schema field.
     #[serde(default)]
     pub available_agents: Vec<String>,
     /// Restart the subprocess automatically when it exits unexpectedly.
