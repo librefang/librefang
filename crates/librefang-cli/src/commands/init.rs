@@ -63,6 +63,7 @@ pub(crate) fn cmd_init(quick: bool) {
         &librefang_dir,
         librefang_runtime::registry_sync::DEFAULT_CACHE_TTL_SECS,
         "",
+        None,
     );
 
     // Initialize vault if not already initialized
@@ -129,7 +130,7 @@ pub(crate) fn cmd_init_upgrade() {
 
     // 3. Sync registry (TTL=0 forces refresh regardless of last sync time)
     p.set_message("Syncing registry");
-    if librefang_runtime::registry_sync::sync_registry(&librefang_dir, 0, "") {
+    if librefang_runtime::registry_sync::sync_registry(&librefang_dir, 0, "", None) {
         p.tick(1);
         ui::success("Registry synced");
     } else {

@@ -77,6 +77,7 @@ async fn boot_router_with_config(api_key: &str, registry_allowed_hosts: Vec<Stri
         tmp.path(),
         librefang_kernel::registry_sync::DEFAULT_CACHE_TTL_SECS,
         "",
+        None,
     );
 
     let config = KernelConfig {

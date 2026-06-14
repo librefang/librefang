@@ -5299,6 +5299,9 @@ impl Default for BackgroundConfig {
 /// #   registry_mirror = "https://ghproxy.cn"
 /// # turns "https://github.com/..." into "https://ghproxy.cn/https://github.com/..."
 /// registry_mirror = ""
+/// # Optional: full base URL of the forge that hosts the registry repo.
+/// # Default unset = GitHub. Set to consume a Codeberg-hosted registry, e.g.
+/// #   registry_host = "https://codeberg.org"
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
@@ -5316,6 +5319,14 @@ pub struct RegistryConfig {
     /// `https://github.com/...` → `https://ghproxy.cn/https://github.com/...`
     #[serde(default)]
     pub registry_mirror: String,
+    /// Full base URL of the forge hosting the registry repository
+    /// (`librefang/librefang-registry`). When `None` (the default), the
+    /// registry is fetched from GitHub, producing byte-identical URLs to
+    /// previous releases. Set to a full base URL such as
+    /// `"https://codeberg.org"` to consume a Codeberg-hosted registry; the
+    /// tarball, git-clone, and tarball-prefix values are all derived from it.
+    #[serde(default)]
+    pub registry_host: Option<String>,
 }
 
 fn default_registry_cache_ttl_secs() -> u64 {
@@ -5327,6 +5338,7 @@ impl Default for RegistryConfig {
         Self {
             cache_ttl_secs: default_registry_cache_ttl_secs(),
             registry_mirror: String::new(),
+            registry_host: None,
         }
     }
 }

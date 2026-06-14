@@ -12,15 +12,65 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Mutex;
 
-/// GitHub tarball URL for the registry (no auth required).
-const REGISTRY_TARBALL_URL: &str =
-    "https://github.com/librefang/librefang-registry/archive/refs/heads/main.tar.gz";
+/// Owner/repo path of the registry, shared by every forge.
+const REGISTRY_REPO_PATH: &str = "librefang/librefang-registry";
 
-/// Fallback: git clone URL.
-const REGISTRY_REPO: &str = "https://github.com/librefang/librefang-registry.git";
+/// Branch the registry sync tracks.
+const REGISTRY_BRANCH: &str = "main";
 
-/// Prefix inside the tarball (GitHub convention: `{repo}-{branch}/`).
-const TARBALL_PREFIX: &str = "librefang-registry-main/";
+/// The three forge-specific URLs/strings the sync needs: where to download the
+/// tarball, where to `git clone`, and the top-level directory name inside the
+/// downloaded tarball (which the extractor strips).
+struct RegistryUrls {
+    /// HTTP tarball URL (no auth required).
+    tarball_url: String,
+    /// Git clone URL (fallback when the HTTP download fails).
+    clone_url: String,
+    /// Prefix inside the tarball, e.g. `librefang-registry-main/`.
+    tarball_prefix: String,
+}
+
+/// Derive the tarball / clone / prefix values from the configured registry
+/// host.
+///
+/// `registry_host` is the full base URL of the forge hosting the registry
+/// (e.g. `"https://codeberg.org"`). When `None`, the values are byte-identical
+/// to the GitHub defaults shipped in earlier releases.
+///
+/// GitHub and Forgejo (which Codeberg runs) disagree on both the archive path
+/// and the tarball's top-level directory:
+///
+/// - GitHub: `…/archive/refs/heads/{branch}.tar.gz`, prefix `{repo}-{branch}/`.
+/// - Forgejo/Codeberg: `…/archive/{branch}.tar.gz`, prefix `{repo}/`.
+///
+/// The git clone URL is `{host}/{repo}.git` on both. We branch on whether a
+/// host override is set: `None` keeps the GitHub scheme, any explicit host uses
+/// the Forgejo scheme (the only non-GitHub forge this slice targets).
+fn registry_urls(registry_host: Option<&str>) -> RegistryUrls {
+    let repo_name = REGISTRY_REPO_PATH
+        .rsplit('/')
+        .next()
+        .unwrap_or(REGISTRY_REPO_PATH);
+    match registry_host {
+        None => RegistryUrls {
+            tarball_url: format!(
+                "https://github.com/{REGISTRY_REPO_PATH}/archive/refs/heads/{REGISTRY_BRANCH}.tar.gz"
+            ),
+            clone_url: format!("https://github.com/{REGISTRY_REPO_PATH}.git"),
+            tarball_prefix: format!("{repo_name}-{REGISTRY_BRANCH}/"),
+        },
+        Some(host) => {
+            let host = host.trim_end_matches('/');
+            RegistryUrls {
+                tarball_url: format!(
+                    "{host}/{REGISTRY_REPO_PATH}/archive/{REGISTRY_BRANCH}.tar.gz"
+                ),
+                clone_url: format!("{host}/{REGISTRY_REPO_PATH}.git"),
+                tarball_prefix: format!("{repo_name}/"),
+            }
+        }
+    }
+}
 
 /// Default cache TTL: how long (in seconds) before we re-download the registry.
 /// Callers without access to `KernelConfig` can use this value directly.
@@ -50,13 +100,14 @@ pub fn refresh_registry_checkout(
     home_dir: &Path,
     cache_ttl_secs: u64,
     registry_mirror: &str,
+    registry_host: Option<&str>,
 ) -> bool {
     let _guard = SYNC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let registry_cache = home_dir.join("registry");
 
     if should_refresh(&registry_cache, cache_ttl_secs) {
         // Try git first (faster incremental updates, private fork support)
-        let git_ok = match git_clone_fallback(&registry_cache, registry_mirror) {
+        let git_ok = match git_clone_fallback(&registry_cache, registry_mirror, registry_host) {
             Ok(()) => true,
             Err(e) => {
                 tracing::debug!("Git sync unavailable: {e} — trying HTTP download");
@@ -66,7 +117,7 @@ pub fn refresh_registry_checkout(
 
         // Fall back to HTTP tarball if git failed
         if !git_ok {
-            if let Err(e) = download_and_extract(&registry_cache, registry_mirror) {
+            if let Err(e) = download_and_extract(&registry_cache, registry_mirror, registry_host) {
                 tracing::warn!("HTTP registry download also failed: {e}");
                 return registry_cache.exists();
             }
@@ -92,13 +143,22 @@ pub fn refresh_registry_checkout(
 /// When non-empty, all GitHub URLs are prefixed with this value (e.g.
 /// `"https://ghproxy.cn"` rewrites `https://github.com/...` to
 /// `https://ghproxy.cn/https://github.com/...`).
-pub fn sync_registry(home_dir: &Path, cache_ttl_secs: u64, registry_mirror: &str) -> bool {
+///
+/// `registry_host` is the optional full base URL of the forge hosting the
+/// registry (e.g. `Some("https://codeberg.org")`). `None` keeps the GitHub
+/// defaults — see [`registry_urls`].
+pub fn sync_registry(
+    home_dir: &Path,
+    cache_ttl_secs: u64,
+    registry_mirror: &str,
+    registry_host: Option<&str>,
+) -> bool {
     let _guard = SYNC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let registry_cache = home_dir.join("registry");
 
     if should_refresh(&registry_cache, cache_ttl_secs) {
         // Try git first (faster incremental updates, private fork support)
-        let git_ok = match git_clone_fallback(&registry_cache, registry_mirror) {
+        let git_ok = match git_clone_fallback(&registry_cache, registry_mirror, registry_host) {
             Ok(()) => true,
             Err(e) => {
                 tracing::debug!("Git sync unavailable: {e} — trying HTTP download");
@@ -108,7 +168,7 @@ pub fn sync_registry(home_dir: &Path, cache_ttl_secs: u64, registry_mirror: &str
 
         // Fall back to HTTP tarball if git failed
         if !git_ok {
-            if let Err(e) = download_and_extract(&registry_cache, registry_mirror) {
+            if let Err(e) = download_and_extract(&registry_cache, registry_mirror, registry_host) {
                 tracing::warn!("HTTP registry download also failed: {e}");
                 if !registry_cache.exists() {
                     return false;
@@ -277,6 +337,7 @@ fn apply_mirror(mirror: &str, url: &str) -> String {
 pub(crate) fn extract_entries_into<R: std::io::Read>(
     archive: &mut tar::Archive<R>,
     tmp_dir: &Path,
+    tarball_prefix: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Canonicalise the extraction root once so the per-entry containment
     // check below operates on a path with no symlink / `.` / `..` segments.
@@ -302,13 +363,13 @@ pub(crate) fn extract_entries_into<R: std::io::Read>(
         }
 
         // Strip the tarball prefix
-        let relative: String = match path_str.strip_prefix(TARBALL_PREFIX) {
+        let relative: String = match path_str.strip_prefix(tarball_prefix) {
             Some(r) if !r.is_empty() => r.to_string(),
             _ => continue,
         };
 
         // SECURITY: reject any entry whose name contains a `..` (or root /
-        // prefix) component. `strip_prefix(TARBALL_PREFIX)` is a plain
+        // prefix) component. `strip_prefix(tarball_prefix)` is a plain
         // string strip — it does NOT normalise, so a crafted entry like
         // `librefang-registry-main/foo/../../../../etc/cron.d/owned`
         // survives the strip with `relative` still holding the traversal.
@@ -372,8 +433,10 @@ pub(crate) fn extract_entries_into<R: std::io::Read>(
 fn download_and_extract(
     registry_cache: &Path,
     registry_mirror: &str,
+    registry_host: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let url = apply_mirror(registry_mirror, REGISTRY_TARBALL_URL);
+    let urls = registry_urls(registry_host);
+    let url = apply_mirror(registry_mirror, &urls.tarball_url);
     tracing::info!("Downloading registry from {url}");
 
     let resp = ureq::get(&url).call()?;
@@ -398,7 +461,7 @@ fn download_and_extract(
     }
     std::fs::create_dir_all(&tmp_dir)?;
 
-    extract_entries_into(&mut archive, &tmp_dir)?;
+    extract_entries_into(&mut archive, &tmp_dir, &urls.tarball_prefix)?;
 
     // Swap: remove old cache, rename tmp to cache
     if registry_cache.exists() {
@@ -417,6 +480,7 @@ fn download_and_extract(
 fn git_clone_fallback(
     registry_cache: &Path,
     registry_mirror: &str,
+    registry_host: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Attempting git clone fallback");
 
@@ -444,7 +508,7 @@ fn git_clone_fallback(
         if registry_cache.exists() {
             std::fs::remove_dir_all(registry_cache)?;
         }
-        let repo_url = apply_mirror(registry_mirror, REGISTRY_REPO);
+        let repo_url = apply_mirror(registry_mirror, &registry_urls(registry_host).clone_url);
         let status = Command::new("git")
             .args([
                 "clone",
@@ -488,7 +552,7 @@ pub fn resolve_home_dir_for_tests() -> std::path::PathBuf {
                 .map(|d| d.count() == 0)
                 .unwrap_or(true)
         {
-            sync_registry(&home, DEFAULT_CACHE_TTL_SECS, "");
+            sync_registry(&home, DEFAULT_CACHE_TTL_SECS, "", None);
         }
         home
     })
@@ -763,6 +827,52 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `None` ⇒ byte-identical GitHub URLs/prefix shipped before #6095.
+    #[test]
+    fn registry_urls_none_matches_github_defaults() {
+        let urls = registry_urls(None);
+        assert_eq!(
+            urls.tarball_url,
+            "https://github.com/librefang/librefang-registry/archive/refs/heads/main.tar.gz"
+        );
+        assert_eq!(
+            urls.clone_url,
+            "https://github.com/librefang/librefang-registry.git"
+        );
+        assert_eq!(urls.tarball_prefix, "librefang-registry-main/");
+    }
+
+    /// #6095: a Codeberg host yields the Forgejo archive scheme — no
+    /// `refs/heads/` segment and a `{repo}/` (not `{repo}-{branch}/`) prefix.
+    #[test]
+    fn registry_urls_codeberg_host() {
+        let urls = registry_urls(Some("https://codeberg.org"));
+        assert_eq!(
+            urls.tarball_url,
+            "https://codeberg.org/librefang/librefang-registry/archive/main.tar.gz"
+        );
+        assert_eq!(
+            urls.clone_url,
+            "https://codeberg.org/librefang/librefang-registry.git"
+        );
+        assert_eq!(urls.tarball_prefix, "librefang-registry/");
+    }
+
+    /// A trailing slash on the configured host must not double up in the
+    /// derived URLs.
+    #[test]
+    fn registry_urls_trims_trailing_slash() {
+        let urls = registry_urls(Some("https://codeberg.org/"));
+        assert_eq!(
+            urls.tarball_url,
+            "https://codeberg.org/librefang/librefang-registry/archive/main.tar.gz"
+        );
+        assert_eq!(
+            urls.clone_url,
+            "https://codeberg.org/librefang/librefang-registry.git"
+        );
+    }
 
     #[test]
     fn test_needs_sync_when_registry_cache_missing() {
@@ -1056,7 +1166,7 @@ mod tests {
             b.finish().unwrap();
         }
         let mut archive = tar::Archive::new(&buf[..]);
-        extract_entries_into(&mut archive, &extract_root).unwrap();
+        extract_entries_into(&mut archive, &extract_root, "librefang-registry-main/").unwrap();
 
         assert!(
             !outside.exists(),
@@ -1104,7 +1214,7 @@ mod tests {
             b.finish().unwrap();
         }
         let mut archive = tar::Archive::new(&buf[..]);
-        extract_entries_into(&mut archive, &extract_root).unwrap();
+        extract_entries_into(&mut archive, &extract_root, "librefang-registry-main/").unwrap();
 
         // The symlink entry was skipped, so `evil` is NOT a symlink and the
         // original outside file is untouched.
@@ -1140,7 +1250,7 @@ mod tests {
             ),
         ]);
         let mut archive = tar::Archive::new(&bytes[..]);
-        extract_entries_into(&mut archive, &extract_root).unwrap();
+        extract_entries_into(&mut archive, &extract_root, "librefang-registry-main/").unwrap();
 
         assert_eq!(
             std::fs::read_to_string(extract_root.join("providers/groq.toml")).unwrap(),

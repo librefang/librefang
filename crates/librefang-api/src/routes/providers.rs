@@ -2469,7 +2469,10 @@ pub async fn copilot_oauth_poll(
 pub async fn catalog_update(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let cfg = state.kernel.config_ref();
     let mirror = &cfg.registry.registry_mirror;
-    match librefang_kernel::catalog_sync::sync_catalog_to(state.kernel.home_dir(), mirror).await {
+    let host = cfg.registry.registry_host.as_deref();
+    match librefang_kernel::catalog_sync::sync_catalog_to(state.kernel.home_dir(), mirror, host)
+        .await
+    {
         Ok(result) => {
             // Refresh the in-memory catalog so the new models are available immediately
             {

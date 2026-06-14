@@ -53,6 +53,7 @@ async fn boot_router_with_api_key(api_key: &str) -> RouterHarness {
         tmp.path(),
         librefang_kernel::registry_sync::DEFAULT_CACHE_TTL_SECS,
         "",
+        None,
     );
 
     let config = KernelConfig {
@@ -95,6 +96,7 @@ async fn boot_router_strict_reads() -> RouterHarness {
         tmp.path(),
         librefang_kernel::registry_sync::DEFAULT_CACHE_TTL_SECS,
         "",
+        None,
     );
 
     let config = KernelConfig {
@@ -646,6 +648,7 @@ async fn auth_providers_open_mode_returns_names_only() {
         tmp.path(),
         librefang_kernel::registry_sync::DEFAULT_CACHE_TTL_SECS,
         "",
+        None,
     );
     let config = KernelConfig {
         home_dir: tmp.path().to_path_buf(),

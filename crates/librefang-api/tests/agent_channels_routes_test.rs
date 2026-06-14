@@ -47,6 +47,7 @@ async fn boot() -> Harness {
         tmp.path(),
         librefang_kernel::registry_sync::DEFAULT_CACHE_TTL_SECS,
         "",
+        None,
     );
 
     let config = KernelConfig {

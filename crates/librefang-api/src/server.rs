@@ -2011,6 +2011,7 @@ pub async fn run_daemon(
                 match librefang_kernel::catalog_sync::sync_catalog_to(
                     kernel.home_dir(),
                     &cfg.registry.registry_mirror,
+                    cfg.registry.registry_host.as_deref(),
                 )
                 .await
                 {

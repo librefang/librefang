@@ -50,6 +50,7 @@ async fn boot_router_with_api_key(api_key: &str) -> RouterHarness {
         tmp.path(),
         librefang_kernel::registry_sync::DEFAULT_CACHE_TTL_SECS,
         "",
+        None,
     );
 
     let config = KernelConfig {

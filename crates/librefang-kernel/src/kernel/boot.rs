@@ -790,6 +790,7 @@ impl LibreFangKernel {
             &config.home_dir,
             config.registry.cache_ttl_secs,
             &config.registry.registry_mirror,
+            config.registry.registry_host.as_deref(),
         );
 
         // One-shot: reclaim the duplicate registry checkout that older

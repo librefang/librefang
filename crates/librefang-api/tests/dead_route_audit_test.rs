@@ -80,6 +80,7 @@ async fn boot_full_router() -> (Router, Arc<AppState>, TempDir) {
         tmp.path(),
         librefang_kernel::registry_sync::DEFAULT_CACHE_TTL_SECS,
         "",
+        None,
     );
 
     let config = KernelConfig {
