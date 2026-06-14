@@ -245,8 +245,7 @@ impl GoalRunner {
     /// Snapshot the observable state of a goal's run, if one exists.
     pub fn state(&self, goal_id: GoalId) -> Option<GoalRunState> {
         let handle = self.runs.get(&goal_id)?;
-        // try_lock avoids blocking the caller (an async HTTP handler) on a tick;
-        // a momentary contention just yields no snapshot this call.
+        // try_lock: None → `running:false`; run_loop must never hold this lock across I/O.
         handle.state.try_lock().ok().map(|s| s.clone())
     }
 
@@ -555,7 +554,8 @@ async fn run_loop<F, Fut>(
                 };
                 patch_goal(&substrate, goal_id, new_progress, new_status);
 
-                {
+                // Release before persist_run: state()'s try_lock returns None (→ running:false) while held.
+                let snapshot = {
                     let mut s = state.lock().await;
                     s.iteration = iteration + 1;
                     if let Some(p) = new_progress {
@@ -563,10 +563,11 @@ async fn run_loop<F, Fut>(
                     }
                     s.last_error = None;
                     s.updated_at = Utc::now();
-                    // Mirror the post-iteration state to the durable store so a
-                    // crash before the next tick still leaves a recoverable row.
-                    persist_run(&store, &s);
-                }
+                    s.clone()
+                };
+                // Mirror the post-iteration state to the durable store so a
+                // crash before the next tick still leaves a recoverable row.
+                persist_run(&store, &snapshot);
 
                 if parsed.done {
                     break GoalRunPhase::Finished;
@@ -590,12 +591,14 @@ async fn run_loop<F, Fut>(
                         rate_limit_streak = 0;
                     }
                 }
-                {
+                // Same lock discipline as success path: release before persist_run.
+                let snapshot = {
                     let mut s = state.lock().await;
                     s.last_error = Some(e);
                     s.updated_at = Utc::now();
-                    persist_run(&store, &s);
-                }
+                    s.clone()
+                };
+                persist_run(&store, &snapshot);
                 if rate_limit_streak >= MAX_RATE_LIMIT_STREAK {
                     break GoalRunPhase::RateLimited;
                 }

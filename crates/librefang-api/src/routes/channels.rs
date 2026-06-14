@@ -198,12 +198,11 @@ struct SidecarCatalogEntry {
     /// Module / script arguments passed to `command`. `--describe` is appended
     /// by `describe_sidecar()` at probe time.
     args: &'static [&'static str],
-    /// Compile-time fallback schema used when `--describe` fails at daemon
-    /// boot (e.g. Python sidecar SDK not installed). When `Some`, the fields
-    /// are seeded into the schema cache so the dashboard configure form and
-    /// the `POST /api/channels/sidecar/{name}/configure` endpoint work even
-    /// without a live Python interpreter. When `None`, the adapter shows an
-    /// empty form until the SDK is installed and the daemon is restarted.
+    /// Last-resort fallback schema for the configure form. `describe_sidecar`
+    /// injects the embedded SDK onto PYTHONPATH, so a `python3`-only host (no
+    /// `pip install`) normally gets the adapter's live schema; this is used only
+    /// when that probe fails outright (no usable `python3`, or the embedded
+    /// extract errored). `None` ⇒ empty form in that rare case.
     static_fields: Option<&'static [StaticSidecarField]>,
 }
 
@@ -540,18 +539,20 @@ fn schema_error_cache() -> &'static RwLock<HashMap<&'static str, String>> {
 
 /// Spawn `<command> <args> --describe` for every catalog entry and cache
 /// the resulting schemas. Called once at daemon boot from
-/// `server::build_router`. Failures (SDK not installed, describe crashed)
-/// are logged at WARN; when the entry carries `static_fields`, those are
-/// used as a compile-time fallback so the dashboard configure form always
-/// shows fields for adapters that have opted in. Entries without
-/// `static_fields` fall back to an empty `fields[]` — the operator then
-/// sees the description + setup-steps text but no form until the SDK is
-/// installed. This keeps daemon boot resilient in dev environments that
-/// have not run `pip install -e sdk/python`.
-pub async fn populate_sidecar_schema_cache() {
+/// `server::build_router`. `describe_sidecar` injects the binary-embedded
+/// `librefang-sdk` onto the child's PYTHONPATH (see there), so on any host with
+/// just `python3` on PATH the probe succeeds and the dashboard gets the
+/// adapter's authoritative live schema — no `pip install` required.
+/// `static_fields` is now only a last-resort fallback for the case where even
+/// that probe fails (no `python3` at all, or the embedded extract errored): a
+/// failure is logged at WARN, and when the entry carries `static_fields` those
+/// compile-time fields seed the form instead of leaving an empty `fields[]`.
+/// `home_dir` must be the kernel's `KernelConfig.home_dir`
+/// (`KernelApi::home_dir()`); it locates the embedded-SDK extraction dir.
+pub async fn populate_sidecar_schema_cache(home_dir: &std::path::Path) {
     for entry in SIDECAR_CATALOG {
         let args: Vec<String> = entry.args.iter().map(|s| s.to_string()).collect();
-        match describe_sidecar(entry.command, &args).await {
+        match describe_sidecar(entry.command, &args, home_dir).await {
             Ok(schema) => {
                 tracing::info!(
                     adapter = entry.name,
