@@ -3771,6 +3771,18 @@ impl SkillsResource {
         .await
     }
 
+    pub async fn propose_pending_to_registry(&self, id: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &format!("/api/skills/pending/{}/propose-to-registry", id),
+            None,
+            &[],
+        )
+        .await
+    }
+
     pub async fn reject_pending_candidate(&self, id: &str) -> Result<Value> {
         do_req(
             &self.client,
