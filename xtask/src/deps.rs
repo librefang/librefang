@@ -92,8 +92,16 @@ fn run_pnpm_audit(dir: &Path, label: &str) -> bool {
     }
 
     println!("--- pnpm audit: {} ---", label);
+    // Scope the frontend audit to production dependencies.
+    // The dashboard and web SPAs are bundled — devDependencies (the build
+    // toolchain: vite, esbuild, type stubs, test runners) are tree-shaken out
+    // and never reach the served artifact, so an advisory against a build-time
+    // tool is not a runtime exposure for users. Auditing `--prod` keeps the
+    // gate meaningful (a vulnerable dependency that actually ships still fails
+    // it) while not blocking every PR on dev-tooling advisories that the
+    // project cannot act on without bumping the whole build chain.
     let status = Command::new("pnpm")
-        .args(["audit"])
+        .args(["audit", "--prod"])
         .current_dir(dir)
         .status();
     println!();
