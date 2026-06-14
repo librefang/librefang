@@ -500,3 +500,25 @@ async fn config_overrides_overlay_applies_to_live_kernel() {
         "config_set override must reach the live kernel config"
     );
 }
+
+// ── Settings-to-store: budget whole-section override (phase 9) ───────────────
+
+#[test]
+fn budget_section_override_resolves_into_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg_path = tmp.path().join("config.toml");
+    std::fs::write(&cfg_path, "log_level = \"info\"\n").unwrap();
+
+    // A budget settings change persisted by routes/budget.rs as one whole-section
+    // `config_overrides` entry (no credential fields -> allowlisted).
+    let mut budget = librefang_types::config::KernelConfig::default().budget;
+    budget.max_daily_usd = 42.0;
+    let mut overrides = BTreeMap::new();
+    overrides.insert("budget".to_string(), serde_json::to_value(&budget).unwrap());
+
+    let (merged, _raw) = resolve_config_with_overrides(&cfg_path, &overrides).unwrap();
+    assert_eq!(
+        merged.budget.max_daily_usd, 42.0,
+        "whole-section budget override must apply via resolve (allowlisted)"
+    );
+}
