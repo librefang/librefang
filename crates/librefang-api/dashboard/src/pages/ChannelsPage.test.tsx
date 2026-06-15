@@ -257,6 +257,38 @@ describe("ChannelsPage", () => {
     expect(within(drawer).getByText("Bot token")).toBeInTheDocument();
   });
 
+  it("shows the SDK-missing reason and disables Save when the sidecar schema is unavailable", () => {
+    const reason =
+      "librefang-sdk is not installed in the Python interpreter resolved by 'python3'.";
+    useChannelsMock.mockReturnValue(
+      makeQuery<ChannelItem[]>([
+        makeChannel({ name: "slack" }),
+        makeChannel({
+          name: "wechat",
+          display_name: "WeChat",
+          configured: false,
+          // describe failed at boot → no fields, but a reason rides along.
+          fields: [],
+          schema_error: reason,
+        }),
+      ]),
+    );
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: /channels\.add/ }));
+    let drawer = screen.getByTestId("drawer-slot");
+    fireEvent.click(within(drawer).getByText("WeChat"));
+    drawer = screen.getByTestId("drawer-slot");
+    // The actionable reason is surfaced verbatim instead of a blank form.
+    expect(within(drawer).getByText(reason)).toBeInTheDocument();
+    expect(
+      within(drawer).getByText("channels.schema_unavailable_title"),
+    ).toBeInTheDocument();
+    // Save is dead — there is nothing to submit.
+    expect(
+      within(drawer).getByRole("button", { name: /common\.save/ }),
+    ).toBeDisabled();
+  });
+
   it("forwards the schema-driven values to useSaveSidecarConfig on Save", () => {
     const { save } = setMutationDefaults();
     useChannelsMock.mockReturnValue(

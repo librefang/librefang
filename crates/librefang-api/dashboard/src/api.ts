@@ -144,6 +144,9 @@ export interface ChannelItem {
   /** Schema-driven configure form for a sidecar adapter (returned by
    *  `python -m <module> --describe` and cached daemon-side). */
   fields?: ChannelField[];
+  /** Set on an unconfigured sidecar row when `--describe` failed at daemon boot and there is no static fallback — i.e. `fields` is empty and the configure form would otherwise be a blank drawer.
+   *  Carries the actionable reason (typically: the Python sidecar SDK is not installed), surfaced in the configure form so the operator knows why the form is empty and how to fix it. */
+  schema_error?: string;
   /** Read-only TOML snippet the operator can copy into config.toml
    *  if they prefer hand-editing over the configure drawer. Emitted
    *  by the backend on every row. */
@@ -2007,6 +2010,13 @@ export interface PendingProvenance {
   turn_index: number;
 }
 
+/**
+ * Whether a pending candidate creates a brand-new skill or proposes an
+ * update/patch to an existing one (#5844 / #5819). Defaults to `"create"`
+ * for drafts written before this field existed.
+ */
+export type PendingCandidateKind = "create" | "update";
+
 export interface PendingCandidate {
   id: string;
   agent_id: string;
@@ -2018,6 +2028,14 @@ export interface PendingCandidate {
   description: string;
   prompt_context: string;
   provenance: PendingProvenance;
+  /** Create vs update/patch. Absent on legacy drafts → treat as `"create"`. */
+  kind?: PendingCandidateKind;
+  /** For an update: the existing skill this draft proposes to replace. */
+  target_skill_id?: string | null;
+  /** For an update: the current on-disk version of `target_skill_id`. */
+  current_version?: string | null;
+  /** For an update: the version the reviewer proposes bumping to on approval. */
+  proposed_version?: string | null;
 }
 
 // Discriminated on `status`:
@@ -2063,6 +2081,20 @@ export async function approvePendingCandidate(id: string): Promise<PendingApprov
 export async function rejectPendingCandidate(id: string): Promise<{ status: "rejected"; candidate_id: string }> {
   return post<{ status: "rejected"; candidate_id: string }>(
     `/api/skills/pending/${encodeURIComponent(id)}/reject`,
+    {},
+  );
+}
+
+/**
+ * Open a PR contributing a *pending* candidate to the configured registry
+ * repo, without first approving it into the active registry (#5819). Shares
+ * the `ProposeSkillResult` shape with {@link proposeSkillToRegistry}. Requires
+ * a GitHub token (env or vault) on the daemon side; a 401 is returned when
+ * none is configured.
+ */
+export async function proposePendingToRegistry(id: string): Promise<ProposeSkillResult> {
+  return post<ProposeSkillResult>(
+    `/api/skills/pending/${encodeURIComponent(id)}/propose-to-registry`,
     {},
   );
 }
@@ -3396,6 +3428,28 @@ export async function activateHand(
 ): Promise<ApiActionResponse> {
   return post<ApiActionResponse>(`/api/hands/${encodeURIComponent(handId)}/activate`, {
     config: config ?? {}
+  });
+}
+
+/** Result of installing a hand from the remote HandsHub marketplace. */
+export interface HandsHubInstallResult {
+  hand_id: string;
+  version: string;
+  checksum_verified: boolean;
+  definition: HandDefinitionItem | null;
+}
+
+/** Install a hand from the remote HandsHub marketplace. The server downloads
+ *  the bundle, verifies its SHA-256 against the registry digest, runs the
+ *  shared supply-chain audit, then installs it. `registryUrl` overrides the
+ *  default registry (self-hosted forks). */
+export async function installHandFromMarketplace(
+  handId: string,
+  registryUrl?: string
+): Promise<HandsHubInstallResult> {
+  return post<HandsHubInstallResult>("/api/hands/marketplace/install", {
+    hand_id: handId,
+    ...(registryUrl ? { registry_url: registryUrl } : {})
   });
 }
 

@@ -7,6 +7,7 @@
 //! All API keys use `Zeroizing<String>` via `resolve_api_key()` to auto-wipe
 //! secrets from memory on drop.
 
+use crate::tool_runner::ToolError;
 use crate::web_cache::WebCache;
 use crate::web_content::wrap_external_content;
 use librefang_types::config::{SearchProvider, WebConfig};
@@ -80,7 +81,7 @@ impl WebSearchEngine {
     }
 
     /// Perform a web search using the configured provider (or auto-fallback).
-    pub async fn search(&self, query: &str, max_results: usize) -> Result<String, String> {
+    pub async fn search(&self, query: &str, max_results: usize) -> Result<String, ToolError> {
         // Check cache first
         let cache_key = format!("search:{}:{}", query, max_results);
         if let Some(cached) = self.cache.get(&cache_key) {
@@ -108,7 +109,7 @@ impl WebSearchEngine {
 
     /// Auto-select provider based on available API keys.
     /// Priority: Tavily → Brave → Jina → Perplexity → Searxng → DuckDuckGo
-    async fn search_auto(&self, query: &str, max_results: usize) -> Result<String, String> {
+    async fn search_auto(&self, query: &str, max_results: usize) -> Result<String, ToolError> {
         // Tavily first (AI-agent-native)
         if resolve_api_key(&self.config.tavily.api_key_env).is_some() {
             debug!("Auto: trying Tavily");
@@ -164,8 +165,8 @@ impl WebSearchEngine {
         debug!("Auto: falling back to DuckDuckGo");
         match self.search_duckduckgo(query, max_results).await {
             Ok(result) if !result.trim().is_empty() => Ok(result),
-            Ok(_) => Err("All search providers failed; DuckDuckGo returned empty results (likely captcha-blocked). Configure a Brave, Tavily, Jina, Perplexity, or SearXNG provider for reliable search.".to_string()),
-            Err(e) => Err(format!("All search providers exhausted. Last error (DuckDuckGo): {e}")),
+            Ok(_) => Err(ToolError::upstream_msg("All search providers failed; DuckDuckGo returned empty results (likely captcha-blocked). Configure a Brave, Tavily, Jina, Perplexity, or SearXNG provider for reliable search.")),
+            Err(e) => Err(ToolError::upstream_msg(format!("All search providers exhausted. Last error (DuckDuckGo): {e}"))),
         }
     }
 
@@ -174,8 +175,8 @@ impl WebSearchEngine {
     /// Tries each configured API key in priority order. If a key returns
     /// 402 (Payment Required) or 429 (Too Many Requests), the next key is
     /// tried automatically.
-    async fn search_brave(&self, query: &str, max_results: usize) -> Result<String, String> {
-        let mut last_err = String::from("Brave API key not set");
+    async fn search_brave(&self, query: &str, max_results: usize) -> Result<String, ToolError> {
+        let mut last_err: ToolError = ToolError::Unavailable("Brave API key");
 
         for env_var in &self.brave_key_envs {
             let Some(api_key) = resolve_api_key(env_var) else {
@@ -188,8 +189,10 @@ impl WebSearchEngine {
             {
                 Ok(result) => return Ok(result),
                 Err(e) => {
-                    let is_rotatable =
-                        e.contains("402") || e.contains("429") || e.contains("Payment");
+                    let rendered = e.to_string();
+                    let is_rotatable = rendered.contains("402")
+                        || rendered.contains("429")
+                        || rendered.contains("Payment");
                     if is_rotatable && self.brave_key_envs.len() > 1 {
                         warn!(
                             env_var,
@@ -213,7 +216,7 @@ impl WebSearchEngine {
         query: &str,
         max_results: usize,
         api_key: &Zeroizing<String>,
-    ) -> Result<String, String> {
+    ) -> Result<String, ToolError> {
         let mut params = vec![("q", query.to_string()), ("count", max_results.to_string())];
         if !self.config.brave.country.is_empty() {
             params.push(("country", self.config.brave.country.clone()));
@@ -233,16 +236,16 @@ impl WebSearchEngine {
             .header("Accept", "application/json")
             .send()
             .await
-            .map_err(|e| format!("Brave request failed: {e}"))?;
+            .map_err(ToolError::upstream)?;
 
         if !resp.status().is_success() {
-            return Err(format!("Brave API returned {}", resp.status()));
+            return Err(ToolError::upstream_msg(format!(
+                "Brave API returned {}",
+                resp.status()
+            )));
         }
 
-        let body: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| format!("Brave JSON parse failed: {e}"))?;
+        let body: serde_json::Value = resp.json().await.map_err(ToolError::upstream)?;
 
         let results = body["web"]["results"]
             .as_array()
@@ -250,7 +253,9 @@ impl WebSearchEngine {
             .unwrap_or_default();
 
         if results.is_empty() {
-            return Err(format!("No results found for '{query}' (Brave)."));
+            return Err(ToolError::upstream_msg(format!(
+                "No results found for '{query}' (Brave)."
+            )));
         }
 
         let mut output = format!("Search results for '{query}' (Brave):\n\n");
@@ -271,9 +276,9 @@ impl WebSearchEngine {
     }
 
     /// Search via Tavily API (AI-agent-native search).
-    async fn search_tavily(&self, query: &str, max_results: usize) -> Result<String, String> {
-        let api_key =
-            resolve_api_key(&self.config.tavily.api_key_env).ok_or("Tavily API key not set")?;
+    async fn search_tavily(&self, query: &str, max_results: usize) -> Result<String, ToolError> {
+        let api_key = resolve_api_key(&self.config.tavily.api_key_env)
+            .ok_or(ToolError::Unavailable("Tavily API key"))?;
 
         let body = serde_json::json!({
             "api_key": api_key.as_str(),
@@ -289,16 +294,16 @@ impl WebSearchEngine {
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("Tavily request failed: {e}"))?;
+            .map_err(ToolError::upstream)?;
 
         if !resp.status().is_success() {
-            return Err(format!("Tavily API returned {}", resp.status()));
+            return Err(ToolError::upstream_msg(format!(
+                "Tavily API returned {}",
+                resp.status()
+            )));
         }
 
-        let data: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| format!("Tavily JSON parse failed: {e}"))?;
+        let data: serde_json::Value = resp.json().await.map_err(ToolError::upstream)?;
 
         let mut output = format!("Search results for '{query}' (Tavily):\n\n");
 
@@ -324,16 +329,18 @@ impl WebSearchEngine {
         }
 
         if results.is_empty() && !output.contains("AI Summary") {
-            return Err(format!("No results found for '{query}' (Tavily)."));
+            return Err(ToolError::upstream_msg(format!(
+                "No results found for '{query}' (Tavily)."
+            )));
         }
 
         Ok(wrap_external_content("tavily-search", &output))
     }
 
     /// Search via Perplexity AI (chat completions endpoint).
-    async fn search_perplexity(&self, query: &str) -> Result<String, String> {
+    async fn search_perplexity(&self, query: &str) -> Result<String, ToolError> {
         let api_key = resolve_api_key(&self.config.perplexity.api_key_env)
-            .ok_or("Perplexity API key not set")?;
+            .ok_or(ToolError::Unavailable("Perplexity API key"))?;
 
         let body = serde_json::json!({
             "model": self.config.perplexity.model,
@@ -349,16 +356,16 @@ impl WebSearchEngine {
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("Perplexity request failed: {e}"))?;
+            .map_err(ToolError::upstream)?;
 
         if !resp.status().is_success() {
-            return Err(format!("Perplexity API returned {}", resp.status()));
+            return Err(ToolError::upstream_msg(format!(
+                "Perplexity API returned {}",
+                resp.status()
+            )));
         }
 
-        let data: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| format!("Perplexity JSON parse failed: {e}"))?;
+        let data: serde_json::Value = resp.json().await.map_err(ToolError::upstream)?;
 
         let answer = data["choices"][0]["message"]["content"]
             .as_str()
@@ -385,9 +392,9 @@ impl WebSearchEngine {
     }
 
     /// Search via Jina AI Search API (with single retry on transient errors).
-    async fn search_jina(&self, query: &str, max_results: usize) -> Result<String, String> {
-        let api_key =
-            resolve_api_key(&self.config.jina.api_key_env).ok_or("Jina API key not set")?;
+    async fn search_jina(&self, query: &str, max_results: usize) -> Result<String, ToolError> {
+        let api_key = resolve_api_key(&self.config.jina.api_key_env)
+            .ok_or(ToolError::Unavailable("Jina API key"))?;
 
         let endpoint = if self.config.jina.use_eu_endpoint {
             "https://eu.s.jina.ai/"
@@ -425,15 +432,14 @@ impl WebSearchEngine {
 
             match resp_result {
                 Ok(resp) if resp.status().is_success() => {
-                    let data: serde_json::Value = resp
-                        .json()
-                        .await
-                        .map_err(|e| format!("Jina JSON parse failed: {e}"))?;
+                    let data: serde_json::Value = resp.json().await.map_err(ToolError::upstream)?;
 
                     let results = data["data"].as_array().cloned().unwrap_or_default();
 
                     if results.is_empty() {
-                        return Err(format!("No results found for '{query}' (Jina)."));
+                        return Err(ToolError::upstream_msg(format!(
+                            "No results found for '{query}' (Jina)."
+                        )));
                     }
 
                     let mut output = format!("Search results for '{query}' (Jina):\n\n");
@@ -464,21 +470,27 @@ impl WebSearchEngine {
                         warn!("Jina returned {status}, retrying...");
                         continue;
                     }
-                    return Err(format!("Jina API returned {status}"));
+                    return Err(ToolError::upstream_msg(format!(
+                        "Jina API returned {status}"
+                    )));
                 }
                 Err(e) => {
                     if attempts < 2 {
                         warn!("Jina request failed: {e}, retrying...");
                         continue;
                     }
-                    return Err(format!("Jina request failed: {e}"));
+                    return Err(ToolError::upstream(e));
                 }
             }
         }
     }
 
     /// Search via DuckDuckGo HTML (no API key needed).
-    async fn search_duckduckgo(&self, query: &str, max_results: usize) -> Result<String, String> {
+    async fn search_duckduckgo(
+        &self,
+        query: &str,
+        max_results: usize,
+    ) -> Result<String, ToolError> {
         debug!(query, "Searching via DuckDuckGo HTML");
 
         let resp = self
@@ -488,17 +500,16 @@ impl WebSearchEngine {
             .header("User-Agent", "Mozilla/5.0 (compatible; LibreFangAgent/0.1)")
             .send()
             .await
-            .map_err(|e| format!("DuckDuckGo request failed: {e}"))?;
+            .map_err(ToolError::upstream)?;
 
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| format!("Failed to read DDG response: {e}"))?;
+        let body = resp.text().await.map_err(ToolError::upstream)?;
 
         let results = parse_ddg_results(&body, max_results);
 
         if results.is_empty() {
-            return Err(format!("No results found for '{query}'."));
+            return Err(ToolError::upstream_msg(format!(
+                "No results found for '{query}'."
+            )));
         }
 
         let mut output = format!("Search results for '{query}':\n\n");
@@ -528,16 +539,19 @@ impl WebSearchEngine {
         max_results: usize,
         category: Option<&str>,
         page: u32,
-    ) -> Result<String, String> {
+    ) -> Result<String, ToolError> {
         if self.config.searxng.url.is_empty() {
-            return Err("SearXNG URL is not configured".to_string());
+            return Err(ToolError::Unavailable("SearXNG URL"));
         }
 
         // SearXNG treats `pageno=0` as "no results" silently — guard up-front
         // so callers (LLM tool args, internal misuse) get a clear error
         // instead of an opaque empty response.
         if page == 0 {
-            return Err("SearXNG pageno must be >= 1 (pages are 1-indexed)".to_string());
+            return Err(ToolError::InvalidParameter {
+                name: "pageno",
+                reason: "must be >= 1 (pages are 1-indexed)".to_string(),
+            });
         }
 
         let category = category.unwrap_or("general");
@@ -549,11 +563,14 @@ impl WebSearchEngine {
         match self.list_searxng_categories().await {
             Ok(cats) => {
                 if !cats.iter().any(|c| c == category) {
-                    return Err(format!(
-                        "Invalid SearXNG category '{}'. Available: {}",
-                        category,
-                        cats.join(", ")
-                    ));
+                    return Err(ToolError::InvalidParameter {
+                        name: "category",
+                        reason: format!(
+                            "'{}' is not available on this SearXNG instance. Available: {}",
+                            category,
+                            cats.join(", ")
+                        ),
+                    });
                 }
             }
             Err(e) => warn!("Could not validate SearXNG category: {e}"),
@@ -577,10 +594,13 @@ impl WebSearchEngine {
             .header("User-Agent", "Mozilla/5.0 (compatible; LibreFangAgent/0.1)")
             .send()
             .await
-            .map_err(|e| format!("SearXNG request failed: {e}"))?;
+            .map_err(ToolError::upstream)?;
 
         if !resp.status().is_success() {
-            return Err(format!("SearXNG API returned {}", resp.status()));
+            return Err(ToolError::upstream_msg(format!(
+                "SearXNG API returned {}",
+                resp.status()
+            )));
         }
 
         #[derive(serde::Deserialize)]
@@ -597,13 +617,12 @@ impl WebSearchEngine {
             published_date: Option<String>,
         }
 
-        let data: SearxngResponse = resp
-            .json()
-            .await
-            .map_err(|e| format!("SearXNG JSON parse failed: {e}"))?;
+        let data: SearxngResponse = resp.json().await.map_err(ToolError::upstream)?;
 
         if data.results.is_empty() {
-            return Err(format!("No results found for '{query}' (SearXNG)."));
+            return Err(ToolError::upstream_msg(format!(
+                "No results found for '{query}' (SearXNG)."
+            )));
         }
 
         let total = data.results.len();
@@ -644,9 +663,9 @@ impl WebSearchEngine {
     /// instead of two (`/config` + `/search`). On TTL miss the previous
     /// cached value is returned if the refresh fetch fails, so transient
     /// `/config` outages don't block searches.
-    pub async fn list_searxng_categories(&self) -> Result<Vec<String>, String> {
+    pub async fn list_searxng_categories(&self) -> Result<Vec<String>, ToolError> {
         if self.config.searxng.url.is_empty() {
-            return Err("SearXNG URL is not configured".to_string());
+            return Err(ToolError::Unavailable("SearXNG URL"));
         }
 
         // Fast path — fresh cached value.
@@ -664,7 +683,7 @@ impl WebSearchEngine {
             categories: Vec<String>,
         }
 
-        let fetch_result: Result<Vec<String>, String> = async {
+        let fetch_result: Result<Vec<String>, ToolError> = async {
             let resp = self
                 .client
                 .get(format!(
@@ -674,16 +693,16 @@ impl WebSearchEngine {
                 .header("User-Agent", "Mozilla/5.0 (compatible; LibreFangAgent/0.1)")
                 .send()
                 .await
-                .map_err(|e| format!("SearXNG config request failed: {e}"))?;
+                .map_err(ToolError::upstream)?;
 
             if !resp.status().is_success() {
-                return Err(format!("SearXNG config API returned {}", resp.status()));
+                return Err(ToolError::upstream_msg(format!(
+                    "SearXNG config API returned {}",
+                    resp.status()
+                )));
             }
 
-            let data: SearxngConfig = resp
-                .json()
-                .await
-                .map_err(|e| format!("SearXNG config JSON parse failed: {e}"))?;
+            let data: SearxngConfig = resp.json().await.map_err(ToolError::upstream)?;
             Ok(data.categories)
         }
         .await;
@@ -1096,10 +1115,7 @@ mod tests {
             .search_searxng("test", 5, None, 1)
             .await
             .expect_err("empty SearXNG URL must fail");
-        assert!(
-            err.contains("SearXNG URL is not configured"),
-            "expected configuration error, got: {err}"
-        );
+        assert_eq!(err.to_string(), "SearXNG URL unavailable");
     }
 
     #[tokio::test]
@@ -1111,7 +1127,7 @@ mod tests {
             .list_searxng_categories()
             .await
             .expect_err("empty SearXNG URL must fail");
-        assert!(err.contains("SearXNG URL is not configured"));
+        assert_eq!(err.to_string(), "SearXNG URL unavailable");
     }
 
     #[tokio::test]
@@ -1127,9 +1143,9 @@ mod tests {
             .search_searxng("test", 5, None, 0)
             .await
             .expect_err("pageno=0 must be rejected");
-        assert!(
-            err.contains("pageno must be >= 1"),
-            "expected pageno guard error, got: {err}"
+        assert_eq!(
+            err.to_string(),
+            "Invalid parameter 'pageno': must be >= 1 (pages are 1-indexed)"
         );
     }
 }

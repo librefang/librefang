@@ -748,8 +748,13 @@ impl LibreFangKernel {
             config.background.max_consecutive_rate_limits,
         );
         // Autonomous long-horizon goal runner (#5744) — shares the kernel
-        // shutdown signal so active runs end cleanly on shutdown.
-        let goal_runner = crate::goal_runner::GoalRunner::new(supervisor.subscribe());
+        // shutdown signal so active runs end cleanly on shutdown, and a
+        // SQLite-backed store (mirroring WorkflowStore) so active runs survive
+        // a daemon restart and are recovered at the next boot.
+        let goal_runner = crate::goal_runner::GoalRunner::new_with_store(
+            supervisor.subscribe(),
+            librefang_memory::GoalRunStore::new(memory.pool()),
+        );
 
         // Initialize WASM sandbox engine (shared across all WASM agents)
         let wasm_sandbox = WasmSandbox::new()
@@ -957,7 +962,36 @@ impl LibreFangKernel {
         } else {
             config
         };
-        let all_mcp_servers = config.mcp_servers.clone();
+        // DB rows override file entries by name; empty table is a no-op (supports K8s read-only ConfigMaps, #6021).
+        let mut all_mcp_servers = config.mcp_servers.clone();
+        {
+            let mcp_config_store = librefang_memory::McpConfigStore::new(memory.pool());
+            match mcp_config_store.load_all() {
+                Ok(db_servers) if !db_servers.is_empty() => {
+                    let mut overridden = 0usize;
+                    let mut added = 0usize;
+                    for db_srv in db_servers {
+                        if let Some(slot) =
+                            all_mcp_servers.iter_mut().find(|s| s.name == db_srv.name)
+                        {
+                            *slot = db_srv;
+                            overridden += 1;
+                        } else {
+                            all_mcp_servers.push(db_srv);
+                            added += 1;
+                        }
+                    }
+                    info!(
+                        "MCP config (DB): {added} added, {overridden} overridden from \
+                         mcp_server_configs"
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    warn!("Failed to load DB-backed MCP server configs: {e}");
+                }
+            }
+        }
 
         // Initialize MCP health monitor.
         // [health_check] section overrides [extensions] when explicitly set (non-default).
@@ -2527,6 +2561,27 @@ system_prompt = "You are a helpful assistant."
                     // the wake-idle path is deliberately skipped because
                     // `self_handle` is not yet set at this point in boot.
                     kernel.synthesize_task_failures_for_recovered_runs(&recovered_run_ids);
+                }
+            }
+        }
+
+        // Recover goal runs left in Running phase by a prior crash or restart
+        // (#5744 follow-up). Reuses `workflow_stale_timeout_minutes`: the
+        // staleness semantic is identical (how long before an interrupted
+        // in-flight run is demoted), so a second config knob would only add
+        // operator surface for no behavioural gain. `recover_stale_runs` is a
+        // synchronous SQLite read + write, matching the workflow sweep above.
+        {
+            let stale_timeout_mins = kernel.config.load().workflow_stale_timeout_minutes;
+            if stale_timeout_mins > 0 {
+                let stale_timeout = std::time::Duration::from_secs(stale_timeout_mins * 60);
+                let recovered_goal_ids =
+                    tokio::task::block_in_place(|| kernel.recover_stale_goal_runs(stale_timeout));
+                if !recovered_goal_ids.is_empty() {
+                    info!(
+                        "Recovered {} stale goal run(s) interrupted by daemon restart",
+                        recovered_goal_ids.len()
+                    );
                 }
             }
         }

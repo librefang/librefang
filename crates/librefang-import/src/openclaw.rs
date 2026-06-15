@@ -39,10 +39,17 @@ fn validate_migration_id(id: &str) -> Result<(), crate::MigrateError> {
     if id.is_empty() {
         return Err(crate::MigrateError::InvalidId("id is empty".to_string()));
     }
-    if id.contains('\0') {
-        return Err(crate::MigrateError::InvalidId(
-            "id contains NUL byte".to_string(),
-        ));
+    // The id is interpolated into TOML comment / description lines of the
+    // generated agent manifest. Reject control characters (incl. NUL and
+    // newlines), double-quote and backslash so it cannot break out of those
+    // contexts and inject manifest keys (manifest-injection hardening).
+    if let Some(bad) = id
+        .chars()
+        .find(|c| c.is_control() || *c == '"' || *c == '\\')
+    {
+        return Err(crate::MigrateError::InvalidId(format!(
+            "id contains illegal character {bad:?}: {id:?}"
+        )));
     }
     for component in std::path::Path::new(id).components() {
         match component {
@@ -55,6 +62,43 @@ fn validate_migration_id(id: &str) -> Result<(), crate::MigrateError> {
         }
     }
     Ok(())
+}
+
+/// Escape a string for safe inclusion inside a TOML basic string (`"..."`).
+///
+/// Several agent-manifest fields (name, description, system_prompt, model /
+/// provider, base_url, tags, skills, capability entries) are interpolated from
+/// untrusted imported config straight into hand-built TOML. Without escaping, a
+/// value containing `"` (or `"""`, or a newline) terminates the string early
+/// and lets the importer inject arbitrary manifest keys — e.g. widening
+/// `[capabilities]` with `shell = ["*"]`. Escaping backslash, double-quote and
+/// control characters per the TOML spec makes every such value inert.
+fn toml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0c}' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 || (c as u32) == 0x7f => {
+                out.push_str(&format!("\\u{:04X}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Collapse control characters (newlines etc.) to spaces for safe inclusion in
+/// a TOML `#` comment line, where backslash-escaping does not apply.
+fn toml_comment_safe(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
 }
 
 /// #3798 — Write `content` to `path` atomically: write to a sibling `.tmp`
@@ -2065,10 +2109,7 @@ fn convert_agent_from_json(
     toml_str.push_str(&format!(
         "# LibreFang agent manifest\n# Migrated from OpenClaw agent '{id}'\n\n"
     ));
-    toml_str.push_str(&format!(
-        "name = \"{}\"\n",
-        display_name.replace('"', "\\\"")
-    ));
+    toml_str.push_str(&format!("name = \"{}\"\n", toml_escape(&display_name)));
     toml_str.push_str(&format!("version = \"{}\"\n", librefang_types::VERSION));
     toml_str.push_str(&format!(
         "description = \"Migrated from OpenClaw agent '{id}'\"\n"
@@ -2083,7 +2124,10 @@ fn convert_agent_from_json(
     if let Some(ref skills_val) = entry.skills {
         let skill_names = extract_string_list(skills_val);
         if !skill_names.is_empty() {
-            let skills_toml: Vec<String> = skill_names.iter().map(|s| format!("\"{s}\"")).collect();
+            let skills_toml: Vec<String> = skill_names
+                .iter()
+                .map(|s| format!("\"{}\"", toml_escape(s)))
+                .collect();
             toml_str.push_str(&format!("skills = [{}]\n", skills_toml.join(", ")));
         }
     }
@@ -2091,8 +2135,10 @@ fn convert_agent_from_json(
     // Tool blocklist from OpenClaw's tools.deny list — previously dropped,
     // which widened the agent's tool access relative to the source config.
     if !tool_blocklist.is_empty() {
-        let blocklist_toml: Vec<String> =
-            tool_blocklist.iter().map(|t| format!("\"{t}\"")).collect();
+        let blocklist_toml: Vec<String> = tool_blocklist
+            .iter()
+            .map(|t| format!("\"{}\"", toml_escape(t)))
+            .collect();
         toml_str.push_str(&format!(
             "tool_blocklist = [{}]\n",
             blocklist_toml.join(", ")
@@ -2102,22 +2148,20 @@ fn convert_agent_from_json(
     // Custom workspace path (previously dropped — agents reverted to default).
     if let Some(ref workspace) = entry.workspace {
         if !workspace.is_empty() {
-            toml_str.push_str(&format!(
-                "workspace = \"{}\"\n",
-                workspace.replace('"', "\\\"")
-            ));
+            toml_str.push_str(&format!("workspace = \"{}\"\n", toml_escape(workspace)));
         }
     }
 
     toml_str.push_str("\n[model]\n");
-    toml_str.push_str(&format!("provider = \"{provider}\"\n"));
-    toml_str.push_str(&format!("model = \"{model}\"\n"));
+    toml_str.push_str(&format!("provider = \"{}\"\n", toml_escape(&provider)));
+    toml_str.push_str(&format!("model = \"{}\"\n", toml_escape(&model)));
     toml_str.push_str(&format!(
-        "system_prompt = \"\"\"\n{system_prompt}\n\"\"\"\n"
+        "system_prompt = \"{}\"\n",
+        toml_escape(&system_prompt)
     ));
 
     if let Some(ref api_key) = api_key_env {
-        toml_str.push_str(&format!("api_key_env = \"{api_key}\"\n"));
+        toml_str.push_str(&format!("api_key_env = \"{}\"\n", toml_escape(api_key)));
     }
 
     // Fallback models
@@ -2125,8 +2169,8 @@ fn convert_agent_from_json(
         let (fb_provider, fb_model) = split_model_ref(fb);
         let fb_api_key = default_api_key_env(&fb_provider);
         toml_str.push_str("\n[[fallback_models]]\n");
-        toml_str.push_str(&format!("provider = \"{fb_provider}\"\n"));
-        toml_str.push_str(&format!("model = \"{fb_model}\"\n"));
+        toml_str.push_str(&format!("provider = \"{}\"\n", toml_escape(&fb_provider)));
+        toml_str.push_str(&format!("model = \"{}\"\n", toml_escape(&fb_model)));
         if !fb_api_key.is_empty() {
             toml_str.push_str(&format!("api_key_env = \"{fb_api_key}\"\n"));
         }
@@ -2134,24 +2178,35 @@ fn convert_agent_from_json(
 
     // Capabilities section
     toml_str.push_str("\n[capabilities]\n");
-    let tools_str: Vec<String> = tools.iter().map(|t| format!("\"{t}\"")).collect();
+    let tools_str: Vec<String> = tools
+        .iter()
+        .map(|t| format!("\"{}\"", toml_escape(t)))
+        .collect();
     toml_str.push_str(&format!("tools = [{}]\n", tools_str.join(", ")));
     toml_str.push_str("memory_read = [\"*\"]\n");
     toml_str.push_str("memory_write = [\"self.*\"]\n");
 
     if !caps.network.is_empty() {
-        let net_str: Vec<String> = caps.network.iter().map(|n| format!("\"{n}\"")).collect();
+        let net_str: Vec<String> = caps
+            .network
+            .iter()
+            .map(|n| format!("\"{}\"", toml_escape(n)))
+            .collect();
         toml_str.push_str(&format!("network = [{}]\n", net_str.join(", ")));
     }
     if !caps.shell.is_empty() {
-        let shell_str: Vec<String> = caps.shell.iter().map(|s| format!("\"{s}\"")).collect();
+        let shell_str: Vec<String> = caps
+            .shell
+            .iter()
+            .map(|s| format!("\"{}\"", toml_escape(s)))
+            .collect();
         toml_str.push_str(&format!("shell = [{}]\n", shell_str.join(", ")));
     }
     if !caps.agent_message.is_empty() {
         let msg_str: Vec<String> = caps
             .agent_message
             .iter()
-            .map(|m| format!("\"{m}\""))
+            .map(|m| format!("\"{}\"", toml_escape(m)))
             .collect();
         toml_str.push_str(&format!("agent_message = [{}]\n", msg_str.join(", ")));
     }
@@ -3076,55 +3131,71 @@ fn convert_legacy_agent(
     let mut toml_str = String::new();
     toml_str.push_str(&format!(
         "# LibreFang agent manifest\n# Migrated from OpenClaw agent '{}'\n\n",
-        oc.name
+        toml_comment_safe(&oc.name)
     ));
-    toml_str.push_str(&format!("name = \"{}\"\n", oc.name));
+    toml_str.push_str(&format!("name = \"{}\"\n", toml_escape(&oc.name)));
     toml_str.push_str(&format!("version = \"{}\"\n", librefang_types::VERSION));
     toml_str.push_str(&format!(
         "description = \"{}\"\n",
-        oc.description.replace('"', "\\\"")
+        toml_escape(&oc.description)
     ));
     toml_str.push_str("author = \"librefang\"\n");
     toml_str.push_str("module = \"builtin:chat\"\n");
 
     if !oc.tags.is_empty() {
-        let tags_str: Vec<String> = oc.tags.iter().map(|t| format!("\"{t}\"")).collect();
+        let tags_str: Vec<String> = oc
+            .tags
+            .iter()
+            .map(|t| format!("\"{}\"", toml_escape(t)))
+            .collect();
         toml_str.push_str(&format!("tags = [{}]\n", tags_str.join(", ")));
     }
 
     toml_str.push_str("\n[model]\n");
-    toml_str.push_str(&format!("provider = \"{provider}\"\n"));
-    toml_str.push_str(&format!("model = \"{model}\"\n"));
+    toml_str.push_str(&format!("provider = \"{}\"\n", toml_escape(&provider)));
+    toml_str.push_str(&format!("model = \"{}\"\n", toml_escape(&model)));
     toml_str.push_str(&format!(
-        "system_prompt = \"\"\"\n{system_prompt}\n\"\"\"\n"
+        "system_prompt = \"{}\"\n",
+        toml_escape(&system_prompt)
     ));
 
     if let Some(ref api_key) = api_key_env {
-        toml_str.push_str(&format!("api_key_env = \"{api_key}\"\n"));
+        toml_str.push_str(&format!("api_key_env = \"{}\"\n", toml_escape(api_key)));
     }
     if let Some(base_url) = oc.base_url {
-        toml_str.push_str(&format!("base_url = \"{base_url}\"\n"));
+        toml_str.push_str(&format!("base_url = \"{}\"\n", toml_escape(&base_url)));
     }
 
     toml_str.push_str("\n[capabilities]\n");
-    let tools_str: Vec<String> = tools.iter().map(|t| format!("\"{t}\"")).collect();
+    let tools_str: Vec<String> = tools
+        .iter()
+        .map(|t| format!("\"{}\"", toml_escape(t)))
+        .collect();
     toml_str.push_str(&format!("tools = [{}]\n", tools_str.join(", ")));
     toml_str.push_str("memory_read = [\"*\"]\n");
     toml_str.push_str("memory_write = [\"self.*\"]\n");
 
     if !caps.network.is_empty() {
-        let net_str: Vec<String> = caps.network.iter().map(|n| format!("\"{n}\"")).collect();
+        let net_str: Vec<String> = caps
+            .network
+            .iter()
+            .map(|n| format!("\"{}\"", toml_escape(n)))
+            .collect();
         toml_str.push_str(&format!("network = [{}]\n", net_str.join(", ")));
     }
     if !caps.shell.is_empty() {
-        let shell_str: Vec<String> = caps.shell.iter().map(|s| format!("\"{s}\"")).collect();
+        let shell_str: Vec<String> = caps
+            .shell
+            .iter()
+            .map(|s| format!("\"{}\"", toml_escape(s)))
+            .collect();
         toml_str.push_str(&format!("shell = [{}]\n", shell_str.join(", ")));
     }
     if !caps.agent_message.is_empty() {
         let msg_str: Vec<String> = caps
             .agent_message
             .iter()
-            .map(|m| format!("\"{m}\""))
+            .map(|m| format!("\"{}\"", toml_escape(m)))
             .collect();
         toml_str.push_str(&format!("agent_message = [{}]\n", msg_str.join(", ")));
     }
@@ -3315,6 +3386,65 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), std::io::Error> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn validate_migration_id_rejects_toml_injection_chars() {
+        // Path-component / NUL checks (existing behaviour).
+        assert!(validate_migration_id("good-agent").is_ok());
+        assert!(validate_migration_id("").is_err());
+        assert!(validate_migration_id("../escape").is_err());
+        // New: quote / newline / backslash / control chars that would let the
+        // id break out of the manifest comment / description it is interpolated
+        // into.
+        assert!(validate_migration_id("evil\"key").is_err());
+        assert!(validate_migration_id("evil\nshell = [\"*\"]").is_err());
+        assert!(validate_migration_id("evil\\path").is_err());
+        assert!(validate_migration_id("evil\0nul").is_err());
+    }
+
+    #[test]
+    fn toml_escape_neutralises_quotes_and_newlines() {
+        assert_eq!(toml_escape("plain"), "plain");
+        assert_eq!(toml_escape("a\"b"), "a\\\"b");
+        assert_eq!(toml_escape("a\\b"), "a\\\\b");
+        assert_eq!(toml_escape("line1\nline2"), "line1\\nline2");
+        // A triple-quote can no longer terminate a multiline string.
+        assert!(!toml_escape("x\"\"\"y").contains("\"\"\""));
+    }
+
+    #[test]
+    fn malicious_system_prompt_cannot_inject_manifest_keys() {
+        // A system_prompt crafted to close the TOML string and append a
+        // capability-escalating key. Before escaping it injected
+        // `[capabilities] shell = ["*"]` into the generated manifest.
+        let injected = "hello\"\"\"\n[capabilities]\nshell = [\"*\"]\nagent_spawn = true\n";
+        let entry = OpenClawAgentEntry {
+            id: "victim".to_string(),
+            identity: Some(OpenClawIdentity::Text(injected.to_string())),
+            ..Default::default()
+        };
+
+        let (toml_str, _) = convert_agent_from_json(&entry, None).unwrap();
+        // Must parse as valid TOML and round-trip the prompt verbatim.
+        let parsed: toml::Value = toml::from_str(&toml_str).expect("manifest must be valid TOML");
+        // `extract_identity_prompt` trims surrounding whitespace, so compare
+        // against the trimmed form. The point is that the embedded quotes /
+        // newlines survive as DATA rather than becoming manifest structure.
+        assert_eq!(
+            parsed["model"]["system_prompt"].as_str().unwrap(),
+            injected.trim()
+        );
+        // The injected escalation must NOT have leaked into [capabilities].
+        let caps = &parsed["capabilities"];
+        assert!(
+            caps.get("shell").is_none(),
+            "system_prompt injected a shell capability: {toml_str}"
+        );
+        assert!(
+            caps.get("agent_spawn").is_none(),
+            "system_prompt injected agent_spawn: {toml_str}"
+        );
+    }
 
     // ===== Helper: create legacy YAML workspace =====
 

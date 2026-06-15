@@ -963,13 +963,13 @@
           "type": "integer"
         },
         "allow_filesystem": {
-          "default": true,
-          "description": "Restrict hook filesystem access: sets `HOME=/dev/null`, per-call `TMPDIR`, and `LIBREFANG_READONLY_FS=1`. Defaults to `true` (no restriction).",
+          "default": false,
+          "description": "Restrict hook filesystem access: sets `HOME=/dev/null`, per-call `TMPDIR`, and `LIBREFANG_READONLY_FS=1`. Defaults to `false` (secure-by-default — a plugin that needs filesystem write access must declare `allow_filesystem = true` in its `plugin.toml`).",
           "type": "boolean"
         },
         "allow_network": {
-          "default": true,
-          "description": "Whether hook subprocesses are allowed to make network connections.\n\nWhen `false` the runtime attempts soft network isolation: on Linux it wraps the hook with `unshare --net` (if available); on other platforms it injects `no_proxy=*` / `NO_PROXY=*` into the subprocess environment. Defaults to `true`.",
+          "default": false,
+          "description": "Whether hook subprocesses are allowed to make network connections.\n\nWhen `false` the runtime attempts soft network isolation: on Linux it wraps the hook with `unshare --net` (if available); on other platforms it injects `no_proxy=*` / `NO_PROXY=*` into the subprocess environment. Defaults to `false` (secure-by-default — a plugin that needs outbound network must declare `allow_network = true` in its `plugin.toml`).",
           "type": "boolean"
         },
         "allowed_secrets": {
@@ -1211,6 +1211,32 @@
       },
       "type": "object"
     },
+    "ContextEngineSidecarConfig": {
+      "description": "Configuration for an out-of-process context engine (`engine = \"sidecar\"`).\n\n```toml [context_engine] engine = \"sidecar\"\n\n[context_engine.sidecar] command = \"python3\" args = [\"/home/me/.librefang/context_engines/recall.py\"] request_timeout_secs = 30 ```",
+      "properties": {
+        "args": {
+          "default": [],
+          "description": "Arguments passed to the command.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "command": {
+          "default": "",
+          "description": "Executable to launch (resolved via `PATH`).",
+          "type": "string"
+        },
+        "request_timeout_secs": {
+          "default": 30,
+          "description": "Per-request wall-clock timeout. A request that exceeds it falls back to the built-in engine for that call. `0` means the compiled default (30s).",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "ContextEngineTomlConfig": {
       "description": "External authentication provider configuration (OAuth2/OIDC).\n\nAllows delegating user authentication to an external identity provider (Okta, Auth0, Keycloak, Google, GitHub, Microsoft, etc.).\n\nSingle provider (backward-compatible): ```toml [external_auth] enabled = true issuer_url = \"https://accounts.google.com\" client_id = \"your-client-id.apps.googleusercontent.com\" client_secret_env = \"LIBREFANG_OAUTH_CLIENT_SECRET\" redirect_url = \"http://127.0.0.1:4545/api/auth/callback\" scopes = [\"openid\", \"profile\", \"email\"] ```\n\nMultiple providers: ```toml [external_auth] enabled = true\n\n[[external_auth.providers]] id = \"google\" display_name = \"Google\" issuer_url = \"https://accounts.google.com\" client_id = \"your-google-client-id\" client_secret_env = \"GOOGLE_OAUTH_CLIENT_SECRET\"\n\n[[external_auth.providers]] id = \"github\" display_name = \"GitHub\" issuer_url = \"https://token.actions.githubusercontent.com\" auth_url = \"https://github.com/login/oauth/authorize\" token_url = \"https://github.com/login/oauth/access_token\" userinfo_url = \"https://api.github.com/user\" client_id = \"your-github-client-id\" Pluggable context engine configuration.\n\nConfigure in config.toml: ```toml [context_engine] engine = \"default\"     # built-in engine: \"default\"\n\n[context_engine.hooks] ingest = \"~/.librefang/plugins/my_recall.py\" after_turn = \"~/.librefang/plugins/my_indexer.py\" ```\n\nHeavy hooks (`assemble`, `compact`) always run in Rust for performance. Light hooks (`ingest`, `after_turn`) can be overridden with Python scripts using the same JSON stdin/stdout protocol as Python agents.\n\n# Usage\n\n**Simple (plugin-based):** ```toml [context_engine] plugin = \"qdrant-recall\"   # resolves to ~/.librefang/plugins/qdrant-recall/ ```\n\n**Manual (direct hook paths):** ```toml [context_engine.hooks] ingest = \"~/.librefang/scripts/my_recall.py\" after_turn = \"~/.librefang/scripts/my_indexer.py\" ```",
       "properties": {
@@ -1307,6 +1333,18 @@
             "type": "number"
           },
           "type": "array"
+        },
+        "sidecar": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ContextEngineSidecarConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Out-of-process context engine, selected with `engine = \"sidecar\"`.\n\nThe daemon spawns the configured command and delegates the async lifecycle hooks (`ingest`, `assemble`, `after_turn`, `bootstrap`) to it over a newline-delimited JSON request/reply protocol; LLM-bearing compaction and the cheap synchronous hooks stay in Rust. Any sidecar failure falls back to the built-in engine, so a flaky context process never breaks a turn. See `docs/architecture/sidecar-context-engine.md`."
         }
       },
       "type": "object"
@@ -1452,6 +1490,71 @@
           "type": "string"
         }
       ]
+    },
+    "CustomSttConfig": {
+      "description": "Configuration for a self-hosted / custom-URL speech-to-text provider.\n\nPoints STT at any OpenAI-compatible `/v1/audio/transcriptions` endpoint — e.g. a local `faster-whisper-server`, `whisper.cpp` HTTP server, or any other Whisper-API-compatible service. No new dependencies are needed: the same multipart HTTP path used for cloud providers is reused here.\n\n## Example (`config.toml`) ```toml [media] audio_provider = \"local-whisper\"\n\n[media.custom_stt] base_url = \"http://localhost:8080/v1/audio/transcriptions\" # api_key_env = \"MY_LOCAL_WHISPER_KEY\"  # omit for keyless servers  # pragma: allowlist secret key_required = false model = \"large-v3\" ```",
+      "properties": {
+        "api_key_env": {
+          "default": "",
+          "description": "Environment variable that holds the API key for this endpoint. When empty (default), no `Authorization` header is sent.",
+          "type": "string"
+        },
+        "base_url": {
+          "default": "",
+          "description": "Full URL of the OpenAI-compatible transcription endpoint. E.g. `\"http://localhost:8080/v1/audio/transcriptions\"`.",
+          "type": "string"
+        },
+        "key_required": {
+          "default": false,
+          "description": "When `true`, the request is rejected immediately if the env var named by `api_key_env` is not set. When `false` (default), a missing key simply means no auth header is added — suitable for keyless local servers.",
+          "type": "boolean"
+        },
+        "model": {
+          "default": null,
+          "description": "Model identifier forwarded to the endpoint. When unset the endpoint default (typically `whisper-1` for OpenAI-compatible servers) is used.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "CustomTtsConfig": {
+      "description": "Configuration for a self-hosted / custom-URL text-to-speech provider.\n\nPoints TTS at any OpenAI-compatible `/v1/audio/speech` endpoint — e.g. a local `openedai-speech` server, a Piper HTTP wrapper, or any other service that accepts the same JSON request shape. No new dependencies are needed.\n\n## Example (`config.toml`) ```toml [tts] enabled = true provider = \"local-piper\"\n\n[tts.custom] base_url = \"http://localhost:5000/v1/audio/speech\" # api_key_env = \"MY_LOCAL_TTS_KEY\"  # omit for keyless servers  # pragma: allowlist secret key_required = false model = \"tts-1\" voice = \"en_US-lessac-medium\" format = \"mp3\" ```",
+      "properties": {
+        "api_key_env": {
+          "default": "",
+          "description": "Environment variable that holds the API key for this endpoint. When empty (default), no `Authorization` header is sent.",
+          "type": "string"
+        },
+        "base_url": {
+          "default": "",
+          "description": "Full URL of the OpenAI-compatible TTS endpoint. E.g. `\"http://localhost:5000/v1/audio/speech\"`.",
+          "type": "string"
+        },
+        "format": {
+          "default": "mp3",
+          "description": "Audio format: \"mp3\", \"opus\", \"aac\", \"flac\", \"wav\". Default: `\"mp3\"`.",
+          "type": "string"
+        },
+        "key_required": {
+          "default": false,
+          "description": "When `true`, the request is rejected immediately if the env var named by `api_key_env` is not set. When `false` (default), a missing key simply means no auth header is added — suitable for keyless local servers.",
+          "type": "boolean"
+        },
+        "model": {
+          "default": "tts-1",
+          "description": "Model identifier forwarded to the endpoint. Default: `\"tts-1\"`.",
+          "type": "string"
+        },
+        "voice": {
+          "default": "alloy",
+          "description": "Voice identifier forwarded to the endpoint. Default: `\"alloy\"`.",
+          "type": "string"
+        }
+      },
+      "type": "object"
     },
     "DaytonaBackendConfig": {
       "description": "Daytona-managed-sandbox backend configuration.\n\nDaytona exposes a REST API for ephemeral developer sandboxes. We authenticate with a bearer token stored in an env var (so the daemon never persists the secret), create a workspace per agent session, and execute commands via the workspace's exec endpoint.",
@@ -1790,6 +1893,11 @@
           },
           "type": "array"
         },
+        "safe_bins_skip_approval": {
+          "default": false,
+          "description": "Opt-in: in `allowlist` mode, let a `shell_exec` whose every base command is a declared `safe_bin` also skip the human-approval prompt. Default `false` preserves today's posture — `safe_bins` membership only satisfies the allowlist gate, and an approved-but-required tool still prompts. When `true`, a command like `env` (every chained base in `safe_bins`) executes without prompting, while any non-safe base (e.g. `env; curl …`) still routes through approval.\n\nSecurity trade-off when enabling: you are replacing the per-command approval prompt with the argument-blind allowlist + dangerous-command denylist. So a read-capable `safe_bin` (`cat`, `tail`, `head`) can read arbitrary files into the agent's context with no prompt — only put a binary in `safe_bins` if you accept that for *any* arguments. Never put a shell wrapper (`sh`, `bash`, `zsh`) in `safe_bins`: it would let the outer base pass while the real command hides in `-c \"…\"`. (The skip is gated to a strict subset of the execution allowlist — metacharacters and wrappers are still rejected — but the approval prompt is gone.)",
+          "type": "boolean"
+        },
         "timeout_secs": {
           "default": 30,
           "description": "Max execution timeout in seconds. Default: 30.",
@@ -2010,6 +2118,20 @@
           "description": "Trigger ratio: gateway pass fires when estimated session tokens exceed `context_window * threshold_ratio` (default: 0.85). Must be strictly greater than [`CompactionTomlConfig::token_threshold_ratio`] (default 0.70) so the agent-level compactor gets first crack.",
           "format": "float",
           "type": "number"
+        }
+      },
+      "type": "object"
+    },
+    "HandsConfig": {
+      "description": "Hands marketplace configuration.\n\nConfigure in config.toml: ```toml [hands] # Hosts/CIDRs/glob patterns that a caller-supplied `registry_url` is # allowed to resolve to even when it points at a private/internal # network — e.g. a self-hosted HandsHub mirror inside a VPC/K8s cluster. # Default empty: only public registries are reachable. Cloud-metadata # endpoints (169.254.x.x, etc.) stay blocked regardless of this list. registry_allowed_hosts = [\"hub.internal.example.com\", \"10.0.0.0/8\"] ```",
+      "properties": {
+        "registry_allowed_hosts": {
+          "default": [],
+          "description": "SSRF allowlist for a caller-supplied `registry_url` on `POST /api/hands/marketplace/install`. Entries are CIDRs, glob hostname patterns, or literal IPs/hostnames that are exempt from the private-IP SSRF block. Cloud-metadata ranges remain unconditionally blocked. Default empty means only public registries are reachable.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "type": "object"
@@ -2720,7 +2842,7 @@
         },
         "audio_provider": {
           "default": null,
-          "description": "Preferred audio transcription provider (auto-detect if None).",
+          "description": "Preferred audio transcription provider (auto-detect if None).\n\nSet to any string (e.g. `\"local-whisper\"`) to use the custom STT endpoint defined in `[media.custom_stt]`.",
           "type": [
             "string",
             "null"
@@ -2731,10 +2853,32 @@
           "description": "Enable audio transcription. Default: true.",
           "type": "boolean"
         },
+        "custom_stt": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/CustomSttConfig"
+            }
+          ],
+          "default": {
+            "api_key_env": "",
+            "base_url": "",
+            "key_required": false,
+            "model": null
+          },
+          "description": "Custom / self-hosted STT endpoint configuration.\n\nWhen `audio_provider` is set to a name that is not one of the built-in providers (`groq`, `openai`, `minimax`, `fireworks`, `together`, `siliconflow`, `gemini`, `elevenlabs`), this block is consulted and the request is forwarded to an OpenAI-compatible Whisper endpoint at `custom_stt.base_url`."
+        },
         "image_description": {
           "default": true,
           "description": "Enable image description. Default: true.",
           "type": "boolean"
+        },
+        "image_model": {
+          "default": null,
+          "description": "Preferred image description model (provider default if None).",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "image_provider": {
           "default": null,
@@ -2915,6 +3059,32 @@
           "default": 7,
           "description": "SESSION-scope memories expire after this many days of no access.",
           "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "MemoryExtractorSidecarConfig": {
+      "description": "Configuration for an out-of-process memory extractor (see [`ProactiveMemoryConfig::extractor_sidecar`]).\n\n**Precedence (review-followup G).** When this table is present AND `command` is non-empty, the sidecar handles every `auto_memorize` call — the kernel's built-in `LlmMemoryExtractor` is **not constructed at all**, and any per-agent [`ProactiveMemoryOverrides::extraction_model`] is silently shadowed. The kernel emits a `WARN` at boot in that case so an operator who set both isn't surprised which wins. A configured-but-empty `command` is treated as a no-op (the kernel falls back to the LLM/rule-based path with a separate `WARN`).\n\nThe sidecar only handles **extraction**. The store, the dedup `decide_action` decision, and the prompt-context formatting all stay in Rust, so the sidecar's output cannot influence retrieval ranking or storage layout — only what gets *proposed* to remember.\n\n```toml [proactive_memory.extractor_sidecar] command = \"python3\" args = [\"/home/me/.librefang/memory/extract.py\"] request_timeout_secs = 30 ```",
+      "properties": {
+        "args": {
+          "default": [],
+          "description": "Arguments passed to the command.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "command": {
+          "default": "",
+          "description": "Executable to launch (resolved via `PATH`). Empty string disables the sidecar (operator typo or commented-out args field) — see the precedence note on the struct.",
+          "type": "string"
+        },
+        "request_timeout_secs": {
+          "default": 30,
+          "description": "Per-extraction wall-clock timeout. `0` means the compiled default (30s).",
+          "format": "uint64",
           "minimum": 0.0,
           "type": "integer"
         }
@@ -3362,7 +3532,7 @@
         },
         "max_concurrent": {
           "default": 4,
-          "description": "Cap on concurrent tool calls within a single bucket. `0` = uncapped (use the bucket size). The dispatcher honours this when launching futures via `join_all`.",
+          "description": "Cap on concurrent tool calls within a single bucket. `0` = uncapped (use the bucket size). The dispatcher honours this with a `FuturesUnordered` prime/backfill loop (`join_all` cannot bound concurrency, so it is not used).",
           "format": "uint32",
           "minimum": 0.0,
           "type": "integer"
@@ -3519,8 +3689,8 @@
           "type": "number"
         },
         "duplicate_threshold": {
-          "default": 0.5,
-          "description": "Similarity threshold for duplicate detection (0.0 - 1.0). When stored embeddings are available, uses vector cosine similarity (mem0-quality); otherwise falls back to Jaccard word overlap. Default: 0.5.",
+          "default": 0.8500000238418579,
+          "description": "Similarity threshold for duplicate detection (0.0 - 1.0). When stored embeddings are available, uses vector cosine similarity (mem0-quality); otherwise falls back to Jaccard word overlap. Default: 0.85.\n\nPre-fix this defaulted to 0.5, which is far too permissive for both metrics: cosine 0.5 matches \"topically related\" pairs (including opposite-meaning sentences that share keywords), and Jaccard 0.5 matches anything with 50% word overlap. 0.85 is the threshold mem0 recommends for \"near-duplicate\" detection and matches the industry-standard cosine cut-off for embedding-based dedup.",
           "format": "float",
           "type": "number"
         },
@@ -3559,6 +3729,25 @@
           "format": "float",
           "type": "number"
         },
+        "extractor_sidecar": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MemoryExtractorSidecarConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Out-of-process memory extractor. When set, extraction is delegated to the configured subprocess (which may use its own LLM, a local model, embeddings, etc.) instead of the built-in LLM/rule-based extractor; the store and the dedup decision stay in Rust. Takes precedence over `extraction_model`."
+        },
+        "format_context_max_chars": {
+          "default": 8000,
+          "description": "Maximum number of characters that `format_context` (the prompt injection for `auto_retrieve` memories) may emit, including the header template (H4 review-followup #8). At ~4 chars per token this is roughly a token budget; the default 8000 (~2000 tokens) suits an 8k–32k context window. Operators on larger windows can raise this without recompiling. Excess memories are dropped and reported via a footer; the cap is a hard ceiling on the section.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
         "max_memories_per_agent": {
           "default": 1000,
           "description": "Maximum number of memories allowed per agent. When adding new memories would exceed this cap, the oldest/lowest-confidence memories are evicted first. Default: 1000. Set to 0 to disable the cap.",
@@ -3579,6 +3768,18 @@
           "format": "uint32",
           "minimum": 0.0,
           "type": "integer"
+        },
+        "update_threshold_cross_category": {
+          "default": 0.800000011920929,
+          "description": "Same as `update_threshold_same_category` but for memories with *different* categories. Higher (default 0.8) because cross-category merges require stronger evidence — the categories themselves carry semantic distinction that a purely-text similarity score might miss.",
+          "format": "float",
+          "type": "number"
+        },
+        "update_threshold_same_category": {
+          "default": 0.699999988079071,
+          "description": "Similarity threshold above which `decide_action` returns UPDATE instead of ADD when the new and existing memory share a category (M14). Lower than `update_threshold_cross_category` because same-category memories share semantic context, so a modest similarity bump is enough evidence to fold them together. Default 0.7 — empirically the cut-off where embedding cosine starts catching genuine paraphrases without merging unrelated facts.\n\nConceptually distinct from `duplicate_threshold` (which gates the post-hoc consolidation sweep — \"should two existing memories be merged into one?\"). The two serve different purposes: UPDATE is per-insertion conflict resolution; dedup is batch cleanup. Pre-fix both used the same hardcoded values, which conflated the contracts.",
+          "format": "float",
+          "type": "number"
         }
       },
       "type": "object"
@@ -3934,6 +4135,153 @@
         }
       ]
     },
+    "RlExportConfig": {
+      "description": "RL rollout trajectory export configuration (issues #3330 / #3331).\n\nWhen `enabled`, a finished agent turn's session trajectory is serialized and uploaded to the configured upstream RL-tracking service via `librefang_rl_export::export`. Default disabled — opt-in. A per-agent override lives on the agent manifest (`agent.toml: [rl_export] enabled = …`), which supersedes this global toggle for that one agent.\n\nThe `target` shape mirrors `librefang_rl_export::ExportTarget`; the config carries env-var **names** for any secret (`api_key_env`), never the secret material, matching the rest of the workspace's `*_env` indirection convention. The kernel converts this config-side enum into the exporter's `ExportTarget` at upload time.\n\nConfigure in `config.toml`: ```toml [rl_export] enabled = true target = { type = \"wandb\", project = \"my-rollouts\", entity = \"my-team\", api_key_env = \"WANDB_API_KEY\" } ```",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "Master toggle. Default: disabled — when false, no trajectory is exported regardless of per-agent opt-in.",
+          "type": "boolean"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RlExportTarget"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Upstream export destination. `None` means no destination is configured; even with `enabled = true` the producer no-ops (and logs a warning at boot) until a target is set."
+        }
+      },
+      "type": "object"
+    },
+    "RlExportTarget": {
+      "description": "Config-side mirror of `librefang_rl_export::ExportTarget`.\n\nKept separate from the exporter's own enum because that one is `#[non_exhaustive]` and intentionally does not derive `Serialize`/`Deserialize` (it is an in-process call surface, not a config shape). This enum is the TOML-deserializable representation; the kernel maps it onto the exporter's `ExportTarget` at upload time. Secret material is never inlined — `api_key_env` holds the **name** of the environment variable holding the key, resolved by the exporter at upload time.",
+      "oneOf": [
+        {
+          "description": "Weights & Biases. See `librefang_rl_export::ExportTarget::WandB`.",
+          "properties": {
+            "api_key_env": {
+              "description": "Name of the environment variable holding the W&B API key.",
+              "type": "string"
+            },
+            "entity": {
+              "description": "W&B entity (team or username). Required.",
+              "type": "string"
+            },
+            "project": {
+              "description": "W&B project name. The project must already exist.",
+              "type": "string"
+            },
+            "run_id": {
+              "description": "Optional client-supplied run id hint. When `None`, the producer's run id is forwarded as the hint.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "wandb"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "api_key_env",
+            "entity",
+            "project",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Tinker. See `librefang_rl_export::ExportTarget::Tinker`.",
+          "properties": {
+            "api_key_env": {
+              "description": "Name of the environment variable holding the Tinker API key.",
+              "type": "string"
+            },
+            "base_url": {
+              "description": "Optional override for the Tinker REST base URL. `None` uses the crate's documented prod default.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "project": {
+              "description": "Project identifier sent on the create-session call. Required.",
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "tinker"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "api_key_env",
+            "project",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Atropos. See `librefang_rl_export::ExportTarget::Atropos`.",
+          "properties": {
+            "base_url": {
+              "description": "Atropos `run-api` base URL. Required and SSRF-validated against the loopback / RFC-1918 allowlist by the exporter.",
+              "type": "string"
+            },
+            "group_size": {
+              "description": "Group size to report on `RegisterEnv`. `None` uses the exporter's default.",
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "max_token_length": {
+              "description": "Maximum token length to report on `RegisterEnv`. `None` uses the exporter's conservative default.",
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "project": {
+              "description": "Producer name registered with Atropos. Required.",
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "atropos"
+              ],
+              "type": "string"
+            },
+            "weight": {
+              "description": "Weight to report on `RegisterEnv`. `None` uses the exporter's default.",
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "base_url",
+            "project",
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "SanitizeConfig": {
       "description": "Configuration for channel input sanitization / prompt-injection detection.\n\nThe sanitizer is **enabled by default** (mode = \"block\"). To opt out set `disable_input_sanitizer = true` in `[sanitize]` or change `mode`:\n\n```toml [sanitize] mode = \"block\"          # off | warn | block  (default: block) max_message_length = 32768 custom_block_patterns = [\"(?i)secret\\\\s+code\"] # disable_input_sanitizer = true  # emergency opt-out ```",
       "properties": {
@@ -4220,8 +4568,16 @@
       "type": "object"
     },
     "SidecarChannelConfig": {
-      "description": "Configuration for a sidecar channel adapter (external process-based).\n\nSidecar adapters allow external processes written in any language to act as channel adapters. Communication uses newline-delimited JSON over stdin/stdout.\n\nConfigure in config.toml: ```toml [[sidecar_channels]] name = \"my-telegram\" command = \"python3\" args = [\"-m\", \"librefang.sidecar.adapters.telegram\"] env = { TELEGRAM_BOT_TOKEN = \"xxx\" } ```",
+      "description": "Configuration for a sidecar channel adapter (external process-based).\n\nSidecar adapters allow external processes written in any language to act as channel adapters. Communication uses newline-delimited JSON over stdin/stdout.\n\nConfigure in config.toml: ```toml [[sidecar_channels]] name = \"my-telegram\" command = \"python3\" args = [\"-m\", \"librefang.sidecar.adapters.telegram\"] env = { TELEGRAM_BOT_TOKEN = \"xxx\" } agent = \"coder\"                  # default agent for this channel available_agents = [\"coder\", \"triage\"]  # optional /agent whitelist ```\n\nThe `agent` key was previously named `default_agent`; the old name is still accepted as a deserialization alias so existing configs keep loading unchanged (#5671).",
       "properties": {
+        "agent": {
+          "default": null,
+          "description": "Default agent name for incoming messages on this sidecar channel.\n\nWhen set, seeds the `AgentRouter.channel_defaults` map at boot so inbound messages with no explicit binding route to this agent. This mirrors the `default_agent` field that lived on the per-channel in-process configs (`TelegramConfig`, `WhatsAppConfig`, …) before the sidecar migration (#5241 / #5294). Without this, the resolver falls through to the non-deterministic \"first available agent\" branch in `resolve_or_fallback`, which silently routes traffic to a different agent whenever a new agent is spawned.\n\nRenamed from `default_agent` in #5671; the old key is still accepted via `#[serde(alias = \"default_agent\")]` so existing configs keep deserializing. Remains `Option<String>` for now — mandatory enforcement is a later boot-validation PR.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "allowed_commands": {
           "default": [],
           "description": "Whitelist of built-in command names (without the leading `/`) consulted when `command_policy = \"allowlist\"`. Entries may be written with or without a leading slash.",
@@ -4233,6 +4589,14 @@
         "args": {
           "default": [],
           "description": "Arguments to pass to the command.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "available_agents": {
+          "default": [],
+          "description": "Whitelist of agent names this channel is allowed to route to.\n\nReserved for the forthcoming `/agent` command (#5671): when non-empty it gates which agents an inbound `/agent <name>` switch may select on this channel. Empty (the default) means \"no whitelist\" — the `/agent` gate is open, preserving today's behaviour. Not yet consulted anywhere; this PR only lands the schema field.",
           "items": {
             "type": "string"
           },
@@ -4266,14 +4630,6 @@
           ],
           "default": "allow",
           "description": "Built-in slash-command policy for this channel (#5841). Ports the in-process `disable_commands` / `allowed_commands` / `blocked_commands` gating to sidecars. Defaults to `allow` so existing configs keep honouring every command. A rejected command is forwarded to the agent as plain text, never answered with an \"unknown command\" error."
-        },
-        "default_agent": {
-          "default": null,
-          "description": "Default agent name for incoming messages on this sidecar channel.\n\nWhen set, seeds the `AgentRouter.channel_defaults` map at boot so inbound messages with no explicit binding route to this agent. This mirrors the `default_agent` field that lived on the per-channel in-process configs (`TelegramConfig`, `WhatsAppConfig`, …) before the sidecar migration (#5241 / #5294). Without this, the resolver falls through to the non-deterministic \"first available agent\" branch in `resolve_or_fallback`, which silently routes traffic to a different agent whenever a new agent is spawned.",
-          "type": [
-            "string",
-            "null"
-          ]
         },
         "env": {
           "additionalProperties": {
@@ -5102,6 +5458,22 @@
     "TtsConfig": {
       "description": "Text-to-speech configuration.",
       "properties": {
+        "custom": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/CustomTtsConfig"
+            }
+          ],
+          "default": {
+            "api_key_env": "",
+            "base_url": "",
+            "format": "mp3",
+            "key_required": false,
+            "model": "tts-1",
+            "voice": "alloy"
+          },
+          "description": "Custom / self-hosted TTS endpoint configuration.\n\nUsed when `provider` is set to a name that is not one of the built-in providers (`openai`, `elevenlabs`, `google_tts`). The request is forwarded to an OpenAI-compatible `/v1/audio/speech` endpoint."
+        },
         "elevenlabs": {
           "allOf": [
             {
@@ -5159,7 +5531,7 @@
         },
         "provider": {
           "default": null,
-          "description": "Default provider: \"openai\", \"elevenlabs\", or \"google_tts\".",
+          "description": "Default provider: \"openai\", \"elevenlabs\", \"google_tts\", or any custom name. When set to a name other than the three built-in ones, the `[tts.custom]` block must supply the endpoint URL.",
           "type": [
             "string",
             "null"
@@ -6065,7 +6437,8 @@
           }
         ],
         "plugin_stack": null,
-        "plugin_stack_weights": []
+        "plugin_stack_weights": [],
+        "sidecar": null
       },
       "description": "Pluggable context engine configuration."
     },
@@ -6245,6 +6618,7 @@
           "pwd",
           "env"
         ],
+        "safe_bins_skip_approval": false,
         "timeout_secs": 30
       },
       "description": "Shell/exec security policy."
@@ -6313,6 +6687,17 @@
         "threshold_ratio": 0.8500000238418579
       },
       "description": "Gateway-level safety-net compression (#4972). Cheap pre-loop pass that prunes oversized tool results and oldest non-pinned messages when a session has grown past the model's context window *between* turns, before the first LLM call. Runs at a higher threshold (0.85) than the agent-level compactor (0.70) — they are complementary, not alternatives. See [`GatewayCompressionConfig`]."
+    },
+    "hands": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/HandsConfig"
+        }
+      ],
+      "default": {
+        "registry_allowed_hosts": []
+      },
+      "description": "Hands marketplace configuration (SSRF allowlist for a caller-supplied `registry_url` on the install endpoint)."
     },
     "health_check": {
       "allOf": [
@@ -6475,7 +6860,14 @@
         "audio_model": null,
         "audio_provider": null,
         "audio_transcription": true,
+        "custom_stt": {
+          "api_key_env": "",
+          "base_url": "",
+          "key_required": false,
+          "model": null
+        },
         "image_description": true,
+        "image_model": null,
         "image_provider": null,
         "max_concurrency": 2,
         "video_description": false
@@ -6653,7 +7045,7 @@
         "auto_memorize": true,
         "auto_retrieve": true,
         "confidence_decay_rate": 0.01,
-        "duplicate_threshold": 0.5,
+        "duplicate_threshold": 0.8500000238418579,
         "enabled": true,
         "extract_categories": [
           "communication_style",
@@ -6666,9 +7058,13 @@
         ],
         "extraction_model": null,
         "extraction_threshold": 0.699999988079071,
+        "extractor_sidecar": null,
+        "format_context_max_chars": 8000,
         "max_memories_per_agent": 1000,
         "max_retrieve": 10,
-        "session_ttl_hours": 24
+        "session_ttl_hours": 24,
+        "update_threshold_cross_category": 0.800000011920929,
+        "update_threshold_same_category": 0.699999988079071
       },
       "description": "Proactive memory (mem0-style) configuration."
     },
@@ -6708,6 +7104,16 @@
       },
       "default": {},
       "description": "Provider API key env var overrides (provider ID → env var name). For custom/unknown providers, maps the provider name to the environment variable holding the API key. e.g. `nvidia = \"NVIDIA_API_KEY\"`. If not set, the convention `{PROVIDER_UPPER}_API_KEY` is used automatically. Uses `BTreeMap` for deterministic serialisation order (see #3757).",
+      "type": "object"
+    },
+    "provider_max_retries": {
+      "additionalProperties": {
+        "format": "uint32",
+        "minimum": 0.0,
+        "type": "integer"
+      },
+      "default": {},
+      "description": "Per-provider in-driver retry-count overrides (provider ID → retries).\n\nCaps the number of re-attempts the HTTP-API driver makes for a single LLM call on retryable failures — server throttling (429 / 529 / 503), transient overloads, and transport-layer errors (connection refused / TLS / read timeout, #10). The request is issued at most `retries + 1` times. Absent providers use the compiled default of 3 (four total attempts); set `0` to disable in-driver retries for a provider and rely solely on the `FallbackChain`. e.g. `openai = 5`, `ollama = 0`.\n\nOnly applies to HTTP API drivers (OpenAI-compatible, Anthropic, Gemini, Vertex AI, Bedrock). CLI-based providers do not run the retry loop and ignore this. Uses `BTreeMap` for deterministic serialisation (see #3757).",
       "type": "object"
     },
     "provider_proxy_urls": {
@@ -6836,6 +7242,17 @@
         "boolean",
         "null"
       ]
+    },
+    "rl_export": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/RlExportConfig"
+        }
+      ],
+      "default": {
+        "enabled": false
+      },
+      "description": "RL rollout trajectory export configuration (#3330 / #3331)."
     },
     "sanitize": {
       "allOf": [
@@ -7096,6 +7513,14 @@
         }
       ],
       "default": {
+        "custom": {
+          "api_key_env": "",
+          "base_url": "",
+          "format": "mp3",
+          "key_required": false,
+          "model": "tts-1",
+          "voice": "alloy"
+        },
         "elevenlabs": {
           "model_id": "eleven_monolingual_v1",
           "similarity_boost": 0.75,

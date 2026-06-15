@@ -1,6 +1,6 @@
 //! Shared memory tools backed by `KernelHandle::memory_*`.
 
-use super::{enforce_memory_acl, kv_acl_namespace, require_kernel, MemoryAclOp};
+use super::{enforce_memory_acl, kv_acl_namespace, require_kernel_typed, MemoryAclOp, ToolError};
 use crate::kernel_handle::prelude::*;
 use std::sync::Arc;
 
@@ -48,20 +48,28 @@ pub(super) fn tool_memory_store(
     caller_agent_id: Option<&str>,
     peer_id: Option<&str>,
     channel: Option<&str>,
-) -> Result<String, String> {
-    let kh = require_kernel(kernel)?;
-    let key = input["key"].as_str().ok_or("Missing 'key' parameter")?;
-    validate_key(key)?;
-    let value = input.get("value").ok_or("Missing 'value' parameter")?;
+) -> Result<String, ToolError> {
+    let kh = require_kernel_typed(kernel)?;
+    let key = input["key"]
+        .as_str()
+        .ok_or(ToolError::MissingParameter("key"))?;
+    validate_key(key).map_err(|reason| ToolError::InvalidParameter {
+        name: "key",
+        reason,
+    })?;
+    let value = input
+        .get("value")
+        .ok_or(ToolError::MissingParameter("value"))?;
     enforce_memory_acl(
         kernel,
         peer_id,
         channel,
         MemoryAclOp::Write,
         &kv_acl_namespace(peer_id),
-    )?;
+    )
+    .map_err(ToolError::PermissionDenied)?;
     kh.memory_store(key, value.clone(), caller_agent_id, peer_id)
-        .map_err(|e| e.to_string())?;
+        .map_err(ToolError::upstream)?;
     Ok(format!("Stored value under key '{key}'."))
 }
 
@@ -71,19 +79,22 @@ pub(super) fn tool_memory_recall(
     caller_agent_id: Option<&str>,
     peer_id: Option<&str>,
     channel: Option<&str>,
-) -> Result<String, String> {
-    let kh = require_kernel(kernel)?;
-    let key = input["key"].as_str().ok_or("Missing 'key' parameter")?;
+) -> Result<String, ToolError> {
+    let kh = require_kernel_typed(kernel)?;
+    let key = input["key"]
+        .as_str()
+        .ok_or(ToolError::MissingParameter("key"))?;
     enforce_memory_acl(
         kernel,
         peer_id,
         channel,
         MemoryAclOp::Read,
         &kv_acl_namespace(peer_id),
-    )?;
+    )
+    .map_err(ToolError::PermissionDenied)?;
     match kh
         .memory_recall(key, caller_agent_id, peer_id)
-        .map_err(|e| e.to_string())?
+        .map_err(ToolError::upstream)?
     {
         Some(val) => {
             let rendered = serde_json::to_string_pretty(&val).unwrap_or_else(|_| val.to_string());
@@ -99,15 +110,16 @@ pub(super) fn tool_memory_list(
     caller_agent_id: Option<&str>,
     peer_id: Option<&str>,
     channel: Option<&str>,
-) -> Result<String, String> {
-    let kh = require_kernel(kernel)?;
+) -> Result<String, ToolError> {
+    let kh = require_kernel_typed(kernel)?;
     enforce_memory_acl(
         kernel,
         peer_id,
         channel,
         MemoryAclOp::Read,
         &kv_acl_namespace(peer_id),
-    )?;
+    )
+    .map_err(ToolError::PermissionDenied)?;
     let limit = input
         .get("limit")
         .and_then(|v| v.as_u64())
@@ -120,7 +132,7 @@ pub(super) fn tool_memory_list(
         .unwrap_or(0);
     let keys = kh
         .memory_list(caller_agent_id, peer_id)
-        .map_err(|e| e.to_string())?;
+        .map_err(ToolError::upstream)?;
     if keys.is_empty() {
         return Ok("No entries found in this agent's memory.".to_string());
     }

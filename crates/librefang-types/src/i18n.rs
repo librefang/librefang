@@ -23,9 +23,10 @@ const ES_FTL: &str = include_str!("../locales/es/errors.ftl");
 const JA_FTL: &str = include_str!("../locales/ja/errors.ftl");
 const DE_FTL: &str = include_str!("../locales/de/errors.ftl");
 const FR_FTL: &str = include_str!("../locales/fr/errors.ftl");
+const UK_FTL: &str = include_str!("../locales/uk/errors.ftl");
 
 /// All languages supported by the error translation system.
-pub const SUPPORTED_LANGUAGES: &[&str] = &["en", "zh-CN", "es", "ja", "de", "fr"];
+pub const SUPPORTED_LANGUAGES: &[&str] = &["en", "zh-CN", "es", "ja", "de", "fr", "uk"];
 
 /// The default language used when no match is found.
 pub const DEFAULT_LANGUAGE: &str = "en";
@@ -38,6 +39,7 @@ fn ftl_source(lang: &str) -> &'static str {
         "ja" => JA_FTL,
         "de" => DE_FTL,
         "fr" => FR_FTL,
+        "uk" => UK_FTL,
         _ => EN_FTL,
     }
 }
@@ -232,6 +234,12 @@ mod tests {
     fn french_translation() {
         let t = ErrorTranslator::new("fr");
         assert_eq!(t.t("api-error-agent-not-found"), "Agent non trouve");
+    }
+
+    #[test]
+    fn ukrainian_translation() {
+        let t = ErrorTranslator::new("uk");
+        assert_eq!(t.t("api-error-agent-not-found"), "Агент не знайдений");
     }
 
     #[test]

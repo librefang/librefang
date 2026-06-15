@@ -198,12 +198,11 @@ struct SidecarCatalogEntry {
     /// Module / script arguments passed to `command`. `--describe` is appended
     /// by `describe_sidecar()` at probe time.
     args: &'static [&'static str],
-    /// Compile-time fallback schema used when `--describe` fails at daemon
-    /// boot (e.g. Python sidecar SDK not installed). When `Some`, the fields
-    /// are seeded into the schema cache so the dashboard configure form and
-    /// the `POST /api/channels/sidecar/{name}/configure` endpoint work even
-    /// without a live Python interpreter. When `None`, the adapter shows an
-    /// empty form until the SDK is installed and the daemon is restarted.
+    /// Last-resort fallback schema for the configure form. `describe_sidecar`
+    /// injects the embedded SDK onto PYTHONPATH, so a `python3`-only host (no
+    /// `pip install`) normally gets the adapter's live schema; this is used only
+    /// when that probe fails outright (no usable `python3`, or the embedded
+    /// extract errored). `None` ⇒ empty form in that rare case.
     static_fields: Option<&'static [StaticSidecarField]>,
 }
 
@@ -528,20 +527,32 @@ fn schema_cache() -> &'static RwLock<HashMap<&'static str, SidecarSchema>> {
     SIDECAR_SCHEMA_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
+/// Process-wide cache of the *reason* a catalog adapter has no usable schema, keyed by `SidecarCatalogEntry::name`.
+/// Populated alongside [`SIDECAR_SCHEMA_CACHE`] in [`populate_sidecar_schema_cache`] when `--describe` fails AND the entry has no `static_fields` fallback — i.e. exactly the case where the dashboard would otherwise render an empty configure form with no explanation.
+/// The string is the already-actionable hint from `describe_sidecar` (e.g. the `pip install librefang-sdk` install hint), surfaced verbatim as the row's `schema_error` so the operator learns *why* the form is empty and how to fix it instead of staring at a blank drawer.
+static SIDECAR_SCHEMA_ERROR_CACHE: OnceLock<RwLock<HashMap<&'static str, String>>> =
+    OnceLock::new();
+
+fn schema_error_cache() -> &'static RwLock<HashMap<&'static str, String>> {
+    SIDECAR_SCHEMA_ERROR_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
 /// Spawn `<command> <args> --describe` for every catalog entry and cache
 /// the resulting schemas. Called once at daemon boot from
-/// `server::build_router`. Failures (SDK not installed, describe crashed)
-/// are logged at WARN; when the entry carries `static_fields`, those are
-/// used as a compile-time fallback so the dashboard configure form always
-/// shows fields for adapters that have opted in. Entries without
-/// `static_fields` fall back to an empty `fields[]` — the operator then
-/// sees the description + setup-steps text but no form until the SDK is
-/// installed. This keeps daemon boot resilient in dev environments that
-/// have not run `pip install -e sdk/python`.
-pub async fn populate_sidecar_schema_cache() {
+/// `server::build_router`. `describe_sidecar` injects the binary-embedded
+/// `librefang-sdk` onto the child's PYTHONPATH (see there), so on any host with
+/// just `python3` on PATH the probe succeeds and the dashboard gets the
+/// adapter's authoritative live schema — no `pip install` required.
+/// `static_fields` is now only a last-resort fallback for the case where even
+/// that probe fails (no `python3` at all, or the embedded extract errored): a
+/// failure is logged at WARN, and when the entry carries `static_fields` those
+/// compile-time fields seed the form instead of leaving an empty `fields[]`.
+/// `home_dir` must be the kernel's `KernelConfig.home_dir`
+/// (`KernelApi::home_dir()`); it locates the embedded-SDK extraction dir.
+pub async fn populate_sidecar_schema_cache(home_dir: &std::path::Path) {
     for entry in SIDECAR_CATALOG {
         let args: Vec<String> = entry.args.iter().map(|s| s.to_string()).collect();
-        match describe_sidecar(entry.command, &args).await {
+        match describe_sidecar(entry.command, &args, home_dir).await {
             Ok(schema) => {
                 tracing::info!(
                     adapter = entry.name,
@@ -584,6 +595,8 @@ pub async fn populate_sidecar_schema_cache() {
                         error = %e,
                         "sidecar --describe failed; discovery card will have no form fields"
                     );
+                    // Stash the failure reason so the discovery row can tell the operator *why* the form is empty (typically: Python sidecar SDK not installed).
+                    schema_error_cache().write().unwrap().insert(entry.name, e);
                 }
             }
         }
@@ -599,6 +612,18 @@ pub async fn populate_sidecar_schema_cache() {
 #[doc(hidden)]
 pub fn __test_seed_sidecar_schema_cache(entries: &[(&'static str, SidecarSchema)]) {
     let mut guard = schema_cache().write().unwrap();
+    guard.clear();
+    for (k, v) in entries {
+        guard.insert(*k, v.clone());
+    }
+}
+
+/// Test-only seeder for the sidecar schema-error cache.
+/// Mirrors [`__test_seed_sidecar_schema_cache`] so integration tests can assert the `schema_error` field on discovery rows without a failing live `--describe`.
+/// `#[doc(hidden)]` for the same reason.
+#[doc(hidden)]
+pub fn __test_seed_sidecar_schema_error_cache(entries: &[(&'static str, String)]) {
+    let mut guard = schema_error_cache().write().unwrap();
     guard.clear();
     for (k, v) in entries {
         guard.insert(*k, v.clone());
@@ -628,6 +653,7 @@ fn sidecar_discovery_rows(
     }
 
     let cache_guard = schema_cache().read().unwrap();
+    let err_guard = schema_error_cache().read().unwrap();
     let mut rows = Vec::new();
     for entry in SIDECAR_CATALOG {
         if covered.contains(entry.name) {
@@ -653,7 +679,7 @@ fn sidecar_discovery_rows(
             })
             .unwrap_or_default();
 
-        rows.push(serde_json::json!({
+        let mut row = serde_json::json!({
             "name": entry.name,
             "display_name": entry.display_name,
             "icon": "SC",
@@ -672,7 +698,13 @@ fn sidecar_discovery_rows(
                 "Fill the form to save credentials to ~/.librefang/secrets.env \
                  (secrets) and ~/.librefang/config.toml (non-secrets)",
             ],
-        }));
+        });
+        // When `--describe` failed at boot and there is no static fallback, `fields` is empty and the configure form would be a blank drawer.
+        // Surface the cached failure reason (typically the `pip install librefang-sdk` install hint) so the dashboard can explain why instead of showing nothing.
+        if let Some(reason) = err_guard.get(entry.name) {
+            row["schema_error"] = serde_json::json!(reason);
+        }
+        rows.push(row);
     }
     rows
 }
@@ -1299,5 +1331,73 @@ mod feishu_static_schema_tests {
             ],
             "secret-typed fields must match FeishuAdapter.SCHEMA"
         );
+    }
+}
+
+#[cfg(test)]
+mod schema_error_discovery_tests {
+    use super::{
+        __test_seed_sidecar_schema_cache, __test_seed_sidecar_schema_error_cache,
+        sidecar_discovery_rows, SidecarSchema, SidecarSchemaField,
+    };
+
+    // Both assertions live in ONE test: the schema / error caches are process-wide, and the seeders clear-then-set, so running the two halves as separate (parallel) tests would race on the shared maps.
+    #[test]
+    fn discovery_row_surfaces_schema_error_only_when_schema_missing() {
+        const HINT: &str = "librefang-sdk is not installed (test hint)";
+
+        // --- describe failed, no static fallback: row carries the reason ---
+        __test_seed_sidecar_schema_cache(&[]);
+        __test_seed_sidecar_schema_error_cache(&[("wechat", HINT.to_string())]);
+        let rows = sidecar_discovery_rows(&[]);
+        let wechat = rows
+            .iter()
+            .find(|r| r["name"] == "wechat")
+            .expect("wechat discovery row must be present");
+        assert_eq!(
+            wechat["fields"].as_array().map(|a| a.len()),
+            Some(0),
+            "no cached schema → empty fields"
+        );
+        assert_eq!(
+            wechat["schema_error"], HINT,
+            "the cached failure reason must ride along as schema_error"
+        );
+
+        // --- schema cached: no schema_error, fields populated ---
+        let schema = SidecarSchema {
+            name: "wechat".to_string(),
+            display_name: "WeChat".to_string(),
+            description: "test".to_string(),
+            fields: vec![SidecarSchemaField {
+                key: "WECHAT_BOT_TOKEN".to_string(),
+                label: "Bot token".to_string(),
+                field_type: "secret".to_string(),
+                required: true,
+                placeholder: String::new(),
+                advanced: false,
+                options: None,
+            }],
+        };
+        __test_seed_sidecar_schema_cache(&[("wechat", schema)]);
+        __test_seed_sidecar_schema_error_cache(&[]);
+        let rows = sidecar_discovery_rows(&[]);
+        let wechat = rows
+            .iter()
+            .find(|r| r["name"] == "wechat")
+            .expect("wechat discovery row must be present");
+        assert_eq!(
+            wechat["fields"].as_array().map(|a| a.len()),
+            Some(1),
+            "cached schema → fields populated"
+        );
+        assert!(
+            wechat.get("schema_error").is_none(),
+            "a usable schema must not carry a schema_error"
+        );
+
+        // Reset shared caches so we don't leak state into other tests.
+        __test_seed_sidecar_schema_cache(&[]);
+        __test_seed_sidecar_schema_error_cache(&[]);
     }
 }

@@ -1764,6 +1764,61 @@ impl BindingMatchRule {
         }
         score
     }
+
+    /// Returns true when every specified (non-`None` / non-empty) field of this rule matches the supplied context.
+    /// Unset fields act as wildcards, and `roles` matches when the rule's role list is empty or intersects the provided roles.
+    /// This is the single source of truth for binding matching, shared by the inbound channel router and the outbound `channel_send` mirror's owner resolution so the two can never drift.
+    pub fn matches(
+        &self,
+        channel: &str,
+        account_id: Option<&str>,
+        peer_id: &str,
+        guild_id: Option<&str>,
+        roles: &[String],
+    ) -> bool {
+        // All specified fields must match.
+        if let Some(ref ch) = self.channel {
+            if ch.as_str() != channel {
+                return false;
+            }
+        }
+        if let Some(ref acc) = self.account_id {
+            match account_id {
+                Some(ctx_acc) => {
+                    if acc.as_str() != ctx_acc {
+                        return false;
+                    }
+                }
+                None => return false,
+            }
+        }
+        if let Some(ref pid) = self.peer_id {
+            if pid.as_str() != peer_id {
+                return false;
+            }
+        }
+        if let Some(ref gid) = self.guild_id {
+            match guild_id {
+                Some(ctx_gid) => {
+                    if gid.as_str() != ctx_gid {
+                        return false;
+                    }
+                }
+                None => return false,
+            }
+        }
+        if !self.roles.is_empty() {
+            // User must have at least one of the specified roles.
+            let has_role = self
+                .roles
+                .iter()
+                .any(|r| roles.iter().any(|cr| cr.as_str() == r.as_str()));
+            if !has_role {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 /// Broadcast config — send same message to multiple agents.
@@ -2016,6 +2071,20 @@ pub struct ExecPolicy {
     pub mode: ExecSecurityMode,
     /// Commands that bypass allowlist (stdin-only utilities).
     pub safe_bins: Vec<String>,
+    /// Opt-in: in `allowlist` mode, let a `shell_exec` whose every base
+    /// command is a declared `safe_bin` also skip the human-approval prompt.
+    /// Default `false` preserves today's posture — `safe_bins` membership only
+    /// satisfies the allowlist gate, and an approved-but-required tool still
+    /// prompts. When `true`, a command like `env` (every chained base in
+    /// `safe_bins`) executes without prompting, while any non-safe base
+    /// (e.g. `env; curl …`) still routes through approval.
+    ///
+    /// Security trade-off when enabling: you are replacing the per-command approval prompt with the argument-blind allowlist + dangerous-command denylist.
+    /// So a read-capable `safe_bin` (`cat`, `tail`, `head`) can read arbitrary files into the agent's context with no prompt — only put a binary in `safe_bins` if you accept that for *any* arguments.
+    /// Never put a shell wrapper (`sh`, `bash`, `zsh`) in `safe_bins`: it would let the outer base pass while the real command hides in `-c "…"`.
+    /// (The skip is gated to a strict subset of the execution allowlist — metacharacters and wrappers are still rejected — but the approval prompt is gone.)
+    #[serde(default)]
+    pub safe_bins_skip_approval: bool,
     /// Global command allowlist (when mode = allowlist).
     pub allowed_commands: Vec<String>,
     /// Environment variables explicitly allowed to pass through to `shell_exec`.
@@ -2046,6 +2115,7 @@ impl Default for ExecPolicy {
             .into_iter()
             .map(String::from)
             .collect(),
+            safe_bins_skip_approval: false,
             allowed_commands: Vec::new(),
             allowed_env_vars: Vec::new(),
             timeout_secs: 30,
@@ -2274,7 +2344,11 @@ pub enum SidecarCommandPolicy {
 /// command = "python3"
 /// args = ["-m", "librefang.sidecar.adapters.telegram"]
 /// env = { TELEGRAM_BOT_TOKEN = "xxx" }
+/// agent = "coder"                  # default agent for this channel
+/// available_agents = ["coder", "triage"]  # optional /agent whitelist
 /// ```
+///
+/// The `agent` key was previously named `default_agent`; the old name is still accepted as a deserialization alias so existing configs keep loading unchanged (#5671).
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SidecarChannelConfig {
     /// Display name for this adapter.
@@ -2300,8 +2374,18 @@ pub struct SidecarChannelConfig {
     /// through to the non-deterministic "first available agent" branch in
     /// `resolve_or_fallback`, which silently routes traffic to a different
     /// agent whenever a new agent is spawned.
+    ///
+    /// Renamed from `default_agent` in #5671; the old key is still accepted via `#[serde(alias = "default_agent")]` so existing configs keep deserializing.
+    /// Remains `Option<String>` for now — mandatory enforcement is a later boot-validation PR.
+    #[serde(default, alias = "default_agent")]
+    pub agent: Option<String>,
+    /// Whitelist of agent names this channel is allowed to route to.
+    ///
+    /// Reserved for the forthcoming `/agent` command (#5671): when non-empty it gates which agents an inbound `/agent <name>` switch may select on this channel.
+    /// Empty (the default) means "no whitelist" — the `/agent` gate is open, preserving today's behaviour.
+    /// Not yet consulted anywhere; this PR only lands the schema field.
     #[serde(default)]
-    pub default_agent: Option<String>,
+    pub available_agents: Vec<String>,
     /// Restart the subprocess automatically when it exits unexpectedly.
     #[serde(default = "default_sidecar_restart")]
     pub restart: bool,
@@ -3502,6 +3586,9 @@ pub struct KernelConfig {
     /// Auto-dream (background memory consolidation) configuration.
     #[serde(default)]
     pub auto_dream: AutoDreamConfig,
+    /// RL rollout trajectory export configuration (#3330 / #3331).
+    #[serde(default)]
+    pub rl_export: RlExportConfig,
     /// Pluggable context engine configuration.
     #[serde(default)]
     pub context_engine: ContextEngineTomlConfig,
@@ -3520,6 +3607,10 @@ pub struct KernelConfig {
     /// Registry sync configuration (cache TTL, etc.).
     #[serde(default)]
     pub registry: RegistryConfig,
+    /// Hands marketplace configuration (SSRF allowlist for a caller-supplied
+    /// `registry_url` on the install endpoint).
+    #[serde(default)]
+    pub hands: HandsConfig,
     /// PII privacy controls for LLM context filtering.
     #[serde(default)]
     pub privacy: PrivacyConfig,
@@ -5079,6 +5170,98 @@ impl Default for AutoDreamConfig {
     }
 }
 
+/// RL rollout trajectory export configuration (issues #3330 / #3331).
+///
+/// When `enabled`, a finished agent turn's session trajectory is serialized
+/// and uploaded to the configured upstream RL-tracking service via
+/// `librefang_rl_export::export`. Default disabled — opt-in. A per-agent
+/// override lives on the agent manifest (`agent.toml: [rl_export] enabled =
+/// …`), which supersedes this global toggle for that one agent.
+///
+/// The `target` shape mirrors `librefang_rl_export::ExportTarget`; the
+/// config carries env-var **names** for any secret (`api_key_env`), never
+/// the secret material, matching the rest of the workspace's `*_env`
+/// indirection convention. The kernel converts this config-side enum into
+/// the exporter's `ExportTarget` at upload time.
+///
+/// Configure in `config.toml`:
+/// ```toml
+/// [rl_export]
+/// enabled = true
+/// target = { type = "wandb", project = "my-rollouts", entity = "my-team", api_key_env = "WANDB_API_KEY" }
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct RlExportConfig {
+    /// Master toggle. Default: disabled — when false, no trajectory is
+    /// exported regardless of per-agent opt-in.
+    pub enabled: bool,
+    /// Upstream export destination. `None` means no destination is
+    /// configured; even with `enabled = true` the producer no-ops (and
+    /// logs a warning at boot) until a target is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<RlExportTarget>,
+}
+
+/// Config-side mirror of `librefang_rl_export::ExportTarget`.
+///
+/// Kept separate from the exporter's own enum because that one is
+/// `#[non_exhaustive]` and intentionally does not derive
+/// `Serialize`/`Deserialize` (it is an in-process call surface, not a
+/// config shape). This enum is the TOML-deserializable representation; the
+/// kernel maps it onto the exporter's `ExportTarget` at upload time. Secret
+/// material is never inlined — `api_key_env` holds the **name** of the
+/// environment variable holding the key, resolved by the exporter at upload
+/// time.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RlExportTarget {
+    /// Weights & Biases. See `librefang_rl_export::ExportTarget::WandB`.
+    Wandb {
+        /// W&B project name. The project must already exist.
+        project: String,
+        /// W&B entity (team or username). Required.
+        entity: String,
+        /// Optional client-supplied run id hint. When `None`, the
+        /// producer's run id is forwarded as the hint.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
+        /// Name of the environment variable holding the W&B API key.
+        api_key_env: String,
+    },
+    /// Tinker. See `librefang_rl_export::ExportTarget::Tinker`.
+    Tinker {
+        /// Name of the environment variable holding the Tinker API key.
+        api_key_env: String,
+        /// Project identifier sent on the create-session call. Required.
+        project: String,
+        /// Optional override for the Tinker REST base URL. `None` uses the
+        /// crate's documented prod default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base_url: Option<String>,
+    },
+    /// Atropos. See `librefang_rl_export::ExportTarget::Atropos`.
+    Atropos {
+        /// Producer name registered with Atropos. Required.
+        project: String,
+        /// Atropos `run-api` base URL. Required and SSRF-validated against
+        /// the loopback / RFC-1918 allowlist by the exporter.
+        base_url: String,
+        /// Maximum token length to report on `RegisterEnv`. `None` uses the
+        /// exporter's conservative default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_token_length: Option<u32>,
+        /// Group size to report on `RegisterEnv`. `None` uses the
+        /// exporter's default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group_size: Option<u32>,
+        /// Weight to report on `RegisterEnv`. `None` uses the exporter's
+        /// default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        weight: Option<f32>,
+    },
+}
+
 /// Background autonomous-loop executor configuration (issue #5168).
 ///
 /// Tunes the circuit breaker that stops a continuous / periodic background
@@ -5160,6 +5343,29 @@ impl Default for RegistryConfig {
             registry_mirror: String::new(),
         }
     }
+}
+
+/// Hands marketplace configuration.
+///
+/// Configure in config.toml:
+/// ```toml
+/// [hands]
+/// # Hosts/CIDRs/glob patterns that a caller-supplied `registry_url` is
+/// # allowed to resolve to even when it points at a private/internal
+/// # network — e.g. a self-hosted HandsHub mirror inside a VPC/K8s cluster.
+/// # Default empty: only public registries are reachable. Cloud-metadata
+/// # endpoints (169.254.x.x, etc.) stay blocked regardless of this list.
+/// registry_allowed_hosts = ["hub.internal.example.com", "10.0.0.0/8"]
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct HandsConfig {
+    /// SSRF allowlist for a caller-supplied `registry_url` on
+    /// `POST /api/hands/marketplace/install`. Entries are CIDRs, glob hostname
+    /// patterns, or literal IPs/hostnames that are exempt from the private-IP
+    /// SSRF block. Cloud-metadata ranges remain unconditionally blocked.
+    /// Default empty means only public registries are reachable.
+    pub registry_allowed_hosts: Vec<String>,
 }
 
 /// Plugin registry configuration.
@@ -6020,12 +6226,14 @@ impl Default for KernelConfig {
             tool_policy: crate::tool_policy::ToolPolicy::default(),
             proactive_memory: crate::memory::ProactiveMemoryConfig::default(),
             auto_dream: AutoDreamConfig::default(),
+            rl_export: RlExportConfig::default(),
             context_engine: ContextEngineTomlConfig::default(),
             audit: AuditConfig::default(),
             health_check: HealthCheckConfig::default(),
             heartbeat: HeartbeatTomlConfig::default(),
             plugins: PluginsConfig::default(),
             registry: RegistryConfig::default(),
+            hands: HandsConfig::default(),
             cors_origin: Vec::new(),
             trusted_hosts: Vec::new(),
             trusted_proxies: Vec::new(),
@@ -6943,8 +7151,9 @@ pub struct ParallelToolsConfig {
     pub enabled: bool,
 
     /// Cap on concurrent tool calls within a single bucket. `0` =
-    /// uncapped (use the bucket size). The dispatcher honours this
-    /// when launching futures via `join_all`.
+    /// uncapped (use the bucket size). The dispatcher honours this with a
+    /// `FuturesUnordered` prime/backfill loop (`join_all` cannot bound
+    /// concurrency, so it is not used).
     pub max_concurrent: u32,
 
     /// Default `ParallelSafety` class assigned to MCP tools whose
@@ -7104,6 +7313,52 @@ mod tests {
         assert!(cfg.allowed_commands.is_empty());
         assert!(cfg.blocked_commands.is_empty());
         assert_eq!(cfg.message_coalesce_window_ms, 0);
+    }
+
+    /// #5671 — the `default_agent` field was renamed to `agent`, kept as a
+    /// serde alias. Both spellings must deserialize into `agent`, and the new
+    /// `available_agents` whitelist must default to empty.
+    #[test]
+    fn sidecar_agent_field_accepts_legacy_and_new_keys() {
+        // Legacy `default_agent` key still loads into `agent` via the alias.
+        let legacy = r#"
+            name = "telegram"
+            command = "python3"
+            default_agent = "x"
+        "#;
+        let cfg: SidecarChannelConfig = toml::from_str(legacy).unwrap();
+        assert_eq!(cfg.agent.as_deref(), Some("x"));
+        assert!(cfg.available_agents.is_empty());
+
+        // New `agent` key loads directly.
+        let new = r#"
+            name = "telegram"
+            command = "python3"
+            agent = "x"
+        "#;
+        let cfg: SidecarChannelConfig = toml::from_str(new).unwrap();
+        assert_eq!(cfg.agent.as_deref(), Some("x"));
+        assert!(cfg.available_agents.is_empty());
+
+        // Absent → None, and the whitelist defaults to empty.
+        let minimal = r#"
+            name = "telegram"
+            command = "python3"
+        "#;
+        let cfg: SidecarChannelConfig = toml::from_str(minimal).unwrap();
+        assert!(cfg.agent.is_none());
+        assert!(cfg.available_agents.is_empty());
+
+        // The whitelist round-trips when present.
+        let with_list = r#"
+            name = "telegram"
+            command = "python3"
+            agent = "coder"
+            available_agents = ["coder", "triage"]
+        "#;
+        let cfg: SidecarChannelConfig = toml::from_str(with_list).unwrap();
+        assert_eq!(cfg.agent.as_deref(), Some("coder"));
+        assert_eq!(cfg.available_agents, vec!["coder", "triage"]);
     }
 
     #[test]
@@ -7874,5 +8129,103 @@ rule_sets = ["browser_handles", "pii_baseline"]
         .unwrap();
         assert!(hooks.allow_network);
         assert!(hooks.allow_filesystem);
+    }
+
+    // ─── BindingMatchRule::matches — shared inbound/outbound matcher ─────────
+
+    /// A channel-only rule is a wildcard over everything except the channel.
+    #[test]
+    fn binding_matches_channel_only_is_wildcard() {
+        let rule = BindingMatchRule {
+            channel: Some("matrix".into()),
+            ..Default::default()
+        };
+        assert!(rule.matches("matrix", None, "!room:server", None, &[]));
+        assert!(rule.matches("matrix", Some("acct"), "anyone", Some("g1"), &[]));
+        assert!(!rule.matches("telegram", None, "!room:server", None, &[]));
+    }
+
+    /// An all-unset rule matches any context (the empty match_rule wildcard).
+    #[test]
+    fn binding_matches_all_unset_matches_anything() {
+        let rule = BindingMatchRule::default();
+        assert!(rule.matches("matrix", None, "x", None, &[]));
+        assert!(rule.matches("discord", Some("a"), "y", Some("g"), &["admin".into()]));
+    }
+
+    /// `peer_id` must match exactly when specified.
+    #[test]
+    fn binding_matches_peer_id_match_and_mismatch() {
+        let rule = BindingMatchRule {
+            channel: Some("matrix".into()),
+            peer_id: Some("!room:server".into()),
+            ..Default::default()
+        };
+        assert!(rule.matches("matrix", None, "!room:server", None, &[]));
+        assert!(!rule.matches("matrix", None, "!other:server", None, &[]));
+    }
+
+    /// A specified `account_id` requires the context to carry a matching value;
+    /// a `None` context account_id fails the constraint.
+    #[test]
+    fn binding_matches_account_id_constraint() {
+        let rule = BindingMatchRule {
+            channel: Some("telegram".into()),
+            account_id: Some("bot-a".into()),
+            ..Default::default()
+        };
+        assert!(rule.matches("telegram", Some("bot-a"), "user1", None, &[]));
+        assert!(!rule.matches("telegram", Some("bot-b"), "user1", None, &[]));
+        assert!(!rule.matches("telegram", None, "user1", None, &[]));
+    }
+
+    /// A specified `guild_id` requires a matching context guild; absent guild fails.
+    #[test]
+    fn binding_matches_guild_id_constraint() {
+        let rule = BindingMatchRule {
+            channel: Some("discord".into()),
+            guild_id: Some("g1".into()),
+            ..Default::default()
+        };
+        assert!(rule.matches("discord", None, "u", Some("g1"), &[]));
+        assert!(!rule.matches("discord", None, "u", Some("g2"), &[]));
+        assert!(!rule.matches("discord", None, "u", None, &[]));
+    }
+
+    /// `roles` matches when the rule's role list intersects the context roles;
+    /// no intersection fails, and an empty context role set fails a non-empty rule.
+    #[test]
+    fn binding_matches_roles_intersection() {
+        let rule = BindingMatchRule {
+            channel: Some("discord".into()),
+            roles: vec!["admin".into(), "mod".into()],
+            ..Default::default()
+        };
+        assert!(rule.matches("discord", None, "u", None, &["mod".into()]));
+        assert!(rule.matches(
+            "discord",
+            None,
+            "u",
+            None,
+            &["member".into(), "admin".into()]
+        ));
+        assert!(!rule.matches("discord", None, "u", None, &["member".into()]));
+        assert!(!rule.matches("discord", None, "u", None, &[]));
+    }
+
+    /// All specified fields are ANDed together — one mismatch fails the whole rule.
+    #[test]
+    fn binding_matches_all_specified_fields_must_match() {
+        let rule = BindingMatchRule {
+            channel: Some("matrix".into()),
+            account_id: Some("acct".into()),
+            peer_id: Some("!room:server".into()),
+            ..Default::default()
+        };
+        assert!(rule.matches("matrix", Some("acct"), "!room:server", None, &[]));
+        // peer_id mismatch alone fails.
+        assert!(!rule.matches("matrix", Some("acct"), "!other:server", None, &[]));
+        // account_id mismatch alone fails.
+        assert!(!rule.matches("matrix", Some("other"), "!room:server", None, &[]));
     }
 }

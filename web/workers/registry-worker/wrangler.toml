@@ -1,12 +1,12 @@
 name = "librefang-registry"
 main = "index.js"
 compatibility_date = "2025-01-01"
-account_id = "3ee9bb524a4fb2a9d685ce1f82b52581"
+account_id = "57449de851e4289a4407a73e66baaac9"
 
 [[d1_databases]]
 binding = "DB"
 database_name = "librefang-marketplace"
-database_id = "91df0bc6-e658-4463-9eba-22d5476d420a"
+database_id = "1bbf40ca-963b-4b94-b65d-062b9e7bbb42"
 
 # Daily registry refresh at UTC 02:00
 [triggers]
@@ -19,4 +19,4 @@ crons = ["0 2 * * *"]
 # Until both are set, the signing endpoints return 503 and the cron refresh
 # skips signing — the existing /api/registry path remains fully functional.
 [vars]
-REGISTRY_PUBLIC_KEY = "ClGa0Ucap8NdrKAy1rw9Tt6A9I8eg4zJ53+xIuKMuq0="
+REGISTRY_PUBLIC_KEY = "joY8IYrUbbACfKRyp2CTcEbcEty8wcBwP1MTxU+vjaM="
