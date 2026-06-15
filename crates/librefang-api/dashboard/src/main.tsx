@@ -114,3 +114,16 @@ createRoot(rootEl).render(
     </RootErrorBoundary>
   </React.StrictMode>
 );
+
+// Register the PWA service worker. Done here in the bundled, 'self'-sourced
+// entry module — NOT via an inline <script> in index.html — so the strict CSP
+// `script-src 'self'` (no 'unsafe-inline', #3732) keeps blocking inline
+// execution. `import.meta.env.BASE_URL` is Vite's configured `base`
+// ("/dashboard/"), matching the path the old inline script used via %BASE_URL%.
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker
+      .register(`${import.meta.env.BASE_URL}sw.js`)
+      .catch(() => {});
+  });
+}
