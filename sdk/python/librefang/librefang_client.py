@@ -1018,6 +1018,9 @@ class _SkillsResource(_Resource):
     def approve_pending_candidate(self, id: str):
         return self._c._request("POST", f"/api/skills/pending/{id}/approve")
 
+    def propose_pending_to_registry(self, id: str):
+        return self._c._request("POST", f"/api/skills/pending/{id}/propose-to-registry")
+
     def reject_pending_candidate(self, id: str):
         return self._c._request("POST", f"/api/skills/pending/{id}/reject")
 
