@@ -507,7 +507,9 @@ pub(super) async fn execute_tool_group(
     // Each member is either short-circuited (blocked) or proceeds with a
     // verdict that feeds the concurrent core. A circuit break aborts here.
     enum Member<'c> {
-        Blocked(ExecutedToolCall),
+        // Boxed: `ExecutedToolCall` is ~272 bytes, far larger than the
+        // `Proceed` variant — keeps the enum small (clippy::large_enum_variant).
+        Blocked(Box<ExecutedToolCall>),
         Proceed(&'c ToolCall, LoopGuardVerdict),
     }
     let mut members: Vec<(usize, Member)> = Vec::with_capacity(group.len());
@@ -554,7 +556,7 @@ pub(super) async fn execute_tool_group(
     let mut pending: Vec<(usize, &ToolCall, LoopGuardVerdict)> = Vec::new();
     for (idx, member) in members {
         match member {
-            Member::Blocked(executed) => blocked.push((idx, executed)),
+            Member::Blocked(executed) => blocked.push((idx, *executed)),
             Member::Proceed(tool_call, verdict) => pending.push((idx, tool_call, verdict)),
         }
     }
@@ -639,7 +641,9 @@ pub(super) enum LoopGuardPrecheck {
     Proceed(LoopGuardVerdict),
     /// Guard blocked this single call (soft). The call yields the carried
     /// error result without running the tool body; the batch continues.
-    Blocked(ExecutedToolCall),
+    /// Boxed: `ExecutedToolCall` (~272 bytes) dwarfs the other variants, so
+    /// boxing keeps the enum small (clippy::large_enum_variant).
+    Blocked(Box<ExecutedToolCall>),
     /// Circuit breaker tripped. The whole turn aborts with this error —
     /// session already repaired + saved and the `AgentLoopEnd` hook fired.
     CircuitBreak(LibreFangError),
@@ -703,7 +707,7 @@ pub(super) async fn precheck_loop_guard(
             // (#5979). `Skipped` is soft (`is_soft_error()`), so the turn
             // survives and the block message steers the model; the genuinely
             // fatal runaway is still caught by the CircuitBreak arm above.
-            LoopGuardPrecheck::Blocked(ExecutedToolCall {
+            LoopGuardPrecheck::Blocked(Box::new(ExecutedToolCall {
                 result: librefang_types::tool::ToolResult {
                     tool_use_id: tool_call.id.clone(),
                     content: msg.clone(),
@@ -712,7 +716,7 @@ pub(super) async fn precheck_loop_guard(
                     ..Default::default()
                 },
                 final_content: msg.clone(),
-            })
+            }))
         }
         _ => LoopGuardPrecheck::Proceed(verdict),
     }
@@ -736,7 +740,7 @@ pub(super) async fn execute_single_tool_call_inner(
     .await
     {
         LoopGuardPrecheck::Proceed(verdict) => verdict,
-        LoopGuardPrecheck::Blocked(executed) => return Ok(executed),
+        LoopGuardPrecheck::Blocked(executed) => return Ok(*executed),
         LoopGuardPrecheck::CircuitBreak(err) => return Err(err),
     };
 
