@@ -200,6 +200,7 @@ fn every_kernel_config_struct_field_is_exposed_via_overlay() {
     const EXCLUDED: &[&str] = &[
         // Dedicated pages render these directly.
         "mcp_servers",          // /mcp-servers
+        "mcp_runtime_store",    // /mcp-servers (MCP write-target selector, #6113)
         "users",                // /users
         "bindings",             // /agents
         "provider_api_keys",    // /providers (sensitive too)
