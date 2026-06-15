@@ -230,3 +230,80 @@ Kubernetes environment it is meant to fix.
 - [Configuration drift in Kubernetes — garden.io](https://garden.io/blog/configuration-drift)
 - [Azure App Configuration best practices (K8s, hot reload)](https://learn.microsoft.com/en-us/azure/azure-app-configuration/howto-best-practices)
 - [About sources of truth — GKE Config Sync](https://docs.cloud.google.com/kubernetes-engine/config-sync/docs/concepts/sources-of-truth)
+
+---
+
+# C-005d Assessment — Migrate `memory` + `channels` settings to SurrealDB (2026-06-14)
+
+**Status:** Gap report — design verdict + scoped recommendation
+**Scope (user):** Move memory and channel settings from `config.toml` into the database, using the same C-005c method — load the file first, write new/changed settings into the DB, then run everything from the DB.
+
+## 1. Verdict
+
+**Proceed — and the credential blocker I flagged when deferring this is smaller than it looked.**
+The actual secret *values* never need to enter the database: channels already separates them, and memory only stores an env-var *pointer*.
+The migration reuses the C-005c `config_overrides` infrastructure end-to-end, plus a small "trusted-handler section" apply path so these typed endpoints aren't gated by the generic `config_set` allowlist.
+
+## 2. Current state (the file-writing paths)
+
+- **memory** — `memory_config_patch` (`PATCH /api/memory/config`, `crates/librefang-api/src/routes/memory.rs:1592`) reads `config.toml`, edits the `[memory]` (`embedding_provider`, `embedding_model`, `embedding_api_key_env`, `decay_rate`) and `[proactive_memory]` (`enabled`, `auto_memorize`, `auto_retrieve`, `extraction_model`, `max_retrieve`) tables, then `std::fs::write`s the whole file (`memory.rs:1666`) and `reload_config()`s. Zero config-store references — fails with `os error 30` under the read-only ConfigMap.
+- **channels** — `configure_sidecar_channel` (`POST /api/channels/sidecar/{name}/configure`, `crates/librefang-api/src/routes/channels.rs:809`) **already splits the payload**: secret values go to `~/.librefang/secrets.env` (`channels.rs:862,884`), and only the non-secret `[[sidecar_channels]]` block goes to `config.toml` via `sidecar_toml::upsert_sidecar_block` (`crates/librefang-api/src/routes/sidecar_toml.rs:11`). The config.toml half is what fails under the read-only mount.
+
+KernelConfig fields involved: `memory: MemoryConfig` (`types.rs:3170`), `proactive_memory: ProactiveMemoryConfig` (`types.rs:3630`), `sidecar_channels: Vec<SidecarChannelConfig>` (`types.rs:3569`).
+
+## 3. Design reframe — why this is now safe
+
+The deferral reason was that memory/channels carry credential-redirect fields (`embedding_api_key_env`, `token_env`/`secret_env`) that the `config_set` allowlist blocks via its `_env` / depth-2 rules. On inspection:
+
+1. **Secret VALUES already stay out of `config.toml`.** Channels writes credentials to `secrets.env`; the migration touches only the `[[sidecar_channels]]` *structure* (name/command/args/channel_type/non-secret env). secrets.env is left exactly as-is — secrets never enter the DB (assessment §3b security rationale holds).
+2. **`embedding_api_key_env` is a POINTER, not a secret.** It holds the *name* of an env var (e.g. `OPENAI_API_KEY`); the key itself lives in the env var (a K8s Secret). Storing the pointer in the DB exposes no secret value.
+3. **The `_env` / depth-2 allowlist is the boundary for the UNTRUSTED generic `config_set` endpoint** (an API caller with a leaked key must not write arbitrary dotted paths). The memory PATCH and channels configure endpoints are **dedicated, typed, structurally-validated** handlers — they are on the same trust footing as `persist_budget`. So they may write their own section to the store via a trusted path; the typed `deserialize → validate_config_for_reload` at resolve time is the guard, exactly as for budget (C-005d budget already shipped, PR #84).
+
+The resolve-time allowlist re-check in `resolve_config_with_overrides` is belt-and-suspenders against a *directly-tampered store row* — but anyone who can write the embedded SurrealDB has already cleared the daemon's trust boundary, so it is not a hard gate. The hard gate is the API surface, which these typed handlers own.
+
+## 4. Gap table
+
+| Gap | Setting domain | Resolution | Effort |
+|---|---|---|---|
+| G-d1 | `[memory]` (incl. `embedding_api_key_env` pointer) | Store as a trusted whole-section override `memory`; resolve applies it. | S |
+| G-d2 | `[proactive_memory]` | Store as override `proactive_memory` (no credential fields at all). | S |
+| G-d3 | `[[sidecar_channels]]` array (config only) | Store the array as override `sidecar_channels`; secrets stay in `secrets.env`. | M |
+| G-d4 | Trusted-section apply path | resolve must apply `memory`/`proactive_memory`/`sidecar_channels` overrides WITHOUT the `config_set` allowlist gate (they are NOT in `is_writable_config_path`, and must not be — config_set users still can't write them). | S |
+| G-d5 | Read-back consistency | `GET /api/memory/config` + the channel-row synthesizers read `kernel.config_ref()` (the live, overlay-resolved config), so once the override is applied via `replace_config` the reads are correct with no change. | — |
+
+## 5. Proposed mechanism (reuse C-005c)
+
+Add a **trusted-section** variant of the override apply:
+
+- `crates/librefang-api/src/config_store_overlay.rs`: a `TRUSTED_SECTION_KEYS: &[&str] = &["budget", "memory", "proactive_memory", "sidecar_channels"]` set, and make `resolve_config_with_overrides` apply an override when its key is allowlisted **OR** in `TRUSTED_SECTION_KEYS` (instead of only `is_writable_config_path`). Budget already round-trips via the exact-allowlist; folding it into the trusted set unifies the two and removes the `"budget"` allowlist entry (so config_set still can't write whole sections, but the typed handlers can).
+- **memory handler** (`memory.rs:1592`): under `surreal-backend`, build the resulting `[memory]` and `[proactive_memory]` tables (config.toml ⊕ patch), persist them as overrides `memory` + `proactive_memory`, resolve + `replace_config`. sqlite-only keeps the file path.
+- **channels handler** (`channels.rs:809`): keep the `secrets.env` write unchanged. Replace the `config.toml` `upsert_sidecar_block` write (surreal branch) with: read current `sidecar_channels` (from `kernel.config_ref()`), upsert the named block in memory, store the resulting `Vec<SidecarChannelConfig>` as override `sidecar_channels`, resolve + `replace_config`. The `reload_channels_from_disk` restart of the bridge manager stays.
+
+This is the same load-file → write-DB → run-from-DB flow as budget; the boot/reload overlay (`overlay_config_overrides`, `config_store_overlay.rs:550`) already re-applies all `config_overrides` entries, so memory/channels survive restart automatically once stored.
+
+## 6. Security analysis (the crux)
+
+- **Never store a secret value.** Channels secrets stay in `secrets.env` (untouched). Audit the channels migration to confirm NO secret-valued field is folded into the `sidecar_channels` override — only the schema-managed non-secret keys + `*_env` pointers.
+- **`*_env` pointers in the DB are acceptable** (they name an env var; the value is in the env). Document this explicitly; it is the one judgment call.
+- **Tampered-store-row risk is unchanged** from budget — DB write access == daemon trust boundary already breached. The typed `deserialize → validate_config_for_reload` still runs at resolve, so a malformed override is rejected, live config unchanged.
+- **config_set stays locked.** `memory`/`channels`/`sidecar_channels` remain OUT of `is_writable_config_path` — only the typed endpoints can write them; the generic `config_set` API still cannot, preserving the `_env` / depth-2 protection on the untrusted surface.
+
+## 7. Proposed changes (C-005d)
+
+1. **C-005d.1** — `resolve_config_with_overrides` trusted-section apply path + `TRUSTED_SECTION_KEYS` (fold in `budget`; remove the `"budget"` exact-allowlist entry). Tests: trusted key applies; non-trusted non-allowlisted key still skipped; a tampered blocked path still skipped.
+2. **C-005d.2** — memory handler → store (`memory` + `proactive_memory` overrides). Test: PATCH → store → live config reflects it → survives restart via overlay; `config.toml` untouched.
+3. **C-005d.3** — channels handler → store (`sidecar_channels` override); secrets.env unchanged. Test: configure → secrets.env still written, sidecar_channels override applied, `config.toml` untouched, bridge reload still fires; **security test** — a secret-valued field is NOT present in the stored override.
+
+## 8. Risks
+
+- **R-d1 (med):** channels' `upsert_sidecar_block` has include-file shadowing logic (`channels.rs:805,880`) — the DB path must preserve the "refuse if an included file already declares the block" guard or it silently shadows. Keep the pre-write include check.
+- **R-d2 (low):** `[memory].sqlite_path` is a storage path; moving it to a runtime override could relocate the memory DB mid-run. It is restart-required in the reload plan, so `replace_config` swaps the config but the live store keeps its boot path — acceptable, same as today's reload.
+- **R-d3 (low):** `MemoryConfig` / `SidecarChannelConfig` must round-trip cleanly through `serde_json → toml_edit inline → KernelConfig` (the `env: HashMap` becomes an inline table). Covered by the round-trip tests.
+
+## 9. Verification
+
+- Unit/integration in `crates/librefang-api/tests/config_store_overlay_test.rs`: per-section resolve + trusted-apply + the security (no-secret-value) assertion.
+- `cargo check --workspace --lib`; `clippy -p librefang-api`; `enforce-branding.py --check`.
+- Live (HUMAN/cluster, after deploy): `PATCH /api/memory/config` and `POST /api/channels/sidecar/{n}/configure` return success under the read-only `config.toml`, values survive a pod restart, and `config.toml` stays read-only.
+
+**Suggested order:** C-005d.1 → C-005d.2 → C-005d.3.

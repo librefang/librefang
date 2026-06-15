@@ -2,34 +2,40 @@
 
 **Active phase:** phase-9-config-store-migration
 **Previous phase:** phase-8-fixture-rebuilds
-**Updated:** 2026-06-06 by kbd-plan
+**Updated:** 2026-06-14 by kbd-plan
 
 ## Where we are
 
-Phase 9 assessed and planned. Verdict: **proceed with corrected mechanism** —
-move MCP server registrations and the UI-mutable config subset into a SurrealDB
-`config_store` table (embedded + remote), seeded once from bootstrap config, with
-**content-hash + revision + per-key provenance** conflict handling (NOT file
-mtime, NOT whole-file "newer wins"). Bootstrap/secret/storage-connection config
-stays in file+env. K8s ConfigMap revert is last and hard-gated on a verified
-prod import.
+Phase 9 production cutover is **complete and deployed** (C-001..C-009 merged via
+PR #74; root-signin auth fix #78 unblocked the prod config store; budget settings
+migrated #84). New sub-phase **C-005d** planned: move the last two file-writing
+settings handlers — memory and channels — into the SurrealDB config store, using
+the same load-file-first → write-DB → run-from-DB method as budget.
 
-## 9 ordered changes
+**Security invariant:** no secret VALUE enters the DB. Channel secrets stay in
+`~/.librefang/secrets.env` (already separated). `*_env` fields are env-var
+pointers (names), which are config, not secrets. The generic `config_set`
+endpoint stays unable to write `memory` / `channels` / `sidecar_channels`.
+
+## C-005d — 3 ordered changes
 
 | Change | Title | Depends on |
 |---|---|---|
-| C-001 | `config_store` SurrealDB migration | none |
-| C-002 | `ConfigStore` trait + SurrealDB impl | C-001 |
-| C-003 | Seed-once + content-hash/revision/provenance merge | C-002 |
-| C-004 | Kernel effective-config read path (bootstrap ⊕ DB) | C-002 |
-| C-005 | Re-target write endpoints to `ConfigStore` | C-002, C-004 |
-| C-006 | Reload path reads DB store | C-004 |
-| C-007 | Determinism `ORDER BY` + regression test | C-004 |
-| C-008 | One-time prod `config.toml` → DB import + verify | C-003, C-005 |
-| C-009 | K8s: drop `init-config`, restore read-only ConfigMap | C-008 verified |
+| C-005d.1 | Trusted-section apply path (`TRUSTED_SECTION_KEYS`) + fold budget off the `config_set` allowlist | C-005c |
+| C-005d.2 | `PATCH /api/memory/config` → store `memory` + `proactive_memory` overrides | C-005d.1 |
+| C-005d.3 | `configure_sidecar_channel` → store `sidecar_channels` override; secrets.env untouched; include-shadow guard kept | C-005d.1 |
+
+## Status
+
+- **C-005d.1 — CODE DONE** on `feat/memory-channels-to-store` (trusted-section
+  apply path; budget folded off the `config_set` allowlist). Verified: overlay
+  15/15, config unit 18/18, api clippy + branding clean.
+- **Prerequisite:** PR #85 (`fix(runtime): clippy 1.95 large_enum_variant`) must
+  merge to `main` first — until then the api-clippy CI lane is red because it
+  compiles `librefang-runtime`.
 
 ## Next step
 
 ```
-/kbd-execute C-001
+merge PR #85 → rebase feat/memory-channels-to-store onto main → /kbd-execute C-005d.2
 ```

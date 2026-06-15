@@ -273,3 +273,28 @@ python3 scripts/enforce-branding.py --check
 ## Next
 
 `/kbd-execute C-001`
+
+---
+
+## C-005d — Migrate memory + channels settings to the DB (2026-06-14)
+
+Continuation of the settings-to-store work (budget shipped as PR #84). Moves the
+last two file-writing settings handlers to the SurrealDB config store, reusing
+the C-005c `config_overrides` infrastructure. Secret VALUES never enter the DB.
+
+| # | Change | Effort | Depends on | Summary |
+|---|---|---|---|---|
+| C-005d.1 | trusted-section resolve path | S | C-005c | `TRUSTED_SECTION_KEYS` apply path in `resolve_config_with_overrides`; fold in `budget` (remove its `config_set` allowlist entry). |
+| C-005d.2 | memory → store | S | C-005d.1 | `PATCH /api/memory/config` stores `memory` + `proactive_memory` overrides; `embedding_api_key_env` pointer is config, not a secret. |
+| C-005d.3 | channels → store | M | C-005d.1 | `configure_sidecar_channel` stores the `sidecar_channels` array; `secrets.env` write unchanged; keep the include-shadow guard. |
+
+**Order:** C-005d.1 → C-005d.2 → C-005d.3.
+
+**Security invariant (all three):** no secret VALUE enters the store; `*_env`
+pointers are acceptable; the generic `config_set` endpoint stays unable to write
+`memory` / `channels` / `sidecar_channels` (their `_env` / depth-2 protections
+remain on the untrusted surface).
+
+## Next
+
+`/kbd-execute C-005d.1`

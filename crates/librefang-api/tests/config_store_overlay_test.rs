@@ -510,7 +510,8 @@ fn budget_section_override_resolves_into_config() {
     std::fs::write(&cfg_path, "log_level = \"info\"\n").unwrap();
 
     // A budget settings change persisted by routes/budget.rs as one whole-section
-    // `config_overrides` entry (no credential fields -> allowlisted).
+    // `config_overrides` entry. `budget` is a TRUSTED_SECTION_KEYS entry (C-005d.1),
+    // NOT on the generic config_set allowlist.
     let mut budget = librefang_types::config::KernelConfig::default().budget;
     budget.max_daily_usd = 42.0;
     let mut overrides = BTreeMap::new();
@@ -519,6 +520,60 @@ fn budget_section_override_resolves_into_config() {
     let (merged, _raw) = resolve_config_with_overrides(&cfg_path, &overrides).unwrap();
     assert_eq!(
         merged.budget.max_daily_usd, 42.0,
-        "whole-section budget override must apply via resolve (allowlisted)"
+        "whole-section budget override must apply via resolve (trusted section)"
+    );
+}
+
+// ── C-005d.1: trusted-section apply path ─────────────────────────────────────
+
+/// A trusted whole-section key (`budget`) applies through resolve even though it
+/// is NOT on the generic `config_set` allowlist; a blocked path planted directly
+/// in the store is still skipped; a non-trusted, non-allowlisted key is skipped.
+///
+/// The companion assertion that `is_writable_config_path` rejects the trusted
+/// section keys lives in `routes::config`'s unit tests (the fn is `pub(crate)`).
+#[test]
+fn trusted_section_applies_blocked_and_unknown_are_skipped() {
+    use librefang_api::config_store_overlay::TRUSTED_SECTION_KEYS;
+
+    // `budget` is trusted but NOT on the untrusted config_set allowlist.
+    assert!(
+        TRUSTED_SECTION_KEYS.contains(&"budget"),
+        "budget must be a trusted whole-section key"
+    );
+
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg_path = tmp.path().join("config.toml");
+    std::fs::write(&cfg_path, "log_level = \"info\"\n").unwrap();
+
+    let mut budget = librefang_types::config::KernelConfig::default().budget;
+    budget.max_daily_usd = 7.5;
+
+    let mut overrides = BTreeMap::new();
+    // Trusted: applies.
+    overrides.insert("budget".to_string(), serde_json::to_value(&budget).unwrap());
+    // Blocked credential-redirect path planted directly in the store: skipped.
+    overrides.insert(
+        "channels.telegram.token_env".to_string(),
+        serde_json::Value::String("EVIL_TOKEN".into()),
+    );
+    // Neither trusted nor allowlisted: skipped.
+    overrides.insert(
+        "vault".to_string(),
+        serde_json::json!({ "key_env": "EVIL" }),
+    );
+
+    let (merged, raw) = resolve_config_with_overrides(&cfg_path, &overrides).unwrap();
+    assert_eq!(
+        merged.budget.max_daily_usd, 7.5,
+        "trusted budget override must apply"
+    );
+    assert!(
+        !raw.contains("EVIL_TOKEN"),
+        "blocked token_env override must not reach the merged config"
+    );
+    assert!(
+        !raw.contains("EVIL"),
+        "non-trusted vault override must not reach the merged config"
     );
 }
