@@ -2,10 +2,31 @@
 //!
 //! Auto-cascades through available providers based on configured API keys.
 
-use librefang_types::config::TtsConfig;
+use librefang_types::config::{TtsConfig, TtsElevenLabsConfig};
 
 /// Maximum audio response size (10MB).
 const MAX_AUDIO_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
+
+/// Resolve the ElevenLabs output format: per-request `format_override` wins
+/// over the config-driven `[tts.elevenlabs].output_format`, which itself
+/// defaults to `opus_48000_32` (see [`TtsElevenLabsConfig`]). Free function so
+/// the precedence is unit-testable without a network call (#6116).
+fn resolve_elevenlabs_format<'a>(
+    format_override: Option<&'a str>,
+    cfg: &'a TtsElevenLabsConfig,
+) -> &'a str {
+    format_override.unwrap_or(cfg.output_format.as_str())
+}
+
+/// Derive the codec/container label from an ElevenLabs compound output-format
+/// string, e.g. `"opus_48000_32"` -> `"opus"`, `"mp3_44100_128"` -> `"mp3"`.
+fn elevenlabs_format_label(output_format: &str) -> String {
+    output_format
+        .split('_')
+        .next()
+        .unwrap_or("opus")
+        .to_string()
+}
 
 /// Result of TTS synthesis.
 #[derive(Debug)]
@@ -82,7 +103,10 @@ impl TtsEngine {
                 self.synthesize_openai(text, voice_override, format_override)
                     .await
             }
-            "elevenlabs" => self.synthesize_elevenlabs(text, voice_override).await,
+            "elevenlabs" => {
+                self.synthesize_elevenlabs(text, voice_override, format_override)
+                    .await
+            }
             "google_tts" => {
                 #[cfg(feature = "media")]
                 {
@@ -180,12 +204,20 @@ impl TtsEngine {
         &self,
         text: &str,
         voice_override: Option<&str>,
+        format_override: Option<&str>,
     ) -> Result<TtsResult, String> {
         let api_key =
             std::env::var("ELEVENLABS_API_KEY").map_err(|_| "ELEVENLABS_API_KEY not set")?;
 
         let voice_id = voice_override.unwrap_or(&self.config.elevenlabs.voice_id);
-        let url = format!("https://api.elevenlabs.io/v1/text-to-speech/{}", voice_id);
+        // 3-tier resolution: tool-arg override > `[tts.elevenlabs].output_format`
+        // (default `opus_48000_32` for WhatsApp PTT) > built-in default. Request
+        // the format explicitly so ElevenLabs returns Ogg/Opus, not its MP3
+        // default (#6116).
+        let output_format = resolve_elevenlabs_format(format_override, &self.config.elevenlabs);
+        let url = format!(
+            "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}?output_format={output_format}"
+        );
 
         let body = serde_json::json!({
             "text": text,
@@ -239,9 +271,14 @@ impl TtsEngine {
         let word_count = text.split_whitespace().count();
         let duration_ms = (word_count as u64 * 400).max(500);
 
+        // Label the container/codec from the requested format prefix (e.g.
+        // `opus_48000_32` -> "opus") so downstream consumers (the WhatsApp
+        // gateway's mime sniff) see the real format, not a hardcoded "mp3".
+        let format = elevenlabs_format_label(output_format);
+
         Ok(TtsResult {
             audio_data: audio_data.to_vec(),
-            format: "mp3".to_string(),
+            format,
             provider: "elevenlabs".to_string(),
             duration_estimate_ms: duration_ms,
         })
@@ -488,6 +525,53 @@ mod tests {
     #[test]
     fn test_max_audio_constant() {
         assert_eq!(MAX_AUDIO_RESPONSE_BYTES, 10 * 1024 * 1024);
+    }
+
+    /// Pins the 3-tier precedence for the ElevenLabs output format
+    /// (tool-arg override > `[tts.elevenlabs].output_format` > built-in
+    /// default) via the same `resolve_elevenlabs_format` the synth path uses.
+    #[test]
+    fn test_three_tier_resolution_elevenlabs_format() {
+        let mut config = TtsConfig::default();
+        config.elevenlabs.output_format = "mp3_44100_128".to_string();
+
+        // Tier 1: tool-arg override wins.
+        assert_eq!(
+            resolve_elevenlabs_format(Some("pcm_16000"), &config.elevenlabs),
+            "pcm_16000"
+        );
+        // Tier 2: provider-config default applies when no override.
+        assert_eq!(
+            resolve_elevenlabs_format(None, &config.elevenlabs),
+            "mp3_44100_128"
+        );
+        // Tier 3: built-in default when neither override nor custom config.
+        assert_eq!(
+            resolve_elevenlabs_format(None, &TtsConfig::default().elevenlabs),
+            "opus_48000_32"
+        );
+    }
+
+    /// The default ElevenLabs config must yield a `TtsResult.format` of
+    /// `"opus"` — the codec the WhatsApp gateway's mime sniff requires to send
+    /// an `audio/ogg; codecs=opus` PTT voice-note (#6116).
+    #[test]
+    fn test_default_elevenlabs_format_label_is_opus() {
+        let config = TtsConfig::default();
+        let fmt = elevenlabs_format_label(resolve_elevenlabs_format(None, &config.elevenlabs));
+        assert_eq!(fmt, "opus");
+
+        for (input, expected) in [
+            ("mp3_44100_128", "mp3"),
+            ("pcm_16000", "pcm"),
+            ("ulaw_8000", "ulaw"),
+        ] {
+            assert_eq!(
+                elevenlabs_format_label(input),
+                expected,
+                "prefix of {input}"
+            );
+        }
     }
 
     // ── Custom TTS config tests ──────────────────────────────────────────

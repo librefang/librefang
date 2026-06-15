@@ -1373,6 +1373,13 @@ pub struct TtsElevenLabsConfig {
     pub stability: f32,
     /// Similarity boost (0.0-1.0). Default: 0.75.
     pub similarity_boost: f32,
+    /// Output format passed as the `?output_format=` query parameter.
+    /// Default `"opus_48000_32"` — an Ogg/Opus stream that WhatsApp accepts as
+    /// a PTT voice-note without transcoding; ElevenLabs would otherwise return
+    /// MP3, which the mautrix-whatsapp/Beeper bridge rejects (#6116).
+    /// Other values: `mp3_44100_128`, `mp3_22050_32`, `opus_24000_32`,
+    /// `pcm_16000`, `pcm_44100`, `ulaw_8000`.
+    pub output_format: String,
 }
 
 impl Default for TtsElevenLabsConfig {
@@ -1382,6 +1389,7 @@ impl Default for TtsElevenLabsConfig {
             model_id: "eleven_monolingual_v1".to_string(),
             stability: 0.5,
             similarity_boost: 0.75,
+            output_format: "opus_48000_32".to_string(),
         }
     }
 }

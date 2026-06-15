@@ -657,6 +657,15 @@ debounce_ms = 500
 # [tts]
 # enabled = false
 # provider = "openai"          # or "elevenlabs" or "google_tts"
+#
+# [tts.elevenlabs]
+# voice_id = "21m00Tcm4TlvDq8ikWAM"   # Rachel (default)
+# model_id = "eleven_monolingual_v1"
+# stability = 0.5
+# similarity_boost = 0.75
+# output_format = "opus_48000_32"      # WhatsApp PTT voice-notes need Ogg/Opus.
+#                                      # Others: mp3_44100_128, mp3_22050_32,
+#                                      # opus_24000_32, pcm_16000, pcm_44100, ulaw_8000.
 
 # ── Network (P2P Federation) ─────────────────────────────────
 # network_enabled = false

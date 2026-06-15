@@ -48,6 +48,7 @@ const {
   runDispatchSelfTest,
   channelTypeForChat,
   compileGroupTriggerRegex,
+  detectAudioMime,
 } = require('./index.js');
 
 // ---------------------------------------------------------------------------
@@ -1638,5 +1639,51 @@ describe('compileGroupTriggerRegex', () => {
     assert.equal(hitEmpty('Signore'), false);
     // 4. No match
     assert.equal(hit('Caterina, chiedi al barista'), false);
+  });
+});
+
+// detectAudioMime — magic-byte sniff guarding the WhatsApp PTT mime so MP3
+// bytes are never labelled `audio/ogg; codecs=opus` (#6116).
+describe('detectAudioMime', () => {
+  const mk = (head, tailLen = 0) =>
+    Buffer.concat([Buffer.from(head, 'binary'), Buffer.alloc(tailLen)]);
+
+  it('identifies Ogg/Opus by "OggS" magic', () => {
+    assert.equal(detectAudioMime(mk('OggS', 100)), 'audio/ogg; codecs=opus');
+  });
+
+  it('identifies MP3 by ID3 tag', () => {
+    assert.equal(detectAudioMime(mk('ID3\x04\x00', 100)), 'audio/mpeg');
+  });
+
+  it('identifies MP3 by MPEG frame sync (0xFF 0xFB)', () => {
+    assert.equal(detectAudioMime(Buffer.from([0xff, 0xfb, 0x90, 0x44, 0x00, 0x00])), 'audio/mpeg');
+  });
+
+  it('identifies WAV by "RIFF"', () => {
+    assert.equal(detectAudioMime(mk('RIFF\x00\x00\x00\x00WAVE', 100)), 'audio/wav');
+  });
+
+  it('identifies FLAC by "fLaC"', () => {
+    assert.equal(detectAudioMime(mk('fLaC', 100)), 'audio/flac');
+  });
+
+  it('identifies MP4/M4A by "ftyp" at offset 4', () => {
+    const buf = Buffer.concat([Buffer.from([0, 0, 0, 32]), Buffer.from('ftypM4A ', 'ascii'), Buffer.alloc(100)]);
+    assert.equal(detectAudioMime(buf), 'audio/mp4');
+  });
+
+  it('returns octet-stream for unknown bytes', () => {
+    assert.equal(detectAudioMime(Buffer.from([0xde, 0xad, 0xbe, 0xef, 0x00, 0x00])), 'application/octet-stream');
+  });
+
+  it('returns octet-stream for too-short buffer', () => {
+    assert.equal(detectAudioMime(Buffer.from([0x00, 0x01])), 'application/octet-stream');
+  });
+
+  it('returns octet-stream for non-Buffer input', () => {
+    assert.equal(detectAudioMime('not a buffer'), 'application/octet-stream');
+    assert.equal(detectAudioMime(null), 'application/octet-stream');
+    assert.equal(detectAudioMime(undefined), 'application/octet-stream');
   });
 });
