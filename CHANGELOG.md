@@ -762,6 +762,12 @@ In-crate only; no cross-crate error-shape changes.
 
 ### Added
 
+- **memory/kernel: SQLite-backed MCP server configs merged over `config.toml` at boot** (#6021) (@houko) — MCP servers can now be stored in the database instead of (or in addition to) the `[[mcp_servers]]` array in `config.toml`.
+  The motivating case is Kubernetes: previously, adding an MCP server at runtime meant writing to the config file, so the file could not live in a read-only ConfigMap and had to sit on an attached writable volume.
+  A new `mcp_server_configs` table (schema v43) holds each `McpServerConfigEntry` as a JSON blob keyed on `name`; `McpConfigStore` (in `librefang-memory`) is the thin CRUD layer (`upsert` / `get` / `load_all` / `delete` / `count`), sharing the substrate's existing connection pool.
+  At boot the kernel merges DB rows over the file-backed set by name — a DB row with the same `name` overrides the file entry, a DB-only name is appended, and an empty table is a no-op so the file-only path is byte-for-byte unchanged.
+  The store carries 6 unit tests (round-trip, missing-key, in-place replace, sorted `load_all`, delete, empty) and the migration is covered by the existing audit-row / table-creation ladder tests.
+  This is the storage + load-on-boot slice; wiring the API write-path (`POST /api/mcp/servers`) and the CLI onto the store is a follow-up.
 - **dashboard/skills: pending skill-evolution drafts now show a diff and can be proposed to the registry directly** (#5819) (@houko) — completes the UI slice #5844 deferred.
   For an update/patch candidate the skill-workshop pending review renders an inline unified diff (current skill body vs the proposed `prompt_context`) with the `current_version → proposed_version` bump, and each pending candidate gains a "Propose to Registry" action that opens a registry PR straight from the draft (auto-staged, no approve-first step) via a new `POST /api/skills/pending/{id}/propose-to-registry` route.
   The route shares its proposal core with the existing installed-skill propose endpoint (refactored to a common helper).
