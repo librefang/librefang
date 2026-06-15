@@ -1278,8 +1278,7 @@ fn save_config(state: &mut State) {
     // Write config.example.toml with the full annotated template for reference
     let example_path = librefang_dir.join("config.example.toml");
     if !example_path.exists() {
-        let example_content = include_str!("../../../templates/init_default_config.toml");
-        let _ = std::fs::write(&example_path, example_content);
+        let _ = std::fs::write(&example_path, crate::INIT_DEFAULT_CONFIG_TEMPLATE);
     }
 
     state.saving_done = true;

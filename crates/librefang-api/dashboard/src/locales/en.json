@@ -912,6 +912,8 @@
     "results": "results",
     "saved": "Saved",
     "saved_restart_required": "Saved — restart daemon to apply",
+    "schema_unavailable_hint": "This channel now runs as an out-of-process sidecar and its setup form could not be loaded. Install the sidecar SDK, then reload channels (or restart the daemon) and reopen this dialog.",
+    "schema_unavailable_title": "Setup form unavailable",
     "secret_set_placeholder": "•••• (set — leave blank to keep)",
     "select_all": "Select All",
     "shadowed_secrets_warning": "Warning: these tokens are shadowed by shell environment variables and won't take effect until you unset them and restart: {{keys}}",

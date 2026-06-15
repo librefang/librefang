@@ -31,13 +31,24 @@ use tracing::{debug, info, warn};
 // Caller context (#5699)
 // ---------------------------------------------------------------------------
 
-/// Object-key used to ship the kernel-attested caller context inside the MCP
-/// `tools/call` `arguments` payload for Rmcp and SSE transports. Chosen with a
-/// leading underscore so it sorts deterministically and is visually flagged as
-/// LibreFang-private. Any agent-supplied value under this key is **stripped
-/// then overwritten** by the kernel value just before transmit — see
+/// Object-key the *agent* might use to smuggle a forged caller context into the
+/// MCP `tools/call` `arguments` payload. LibreFang never ships its own value
+/// under this key — it is treated purely as a denylist entry: any agent-supplied
+/// value under this key is **always stripped** from `arguments` just before
+/// transmit so a forged identity can never reach the server. The kernel-attested
+/// caller context travels in the request `_meta` field instead (Rmcp / SSE) or
+/// the [`CALLER_CONTEXT_HEADER`] HTTP header (HttpCompat). See
 /// [`McpConnection::call_tool_with_caller`].
 pub const CALLER_CONTEXT_ARG_KEY: &str = "_librefang_caller";
+
+/// `_meta` key under which the kernel-attested caller context is shipped on the
+/// Rmcp and SSE transports. MCP protocol metadata belongs in the request
+/// `_meta` field, **not** inside `arguments` — placing a JSON object inside
+/// `arguments` breaks MCP servers that forward unknown arguments verbatim to a
+/// downstream REST API (e.g. `@notionhq/notion-mcp-server`, which rejects a
+/// non-scalar query parameter with `validation_error`). The key is reverse-DNS
+/// namespaced per MCP `_meta` convention. See #5965.
+pub const CALLER_CONTEXT_META_KEY: &str = "io.librefang/caller";
 
 /// HTTP header used to ship the kernel-attested caller context on the
 /// [`McpTransport::HttpCompat`] transport. The body of an HttpCompat request is
@@ -58,8 +69,11 @@ pub const CALLER_CONTEXT_HEADER: &str = "X-Librefang-Caller";
 ///
 /// **Security invariant**: the kernel is the sole source of these values. The
 /// agent cannot influence them — any [`CALLER_CONTEXT_ARG_KEY`] entry the agent
-/// puts into `arguments` is stripped and overwritten before transmit. See
-/// `tests::caller_context_overwrites_agent_supplied_value` for the regression.
+/// puts into `arguments` is stripped before transmit, and the kernel value
+/// travels out-of-band in the request `_meta` (Rmcp / SSE) or the
+/// [`CALLER_CONTEXT_HEADER`] header (HttpCompat), never in `arguments`. See
+/// `tests::strip_caller_always_removes_agent_supplied_key` and
+/// `tests::caller_context_ships_in_meta_not_arguments_rmcp` for the regression.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CallerContext {
     /// Channel peer id that drove this turn (e.g. Telegram user id,
@@ -113,40 +127,44 @@ impl CallerContext {
 }
 
 /// Build the wire arguments object: clone `arguments` (coercing non-object /
-/// null inputs to `{}` to match the MCP spec), **strip** any agent-supplied
-/// [`CALLER_CONTEXT_ARG_KEY`] entry, then **set** the kernel-attested value
-/// (when `caller` is `Some`).
+/// null inputs to `{}` to match the MCP spec) and **strip** any agent-supplied
+/// [`CALLER_CONTEXT_ARG_KEY`] entry.
 ///
-/// The strip-then-set ordering is the security boundary — see
+/// The strip is unconditional and is the security boundary: the kernel-attested
+/// caller context is **never** placed in `arguments` (it ships in the request
+/// `_meta` instead — see [`caller_context_meta_value`]), so an agent that learns
+/// the key name and tries to smuggle a forged identity has its value dropped
+/// here before it can reach the server. See
 /// [`McpConnection::call_tool_with_caller`].
-fn inject_caller_into_arguments(
+fn strip_caller_from_arguments(
     arguments: &serde_json::Value,
-    caller: Option<&CallerContext>,
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut obj = arguments.as_object().cloned().unwrap_or_default();
-    // ALWAYS strip the agent-supplied key, even when `caller` is None —
-    // otherwise an agent that learned the key name could populate it and
-    // have it forwarded to a context-blind legacy MCP server.
     obj.remove(CALLER_CONTEXT_ARG_KEY);
-    if let Some(c) = caller {
-        match serde_json::to_value(c) {
-            Ok(v) => {
-                obj.insert(CALLER_CONTEXT_ARG_KEY.to_string(), v);
-            }
-            Err(e) => {
-                // Unreachable for the all-`Option<String>` shape, but a
-                // serialisation failure must NEVER cause a privilege escalation
-                // (continuing without the kernel value would let the call
-                // proceed un-attested). Log and leave the key absent so the
-                // server defaults to its no-caller branch.
-                warn!(
-                    error = %e,
-                    "failed to serialise CallerContext; proceeding without _librefang_caller"
-                );
-            }
+    obj
+}
+
+/// Serialise the kernel-attested [`CallerContext`] into the JSON value that goes
+/// under [`CALLER_CONTEXT_META_KEY`] in the request `_meta`.
+///
+/// Returns `None` (with a `WARN` log) if serialisation fails — unreachable for
+/// the all-`Option<String>` shape, but a failure must NEVER cause a privilege
+/// escalation. Omitting the `_meta` entry leaves the server in its no-caller
+/// branch; it must never fall through to an un-attested-but-agent-controlled
+/// state, which is structurally impossible here because the value is built
+/// solely from the kernel `CallerContext` and the agent's key is already
+/// stripped from `arguments`.
+fn caller_context_meta_value(caller: &CallerContext) -> Option<serde_json::Value> {
+    match serde_json::to_value(caller) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            warn!(
+                error = %e,
+                "failed to serialise CallerContext; omitting it from tools/call _meta"
+            );
+            None
         }
     }
-    obj
 }
 
 /// Maximum JSON nesting depth the taint scanner will traverse. Anything
@@ -433,7 +451,7 @@ fn apply_rule_set_action(
 /// Recursion is hard-capped at [`MCP_TAINT_SCAN_MAX_DEPTH`].
 #[cfg(test)]
 fn scan_mcp_arguments_for_taint(value: &serde_json::Value) -> Option<String> {
-    scan_mcp_arguments_for_taint_with_policy(value, None, &[], "")
+    scan_mcp_arguments_for_taint_with_policy(value, None, &[], "", true)
 }
 
 fn scan_mcp_arguments_for_taint_with_policy(
@@ -441,6 +459,9 @@ fn scan_mcp_arguments_for_taint_with_policy(
     taint_policy: Option<&McpTaintPolicy>,
     rule_set_registry: &[NamedTaintRuleSet],
     tool_name: &str,
+    // `false` disables the value-content heuristic only; sensitive-key-name
+    // blocking always runs (the documented `taint_scanning` contract).
+    content_scanning: bool,
 ) -> Option<String> {
     // Tool-level kill switch: `default = "skip"` bypasses scanning for the
     // entire tool, including sensitive object-key blocking. This is the
@@ -466,9 +487,14 @@ fn scan_mcp_arguments_for_taint_with_policy(
         taint_policy,
         rule_set_registry,
         tool_name,
+        content_scanning,
     )
 }
 
+// Threads scan context (policy / rule sets / tool name / content-scan flag)
+// plus the recursion cursor; the extra `content_scanning` flag pushes it one
+// past clippy's arg threshold, which is not worth a context-struct refactor.
+#[allow(clippy::too_many_arguments)]
 fn walk_taint(
     v: &serde_json::Value,
     sink: &TaintSink,
@@ -477,6 +503,10 @@ fn walk_taint(
     policy: Option<&McpTaintPolicy>,
     rule_set_registry: &[NamedTaintRuleSet],
     tool_name: &str,
+    // When false (`taint_scanning = false`), the value-content heuristic is
+    // skipped, but the always-on sensitive-key-name blocking still runs — see
+    // the contract documented on `McpServerConfig::taint_scanning`.
+    content_scanning: bool,
 ) -> Option<String> {
     if depth > MCP_TAINT_SCAN_MAX_DEPTH {
         return Some(format!(
@@ -497,12 +527,18 @@ fn walk_taint(
             // mask an unauthorized rule B that fires in the same payload
             // (e.g. a Secret-rule warn downgrade masking a PII-rule fire).
             // We block as soon as any fired rule is not downgraded.
-            for rule in detect_outbound_text_violation_rules_with_skip(s, sink, &skip) {
-                if apply_rule_set_action(policy, tool_name, &rule, path, rule_set_registry) {
-                    return Some(format!(
-                        "taint violation: sensitive value in MCP argument '{}' (blocked by sink '{}')",
-                        path, sink.name
-                    ));
+            //
+            // This value-content heuristic is the part disabled by
+            // `taint_scanning = false`; the sensitive-key-name check in the
+            // Object branch below stays active regardless.
+            if content_scanning {
+                for rule in detect_outbound_text_violation_rules_with_skip(s, sink, &skip) {
+                    if apply_rule_set_action(policy, tool_name, &rule, path, rule_set_registry) {
+                        return Some(format!(
+                            "taint violation: sensitive value in MCP argument '{}' (blocked by sink '{}')",
+                            path, sink.name
+                        ));
+                    }
                 }
             }
             None
@@ -518,6 +554,7 @@ fn walk_taint(
                     policy,
                     rule_set_registry,
                     tool_name,
+                    content_scanning,
                 ) {
                     return Some(v);
                 }
@@ -561,6 +598,7 @@ fn walk_taint(
                     policy,
                     rule_set_registry,
                     tool_name,
+                    content_scanning,
                 ) {
                     return Some(v);
                 }
@@ -2198,30 +2236,40 @@ impl McpConnection {
     /// Call a tool on the MCP server, propagating the kernel-attested
     /// [`CallerContext`] alongside the arguments (#5699).
     ///
-    /// # Caller-context injection (strip-then-set)
+    /// # Caller-context injection (strip-args, ship-out-of-band)
     ///
     /// When `caller` is `Some`, the kernel-attested identity is shipped to the
-    /// MCP server so per-user routing can be enforced server-side:
+    /// MCP server so per-user routing can be enforced server-side. It travels
+    /// **out-of-band** from the tool arguments — never inside `arguments`, which
+    /// some MCP servers forward verbatim to a downstream REST API (a JSON object
+    /// in `arguments` then trips that server's scalar-only query-param
+    /// validation; see #5965):
     ///
-    /// - **Rmcp / SSE** transports: a clone of `arguments` is materialised, any
-    ///   agent-supplied [`CALLER_CONTEXT_ARG_KEY`] entry is **removed**, and the
-    ///   kernel value is then inserted under the same key. This strip-then-set
-    ///   ordering is the security boundary: an agent that learns the field name
-    ///   and tries to spoof a caller cannot, because their value is dropped
-    ///   before the kernel value is inserted. See
-    ///   `tests::caller_context_overwrites_agent_supplied_value`.
+    /// - **Rmcp** transport: any agent-supplied [`CALLER_CONTEXT_ARG_KEY`] entry
+    ///   is **stripped** from `arguments`, and the kernel value is attached to
+    ///   the request `_meta` under [`CALLER_CONTEXT_META_KEY`]
+    ///   (`CallToolRequestParams.meta`).
+    /// - **SSE** transport: same strip, with the kernel value placed in a
+    ///   top-level `_meta` object on the JSON-RPC `params`, alongside `name` /
+    ///   `arguments`.
     /// - **HttpCompat** transport: the body is template-rendered against the
     ///   backend's native API and has no general-purpose envelope to inject
     ///   into. The context is shipped as the [`CALLER_CONTEXT_HEADER`] HTTP
     ///   header instead.
     ///
-    /// When `caller` is `None` the arguments are forwarded byte-for-byte
-    /// (preserving prompt-cache equivalence with the pre-#5699 wire shape).
+    /// The strip of the agent-supplied [`CALLER_CONTEXT_ARG_KEY`] is the
+    /// security boundary: an agent that learns the field name and tries to spoof
+    /// a caller cannot, because its value is dropped before transmit and the
+    /// kernel value never shares that location. See
+    /// `tests::inject_caller_strips_agent_supplied_key_when_caller_none` and
+    /// `tests::caller_context_ships_in_meta_not_arguments_rmcp`.
+    ///
+    /// When `caller` is `None` the arguments are still stripped of any
+    /// agent-supplied caller key, and no `_meta` caller entry is added.
     ///
     /// The taint scanner runs against the **original** agent-supplied
     /// arguments — before any kernel mutation — so a malicious agent cannot
-    /// hide credential-shaped data behind a `_librefang_caller` key. The
-    /// injection happens only on the cloned payload that goes to the wire.
+    /// hide credential-shaped data behind a `_librefang_caller` key.
     pub async fn call_tool_with_caller(
         &mut self,
         name: &str,
@@ -2259,7 +2307,11 @@ impl McpConnection {
         // information-flow tracker. Copy-pasted obfuscation still bypasses
         // it. Per-tool, per-path exemptions in `taint_policy` let operators
         // disable specific rules for known-safe fields.
-        if self.config.taint_scanning {
+        // Always run the scan: sensitive-key-name blocking (`Authorization`,
+        // `secret`, …) is documented as always-on, even with
+        // `taint_scanning = false` — only the value-content heuristic is gated
+        // by that flag, which is passed through as `content_scanning`.
+        {
             let policy = self.config.taint_policy.as_ref();
             // Take a `.load()` snapshot at scan start so config reloads
             // mid-walk can't change the rule set under us. The snapshot
@@ -2270,6 +2322,7 @@ impl McpConnection {
                 policy,
                 rule_sets_guard.as_slice(),
                 &raw_name,
+                self.config.taint_scanning,
             ) {
                 // `violation` is already a redacted rule description from
                 // the scanner — do NOT concatenate the raw payload or the
@@ -2304,10 +2357,26 @@ impl McpConnection {
                 // be an object, and some servers (e.g. filesystem) reject
                 // `undefined`/`null` even for zero-parameter tools.
                 //
-                // `inject_caller_into_arguments` strips any agent-supplied
-                // `_librefang_caller` entry and inserts the kernel-attested
-                // value (when `caller.is_some()`). See #5699.
-                params.arguments = Some(inject_caller_into_arguments(arguments, caller));
+                // `strip_caller_from_arguments` removes any agent-supplied
+                // `_librefang_caller` entry so a forged identity never reaches
+                // the server. The kernel-attested value rides in `_meta` below,
+                // not in `arguments` — see #5965.
+                params.arguments = Some(strip_caller_from_arguments(arguments));
+
+                // Attach the kernel-attested caller context to the request
+                // `_meta` (MCP's home for protocol metadata) under a reverse-DNS
+                // namespaced key. `CallToolRequestParams.meta` serialises as the
+                // `_meta` field; a `Meta` derefs to a `serde_json::Map`, so an
+                // arbitrary JSON object value is fine. On serialise failure we
+                // omit it (server falls back to its no-caller branch) rather
+                // than escalate. See #5965.
+                if let Some(c) = caller {
+                    if let Some(v) = caller_context_meta_value(c) {
+                        let mut meta = rmcp::model::Meta::new();
+                        meta.insert(CALLER_CONTEXT_META_KEY.to_string(), v);
+                        params.meta = Some(meta);
+                    }
+                }
 
                 let timeout = std::time::Duration::from_secs(self.config.timeout_secs);
                 let result: rmcp::model::CallToolResult =
@@ -2350,15 +2419,29 @@ impl McpConnection {
                 // `self.inner` is no longer borrowed here, so calling
                 // `self.sse_send_request` (which takes `&mut self`) is safe.
                 //
-                // `inject_caller_into_arguments` strips any agent-supplied
-                // `_librefang_caller` entry and inserts the kernel-attested
-                // value (when `caller.is_some()`). See #5699.
-                let wire_args =
-                    serde_json::Value::Object(inject_caller_into_arguments(arguments, caller));
-                let params = serde_json::json!({
+                // `strip_caller_from_arguments` removes any agent-supplied
+                // `_librefang_caller` entry so a forged identity never reaches
+                // the server. The kernel-attested value rides in a top-level
+                // `_meta` object on the JSON-RPC params, not in `arguments` —
+                // see #5965.
+                let wire_args = serde_json::Value::Object(strip_caller_from_arguments(arguments));
+                let mut params = serde_json::json!({
                     "name": raw_name,
                     "arguments": wire_args,
                 });
+                if let Some(c) = caller {
+                    if let Some(v) = caller_context_meta_value(c) {
+                        // `params` is the object literal above, so this index is
+                        // always an object — attach the `_meta` envelope.
+                        // `(CALLER_CONTEXT_META_KEY)` must be parenthesised —
+                        // a bare identifier key in `json!` is taken as a string
+                        // literal, which would emit the const's *name* not its
+                        // value.
+                        params["_meta"] = serde_json::json!({
+                            (CALLER_CONTEXT_META_KEY): v,
+                        });
+                    }
+                }
 
                 let response = self.sse_send_request("tools/call", Some(params)).await?;
 
@@ -3284,7 +3367,7 @@ mod tests {
             "must block without policy"
         );
         assert!(
-            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &[], "navigate")
+            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &[], "navigate", true)
                 .is_none(),
             "OpaqueToken skip must allow browser tab ID under navigate.tabId"
         );
@@ -3324,16 +3407,56 @@ mod tests {
 
         // With SensitiveKeyName skipped for "$.authorization": allowed.
         assert!(
-            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &[], "send_request")
-                .is_none(),
+            scan_mcp_arguments_for_taint_with_policy(
+                &args,
+                Some(&policy),
+                &[],
+                "send_request",
+                true
+            )
+            .is_none(),
             "SensitiveKeyName skip at child path must allow the key"
         );
 
         // Policy on different tool must NOT apply.
         assert!(
-            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &[], "other_tool")
+            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &[], "other_tool", true)
                 .is_some(),
             "skip for send_request must not affect other_tool"
+        );
+    }
+
+    #[test]
+    fn key_name_blocking_stays_active_when_content_scanning_disabled() {
+        // Regression: `taint_scanning = false` is documented to disable only the
+        // value-content heuristic; sensitive-key-name blocking stays always-on.
+        // The bug gated the ENTIRE scan behind the flag, so `taint_scanning =
+        // false` (the "trusted local server" escape hatch) silently let
+        // `Authorization` / `secret` / `api_key` object keys through.
+
+        // Sensitive object key with a non-empty value — blocked even with
+        // content scanning OFF.
+        let sensitive_key = serde_json::json!({ "authorization": "some-non-empty-value" });
+        assert!(
+            scan_mcp_arguments_for_taint_with_policy(&sensitive_key, None, &[], "call", false)
+                .is_some(),
+            "sensitive key name must still be blocked with content scanning off"
+        );
+
+        // Content-only violation (opaque token under a NON-sensitive key) — NOT
+        // blocked with content scanning off...
+        let content_only =
+            serde_json::json!({ "tabId": "xAbCdEfGhIjKlMnOpQrStUvWxYz1234567890AB" });
+        assert!(
+            scan_mcp_arguments_for_taint_with_policy(&content_only, None, &[], "call", false)
+                .is_none(),
+            "content heuristic must be disabled with content scanning off"
+        );
+        // ...but IS blocked with content scanning on.
+        assert!(
+            scan_mcp_arguments_for_taint_with_policy(&content_only, None, &[], "call", true)
+                .is_some(),
+            "content heuristic must fire with content scanning on"
         );
     }
 
@@ -3363,7 +3486,8 @@ mod tests {
 
         let args = serde_json::json!({ "token": "api_key=sk-not-real" });
         assert!(
-            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &[], "call").is_some(),
+            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &[], "call", true)
+                .is_some(),
             "non-skipped KeyValueSecret must still fire even when OpaqueToken is skipped"
         );
     }
@@ -3394,7 +3518,7 @@ mod tests {
             "must block without policy"
         );
         assert!(
-            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &[], "navigate")
+            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &[], "navigate", true)
                 .is_none(),
             "tool-level default=skip must bypass scanning entirely"
         );
@@ -3418,8 +3542,14 @@ mod tests {
         // does NOT have a skip policy — must still block.
         let args = serde_json::json!({ "Authorization": "Bearer sk-not-real-token-12345" });
         assert!(
-            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &[], "send_request")
-                .is_some(),
+            scan_mcp_arguments_for_taint_with_policy(
+                &args,
+                Some(&policy),
+                &[],
+                "send_request",
+                true
+            )
+            .is_some(),
             "default=skip on `navigate` must not affect `send_request`"
         );
     }
@@ -3454,8 +3584,14 @@ mod tests {
             "must block without policy"
         );
         assert!(
-            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &registry, "navigate")
-                .is_none(),
+            scan_mcp_arguments_for_taint_with_policy(
+                &args,
+                Some(&policy),
+                &registry,
+                "navigate",
+                true
+            )
+            .is_none(),
             "rule_set with action=warn must allow the call through"
         );
     }
@@ -3484,8 +3620,14 @@ mod tests {
 
         let args = serde_json::json!({ "to": "alice@example.com" });
         assert!(
-            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &registry, "audit_tool")
-                .is_none(),
+            scan_mcp_arguments_for_taint_with_policy(
+                &args,
+                Some(&policy),
+                &registry,
+                "audit_tool",
+                true
+            )
+            .is_none(),
             "rule_set with action=log must allow the call through"
         );
     }
@@ -3514,8 +3656,14 @@ mod tests {
 
         let args = serde_json::json!({ "tabId": "xAbCdEfGhIjKlMnOpQrStUvWxYz1234567890AB" });
         assert!(
-            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &registry, "navigate")
-                .is_some(),
+            scan_mcp_arguments_for_taint_with_policy(
+                &args,
+                Some(&policy),
+                &registry,
+                "navigate",
+                true
+            )
+            .is_some(),
             "rule_set with action=block must keep the call blocked"
         );
     }
@@ -3545,8 +3693,14 @@ mod tests {
 
         let args = serde_json::json!({ "blob": "api_key=sk-not-real" });
         assert!(
-            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &registry, "do_thing")
-                .is_some(),
+            scan_mcp_arguments_for_taint_with_policy(
+                &args,
+                Some(&policy),
+                &registry,
+                "do_thing",
+                true
+            )
+            .is_some(),
             "rule_set covering OpaqueToken must not exempt KeyValueSecret"
         );
     }
@@ -3583,8 +3737,14 @@ mod tests {
 
         let args = serde_json::json!({ "tabId": "xAbCdEfGhIjKlMnOpQrStUvWxYz1234567890AB" });
         assert!(
-            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &registry, "navigate")
-                .is_none(),
+            scan_mcp_arguments_for_taint_with_policy(
+                &args,
+                Some(&policy),
+                &registry,
+                "navigate",
+                true
+            )
+            .is_none(),
             "warn must override block when both sets cover the same rule"
         );
     }
@@ -3618,7 +3778,8 @@ mod tests {
                 &args,
                 Some(&policy),
                 &registry,
-                "send_request"
+                "send_request",
+                true
             )
             .is_none(),
             "rule_set warn covering SensitiveKeyName must allow object key through"
@@ -3672,7 +3833,7 @@ mod tests {
                 &args,
                 Some(&policy),
                 &registry,
-                "post_message"
+                "post_message", true
             )
             .is_some(),
             "rule_set warn for Secret must NOT mask an unauthorized PII rule firing on the same payload"
@@ -3847,7 +4008,7 @@ mod tests {
             "metadata": { "api_key": "x", "etag": "y" }
         });
         assert!(
-            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &[], "read_file")
+            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &[], "read_file", true)
                 .is_none(),
             "wildcard $.metadata.* must exempt all direct children"
         );
@@ -4992,7 +5153,7 @@ mod tests {
             "user_id": "<user-A>",
             CALLER_CONTEXT_ARG_KEY: { "peer_id": "<spoofed-peer-B>" },
         });
-        let wire = inject_caller_into_arguments(&agent_payload, None);
+        let wire = strip_caller_from_arguments(&agent_payload);
         assert!(
             !wire.contains_key(CALLER_CONTEXT_ARG_KEY),
             "agent-supplied caller key must be stripped even when caller is None"
@@ -5004,10 +5165,11 @@ mod tests {
     }
 
     #[test]
-    fn inject_caller_overwrites_agent_supplied_value() {
-        // Core #5699 security regression: a malicious agent that knows the
-        // private key name MUST NOT be able to spoof the kernel-attested
-        // identity. The kernel value wins.
+    fn strip_caller_always_removes_agent_supplied_key() {
+        // The agent-supplied caller key is unconditionally removed from
+        // `arguments` — this is the security boundary. The kernel value never
+        // shares this location (it rides in `_meta`), so a smuggled forgery is
+        // simply dropped and can never reach the server.
         let agent_payload = serde_json::json!({
             "user_id": "<user-A>",
             CALLER_CONTEXT_ARG_KEY: {
@@ -5015,62 +5177,138 @@ mod tests {
                 "channel": "<spoofed-channel>",
             },
         });
+        let wire = strip_caller_from_arguments(&agent_payload);
+        assert!(
+            !wire.contains_key(CALLER_CONTEXT_ARG_KEY),
+            "agent-supplied caller key must always be stripped from arguments"
+        );
+        // Other agent-supplied fields are forwarded byte-for-byte —
+        // the strip must NOT touch them.
+        assert_eq!(
+            wire.get("user_id").and_then(|v| v.as_str()),
+            Some("<user-A>")
+        );
+        assert_eq!(wire.len(), 1);
+    }
+
+    #[test]
+    fn caller_context_ships_in_meta_not_arguments_rmcp() {
+        // #5965 regression: the kernel-attested caller context must travel in
+        // the Rmcp request `_meta` (under `io.librefang/caller`), and the
+        // `arguments` object must NOT contain `_librefang_caller`. This mirrors
+        // the wire shape built in the Rmcp branch of `call_tool_with_caller`.
+        let agent_payload = serde_json::json!({
+            "user_id": "<user-A>",
+            // Agent attempts to smuggle a forged caller into arguments.
+            CALLER_CONTEXT_ARG_KEY: { "peer_id": "<spoofed-peer-B>" },
+        });
         let kernel_caller = CallerContext {
             peer_id: Some("attested-peer-A".to_string()),
             channel: Some("telegram".to_string()),
             chat_id: Some("chat-1".to_string()),
             session_id: None,
         };
-        let wire = inject_caller_into_arguments(&agent_payload, Some(&kernel_caller));
-        let injected = wire
-            .get(CALLER_CONTEXT_ARG_KEY)
-            .expect("kernel caller must be present on the wire");
-        // Round-trip through CallerContext to assert the value is the
-        // kernel-attested one, not the agent's spoof attempt.
-        let parsed: CallerContext = serde_json::from_value(injected.clone())
-            .expect("injected value must deserialize as CallerContext");
-        assert_eq!(parsed, kernel_caller);
-        assert_eq!(parsed.peer_id.as_deref(), Some("attested-peer-A"));
-        // The agent's spoofed values must NOT survive.
-        assert_ne!(parsed.peer_id.as_deref(), Some("<spoofed-peer-B>"));
-        assert_ne!(parsed.channel.as_deref(), Some("<spoofed-channel>"));
-        // Other agent-supplied fields are forwarded byte-for-byte —
-        // the strip-then-set logic must NOT touch them.
+
+        let mut params = rmcp::model::CallToolRequestParams::new("some_tool");
+        params.arguments = Some(strip_caller_from_arguments(&agent_payload));
+        let v = caller_context_meta_value(&kernel_caller).expect("CallerContext must serialise");
+        let mut meta = rmcp::model::Meta::new();
+        meta.insert(CALLER_CONTEXT_META_KEY.to_string(), v);
+        params.meta = Some(meta);
+
+        // (a) arguments must NOT contain the caller key (stripped) — the
+        //     forged value never reaches the server.
+        let args = params.arguments.as_ref().unwrap();
+        assert!(
+            !args.contains_key(CALLER_CONTEXT_ARG_KEY),
+            "arguments must not carry the caller key"
+        );
         assert_eq!(
-            wire.get("user_id").and_then(|v| v.as_str()),
+            args.get("user_id").and_then(|v| v.as_str()),
             Some("<user-A>")
         );
+
+        // (b) the kernel caller appears under `_meta` with the namespaced key,
+        //     and serialises into the `_meta` field of the request.
+        let wire = serde_json::to_value(&params).expect("params must serialise");
+        let meta_obj = wire
+            .get("_meta")
+            .and_then(|m| m.get(CALLER_CONTEXT_META_KEY))
+            .expect("kernel caller must be present under _meta");
+        let parsed: CallerContext = serde_json::from_value(meta_obj.clone())
+            .expect("meta value must deserialize as CallerContext");
+        assert_eq!(parsed, kernel_caller);
+        assert_eq!(parsed.peer_id.as_deref(), Some("attested-peer-A"));
+        // The agent's spoofed value must NOT survive anywhere on the wire.
+        assert_ne!(parsed.peer_id.as_deref(), Some("<spoofed-peer-B>"));
+        // `arguments` on the wire must likewise be free of the caller key.
+        let wire_args = wire.get("arguments").expect("arguments present");
+        assert!(wire_args.get(CALLER_CONTEXT_ARG_KEY).is_none());
     }
 
     #[test]
-    fn inject_caller_coerces_non_object_arguments_to_empty_object() {
-        // MCP spec requires `arguments` to be an object — a malformed
-        // non-object input (e.g. a stray array or string) must still
-        // produce an object on the wire, and the caller context must
-        // still be present.
+    fn caller_context_ships_in_meta_not_arguments_sse() {
+        // #5965 regression for the SSE path: the JSON-RPC `params` carries a
+        // top-level `_meta` object with the caller under `io.librefang/caller`,
+        // and `arguments` is free of `_librefang_caller`. Mirrors the SSE
+        // branch of `call_tool_with_caller`.
+        let agent_payload = serde_json::json!({
+            "user_id": "<user-A>",
+            CALLER_CONTEXT_ARG_KEY: { "peer_id": "<spoofed-peer-B>" },
+        });
         let kernel_caller = CallerContext {
-            peer_id: Some("p".to_string()),
+            peer_id: Some("attested-peer-A".to_string()),
+            channel: Some("telegram".to_string()),
             ..Default::default()
         };
-        let wire = inject_caller_into_arguments(
-            &serde_json::Value::String("garbage".into()),
-            Some(&kernel_caller),
+
+        let wire_args = serde_json::Value::Object(strip_caller_from_arguments(&agent_payload));
+        let mut params = serde_json::json!({
+            "name": "some_tool",
+            "arguments": wire_args,
+        });
+        let v = caller_context_meta_value(&kernel_caller).expect("CallerContext must serialise");
+        params["_meta"] = serde_json::json!({ (CALLER_CONTEXT_META_KEY): v });
+
+        // arguments stripped of the caller key.
+        let args = params.get("arguments").unwrap();
+        assert!(args.get(CALLER_CONTEXT_ARG_KEY).is_none());
+        assert_eq!(
+            args.get("user_id").and_then(|v| v.as_str()),
+            Some("<user-A>")
         );
-        assert_eq!(wire.len(), 1);
-        assert!(wire.contains_key(CALLER_CONTEXT_ARG_KEY));
+
+        // caller present under the top-level `_meta`.
+        let meta_caller = params
+            .get("_meta")
+            .and_then(|m| m.get(CALLER_CONTEXT_META_KEY))
+            .expect("caller must be under params._meta");
+        let parsed: CallerContext = serde_json::from_value(meta_caller.clone())
+            .expect("meta value must deserialize as CallerContext");
+        assert_eq!(parsed, kernel_caller);
+        assert_ne!(parsed.peer_id.as_deref(), Some("<spoofed-peer-B>"));
     }
 
     #[test]
-    fn inject_caller_with_none_and_no_agent_key_is_byte_identical() {
+    fn strip_caller_coerces_non_object_arguments_to_empty_object() {
+        // MCP spec requires `arguments` to be an object — a malformed
+        // non-object input (e.g. a stray array or string) must still
+        // produce an (empty) object on the wire.
+        let wire = strip_caller_from_arguments(&serde_json::Value::String("garbage".into()));
+        assert!(wire.is_empty());
+    }
+
+    #[test]
+    fn strip_caller_with_no_agent_key_is_byte_identical() {
         // Prompt-cache equivalence: legacy call sites that don't carry any
-        // caller context must produce the exact same `arguments` object as
-        // before #5699 — otherwise we'd silently bust the provider prompt
-        // cache for every existing deployment on upgrade.
+        // caller key must produce the exact same `arguments` object as before
+        // — otherwise we'd silently bust the provider prompt cache for every
+        // existing deployment on upgrade.
         let agent_payload = serde_json::json!({
             "city": "Paris",
             "units": "metric",
         });
-        let wire = inject_caller_into_arguments(&agent_payload, None);
+        let wire = strip_caller_from_arguments(&agent_payload);
         let wire_value = serde_json::Value::Object(wire);
         assert_eq!(wire_value, agent_payload);
     }

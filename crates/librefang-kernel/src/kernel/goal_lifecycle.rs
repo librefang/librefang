@@ -73,4 +73,15 @@ impl LibreFangKernel {
     pub fn goal_run_status(&self, goal_id: GoalId) -> Option<GoalRunState> {
         self.workflows.goal_runner.state(goal_id)
     }
+
+    /// Recover goal runs interrupted by a prior crash or restart.
+    ///
+    /// Boot calls this once, mirroring the workflow stale-recovery sweep:
+    /// persisted runs still in `Running` phase and older than `stale_timeout`
+    /// are demoted to `Stopped` ("Interrupted by daemon restart"). Runs are not
+    /// auto-resumed — an in-flight LLM call cannot be replayed. Returns the
+    /// recovered goal ids.
+    pub fn recover_stale_goal_runs(&self, stale_timeout: std::time::Duration) -> Vec<GoalId> {
+        self.workflows.goal_runner.recover_stale_runs(stale_timeout)
+    }
 }

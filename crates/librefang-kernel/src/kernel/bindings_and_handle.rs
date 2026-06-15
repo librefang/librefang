@@ -76,6 +76,20 @@ impl LibreFangKernel {
                     Arc::downgrade(self),
                 )),
             );
+            // RL rollout trajectory export (#3330 / #3331) — same wiring
+            // shape as auto_dream / skill_workshop. Registers a
+            // Weak<Self>-holding handler on AgentLoopEnd that serializes the
+            // finished session's trajectory and forwards it to the
+            // configured upstream (W&B / Tinker / Atropos) on a detached
+            // task. Default off (opt-in via `[rl_export] enabled = true` in
+            // config.toml, plus a configured target); see
+            // `crate::rl_export`.
+            self.governance.hooks.register(
+                librefang_types::agent::HookEvent::AgentLoopEnd,
+                std::sync::Arc::new(crate::rl_export::RlExportTurnEndHook::new(Arc::downgrade(
+                    self,
+                ))),
+            );
             // Best-effort cleanup of `.toml.tmp` orphans left over from
             // crashes mid-write between previous daemon runs. Pushed to
             // a background task so kernel boot does not block on a

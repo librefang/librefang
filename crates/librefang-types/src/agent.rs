@@ -113,6 +113,14 @@ pub struct AutonomousConfig {
     pub heartbeat_keep_recent: Option<usize>,
     /// Channel to send heartbeat status to (e.g., "telegram", "discord").
     pub heartbeat_channel: Option<String>,
+    /// After this many consecutive *block-only* iterations (every tool result
+    /// a soft loop-guard block, no success, no hard error, no assistant prose)
+    /// the agent loop forces one tools-stripped completion so the model emits
+    /// a real reply instead of looping silently to `max_iterations` (#5979).
+    /// `Some(0)` or `None` disables the behaviour; defaults to
+    /// `Some(DEFAULT_BLOCK_STALL_DEGRADE_AFTER)`.
+    #[serde(default = "AutonomousConfig::default_block_stall_degrade_after")]
+    pub block_stall_degrade_after: Option<u32>,
 }
 
 impl AutonomousConfig {
@@ -121,6 +129,16 @@ impl AutonomousConfig {
     /// which re-exports this value so the runtime's own fallback path
     /// stays in lockstep with the manifest default.
     pub const DEFAULT_MAX_ITERATIONS: u32 = 50;
+
+    /// Default number of consecutive block-only iterations tolerated before
+    /// the loop degrades to one tools-stripped completion (#5979). Two means
+    /// the model gets one chance to self-correct after the first block stall;
+    /// the second triggers the graceful reply.
+    pub const DEFAULT_BLOCK_STALL_DEGRADE_AFTER: u32 = 2;
+
+    fn default_block_stall_degrade_after() -> Option<u32> {
+        Some(Self::DEFAULT_BLOCK_STALL_DEGRADE_AFTER)
+    }
 }
 
 impl Default for AutonomousConfig {
@@ -133,6 +151,7 @@ impl Default for AutonomousConfig {
             heartbeat_timeout_secs: None,
             heartbeat_keep_recent: None,
             heartbeat_channel: None,
+            block_stall_degrade_after: Some(Self::DEFAULT_BLOCK_STALL_DEGRADE_AFTER),
         }
     }
 }
@@ -1341,6 +1360,15 @@ pub struct AgentManifest {
     /// fits-all once both agents share a daemon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction: Option<CompactionOverrides>,
+    /// Per-agent override for the kernel-global `[rl_export]` toggle
+    /// (#3331). When `enabled` is `Some`, it supersedes
+    /// `KernelConfig.rl_export.enabled` for this agent only. `None`
+    /// (the default) inherits the global. The export **target** itself
+    /// is not overridable per-agent — only whether this agent
+    /// participates — so a single deployment exports every opted-in
+    /// agent's trajectories to one configured upstream.
+    #[serde(default)]
+    pub rl_export: RlExportOverride,
     /// Declarative event triggers (#5014) — symmetric to runtime
     /// triggers created via `POST /api/triggers`. On agent spawn or
     /// reload the kernel reconciles this list against the existing
@@ -1579,6 +1607,7 @@ impl Default for AgentManifest {
             skill_workshop: SkillWorkshopConfig::default(),
             rate_limit_notify: None,
             proactive_memory: crate::memory::ProactiveMemoryOverrides::default(),
+            rl_export: RlExportOverride::default(),
             compaction: None,
             triggers: Vec::new(),
             reconcile_orphans: OrphanPolicy::default(),
@@ -1659,6 +1688,23 @@ pub struct ManifestCapabilities {
     pub ofp_connect: Vec<String>,
 }
 
+/// Per-agent override for the kernel-global `[rl_export]` policy (#3331).
+///
+/// Only the participation toggle is overridable per-agent; the export
+/// destination is a deployment-wide concern that stays on
+/// `KernelConfig.rl_export.target`. `enabled = Some(false)` opts a single
+/// agent out of an otherwise-global export; `Some(true)` opts one agent in
+/// when the global default is off. `None` (the default) inherits the
+/// global toggle.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RlExportOverride {
+    /// Override the master `[rl_export] enabled` switch for this agent.
+    /// `None` inherits the kernel-global value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+}
+
 /// Skill workshop configuration (#3328).
 ///
 /// Controls passive, after-turn capture of reusable workflows from
@@ -1716,6 +1762,21 @@ pub struct SkillWorkshopConfig {
     /// operator who configured zero expecting the disabled meaning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_pending_age_days: Option<u32>,
+    /// How background skill evolution (`auto_evolve` / `background_skill_review`)
+    /// routes its mutations.
+    ///
+    /// - [`EvolutionMode::Free`] (default) preserves today's behavior: a
+    ///   `create` goes to the pending queue (#5800) while an `update` / `patch`
+    ///   to an already-approved skill applies directly.
+    /// - [`EvolutionMode::Controlled`] sends *every* mutation — create, update,
+    ///   and patch — to the pending queue so a human approves each one. The
+    ///   update/patch then crosses the same `SkillVerifier` prompt-injection
+    ///   scan that `save_candidate` runs for creates (#5844).
+    ///
+    /// Per-agent only: lives in `agent.toml` / `HAND.toml [agents.<name>]`,
+    /// never `config.toml` (#5476).
+    #[serde(default)]
+    pub evolution_mode: EvolutionMode,
 }
 
 impl Default for SkillWorkshopConfig {
@@ -1736,8 +1797,37 @@ impl Default for SkillWorkshopConfig {
             // No TTL by default — the cap is the only aging mechanism
             // unless the operator opts in.
             max_pending_age_days: None,
+            // `free` preserves today's behavior: creates queue (#5800),
+            // updates/patches apply directly. Opt into `controlled` to
+            // route every mutation through the pending queue (#5844).
+            evolution_mode: EvolutionMode::Free,
         }
     }
+}
+
+/// How background skill evolution routes its mutations (#5819 / #5844).
+///
+/// Resolved per-agent from `SkillWorkshopConfig::evolution_mode` (set in
+/// `agent.toml` / `HAND.toml [agents.<name>]`, never `config.toml` — #5476).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EvolutionMode {
+    /// Default — preserves today's behavior. A reviewer `create` is routed
+    /// to the pending queue (#5800); an `update` / `patch` to an existing,
+    /// already-approved skill applies directly via `evolution::update_skill`
+    /// / `patch_skill`.
+    #[default]
+    Free,
+    /// Every **background** (`auto_evolve` / `background_skill_review`)
+    /// mutation — create, update, and patch — is routed to the pending queue
+    /// for explicit human approval; updates/patches cross the same
+    /// `SkillVerifier` prompt-injection scan creates already do (#5844).
+    ///
+    /// Scope is the background reviewer path (`resolve_evolution_mode`) only.
+    /// An agent's own explicit `skill_evolve_*` tool calls are a deliberate
+    /// surface and still apply directly — exactly as `skill_evolve_create`
+    /// always has — so this is not a blanket registry-write lock.
+    Controlled,
 }
 
 /// What happens to a positively-classified skill workshop candidate.

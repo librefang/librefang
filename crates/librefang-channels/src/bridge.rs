@@ -2004,7 +2004,7 @@ impl BridgeManager {
     /// `reload_channels_from_disk` swaps the old `BridgeManager` out of an
     /// `ArcSwap<Option<BridgeManager>>` and then tries `Arc::try_unwrap` to
     /// get `&mut` for the graceful `stop()`. Under load that `try_unwrap`
-    /// fails — `routes/agents.rs::push_message` does
+    /// fails — `routes/agents/messaging.rs::push_message` does
     /// `state.bridge_manager.load_full()` and holds the Arc across
     /// `bm.push_message(...).await`, so a strong ref outlives the swap. The
     /// old `if let Ok(Some(_)) = try_unwrap` arm is then skipped and the old

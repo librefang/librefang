@@ -452,6 +452,14 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     // ====================================================================
 
     fn reload_skills(&self);
+    /// Approve a pending skill candidate and, for a CREATE, auto-assign the
+    /// promoted skill to the creating agent's allowlist (#5844). Promotion runs
+    /// through `evolution::create_skill` (re-running the prompt-injection scan)
+    /// and the registry is hot-reloaded before returning.
+    fn approve_pending_skill(
+        &self,
+        id: &str,
+    ) -> Result<librefang_skills::evolution::EvolutionResult, crate::skill_workshop::WorkshopError>;
     fn model_catalog_load(
         &self,
     ) -> arc_swap::Guard<Arc<librefang_runtime::model_catalog::ModelCatalog>>;
@@ -1236,6 +1244,13 @@ impl KernelApi for LibreFangKernel {
     // -- Skills / driver caches / model catalog --
     fn reload_skills(&self) {
         Self::reload_skills(self);
+    }
+    fn approve_pending_skill(
+        &self,
+        id: &str,
+    ) -> Result<librefang_skills::evolution::EvolutionResult, crate::skill_workshop::WorkshopError>
+    {
+        Self::approve_pending_skill(self, id)
     }
     fn model_catalog_load(
         &self,

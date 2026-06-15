@@ -210,9 +210,13 @@ fn load_dotenv(path: &Path) -> Result<HashMap<String, String>, std::io::Error> {
         if let Some((key, value)) = line.split_once('=') {
             let key = key.trim();
             let mut value = value.trim().to_string();
-            // Strip surrounding quotes
-            if (value.starts_with('"') && value.ends_with('"'))
-                || (value.starts_with('\'') && value.ends_with('\''))
+            // Strip surrounding quotes. The `len() >= 2` guard is essential: a
+            // bare single quote char (`KEY="`) satisfies both starts_with and
+            // ends_with on the SAME byte, and `value[1..0]` would panic. This
+            // matches the guard in `dotenv.rs::parse_env_line`.
+            if value.len() >= 2
+                && ((value.starts_with('"') && value.ends_with('"'))
+                    || (value.starts_with('\'') && value.ends_with('\'')))
             {
                 value = value[1..value.len() - 1].to_string();
             }
@@ -270,6 +274,23 @@ SINGLE_QUOTED='single'
     fn load_dotenv_nonexistent() {
         let map = load_dotenv(Path::new("/nonexistent/.env")).unwrap();
         assert!(map.is_empty());
+    }
+
+    #[test]
+    fn load_dotenv_single_quote_char_does_not_panic() {
+        // A value that is a single quote character satisfies both starts_with
+        // and ends_with on the same byte; without the `len() >= 2` guard the
+        // `value[1..0]` slice panicked and took down the parsing process.
+        let dir = tempfile::tempdir().unwrap();
+        let env_path = dir.path().join(".env");
+        std::fs::write(&env_path, "DQUOTE=\"\nSQUOTE='\nOK=value\n").unwrap();
+
+        let map = load_dotenv(&env_path).unwrap();
+        // The lone quote char is kept verbatim (not stripped) and parsing
+        // continues to the following keys.
+        assert_eq!(map.get("DQUOTE").unwrap(), "\"");
+        assert_eq!(map.get("SQUOTE").unwrap(), "'");
+        assert_eq!(map.get("OK").unwrap(), "value");
     }
 
     // Tests that mutate process-wide env vars must run serially to avoid races

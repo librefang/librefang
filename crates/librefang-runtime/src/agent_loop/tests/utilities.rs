@@ -246,6 +246,7 @@ async fn test_tool_failure_allows_retry_on_next_iteration() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(FailThenTextDriver::new());
@@ -309,6 +310,7 @@ async fn test_repeated_tool_failures_cap_exits_loop() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(AlwaysFailingToolDriver);
@@ -371,6 +373,7 @@ async fn test_streaming_tool_failure_allows_retry() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(FailThenTextDriver::new());
@@ -436,6 +439,7 @@ async fn test_streaming_repeated_tool_failures_cap_exits() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(AlwaysFailingToolDriver);
@@ -513,6 +517,7 @@ fn fresh_session() -> librefang_memory::session::Session {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     }
 }
 
@@ -1316,6 +1321,7 @@ async fn test_normal_turn_persists_session_as_incognito_control() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(NormalDriver);
@@ -1386,6 +1392,7 @@ async fn test_incognito_skips_session_save_on_end_turn() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(NormalDriver);
@@ -1466,6 +1473,7 @@ async fn test_incognito_skips_proactive_memory_auto_memorize() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(NormalDriver);
@@ -1547,6 +1555,7 @@ async fn test_normal_turn_auto_memorizes_proactive_memory_control() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(NormalDriver);
@@ -1599,5 +1608,116 @@ async fn test_normal_turn_auto_memorizes_proactive_memory_control() {
             .expect("memory count after normal turn must not error")
             > 0,
         "normal turn should auto_memorize the preference fixture"
+    );
+}
+
+// --- #6010: redact_images_for_text_only ---
+
+#[test]
+fn redact_images_for_text_only_replaces_image_and_imagefile_blocks() {
+    use super::super::redact_images_for_text_only;
+    use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
+
+    let messages = vec![
+        // Plain text user message — must be left untouched.
+        Message {
+            role: Role::User,
+            content: MessageContent::Text("hello".to_string()),
+            pinned: false,
+            timestamp: None,
+        },
+        // Mixed block message: a Text block, an inline Image, and an
+        // on-disk ImageFile. Both image variants must be redacted; the
+        // Text block and surrounding structure must survive.
+        Message {
+            role: Role::User,
+            content: MessageContent::Blocks(vec![
+                ContentBlock::Text {
+                    text: "what is in this photo?".to_string(),
+                    provider_metadata: None,
+                },
+                ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: "aGVsbG8=".to_string(),
+                },
+                ContentBlock::ImageFile {
+                    media_type: "image/jpeg".to_string(),
+                    path: "/tmp/photo.jpg".to_string(),
+                },
+            ]),
+            pinned: false,
+            timestamp: None,
+        },
+    ];
+
+    let out = redact_images_for_text_only(messages, "deepseek-v4");
+
+    // First message untouched.
+    assert!(matches!(
+        &out[0].content,
+        MessageContent::Text(t) if t == "hello"
+    ));
+
+    let blocks = match &out[1].content {
+        MessageContent::Blocks(b) => b,
+        other => panic!("expected Blocks, got {other:?}"),
+    };
+    assert_eq!(blocks.len(), 3, "block count must be preserved");
+    // Original text block survives verbatim.
+    assert!(matches!(
+        &blocks[0],
+        ContentBlock::Text { text, .. } if text == "what is in this photo?"
+    ));
+    // No image block of either variant may remain.
+    assert!(
+        !blocks.iter().any(|b| matches!(
+            b,
+            ContentBlock::Image { .. } | ContentBlock::ImageFile { .. }
+        )),
+        "all image blocks must be redacted"
+    );
+    // The two image slots became text placeholders mentioning the model.
+    for idx in [1usize, 2usize] {
+        match &blocks[idx] {
+            ContentBlock::Text { text, .. } => {
+                assert!(
+                    text.contains("image omitted") && text.contains("deepseek-v4"),
+                    "redacted placeholder must mention omission + model, got {text:?}"
+                );
+            }
+            other => panic!("expected redacted Text placeholder, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn redact_images_for_text_only_is_noop_without_images() {
+    use super::super::redact_images_for_text_only;
+    use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
+
+    let messages = vec![Message {
+        role: Role::Assistant,
+        content: MessageContent::Blocks(vec![
+            ContentBlock::Text {
+                text: "sure".to_string(),
+                provider_metadata: None,
+            },
+            ContentBlock::ToolUse {
+                id: "call_1".to_string(),
+                name: "search".to_string(),
+                input: serde_json::json!({"q": "x"}),
+                provider_metadata: None,
+            },
+        ]),
+        pinned: false,
+        timestamp: None,
+    }];
+    let original = messages.clone();
+    let out = redact_images_for_text_only(messages, "gpt-4o");
+    // Non-image content is structurally unchanged.
+    assert_eq!(
+        format!("{:?}", out[0].content),
+        format!("{:?}", original[0].content),
+        "messages without image blocks must pass through unchanged"
     );
 }

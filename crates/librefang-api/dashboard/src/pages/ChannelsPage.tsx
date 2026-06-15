@@ -401,6 +401,9 @@ function SidecarForm({
   const advanced = allFields.filter((f) => f.advanced);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const visible = showAdvanced ? [...fields, ...advanced] : fields;
+  // `--describe` failed at boot and there's no static fallback, so the schema is empty.
+  // Show the actionable reason (typically: install the Python sidecar SDK) instead of a blank drawer + dead Save button.
+  const schemaUnavailable = allFields.length === 0 && !!channel.schema_error;
 
   // Pre-populate from the schema:
   //  - non-secret fields with a `value` get their value
@@ -474,6 +477,27 @@ function SidecarForm({
         </button>
       </div>
       <div className="p-6 space-y-3">
+        {schemaUnavailable && (
+          <div className="flex gap-2 p-3 rounded-lg border border-warning/30 bg-warning/5">
+            <AlertCircle className="w-4 h-4 text-warning shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <p className="text-xs font-bold text-warning">
+                {t("channels.schema_unavailable_title", {
+                  defaultValue: "Setup form unavailable",
+                })}
+              </p>
+              <p className="text-[11px] text-text-dim leading-relaxed">
+                {t("channels.schema_unavailable_hint", {
+                  defaultValue:
+                    "This channel now runs as an out-of-process sidecar and its setup form could not be loaded. Install the sidecar SDK, then reload channels (or restart the daemon) and reopen this dialog.",
+                })}
+              </p>
+              <p className="text-[11px] font-mono text-text-dim/90 leading-relaxed break-words">
+                {channel.schema_error}
+              </p>
+            </div>
+          </div>
+        )}
         {visible.map((f) => (
           <div key={f.key} className="space-y-1">
             <label className="text-xs font-bold">
@@ -543,7 +567,7 @@ function SidecarForm({
         <Button
           variant="primary"
           onClick={handleSubmit}
-          disabled={saveMut.isPending}
+          disabled={saveMut.isPending || schemaUnavailable}
         >
           {saveMut.isPending
             ? t("common.saving", { defaultValue: "Saving…" })

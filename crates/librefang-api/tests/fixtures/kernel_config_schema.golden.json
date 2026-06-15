@@ -1790,6 +1790,11 @@
           },
           "type": "array"
         },
+        "safe_bins_skip_approval": {
+          "default": false,
+          "description": "Opt-in: in `allowlist` mode, let a `shell_exec` whose every base command is a declared `safe_bin` also skip the human-approval prompt. Default `false` preserves today's posture — `safe_bins` membership only satisfies the allowlist gate, and an approved-but-required tool still prompts. When `true`, a command like `env` (every chained base in `safe_bins`) executes without prompting, while any non-safe base (e.g. `env; curl …`) still routes through approval.",
+          "type": "boolean"
+        },
         "timeout_secs": {
           "default": 30,
           "description": "Max execution timeout in seconds. Default: 30.",
