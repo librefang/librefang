@@ -85,6 +85,10 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
             "/skills/pending/{id}/reject",
             axum::routing::post(reject_pending_candidate),
         )
+        .route(
+            "/skills/pending/{id}/propose-to-registry",
+            axum::routing::post(propose_pending_to_registry),
+        )
         // Marketplace / ClawHub
         .route(
             "/marketplace/search",

@@ -16,6 +16,7 @@ import {
   proposeSkillToRegistry,
   approvePendingCandidate,
   rejectPendingCandidate,
+  proposePendingToRegistry,
 } from "../http/client";
 import {
   skillKeys,
@@ -170,6 +171,22 @@ export function useEvolvePatchSkill() {
 export function useProposeSkillToRegistry() {
   return useMutation({
     mutationFn: ({ name }: { name: string }) => proposeSkillToRegistry(name),
+  });
+}
+
+/**
+ * Propose a *pending* candidate directly to the public registry as a GitHub
+ * PR (#5819), without first approving it into the active registry. The daemon
+ * stages the candidate in a temp dir and reuses the same fork/push/PR
+ * machinery as {@link useProposeSkillToRegistry}.
+ *
+ * Like the installed-skill propose, it does not mutate local skill state (it
+ * only opens a remote PR), so it invalidates no local query caches. The call
+ * site consumes the returned `pr_url` to show the operator the PR.
+ */
+export function useProposePendingToRegistry() {
+  return useMutation({
+    mutationFn: ({ id }: { id: string }) => proposePendingToRegistry(id),
   });
 }
 

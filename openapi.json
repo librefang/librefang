@@ -10585,6 +10585,51 @@
         }
       }
     },
+    "/api/skills/pending/{id}/propose-to-registry": {
+      "post": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "POST /api/skills/pending/{id}/propose-to-registry — open a PR\ncontributing a *pending* candidate to the configured public skill\nregistry, without first approving it into the active registry (#5819).",
+        "description": "The candidate carries everything a contribution needs (`name`,\n`description`, `prompt_context`). We stage it as an\n[`librefang_skills::InstalledSkill`] in a throwaway temp directory and\nreuse the same fork/push/PR machinery as the installed-skill route\n(`run_registry_proposal`). For an update candidate (`kind = update`,\n`target_skill_id` set), the target skill's evolution history is pulled in\nso the PR description carries the version diff / changelog. The temp\ndirectory is removed once the proposal returns.",
+        "operationId": "propose_pending_to_registry",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Candidate UUID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "PR opened against the registry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid candidate id"
+          },
+          "401": {
+            "description": "No GitHub token configured"
+          },
+          "404": {
+            "description": "Candidate not found"
+          },
+          "502": {
+            "description": "GitHub request failed"
+          }
+        }
+      }
+    },
     "/api/skills/pending/{id}/reject": {
       "post": {
         "tags": [
