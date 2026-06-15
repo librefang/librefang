@@ -133,11 +133,12 @@ pub(super) async fn tool_channel_send(
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
 
+    // Kernel `send_channel_*` lookups are case-sensitive; adapters register with original case (#6078).
     let channel = input["channel"]
         .as_str()
         .ok_or("Missing 'channel' parameter")?
         .trim()
-        .to_lowercase();
+        .to_string();
 
     let recipient = input["recipient"]
         .as_str()

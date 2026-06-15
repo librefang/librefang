@@ -112,7 +112,9 @@ impl MediaDriver for ElevenLabsMediaDriver {
         let voice_id = request.voice.as_deref().unwrap_or(DEFAULT_VOICE_ID);
         validate_voice_id(voice_id)?;
         let api_key = Self::api_key()?;
-        let format = request.format.as_deref().unwrap_or("mp3_44100_128");
+        // Default to Opus so WhatsApp PTT voice-notes work without transcoding;
+        // callers needing MP3 pass `format: Some("mp3_44100_128")` (#6116).
+        let format = request.format.as_deref().unwrap_or("opus_48000_32");
 
         let mut body = serde_json::json!({
             "text": request.text,

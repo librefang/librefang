@@ -1569,6 +1569,7 @@ pub async fn build_router(
             "/locales/zh-CN.json",
             axum::routing::get(webchat::locale_zh_cn),
         )
+        .route("/locales/uk.json", axum::routing::get(webchat::locale_uk))
         // API version discovery endpoint (not versioned itself)
         .route("/api/versions", axum::routing::get(routes::api_versions))
         // Auto-generated OpenAPI specification
@@ -2033,7 +2034,7 @@ pub async fn run_daemon(
                 match librefang_kernel::catalog_sync::sync_catalog_to(
                     kernel.home_dir(),
                     &cfg.registry.registry_mirror,
-                    &cfg.registry.base_url,
+                    cfg.registry.registry_host.as_deref(),
                 )
                 .await
                 {

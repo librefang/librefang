@@ -1379,6 +1379,13 @@ pub struct TtsElevenLabsConfig {
     pub stability: f32,
     /// Similarity boost (0.0-1.0). Default: 0.75.
     pub similarity_boost: f32,
+    /// Output format passed as the `?output_format=` query parameter.
+    /// Default `"opus_48000_32"` — an Ogg/Opus stream that WhatsApp accepts as
+    /// a PTT voice-note without transcoding; ElevenLabs would otherwise return
+    /// MP3, which the mautrix-whatsapp/Beeper bridge rejects (#6116).
+    /// Other values: `mp3_44100_128`, `mp3_22050_32`, `opus_24000_32`,
+    /// `pcm_16000`, `pcm_44100`, `ulaw_8000`.
+    pub output_format: String,
 }
 
 impl Default for TtsElevenLabsConfig {
@@ -1388,6 +1395,7 @@ impl Default for TtsElevenLabsConfig {
             model_id: "eleven_monolingual_v1".to_string(),
             stability: 0.5,
             similarity_boost: 0.75,
+            output_format: "opus_48000_32".to_string(),
         }
     }
 }
@@ -2350,7 +2358,11 @@ pub enum SidecarCommandPolicy {
 /// command = "python3"
 /// args = ["-m", "librefang.sidecar.adapters.telegram"]
 /// env = { TELEGRAM_BOT_TOKEN = "xxx" }
+/// agent = "coder"                  # default agent for this channel
+/// available_agents = ["coder", "triage"]  # optional /agent whitelist
 /// ```
+///
+/// The `agent` key was previously named `default_agent`; the old name is still accepted as a deserialization alias so existing configs keep loading unchanged (#5671).
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SidecarChannelConfig {
     /// Display name for this adapter.
@@ -2376,8 +2388,18 @@ pub struct SidecarChannelConfig {
     /// through to the non-deterministic "first available agent" branch in
     /// `resolve_or_fallback`, which silently routes traffic to a different
     /// agent whenever a new agent is spawned.
+    ///
+    /// Renamed from `default_agent` in #5671; the old key is still accepted via `#[serde(alias = "default_agent")]` so existing configs keep deserializing.
+    /// Remains `Option<String>` for now — mandatory enforcement is a later boot-validation PR.
+    #[serde(default, alias = "default_agent")]
+    pub agent: Option<String>,
+    /// Whitelist of agent names this channel is allowed to route to.
+    ///
+    /// Reserved for the forthcoming `/agent` command (#5671): when non-empty it gates which agents an inbound `/agent <name>` switch may select on this channel.
+    /// Empty (the default) means "no whitelist" — the `/agent` gate is open, preserving today's behaviour.
+    /// Not yet consulted anywhere; this PR only lands the schema field.
     #[serde(default)]
-    pub default_agent: Option<String>,
+    pub available_agents: Vec<String>,
     /// Restart the subprocess automatically when it exits unexpectedly.
     #[serde(default = "default_sidecar_restart")]
     pub restart: bool,
@@ -3063,6 +3085,21 @@ pub struct UarConfig {
     pub share_librefang_storage: bool,
 }
 
+/// Selects where runtime `/api/mcp/servers` writes are persisted.
+/// See [`KernelConfig::mcp_runtime_store`].
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum McpRuntimeStore {
+    /// Persist writes to `config.toml` (pre-#6113 behaviour). Default.
+    #[default]
+    File,
+    /// Persist writes to the SQLite `mcp_server_configs` table, leaving
+    /// `config.toml` untouched — for read-only `config.toml` deployments.
+    Db,
+}
+
 /// Top-level kernel configuration.
 #[derive(Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
@@ -3280,6 +3317,16 @@ pub struct KernelConfig {
     /// MCP server configurations for external tool integration.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_servers: Vec<McpServerConfigEntry>,
+    /// Where the `POST/PUT/DELETE /api/mcp/servers` handlers persist a
+    /// runtime change. `file` (the default) rewrites `config.toml`, preserving
+    /// the pre-#6113 behaviour. `db` writes the SQLite `mcp_server_configs`
+    /// table instead and leaves `config.toml` untouched, so MCP servers can be
+    /// managed at runtime when `config.toml` is read-only (e.g. a Kubernetes
+    /// ConfigMap — the #6021 motivation). The boot merge already lets DB rows
+    /// override the file-backed list by name; this knob only selects the write
+    /// target. Changing it takes effect on the next write — no restart needed.
+    #[serde(default)]
+    pub mcp_runtime_store: McpRuntimeStore,
     /// Reusable named taint rule sets referenced by
     /// [`McpTaintToolPolicy::rule_sets`]. Each entry defines a group of
     /// taint rules with a severity action (block / warn / log) that the
@@ -5390,10 +5437,11 @@ impl Default for BackgroundConfig {
 /// #   registry_mirror = "https://ghproxy.cn"
 /// # turns "https://github.com/..." into "https://ghproxy.cn/https://github.com/..."
 /// registry_mirror = ""
-/// # Optional: full base URL of the registry repo (without trailing slash).
-/// # Replaces the built-in librefang/librefang-registry default entirely.
-/// # Empty = use upstream default.
-/// base_url = "https://github.com/GQAdonis/librefang-registry"
+/// # Optional: full base URL of the forge that hosts the registry repo.
+/// # Default unset = GitHub at GQAdonis/librefang-registry (the BossFang fork
+/// # default; the owner lives in the REGISTRY_REPO_PATH constant). Set to
+/// # consume a Codeberg/Forgejo-hosted registry, e.g.
+/// #   registry_host = "https://codeberg.org"
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
@@ -5411,29 +5459,25 @@ pub struct RegistryConfig {
     /// `https://github.com/...` → `https://ghproxy.cn/https://github.com/...`
     #[serde(default)]
     pub registry_mirror: String,
-    /// Full base URL of the registry repository (no trailing slash).
-    /// The tarball URL is derived as
-    /// `{base_url}/archive/refs/heads/main.tar.gz` and the git clone URL
-    /// as `{base_url}.git`. The tarball prefix (`{repo-name}-main/`) is
-    /// derived from the URL's last path segment.
+    /// Full base URL of the forge hosting the registry repository.
     ///
-    /// BossFang fork default: `https://github.com/GQAdonis/librefang-registry`.
-    /// Set to `""` to fall back to the historical upstream constants
-    /// (emergency rollback without recompiling). Set to any other URL
-    /// to point at a custom fork.
-    #[serde(default = "default_registry_base_url")]
-    pub base_url: String,
+    /// When `None` (the default), the registry is fetched from GitHub at the
+    /// BossFang-owned `GQAdonis/librefang-registry` (the owner/repo is the
+    /// `REGISTRY_REPO_PATH` constant in `librefang-runtime::registry_sync`).
+    /// Set to a full base URL such as `"https://codeberg.org"` to consume a
+    /// Codeberg/Forgejo-hosted registry (upstream #6095); the tarball, git-clone,
+    /// and tarball-prefix values are all derived from it.
+    ///
+    /// This replaced the fork's earlier `base_url` full-URL knob: the default
+    /// registry owner now lives in one place (the `REGISTRY_REPO_PATH` constant),
+    /// and `registry_host` only selects the forge, eliminating the per-merge
+    /// conflict the parallel `base_url` field caused.
+    #[serde(default)]
+    pub registry_host: Option<String>,
 }
 
 fn default_registry_cache_ttl_secs() -> u64 {
     86400
-}
-
-/// BossFang fork: registry comes from GQAdonis/librefang-registry by default.
-/// To upstream this back to LibreFang, change this to return `String::new()`
-/// so the historical upstream URL constants take effect.
-fn default_registry_base_url() -> String {
-    "https://github.com/GQAdonis/librefang-registry".to_string()
 }
 
 impl Default for RegistryConfig {
@@ -5441,7 +5485,7 @@ impl Default for RegistryConfig {
         Self {
             cache_ttl_secs: default_registry_cache_ttl_secs(),
             registry_mirror: String::new(),
-            base_url: default_registry_base_url(),
+            registry_host: None,
         }
     }
 }
@@ -6248,6 +6292,7 @@ impl Default for KernelConfig {
             users: Vec::new(),
             channel_role_mapping: ChannelRoleMapping::default(),
             mcp_servers: Vec::new(),
+            mcp_runtime_store: McpRuntimeStore::default(),
             taint_rules: Vec::new(),
             a2a: None,
             usage_footer: UsageFooterMode::default(),
@@ -7410,6 +7455,52 @@ mod tests {
         assert_eq!(cfg.message_coalesce_window_ms, 0);
     }
 
+    /// #5671 — the `default_agent` field was renamed to `agent`, kept as a
+    /// serde alias. Both spellings must deserialize into `agent`, and the new
+    /// `available_agents` whitelist must default to empty.
+    #[test]
+    fn sidecar_agent_field_accepts_legacy_and_new_keys() {
+        // Legacy `default_agent` key still loads into `agent` via the alias.
+        let legacy = r#"
+            name = "telegram"
+            command = "python3"
+            default_agent = "x"
+        "#;
+        let cfg: SidecarChannelConfig = toml::from_str(legacy).unwrap();
+        assert_eq!(cfg.agent.as_deref(), Some("x"));
+        assert!(cfg.available_agents.is_empty());
+
+        // New `agent` key loads directly.
+        let new = r#"
+            name = "telegram"
+            command = "python3"
+            agent = "x"
+        "#;
+        let cfg: SidecarChannelConfig = toml::from_str(new).unwrap();
+        assert_eq!(cfg.agent.as_deref(), Some("x"));
+        assert!(cfg.available_agents.is_empty());
+
+        // Absent → None, and the whitelist defaults to empty.
+        let minimal = r#"
+            name = "telegram"
+            command = "python3"
+        "#;
+        let cfg: SidecarChannelConfig = toml::from_str(minimal).unwrap();
+        assert!(cfg.agent.is_none());
+        assert!(cfg.available_agents.is_empty());
+
+        // The whitelist round-trips when present.
+        let with_list = r#"
+            name = "telegram"
+            command = "python3"
+            agent = "coder"
+            available_agents = ["coder", "triage"]
+        "#;
+        let cfg: SidecarChannelConfig = toml::from_str(with_list).unwrap();
+        assert_eq!(cfg.agent.as_deref(), Some("coder"));
+        assert_eq!(cfg.available_agents, vec!["coder", "triage"]);
+    }
+
     #[test]
     fn sidecar_command_policy_disable_parses() {
         let toml_str = r#"
@@ -8137,32 +8228,37 @@ rule_sets = ["browser_handles", "pii_baseline"]
         assert_eq!(cfg.default_burst_ratio, 0.0);
     }
 
-    // BossFang fork: registry base_url defaults to GQAdonis/librefang-registry.
+    // BossFang fork: the default registry forge is `None` (= GitHub), and the
+    // owner/repo (`GQAdonis/librefang-registry`) lives in the
+    // `REGISTRY_REPO_PATH` constant in `librefang-runtime::registry_sync`. The
+    // earlier `base_url` full-URL knob was folded into upstream's `registry_host`
+    // (#6095) during the merge — see `RegistryConfig::registry_host`.
     #[test]
-    fn registry_config_default_base_url_points_at_gqadonis_fork() {
+    fn registry_config_default_host_is_none_github() {
         let cfg = RegistryConfig::default();
         assert_eq!(
-            cfg.base_url,
-            "https://github.com/GQAdonis/librefang-registry"
+            cfg.registry_host, None,
+            "default forge is GitHub (the GQAdonis owner comes from REGISTRY_REPO_PATH)"
         );
     }
 
     #[test]
-    fn registry_config_empty_toml_uses_bossfang_default_base_url() {
+    fn registry_config_empty_toml_keeps_default_host() {
         let cfg: RegistryConfig = toml::from_str("").unwrap();
         assert_eq!(
-            cfg.base_url,
-            "https://github.com/GQAdonis/librefang-registry",
-            "missing [registry] section in config.toml should still resolve to the BossFang default"
+            cfg.registry_host, None,
+            "missing [registry] section should leave the forge at the GitHub/GQAdonis default"
         );
     }
 
     #[test]
-    fn registry_config_explicit_empty_base_url_opts_back_to_upstream_constants() {
-        let cfg: RegistryConfig = toml::from_str("base_url = \"\"").unwrap();
+    fn registry_config_explicit_host_consumes_codeberg() {
+        let cfg: RegistryConfig =
+            toml::from_str("registry_host = \"https://codeberg.org\"").unwrap();
         assert_eq!(
-            cfg.base_url, "",
-            "explicit empty string is the emergency-rollback signal — registry_sync falls back to upstream constants"
+            cfg.registry_host.as_deref(),
+            Some("https://codeberg.org"),
+            "an explicit registry_host selects a Codeberg/Forgejo-hosted registry"
         );
     }
 

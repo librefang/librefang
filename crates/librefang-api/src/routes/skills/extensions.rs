@@ -177,8 +177,11 @@ pub async fn install_extension(
     // kernel; the helper triggers the reconnect. config.toml stays read-only
     // bootstrap (so this works when config.toml is a read-only ConfigMap).
     let server_name = result.server.name.clone();
-    if let Err(resp) =
-        super::mcp::apply_mcp_mutation(&state, super::mcp::McpMutation::Upsert(result.server)).await
+    if let Err(resp) = super::mcp::apply_mcp_mutation(
+        &state,
+        super::mcp::McpMutation::Upsert(Box::new(result.server)),
+    )
+    .await
     {
         return resp;
     }

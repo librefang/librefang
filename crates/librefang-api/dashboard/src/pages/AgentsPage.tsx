@@ -220,6 +220,11 @@ export function AgentsPage() {
   // five sections (Conversation / Memory / Skills / Schedule / Logs).
   const [toolsDraft, setToolsDraft] = useState<string[] | null>(null);
   const [expandedToolGroup, setExpandedToolGroup] = useState<string | null>(null);
+  // Skills tab draft — mirrors `toolsDraft`. Holds the staged per-agent skill
+  // allowlist; `null` = pristine (no edits). Add/remove/customize/reset only
+  // mutate this local draft, so nothing persists until the Save button fires
+  // the PUT — leaving the tab discards the draft (the "change your mind" path).
+  const [skillsDraft, setSkillsDraft] = useState<string[] | null>(null);
   const [agentTab, setAgentTab] = useState<
     "conversation" | "memory" | "skills" | "tools" | "schedule" | "logs"
   >("conversation");
@@ -514,6 +519,22 @@ export function AgentsPage() {
       setToolsDraft([...declared]);
     }
   }, [agentTab, tabAgentToolsQuery.data]);
+
+  // Seed / reset the Skills draft, same shape as the Tools effect above.
+  // Only an allowlist-mode agent (a pinned set) seeds the draft; "all" mode
+  // leaves it null so the all-view renders until the operator customizes.
+  useEffect(() => {
+    if (agentTab !== "skills") {
+      setSkillsDraft(null);
+      return;
+    }
+    const data = tabAgentSkillsQuery.data;
+    if (!data) return;
+    const pinned = data.mode === "allowlist" ? (data.assigned ?? []) : [];
+    if (pinned.length > 0 && skillsDraft === null) {
+      setSkillsDraft([...pinned]);
+    }
+  }, [agentTab, tabAgentSkillsQuery.data]);
 
   // Per-agent session list — Conversation tab uses this directly. The
   // global /api/sessions used previously was paginated to 50, so the
@@ -1301,7 +1322,7 @@ export function AgentsPage() {
       : Array.isArray(view.capabilities?.skills)
         ? view.capabilities!.skills!
         : [];
-    const assigned: string[] = (skillsData?.assigned ?? manifestSkills)
+    const serverAssigned: string[] = (skillsData?.assigned ?? manifestSkills)
       .slice()
       .sort();
     const available: string[] = (skillsData?.available ?? []).slice().sort();
@@ -1310,26 +1331,59 @@ export function AgentsPage() {
     // set). Prefer the live query's mode; fall back to the detail payload.
     const skillsMode =
       skillsData?.mode ?? (agent as AgentDetail).skills_mode;
-    const usesAllSkills = skillsMode === "all";
     const skillsDisabled =
       skillsData?.disabled ?? skillsMode === "none";
-    // Available skills not yet on the allowlist — the add pool in allowlist
-    // mode. Built from the registry list minus what's already assigned.
-    const assignedSet = new Set(assigned);
-    const addable = available.filter((s) => !assignedSet.has(s));
+    // The persisted allowlist as the server currently has it: the pinned set
+    // in allowlist mode, empty in all-mode (an empty allowlist === all-mode on
+    // write). `draft` is the locally-staged copy — `skillsDraft` is null until
+    // the first edit, so nothing is persisted until Save. Mirrors `toolsDraft`.
+    const persisted: string[] =
+      skillsMode === "allowlist" ? serverAssigned : [];
+    const assigned: string[] = (skillsDraft ?? persisted).slice().sort();
+    const draftSet = new Set(assigned);
+    const isDirty =
+      skillsDraft !== null &&
+      (assigned.length !== persisted.length ||
+        assigned.some((s) => !persisted.includes(s)));
+    // Render the "using all skills" view only when the persisted state is
+    // all-mode AND there are no staged edits — once the operator customizes,
+    // the allowlist editor takes over (mirrors the Tools tab's `usesAll`).
+    const usesAllSkills = persisted.length === 0 && !isDirty;
+    // Available skills not yet on the (draft) allowlist — the add pool.
+    const addable = available.filter((s) => !draftSet.has(s));
     const mutating = setAgentSkillsMutation.isPending;
     const skillsLoading =
       tabAgentSkillsQuery.isLoading && !skillsData;
 
-    // Apply a new allowlist. Empty array clears it back to "all" mode.
-    const applySkills = (next: string[], toast: string) => {
+    // Every edit stages into `skillsDraft`; the server is only touched on Save.
+    const addSkill = (name: string) =>
+      setSkillsDraft((prev) => {
+        const base = prev ?? persisted;
+        return base.includes(name) ? base : [...base, name];
+      });
+    const removeSkill = (name: string) =>
+      setSkillsDraft((prev) => (prev ?? persisted).filter((s) => s !== name));
+    // "Customize" from all-mode: seed the allowlist with every available skill
+    // so the operator gets a concrete list to prune (saving an empty allowlist
+    // would just stay in all-mode).
+    const customizeFromAll = () => setSkillsDraft([...available]);
+    // "Reset to all": stage an empty allowlist (an empty PUT → all-mode on Save).
+    const resetToAll = () => setSkillsDraft([]);
+    // Persist the staged allowlist. Empty array clears it back to "all" mode.
+    const handleSaveSkills = () => {
       if (!agent.id) return;
       setAgentSkillsMutation.mutate(
-        { agentId: agent.id, skills: next },
+        { agentId: agent.id, skills: assigned },
         {
           onSuccess: async () => {
             await refreshDetailAgent(agent.id, agent.is_hand);
-            addToast(toast, "success");
+            setSkillsDraft(null);
+            addToast(
+              t("agents.detail.skills_saved", {
+                defaultValue: "Saved to agent.toml",
+              }),
+              "success",
+            );
           },
           onError: (e) => {
             addToast(
@@ -1345,39 +1399,6 @@ export function AgentsPage() {
         },
       );
     };
-    const addSkill = (name: string) =>
-      applySkills(
-        [...assigned, name],
-        t("agents.detail.skill_added", {
-          defaultValue: "Skill assigned",
-        }),
-      );
-    const removeSkill = (name: string) =>
-      applySkills(
-        assigned.filter((s) => s !== name),
-        t("agents.detail.skill_removed", {
-          defaultValue: "Skill removed",
-        }),
-      );
-    // "Customize" from all-mode: seed the allowlist with every available
-    // skill so the operator gets a concrete list to prune (an empty PUT
-    // would just stay in all-mode). Done with the assign mutation so the
-    // skill-registry validation runs server-side.
-    const customizeFromAll = () =>
-      applySkills(
-        available,
-        t("agents.detail.skill_customized", {
-          defaultValue: "Switched to a per-agent allowlist",
-        }),
-      );
-    // "Reset to all": clear the allowlist (empty PUT → all-mode).
-    const resetToAll = () =>
-      applySkills(
-        [],
-        t("agents.detail.skill_reset_all", {
-          defaultValue: "Reset to all available skills",
-        }),
-      );
 
     const autoEvolve = agent.auto_evolve !== false;
     const handleToggleAutoEvolve = () => {
@@ -1559,6 +1580,21 @@ export function AgentsPage() {
                 </div>
               </div>
             )}
+          </div>
+        )}
+
+        {!skillsLoading && !skillsDisabled && (
+          <div className="flex justify-end mt-2">
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={handleSaveSkills}
+              disabled={!isDirty || mutating}
+            >
+              {mutating
+                ? t("common.saving", { defaultValue: "Saving..." })
+                : t("common.save", { defaultValue: "Save" })}
+            </Button>
           </div>
         )}
       </div>

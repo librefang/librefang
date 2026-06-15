@@ -566,17 +566,35 @@ pub fn shared_memory_agent_id() -> AgentId {
     ]))
 }
 
-/// Namespace a memory key by peer ID for per-user isolation.
-/// When `peer_id` is `Some(pid)` (non-empty, colon-free), returns
-/// `"peer:{pid}:{key}"`. When `None`, returns the key unchanged (global scope).
+/// Percent-encode the namespace delimiters of a `peer_id` so it can be embedded
+/// in the `peer:{pid}:{key}` framing without breaking injectivity (#6100).
 ///
-/// SECURITY (#5119 / #5120): the `peer:{pid}:{key}` framing is only injective
-/// when `pid` contains no `:`. A peer_id like Slack's `T1:U2` or IRC's
-/// `user:42` would collide with a different `(peer_id, key)` pair under the
-/// historical `strip_prefix("peer:{pid}:")` recovery path in the
-/// `memory_access` handle's `memory_list`, letting one peer see another peer's
-/// keys. We reject colon-bearing peer ids at this boundary.
-/// An empty `peer_id` is likewise rejected: `peer::{key}` is ambiguous with a
+/// `%` is encoded first (to `%25`) so the encoding is unambiguous, then `:` is
+/// encoded (to `%3A`). The result therefore contains no bare `:`, which is what
+/// makes `peer:{escape_peer_id(pid)}:{key}` injective in `pid` even when `pid`
+/// carries colons — e.g. a Matrix user id `@user:matrix.org` becomes
+/// `@user%3Amatrix.org`. Colon-free peer_ids are returned unchanged, so the
+/// stored form of legacy (colon-free) peers is byte-identical to before.
+pub(super) fn escape_peer_id(pid: &str) -> String {
+    // Order matters: encode `%` before `:`, otherwise a literal `%3A` in the
+    // input would be indistinguishable from an encoded colon.
+    pid.replace('%', "%25").replace(':', "%3A")
+}
+
+/// Namespace a memory key by peer ID for per-user isolation.
+/// When `peer_id` is `Some(pid)` (non-empty), returns
+/// `"peer:{escape_peer_id(pid)}:{key}"`. When `None`, returns the key unchanged
+/// (global scope).
+///
+/// SECURITY (#5119 / #5120 / #6100): the `peer:{pid}:{key}` framing is only
+/// injective when `pid` carries no bare namespace separator. Rather than
+/// rejecting colon-bearing peer_ids (which locked out platforms like Matrix
+/// whose user ids look like `@user:matrix.org`, #6100), we percent-encode the
+/// colon via [`escape_peer_id`]. Peer `T1` listing computes the prefix
+/// `peer:T1:`, which no longer matches the escaped key `peer:T1%3AU2:…` of peer
+/// `T1:U2`, so the historical `strip_prefix("peer:{pid}:")` recovery path in
+/// `memory_access`'s `memory_list` can never let one peer see another's keys.
+/// An empty `peer_id` is still rejected: `peer::{key}` is ambiguous with a
 /// `None`-scope key literally named `:{key}` and would split a namespace.
 /// Similarly, an LLM-supplied key starting with `peer:` is rejected so the tool
 /// layer cannot plant rows that appear to come from a different peer namespace.
@@ -597,12 +615,8 @@ pub(super) fn peer_scoped_key(
                     "peer_id must not be empty (ambiguous with global scope)".to_string(),
                 ));
             }
-            if pid.contains(':') {
-                return Err(KernelOpError::InvalidInput(format!(
-                    "peer_id '{pid}' must not contain ':' (reserved namespace separator)"
-                )));
-            }
-            Ok(format!("peer:{pid}:{key}"))
+            let escaped_pid = escape_peer_id(pid);
+            Ok(format!("peer:{escaped_pid}:{key}"))
         }
         None => Ok(key.to_string()),
     }

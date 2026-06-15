@@ -626,31 +626,50 @@ pub(super) async fn tool_text_to_speech(
             cache.detect_for_capability(librefang_types::media::MediaCapability::TextToSpeech)
         };
 
-        // Google TTS: override LLM-provided voice (e.g. "alloy") with the
-        // configured one — Google doesn't recognise OpenAI voice names.
-        let (effective_voice, effective_language, effective_speed, effective_pitch) =
-            if resolved_provider == Some("google_tts") {
-                if let Some(engine) = tts_engine {
-                    let cfg = &engine.tts_config().google;
-                    (
-                        Some(cfg.voice.clone()),
-                        Some(cfg.language_code.clone()),
-                        Some(cfg.speaking_rate),
-                        Some(cfg.pitch),
-                    )
-                } else {
-                    (None, None, None, None)
-                }
+        // Provider-specific config overrides: inject the operator's configured
+        // defaults when the tool call omitted an explicit value, so the driver
+        // gets the chosen settings rather than its own hard-coded fallback.
+        let (
+            effective_voice,
+            effective_language,
+            effective_speed,
+            effective_pitch,
+            effective_format,
+        ) = if resolved_provider == Some("google_tts") {
+            // Google TTS: override LLM-provided voice (e.g. "alloy") with the
+            // configured one — Google doesn't recognise OpenAI voice names.
+            if let Some(engine) = tts_engine {
+                let cfg = &engine.tts_config().google;
+                (
+                    Some(cfg.voice.clone()),
+                    Some(cfg.language_code.clone()),
+                    Some(cfg.speaking_rate),
+                    Some(cfg.pitch),
+                    None, // Google format handled by its own driver
+                )
             } else {
-                (None, None, None, None)
+                (None, None, None, None, None)
+            }
+        } else if resolved_provider == Some("elevenlabs") {
+            // ElevenLabs: when the tool call omits `format`, inject the config's
+            // `output_format` (default `opus_48000_32`) so the media-driver path
+            // also produces Ogg/Opus for WhatsApp PTT (#6116).
+            let el_format = if format.is_none() {
+                tts_engine.map(|e| e.tts_config().elevenlabs.output_format.clone())
+            } else {
+                None
             };
+            (None, None, None, None, el_format)
+        } else {
+            (None, None, None, None, None)
+        };
 
         let request = librefang_types::media::MediaTtsRequest {
             text: text.to_string(),
             provider: resolved_provider.map(String::from),
             model: input["model"].as_str().map(String::from),
             voice: effective_voice.or_else(|| voice.map(String::from)),
-            format: format.map(String::from),
+            format: format.map(String::from).or(effective_format),
             speed: effective_speed.or_else(|| input["speed"].as_f64().map(|v| v as f32)),
             language: effective_language.or_else(|| input["language"].as_str().map(String::from)),
             pitch: effective_pitch.or_else(|| input["pitch"].as_f64().map(|v| v as f32)),

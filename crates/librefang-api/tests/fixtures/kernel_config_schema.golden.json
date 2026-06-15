@@ -724,6 +724,15 @@
       "format": "uint",
       "minimum": 0.0
     },
+    "mcp_runtime_store": {
+      "description": "Where the `POST/PUT/DELETE /api/mcp/servers` handlers persist a runtime change. `file` (the default) rewrites `config.toml`, preserving the pre-#6113 behaviour. `db` writes the SQLite `mcp_server_configs` table instead and leaves `config.toml` untouched, so MCP servers can be managed at runtime when `config.toml` is read-only (e.g. a Kubernetes ConfigMap — the #6021 motivation). The boot merge already lets DB rows override the file-backed list by name; this knob only selects the write target. Changing it takes effect on the next write — no restart needed.",
+      "default": "file",
+      "allOf": [
+        {
+          "$ref": "#/definitions/McpRuntimeStore"
+        }
+      ]
+    },
     "mcp_servers": {
       "description": "MCP server configurations for external tool integration.",
       "type": "array",
@@ -1098,7 +1107,7 @@
       "default": {
         "cache_ttl_secs": 86400,
         "registry_mirror": "",
-        "base_url": "https://github.com/GQAdonis/librefang-registry"
+        "registry_host": null
       },
       "allOf": [
         {
@@ -1419,7 +1428,8 @@
           "voice_id": "21m00Tcm4TlvDq8ikWAM",
           "model_id": "eleven_monolingual_v1",
           "stability": 0.5,
-          "similarity_boost": 0.75
+          "similarity_boost": 0.75,
+          "output_format": "opus_48000_32"
         },
         "google": {
           "voice": "en-US-Standard-F",
@@ -4127,6 +4137,25 @@
         }
       }
     },
+    "McpRuntimeStore": {
+      "description": "Selects where runtime `/api/mcp/servers` writes are persisted. See [`KernelConfig::mcp_runtime_store`].",
+      "oneOf": [
+        {
+          "description": "Persist writes to `config.toml` (pre-#6113 behaviour). Default.",
+          "type": "string",
+          "enum": [
+            "file"
+          ]
+        },
+        {
+          "description": "Persist writes to the SQLite `mcp_server_configs` table, leaving `config.toml` untouched — for read-only `config.toml` deployments.",
+          "type": "string",
+          "enum": [
+            "db"
+          ]
+        }
+      ]
+    },
     "McpServerConfigEntry": {
       "description": "Configuration entry for an MCP server.\n\nThis is the config.toml representation. The runtime `McpServerConfig` struct is constructed from this during kernel boot.",
       "type": "object",
@@ -5648,20 +5677,23 @@
       }
     },
     "RegistryConfig": {
-      "description": "Registry sync configuration.\n\nConfigure in config.toml: ```toml [registry] cache_ttl_secs = 86400 # Optional: proxy/mirror prefix for users behind the GFW. # All GitHub URLs are prefixed with this value, e.g. #   registry_mirror = \"https://ghproxy.cn\" # turns \"https://github.com/...\" into \"https://ghproxy.cn/https://github.com/...\" registry_mirror = \"\" # Optional: full base URL of the registry repo (without trailing slash). # Replaces the built-in librefang/librefang-registry default entirely. # Empty = use upstream default. base_url = \"https://github.com/GQAdonis/librefang-registry\" ```",
+      "description": "Registry sync configuration.\n\nConfigure in config.toml: ```toml [registry] cache_ttl_secs = 86400 # Optional: proxy/mirror prefix for users behind the GFW. # All GitHub URLs are prefixed with this value, e.g. #   registry_mirror = \"https://ghproxy.cn\" # turns \"https://github.com/...\" into \"https://ghproxy.cn/https://github.com/...\" registry_mirror = \"\" # Optional: full base URL of the forge that hosts the registry repo. # Default unset = GitHub at GQAdonis/librefang-registry (the BossFang fork # default; the owner lives in the REGISTRY_REPO_PATH constant). Set to # consume a Codeberg/Forgejo-hosted registry, e.g. #   registry_host = \"https://codeberg.org\" ```",
       "type": "object",
       "properties": {
-        "base_url": {
-          "description": "Full base URL of the registry repository (no trailing slash). The tarball URL is derived as `{base_url}/archive/refs/heads/main.tar.gz` and the git clone URL as `{base_url}.git`. The tarball prefix (`{repo-name}-main/`) is derived from the URL's last path segment.\n\nBossFang fork default: `https://github.com/GQAdonis/librefang-registry`. Set to `\"\"` to fall back to the historical upstream constants (emergency rollback without recompiling). Set to any other URL to point at a custom fork.",
-          "default": "https://github.com/GQAdonis/librefang-registry",
-          "type": "string"
-        },
         "cache_ttl_secs": {
           "description": "Cache TTL for registry sync in seconds (default: 86400 = 24 hours). The registry is re-downloaded when the local cache is older than this.",
           "default": 86400,
           "type": "integer",
           "format": "uint64",
           "minimum": 0.0
+        },
+        "registry_host": {
+          "description": "Full base URL of the forge hosting the registry repository.\n\nWhen `None` (the default), the registry is fetched from GitHub at the BossFang-owned `GQAdonis/librefang-registry` (the owner/repo is the `REGISTRY_REPO_PATH` constant in `librefang-runtime::registry_sync`). Set to a full base URL such as `\"https://codeberg.org\"` to consume a Codeberg/Forgejo-hosted registry (upstream #6095); the tarball, git-clone, and tarball-prefix values are all derived from it.\n\nThis replaced the fork's earlier `base_url` full-URL knob: the default registry owner now lives in one place (the `REGISTRY_REPO_PATH` constant), and `registry_host` only selects the forge, eliminating the per-merge conflict the parallel `base_url` field caused.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "registry_mirror": {
           "description": "Mirror/proxy prefix for GitHub URLs. When non-empty, all outbound GitHub requests (tarball downloads, git clones, raw content fetches) are prefixed with this value. Useful for users in China Mainland where direct GitHub access is slow or blocked.\n\nExample: `\"https://ghproxy.cn\"` rewrites `https://github.com/...` → `https://ghproxy.cn/https://github.com/...`",
@@ -6196,13 +6228,21 @@
       }
     },
     "SidecarChannelConfig": {
-      "description": "Configuration for a sidecar channel adapter (external process-based).\n\nSidecar adapters allow external processes written in any language to act as channel adapters. Communication uses newline-delimited JSON over stdin/stdout.\n\nConfigure in config.toml: ```toml [[sidecar_channels]] name = \"my-telegram\" command = \"python3\" args = [\"-m\", \"librefang.sidecar.adapters.telegram\"] env = { TELEGRAM_BOT_TOKEN = \"xxx\" } ```",
+      "description": "Configuration for a sidecar channel adapter (external process-based).\n\nSidecar adapters allow external processes written in any language to act as channel adapters. Communication uses newline-delimited JSON over stdin/stdout.\n\nConfigure in config.toml: ```toml [[sidecar_channels]] name = \"my-telegram\" command = \"python3\" args = [\"-m\", \"librefang.sidecar.adapters.telegram\"] env = { TELEGRAM_BOT_TOKEN = \"xxx\" } agent = \"coder\"                  # default agent for this channel available_agents = [\"coder\", \"triage\"]  # optional /agent whitelist ```\n\nThe `agent` key was previously named `default_agent`; the old name is still accepted as a deserialization alias so existing configs keep loading unchanged (#5671).",
       "type": "object",
       "required": [
         "command",
         "name"
       ],
       "properties": {
+        "agent": {
+          "description": "Default agent name for incoming messages on this sidecar channel.\n\nWhen set, seeds the `AgentRouter.channel_defaults` map at boot so inbound messages with no explicit binding route to this agent. This mirrors the `default_agent` field that lived on the per-channel in-process configs (`TelegramConfig`, `WhatsAppConfig`, …) before the sidecar migration (#5241 / #5294). Without this, the resolver falls through to the non-deterministic \"first available agent\" branch in `resolve_or_fallback`, which silently routes traffic to a different agent whenever a new agent is spawned.\n\nRenamed from `default_agent` in #5671; the old key is still accepted via `#[serde(alias = \"default_agent\")]` so existing configs keep deserializing. Remains `Option<String>` for now — mandatory enforcement is a later boot-validation PR.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "allowed_commands": {
           "description": "Whitelist of built-in command names (without the leading `/`) consulted when `command_policy = \"allowlist\"`. Entries may be written with or without a leading slash.",
           "default": [],
@@ -6213,6 +6253,14 @@
         },
         "args": {
           "description": "Arguments to pass to the command.",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "available_agents": {
+          "description": "Whitelist of agent names this channel is allowed to route to.\n\nReserved for the forthcoming `/agent` command (#5671): when non-empty it gates which agents an inbound `/agent <name>` switch may select on this channel. Empty (the default) means \"no whitelist\" — the `/agent` gate is open, preserving today's behaviour. Not yet consulted anywhere; this PR only lands the schema field.",
           "default": [],
           "type": "array",
           "items": {
@@ -6246,14 +6294,6 @@
             {
               "$ref": "#/definitions/SidecarCommandPolicy"
             }
-          ]
-        },
-        "default_agent": {
-          "description": "Default agent name for incoming messages on this sidecar channel.\n\nWhen set, seeds the `AgentRouter.channel_defaults` map at boot so inbound messages with no explicit binding route to this agent. This mirrors the `default_agent` field that lived on the per-channel in-process configs (`TelegramConfig`, `WhatsAppConfig`, …) before the sidecar migration (#5241 / #5294). Without this, the resolver falls through to the non-deterministic \"first available agent\" branch in `resolve_or_fallback`, which silently routes traffic to a different agent whenever a new agent is spawned.",
-          "default": null,
-          "type": [
-            "string",
-            "null"
           ]
         },
         "env": {
@@ -7205,7 +7245,8 @@
             "voice_id": "21m00Tcm4TlvDq8ikWAM",
             "model_id": "eleven_monolingual_v1",
             "stability": 0.5,
-            "similarity_boost": 0.75
+            "similarity_boost": 0.75,
+            "output_format": "opus_48000_32"
           },
           "allOf": [
             {
@@ -7278,6 +7319,11 @@
         "model_id": {
           "description": "Model ID. Default: \"eleven_monolingual_v1\".",
           "default": "eleven_monolingual_v1",
+          "type": "string"
+        },
+        "output_format": {
+          "description": "Output format passed as the `?output_format=` query parameter. Default `\"opus_48000_32\"` — an Ogg/Opus stream that WhatsApp accepts as a PTT voice-note without transcoding; ElevenLabs would otherwise return MP3, which the mautrix-whatsapp/Beeper bridge rejects (#6116). Other values: `mp3_44100_128`, `mp3_22050_32`, `opus_24000_32`, `pcm_16000`, `pcm_44100`, `ulaw_8000`.",
+          "default": "opus_48000_32",
           "type": "string"
         },
         "similarity_boost": {
