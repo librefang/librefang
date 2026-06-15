@@ -13245,6 +13245,13 @@
           "slug": {
             "type": "string",
             "description": "ClawHub skill slug (e.g., \"github-helper\")."
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Requested version (e.g., \"latest\"). The dashboard always sends this;\nthe installer currently resolves to the latest published version, so\nthe field is accepted to keep the request well-formed under\n`deny_unknown_fields` rather than driving version selection yet."
           }
         },
         "additionalProperties": false
