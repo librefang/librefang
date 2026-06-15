@@ -27,7 +27,7 @@ fn sidecar_default_agent<'a>(
     sidecar_channels.iter().find_map(|entry| {
         let entry_channel = entry.channel_type.as_deref().unwrap_or(entry.name.as_str());
         if entry_channel == channel {
-            entry.default_agent.as_deref().filter(|s| !s.is_empty())
+            entry.agent.as_deref().filter(|s| !s.is_empty())
         } else {
             None
         }

@@ -8,7 +8,9 @@ use librefang_runtime::kernel_handle;
 use librefang_types::event::*;
 
 use super::super::PUBLISH_EVENT_DEPTH;
-use super::super::{peer_scoped_key, shared_memory_agent_id, spawn_logged, LibreFangKernel};
+use super::super::{
+    escape_peer_id, peer_scoped_key, shared_memory_agent_id, spawn_logged, LibreFangKernel,
+};
 
 fn resolve_agent_id(agent_id: Option<&str>) -> Result<AgentId, kernel_handle::KernelOpError> {
     match agent_id {
@@ -22,12 +24,11 @@ fn resolve_agent_id(agent_id: Option<&str>) -> Result<AgentId, kernel_handle::Ke
     }
 }
 
-/// Reject a `peer_id` that is empty or contains `:` at the kernel-handle
-/// boundary (#5119). The historical `peer:{pid}:{key}` framing is only
-/// injective when `pid` is non-empty and colon-free; otherwise
-/// `memory_list`'s `strip_prefix("peer:{pid}:")` recovery path lets one peer
-/// see another peer's keys, and an empty `pid` collides with the `None`-scope
-/// global namespace.
+/// Reject a `peer_id` that is empty at the kernel-handle boundary (#5119).
+/// Colons in `pid` are percent-encoded by [`escape_peer_id`] during storage
+/// (#6100), so they no longer collapse the `peer:{pid}:{key}` framing and need
+/// not be rejected. An empty `pid` still collides with the `None`-scope global
+/// namespace (`peer::{key}`) and must be rejected.
 fn reject_bad_peer_id(peer_id: Option<&str>) -> Result<(), kernel_handle::KernelOpError> {
     use kernel_handle::KernelOpError;
     if let Some(pid) = peer_id {
@@ -35,11 +36,6 @@ fn reject_bad_peer_id(peer_id: Option<&str>) -> Result<(), kernel_handle::Kernel
             return Err(KernelOpError::InvalidInput(
                 "peer_id must not be empty (ambiguous with global scope)".to_string(),
             ));
-        }
-        if pid.contains(':') {
-            return Err(KernelOpError::InvalidInput(format!(
-                "peer_id '{pid}' must not contain ':' (reserved namespace separator)"
-            )));
         }
     }
     Ok(())
@@ -192,10 +188,11 @@ impl kernel_handle::MemoryAccess for LibreFangKernel {
         peer_id: Option<&str>,
     ) -> Result<Vec<String>, kernel_handle::KernelOpError> {
         use kernel_handle::KernelOpError;
-        // (#5119) An attacker cannot even issue a colon-bearing / empty
-        // `peer_id` query: `reject_bad_peer_id` fails the call before the
-        // recovery loop runs, so a Slack-style `T1:U2` can never strip
-        // `peer:T1:` off `peer:T1:U2:car` to read peer `T1`'s neighbour.
+        // (#5119 / #6100) A colon-bearing query is now allowed but stays
+        // isolated: the prefix below is built from the *escaped* peer_id, so a
+        // Slack-style `T1:U2` lists under `peer:T1%3AU2:` and can never strip
+        // `peer:T1:` off peer `T1`'s rows (and vice-versa). An empty `peer_id`
+        // is still rejected before the recovery loop runs.
         reject_bad_peer_id(peer_id)?;
         let agent_id = resolve_agent_id(agent_id)?;
         let all_keys = self
@@ -205,7 +202,10 @@ impl kernel_handle::MemoryAccess for LibreFangKernel {
             .map_err(|e| KernelOpError::Internal(format!("Memory list failed: {e}")))?;
         match peer_id {
             Some(pid) => {
-                let prefix = format!("peer:{pid}:");
+                // Build the recovery prefix from the escaped peer_id so it
+                // matches the form `peer_scoped_key` stored under (#6100).
+                let escaped_pid = escape_peer_id(pid);
+                let prefix = format!("peer:{escaped_pid}:");
                 // SECURITY (#5120 read-side residual): the write path now
                 // rejects `peer:`-prefixed keys, but rows planted *before* the
                 // fix can still sit at `peer:{x}:...` in the shared substrate.
