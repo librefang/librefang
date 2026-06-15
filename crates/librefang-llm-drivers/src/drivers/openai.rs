@@ -412,8 +412,15 @@ impl OpenAIDriver {
 
     /// True if this DeepSeek model has thinking mode on by default and the
     /// API **requires** `reasoning_content` to be echoed back on historical
-    /// assistant messages that contain `tool_calls`. Currently matches
-    /// DeepSeek V4 Flash.
+    /// assistant messages that contain `tool_calls`. Matches DeepSeek V4
+    /// Flash and V4 Pro.
+    ///
+    /// V4 Pro was originally excluded here (#4842 assumed it "works
+    /// out-of-the-box"), but production multi-turn tool-call conversations
+    /// on `deepseek-v4-pro` return `400 "The reasoning_content in the
+    /// thinking mode must be passed back to the API."` — i.e. it has the
+    /// same echo requirement as Flash. The original assumption was wrong
+    /// (or DeepSeek changed the contract), so V4 Pro is now matched too.
     ///
     /// Per the DeepSeek thinking-mode docs:
     /// > For turns that do perform tool calls, the `reasoning_content` must
@@ -427,7 +434,7 @@ impl OpenAIDriver {
     /// thinking text round-tripped intact (#4842).
     fn is_deepseek_v4_thinking_with_tools(&self, model: &str) -> bool {
         let m = model.to_lowercase();
-        m.contains("deepseek-v4-flash")
+        m.contains("deepseek-v4-flash") || m.contains("deepseek-v4-pro")
     }
 
     /// Create a driver with additional HTTP headers (e.g. for Copilot IDE auth).
@@ -2911,14 +2918,18 @@ mod tests {
         // Hypothetical pinned variants — substring match keeps us forward-
         // compatible with date-stamped releases like deepseek-v4-flash-0501.
         assert!(driver.is_deepseek_v4_thinking_with_tools("deepseek-v4-flash-0501"));
+        // V4 Pro ALSO requires the echo: production returned deepseek
+        // 400 "reasoning_content in the thinking mode must be passed back"
+        // on multi-turn tool-call conversations. The #4842 "works
+        // out-of-the-box" assumption was wrong.
+        assert!(driver.is_deepseek_v4_thinking_with_tools("deepseek-v4-pro"));
+        assert!(driver.is_deepseek_v4_thinking_with_tools("DeepSeek-V4-Pro"));
+        assert!(driver.is_deepseek_v4_thinking_with_tools("deepseek-v4-pro-0501"));
     }
 
     #[test]
     fn test_is_deepseek_v4_thinking_with_tools_does_not_match_others() {
         let driver = OpenAIDriver::new(String::new(), "https://api.deepseek.com/v1".to_string());
-        // V4 Pro is reported as working out-of-the-box (#4842 workaround
-        // section) — must not be lumped in with V4 Flash.
-        assert!(!driver.is_deepseek_v4_thinking_with_tools("deepseek-v4-pro"));
         assert!(!driver.is_deepseek_v4_thinking_with_tools("deepseek-chat"));
         assert!(!driver.is_deepseek_v4_thinking_with_tools("deepseek-reasoner"));
         assert!(!driver.is_deepseek_v4_thinking_with_tools("deepseek-r1"));

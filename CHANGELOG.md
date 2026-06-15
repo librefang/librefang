@@ -11,6 +11,10 @@ _8 PRs from 2 contributors since v2026.6.10-beta.17._
 
 ### Fixed
 
+- **llm-drivers(deepseek): recognise `deepseek-v4-pro` as a thinking-with-tools model so its `reasoning_content` is echoed back** (@DaBlitzStein).
+  `deepseek-v4-pro` was excluded from `is_deepseek_v4_thinking_with_tools` on the #4842 assumption that it "works out-of-the-box", but production multi-turn tool-call conversations on it return `400 "The reasoning_content in the thinking mode must be passed back to the API."` — the same echo requirement as V4 Flash.
+  A delegated agent running `deepseek-v4-pro` failed every turn once its history contained a tool-call thinking turn, so `agent_send` / shared-queue tasks to it never executed; a sibling agent on the same model only avoided it by never trimming its history.
+  The model is now matched (Flash + Pro) so the `Echo` reasoning-echo policy applies and the thinking text is round-tripped intact. Regression in `test_is_deepseek_v4_thinking_with_tools_matches_v4_flash`.
 - Persist run state outside the state lock so GET /run never spuriously reports running:false (#6083) (@houko)
 - Inject embedded SDK into the sidecar --describe probe so the configure form isn't empty without pip install (#6085) (@houko)
 - Encode qrcode_img_content so the login QR is scannable (#6086) (@houko)
