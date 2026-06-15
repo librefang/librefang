@@ -34,7 +34,7 @@
 //! - 2 — file read error.
 //! - 3 — Component::from_binary rejected the bytes (NOT a Component).
 //! - 4 — `--invoke` mode: load OK but instantiation/invocation failed.
-//!       Smoke treats this as PARTIAL-OK (load proved).
+//!   Smoke treats this as PARTIAL-OK (load proved).
 //!
 //! ## Why not full per-language execute coverage in the smoke?
 //!
