@@ -247,6 +247,7 @@ export {
   pauseHand,
   resumeHand,
   uninstallHand,
+  installHandFromMarketplace,
   setHandSecret,
   updateHandSettings,
   sendHandMessage,
@@ -313,6 +314,7 @@ export {
   // skill workshop pending review (#3328)
   approvePendingCandidate,
   rejectPendingCandidate,
+  proposePendingToRegistry,
   clawhubInstall,
   clawhubCnInstall,
   skillhubInstall,

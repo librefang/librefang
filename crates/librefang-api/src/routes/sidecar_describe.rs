@@ -2,10 +2,12 @@
 //! it prints on stdout. Used at daemon boot to populate the Add-picker
 //! form for each first-party SIDECAR_CATALOG entry.
 
+use librefang_channels::embedded_sdk::pythonpath_with_embedded;
 use librefang_channels::sidecar::{
     format_librefang_sdk_missing_hint, looks_like_librefang_sdk_missing,
 };
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::time::Duration;
 use tokio::process::Command;
 
@@ -38,7 +40,12 @@ pub struct SidecarSchema {
 /// Timeout is 5s — describe should be sub-second; if it hangs (the
 /// adapter's __init__ blocks on a network call before reading argv,
 /// for example) we'd rather skip than block daemon boot.
-pub async fn describe_sidecar(command: &str, args: &[String]) -> Result<SidecarSchema, String> {
+/// `home_dir`: pass `KernelApi::home_dir()`, never a recomputed `LIBREFANG_HOME`.
+pub async fn describe_sidecar(
+    command: &str,
+    args: &[String],
+    home_dir: &Path,
+) -> Result<SidecarSchema, String> {
     let mut full_args: Vec<String> = args.to_vec();
     full_args.push("--describe".into());
 
@@ -47,13 +54,20 @@ pub async fn describe_sidecar(command: &str, args: &[String]) -> Result<SidecarS
     // this flag a hanging adapter would leak after `--describe` returns
     // — the timeout returns to the caller but the child keeps running
     // until it crashes on its own.
-    let fut = Command::new(command)
-        .args(&full_args)
+    let mut cmd = Command::new(command);
+    cmd.args(&full_args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .output();
+        .kill_on_drop(true);
+    // Inject the bundled SDK onto PYTHONPATH so --describe succeeds on python3-only hosts; no-op for non-Python commands or when a real install already wins.
+    let existing_pythonpath = std::env::var("PYTHONPATH").ok();
+    if let Some(composed) =
+        pythonpath_with_embedded(command, home_dir, existing_pythonpath.as_deref())
+    {
+        cmd.env("PYTHONPATH", composed);
+    }
+    let fut = cmd.output();
 
     let out = tokio::time::timeout(Duration::from_secs(5), fut)
         .await

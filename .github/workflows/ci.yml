@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  merge_group:
 
 permissions:
   contents: read
@@ -65,6 +66,21 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
+
+          # Merge queue: the queue branch is the last gate before main. A queued
+          # entry can batch several PRs, so a HEAD~1 diff is unreliable — instead
+          # force every route flag on and run the full suite on all platforms.
+          # This sidesteps the selective diff entirely.
+          if [ "$EVENT_NAME" = "merge_group" ]; then
+            {
+              echo "rust=true"; echo "docs=true"; echo "ci=true"; echo "install=true"
+              echo "full_run=true"; echo "full_test=true"
+              echo "skill_sdk=true"; echo "sidecar_rust=true"
+              echo "crates="
+            } >> "$GITHUB_OUTPUT"
+            echo "merge_group: forcing full run on all platforms"
+            exit 0
+          fi
 
           # Range: PR → base..head, push → just the pushed commit.
           if [ "$EVENT_NAME" = "pull_request" ]; then
@@ -416,29 +432,39 @@ jobs:
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # Same-repo PRs need write to push the auto-codegen commit back to the
-    # PR branch. Fork PRs run with read-only GITHUB_TOKEN regardless of
-    # what we declare here — they fall through to the fail-with-instructions
-    # path below.
+    # Auto-sync the committed generated artifacts (openapi.json, SDKs, schema
+    # baselines) to the source on same-repo PRs: regenerate, and if anything
+    # drifted, commit it back to the PR branch. The push uses WEBSITE_REPO_TOKEN
+    # (a PAT), NOT the default GITHUB_TOKEN — GitHub suppresses workflow runs
+    # for GITHUB_TOKEN pushes to prevent recursion, which would leave the new
+    # head with no CI run and deadlock required-status-checks (the reason the
+    # old [skip ci] auto-commit was removed). The PAT push triggers a fresh
+    # pull_request run that re-verifies and converges in one cycle. Fork PRs
+    # don't receive the secret, and pushes to main aren't auto-committed; both
+    # fall back to the read-only verify-and-fail path, leaving regen to the
+    # author.
+    # Belt-and-suspenders: the push is authenticated by the PAT that
+    # actions/checkout persists into the origin remote, not by GITHUB_TOKEN, so
+    # this scope isn't strictly consumed by it (and GitHub forces GITHUB_TOKEN
+    # read-only on fork PRs regardless). Kept for clarity / any future
+    # GITHUB_TOKEN-based step.
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
-          # Internal PRs only: check out the PR head branch (not the merge
-          # commit) so the auto-codegen step below can `git push` back. Fork
-          # PRs and push events leave `ref` empty so `actions/checkout` falls
-          # back to its default ref — that path never reaches the push branch
-          # and would otherwise fail at fetch (the fork's branch does not
-          # exist in this repo's `origin`).
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref || '' }}
-          # `persist-credentials: true` is the default; we re-state it for
-          # readability. Required for the auto-commit step below.
-          persist-credentials: true
+          # Same-repo PRs: check out the head branch with the PAT so a
+          # regenerated commit can be pushed back AND re-trigger CI. Fork PRs
+          # get an empty secret here (falls back to the read-only token) and
+          # push events check out the pushed ref — both end on the verify-only
+          # path below.
+          token: ${{ secrets.WEBSITE_REPO_TOKEN || github.token }}
+          ref: ${{ github.event.pull_request.head.ref || github.ref }}
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: openapi-drift-${{ hashFiles('**/Cargo.lock') }}
+          shared-key: openapi-drift
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: '3.11'
@@ -461,39 +487,53 @@ jobs:
       # PRs no longer need a manual `cargo xtask schema-check gen` round.
       - name: Regenerate schema baselines
         run: cargo xtask schema-check gen
-      - name: Verify no drift (auto-commit on internal PRs)
+      - name: Sync drift (commit on same-repo PRs) or fail
         env:
-          # Same-repo PR: GITHUB_TOKEN has write scope -> we can push the
-          # regenerated artifacts back to the PR branch.
-          # Fork PR or push event: GITHUB_TOKEN is read-only -> fall back
-          # to the original "fail with reproduce instructions" behaviour.
-          IS_INTERNAL_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
+          PAT: ${{ secrets.WEBSITE_REPO_TOKEN }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          EVENT_NAME: ${{ github.event_name }}
+          IS_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
         run: |
           if git diff --quiet -- openapi.json sdk/ xtask/baselines/; then
             echo "openapi.json, SDKs, and schema baselines are in sync."
             exit 0
           fi
-          if [ "$IS_INTERNAL_PR" = "true" ]; then
-            git config user.name  "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add openapi.json sdk/ xtask/baselines/
-            git commit -m "chore(codegen): auto-regenerate openapi.json + sdk + schema baselines [skip ci]"
-            git push
-            echo "::notice::Auto-committed regenerated openapi.json + sdk/ + xtask/baselines/ to the PR branch."
-            echo "::notice::The [skip ci] marker prevents an immediate re-run; if you want full CI"
-            echo "::notice::on the post-codegen tip, push an empty commit or close+reopen the PR."
-            exit 0
+
+          fail_manual() {
+            echo "::error::openapi.json, generated SDKs, or schema baselines are out of sync with the source code."
+            echo "Regenerate locally and commit the result:"
+            echo "  cargo xtask codegen --openapi"
+            echo "  python3 scripts/codegen-sdks.py"
+            echo "  cargo xtask schema-check gen"
+            echo "Then commit the updated openapi.json, sdk/*, and xtask/baselines/* files."
+            git --no-pager diff --stat -- openapi.json sdk/ xtask/baselines/
+            exit 1
+          }
+
+          # Only auto-commit on same-repo pull_request runs that carry the PAT.
+          # Fork PRs (secret withheld) and push events fall back to verify-and-fail.
+          if [ "$EVENT_NAME" != "pull_request" ] || [ "$IS_FORK" = "true" ] || [ -z "$PAT" ]; then
+            fail_manual
           fi
-          # Fork PR or push to main — fail loudly.
-          echo "::error::openapi.json, generated SDKs, or schema baselines are out of sync with the source code."
-          echo "Reproduce locally:"
-          echo "  cargo xtask codegen --openapi"
-          echo "  python3 scripts/codegen-sdks.py"
-          echo "  cargo xtask schema-check gen"
-          echo "Then commit the regenerated openapi.json, sdk/*, and xtask/baselines/* files."
-          echo "(Fork PRs cannot use the auto-commit path because GITHUB_TOKEN"
-          echo "is read-only on cross-repository pull requests.)"
-          exit 1
+
+          # Loop guard: if the previous commit is already an auto-codegen sync
+          # yet drift persists, generation is non-deterministic — fail rather
+          # than push forever.
+          if git log -1 --pretty=%s | grep -q '^chore(codegen): sync generated artifacts'; then
+            echo "::error::drift persists after an auto-codegen sync commit — generation is non-deterministic. Failing to avoid a push loop."
+            git --no-pager diff --stat -- openapi.json sdk/ xtask/baselines/
+            exit 1
+          fi
+
+          echo "Drift detected on a same-repo PR — committing regenerated artifacts back to '$HEAD_REF'."
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add openapi.json sdk/ xtask/baselines/
+          git commit -m "chore(codegen): sync generated artifacts (openapi.json, SDKs, baselines)"
+          # actions/checkout configured the origin remote with the PAT, so this
+          # push re-triggers CI on the new head (GITHUB_TOKEN pushes would not).
+          git push origin "HEAD:$HEAD_REF"
+          echo "Pushed regenerated artifacts; a fresh CI run will verify the synced commit."
       # Sanity verify that `schema-check gen` produced baselines that
       # match the on-disk schema artifacts — catches a bug in `gen`
       # itself rather than letting drift leak past us.
@@ -596,7 +636,7 @@ jobs:
     needs: changes
     # PR-only: push to main already runs the full test matrix; the smoke
     # adds spawn-a-real-daemon coverage that the in-process tests miss.
-    if: github.event_name == 'pull_request' && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true')
+    if: (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -681,10 +721,18 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      # ubuntu-latest leaves only ~14 GB free; a full-workspace `cargo nextest run --workspace` debug-compiles every lib+bin target (librefang-desktop's static archive alone is large) and overruns it — the linker dies with "No space left on device".
+      # Reclaim ~25 GB by removing preinstalled toolchains this job never uses, mirroring the nix-build job's fix (#6081).
+      - name: Free runner disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/.ghcup
+          sudo docker image prune --all --force
+          df -h /
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: test-unit-${{ hashFiles('**/Cargo.lock') }}
+          shared-key: test-unit
       - name: Install nextest
         uses: taiki-e/install-action@4616abf838e456930a67014fba647f87c185cc6c # nextest
       - name: Ensure dashboard build dir exists
@@ -744,12 +792,20 @@ jobs:
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
+      # ubuntu-latest leaves ~14 GB free; the full-run path compiles every workspace test binary and overruns the disk.
+      - name: Free runner disk space
+        if: steps.gate.outputs.skip != 'true'
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/.ghcup
+          sudo docker image prune --all --force
+          df -h /
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         if: steps.gate.outputs.skip != 'true'
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         if: steps.gate.outputs.skip != 'true'
         with:
-          key: test-ubuntu-${{ hashFiles('**/Cargo.lock') }}
+          shared-key: test-ubuntu
       - name: Install nextest
         if: steps.gate.outputs.skip != 'true'
         uses: taiki-e/install-action@4616abf838e456930a67014fba647f87c185cc6c # nextest
@@ -829,7 +885,7 @@ jobs:
   test-windows:
     name: Test / Windows (shard ${{ matrix.shard }}/2)
     needs: changes
-    if: github.event_name == 'push' && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true')
+    if: (github.event_name == 'push' || github.event_name == 'merge_group') && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true')
     runs-on: windows-latest
     timeout-minutes: 60
     strategy:
@@ -841,7 +897,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: test-windows-${{ hashFiles('**/Cargo.lock') }}
+          shared-key: test-windows
       - name: Install nextest
         uses: taiki-e/install-action@4616abf838e456930a67014fba647f87c185cc6c # nextest
       - name: Ensure dashboard build dir exists
@@ -864,7 +920,7 @@ jobs:
   test-macos:
     name: Test / macOS
     needs: changes
-    if: github.event_name == 'push' && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true')
+    if: (github.event_name == 'push' || github.event_name == 'merge_group') && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true')
     runs-on: macos-latest
     timeout-minutes: 60
     steps:
@@ -872,7 +928,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: test-macos-${{ hashFiles('**/Cargo.lock') }}
+          shared-key: test-macos
       - name: Install nextest
         uses: taiki-e/install-action@4616abf838e456930a67014fba647f87c185cc6c # nextest
       - name: Ensure dashboard build dir exists
@@ -881,3 +937,80 @@ jobs:
         run: |
           echo "Running workspace tests (full run)…"
           cargo nextest run --workspace --no-fail-fast
+
+  # ── Linux aarch64 compile check: runs on PRs ───────────────────────────────────
+  # The x86 Ubuntu shards never exercise aarch64-gated code paths, so an
+  # arch-specific `cfg(target_arch = ...)` break (e.g. the seccomp `getpgrp`
+  # placement in #5929) compiles clean on x86 and only surfaces on an arm
+  # build — historically post-merge, since release.yml is the only arm build.
+  # A native arm64 runner doing `cargo check` catches that class pre-merge for
+  # a fraction of a full test lane's cost. Check (not test): the observed
+  # failures were compile-time, and arm runner minutes stay cheap this way.
+  test-aarch64-build:
+    name: Build / Linux aarch64
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: build-aarch64
+      - name: Ensure dashboard build dir exists
+        run: mkdir -p crates/librefang-api/static/react
+      - name: Install system deps (keyring + Tauri)
+        # Mirror the x86 lanes: keyring → secret-service → libdbus-sys needs
+        # dbus-1.pc on PKG_CONFIG_PATH, and librefang-desktop needs the Tauri
+        # GTK/WebKit stack, or `cargo check --all-targets` fails opaquely.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libdbus-1-dev libsecret-1-dev pkg-config \
+            libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf
+      - name: Cargo check (aarch64-native)
+        run: cargo check --workspace --all-targets
+
+  # ── Fail-closed CI gate: the single required status check ──────────────────────
+  # The `main` ruleset points its required-status-checks at THIS job only, not
+  # the individual lanes. Two reasons:
+  #   1. The required set can't silently drift as lanes are added / renamed —
+  #      a new lane is covered the moment it lands in `needs` below.
+  #   2. A lane that errors out (rather than reporting a clean failure) can't
+  #      slip through as a context that was never listed as required.
+  # `if: always()` so the gate still runs when upstream lanes are skipped by
+  # Detect-Changes; legitimate skips are allowed, but any `failure` /
+  # `cancelled` in the needs graph turns the gate red.
+  ci-gate:
+    name: CI Gate
+    if: always()
+    needs:
+      - changes
+      - no-build-artifacts
+      - quality
+      - skills-wasm-sdk
+      - rust-telegram-sidecar
+      - changelog-attribution
+      - changelog-attribution-full
+      - openapi-drift
+      - security
+      - secrets
+      - install-smoke
+      - live-integration-smoke
+      - agents-claude-pair
+      - test-unit
+      - test-ubuntu
+      - test-aarch64-build
+      - test-windows
+      - test-macos
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any lane failed or was cancelled
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: |
+          echo "::error::CI Gate: one or more lanes failed or were cancelled."
+          exit 1
+      - name: All lanes green or legitimately skipped
+        run: echo "CI Gate green."

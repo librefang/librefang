@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 41;
+const SCHEMA_VERSION: u32 = 43;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -203,6 +203,12 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // recency-by-agent shape is fast against the audit trail (v8
     // only created two separate single-column indexes).
     run_step!(41, migrate_v41);
+    // v42 (#5744 follow-up): goal run persistence in SQLite. Mirrors the
+    // workflow_runs table (v37) so long-horizon goal runs survive a daemon
+    // restart instead of vanishing from the in-memory DashMap.
+    run_step!(42, migrate_v42);
+    // v43 (#6021): mcp_server_configs table for SQLite-backed MCP server config.
+    run_step!(43, migrate_v43);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1603,6 +1609,63 @@ fn migrate_v41(conn: &Connection) -> Result<(), rusqlite::Error> {
         VALUES (41, datetime('now'), 'sessions(agent_id, updated_at) + audit_entries(agent_id, timestamp) composite indexes (audit: sessions-missing-index)');
         ",
     )
+}
+
+/// v42 (#5744 follow-up): goal run persistence in SQLite.
+///
+/// Long-horizon goal runs (`GoalRunner`) previously kept their live run
+/// state in an in-memory DashMap only — a daemon restart lost every active
+/// run with no boot recovery, unlike workflow runs (v37). This table is the
+/// durable mirror of `GoalRunState`: the runner writes it after each
+/// iteration and on stop, and `recover_stale_goal_runs` reads it at boot to
+/// demote runs interrupted by a restart.
+///
+/// `goal_id` is the PRIMARY KEY because at most one run is active per goal
+/// (the runner replaces any prior run for the same goal). `phase` is
+/// constrained to the `GoalRunPhase` string forms so an unknown value can
+/// never round-trip through the table.
+fn migrate_v42(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS goal_runs (
+            goal_id        TEXT PRIMARY KEY,
+            agent_id       TEXT NOT NULL,
+            phase          TEXT NOT NULL CHECK (phase IN ('running','finished','max_iterations_reached','rate_limited','stopped')),
+            iteration      INTEGER NOT NULL DEFAULT 0,
+            max_iterations INTEGER NOT NULL DEFAULT 0,
+            last_progress  INTEGER NOT NULL DEFAULT 0,
+            last_error     TEXT,
+            started_at     TEXT NOT NULL,
+            updated_at     TEXT NOT NULL,
+            created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_goal_runs_phase
+            ON goal_runs(phase);
+        CREATE INDEX IF NOT EXISTS idx_goal_runs_started_at
+            ON goal_runs(started_at DESC);",
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (42, datetime('now'), 'Add goal_runs table for SQLite-backed goal run persistence (#5744)')",
+        [],
+    )?;
+    Ok(())
+}
+
+fn migrate_v43(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS mcp_server_configs (
+            name       TEXT PRIMARY KEY,
+            entry_json TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );",
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (43, datetime('now'), 'Add mcp_server_configs table for SQLite-backed MCP server config (#6021)')",
+        [],
+    )?;
+    Ok(())
 }
 
 fn migrate_v40(conn: &Connection) -> Result<(), rusqlite::Error> {

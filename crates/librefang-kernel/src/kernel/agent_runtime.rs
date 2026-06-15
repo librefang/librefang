@@ -336,6 +336,7 @@ impl LibreFangKernel {
 
                 messages_generation: 0,
                 last_repaired_generation: None,
+                peer_id: None,
             });
 
         // #4976: merge per-agent [compaction] overrides on top of the
@@ -497,6 +498,7 @@ impl LibreFangKernel {
 
                 messages_generation: 0,
                 last_repaired_generation: None,
+                peer_id: None,
             });
         let system_prompt = &entry.manifest.model.system_prompt;
         // Use the agent's actual filtered tools instead of all builtins
@@ -729,7 +731,7 @@ impl LibreFangKernel {
         );
 
         // Bubble the DB-remove failure last so the operator hears about it
-        // (#5117); on success this is a no-op. routes/agents.rs::kill_agent
+        // (#5117); on success this is a no-op. routes/agents/lifecycle.rs::kill_agent
         // maps a non-AgentNotFound KernelError to ApiErrorResponse::internal
         // → HTTP 500, so the DELETE no longer returns a false 200 OK.
         db_remove_result.map_err(KernelError::LibreFang)?;

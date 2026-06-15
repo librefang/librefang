@@ -130,7 +130,20 @@ pub(crate) fn validate_egress_url(url_str: &str, mode: EgressMode) -> Result<(),
 /// helpers reject the same shapes.
 fn host_is_blocked(host: &str) -> bool {
     let lower = host.trim_end_matches('.').to_lowercase();
-    if lower == "localhost" || lower == "metadata.google.internal" {
+    // IMDS hostnames are never a legitimate exporter backend, and
+    // `localhost` / `ip6-localhost` / `ip6-loopback` are loopback
+    // aliases. Kept in step with
+    // `librefang_runtime_mcp::mcp_oauth::is_ssrf_blocked_host` and
+    // `librefang_runtime::web_fetch::check_ssrf`, which block all of these.
+    if matches!(
+        lower.as_str(),
+        "localhost"
+            | "ip6-localhost"
+            | "ip6-loopback"
+            | "metadata.google.internal"
+            | "metadata.aws.internal"
+            | "instance-data"
+    ) {
         return true;
     }
     let ip_str = host
@@ -158,7 +171,10 @@ fn host_is_blocked(host: &str) -> bool {
 /// `host_is_blocked` — link-local is excluded.)
 fn host_is_private_class(host: &str) -> bool {
     let lower = host.trim_end_matches('.').to_lowercase();
-    if lower == "localhost" {
+    if matches!(
+        lower.as_str(),
+        "localhost" | "ip6-localhost" | "ip6-loopback"
+    ) {
         return true;
     }
     let ip_str = host
@@ -183,7 +199,15 @@ fn host_is_private_class(host: &str) -> bool {
 
 fn blocked_v4(v4: Ipv4Addr) -> bool {
     let o = v4.octets();
-    o[0] == 127
+    // Cloud-metadata / unspecified pivots — never a legitimate operator backend.
+    // Present here (the Public-mode block set) but deliberately absent from
+    // `loopback_or_private_v4`, so they are rejected even on the Atropos
+    // loopback path. Kept in step with
+    // `librefang_runtime_mcp::mcp_oauth::is_ssrf_blocked_host`.
+    (o[0] == 0 && o[1] == 0 && o[2] == 0 && o[3] == 0)          // 0.0.0.0 unspecified → loopback
+        || (o[0] == 100 && (o[1] & 0xc0) == 64)                // 100.64.0.0/10 CGNAT (Alibaba IMDS)
+        || (o[0] == 192 && o[1] == 0 && o[2] == 0 && o[3] == 192) // 192.0.0.192 Azure IMDS
+        || o[0] == 127
         || o[0] == 10
         || (o[0] == 172 && (o[1] & 0xf0) == 16)
         || (o[0] == 192 && o[1] == 168)
@@ -236,6 +260,12 @@ mod tests {
         assert!(validate_egress_url("http://localhost:8000", EgressMode::Public).is_err());
         assert!(validate_egress_url("http://127.0.0.1:8000", EgressMode::Public).is_err());
         assert!(validate_egress_url("http://[::1]:8000", EgressMode::Public).is_err());
+        // ip6-localhost / ip6-loopback are loopback aliases (shipped in
+        // /etc/hosts on common distros) that resolve to ::1 at request
+        // time. The mirror (`librefang_runtime_mcp::mcp_oauth::
+        // is_ssrf_blocked_host`) blocks both; this module must too.
+        assert!(validate_egress_url("http://ip6-localhost:8000", EgressMode::Public).is_err());
+        assert!(validate_egress_url("http://ip6-loopback:8000", EgressMode::Public).is_err());
     }
 
     #[test]
@@ -247,6 +277,30 @@ mod tests {
         assert!(
             validate_egress_url("http://metadata.google.internal/", EgressMode::Public).is_err()
         );
+    }
+
+    #[test]
+    fn rejects_metadata_pivots_that_diverged_from_the_mirror() {
+        // These were missing from the block set, diverging from the
+        // `librefang_runtime_mcp` helper this module promises to mirror. Each is
+        // a metadata/loopback pivot that must be rejected in BOTH modes —
+        // including the Atropos loopback path, since none are RFC-1918 private.
+        for url in [
+            "http://0.0.0.0:8000/",          // unspecified → routes to loopback
+            "http://100.100.100.200/",       // Alibaba Cloud IMDS (100.64/10 CGNAT)
+            "http://192.0.0.192/",           // Azure IMDS alternative endpoint
+            "http://metadata.aws.internal/", // AWS IMDS hostname
+            "http://instance-data/",         // AWS IMDS hostname alias
+        ] {
+            assert!(
+                validate_egress_url(url, EgressMode::Public).is_err(),
+                "Public mode must reject {url}"
+            );
+            assert!(
+                validate_egress_url(url, EgressMode::LoopbackOrPrivate).is_err(),
+                "Atropos/loopback mode must also reject {url}"
+            );
+        }
     }
 
     #[test]
@@ -276,6 +330,16 @@ mod tests {
         );
         assert!(
             validate_egress_url("http://192.168.1.42:8000/", EgressMode::LoopbackOrPrivate).is_ok()
+        );
+        // The ::1 aliases are loopback-class like `localhost`, so the
+        // Atropos loopback path accepts them (matching the mirror's
+        // non-metadata classification).
+        assert!(
+            validate_egress_url("http://ip6-localhost:8000/", EgressMode::LoopbackOrPrivate)
+                .is_ok()
+        );
+        assert!(
+            validate_egress_url("http://ip6-loopback:8000/", EgressMode::LoopbackOrPrivate).is_ok()
         );
     }
 

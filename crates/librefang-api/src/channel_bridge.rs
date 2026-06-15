@@ -40,7 +40,7 @@ fn sanitize_channel_error(err: &str) -> String {
     } else {
         format!(
             "Something went wrong: please try again. (ref: {})",
-            &err[..err.len().min(80)]
+            safe_truncate_str(err, 80)
         )
     }
 }
@@ -311,6 +311,7 @@ fn tr_progress_failed(language: &str) -> &'static str {
         "ja" => "失敗",
         "de" => "fehlgeschlagen",
         "fr" => "échoué",
+        "uk" => "не вдалося",
         _ => "failed",
     }
 }
@@ -2509,11 +2510,17 @@ pub async fn start_channel_bridge_with_config(
         started_at: Instant::now(),
     };
 
-    // (adapter, default_agent_name, account_id) — `account_id` is
-    // always None because `SidecarChannelConfig` carries no such
-    // field (sidecars surface their own per-instance id via env
-    // vars like `TEAMS_ACCOUNT_ID`). The triple stays for the
-    // downstream router-population loop's signature.
+    // (adapter, default_agent_name, account_id) — `account_id` is the
+    // sidecar's config `name`, which qualifies the per-bot routing key
+    // (#5955). Two Telegram sidecars share the `"telegram"` channel
+    // type, so without a distinct `account_id` the downstream
+    // router-population loop would key both under the bare `"telegram"`
+    // default (last-writer-wins) and the `metadata["account_id"]`
+    // resolution path in `bridge.rs` would collapse a `/agent`
+    // selection across every bot of the same platform. The sidecar
+    // reader loop stamps the matching `metadata["account_id"]` from the
+    // same `name` (`librefang-channels/src/sidecar.rs`), so the
+    // registration key and the resolution key line up.
     #[allow(clippy::type_complexity)]
     let mut adapters: Vec<(Arc<dyn ChannelAdapter>, Option<String>, Option<String>)> = Vec::new();
 
@@ -2547,7 +2554,17 @@ pub async fn start_channel_bridge_with_config(
         // the non-deterministic "first available agent" branch in
         // `resolve_or_fallback`, silently routing traffic to whichever agent
         // happens to be first in the registry iteration order.
-        adapters.push((adapter, sidecar_config.default_agent.clone(), None));
+        // #5955 — qualify each sidecar under its own `name` so per-bot
+        // isolation (PR #5688) actually engages. `None` here keyed every
+        // Telegram sidecar under the bare `"telegram"` default, so the
+        // last-registered bot won every chat and `/agent` selections
+        // leaked across bots. Must match the `metadata["account_id"]`
+        // the sidecar reader loop stamps from the same `name`.
+        adapters.push((
+            adapter,
+            sidecar_config.agent.clone(),
+            Some(sidecar_config.name.clone()),
+        ));
     }
 
     if adapters.is_empty() {
@@ -2785,7 +2802,7 @@ pub async fn reload_channels_from_disk(
     // None immediately, then tear down the old instance.
     //
     // #5142: `Arc::try_unwrap` only yields `&mut` when no other strong ref
-    // exists — but `routes/agents.rs::push_message` does
+    // exists — but `routes/agents/messaging.rs::push_message` does
     // `state.bridge_manager.load_full()` and holds the Arc across an `.await`
     // on `push_message`, so on a busy channel `try_unwrap` returns `Err` and
     // (pre-#5142) the graceful `stop()` was skipped entirely, leaking the old
@@ -2882,6 +2899,20 @@ mod tests {
         assert!(
             msg.contains("No pending approval matching 'deadbeef'"),
             "no-audit-hit branch must surface the not-found message verbatim, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn sanitize_channel_error_does_not_panic_on_multibyte_boundary() {
+        // The generic fallback used to slice the error at byte 80, which panics
+        // when byte 80 lands inside a multi-byte UTF-8 codepoint (localized
+        // provider errors, CJK, emoji). Build an error that hits the fallback
+        // branch, exceeds 80 bytes, and has a 2-byte char straddling byte 80.
+        let err = format!("{}é末", "x".repeat(79));
+        let out = sanitize_channel_error(&err);
+        assert!(
+            out.starts_with("Something went wrong"),
+            "must hit the fallback branch, got: {out}"
         );
     }
 
@@ -3195,6 +3226,7 @@ mod tests {
         assert_eq!(tr_progress_failed("zh-CN"), "失败");
         assert_eq!(tr_progress_failed("zh"), "失败");
         assert_eq!(tr_progress_failed("ja"), "失敗");
+        assert_eq!(tr_progress_failed("uk"), "не вдалося");
         // Unknown language falls back to English.
         assert_eq!(tr_progress_failed("xx"), "failed");
     }

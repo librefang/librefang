@@ -2,17 +2,17 @@ use librefang_api::routes::sidecar_describe::{describe_sidecar, SidecarSchema};
 
 #[tokio::test]
 async fn describe_telegram_returns_schema_or_skips_when_sdk_missing() {
+    let home = tempfile::tempdir().unwrap();
     let result = describe_sidecar(
         "python3",
         &["-m".into(), "librefang.sidecar.adapters.telegram".into()],
+        home.path(),
     )
     .await;
     let schema: SidecarSchema = match result {
         Ok(s) => s,
-        // Local dev without `pip install -e sdk/python` is a valid state;
-        // skip rather than fail so CI without the SDK works.
         Err(e) => {
-            eprintln!("describe failed (SDK not installed?): {e}");
+            eprintln!("describe failed (no usable python3?): {e}");
             return;
         }
     };
@@ -28,8 +28,13 @@ async fn describe_telegram_returns_schema_or_skips_when_sdk_missing() {
 
 #[tokio::test]
 async fn describe_failing_command_returns_err() {
-    let result =
-        describe_sidecar("python3", &["-c".into(), "import sys; sys.exit(2)".into()]).await;
+    let home = tempfile::tempdir().unwrap();
+    let result = describe_sidecar(
+        "python3",
+        &["-c".into(), "import sys; sys.exit(2)".into()],
+        home.path(),
+    )
+    .await;
     assert!(result.is_err());
 }
 
@@ -44,12 +49,14 @@ async fn describe_missing_sdk_returns_actionable_install_hint() {
     let stderr_payload = "Error while finding module specification for \
          'librefang.sidecar.adapters.telegram' (ModuleNotFoundError: \
          No module named 'librefang')";
+    let home = tempfile::tempdir().unwrap();
     let result = describe_sidecar(
         "python3",
         &[
             "-c".into(),
             format!("import sys; sys.stderr.write({stderr_payload:?}); sys.exit(1)"),
         ],
+        home.path(),
     )
     .await;
     let err = result.expect_err("missing-SDK shape must surface as Err");
@@ -79,15 +86,17 @@ async fn describe_missing_sdk_returns_actionable_install_hint() {
 /// Rust FEISHU_STATIC_FIELDS compile-time fallback.
 #[tokio::test]
 async fn describe_feishu_returns_schema_or_skips_when_sdk_missing() {
+    let home = tempfile::tempdir().unwrap();
     let result = describe_sidecar(
         "python3",
         &["-m".into(), "librefang.sidecar.adapters.feishu".into()],
+        home.path(),
     )
     .await;
     let schema: SidecarSchema = match result {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("describe failed (SDK not installed?): {e}");
+            eprintln!("describe failed (no usable python3?): {e}");
             return;
         }
     };
@@ -135,6 +144,7 @@ async fn describe_other_failure_modes_keep_raw_stderr() {
     // for a typo in its own code) must NOT trigger the install hint —
     // that would mask real bugs. The raw stderr should pass through
     // verbatim so the operator sees the actual problem.
+    let home = tempfile::tempdir().unwrap();
     let result = describe_sidecar(
         "python3",
         &[
@@ -142,6 +152,7 @@ async fn describe_other_failure_modes_keep_raw_stderr() {
             "import sys; sys.stderr.write('ImportError: cannot import name foo'); sys.exit(1)"
                 .into(),
         ],
+        home.path(),
     )
     .await;
     let err = result.expect_err("non-SDK failure must surface as Err");

@@ -1,10 +1,11 @@
 use librefang_types::agent::AgentManifest;
 use regex_lite::Regex;
+use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 const ROUTING_EXCLUDED_TEMPLATES: &[&str] = &["assistant"];
 const GENERIC_ENGLISH_WORDS: &[&str] = &[
@@ -53,10 +54,69 @@ const GENERIC_ENGLISH_WORDS: &[&str] = &[
     "writing",
 ];
 
+/// A template routing rule, owned so it can be loaded from TOML at runtime
+/// rather than baked into the binary as `&'static`. `strong` / `weak` are
+/// `(label, regex)` pairs; a strong hit scores [`EXPLICIT_ALIAS_WEIGHT`], a
+/// weak hit [`WEAK_PHRASE_WEIGHT`].
+#[derive(Debug, Clone)]
 struct RouteRule {
-    target: &'static str,
-    strong: &'static [(&'static str, &'static str)],
-    weak: &'static [(&'static str, &'static str)],
+    target: String,
+    strong: Vec<(String, String)>,
+    weak: Vec<(String, String)>,
+}
+
+/// Embedded default routing rules — the single source of truth for the
+/// built-in specialist routes. Operators override per-target via
+/// `$LIBREFANG_HOME/registry/templates/routing.toml` (see [`build_template_rules`]).
+const DEFAULT_ROUTING_TOML: &str = include_str!("../default_routing.toml");
+
+/// Serde shape for one `[[template]]` entry in a routing.toml.
+#[derive(Debug, Clone, Deserialize)]
+struct RouteRuleToml {
+    target: String,
+    #[serde(default)]
+    strong: Vec<LabeledPattern>,
+    #[serde(default)]
+    weak: Vec<LabeledPattern>,
+    /// `enabled = false` removes a default rule of the same `target` from
+    /// routing (the only way to delete a bundled rule via an override file).
+    #[serde(default = "default_enabled")]
+    enabled: bool,
+}
+
+/// Serde shape for one `{ label, regex }` pattern.
+#[derive(Debug, Clone, Deserialize)]
+struct LabeledPattern {
+    label: String,
+    regex: String,
+}
+
+/// Serde shape for a whole routing.toml file.
+#[derive(Debug, Clone, Deserialize, Default)]
+struct RoutingTomlFile {
+    #[serde(default)]
+    template: Vec<RouteRuleToml>,
+}
+
+fn default_enabled() -> bool {
+    true
+}
+
+impl RouteRuleToml {
+    /// Flatten the serde shape into the owned `RouteRule` used by routing.
+    fn into_rule(self) -> RouteRule {
+        let map = |patterns: Vec<LabeledPattern>| {
+            patterns
+                .into_iter()
+                .map(|p| (p.label, p.regex))
+                .collect::<Vec<_>>()
+        };
+        RouteRule {
+            target: self.target,
+            strong: map(self.strong),
+            weak: map(self.weak),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -107,7 +167,9 @@ const SEMANTIC_ONLY_THRESHOLD: f32 = 0.55;
 #[derive(Debug, Clone)]
 struct HandRouteCacheEntry {
     home_dir: Option<String>,
-    candidates: Vec<HandRouteCandidate>,
+    // `Arc` so per-message `hand_route_candidates()` hands out a refcount bump
+    // instead of deep-cloning the candidate Vec on every routing call.
+    candidates: Arc<Vec<HandRouteCandidate>>,
 }
 
 static HAND_ROUTE_CACHE: OnceLock<Mutex<Option<HandRouteCacheEntry>>> = OnceLock::new();
@@ -129,21 +191,21 @@ pub fn invalidate_hand_route_cache() {
     }
 }
 
-fn hand_route_candidates() -> Vec<HandRouteCandidate> {
+fn hand_route_candidates() -> Arc<Vec<HandRouteCandidate>> {
     let home_dir = resolve_hand_route_home_dir();
     let home_dir_key = Some(home_dir.to_string_lossy().to_string());
     let cache = HAND_ROUTE_CACHE.get_or_init(|| Mutex::new(None));
     let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref cached) = *guard {
         if cached.home_dir == home_dir_key {
-            return cached.candidates.clone();
+            return Arc::clone(&cached.candidates);
         }
     }
 
-    let candidates = build_hand_route_candidates(Some(&home_dir));
+    let candidates = Arc::new(build_hand_route_candidates(Some(&home_dir)));
     *guard = Some(HandRouteCacheEntry {
         home_dir: home_dir_key,
-        candidates: candidates.clone(),
+        candidates: Arc::clone(&candidates),
     });
     candidates
 }
@@ -266,320 +328,124 @@ fn hand_route_candidate_from_definition(
     }
 }
 
-const TEMPLATE_RULES: &[RouteRule] = &[
-    RouteRule {
-        target: "hello-world",
-        strong: &[
-            ("hello", r"\bhello\b|\bhi\b|\bhey\b|\bgreet\b|\bwelcome\b"),
-            ("打招呼", r"打个招呼|欢迎词|自我介绍|介绍你自己|你好"),
-        ],
-        weak: &[],
-    },
-    RouteRule {
-        target: "coder",
-        strong: &[
-            (
-                "implement",
-                r"\bimplement\b|\bbuild\b|\brefactor\b|\bpatch\b",
-            ),
-            ("写代码", r"写代码|实现功能|补丁|脚本|编码|重构|开发"),
-        ],
-        weak: &[
-            ("code", r"\bcode\b|\bfunction\b|\bapi\b"),
-            ("代码", r"代码|程序|模块|接口"),
-        ],
-    },
-    RouteRule {
-        target: "debugger",
-        strong: &[
-            ("debug", r"\bdebug\b|traceback|stack trace"),
-            (
-                "排查报错",
-                r"报错|异常|错误日志|定位根因|排查 bug|故障排查|崩溃",
-            ),
-        ],
-        weak: &[("bug", r"\bbug\b"), ("日志", r"日志|失败原因|根因")],
-    },
-    RouteRule {
-        target: "test-engineer",
-        strong: &[
-            (
-                "test",
-                r"\btest(?:s|ing)?\b|unit test|integration test|regression",
-            ),
-            (
-                "测试",
-                r"测试用例|单元测试|集成测试|回归测试|覆盖率|验收测试",
-            ),
-        ],
-        weak: &[("验证", r"验证|测试")],
-    },
-    RouteRule {
-        target: "code-reviewer",
-        strong: &[
-            (
-                "code review",
-                r"code review|review this diff|review this pr",
-            ),
-            ("代码审查", r"代码审查|评审这个改动|审查代码|找回归风险"),
-        ],
-        weak: &[("diff", r"\bdiff\b|\bpr\b|\breview\b")],
-    },
-    RouteRule {
-        target: "architect",
-        strong: &[
-            (
-                "architecture",
-                r"architecture|system design|technical design",
-            ),
-            (
-                "架构设计",
-                r"架构设计|模块划分|接口设计|技术方案|演进路线|系统设计",
-            ),
-        ],
-        weak: &[("边界", r"边界|拓扑|模块")],
-    },
-    RouteRule {
-        target: "security-auditor",
-        strong: &[
-            (
-                "security",
-                r"security|vulnerability|threat model|xss|csrf|sql injection",
-            ),
-            (
-                "安全审计",
-                r"安全审计|漏洞|攻击面|鉴权|权限提升|sql注入|合规风险",
-            ),
-        ],
-        weak: &[("安全", r"安全|认证|授权|加密")],
-    },
-    RouteRule {
-        target: "devops-lead",
-        strong: &[
-            (
-                "deploy",
-                r"\bdeploy\b|ci/cd|kubernetes|docker|helm|infra|sre",
-            ),
-            (
-                "部署运维",
-                r"部署|上线|发布流程|监控告警|容器|k8s|devops|基础设施",
-            ),
-        ],
-        weak: &[("ops", r"运维平台|集群|流水线")],
-    },
-    RouteRule {
-        target: "researcher",
-        strong: &[
-            ("research", r"\bresearch\b|look up|fact check|latest"),
-            ("调研", r"调研|研究|查资料|搜集来源|最新进展|事实核查"),
-        ],
-        weak: &[("来源", r"来源|资料|背景|现状"), ("对比", r"对比")],
-    },
-    RouteRule {
-        target: "analyst",
-        strong: &[
-            (
-                "analysis",
-                r"business analysis|competitive analysis|trend analysis",
-            ),
-            (
-                "业务分析",
-                r"竞品分析|趋势分析|报表分析|指标分析|漏斗分析|商业分析",
-            ),
-        ],
-        weak: &[("分析", r"分析|指标|趋势|报表")],
-    },
-    RouteRule {
-        target: "data-scientist",
-        strong: &[
-            (
-                "ml",
-                r"machine learning|regression|classification|forecast model|a/?b test",
-            ),
-            (
-                "数据科学",
-                r"数据科学|统计建模|回归分析|分类模型|实验设计|预测模型",
-            ),
-        ],
-        weak: &[("统计", r"统计|特征工程|建模")],
-    },
-    RouteRule {
-        target: "planner",
-        strong: &[
-            ("plan", r"\bplan\b|roadmap|timeline|milestone"),
-            (
-                "项目计划",
-                r"项目计划|里程碑|排期|执行计划|实施计划|三周计划|任务拆解|优先级",
-            ),
-        ],
-        weak: &[("依赖", r"依赖|风险|计划")],
-    },
-    RouteRule {
-        target: "writer",
-        strong: &[
-            ("writing", r"write an article|blog post|rewrite|polish"),
-            ("写作", r"写一篇|起草文章|改写|润色|文案|写作"),
-        ],
-        weak: &[("内容创作", r"文章|博客|内容创作|内容策划|文章草稿")],
-    },
-    RouteRule {
-        target: "tutor",
-        strong: &[
-            (
-                "teach",
-                r"teach me|explain step by step|lesson plan|tutor me",
-            ),
-            (
-                "教学辅导",
-                r"教我|讲解这个概念|一步一步解释|辅导学习|辅导功课|作业辅导",
-            ),
-        ],
-        weak: &[("练习", r"练习题|知识讲解|学习计划|教学")],
-    },
-    RouteRule {
-        target: "doc-writer",
-        strong: &[
-            ("docs", r"\bdocs?\b|readme|api docs|documentation"),
-            (
-                "技术文档",
-                r"技术文档|操作手册|接口文档|教程文档|架构文档|说明文档",
-            ),
-        ],
-        weak: &[("README", r"readme|文档")],
-    },
-    RouteRule {
-        target: "translator",
-        strong: &[
-            ("translate", r"\btranslate\b|\btranslation\b|localization"),
-            ("翻译", r"翻译|本地化|中译英|英译中|日译中|术语统一"),
-        ],
-        weak: &[("译", r"译成|翻成")],
-    },
-    RouteRule {
-        target: "email-assistant",
-        strong: &[
-            ("email", r"\bemail\b|\bmail\b|draft reply"),
-            ("邮件", r"邮件草稿|回复邮件|收件箱|邮件总结|邮件跟进"),
-        ],
-        weak: &[("邮箱", r"邮箱|邮件")],
-    },
-    RouteRule {
-        target: "meeting-assistant",
-        strong: &[
-            ("meeting", r"meeting notes|agenda|action items"),
-            ("会议", r"会议纪要|会议议程|行动项|会前准备|会后总结"),
-        ],
-        weak: &[("纪要", r"会议|纪要|议程")],
-    },
-    RouteRule {
-        target: "social-media",
-        strong: &[
-            (
-                "social",
-                r"social media|twitter|linkedin post|content calendar",
-            ),
-            ("社媒", r"社交媒体|发帖|推文|微博|小红书|内容日历"),
-        ],
-        weak: &[("帖子", r"帖子|社媒")],
-    },
-    RouteRule {
-        target: "sales-assistant",
-        strong: &[
-            ("sales", r"sales outreach|crm|pipeline|prospect"),
-            ("销售", r"销售跟进|客户开发|销售线索|商机|管道管理|crm"),
-        ],
-        weak: &[("客户", r"销售|客户跟进")],
-    },
-    RouteRule {
-        target: "customer-support",
-        strong: &[
-            ("support", r"support ticket|customer support|faq reply"),
-            ("客服", r"客服回复|投诉处理|工单|售后|客户支持"),
-        ],
-        weak: &[("工单", r"客服|工单|售后")],
-    },
-    RouteRule {
-        target: "recruiter",
-        strong: &[
-            (
-                "recruiting",
-                r"resume|curriculum vitae|job description|candidate",
-            ),
-            ("招聘", r"招聘|简历筛选|岗位描述|候选人|面试"),
-        ],
-        weak: &[("简历", r"简历|面试|岗位")],
-    },
-    RouteRule {
-        target: "legal-assistant",
-        strong: &[
-            ("legal", r"contract|terms of service|privacy policy|nda"),
-            ("法务", r"法律|合同|条款|合规|法务|隐私政策"),
-        ],
-        weak: &[("协议", r"协议|免责声明")],
-    },
-    RouteRule {
-        target: "personal-finance",
-        strong: &[
-            ("finance", r"budget|expense|cash flow|asset allocation"),
-            ("财务", r"财务规划|预算|支出分析|现金流|储蓄计划|理财"),
-        ],
-        weak: &[("花销", r"预算|花销|财务")],
-    },
-    RouteRule {
-        target: "recipe-assistant",
-        strong: &[
-            ("recipe", r"recipe|meal plan|ingredient substitut|portion"),
-            ("食谱", r"食谱|菜谱|做菜|烹饪|膳食计划|配料替换"),
-        ],
-        weak: &[("烹饪", r"菜|做饭|食材|烹饪")],
-    },
-    RouteRule {
-        target: "travel-planner",
-        strong: &[
-            ("travel", r"travel itinerary|trip plan|flight|hotel"),
-            ("旅行", r"行程规划|旅行|旅游计划|机票酒店|路线安排"),
-        ],
-        weak: &[("出行", r"出行|航班|酒店|景点")],
-    },
-    RouteRule {
-        target: "health-tracker",
-        strong: &[
-            ("health", r"health tracker|fitness plan|diet log|sleep"),
-            ("健康", r"健康记录|健身计划|饮食追踪|睡眠|体重变化"),
-        ],
-        weak: &[("健康跟踪", r"健康|运动|饮食|睡眠|体重|用药")],
-    },
-    RouteRule {
-        target: "home-automation",
-        strong: &[
-            ("smart home", r"home assistant|smart home|iot"),
-            ("智能家居", r"智能家居|自动化场景|传感器|设备联动"),
-        ],
-        weak: &[("设备", r"家庭自动化|设备|iot")],
-    },
-    RouteRule {
-        target: "ops",
-        strong: &[
-            (
-                "incident",
-                r"incident response|service status|restore service",
-            ),
-            ("系统运维", r"系统状态|故障恢复|运行诊断|服务异常|恢复服务"),
-        ],
-        weak: &[("状态", r"状态检查|运行状态|故障")],
-    },
-    RouteRule {
-        target: "orchestrator",
-        strong: &[
-            (
-                "orchestrate",
-                r"orchestrate|delegate|multi-agent|multi step",
-            ),
-            ("复杂协调", r"多代理|多个专家|复杂任务|拆成子任务|协调执行"),
-        ],
-        weak: &[("编排", r"编排|协作|分工")],
-    },
-];
+// ── Template routing: data-driven from default_routing.toml + override ───
+
+/// Cached merged template routing rules. Invalidated alongside
+/// `MANIFEST_CACHE` and `HAND_ROUTE_CACHE` on hot-reload.
+#[derive(Debug, Clone)]
+struct TemplateRuleCacheEntry {
+    home_dir: Option<String>,
+    // `Arc` so the per-message `template_rules()` hands out a cheap refcount
+    // bump instead of deep-cloning ~30 rules (each with several owned Strings)
+    // on every inbound routing call.
+    rules: Arc<Vec<RouteRule>>,
+}
+
+static TEMPLATE_RULE_CACHE: OnceLock<Mutex<Option<TemplateRuleCacheEntry>>> = OnceLock::new();
+
+/// Invalidate the template rule cache (call alongside
+/// [`invalidate_manifest_cache`] / [`invalidate_hand_route_cache`]).
+pub fn invalidate_template_rule_cache() {
+    if let Some(cache) = TEMPLATE_RULE_CACHE.get() {
+        if let Ok(mut guard) = cache.lock() {
+            *guard = None;
+        }
+    }
+}
+
+/// Resolve the active template routing rules: the embedded defaults merged
+/// with any operator override at
+/// `$LIBREFANG_HOME/registry/templates/routing.toml`. Cached per home dir;
+/// rebuilt on hot-reload via [`invalidate_template_rule_cache`].
+fn template_rules() -> Arc<Vec<RouteRule>> {
+    // Template rules share the router home dir with hand routing.
+    let home_dir = resolve_hand_route_home_dir();
+    let home_dir_key = Some(home_dir.to_string_lossy().to_string());
+    let cache = TEMPLATE_RULE_CACHE.get_or_init(|| Mutex::new(None));
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(ref cached) = *guard {
+        if cached.home_dir == home_dir_key {
+            return Arc::clone(&cached.rules);
+        }
+    }
+    let rules = Arc::new(build_template_rules(Some(&home_dir)));
+    *guard = Some(TemplateRuleCacheEntry {
+        home_dir: home_dir_key,
+        rules: Arc::clone(&rules),
+    });
+    rules
+}
+
+/// Build the merged rule set: embedded defaults first (in file order, which
+/// the scoring tie-break relies on), then operator overrides applied by
+/// `target` — same target replaces in place (preserving position), a new
+/// target appends, `enabled = false` removes. A missing override file leaves
+/// the defaults untouched; an unreadable / unparseable file is logged at WARN
+/// and the defaults are used, so routing never breaks on a bad override.
+fn build_template_rules(home_dir: Option<&Path>) -> Vec<RouteRule> {
+    let mut rules: Vec<RouteRule> = parse_routing_toml(DEFAULT_ROUTING_TOML)
+        .unwrap_or_else(|e| {
+            // The bundled default is a compile-time asset; a parse failure
+            // means the binary itself is broken. Surface it loudly but keep
+            // routing alive with an empty set rather than panicking the daemon.
+            tracing::error!(error = %e, "Embedded default_routing.toml failed to parse");
+            Vec::new()
+        })
+        .into_iter()
+        // Honor `enabled = false` in the bundled default too, so the field has
+        // one consistent meaning ("drop this rule") on both load paths.
+        .filter(|entry| entry.enabled)
+        .map(RouteRuleToml::into_rule)
+        .collect();
+
+    let Some(home_dir) = home_dir else {
+        return rules;
+    };
+    let path = home_dir
+        .join("registry")
+        .join("templates")
+        .join("routing.toml");
+    let content = match fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return rules,
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "Failed to read routing.toml override; using bundled default rules",
+            );
+            return rules;
+        }
+    };
+    let overrides = match parse_routing_toml(&content) {
+        Ok(overrides) => overrides,
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "Failed to parse routing.toml override; using bundled default rules",
+            );
+            return rules;
+        }
+    };
+
+    for entry in overrides {
+        match rules.iter().position(|r| r.target == entry.target) {
+            Some(pos) if entry.enabled => rules[pos] = entry.into_rule(),
+            Some(pos) => {
+                rules.remove(pos);
+            }
+            None if entry.enabled => rules.push(entry.into_rule()),
+            None => {} // enabled = false on a non-existent target: no-op
+        }
+    }
+    rules
+}
+
+/// Parse a routing.toml document into its `[[template]]` entries.
+fn parse_routing_toml(content: &str) -> Result<Vec<RouteRuleToml>, toml::de::Error> {
+    toml::from_str::<RoutingTomlFile>(content).map(|f| f.template)
+}
 
 /// Minimum score required for a hand match to be considered. A single weak
 /// keyword hit (score 1) is too noisy — require at least one strong hit (3)
@@ -598,7 +464,7 @@ pub fn auto_select_hand(
 ) -> HandSelection {
     let mut scored: Vec<(usize, String, Vec<String>)> = Vec::new();
 
-    for candidate in hand_route_candidates() {
+    for candidate in hand_route_candidates().iter() {
         let strong_hits: Vec<String> = candidate
             .strong_phrases
             .iter()
@@ -654,18 +520,19 @@ pub fn auto_select_template(
 ) -> TemplateSelection {
     let normalized = message.to_lowercase();
     let metadata_match = auto_select_template_from_metadata(message, agents_dir, semantic_scores);
-    let mut scored: Vec<(usize, &'static str, Vec<&'static str>)> = Vec::new();
+    let rules = template_rules();
+    let mut scored: Vec<(usize, String, Vec<String>)> = Vec::new();
 
-    for rule in TEMPLATE_RULES {
-        let strong_hits = matched_labels(message, rule.strong);
-        let weak_hits = matched_labels(message, rule.weak);
-        // TEMPLATE_RULES are hand-curated (equivalent to explicit aliases)
+    for rule in rules.iter() {
+        let strong_hits = matched_labels(message, &rule.strong);
+        let weak_hits = matched_labels(message, &rule.weak);
+        // Template rules are hand-curated (equivalent to explicit aliases)
         let mut score =
             strong_hits.len() * EXPLICIT_ALIAS_WEIGHT + weak_hits.len() * WEAK_PHRASE_WEIGHT;
 
         // Blend semantic similarity when available
         if let Some(scores) = semantic_scores {
-            if let Some(&sim) = scores.get(rule.target) {
+            if let Some(&sim) = scores.get(&rule.target) {
                 let bonus = (sim * MAX_SEMANTIC_BONUS).round() as usize;
                 score += bonus;
             }
@@ -674,18 +541,18 @@ pub fn auto_select_template(
         if score > 0 {
             let mut hits = strong_hits;
             hits.extend(weak_hits);
-            scored.push((score, rule.target, hits));
+            scored.push((score, rule.target.clone(), hits));
         }
     }
 
-    // When keyword matching found nothing, try semantic-only candidates from TEMPLATE_RULES
+    // When keyword matching found nothing, try semantic-only candidates from the rule set
     if scored.is_empty() {
         if let Some(scores) = semantic_scores {
-            for rule in TEMPLATE_RULES {
-                if let Some(&sim) = scores.get(rule.target) {
+            for rule in rules.iter() {
+                if let Some(&sim) = scores.get(&rule.target) {
                     if sim >= SEMANTIC_ONLY_THRESHOLD {
                         let bonus = (sim * MAX_SEMANTIC_BONUS).round() as usize;
-                        scored.push((bonus, rule.target, vec![]));
+                        scored.push((bonus, rule.target.clone(), vec![]));
                     }
                 }
             }
@@ -730,7 +597,7 @@ pub fn auto_select_template(
 
     let hits = best_hits.join(", ");
     TemplateSelection {
-        template: (*best_template).to_string(),
+        template: best_template.clone(),
         reason: if hits.is_empty() {
             format!("matched {best_template}")
         } else {
@@ -751,7 +618,7 @@ fn auto_select_template_from_metadata(
 ) -> Option<TemplateSelection> {
     let mut scored: Vec<(usize, String, Vec<String>)> = Vec::new();
 
-    for candidate in manifest_route_candidates(agents_dir) {
+    for candidate in manifest_route_candidates(agents_dir).iter() {
         let explicit_hits: Vec<String> = candidate
             .explicit_aliases
             .iter()
@@ -793,7 +660,7 @@ fn auto_select_template_from_metadata(
     // When keyword matching found nothing, try semantic-only candidates
     if scored.is_empty() {
         if let Some(scores) = semantic_scores {
-            for candidate in manifest_route_candidates(agents_dir) {
+            for candidate in manifest_route_candidates(agents_dir).iter() {
                 if let Some(&sim) = scores.get(candidate.template.as_str()) {
                     if sim >= SEMANTIC_ONLY_THRESHOLD {
                         let bonus = (sim * MAX_SEMANTIC_BONUS).round() as usize;
@@ -824,7 +691,7 @@ fn auto_select_template_from_metadata(
 /// Cached manifest route candidates, keyed by the `agents_dir` path used to
 /// build them. Invalidated via `invalidate_manifest_cache()`, which should be
 /// called on config hot-reload or agent install/uninstall.
-type ManifestCacheEntry = (PathBuf, Vec<ManifestRouteCandidate>);
+type ManifestCacheEntry = (PathBuf, Arc<Vec<ManifestRouteCandidate>>);
 static MANIFEST_CACHE: OnceLock<Mutex<Option<ManifestCacheEntry>>> = OnceLock::new();
 
 /// Invalidate the cached manifest route candidates so they are rebuilt on the
@@ -860,17 +727,17 @@ pub fn all_template_descriptions(agents_dir: &Path) -> Vec<(String, String)> {
     result
 }
 
-fn manifest_route_candidates(agents_dir: &Path) -> Vec<ManifestRouteCandidate> {
+fn manifest_route_candidates(agents_dir: &Path) -> Arc<Vec<ManifestRouteCandidate>> {
     let cache = MANIFEST_CACHE.get_or_init(|| Mutex::new(None));
     let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((ref cached_path, ref cached)) = *guard {
         if cached_path == agents_dir {
-            return cached.clone();
+            return Arc::clone(cached);
         }
     }
 
-    let candidates = build_manifest_route_candidates(agents_dir);
-    *guard = Some((agents_dir.to_path_buf(), candidates.clone()));
+    let candidates = Arc::new(build_manifest_route_candidates(agents_dir));
+    *guard = Some((agents_dir.to_path_buf(), Arc::clone(&candidates)));
     candidates
 }
 
@@ -970,10 +837,11 @@ fn is_safe_template_name(template: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-fn matched_labels(message: &str, patterns: &[(&'static str, &'static str)]) -> Vec<&'static str> {
+fn matched_labels(message: &str, patterns: &[(String, String)]) -> Vec<String> {
     patterns
         .iter()
-        .filter_map(|(label, pattern)| regex_matches(message, pattern).then_some(*label))
+        .filter(|(_, pattern)| regex_matches(message, pattern))
+        .map(|(label, _)| label.clone())
         .collect()
 }
 
@@ -1920,5 +1788,150 @@ system_prompt = "override"
         let second = cache.get_or_compile("[invalid");
         assert!(second.is_none());
         assert_eq!(cache.entries.len(), 1);
+    }
+
+    // ── Template rule loading / override merge ───────────────────────────
+
+    fn write_routing_override(home_dir: &Path, body: &str) {
+        let dir = home_dir.join("registry").join("templates");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("routing.toml"), body).unwrap();
+    }
+
+    #[test]
+    fn embedded_default_routing_toml_is_valid() {
+        // The include_str! asset must always parse — a broken default would
+        // silently empty the rule set in production.
+        let parsed =
+            parse_routing_toml(DEFAULT_ROUTING_TOML).expect("bundled default routing.toml parses");
+        assert_eq!(parsed.len(), 30);
+        assert!(parsed.iter().all(|r| !r.strong.is_empty()));
+    }
+
+    #[test]
+    fn default_rules_preserve_file_order() {
+        // No home dir → bundled defaults only. File order is load-bearing for
+        // the scoring tie-break, so assert the historical first/last targets.
+        let rules = build_template_rules(None);
+        assert_eq!(rules.len(), 30);
+        assert_eq!(rules.first().unwrap().target, "hello-world");
+        assert_eq!(rules.last().unwrap().target, "orchestrator");
+    }
+
+    #[test]
+    fn missing_override_file_uses_defaults() {
+        let tmp = tempdir().unwrap();
+        let rules = build_template_rules(Some(tmp.path()));
+        assert_eq!(rules.len(), 30);
+        assert_eq!(rules.first().unwrap().target, "hello-world");
+    }
+
+    #[test]
+    fn override_replaces_rule_in_place() {
+        let tmp = tempdir().unwrap();
+        write_routing_override(
+            tmp.path(),
+            r#"
+[[template]]
+target = "coder"
+strong = [{ label = "造轮子", regex = "造个轮子|攒一个" }]
+"#,
+        );
+        let rules = build_template_rules(Some(tmp.path()));
+        // Count unchanged and coder kept its original index (1) — a same-target
+        // override replaces in place, never reorders.
+        assert_eq!(rules.len(), 30);
+        assert_eq!(rules[1].target, "coder");
+        assert_eq!(
+            rules[1].strong,
+            vec![("造轮子".to_string(), "造个轮子|攒一个".to_string())]
+        );
+        assert!(
+            rules[1].weak.is_empty(),
+            "override with no weak clears weak"
+        );
+    }
+
+    #[test]
+    fn override_appends_new_target() {
+        let tmp = tempdir().unwrap();
+        write_routing_override(
+            tmp.path(),
+            r#"
+[[template]]
+target = "my-bot"
+strong = [{ label = "bot", regex = "\\bmybot\\b" }]
+"#,
+        );
+        let rules = build_template_rules(Some(tmp.path()));
+        assert_eq!(rules.len(), 31);
+        assert_eq!(rules.last().unwrap().target, "my-bot");
+    }
+
+    #[test]
+    fn override_disables_default_target() {
+        let tmp = tempdir().unwrap();
+        write_routing_override(
+            tmp.path(),
+            "[[template]]\ntarget = \"recipe-assistant\"\nenabled = false\n",
+        );
+        let rules = build_template_rules(Some(tmp.path()));
+        assert_eq!(rules.len(), 29);
+        assert!(rules.iter().all(|r| r.target != "recipe-assistant"));
+    }
+
+    #[test]
+    fn disable_on_unknown_target_is_noop() {
+        let tmp = tempdir().unwrap();
+        write_routing_override(
+            tmp.path(),
+            "[[template]]\ntarget = \"does-not-exist\"\nenabled = false\n",
+        );
+        let rules = build_template_rules(Some(tmp.path()));
+        assert_eq!(rules.len(), 30);
+    }
+
+    #[test]
+    fn unparseable_override_falls_back_to_defaults() {
+        let tmp = tempdir().unwrap();
+        write_routing_override(tmp.path(), "this is = = not valid toml");
+        // Fail-soft: a broken override must not empty routing.
+        let rules = build_template_rules(Some(tmp.path()));
+        assert_eq!(rules.len(), 30);
+        assert_eq!(rules.first().unwrap().target, "hello-world");
+    }
+
+    #[test]
+    fn bad_regex_in_override_loads_without_error() {
+        // An invalid regex compiles to None in RegexCache (never matches) but
+        // must not fail loading/merging.
+        let tmp = tempdir().unwrap();
+        write_routing_override(
+            tmp.path(),
+            r#"
+[[template]]
+target = "coder"
+strong = [{ label = "bad", regex = "(unclosed" }]
+"#,
+        );
+        let rules = build_template_rules(Some(tmp.path()));
+        assert_eq!(rules.len(), 30);
+        let coder = rules.iter().find(|r| r.target == "coder").unwrap();
+        assert_eq!(coder.strong[0].0, "bad");
+    }
+
+    #[test]
+    fn default_targets_are_unique() {
+        // A duplicate target in the bundled default would make the second copy
+        // un-overridable — the merge loop only ever finds the first by position.
+        let rules = build_template_rules(None);
+        let mut seen = HashSet::new();
+        for r in &rules {
+            assert!(
+                seen.insert(r.target.clone()),
+                "duplicate default target: {}",
+                r.target
+            );
+        }
     }
 }

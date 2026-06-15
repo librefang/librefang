@@ -1129,12 +1129,33 @@ impl AuditLog {
             // caller) re-anchors against the chain_anchor we set below.
             entries[total - 1].seq + 1
         };
+        // Persist-before-mutate: only drop the in-memory prefix if the DB
+        // delete actually succeeded. If `db.get()` or the `DELETE` fails and we
+        // trimmed memory anyway, a restart would reload the un-deleted rows —
+        // resurrecting the entries retention was supposed to remove and
+        // desyncing the anchor seq from the DB. On failure, keep memory intact
+        // and report nothing dropped so the trim retries on the next tick.
         if let Some(ref db) = self.db {
-            if let Ok(conn) = db.get() {
-                let _ = conn.execute(
-                    "DELETE FROM audit_entries WHERE seq < ?1",
-                    rusqlite::params![first_survivor_seq as i64],
-                );
+            match db.get() {
+                Ok(conn) => {
+                    if let Err(e) = conn.execute(
+                        "DELETE FROM audit_entries WHERE seq < ?1",
+                        rusqlite::params![first_survivor_seq as i64],
+                    ) {
+                        tracing::error!(
+                            "Audit trim DELETE failed ({e}); keeping the in-memory window \
+                             consistent with the DB — retrying on the next trim tick"
+                        );
+                        return TrimReport::default();
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Audit trim could not acquire a DB connection ({e}); keeping the \
+                         in-memory window consistent with the DB — retrying on the next tick"
+                    );
+                    return TrimReport::default();
+                }
             }
         }
 
@@ -1209,14 +1230,7 @@ impl AuditLog {
             return 0;
         }
 
-        // Update the in-memory chain anchor BEFORE draining so a verify
-        // racing against this prune (blocked on the entries lock) sees a
-        // consistent (anchor, first_survivor) pair on the next acquire.
         let new_anchor = entries[drop_count - 1].hash.clone();
-        {
-            let mut anchor = self.chain_anchor.lock().unwrap_or_else(|e| e.into_inner());
-            *anchor = Some(new_anchor);
-        }
 
         // Persist: delete the same prefix from SQLite using `seq` rather
         // than `timestamp` so DB and in-memory share one source of truth
@@ -1228,15 +1242,45 @@ impl AuditLog {
         } else {
             entries[total - 1].seq + 1
         };
+        // Persist-before-mutate: keep the in-memory window only if the DB
+        // delete succeeded (see AuditLog::trim). On failure, leave memory and
+        // the DB consistent and report nothing pruned so the next prune retries.
         if let Some(ref db) = self.db {
-            if let Ok(conn) = db.get() {
-                let _ = conn.execute(
-                    "DELETE FROM audit_entries WHERE seq < ?1",
-                    rusqlite::params![first_survivor_seq as i64],
-                );
+            match db.get() {
+                Ok(conn) => {
+                    if let Err(e) = conn.execute(
+                        "DELETE FROM audit_entries WHERE seq < ?1",
+                        rusqlite::params![first_survivor_seq as i64],
+                    ) {
+                        tracing::error!(
+                            "Audit prune DELETE failed ({e}); keeping the in-memory window \
+                             consistent with the DB — retrying on the next prune"
+                        );
+                        return 0;
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Audit prune could not acquire a DB connection ({e}); keeping the \
+                         in-memory window consistent with the DB — retrying on the next prune"
+                    );
+                    return 0;
+                }
             }
         }
 
+        // Mutate in-memory state only after the DB delete succeeded
+        // (mirrors `AuditLog::trim`). Order matters: anchor before drain
+        // so a verify racing against this prune (blocked on the entries
+        // lock) sees a consistent (anchor, first_survivor) pair on the
+        // next acquire. Advancing the anchor before the DB block would
+        // leave a failed DELETE with un-drained entries whose
+        // `entries[0].prev_hash` no longer matches the anchor —
+        // verify_integrity would then raise a spurious "chain break".
+        {
+            let mut anchor = self.chain_anchor.lock().unwrap_or_else(|e| e.into_inner());
+            *anchor = Some(new_anchor);
+        }
         entries.drain(..drop_count);
 
         // Refresh the external anchor file's `seq` column so the next

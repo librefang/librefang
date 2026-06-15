@@ -34,7 +34,7 @@ use tokio::sync::{watch, Mutex};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-use librefang_memory::MemorySubstrate;
+use librefang_memory::{GoalRunRow, GoalRunStore, MemorySubstrate};
 use librefang_types::agent::AgentId;
 use librefang_types::goal::{
     goals_storage_agent_id, Goal, GoalId, GoalRunPhase, GoalRunState, GoalStatus, GOALS_STORAGE_KEY,
@@ -156,10 +156,48 @@ fn patch_goal(
     }
 }
 
-/// A single in-flight goal run: the spawned loop task plus its observable state
+/// Flatten a `GoalRunState` into the `goal_runs` row shape the store persists.
+fn row_from_state(state: &GoalRunState) -> GoalRunRow {
+    GoalRunRow {
+        goal_id: state.goal_id.to_string(),
+        agent_id: state.agent_id.to_string(),
+        phase: state.phase.to_string(),
+        iteration: state.iteration as i64,
+        max_iterations: state.max_iterations as i64,
+        last_progress: state.last_progress as i64,
+        last_error: state.last_error.clone(),
+        started_at: state.started_at.to_rfc3339(),
+        updated_at: state.updated_at.to_rfc3339(),
+    }
+}
+
+/// Mirror the live run state into the durable store. A persistence failure is
+/// logged and swallowed — the in-memory DashMap stays the hot path, so a
+/// transient DB hiccup must never abort or stall the run loop.
+fn persist_run(store: &Option<GoalRunStore>, state: &GoalRunState) {
+    let Some(store) = store else { return };
+    if let Err(e) = store.save_run(&row_from_state(state)) {
+        warn!(goal_id = %state.goal_id, "Failed to persist goal run state: {e}");
+    }
+}
+
+/// Drop the durable mirror once a run ends. Same failure policy as
+/// [`persist_run`]: log and swallow.
+fn delete_persisted_run(store: &Option<GoalRunStore>, goal_id: GoalId) {
+    let Some(store) = store else { return };
+    if let Err(e) = store.delete_run(&goal_id.to_string()) {
+        warn!(goal_id = %goal_id, "Failed to delete persisted goal run: {e}");
+    }
+}
+
+/// A single goal run entry: the spawned loop task plus its observable state
 /// and a cooperative stop flag.
 struct RunHandle {
-    task: JoinHandle<()>,
+    /// The spawned loop task. `None` for a terminal entry reconstructed at boot
+    /// by [`GoalRunner::recover_stale_runs`] — that run's process already died,
+    /// so there is no live loop to abort; the entry exists only so the demoted
+    /// `Stopped` state stays observable via [`GoalRunner::state`].
+    task: Option<JoinHandle<()>>,
     state: Arc<Mutex<GoalRunState>>,
     stop: Arc<AtomicBool>,
     /// Monotonic id for this run, used by the task's self-cleanup so it only
@@ -174,31 +212,56 @@ pub struct GoalRunner {
     shutdown_rx: watch::Receiver<bool>,
     /// Source of monotonic run generations (see [`RunHandle::generation`]).
     next_gen: Arc<AtomicU64>,
+    /// Durable mirror of active run state (#5744 follow-up). `None` when the
+    /// runner is constructed without persistence (e.g. unit tests that drive
+    /// `run_loop` directly); the in-memory DashMap remains the hot path either
+    /// way.
+    store: Option<GoalRunStore>,
 }
 
 impl GoalRunner {
-    /// Create a runner wired to the kernel shutdown signal.
+    /// Create a runner wired to the kernel shutdown signal, without durable
+    /// persistence. Used where no memory substrate is available.
     pub fn new(shutdown_rx: watch::Receiver<bool>) -> Self {
         Self {
             runs: Arc::new(DashMap::new()),
             shutdown_rx,
             next_gen: Arc::new(AtomicU64::new(0)),
+            store: None,
+        }
+    }
+
+    /// Create a runner backed by a [`GoalRunStore`] so active runs survive a
+    /// daemon restart. Boot wires this with the shared memory connection pool.
+    pub fn new_with_store(shutdown_rx: watch::Receiver<bool>, store: GoalRunStore) -> Self {
+        Self {
+            runs: Arc::new(DashMap::new()),
+            shutdown_rx,
+            next_gen: Arc::new(AtomicU64::new(0)),
+            store: Some(store),
         }
     }
 
     /// Snapshot the observable state of a goal's run, if one exists.
     pub fn state(&self, goal_id: GoalId) -> Option<GoalRunState> {
         let handle = self.runs.get(&goal_id)?;
-        // try_lock avoids blocking the caller (an async HTTP handler) on a tick;
-        // a momentary contention just yields no snapshot this call.
+        // try_lock: None → `running:false`; run_loop must never hold this lock across I/O.
         handle.state.try_lock().ok().map(|s| s.clone())
     }
 
     /// Stop a goal's run if active. Returns whether a run was stopped.
+    ///
+    /// An operator stop is a terminal boundary, so the durable mirror is
+    /// dropped too — a stopped run must not be resurrected as "stale" at the
+    /// next boot.
     pub fn stop(&self, goal_id: GoalId) -> bool {
         if let Some((_, handle)) = self.runs.remove(&goal_id) {
             handle.stop.store(true, Ordering::SeqCst);
-            handle.task.abort();
+            // A recovered terminal entry has no live loop task to abort.
+            if let Some(task) = handle.task {
+                task.abort();
+            }
+            delete_persisted_run(&self.store, goal_id);
             true
         } else {
             false
@@ -227,7 +290,7 @@ impl GoalRunner {
         self.stop(goal_id);
 
         let now = Utc::now();
-        let state = Arc::new(Mutex::new(GoalRunState {
+        let initial = GoalRunState {
             goal_id,
             agent_id,
             phase: GoalRunPhase::Running,
@@ -237,7 +300,11 @@ impl GoalRunner {
             last_error: None,
             started_at: now,
             updated_at: now,
-        }));
+        };
+        // Persist the initial Running row before the first tick so a crash
+        // mid-tick still leaves a recoverable record at the next boot.
+        persist_run(&self.store, &initial);
+        let state = Arc::new(Mutex::new(initial));
         let stop = Arc::new(AtomicBool::new(false));
         let generation = self.next_gen.fetch_add(1, Ordering::SeqCst);
 
@@ -245,6 +312,7 @@ impl GoalRunner {
         let shutdown_rx = self.shutdown_rx.clone();
         let loop_state = state.clone();
         let loop_stop = stop.clone();
+        let loop_store = self.store.clone();
 
         let task = tokio::spawn(async move {
             run_loop(
@@ -256,6 +324,7 @@ impl GoalRunner {
                 loop_state,
                 loop_stop,
                 shutdown_rx,
+                loop_store,
             )
             .await;
             // Self-cleanup: drop the registry entry once the loop ends so a
@@ -271,13 +340,149 @@ impl GoalRunner {
         self.runs.insert(
             goal_id,
             RunHandle {
-                task,
+                task: Some(task),
                 state,
                 stop,
                 generation,
             },
         );
         info!(goal_id = %goal_id, agent_id = %agent_id, max_iterations, "Goal run started");
+    }
+
+    /// Recover goal runs left in `Running` phase by a prior crash or restart.
+    ///
+    /// Called once at boot, mirroring `WorkflowEngine::recover_stale_running_runs`.
+    /// Only persisted rows still in `Running` phase are candidates — any
+    /// terminal-phase row was already deleted when its run ended, so the only
+    /// `Running` rows on disk are ones whose process died mid-run. For each such
+    /// row older than `stale_timeout`, demote it to `Stopped` with the same
+    /// `"Interrupted by daemon restart"` marker workflow recovery uses, persist
+    /// that, and checkpoint the WAL so the transition is durable. The run is
+    /// **not** auto-resumed — an in-flight LLM call cannot be replayed, so the
+    /// policy matches workflow: surface the interrupted run as failed/stopped
+    /// rather than silently restarting it. Returns the recovered goal ids.
+    pub fn recover_stale_runs(&self, stale_timeout: Duration) -> Vec<GoalId> {
+        let Some(store) = self.store.as_ref() else {
+            return Vec::new();
+        };
+        if stale_timeout.is_zero() {
+            return Vec::new();
+        }
+        let rows = match store.load_all_runs() {
+            Ok(rows) => rows,
+            Err(e) => {
+                warn!("Failed to load persisted goal runs for recovery: {e}");
+                return Vec::new();
+            }
+        };
+
+        let now = Utc::now();
+        let stale_secs = stale_timeout.as_secs() as i64;
+        let mut recovered: Vec<GoalId> = Vec::new();
+        for row in rows {
+            // Terminal-phase rows are settled; only `Running` rows are stale
+            // candidates. (Belt-and-braces: the run loop deletes terminal rows,
+            // so a non-running row on disk would be a bug elsewhere.)
+            if row.phase != GoalRunPhase::Running.to_string() {
+                continue;
+            }
+            let Ok(goal_id) = row.goal_id.parse::<GoalId>() else {
+                warn!(goal_id = %row.goal_id, "Skipping goal run with unparseable id during recovery");
+                continue;
+            };
+            let started_at = match chrono::DateTime::parse_from_rfc3339(&row.started_at) {
+                Ok(dt) => dt.with_timezone(&Utc),
+                Err(e) => {
+                    warn!(goal_id = %goal_id, "Skipping goal run with unparseable started_at during recovery: {e}");
+                    continue;
+                }
+            };
+            let age = now.signed_duration_since(started_at).num_seconds();
+            // Wall-clock skew guard, identical to the workflow sweep (#5114):
+            // `Utc::now()` is not monotonic, so a backwards NTP step makes `age`
+            // negative. Treat a negative age as "fresh" rather than silently
+            // masking a real stale row, and warn so operators see the skew.
+            if age < 0 {
+                warn!(
+                    goal_id = %goal_id,
+                    now = %now,
+                    started_at = %started_at,
+                    age_secs = age,
+                    "Negative goal run age — wall-clock moved backwards; \
+                     treating run as fresh, not stale"
+                );
+                continue;
+            }
+            if age < stale_secs {
+                continue;
+            }
+            warn!(
+                goal_id = %goal_id,
+                started_at = %started_at,
+                age_secs = age,
+                "Recovering stale goal run interrupted by daemon restart"
+            );
+            let recovered_row = GoalRunRow {
+                phase: GoalRunPhase::Stopped.to_string(),
+                last_error: Some("Interrupted by daemon restart".to_string()),
+                updated_at: now.to_rfc3339(),
+                ..row
+            };
+            if let Err(e) = store.save_run(&recovered_row) {
+                warn!(goal_id = %goal_id, "Failed to persist recovered goal run: {e}");
+                continue;
+            }
+            // Load the demoted row back into the in-memory registry so the
+            // runtime read path (`state` → `goal_run_status` → GET
+            // /goals/{id}/run) surfaces "stopped — interrupted by daemon
+            // restart" after a restart, instead of returning `None` for a row
+            // that exists only on disk. Mirrors `WorkflowEngine::load_runs`,
+            // which loads persisted rows back into memory before the stale
+            // sweep so demoted runs stay observable. The entry carries no live
+            // task (`task: None`) and is purely a terminal placeholder — the
+            // run is **not** resumed or re-executed.
+            match recovered_row.agent_id.parse::<AgentId>() {
+                Ok(agent_id) => {
+                    let state = GoalRunState {
+                        goal_id,
+                        agent_id,
+                        phase: GoalRunPhase::Stopped,
+                        iteration: recovered_row.iteration.max(0) as u32,
+                        max_iterations: recovered_row.max_iterations.max(0) as u32,
+                        last_progress: recovered_row.last_progress.clamp(0, 100) as u8,
+                        last_error: recovered_row.last_error.clone(),
+                        started_at,
+                        updated_at: now,
+                    };
+                    self.runs.insert(
+                        goal_id,
+                        RunHandle {
+                            task: None,
+                            state: Arc::new(Mutex::new(state)),
+                            stop: Arc::new(AtomicBool::new(true)),
+                            generation: self.next_gen.fetch_add(1, Ordering::SeqCst),
+                        },
+                    );
+                }
+                Err(_) => {
+                    // The row was demoted on disk; only the in-memory surfacing
+                    // is skipped. Operators still see the corrected DB row.
+                    warn!(
+                        goal_id = %goal_id,
+                        agent_id = %recovered_row.agent_id,
+                        "Recovered goal run has unparseable agent id; demoted on \
+                         disk but not surfaced via the runtime read path"
+                    );
+                }
+            }
+            recovered.push(goal_id);
+        }
+        if !recovered.is_empty() {
+            if let Err(e) = store.wal_checkpoint() {
+                warn!("Goal run recovery WAL checkpoint failed: {e}");
+            }
+        }
+        recovered
     }
 }
 
@@ -293,17 +498,24 @@ async fn run_loop<F, Fut>(
     state: Arc<Mutex<GoalRunState>>,
     stop: Arc<AtomicBool>,
     mut shutdown_rx: watch::Receiver<bool>,
+    store: Option<GoalRunStore>,
 ) where
     F: Fn(AgentId, String) -> Fut + Send + Sync,
     Fut: std::future::Future<Output = Result<String, String>> + Send,
 {
     let mut iteration: u32 = 0;
     let mut rate_limit_streak: u32 = 0;
+    // True when the loop ends because the kernel is shutting down (vs. an
+    // operator stop, completion, or cap). On shutdown the durable row is left
+    // in its last persisted `Running` shape so the next boot's stale-recovery
+    // sweep can demote it — mirroring how workflow runs survive a restart.
+    let mut interrupted_by_shutdown = false;
     let final_phase = loop {
         if stop.load(Ordering::SeqCst) {
             break GoalRunPhase::Stopped;
         }
         if *shutdown_rx.borrow() {
+            interrupted_by_shutdown = true;
             break GoalRunPhase::Stopped;
         }
 
@@ -342,7 +554,8 @@ async fn run_loop<F, Fut>(
                 };
                 patch_goal(&substrate, goal_id, new_progress, new_status);
 
-                {
+                // Release before persist_run: state()'s try_lock returns None (→ running:false) while held.
+                let snapshot = {
                     let mut s = state.lock().await;
                     s.iteration = iteration + 1;
                     if let Some(p) = new_progress {
@@ -350,7 +563,11 @@ async fn run_loop<F, Fut>(
                     }
                     s.last_error = None;
                     s.updated_at = Utc::now();
-                }
+                    s.clone()
+                };
+                // Mirror the post-iteration state to the durable store so a
+                // crash before the next tick still leaves a recoverable row.
+                persist_run(&store, &snapshot);
 
                 if parsed.done {
                     break GoalRunPhase::Finished;
@@ -374,11 +591,14 @@ async fn run_loop<F, Fut>(
                         rate_limit_streak = 0;
                     }
                 }
-                {
+                // Same lock discipline as success path: release before persist_run.
+                let snapshot = {
                     let mut s = state.lock().await;
                     s.last_error = Some(e);
                     s.updated_at = Utc::now();
-                }
+                    s.clone()
+                };
+                persist_run(&store, &snapshot);
                 if rate_limit_streak >= MAX_RATE_LIMIT_STREAK {
                     break GoalRunPhase::RateLimited;
                 }
@@ -391,6 +611,7 @@ async fn run_loop<F, Fut>(
             _ = tokio::time::sleep(TICK_INTERVAL) => {}
             _ = shutdown_rx.changed() => {
                 if *shutdown_rx.borrow() {
+                    interrupted_by_shutdown = true;
                     break GoalRunPhase::Stopped;
                 }
             }
@@ -401,6 +622,14 @@ async fn run_loop<F, Fut>(
         let mut s = state.lock().await;
         s.phase = final_phase;
         s.updated_at = Utc::now();
+    }
+    // A run that reaches a natural terminal phase (completed, capped, rate-
+    // limited, agent-blocked, or an operator stop) is settled — drop its
+    // durable row so it is never resurfaced as "stale" at the next boot. A
+    // shutdown-interrupted run is the exception: leave its last `Running` row
+    // in place so boot recovery demotes it, exactly as workflow runs do.
+    if !interrupted_by_shutdown {
+        delete_persisted_run(&store, goal_id);
     }
     info!(goal_id = %goal_id, phase = %final_phase, "Goal run ended");
 }
@@ -486,6 +715,7 @@ mod tests {
             state.clone(),
             Arc::new(AtomicBool::new(false)),
             rx,
+            None,
         )
         .await;
 
@@ -529,6 +759,7 @@ mod tests {
             state.clone(),
             Arc::new(AtomicBool::new(false)),
             rx,
+            None,
         )
         .await;
 
@@ -579,6 +810,7 @@ mod tests {
             state.clone(),
             Arc::new(AtomicBool::new(false)),
             rx,
+            None,
         )
         .await;
 
@@ -614,6 +846,7 @@ mod tests {
             state.clone(),
             Arc::new(AtomicBool::new(true)),
             rx,
+            None,
         )
         .await;
 
@@ -646,6 +879,7 @@ mod tests {
             state.clone(),
             Arc::new(AtomicBool::new(false)),
             rx,
+            None,
         )
         .await;
 
@@ -679,6 +913,7 @@ mod tests {
             state.clone(),
             Arc::new(AtomicBool::new(false)),
             rx,
+            None,
         )
         .await;
 
@@ -688,5 +923,250 @@ mod tests {
             s.iteration < 100,
             "must trip the breaker, not run to the cap"
         );
+    }
+
+    // --- Persistence + boot recovery (#5744 follow-up) ---
+
+    /// Build a goal-run store sharing the substrate's SQLite pool. The
+    /// substrate has already run migrations, so the `goal_runs` table exists.
+    fn store_from(substrate: &MemorySubstrate) -> GoalRunStore {
+        GoalRunStore::new(substrate.pool())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn run_loop_persists_state_across_iterations() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let agent_id = AgentId::new();
+        let goal = test_goal(agent_id);
+        seed_goal(&substrate, &goal);
+        let store = store_from(&substrate);
+        let (_tx, rx) = watch::channel(false);
+        let state = mk_state(goal.id, agent_id, 3);
+
+        // Capture the persisted row after the second iteration, before the run
+        // reaches the cap and deletes the row. A oneshot fires from inside the
+        // fake send_message on the third call.
+        let counter = Arc::new(AtomicU64::new(0));
+        let probe_store = store.clone();
+        let probe_id = goal.id.to_string();
+        let captured: Arc<Mutex<Option<GoalRunRow>>> = Arc::new(Mutex::new(None));
+        let probe_captured = captured.clone();
+        let send = move |_a: AgentId, _p: String| {
+            let counter = counter.clone();
+            let probe_store = probe_store.clone();
+            let probe_id = probe_id.clone();
+            let probe_captured = probe_captured.clone();
+            async move {
+                let n = counter.fetch_add(1, Ordering::SeqCst);
+                // On the third call (n == 2), two iterations have already
+                // persisted; snapshot the row before the loop ends.
+                if n == 2 {
+                    let row = probe_store.get_run(&probe_id).unwrap();
+                    *probe_captured.lock().await = row;
+                }
+                Ok("GOAL_PROGRESS: 40".to_string())
+            }
+        };
+        run_loop(
+            goal.id,
+            agent_id,
+            3,
+            substrate.clone(),
+            send,
+            state.clone(),
+            Arc::new(AtomicBool::new(false)),
+            rx,
+            Some(store.clone()),
+        )
+        .await;
+
+        let row = captured
+            .lock()
+            .await
+            .clone()
+            .expect("a Running row must have been persisted mid-run");
+        assert_eq!(row.phase, GoalRunPhase::Running.to_string());
+        assert_eq!(row.goal_id, goal.id.to_string());
+        assert!(
+            row.iteration >= 2,
+            "iterations must accumulate in the store"
+        );
+        assert_eq!(row.last_progress, 40);
+    }
+
+    #[tokio::test]
+    async fn completed_run_is_deleted_from_store() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let agent_id = AgentId::new();
+        let goal = test_goal(agent_id);
+        seed_goal(&substrate, &goal);
+        let store = store_from(&substrate);
+        // Pre-seed a Running row as `start()` would.
+        store
+            .save_run(&row_from_state(&GoalRunState {
+                goal_id: goal.id,
+                agent_id,
+                phase: GoalRunPhase::Running,
+                iteration: 0,
+                max_iterations: 10,
+                last_progress: 0,
+                last_error: None,
+                started_at: Utc::now(),
+                updated_at: Utc::now(),
+            }))
+            .unwrap();
+        assert!(store.get_run(&goal.id.to_string()).unwrap().is_some());
+
+        let (_tx, rx) = watch::channel(false);
+        let state = mk_state(goal.id, agent_id, 10);
+        let send = |_a: AgentId, _p: String| async move { Ok("done\nGOAL_DONE".to_string()) };
+        run_loop(
+            goal.id,
+            agent_id,
+            10,
+            substrate.clone(),
+            send,
+            state.clone(),
+            Arc::new(AtomicBool::new(false)),
+            rx,
+            Some(store.clone()),
+        )
+        .await;
+
+        assert_eq!(state.lock().await.phase, GoalRunPhase::Finished);
+        assert!(
+            store.get_run(&goal.id.to_string()).unwrap().is_none(),
+            "a completed run must be removed from the durable store"
+        );
+    }
+
+    #[test]
+    fn recover_stale_run_marks_it_stopped_at_boot() {
+        let substrate = MemorySubstrate::open_in_memory(0.01).unwrap();
+        let store = store_from(&substrate);
+        let goal_id = GoalId::new();
+        let agent_id = AgentId::new();
+
+        // A Running row whose process died an hour ago.
+        let stale_started = Utc::now() - chrono::Duration::seconds(3600);
+        store
+            .save_run(&GoalRunRow {
+                goal_id: goal_id.to_string(),
+                agent_id: agent_id.to_string(),
+                phase: GoalRunPhase::Running.to_string(),
+                iteration: 5,
+                max_iterations: 25,
+                last_progress: 50,
+                last_error: None,
+                started_at: stale_started.to_rfc3339(),
+                updated_at: stale_started.to_rfc3339(),
+            })
+            .unwrap();
+
+        let (_tx, rx) = watch::channel(false);
+        let runner = GoalRunner::new_with_store(rx, store.clone());
+
+        // 10-minute staleness window → the hour-old run is recovered.
+        let recovered = runner.recover_stale_runs(Duration::from_secs(600));
+        assert_eq!(recovered, vec![goal_id]);
+
+        let row = store.get_run(&goal_id.to_string()).unwrap().unwrap();
+        assert_eq!(row.phase, GoalRunPhase::Stopped.to_string());
+        assert_eq!(
+            row.last_error,
+            Some("Interrupted by daemon restart".to_string())
+        );
+    }
+
+    #[test]
+    fn recovered_stale_run_is_observable_via_runtime_read_path() {
+        // Regression: a stale `Running` row demoted to `Stopped` at boot must
+        // also be loaded back into the in-memory registry so `state()` — the
+        // runtime read path behind `goal_run_status` and GET /goals/{id}/run —
+        // surfaces it, instead of returning `None` for a row that exists only
+        // on disk (write-only invisibility). Mirrors WorkflowEngine, which
+        // loads persisted rows back into memory before the stale sweep.
+        let substrate = MemorySubstrate::open_in_memory(0.01).unwrap();
+        let store = store_from(&substrate);
+        let goal_id = GoalId::new();
+        let agent_id = AgentId::new();
+
+        let stale_started = Utc::now() - chrono::Duration::seconds(3600);
+        store
+            .save_run(&GoalRunRow {
+                goal_id: goal_id.to_string(),
+                agent_id: agent_id.to_string(),
+                phase: GoalRunPhase::Running.to_string(),
+                iteration: 5,
+                max_iterations: 25,
+                last_progress: 50,
+                last_error: None,
+                started_at: stale_started.to_rfc3339(),
+                updated_at: stale_started.to_rfc3339(),
+            })
+            .unwrap();
+
+        let (_tx, rx) = watch::channel(false);
+        let runner = GoalRunner::new_with_store(rx, store.clone());
+
+        // Before recovery the registry is empty — nothing observable yet.
+        assert!(runner.state(goal_id).is_none());
+
+        let recovered = runner.recover_stale_runs(Duration::from_secs(600));
+        assert_eq!(recovered, vec![goal_id]);
+
+        // The demoted run is now visible through the runtime read path, not
+        // just present in the DB, and carries the interrupted marker.
+        let observed = runner
+            .state(goal_id)
+            .expect("recovered run must be observable via the runtime read path");
+        assert_eq!(observed.phase, GoalRunPhase::Stopped);
+        assert_eq!(observed.agent_id, agent_id);
+        assert_eq!(observed.iteration, 5);
+        assert_eq!(observed.max_iterations, 25);
+        assert_eq!(observed.last_progress, 50);
+        assert_eq!(
+            observed.last_error,
+            Some("Interrupted by daemon restart".to_string())
+        );
+
+        // The terminal placeholder must not shadow a future live run: an
+        // operator stop clears it (start() calls stop() before inserting the
+        // new run), restoring the empty-registry invariant.
+        assert!(runner.stop(goal_id), "stop() removes the recovered entry");
+        assert!(runner.state(goal_id).is_none());
+    }
+
+    #[test]
+    fn recover_skips_fresh_running_run() {
+        let substrate = MemorySubstrate::open_in_memory(0.01).unwrap();
+        let store = store_from(&substrate);
+        let goal_id = GoalId::new();
+        let agent_id = AgentId::new();
+
+        // A Running row that started just now — not stale.
+        store
+            .save_run(&GoalRunRow {
+                goal_id: goal_id.to_string(),
+                agent_id: agent_id.to_string(),
+                phase: GoalRunPhase::Running.to_string(),
+                iteration: 1,
+                max_iterations: 25,
+                last_progress: 10,
+                last_error: None,
+                started_at: Utc::now().to_rfc3339(),
+                updated_at: Utc::now().to_rfc3339(),
+            })
+            .unwrap();
+
+        let (_tx, rx) = watch::channel(false);
+        let runner = GoalRunner::new_with_store(rx, store.clone());
+        let recovered = runner.recover_stale_runs(Duration::from_secs(600));
+        assert!(recovered.is_empty(), "a fresh run must not be recovered");
+
+        // Row stays Running, untouched.
+        let row = store.get_run(&goal_id.to_string()).unwrap().unwrap();
+        assert_eq!(row.phase, GoalRunPhase::Running.to_string());
+        assert!(row.last_error.is_none());
     }
 }

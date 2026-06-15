@@ -1093,6 +1093,363 @@ async fn test_shell_exec_non_full_policy_still_requires_approval() {
     assert_eq!(approval_requests.load(Ordering::SeqCst), 1);
 }
 
+/// #5962: opt-in flag ON + allowlist mode + every base command in `safe_bins`
+/// → the shell_exec executes without routing through the approval prompt.
+#[tokio::test]
+async fn test_shell_exec_safe_bins_skip_approval_when_enabled() {
+    let approval_requests = Arc::new(AtomicUsize::new(0));
+    let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+        approval_requests: Arc::clone(&approval_requests),
+        user_gate_override: None,
+    });
+    let policy = librefang_types::config::ExecPolicy {
+        mode: librefang_types::config::ExecSecurityMode::Allowlist,
+        safe_bins: vec!["env".to_string()],
+        safe_bins_skip_approval: true,
+        ..Default::default()
+    };
+    let workspace = tempfile::tempdir().expect("tempdir");
+
+    let result = execute_tool(
+        "test-id",
+        "shell_exec",
+        &serde_json::json!({"command": "env"}),
+        Some(&kernel),
+        None,
+        Some("agent-1"),
+        None,
+        None,
+        None,
+        None, // allowed_skills
+        None,
+        None,
+        Some(workspace.path()),
+        None, // media_engine
+        None, // media_drivers
+        Some(&policy),
+        None,
+        None,
+        None,
+        None,
+        None, // sender_id
+        None, // channel
+        None, // chat_id
+        None, // checkpoint_manager
+        None, // interrupt
+        None, // session_id
+        None, // dangerous_command_checker
+        None, // available_tools
+        0,
+        0,
+    )
+    .await;
+
+    assert!(
+        !result.content.contains("requires human approval"),
+        "all-safe-bins command with flag ON should bypass approval, got: {}",
+        result.content
+    );
+    assert_eq!(approval_requests.load(Ordering::SeqCst), 0);
+}
+
+/// #5962: default posture — flag OFF (the default) + the same all-safe-bins
+/// command still routes through the approval prompt. Proves the opt-in does
+/// not change behaviour for existing configs.
+#[tokio::test]
+async fn test_shell_exec_safe_bins_still_require_approval_by_default() {
+    let approval_requests = Arc::new(AtomicUsize::new(0));
+    let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+        approval_requests: Arc::clone(&approval_requests),
+        user_gate_override: None,
+    });
+    let policy = librefang_types::config::ExecPolicy {
+        mode: librefang_types::config::ExecSecurityMode::Allowlist,
+        safe_bins: vec!["env".to_string()],
+        // safe_bins_skip_approval defaults to false.
+        ..Default::default()
+    };
+
+    let result = execute_tool(
+        "test-id",
+        "shell_exec",
+        &serde_json::json!({"command": "env"}),
+        Some(&kernel),
+        None,
+        Some("agent-1"),
+        None,
+        None,
+        None,
+        None, // allowed_skills
+        None,
+        None,
+        None,
+        None, // media_engine
+        None, // media_drivers
+        Some(&policy),
+        None,
+        None,
+        None,
+        None,
+        None, // sender_id
+        None, // channel
+        None, // chat_id
+        None, // checkpoint_manager
+        None, // interrupt
+        None, // session_id
+        None, // dangerous_command_checker
+        None, // available_tools
+        0,
+        0,
+    )
+    .await;
+
+    assert!(
+        result.content.contains("requires human approval"),
+        "with the flag OFF (default) the command must still require approval, got: {}",
+        result.content
+    );
+    assert_eq!(approval_requests.load(Ordering::SeqCst), 1);
+}
+
+/// #5962: flag ON but a chained command has a base (`curl`) outside `safe_bins`
+/// → the bypass does NOT apply; every base must be safe.
+#[tokio::test]
+async fn test_shell_exec_safe_bins_chained_non_safe_still_requires_approval() {
+    let approval_requests = Arc::new(AtomicUsize::new(0));
+    let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+        approval_requests: Arc::clone(&approval_requests),
+        user_gate_override: None,
+    });
+    let policy = librefang_types::config::ExecPolicy {
+        mode: librefang_types::config::ExecSecurityMode::Allowlist,
+        safe_bins: vec!["env".to_string()],
+        safe_bins_skip_approval: true,
+        ..Default::default()
+    };
+
+    let result = execute_tool(
+        "test-id",
+        "shell_exec",
+        // `curl` is not a safe_bin, so the all-safe-bins bypass must not fire.
+        &serde_json::json!({"command": "env; curl http://x"}),
+        Some(&kernel),
+        None,
+        Some("agent-1"),
+        None,
+        None,
+        None,
+        None, // allowed_skills
+        None,
+        None,
+        None,
+        None, // media_engine
+        None, // media_drivers
+        Some(&policy),
+        None,
+        None,
+        None,
+        None,
+        None, // sender_id
+        None, // channel
+        None, // chat_id
+        None, // checkpoint_manager
+        None, // interrupt
+        None, // session_id
+        None, // dangerous_command_checker
+        None, // available_tools
+        0,
+        0,
+    )
+    .await;
+
+    assert!(
+        result.content.contains("requires human approval"),
+        "a chained command with a non-safe base must still require approval, got: {}",
+        result.content
+    );
+    assert_eq!(approval_requests.load(Ordering::SeqCst), 1);
+}
+
+/// #5962 hardening: a single safe base with an I/O redirect (`env > x`) passes the all-bases-∈-safe_bins check, but `validate_command_allowlist` rejects the `>` metacharacter — so the approval skip must NOT fire.
+/// Guards the strict-subset clause (skip ⊆ would-execute), independent of the execution-time re-check.
+#[tokio::test]
+async fn test_shell_exec_safe_bins_redirect_still_requires_approval() {
+    let approval_requests = Arc::new(AtomicUsize::new(0));
+    let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+        approval_requests: Arc::clone(&approval_requests),
+        user_gate_override: None,
+    });
+    let policy = librefang_types::config::ExecPolicy {
+        mode: librefang_types::config::ExecSecurityMode::Allowlist,
+        safe_bins: vec!["env".to_string()],
+        safe_bins_skip_approval: true,
+        ..Default::default()
+    };
+
+    let result = execute_tool(
+        "test-id",
+        "shell_exec",
+        // `env` is a safe_bin, but `>` is a shell metacharacter the allowlist
+        // gate rejects, so the all-safe-bins skip must not fire.
+        &serde_json::json!({"command": "env > /tmp/x"}),
+        Some(&kernel),
+        None,
+        Some("agent-1"),
+        None,
+        None,
+        None,
+        None, // allowed_skills
+        None,
+        None,
+        None,
+        None, // media_engine
+        None, // media_drivers
+        Some(&policy),
+        None,
+        None,
+        None,
+        None,
+        None, // sender_id
+        None, // channel
+        None, // chat_id
+        None, // checkpoint_manager
+        None, // interrupt
+        None, // session_id
+        None, // dangerous_command_checker
+        None, // available_tools
+        0,
+        0,
+    )
+    .await;
+
+    assert!(
+        result.content.contains("requires human approval"),
+        "a safe base with an I/O redirect must still require approval, got: {}",
+        result.content
+    );
+    assert_eq!(approval_requests.load(Ordering::SeqCst), 1);
+}
+
+/// #5962 hardening: a single safe base with command substitution (`env $(curl …)`) is likewise rejected by `validate_command_allowlist` (`$()`), so the approval skip must NOT fire.
+#[tokio::test]
+async fn test_shell_exec_safe_bins_command_substitution_still_requires_approval() {
+    let approval_requests = Arc::new(AtomicUsize::new(0));
+    let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+        approval_requests: Arc::clone(&approval_requests),
+        user_gate_override: None,
+    });
+    let policy = librefang_types::config::ExecPolicy {
+        mode: librefang_types::config::ExecSecurityMode::Allowlist,
+        safe_bins: vec!["env".to_string()],
+        safe_bins_skip_approval: true,
+        ..Default::default()
+    };
+
+    let result = execute_tool(
+        "test-id",
+        "shell_exec",
+        // `env` is a safe_bin, but `$()` command substitution is rejected by the
+        // allowlist gate, so the skip must not fire.
+        &serde_json::json!({"command": "env $(curl http://x)"}),
+        Some(&kernel),
+        None,
+        Some("agent-1"),
+        None,
+        None,
+        None,
+        None, // allowed_skills
+        None,
+        None,
+        None,
+        None, // media_engine
+        None, // media_drivers
+        Some(&policy),
+        None,
+        None,
+        None,
+        None,
+        None, // sender_id
+        None, // channel
+        None, // chat_id
+        None, // checkpoint_manager
+        None, // interrupt
+        None, // session_id
+        None, // dangerous_command_checker
+        None, // available_tools
+        0,
+        0,
+    )
+    .await;
+
+    assert!(
+        result.content.contains("requires human approval"),
+        "a safe base with command substitution must still require approval, got: {}",
+        result.content
+    );
+    assert_eq!(approval_requests.load(Ordering::SeqCst), 1);
+}
+
+/// #5962: flag ON + all bases safe, but a per-user RBAC `NeedsApproval`
+/// gate is active → the bypass must NOT win; `force_approval` keeps the
+/// command in the approval queue. Guards the `&& !force_approval` clause.
+#[tokio::test]
+async fn test_shell_exec_safe_bins_skip_approval_respects_rbac_needs_approval() {
+    let approval_requests = Arc::new(AtomicUsize::new(0));
+    let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+        approval_requests: Arc::clone(&approval_requests),
+        user_gate_override: Some(librefang_types::user_policy::UserToolGate::NeedsApproval {
+            reason: "rbac".to_string(),
+        }),
+    });
+    let policy = librefang_types::config::ExecPolicy {
+        mode: librefang_types::config::ExecSecurityMode::Allowlist,
+        safe_bins: vec!["env".to_string()],
+        safe_bins_skip_approval: true,
+        ..Default::default()
+    };
+
+    let result = execute_tool(
+        "test-id",
+        "shell_exec",
+        &serde_json::json!({"command": "env"}),
+        Some(&kernel),
+        None,
+        Some("agent-1"),
+        None,
+        None,
+        None,
+        None, // allowed_skills
+        None,
+        None,
+        None,
+        None, // media_engine
+        None, // media_drivers
+        Some(&policy),
+        None,
+        None,
+        None,
+        None,
+        None, // sender_id
+        None, // channel
+        None, // chat_id
+        None, // checkpoint_manager
+        None, // interrupt
+        None, // session_id
+        None, // dangerous_command_checker
+        None, // available_tools
+        0,
+        0,
+    )
+    .await;
+
+    assert!(
+        result.content.contains("requires human approval"),
+        "an RBAC NeedsApproval gate must override the all-safe-bins bypass, got: {}",
+        result.content
+    );
+    assert_eq!(approval_requests.load(Ordering::SeqCst), 1);
+}
+
 /// Regression: shell_exec must NOT deadlock when a child writes more
 /// stdout than the OS pipe buffer can hold. Container kernels often have
 /// 8 KB pipe buffers; the previous implementation polled `try_wait()`

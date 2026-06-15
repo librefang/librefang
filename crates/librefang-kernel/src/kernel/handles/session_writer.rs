@@ -83,6 +83,7 @@ impl kernel_handle::SessionWriter for LibreFangKernel {
                 model_override: None,
                 messages_generation: 0,
                 last_repaired_generation: None,
+                peer_id: None,
             },
         };
 
@@ -184,6 +185,7 @@ impl kernel_handle::SessionWriter for LibreFangKernel {
                 model_override: None,
                 messages_generation: 0,
                 last_repaired_generation: None,
+                peer_id: None,
             },
         };
 

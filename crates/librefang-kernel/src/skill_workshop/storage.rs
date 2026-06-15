@@ -14,7 +14,7 @@
 //! pipeline (validate_name, validate_prompt_content, atomic write,
 //! version history) in one place.
 
-use crate::skill_workshop::candidate::CandidateSkill;
+use crate::skill_workshop::candidate::{CandidateKind, CandidateSkill};
 use librefang_skills::evolution::{self, EvolutionResult};
 use librefang_skills::verify::{SkillVerifier, WarningSeverity};
 use librefang_skills::SkillError;
@@ -539,7 +539,10 @@ pub fn reject_candidate(skills_root: &Path, id: &str) -> Result<(), WorkshopErro
 
 /// Promote a pending candidate into the active skills directory.
 ///
-/// Routes through `librefang_skills::evolution::create_skill`, which:
+/// A `Create` candidate routes through `librefang_skills::evolution::create_skill`;
+/// an `Update` candidate (which targets an already-installed skill) routes
+/// through `evolution::update_skill` instead — `create_skill` on an existing
+/// name fails with `AlreadyInstalled`. Both paths:
 /// * validates the suggested name (snake_case, length-bounded);
 /// * runs the prompt-injection scan a second time (defence in depth —
 ///   the body could have been edited on disk between capture and
@@ -560,14 +563,40 @@ pub fn approve_candidate(
 
     // EvolutionAuthor is a type alias for Option<&str>; pass Some(agent_id)
     // so the version-history record names the agent that captured this draft.
-    let result = evolution::create_skill(
-        active_skills_dir,
-        &candidate.name,
-        &candidate.description,
-        &candidate.prompt_context,
-        Vec::new(),
-        Some(&candidate.agent_id),
-    )?;
+    //
+    // Route by kind (#6003): a Create promotes via `create_skill`, but an
+    // Update targets an existing skill — calling `create_skill` on a name that
+    // already exists fails with `AlreadyInstalled`, so a controlled-mode update
+    // could never be approved. Load the target and promote via `update_skill`
+    // instead (bumps the version, rewrites prompt_context.md). The injection
+    // scan ran at `save_candidate` time and runs again inside both
+    // `create_skill` and `update_skill` (`validate_prompt_content`), preserving
+    // defence in depth on the approve path.
+    let result = match candidate.kind {
+        CandidateKind::Create => evolution::create_skill(
+            active_skills_dir,
+            &candidate.name,
+            &candidate.description,
+            &candidate.prompt_context,
+            Vec::new(),
+            Some(&candidate.agent_id),
+        )?,
+        CandidateKind::Update => {
+            let target = candidate
+                .target_skill_id
+                .as_deref()
+                .unwrap_or(&candidate.name);
+            let skill = evolution::load_installed_skill_from_disk(active_skills_dir, target)?;
+            // The candidate's one-line description doubles as the
+            // version-history changelog note for the approved update.
+            evolution::update_skill(
+                &skill,
+                &candidate.prompt_context,
+                &candidate.description,
+                Some(&candidate.agent_id),
+            )?
+        }
+    };
 
     // Promotion succeeded — drop the pending file. We log instead of
     // failing the whole approve when remove fails: the active skill
@@ -647,6 +676,10 @@ mod tests {
                 assistant_response_excerpt: None,
                 turn_index: 1,
             },
+            kind: crate::skill_workshop::candidate::CandidateKind::Create,
+            target_skill_id: None,
+            current_version: None,
+            proposed_version: None,
         }
     }
 
@@ -869,6 +902,56 @@ mod tests {
             .join("fmt_before_commit")
             .join("skill.toml")
             .exists());
+    }
+
+    #[test]
+    fn approve_update_candidate_promotes_via_update_not_create() {
+        // #6003: approving a controlled-mode Update candidate must route through
+        // evolution::update_skill. Routing it through create_skill (the old
+        // unconditional path) 409s with AlreadyInstalled on the existing target,
+        // so the update could never be approved.
+        let tmp = tempdir().unwrap();
+        let active = tempdir().unwrap();
+
+        // Install the target skill first.
+        librefang_skills::evolution::create_skill(
+            active.path(),
+            "fmt_before_commit",
+            "Run fmt before commit",
+            "# OLD body\n\nrun cargo fmt\n",
+            Vec::new(),
+            None,
+        )
+        .expect("install target skill");
+
+        // An Update candidate targeting that skill with a new body.
+        let mut cand = fixture(
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "bbbbbbbb-0000-0000-0000-000000000006",
+            "# NEW body\n\nrun cargo fmt --all before commit\n",
+        );
+        cand.kind = crate::skill_workshop::candidate::CandidateKind::Update;
+        cand.target_skill_id = Some("fmt_before_commit".to_string());
+        save_candidate(tmp.path(), &cand, 20, None).unwrap();
+
+        let result = approve_candidate(tmp.path(), active.path(), &cand.id)
+            .expect("approve update must succeed, not 409 AlreadyInstalled");
+        assert!(result.success);
+        assert_eq!(result.skill_name, "fmt_before_commit");
+
+        // prompt_context.md now holds the updated body, and the pending file is gone.
+        let body = fs::read_to_string(
+            active
+                .path()
+                .join("fmt_before_commit")
+                .join("prompt_context.md"),
+        )
+        .unwrap();
+        assert!(
+            body.contains("NEW body"),
+            "update must rewrite prompt_context.md, got: {body}"
+        );
+        assert!(load_candidate(tmp.path(), &cand.id).is_err());
     }
 
     #[test]

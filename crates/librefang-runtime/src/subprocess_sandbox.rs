@@ -485,7 +485,7 @@ fn split_script_segments(script: &str) -> Vec<&str> {
 
 /// Extract all commands from a shell command string.
 /// Handles pipes (`|`), semicolons (`;`), `&&`, and `||`.
-fn extract_all_commands(command: &str) -> Vec<&str> {
+pub(crate) fn extract_all_commands(command: &str) -> Vec<&str> {
     let mut commands = Vec::new();
     // Split on pipe, semicolon, &&, ||
     // We need to split carefully: first split on ; and &&/||, then on |

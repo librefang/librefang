@@ -22,16 +22,19 @@ export default async function RootLayout({
 	children: React.ReactNode;
 }) {
 	const pages = await glob("**/*.mdx", { cwd: "src/app" });
+	// Route URL from file path: drop the trailing page.mdx and any
+	// "(group)" route-group folders (they never appear in the URL).
+	const toUrl = (filename: string) =>
+		`/${filename
+			.replace(/(^|\/)page\.mdx$/, "")
+			.replace(/\([^/]+\)\//g, "")}`;
 	const allSectionsEntries = (await Promise.all(
 		pages.map(async (filename) => {
 			try {
 				const module = await import(`./${filename}`);
-				return [
-					`/${filename.replace(/(^|\/)page\.mdx$/, "")}`,
-					module.sections || [],
-				];
+				return [toUrl(filename), module.sections || []];
 			} catch (e) {
-				return [`/${filename.replace(/(^|\/)page\.mdx$/, "")}`, []];
+				return [toUrl(filename), []];
 			}
 		}),
 	)) as Array<[string, Array<Section>]>;

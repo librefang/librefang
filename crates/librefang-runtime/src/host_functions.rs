@@ -414,18 +414,6 @@ fn host_net_fetch(state: &GuestState, params: &serde_json::Value) -> serde_json:
         .unwrap_or("GET");
     let body = params.get("body").and_then(|b| b.as_str()).unwrap_or("");
 
-    // SECURITY: SSRF protection — resolve DNS once and validate IPs
-    let ssrf_result = match is_ssrf_target(url) {
-        Ok(r) => r,
-        Err(e) => return e,
-    };
-
-    // Extract host:port from URL for capability check
-    let host = extract_host_from_url(url);
-    if let Err(e) = check_capability(&state.capabilities, &Capability::NetConnect(host)) {
-        return e;
-    }
-
     // SECURITY: Use block_in_place instead of block_on so the tokio scheduler
     // can continue making progress (including the epoch-increment watchdog)
     // while this thread is parked waiting for the async HTTP call to complete.
@@ -434,29 +422,96 @@ fn host_net_fetch(state: &GuestState, params: &serde_json::Value) -> serde_json:
     let handle = state.tokio_handle.clone();
     tokio::task::block_in_place(|| {
         handle.block_on(async {
-            // Build a DNS-pinned client so the HTTP request connects to the
-            // same IPs we already validated (prevents DNS-rebinding TOCTOU).
-            let mut builder = librefang_http::proxied_client_builder();
-            for addr in &ssrf_result.resolved {
-                builder = builder.resolve(&ssrf_result.hostname, *addr);
-            }
-            let client = builder.build().expect("HTTP client build");
-            let request = match method.to_uppercase().as_str() {
-                "POST" => client.post(url).body(body.to_string()),
-                "PUT" => client.put(url).body(body.to_string()),
-                "DELETE" => client.delete(url),
-                _ => client.get(url),
-            };
-            match request.send().await {
-                Ok(resp) => {
-                    let status = resp.status().as_u16();
-                    match resp.text().await {
-                        Ok(text) => json!({"ok": {"status": status, "body": text}}),
-                        Err(e) => json!({"error": format!("Failed to read response: {e}")}),
-                    }
+            // SECURITY: follow redirects MANUALLY, re-running the SSRF check,
+            // the capability gate, and the DNS pin on EVERY hop. Auto-redirects
+            // (reqwest's default 10) would re-resolve a 3xx `Location` host
+            // through reqwest's own connector with no SSRF check and no pin, so
+            // a guest could fetch an allowed host that 302-redirects to
+            // 169.254.169.254 (or a rebinding name) and reach IMDS/internal
+            // endpoints — the same DNS-rebinding/redirect SSRF that
+            // web_fetch::send_with_pinned_redirects defends against. Disabling
+            // auto-redirects (`Policy::none`) and validating each hop closes it.
+            const MAX_REDIRECTS: usize = 10;
+            let mut current_url = url.to_string();
+            let mut current_method = method.to_uppercase();
+            let mut current_body = body.to_string();
+
+            for _ in 0..=MAX_REDIRECTS {
+                let ssrf_result = match is_ssrf_target(&current_url) {
+                    Ok(r) => r,
+                    Err(e) => return e,
+                };
+                // Capability gate on THIS hop's host — a redirect must not reach
+                // a destination the guest lacks `NetConnect` for.
+                let host = extract_host_from_url(&current_url);
+                if let Err(e) = check_capability(&state.capabilities, &Capability::NetConnect(host))
+                {
+                    return e;
                 }
-                Err(e) => json!({"error": format!("Request failed: {e}")}),
+
+                // DNS-pinned, non-redirecting client: connect to the exact IPs
+                // we just validated for this hop.
+                let mut builder = librefang_http::proxied_client_builder()
+                    .redirect(reqwest::redirect::Policy::none());
+                for addr in &ssrf_result.resolved {
+                    builder = builder.resolve(&ssrf_result.hostname, *addr);
+                }
+                let client = builder.build().expect("HTTP client build");
+                let request = match current_method.as_str() {
+                    "POST" => client.post(&current_url).body(current_body.clone()),
+                    "PUT" => client.put(&current_url).body(current_body.clone()),
+                    "DELETE" => client.delete(&current_url),
+                    _ => client.get(&current_url),
+                };
+                let resp = match request.send().await {
+                    Ok(r) => r,
+                    Err(e) => return json!({"error": format!("Request failed: {e}")}),
+                };
+                let status = resp.status();
+                if !status.is_redirection() {
+                    let status_u16 = status.as_u16();
+                    return match resp.text().await {
+                        Ok(text) => json!({"ok": {"status": status_u16, "body": text}}),
+                        Err(e) => json!({"error": format!("Failed to read response: {e}")}),
+                    };
+                }
+
+                // Redirect: resolve the Location against the current URL and loop
+                // so the next hop is validated and pinned afresh.
+                let Some(location) = resp
+                    .headers()
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_string())
+                else {
+                    // 3xx with no usable Location — return it rather than loop.
+                    let status_u16 = status.as_u16();
+                    return match resp.text().await {
+                        Ok(text) => json!({"ok": {"status": status_u16, "body": text}}),
+                        Err(e) => json!({"error": format!("Failed to read response: {e}")}),
+                    };
+                };
+                let base = match url::Url::parse(&current_url) {
+                    Ok(u) => u,
+                    Err(e) => return json!({"error": format!("invalid request URL: {e}")}),
+                };
+                let next = match base.join(&location) {
+                    Ok(u) => u,
+                    Err(e) => {
+                        return json!({"error": format!(
+                            "invalid redirect Location '{location}': {e}"
+                        )})
+                    }
+                };
+                // 301/302/303 downgrade to GET and drop the body (browser
+                // behaviour); 307/308 preserve method and body.
+                if (301..=303).contains(&status.as_u16()) {
+                    current_method = "GET".to_string();
+                    current_body = String::new();
+                }
+                current_url = next.to_string();
             }
+            json!({"error": format!("SSRF blocked: too many redirects (cap: {MAX_REDIRECTS})")})
         })
     })
 }
@@ -1774,6 +1829,16 @@ mod tests {
     fn test_ssrf_public_ips_allowed() {
         assert!(is_ssrf_target("https://api.openai.com/v1/chat").is_ok());
         assert!(is_ssrf_target("https://google.com").is_ok());
+    }
+
+    #[test]
+    fn test_ssrf_blocks_azure_imds_and_alibaba_cgnat() {
+        // 192.0.0.192 (Azure's alternative IMDS endpoint) is not RFC-1918
+        // private and was not in the WASM hostname blocklist, so before the
+        // shared is_cloud_metadata_ip gained it the resolved-IP check let it
+        // through. 100.64/10 CGNAT (Alibaba IMDS) is covered by the same helper.
+        assert!(is_ssrf_target("http://192.0.0.192/metadata/instance").is_err());
+        assert!(is_ssrf_target("http://100.100.100.200/latest/meta-data/").is_err());
     }
 
     #[test]
