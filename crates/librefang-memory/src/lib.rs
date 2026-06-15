@@ -42,6 +42,7 @@ pub mod goal_run_store;
 pub mod http_vector_store;
 pub mod idempotency;
 pub mod knowledge;
+pub mod mcp_config_store;
 pub mod migration;
 pub mod namespace_acl;
 pub mod proactive;
@@ -85,6 +86,7 @@ pub use backends::SurrealTaskBackend;
 #[cfg(feature = "surreal-backend")]
 pub use backends::SurrealUsageStore;
 pub use goal_run_store::{GoalRunRow, GoalRunStore};
+pub use mcp_config_store::McpConfigStore;
 pub use session_store::SessionStore;
 pub use substrate::MemorySubstrate;
 pub use workflow_store::{WorkflowRunRow, WorkflowStore};

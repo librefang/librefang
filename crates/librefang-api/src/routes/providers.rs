@@ -2513,12 +2513,12 @@ pub async fn copilot_oauth_poll(
 pub async fn catalog_update(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let cfg = state.kernel.config_ref();
     let mirror = cfg.registry.registry_mirror.clone();
-    let base_url = cfg.registry.base_url.clone();
+    let host = cfg.registry.registry_host.clone();
     drop(cfg);
     match librefang_kernel::catalog_sync::sync_catalog_to(
         state.kernel.home_dir(),
         &mirror,
-        &base_url,
+        host.as_deref(),
     )
     .await
     {

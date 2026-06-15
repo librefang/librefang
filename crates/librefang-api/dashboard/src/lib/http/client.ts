@@ -315,6 +315,7 @@ export {
   // skill workshop pending review (#3328)
   approvePendingCandidate,
   rejectPendingCandidate,
+  proposePendingToRegistry,
   clawhubInstall,
   clawhubCnInstall,
   skillhubInstall,

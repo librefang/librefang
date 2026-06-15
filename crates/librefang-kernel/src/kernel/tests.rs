@@ -1786,16 +1786,33 @@ fn test_peer_scoped_key() {
         "global_setting"
     );
 
-    // SECURITY (#5119): peer_id containing ':' is rejected — the historical
-    // `peer:{pid}:{key}` framing is only injective when pid is colon-free.
-    assert!(matches!(
-        peer_scoped_key("prefs.color", Some("u:456")),
-        Err(KernelOpError::InvalidInput(_))
-    ));
-    assert!(matches!(
-        peer_scoped_key("car", Some("T1:U2")),
-        Err(KernelOpError::InvalidInput(_))
-    ));
+    // SECURITY (#5119 / #6100): peer_id containing ':' is no longer rejected —
+    // the colon is percent-encoded to `%3A` so the `peer:{pid}:{key}` framing
+    // stays injective. A Slack-style `T1:U2` and a Matrix `@user:matrix.org`
+    // both get a distinct, unambiguous namespace.
+    assert_eq!(
+        peer_scoped_key("prefs.color", Some("u:456")).expect("colon peer_id ok"),
+        "peer:u%3A456:prefs.color"
+    );
+    assert_eq!(
+        peer_scoped_key("car", Some("T1:U2")).expect("colon peer_id ok"),
+        "peer:T1%3AU2:car"
+    );
+    assert_eq!(
+        peer_scoped_key("car", Some("@user:matrix.org")).expect("matrix peer_id ok"),
+        "peer:@user%3Amatrix.org:car"
+    );
+    // A literal `%` is escaped first (to `%25`) so encoding is unambiguous and
+    // cannot collide with an encoded colon.
+    assert_eq!(
+        peer_scoped_key("car", Some("a%b:c")).expect("percent peer_id ok"),
+        "peer:a%25b%3Ac:car"
+    );
+    // Injectivity: peer `T1` and peer `T1:U2` map to disjoint prefixes, so one
+    // can never strip the other's keys.
+    assert!(!peer_scoped_key("car", Some("T1:U2"))
+        .unwrap()
+        .starts_with("peer:T1:"));
 
     // SECURITY (#5119 / review #3): an empty peer_id is rejected — `peer::{key}`
     // is ambiguous with a `None`-scope key literally named `:{key}` and would

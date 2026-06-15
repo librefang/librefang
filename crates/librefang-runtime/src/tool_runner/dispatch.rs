@@ -651,9 +651,13 @@ pub async fn execute_tool_raw(
                 let (threshold, max_artifact) =
                     resolve_spill_config(*spill_threshold_bytes, *max_artifact_bytes);
                 if let Some(ctx) = web_ctx {
-                    ctx.search.search(query, max_results).await.map(|body| {
-                        spill_or_passthrough("web_search", body, threshold, max_artifact)
-                    })
+                    ctx.search
+                        .search(query, max_results)
+                        .await
+                        .map(|body| {
+                            spill_or_passthrough("web_search", body, threshold, max_artifact)
+                        })
+                        .map_err(|e| e.to_string())
                 } else {
                     // #3576: tool returns Result<String, ToolError>; narrow here.
                     tool_web_search_legacy(input)

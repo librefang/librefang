@@ -179,7 +179,7 @@ async fn start_full_router(api_key: &str) -> FullRouterHarness {
         tmp.path(),
         librefang_kernel::registry_sync::DEFAULT_CACHE_TTL_SECS,
         "",
-        "",
+        None,
     );
 
     let config = KernelConfig {
@@ -387,6 +387,7 @@ async fn test_build_router_serves_dashboard_locales() {
         ("/locales/en.json", "Chat"),
         ("/locales/zh-CN.json", "对话"),
         ("/locales/ja.json", "チャット"),
+        ("/locales/uk.json", "Чат"),
     ] {
         let response = harness
             .app
@@ -2928,7 +2929,7 @@ async fn start_full_router_with_proactive(enabled: bool) -> FullRouterHarness {
         tmp.path(),
         librefang_kernel::registry_sync::DEFAULT_CACHE_TTL_SECS,
         "",
-        "",
+        None,
     );
 
     let proactive = librefang_types::memory::ProactiveMemoryConfig {
