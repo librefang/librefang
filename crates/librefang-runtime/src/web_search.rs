@@ -432,8 +432,7 @@ impl WebSearchEngine {
 
             match resp_result {
                 Ok(resp) if resp.status().is_success() => {
-                    let data: serde_json::Value =
-                        resp.json().await.map_err(ToolError::upstream)?;
+                    let data: serde_json::Value = resp.json().await.map_err(ToolError::upstream)?;
 
                     let results = data["data"].as_array().cloned().unwrap_or_default();
 
@@ -471,7 +470,9 @@ impl WebSearchEngine {
                         warn!("Jina returned {status}, retrying...");
                         continue;
                     }
-                    return Err(ToolError::upstream_msg(format!("Jina API returned {status}")));
+                    return Err(ToolError::upstream_msg(format!(
+                        "Jina API returned {status}"
+                    )));
                 }
                 Err(e) => {
                     if attempts < 2 {
@@ -485,7 +486,11 @@ impl WebSearchEngine {
     }
 
     /// Search via DuckDuckGo HTML (no API key needed).
-    async fn search_duckduckgo(&self, query: &str, max_results: usize) -> Result<String, ToolError> {
+    async fn search_duckduckgo(
+        &self,
+        query: &str,
+        max_results: usize,
+    ) -> Result<String, ToolError> {
         debug!(query, "Searching via DuckDuckGo HTML");
 
         let resp = self
