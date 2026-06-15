@@ -764,6 +764,11 @@ _308 PRs from 7 contributors since v2026.5.17-beta.12._
   At boot the kernel merges DB rows over the file-backed set by name — a DB row with the same `name` overrides the file entry, a DB-only name is appended, and an empty table is a no-op so the file-only path is byte-for-byte unchanged.
   The store carries 6 unit tests (round-trip, missing-key, in-place replace, sorted `load_all`, delete, empty) and the migration is covered by the existing audit-row / table-creation ladder tests.
   This is the storage + load-on-boot slice; wiring the API write-path (`POST /api/mcp/servers`) and the CLI onto the store is a follow-up.
+- **dashboard/skills: pending skill-evolution drafts now show a diff and can be proposed to the registry directly** (#5819) (@houko) — completes the UI slice #5844 deferred.
+  For an update/patch candidate the skill-workshop pending review renders an inline unified diff (current skill body vs the proposed `prompt_context`) with the `current_version → proposed_version` bump, and each pending candidate gains a "Propose to Registry" action that opens a registry PR straight from the draft (auto-staged, no approve-first step) via a new `POST /api/skills/pending/{id}/propose-to-registry` route.
+  The route shares its proposal core with the existing installed-skill propose endpoint (refactored to a common helper).
+  The diff helper is dependency-free (no new npm package).
+  Background skill-review prompt tuning is out of scope here.
 - **kernel(triggers): `TaskClaimed` and `TaskCompleted` triggers gain an optional `creator_match` filter** (#5960) (@nevgenov), symmetrical to `TaskPosted`'s `assignee_match`, so an orchestrator can scope claim/completion notifications to tasks it originally posted instead of firing on every claim/completion system-wide.
   Accepts an agent UUID, display name, or `"self"`; absent (`#[serde(default)]`) it preserves the legacy fire-for-all behaviour and existing string-form triggers still parse. The original poster is threaded onto the `TaskClaimed` / `TaskCompleted` events from the task record.
 - **runtime(exec): opt-in `exec_policy.safe_bins_skip_approval` lets allowlist-mode `shell_exec` calls whose every base command is a declared `safe_bin` skip the approval prompt; default off preserves today's approve-every-shell posture** (#5962) (@jerrywang121).

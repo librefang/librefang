@@ -136,6 +136,8 @@ use crate::types;
         routes::show_pending_candidate,
         routes::approve_pending_candidate,
         routes::reject_pending_candidate,
+        // Propose a pending candidate directly to the registry (#5819)
+        routes::propose_pending_to_registry,
         routes::list_tools,
         routes::get_tool,
         routes::invoke_tool,

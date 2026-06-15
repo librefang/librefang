@@ -1388,6 +1388,10 @@ func (r *SkillsResource) ApprovePendingCandidate(id string) (interface{}, error)
 	return r.client.request("POST", fmt.Sprintf("/api/skills/pending/%s/approve", id), nil, nil)
 }
 
+func (r *SkillsResource) ProposePendingToRegistry(id string) (interface{}, error) {
+	return r.client.request("POST", fmt.Sprintf("/api/skills/pending/%s/propose-to-registry", id), nil, nil)
+}
+
 func (r *SkillsResource) RejectPendingCandidate(id string) (interface{}, error) {
 	return r.client.request("POST", fmt.Sprintf("/api/skills/pending/%s/reject", id), nil, nil)
 }
