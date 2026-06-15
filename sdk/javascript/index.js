@@ -1288,6 +1288,10 @@ class SkillsResource {
     return this._c._request("POST", `/api/skills/pending/${id}/approve`);
   }
 
+  async proposePendingToRegistry(id) {
+    return this._c._request("POST", `/api/skills/pending/${id}/propose-to-registry`);
+  }
+
   async rejectPendingCandidate(id) {
     return this._c._request("POST", `/api/skills/pending/${id}/reject`);
   }
