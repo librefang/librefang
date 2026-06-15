@@ -37,6 +37,27 @@ pub const DEFAULT_MODEL_KEY: &str = "default_model";
 /// on top of `config.toml`.
 pub const CONFIG_OVERRIDES_KEY: &str = "config_overrides";
 
+/// Whole-section override keys that a **dedicated typed handler** is allowed to
+/// persist to the store, even though the generic `config_set` endpoint may NOT
+/// write them (C-005d). Each entry is a top-level `KernelConfig` section the
+/// matching handler validates before storing; the
+/// `deserialize → validate_config_for_reload` pass at resolve/replace time is
+/// the real guard. Keeping these OUT of
+/// [`crate::routes::config::is_writable_config_path`] keeps the untrusted
+/// `config_set` surface locked (its `_env` / depth-2 protections stay intact),
+/// while [`resolve_config_with_overrides`] still applies a value a trusted
+/// handler stored.
+///
+/// - `budget` — cost limits + provider→limit map (no credential fields).
+/// - `memory` / `proactive_memory` — embedding settings; `embedding_api_key_env`
+///   is an env-var *pointer* (a name), never a key value.
+/// - `sidecar_channels` — channel command/args/non-secret env; secret VALUES are
+///   written to the channel env file by the handler, never into this override.
+///
+/// No secret VALUE ever enters a trusted-section override.
+pub const TRUSTED_SECTION_KEYS: &[&str] =
+    &["budget", "memory", "proactive_memory", "sidecar_channels"];
+
 /// Open the config store via the shared pool, ensuring the schema is applied.
 /// Self-contained so callers work whether or not the boot overlay has run.
 async fn open_config_store(storage_cfg: &StorageConfig) -> Result<SurrealConfigStore, String> {
@@ -502,13 +523,16 @@ pub async fn write_config_overrides(
 }
 
 /// Resolve `effective = config.toml ⊕ overrides`: parse `config.toml` at
-/// `config_path`, apply each **allowlisted** override path, and deserialize the
-/// result. Returns `(merged KernelConfig, merged raw TOML)`.
+/// `config_path`, apply each override path that is **allowlisted or a trusted
+/// whole-section key**, and deserialize the result. Returns
+/// `(merged KernelConfig, merged raw TOML)`.
 ///
-/// Defense in depth: every override path is re-checked against
-/// [`crate::routes::config::is_writable_config_path`] at apply time, so a
-/// directly-tampered store row cannot inject a blocked path (e.g.
-/// `channels.*.token_env`) — such entries are skipped with a `WARN`.
+/// Defense in depth: every override path is re-checked at apply time against
+/// [`crate::routes::config::is_writable_config_path`] OR [`TRUSTED_SECTION_KEYS`],
+/// so a directly-tampered store row cannot inject a blocked path (e.g.
+/// `channels.*.token_env`) — such entries are skipped with a `WARN`. The
+/// trusted-section keys are reachable only by their dedicated typed handlers,
+/// never by the generic `config_set` endpoint.
 ///
 /// # Errors
 /// Returns a scrubbed message if `config.toml` is unreadable/unparseable or the
@@ -526,7 +550,14 @@ pub fn resolve_config_with_overrides(
         raw.parse().map_err(|e| format!("parse config.toml: {e}"))?;
 
     for (path, value) in overrides {
-        if !crate::routes::config::is_writable_config_path(path) {
+        // A stored override applies if the generic `config_set` allowlist
+        // permits it, OR it is a whole-section key a trusted typed handler is
+        // responsible for (C-005d). The trusted set is NOT reachable from the
+        // untrusted `config_set` surface; the typed deserialize+validate below
+        // is the guard for both paths.
+        let allowed = crate::routes::config::is_writable_config_path(path)
+            || TRUSTED_SECTION_KEYS.contains(&path.as_str());
+        if !allowed {
             tracing::warn!(
                 %path,
                 "config-store overlay: stored override path is not allowlisted; skipping"

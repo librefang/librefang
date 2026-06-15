@@ -617,17 +617,17 @@ pub(crate) fn is_writable_config_path(path: &str) -> bool {
         "mode",
         "agent_max_iterations",
         "max_cron_jobs",
-        // ── Whole-section override written by a dedicated typed handler ──
-        // `[budget]` carries NO credential fields (cost limits + a
-        // provider→limit map), so routes/budget.rs persists the entire
-        // validated section as one DB config-override entry (phase 9
-        // settings-to-store). Listed here so `resolve_config_with_overrides`
-        // applies it; the typed `deserialize → validate_config_for_reload`
-        // pass at resolve time is the real guard. `memory` and `channels` are
-        // deliberately NOT here — they carry credential-redirect fields
-        // (embedding_api_key_env, token_env/secret_env) that need per-field
-        // handling preserving the _env / depth-2 protections (follow-up).
-        "budget",
+        // ── Whole-section overrides written by dedicated typed handlers ──
+        // `budget`, `memory`, `proactive_memory`, and `sidecar_channels` are
+        // persisted to the DB config store by their own typed handlers
+        // (routes/budget.rs, routes/memory.rs, routes/channels.rs — phase 9
+        // settings-to-store). They are applied at resolve time via
+        // `config_store_overlay::TRUSTED_SECTION_KEYS`, NOT through this list,
+        // so the untrusted generic `config_set` endpoint cannot write them
+        // (its `_env` / depth-2 / SCRUB protections must keep policing those
+        // sections). The typed `deserialize → validate_config_for_reload` pass
+        // at resolve time is the guard for the trusted path. Do NOT add them
+        // here.
         // ── Collection-typed sections, primitive-valued only (#4678) ──
         // The dashboard's StringMapEditor / NumberMapEditor saves the
         // entire collection as one JSON value posted at the section's
@@ -1491,6 +1491,16 @@ url = "https://search.example.com"
         assert!(!super::is_writable_config_path("network.shared_secret"));
         assert!(!super::is_writable_config_path("migration_state"));
         assert!(!super::is_writable_config_path("nonsense.key"));
+
+        // ── C-005d.1: trusted whole-section keys are NOT reachable here ──
+        // `budget` / `memory` / `proactive_memory` / `sidecar_channels` are
+        // persisted only by their dedicated typed handlers and applied via
+        // `config_store_overlay::TRUSTED_SECTION_KEYS`. The untrusted generic
+        // config_set surface must stay unable to write them.
+        assert!(!super::is_writable_config_path("budget"));
+        assert!(!super::is_writable_config_path("memory"));
+        assert!(!super::is_writable_config_path("proactive_memory"));
+        assert!(!super::is_writable_config_path("sidecar_channels"));
 
         // ── Round-4 review of #4678 ──────────────────────────────────
         // Sections that are intentionally NOT in SECTION_PREFIXES
