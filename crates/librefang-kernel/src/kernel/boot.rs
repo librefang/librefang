@@ -965,8 +965,7 @@ impl LibreFangKernel {
         // DB rows override file entries by name; empty table is a no-op (supports K8s read-only ConfigMaps, #6021).
         let mut all_mcp_servers = config.mcp_servers.clone();
         {
-            let mcp_config_store =
-                librefang_memory::McpConfigStore::new(memory.pool());
+            let mcp_config_store = librefang_memory::McpConfigStore::new(memory.pool());
             match mcp_config_store.load_all() {
                 Ok(db_servers) if !db_servers.is_empty() => {
                     let mut overridden = 0usize;

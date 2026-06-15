@@ -18,9 +18,8 @@ impl McpConfigStore {
 
     /// `ON CONFLICT DO UPDATE` (not `INSERT OR REPLACE`) so `created_at` survives updates.
     pub fn upsert(&self, entry: &McpServerConfigEntry) -> LibreFangResult<()> {
-        let entry_json = serde_json::to_string(entry).map_err(|e| {
-            LibreFangError::memory_msg(format!("mcp config serialize failed: {e}"))
-        })?;
+        let entry_json = serde_json::to_string(entry)
+            .map_err(|e| LibreFangError::memory_msg(format!("mcp config serialize failed: {e}")))?;
         let c = self.pool.get().map_err(LibreFangError::memory)?;
         c.execute(
             "INSERT INTO mcp_server_configs (name, entry_json)
@@ -67,9 +66,7 @@ impl McpConfigStore {
     pub fn load_all(&self) -> LibreFangResult<Vec<McpServerConfigEntry>> {
         let c = self.pool.get().map_err(LibreFangError::memory)?;
         let mut stmt = c
-            .prepare(
-                "SELECT name, entry_json FROM mcp_server_configs ORDER BY name ASC",
-            )
+            .prepare("SELECT name, entry_json FROM mcp_server_configs ORDER BY name ASC")
             .map_err(|e| {
                 LibreFangError::memory_msg(format!("mcp config load_all prepare failed: {e}"))
             })?;
@@ -88,9 +85,7 @@ impl McpConfigStore {
                 LibreFangError::memory_msg(format!("mcp config load_all row read failed: {e}"))
             })?;
             let entry: McpServerConfigEntry = serde_json::from_str(&json).map_err(|e| {
-                LibreFangError::memory_msg(format!(
-                    "mcp config '{name}' deserialize failed: {e}"
-                ))
+                LibreFangError::memory_msg(format!("mcp config '{name}' deserialize failed: {e}"))
             })?;
             result.push(entry);
         }
