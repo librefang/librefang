@@ -335,7 +335,7 @@ const PYTHONPATH_SEP: &str = ":";
 /// PYTHONPATH still wins for any module they're explicitly overriding;
 /// our entry only provides resolution for names that nobody else
 /// claimed.
-pub(crate) fn pythonpath_with_embedded(
+pub fn pythonpath_with_embedded(
     command: &str,
     home_dir: &Path,
     existing_pythonpath: Option<&str>,

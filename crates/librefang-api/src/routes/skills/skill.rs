@@ -346,50 +346,46 @@ pub async fn show_pending_candidate(
     responses(
         (status = 200, description = "Candidate promoted to active skill", body = crate::types::JsonObject),
         (status = 404, description = "Candidate not found", body = crate::types::JsonObject),
-        (status = 409, description = "Promotion blocked (security scan or naming collision)", body = crate::types::JsonObject)
+        (status = 409, description = "Promotion blocked (security scan or naming collision)", body = crate::types::JsonObject),
+        (status = 422, description = "Update candidate targets a skill that no longer exists", body = crate::types::JsonObject)
     )
 )]
 pub async fn approve_pending_candidate(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
+    // `skills_root` is still needed by the `AlreadyInstalled` phantom-vs-collision
+    // disambiguation branch below, which reads the candidate + active skill body
+    // directly off disk.
     let skills_root = state.kernel.home_dir().join("skills");
-    // Capture the creating agent id BEFORE promotion: `approve_candidate`
-    // deletes the pending TOML on success, after which `agent_id` is no
-    // longer recoverable. Best-effort — a read failure here must not block
-    // the approve (auto-assign is a convenience, not a precondition).
+    // Capture the creating agent id BEFORE promotion: the kernel approve
+    // deletes the pending TOML on success, and the phantom-recovery arm
+    // below (AlreadyInstalled) still needs it to converge the best-effort
+    // auto-assign. A read failure here must not block the approve.
     let creator_agent_id =
         match librefang_kernel::skill_workshop::storage::load_candidate(&skills_root, &id) {
             Ok(c) => Some(c.agent_id),
             Err(_) => None,
         };
-    match librefang_kernel::skill_workshop::storage::approve_candidate(
-        &skills_root,
-        &skills_root,
-        &id,
-    ) {
-        Ok(result) => {
-            // Successful promotion landed a new directory under
-            // `skills_root`; refresh the in-memory registry so the next
-            // turn's prompt build sees the new skill.
-            state.kernel.reload_skills();
-            // Auto-assign the promoted skill to the agent that produced it
-            // so the workshop loop (capture → review → approve → use)
-            // closes without a manual `agent.toml` edit (#5989). Best-effort:
-            // logs and continues if the agent was deleted between capture
-            // and approval, so the approve still returns 200.
-            assign_skill_to_creator(&state, creator_agent_id.as_deref(), &result.skill_name);
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "status": "approved",
-                    "candidate_id": id,
-                    "skill_name": result.skill_name,
-                    "version": result.version,
-                    "message": result.message,
-                })),
-            )
-        }
+    // Promote through the kernel so a CREATE is also auto-assigned to the
+    // creating agent's allowlist (#5844 / #5989): the kernel method loads
+    // the candidate, calls approve_candidate (re-running the injection
+    // scan), reloads the registry, and appends the new skill to the owner
+    // agent's allowlist when the candidate is a create, clearing
+    // skills_disabled so it goes live. The AlreadyInstalled arm below
+    // handles phantom recovery, where the kernel errored and did not
+    // assign, so it re-runs the route-level best-effort assign itself.
+    match state.kernel.approve_pending_skill(&id) {
+        Ok(result) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "approved",
+                "candidate_id": id,
+                "skill_name": result.skill_name,
+                "version": result.version,
+                "message": result.message,
+            })),
+        ),
         Err(librefang_kernel::skill_workshop::WorkshopError::InvalidId(_)) => (
             StatusCode::BAD_REQUEST,
             Json(
@@ -515,6 +511,27 @@ pub async fn approve_pending_candidate(
                 )
             }
         }
+        Err(librefang_kernel::skill_workshop::WorkshopError::Skill(
+            librefang_skills::SkillError::NotFound(detail),
+        )) => {
+            // Update candidates can outlive their target: the skill may be
+            // deleted between candidate capture and approval. 409 would
+            // mislead the client into a rename-and-retry; the candidate is
+            // unprocessable until the target skill exists again.
+            // `NotFound`'s payload is a human-readable detail string (not a
+            // bare skill name), so embed it as-is.
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({
+                    "error": format!(
+                        "target skill no longer exists ({detail}); \
+                         reject this candidate and re-capture once the skill is reinstalled"
+                    ),
+                    "kind": "target_skill_missing",
+                    "candidate_id": id,
+                })),
+            )
+        }
         Err(librefang_kernel::skill_workshop::WorkshopError::Skill(e)) => (
             StatusCode::CONFLICT,
             Json(serde_json::json!({"error": format!("promotion rejected: {e}")})),
@@ -528,6 +545,9 @@ pub async fn approve_pending_candidate(
 ///
 /// * `agent_id` is `None` / unparseable / no longer in the registry →
 ///   log a WARN and return; the caller's approve still succeeds.
+/// * agent's allowlist is empty (which already grants every skill) →
+///   no-op, mirroring the kernel's `assign_skill_to_agent_allowlist`;
+///   appending here would narrow an all-skills agent to just this one.
 /// * skill already on the allowlist AND not hidden by `skills_disabled`
 ///   → no-op (no redundant DB write).
 /// * otherwise append the skill and route through `set_agent_skills`,
@@ -559,6 +579,15 @@ fn assign_skill_to_creator(state: &Arc<AppState>, agent_id: Option<&str>, skill_
         );
         return;
     };
+
+    // An empty allowlist already grants the agent every skill; appending
+    // would narrow it to just this one. Match the kernel's
+    // `assign_skill_to_agent_allowlist` and leave all-skills agents
+    // untouched, so this phantom-recovery path behaves identically to the
+    // create path (which skips the same case kernel-side).
+    if entry.manifest.skills.is_empty() {
+        return;
+    }
 
     let already_listed = entry.manifest.skills.iter().any(|s| s == skill_name);
     // Re-run the assign when the skill is present but hidden by
@@ -935,12 +964,28 @@ pub async fn propose_skill_to_registry(
 
     let evolution = librefang_skills::evolution::get_evolution_info(&skill);
 
+    run_registry_proposal(&skill, &evolution, &registry_repo, &token).await
+}
+
+/// Shared core for the two "propose to registry" routes: the installed-skill
+/// route (`/api/skills/{name}/propose`) and the pending-candidate route
+/// (`/api/skills/pending/{id}/propose-to-registry`). Both build an
+/// [`librefang_skills::InstalledSkill`] (the candidate route stages one in a
+/// temp directory) and delegate the fork/push/PR work to
+/// `registry_pr::propose_skill_to_registry`, mapping its result onto the same
+/// JSON shape so dashboard consumers get an identical response either way.
+async fn run_registry_proposal(
+    skill: &librefang_skills::InstalledSkill,
+    evolution: &librefang_skills::evolution::SkillEvolutionMeta,
+    registry_repo: &str,
+    token: &str,
+) -> (StatusCode, Json<serde_json::Value>) {
     let result = librefang_skills::registry_pr::propose_skill_to_registry(
         librefang_skills::registry_pr::ProposeRequest {
-            skill: &skill,
-            evolution: &evolution,
-            registry_repo: &registry_repo,
-            token: &token,
+            skill,
+            evolution,
+            registry_repo,
+            token,
         },
     )
     .await;
@@ -970,6 +1015,165 @@ pub async fn propose_skill_to_registry(
             Json(serde_json::json!({ "error": e.to_string() })),
         ),
     }
+}
+
+/// POST /api/skills/pending/{id}/propose-to-registry — open a PR
+/// contributing a *pending* candidate to the configured public skill
+/// registry, without first approving it into the active registry (#5819).
+///
+/// The candidate carries everything a contribution needs (`name`,
+/// `description`, `prompt_context`). We stage it as an
+/// [`librefang_skills::InstalledSkill`] in a throwaway temp directory and
+/// reuse the same fork/push/PR machinery as the installed-skill route
+/// (`run_registry_proposal`). For an update candidate (`kind = update`,
+/// `target_skill_id` set), the target skill's evolution history is pulled in
+/// so the PR description carries the version diff / changelog. The temp
+/// directory is removed once the proposal returns.
+#[utoipa::path(
+    post,
+    path = "/api/skills/pending/{id}/propose-to-registry",
+    tag = "skills",
+    params(("id" = String, Path, description = "Candidate UUID")),
+    responses(
+        (status = 200, description = "PR opened against the registry", body = crate::types::JsonObject),
+        (status = 400, description = "Invalid candidate id"),
+        (status = 401, description = "No GitHub token configured"),
+        (status = 404, description = "Candidate not found"),
+        (status = 502, description = "GitHub request failed")
+    )
+)]
+pub async fn propose_pending_to_registry(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    let skills_root = state.kernel.home_dir().join("skills");
+    let candidate =
+        match librefang_kernel::skill_workshop::storage::load_candidate(&skills_root, &id) {
+            Ok(c) => c,
+            Err(librefang_kernel::skill_workshop::WorkshopError::InvalidId(_)) => {
+                return ApiErrorResponse::bad_request(format!(
+                    "invalid candidate id (must be a UUID): {id}"
+                ))
+                .into_json_tuple();
+            }
+            Err(librefang_kernel::skill_workshop::WorkshopError::NotFound(_)) => {
+                return ApiErrorResponse::not_found(format!("candidate '{id}' not found"))
+                    .into_json_tuple();
+            }
+            Err(e) => return ApiErrorResponse::internal_scrub(e).into_json_tuple(),
+        };
+
+    let Some(token) = resolve_github_token(&state) else {
+        return ApiErrorResponse::unauthorized(
+            "No GitHub token configured. Connect GitHub in Settings or set GITHUB_TOKEN.",
+        )
+        .into_json_tuple();
+    };
+
+    let registry_repo = state
+        .kernel
+        .config_snapshot()
+        .skills
+        .registry_repo
+        .clone()
+        .filter(|r| !r.trim().is_empty())
+        .unwrap_or_else(|| librefang_skills::registry_pr::DEFAULT_REGISTRY_REPO.to_string());
+
+    // For an update candidate, carry the target skill's evolution history
+    // into the PR description (version diff / changelog). For a create, or
+    // when the target no longer exists, start from an empty history.
+    let evolution = candidate
+        .target_skill_id
+        .as_deref()
+        .and_then(|target| clone_installed_skill(&state, target).ok())
+        .map(|s| librefang_skills::evolution::get_evolution_info(&s))
+        .unwrap_or_default();
+
+    // Stage the candidate as an InstalledSkill in a throwaway temp dir.
+    // The version shown in the PR reflects the proposed bump when known.
+    let version = candidate
+        .proposed_version
+        .clone()
+        .or_else(|| candidate.current_version.clone())
+        .unwrap_or_else(|| "0.1.0".to_string());
+
+    let staged = match stage_candidate_skill(&skills_root, &candidate, &version) {
+        Ok(s) => s,
+        Err(e) => return ApiErrorResponse::internal_scrub(e.to_string()).into_json_tuple(),
+    };
+
+    let response = run_registry_proposal(&staged.skill, &evolution, &registry_repo, &token).await;
+
+    // Best-effort cleanup of the staging directory — the proposal is done
+    // (success or failure) and the temp tree is no longer needed.
+    let _ = std::fs::remove_dir_all(&staged.dir);
+
+    response
+}
+
+/// A candidate skill staged on disk for a registry proposal.
+struct StagedCandidate {
+    /// The temp directory root to remove after proposing.
+    dir: std::path::PathBuf,
+    /// The InstalledSkill pointing at the staged files.
+    skill: librefang_skills::InstalledSkill,
+}
+
+/// Write a pending candidate's content (`skill.toml` + `prompt_context.md`)
+/// into a fresh temp directory under `<skills>/.propose-tmp/<id>/<name>/` and
+/// return an [`librefang_skills::InstalledSkill`] pointing at it. The caller
+/// removes the temp tree once the proposal returns. Staging under the skills
+/// root (rather than the OS temp dir) keeps the files on the same volume and
+/// inside the librefang home, and avoids pulling in a new runtime dependency.
+fn stage_candidate_skill(
+    skills_root: &std::path::Path,
+    candidate: &librefang_kernel::skill_workshop::candidate::CandidateSkill,
+    version: &str,
+) -> std::io::Result<StagedCandidate> {
+    let root = skills_root.join(".propose-tmp").join(&candidate.id);
+    // Clear any leftovers from a previous failed attempt for this candidate.
+    let _ = std::fs::remove_dir_all(&root);
+    let skill_dir = root.join(&candidate.name);
+    std::fs::create_dir_all(&skill_dir)?;
+
+    let manifest = librefang_skills::SkillManifest {
+        skill: librefang_skills::SkillMeta {
+            name: candidate.name.clone(),
+            version: version.to_string(),
+            description: candidate.description.clone(),
+            author: "agent-evolved".to_string(),
+            license: String::new(),
+            tags: Vec::new(),
+        },
+        runtime: librefang_skills::SkillRuntimeConfig {
+            runtime_type: librefang_skills::SkillRuntime::PromptOnly,
+            entry: String::new(),
+        },
+        tools: librefang_skills::SkillTools::default(),
+        requirements: Default::default(),
+        prompt_context: None, // body lives in prompt_context.md
+        source: Some(librefang_skills::SkillSource::Local),
+        config: HashMap::new(),
+        config_vars: Vec::new(),
+        env_passthrough: Vec::new(),
+    };
+
+    let toml_str = toml::to_string_pretty(&manifest)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    std::fs::write(skill_dir.join("skill.toml"), toml_str)?;
+    std::fs::write(
+        skill_dir.join("prompt_context.md"),
+        &candidate.prompt_context,
+    )?;
+
+    Ok(StagedCandidate {
+        dir: root,
+        skill: librefang_skills::InstalledSkill {
+            manifest,
+            path: skill_dir,
+            enabled: true,
+        },
+    })
 }
 
 /// GET /api/skills/{name}/file?path=... — return the contents of a

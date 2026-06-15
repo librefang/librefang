@@ -15,8 +15,10 @@ on the pre-migration tree.
   session) skips the login flow. When unset, the sidecar runs
   ``GET /ilink/bot/get_bot_qrcode?bot_type=3`` and polls
   ``/ilink/bot/get_qrcode_status?qrcode=…`` until ``confirmed``
-  (5 min timeout). The QR code string is logged at INFO so the
-  operator can scan from the WeChat app. Mirrors wechat.rs:174-247.
+  (5 min timeout). The scannable payload is the response's
+  ``qrcode_img_content``; it is surfaced to the dashboard via the
+  ``qr_ready`` event for the operator to scan. The ``qrcode`` field
+  is the opaque poll key only. Mirrors wechat.rs:174-247.
 
 * **Common headers**: ``Content-Type: application/json``,
   ``AuthorizationType: ilink_bot_token``,
@@ -449,9 +451,23 @@ class WeChatAdapter(SidecarAdapter):
                 emit(protocol.qr_status("failed", message=msg))
             raise RuntimeError(msg)
 
+        # `qrcode` is only the opaque status-poll key (passed to
+        # get_qrcode_status below). The payload the WeChat app decodes on scan
+        # is `qrcode_img_content`; encoding the poll token instead yields a blob
+        # WeChat renders as plain text rather than a login prompt — the exact
+        # regression #1560 / #1572 fixed for the in-process Rust adapter, which
+        # surfaced `qrcode_img_content` as the QR payload. Fall back to the
+        # token only so something still renders if iLink omits the field.
+        scan_payload = body.get("qrcode_img_content")
+        if not isinstance(scan_payload, str) or not scan_payload:
+            log.warn(
+                "wechat get_bot_qrcode missing 'qrcode_img_content'; "
+                "rendered QR may not be scannable",
+            )
+            scan_payload = qrcode
+
         log.info(
             "wechat QR code ready — scan with the WeChat app to log in",
-            qrcode=qrcode,
         )
 
         encoded_qr = urllib.parse.quote(qrcode, safe="")
@@ -464,9 +480,10 @@ class WeChatAdapter(SidecarAdapter):
         )
         if emit is not None:
             emit(protocol.qr_ready(
-                qr_code=qrcode,
-                # iLink does not surface a pre-formed deep-link URL —
-                # the dashboard renders the raw qrcode string itself.
+                # The scannable payload — `qrcode_img_content`, NOT the opaque
+                # `qrcode` poll token (see above). The dashboard encodes this
+                # into the canvas the operator scans.
+                qr_code=scan_payload,
                 qr_url=None,
                 message=(
                     "Scan with the WeChat app — 5-minute window"

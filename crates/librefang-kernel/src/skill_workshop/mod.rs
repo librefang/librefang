@@ -48,7 +48,8 @@ pub mod llm_review;
 pub mod storage;
 
 pub use candidate::{
-    truncate_excerpt, CandidateSkill, CaptureSource, Provenance, PROVENANCE_EXCERPT_MAX_CHARS,
+    truncate_excerpt, CandidateKind, CandidateSkill, CaptureSource, Provenance,
+    PROVENANCE_EXCERPT_MAX_CHARS,
 };
 pub use heuristic::HeuristicHit;
 pub use llm_review::ReviewDecision;
@@ -292,6 +293,11 @@ async fn capture_one(
             assistant_response_excerpt: accepted_hit.assistant_response_excerpt,
             turn_index,
         },
+        // Heuristic / workshop captures are always new-skill drafts.
+        kind: CandidateKind::Create,
+        target_skill_id: None,
+        current_version: None,
+        proposed_version: None,
     };
 
     let skills_root = kernel.home_dir().join("skills");
@@ -730,6 +736,10 @@ mod tests {
                 assistant_response_excerpt: hit.assistant_response_excerpt.clone(),
                 turn_index: 2,
             },
+            kind: CandidateKind::Create,
+            target_skill_id: None,
+            current_version: None,
+            proposed_version: None,
         };
 
         let written =
@@ -775,6 +785,10 @@ mod tests {
                 assistant_response_excerpt: None,
                 turn_index: 1,
             },
+            kind: CandidateKind::Create,
+            target_skill_id: None,
+            current_version: None,
+            proposed_version: None,
         };
         let err = storage::save_candidate(tmp.path(), &malicious, 20, None)
             .expect_err("must be blocked by security scan");

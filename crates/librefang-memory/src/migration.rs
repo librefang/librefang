@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 42;
+const SCHEMA_VERSION: u32 = 43;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -207,6 +207,8 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // workflow_runs table (v37) so long-horizon goal runs survive a daemon
     // restart instead of vanishing from the in-memory DashMap.
     run_step!(42, migrate_v42);
+    // v43 (#6021): mcp_server_configs table for SQLite-backed MCP server config.
+    run_step!(43, migrate_v43);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1644,6 +1646,23 @@ fn migrate_v42(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (42, datetime('now'), 'Add goal_runs table for SQLite-backed goal run persistence (#5744)')",
+        [],
+    )?;
+    Ok(())
+}
+
+fn migrate_v43(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS mcp_server_configs (
+            name       TEXT PRIMARY KEY,
+            entry_json TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );",
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (43, datetime('now'), 'Add mcp_server_configs table for SQLite-backed MCP server config (#6021)')",
         [],
     )?;
     Ok(())

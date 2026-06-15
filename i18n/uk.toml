@@ -1,0 +1,74 @@
+# LibreFang i18n — Ukrainian (uk)
+#
+# Цей файл є довідником TOML для всіх перекладених
+# повідомлень про помилки. Бекенд використовує файли Fluent (.ftl)
+# під crates/librefang-types/locales/ для реального пошуку перекладів.
+# Цей TOML файл служить для зручного читання каталогу людиною та може
+# бути використаний зовнішніми інструментами або майбутніми бекендами на основі TOML.
+
+[agent]
+not-found        = "Агента не знайдено"
+spawn-failed     = "Не вдалося запустити агента"
+invalid-id       = "Недійсний ID агента"
+already-exists   = "Агент уже існує"
+
+[message]
+too-large        = "Повідомлення занадто велике (макс. 64KB)"
+delivery-failed  = "Не вдалося доставити повідомлення: {reason}"
+
+[template]
+invalid-name     = "Недійсна назва темплейту"
+not-found        = "Темплейт '{name}' не знайдено"
+parse-failed     = "Не вдалося розпарсити темплейт: {error}"
+required         = "Необхідно вказати 'manifest_toml' або 'template'"
+
+[manifest]
+too-large            = "Маніфест занадто великий (макс. 1MB)"
+invalid-format       = "Недійсний формат маніфесту"
+signature-mismatch   = "Підписаний вміст маніфесту не відповідає manifest_toml"
+signature-failed     = "Помилка перевірки підпису маніфесту"
+
+[auth]
+invalid-key      = "Недійсний API-ключ"
+missing-header   = "Відсутній заголовок Authorization: Bearer <api_key>"
+
+[session]
+load-failed      = "Не вдалося завантажити сесію"
+not-found        = "Сесію не знайдено"
+
+[workflow]
+missing-steps       = "Відсутній масив 'steps'"
+step-needs-agent    = "Крок '{step}' потребує 'agent_id' або 'agent_name'"
+invalid-id          = "Недійсний ID воркфлоу"
+execution-failed    = "Помилка виконання воркфлоу"
+
+[trigger]
+missing-agent-id      = "Відсутній 'agent_id'"
+invalid-agent-id      = "Недійсний agent_id"
+invalid-pattern       = "Недійсний шаблон тригера"
+missing-pattern       = "Відсутній 'pattern'"
+registration-failed   = "Не вдалося зареєструвати тригер (агента не знайдено?)"
+invalid-id            = "Недійсний ID тригера"
+not-found             = "Тригер не знайдено"
+
+[budget]
+invalid-amount   = "Недійсна сума бюджету"
+update-failed    = "Не вдалося оновити бюджет"
+
+[config]
+parse-failed     = "Не вдалося розпарсити конфігурацію: {error}"
+write-failed     = "Не вдалося записати конфігурацію: {error}"
+
+[profile]
+not-found        = "Профіль '{name}' не знайдено"
+
+[cron]
+invalid-id       = "Недійсний ID cron-завдання"
+not-found        = "Cron-завдання не знайдено"
+create-failed    = "Не вдалося створити cron-завдання: {error}"
+
+[general]
+not-found        = "Ресурс не знайдений"
+internal         = "Внутрішня помилка сервера"
+bad-request      = "Некоректний запит: {reason}"
+rate-limited     = "Перевищено ліміт запитів. Спробуйте пізніше."
