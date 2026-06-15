@@ -963,35 +963,25 @@ impl LibreFangKernel {
             config
         };
         // DB rows override file entries by name; empty table is a no-op (supports K8s read-only ConfigMaps, #6021).
-        let mut all_mcp_servers = config.mcp_servers.clone();
-        {
+        // Shared `merge_over` keeps this overlay byte-identical to the hot-reload path (#6113).
+        let all_mcp_servers = {
             let mcp_config_store = librefang_memory::McpConfigStore::new(memory.pool());
-            match mcp_config_store.load_all() {
-                Ok(db_servers) if !db_servers.is_empty() => {
-                    let mut overridden = 0usize;
-                    let mut added = 0usize;
-                    for db_srv in db_servers {
-                        if let Some(slot) =
-                            all_mcp_servers.iter_mut().find(|s| s.name == db_srv.name)
-                        {
-                            *slot = db_srv;
-                            overridden += 1;
-                        } else {
-                            all_mcp_servers.push(db_srv);
-                            added += 1;
-                        }
+            match mcp_config_store.merge_over(config.mcp_servers.clone()) {
+                Ok((merged, added, overridden)) => {
+                    if added > 0 || overridden > 0 {
+                        info!(
+                            "MCP config (DB): {added} added, {overridden} overridden from \
+                             mcp_server_configs"
+                        );
                     }
-                    info!(
-                        "MCP config (DB): {added} added, {overridden} overridden from \
-                         mcp_server_configs"
-                    );
+                    merged
                 }
-                Ok(_) => {}
                 Err(e) => {
                     warn!("Failed to load DB-backed MCP server configs: {e}");
+                    config.mcp_servers.clone()
                 }
             }
-        }
+        };
 
         // Initialize MCP health monitor.
         // [health_check] section overrides [extensions] when explicitly set (non-default).

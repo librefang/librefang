@@ -175,6 +175,7 @@ classified differently — the row note spells out which is which.
 |---|---|---|
 | `extensions` | H | Extensions & integrations config — reloads extensions. |
 | `mcp_servers` | H | MCP server list — reconnects MCP clients. |
+| `mcp_runtime_store` | N | Selects where `/api/mcp/servers` writes land (`file` → config.toml, `db` → SQLite `mcp_server_configs`). Read live by the handler; effective on the next write. |
 | `taint_rules` | H | Named taint rule sets pushed into the shared swap (see field note: already-connected servers pick them up on next scan, not via reconnect). |
 | `a2a` | H | Agent-to-Agent protocol config. |
 | `skills` | H | Skills config (bundled + user-installed) — reloads registry. |

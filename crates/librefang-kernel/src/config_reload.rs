@@ -426,6 +426,16 @@ pub fn build_reload_plan_with_caps(
         plan.hot_actions.push(HotAction::ReloadMcpServers);
     }
 
+    // `mcp_runtime_store` only selects where the next `/api/mcp/servers` write
+    // lands; it is read live from `config_ref()` by the handler, so a change
+    // needs no reload action — noop (#6113).
+    if old.mcp_runtime_store != new.mcp_runtime_store {
+        plan.noop_changes.push(format!(
+            "mcp_runtime_store: {:?} -> {:?} (effective on next /api/mcp/servers write)",
+            old.mcp_runtime_store, new.mcp_runtime_store
+        ));
+    }
+
     // Top-level [[taint_rules]] registry — hot-reloadable via the shared
     // `taint_rules_swap`. Tracked separately from `mcp_servers` because
     // operators commonly tune rule sets without touching MCP server config.
@@ -922,6 +932,7 @@ pub fn classified_reload_fields() -> std::collections::BTreeSet<&'static str> {
         "webhook_triggers",
         "extensions",
         "mcp_servers",
+        "mcp_runtime_store",
         "taint_rules",
         "a2a",
         "fallback_providers",

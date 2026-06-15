@@ -1,5 +1,103 @@
 use super::*;
 
+/// Snapshot the kernel's *effective* MCP server set (file `[[mcp_servers]]`
+/// merged with the DB-backed `mcp_server_configs` overlay) — the list the
+/// kernel actually runs. Read and existence/duplicate checks MUST use this
+/// rather than `config_ref().mcp_servers` (file-only), otherwise servers
+/// persisted with `mcp_runtime_store = "db"` (#6113) are invisible to the API
+/// and cannot be updated or deleted. Returns an owned `Vec` so the `!Send`
+/// `std::sync::RwLock` guard is never held across an `.await`.
+fn effective_mcp_servers_snapshot(
+    state: &Arc<AppState>,
+) -> Vec<librefang_types::config::McpServerConfigEntry> {
+    state
+        .kernel
+        .effective_mcp_servers_ref()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// Persist an MCP server upsert according to `config.mcp_runtime_store`, then
+/// make it effective without a restart. `File` (default) rewrites
+/// `config.toml` and runs a full config reload — byte-for-byte the pre-#6113
+/// behaviour. `Db` writes the SQLite `mcp_server_configs` table, leaving
+/// `config.toml` untouched (for read-only `config.toml` deployments, the
+/// #6021 motivation), then re-runs the MCP merge so the new row connects
+/// immediately. Returns the reload-status string for the response body, or a
+/// ready-to-return error tuple.
+async fn persist_mcp_upsert(
+    state: &Arc<AppState>,
+    entry: &librefang_types::config::McpServerConfigEntry,
+) -> Result<&'static str, (StatusCode, Json<serde_json::Value>)> {
+    match state.kernel.config_ref().mcp_runtime_store {
+        librefang_types::config::McpRuntimeStore::File => {
+            let config_path = state.kernel.home_dir().join("config.toml");
+            if let Err(e) = upsert_mcp_server_config(&config_path, entry) {
+                return Err(ApiErrorResponse::internal_scrub(e).into_json_tuple());
+            }
+            Ok(reload_via_config(state).await)
+        }
+        librefang_types::config::McpRuntimeStore::Db => {
+            let store =
+                librefang_memory::McpConfigStore::new(state.kernel.memory_substrate().pool());
+            if let Err(e) = store.upsert(entry) {
+                return Err(ApiErrorResponse::internal_scrub(e.to_string()).into_json_tuple());
+            }
+            Ok(reload_via_mcp(state).await)
+        }
+    }
+}
+
+/// Delete counterpart of [`persist_mcp_upsert`] — removes the entry from the
+/// configured store and re-applies the effective set.
+async fn persist_mcp_delete(
+    state: &Arc<AppState>,
+    name: &str,
+) -> Result<&'static str, (StatusCode, Json<serde_json::Value>)> {
+    match state.kernel.config_ref().mcp_runtime_store {
+        librefang_types::config::McpRuntimeStore::File => {
+            let config_path = state.kernel.home_dir().join("config.toml");
+            if let Err(e) = remove_mcp_server_config(&config_path, name) {
+                return Err(ApiErrorResponse::internal_scrub(e).into_json_tuple());
+            }
+            Ok(reload_via_config(state).await)
+        }
+        librefang_types::config::McpRuntimeStore::Db => {
+            let store =
+                librefang_memory::McpConfigStore::new(state.kernel.memory_substrate().pool());
+            if let Err(e) = store.delete(name) {
+                return Err(ApiErrorResponse::internal_scrub(e.to_string()).into_json_tuple());
+            }
+            Ok(reload_via_mcp(state).await)
+        }
+    }
+}
+
+/// Full config reload (`File` store path). Maps the plan to the response's
+/// `reload` status string.
+async fn reload_via_config(state: &Arc<AppState>) -> &'static str {
+    match state.kernel.reload_config().await {
+        Ok(plan) => {
+            if plan.restart_required {
+                "applied_partial"
+            } else {
+                "applied"
+            }
+        }
+        Err(_) => "saved_reload_failed",
+    }
+}
+
+/// MCP-only reload (`Db` store path) — re-runs the file+DB merge and connects
+/// new servers without re-reading `config.toml`.
+async fn reload_via_mcp(state: &Arc<AppState>) -> &'static str {
+    match state.kernel.clone().reload_mcp_servers().await {
+        Ok(_) => "applied",
+        Err(_) => "saved_reload_failed",
+    }
+}
+
 /// GET /api/mcp/taint-rules — List configured `[[taint_rules]]`.
 ///
 /// Issue #3050 follow-up: the dashboard `TaintPolicyEditor` references
@@ -58,11 +156,9 @@ pub async fn list_mcp_servers(State(state): State<Arc<AppState>>) -> impl IntoRe
         .collect();
     drop(auth_states);
 
-    // Get configured servers from config
-    let config_servers: Vec<serde_json::Value> = state
-        .kernel
-        .config_ref()
-        .mcp_servers
+    // Effective set = file `[[mcp_servers]]` + DB overlay (#6113), so
+    // DB-backed servers are listed too.
+    let config_servers: Vec<serde_json::Value> = effective_mcp_servers_snapshot(&state)
         .iter()
         .map(|s| {
             let transport = s.transport.as_ref().map(serialize_mcp_transport);
@@ -156,12 +252,10 @@ pub async fn get_mcp_server(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    // Find the configured entry by name — use config_snapshot() because
-    // the result is held across an .await below.
-    let cfg = state.kernel.config_snapshot();
-    let entry = cfg.mcp_servers.iter().find(|s| s.name == name);
-
-    let entry = match entry {
+    // Find the entry in the effective set (file + DB overlay, #6113). Owned
+    // snapshot so the borrow is safe to hold across the .await below.
+    let servers = effective_mcp_servers_snapshot(&state);
+    let entry = match servers.iter().find(|s| s.name == name) {
         Some(e) => e,
         None => {
             return ApiErrorResponse::not_found(format!("MCP server '{}' not found", name))
@@ -260,10 +354,7 @@ pub async fn add_mcp_server(
         // the vault would already hold credentials for a server the caller never
         // managed to register. Reject first, side-effect second.
         let prospective_name = entry.id.clone();
-        if state
-            .kernel
-            .config_ref()
-            .mcp_servers
+        if effective_mcp_servers_snapshot(&state)
             .iter()
             .any(|s| s.name == prospective_name)
         {
@@ -311,10 +402,7 @@ pub async fn add_mcp_server(
     };
 
     // Check for duplicate name
-    if state
-        .kernel
-        .config_ref()
-        .mcp_servers
+    if effective_mcp_servers_snapshot(&state)
         .iter()
         .any(|s| s.name == name)
     {
@@ -322,22 +410,10 @@ pub async fn add_mcp_server(
             .into_json_tuple();
     }
 
-    // Persist to config.toml
-    let config_path = state.kernel.home_dir().join("config.toml");
-    if let Err(e) = upsert_mcp_server_config(&config_path, &entry) {
-        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
-    }
-
-    // Trigger config reload
-    let reload_status = match state.kernel.reload_config().await {
-        Ok(plan) => {
-            if plan.restart_required {
-                "applied_partial"
-            } else {
-                "applied"
-            }
-        }
-        Err(_) => "saved_reload_failed",
+    // Persist per `mcp_runtime_store` (config.toml or DB) and apply.
+    let reload_status = match persist_mcp_upsert(&state, &entry).await {
+        Ok(status) => status,
+        Err(resp) => return resp,
     };
 
     // Establish connection to the newly added server in the background.
@@ -393,11 +469,8 @@ pub async fn update_mcp_server(
     Json(mut body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-    // Ensure the entry exists
-    if !state
-        .kernel
-        .config_ref()
-        .mcp_servers
+    // Ensure the entry exists (effective set = file + DB overlay, #6113)
+    if !effective_mcp_servers_snapshot(&state)
         .iter()
         .any(|s| s.name == name)
     {
@@ -428,27 +501,14 @@ pub async fn update_mcp_server(
         }
     };
 
-    // Persist — upsert replaces an existing entry with the same name
-    let config_path = state.kernel.home_dir().join("config.toml");
-    if let Err(e) = upsert_mcp_server_config(&config_path, &entry) {
-        // Scrub the config-write error (audit: rusqlite-errors-leak):
-        // the helper string carries io / TOML-parse detail. Full error
-        // logged; client sees the generic body.
-        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
-    }
     // Drop ErrorTranslator before .await — FluentBundle is !Send and cannot
     // be held across an async suspension point.
     drop(t);
 
-    let reload_status = match state.kernel.reload_config().await {
-        Ok(plan) => {
-            if plan.restart_required {
-                "applied_partial"
-            } else {
-                "applied"
-            }
-        }
-        Err(_) => "saved_reload_failed",
+    // Persist per `mcp_runtime_store` (config.toml or DB) and apply.
+    let reload_status = match persist_mcp_upsert(&state, &entry).await {
+        Ok(status) => status,
+        Err(resp) => return resp,
     };
 
     // Disconnect the old connection so connect_mcp_servers picks up the new config.
@@ -497,12 +557,9 @@ pub async fn patch_mcp_server_taint(
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
 
     // Locate and clone the existing entry so we mutate a fresh copy that's
-    // safe to pass to upsert_mcp_server_config without touching the live
-    // config until persistence succeeds.
-    let mut entry = match state
-        .kernel
-        .config_ref()
-        .mcp_servers
+    // safe to pass to persist_mcp_upsert without touching the live config
+    // until persistence succeeds. Effective set = file + DB overlay (#6113).
+    let mut entry = match effective_mcp_servers_snapshot(&state)
         .iter()
         .find(|s| s.name == name)
         .cloned()
@@ -523,26 +580,14 @@ pub async fn patch_mcp_server_taint(
         entry.taint_policy = Some(policy);
     }
 
-    let config_path = state.kernel.home_dir().join("config.toml");
-    if let Err(e) = upsert_mcp_server_config(&config_path, &entry) {
-        // Scrub the config-write error (audit: rusqlite-errors-leak):
-        // the helper string carries io / TOML-parse detail. Full error
-        // logged; client sees the generic body.
-        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
-    }
     // Drop ErrorTranslator before .await — FluentBundle is !Send and cannot
     // be held across an async suspension point.
     drop(t);
 
-    let reload_status = match state.kernel.reload_config().await {
-        Ok(plan) => {
-            if plan.restart_required {
-                "applied_partial"
-            } else {
-                "applied"
-            }
-        }
-        Err(_) => "saved_reload_failed",
+    // Persist per `mcp_runtime_store` (config.toml or DB) and apply.
+    let reload_status = match persist_mcp_upsert(&state, &entry).await {
+        Ok(status) => status,
+        Err(resp) => return resp,
     };
 
     // Reconnect so the new taint_policy snapshot reaches the live
@@ -590,41 +635,31 @@ pub async fn delete_mcp_server(
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-    // Ensure the entry exists
-    if !state
-        .kernel
-        .config_ref()
-        .mcp_servers
-        .iter()
-        .any(|s| s.name == name)
-    {
-        return ApiErrorResponse::not_found(
-            t.t_args("api-error-mcp-not-found", &[("name", &name)]),
-        )
-        .into_json_tuple();
-    }
-
-    // Resolve server URL before removing config (needed for vault cleanup)
-    let server_url = state
-        .kernel
-        .config_ref()
-        .mcp_servers
+    // Ensure the entry exists in the effective set (file + DB overlay, #6113),
+    // and resolve its URL before removal (needed for vault cleanup).
+    let server_url = match effective_mcp_servers_snapshot(&state)
         .iter()
         .find(|s| s.name == name)
-        .and_then(|s| match &s.transport {
+    {
+        Some(s) => match &s.transport {
             Some(librefang_types::config::McpTransportEntry::Http { url }) => Some(url.clone()),
             Some(librefang_types::config::McpTransportEntry::Sse { url }) => Some(url.clone()),
             _ => None,
-        });
-
-    let config_path = state.kernel.home_dir().join("config.toml");
-    if let Err(e) = remove_mcp_server_config(&config_path, &name) {
-        // Scrub the config-write error (audit: rusqlite-errors-leak):
-        // the helper string carries io / TOML-parse detail. Full error
-        // logged; client sees the generic body.
-        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
-    }
+        },
+        None => {
+            return ApiErrorResponse::not_found(
+                t.t_args("api-error-mcp-not-found", &[("name", &name)]),
+            )
+            .into_json_tuple();
+        }
+    };
     drop(t);
+
+    // Persist the removal per `mcp_runtime_store` (config.toml or DB) and apply.
+    let reload_status = match persist_mcp_delete(&state, &name).await {
+        Ok(status) => status,
+        Err(resp) => return resp,
+    };
 
     // Clean up OAuth vault tokens, auth state, and live connections.
     //
@@ -671,17 +706,6 @@ pub async fn delete_mcp_server(
         .lock()
         .await
         .retain(|c| c.name() != name);
-
-    let reload_status = match state.kernel.reload_config().await {
-        Ok(plan) => {
-            if plan.restart_required {
-                "applied_partial"
-            } else {
-                "applied"
-            }
-        }
-        Err(_) => "saved_reload_failed",
-    };
 
     state.kernel.audit().record(
         "system",
@@ -773,10 +797,7 @@ pub async fn reconnect_mcp_server_handler(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    let configured = state
-        .kernel
-        .config_ref()
-        .mcp_servers
+    let configured = effective_mcp_servers_snapshot(&state)
         .iter()
         .any(|s| s.name == name);
     if !configured {

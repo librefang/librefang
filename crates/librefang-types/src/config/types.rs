@@ -3018,6 +3018,21 @@ impl Default for TriggersConfig {
     }
 }
 
+/// Selects where runtime `/api/mcp/servers` writes are persisted.
+/// See [`KernelConfig::mcp_runtime_store`].
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum McpRuntimeStore {
+    /// Persist writes to `config.toml` (pre-#6113 behaviour). Default.
+    #[default]
+    File,
+    /// Persist writes to the SQLite `mcp_server_configs` table, leaving
+    /// `config.toml` untouched — for read-only `config.toml` deployments.
+    Db,
+}
+
 /// Top-level kernel configuration.
 #[derive(Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
@@ -3235,6 +3250,16 @@ pub struct KernelConfig {
     /// MCP server configurations for external tool integration.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_servers: Vec<McpServerConfigEntry>,
+    /// Where the `POST/PUT/DELETE /api/mcp/servers` handlers persist a
+    /// runtime change. `file` (the default) rewrites `config.toml`, preserving
+    /// the pre-#6113 behaviour. `db` writes the SQLite `mcp_server_configs`
+    /// table instead and leaves `config.toml` untouched, so MCP servers can be
+    /// managed at runtime when `config.toml` is read-only (e.g. a Kubernetes
+    /// ConfigMap — the #6021 motivation). The boot merge already lets DB rows
+    /// override the file-backed list by name; this knob only selects the write
+    /// target. Changing it takes effect on the next write — no restart needed.
+    #[serde(default)]
+    pub mcp_runtime_store: McpRuntimeStore,
     /// Reusable named taint rule sets referenced by
     /// [`McpTaintToolPolicy::rule_sets`]. Each entry defines a group of
     /// taint rules with a severity action (block / warn / log) that the
@@ -6147,6 +6172,7 @@ impl Default for KernelConfig {
             users: Vec::new(),
             channel_role_mapping: ChannelRoleMapping::default(),
             mcp_servers: Vec::new(),
+            mcp_runtime_store: McpRuntimeStore::default(),
             taint_rules: Vec::new(),
             a2a: None,
             usage_footer: UsageFooterMode::default(),

@@ -9,6 +9,14 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 _8 PRs from 2 contributors since v2026.6.10-beta.17._
 
+### Added
+
+- **mcp/api: `mcp_runtime_store = "db"` persists `/api/mcp/servers` writes to SQLite instead of `config.toml`, so MCP servers can be managed at runtime when the config file is read-only** (#6113) (@houko).
+  #6106 added the DB-backed `mcp_server_configs` store and a boot-time merge, but the API write-path (`POST` / `PUT` / `DELETE /api/mcp/servers`, the taint patch) and the read-path still only saw `config.toml`, so a DB-managed server was invisible to the API and could not be added at all when `config.toml` was a read-only Kubernetes ConfigMap (the #6021 motivation).
+  The new `config.toml: mcp_runtime_store` knob (default `file`, byte-for-byte the prior behaviour) routes writes to the store when set to `db`.
+  The boot overlay and `reload_mcp_servers` now share one `McpConfigStore::merge_over` helper — previously the hot-reload path dropped DB-backed servers the boot merge had applied — and the handlers read the effective (file + DB) set, so DB-backed servers are listed, fetched, updated, and deleted like file-backed ones and take effect without a restart.
+  Tests: `mcp_config_store::tests::merge_over_*` and the `mcp_runtime_store_db_test` API integration suite.
+
 ### Fixed
 
 - **llm-drivers(deepseek): recognise `deepseek-v4-pro` as a thinking-with-tools model so its `reasoning_content` is echoed back** (@DaBlitzStein).

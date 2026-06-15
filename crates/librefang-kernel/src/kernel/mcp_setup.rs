@@ -330,8 +330,23 @@ impl LibreFangKernel {
         //    after `registry_sync`). Atomic swap — readers never blocked.
         let catalog_count = self.mcp_catalog_reload(&cfg.home_dir);
 
-        // 2. Effective server list == config.mcp_servers (no merge needed).
-        let new_configs = cfg.mcp_servers.clone();
+        // 2. Effective server list = config.mcp_servers merged with the
+        //    DB-backed `mcp_server_configs` table (DB wins by name), mirroring
+        //    the boot-time overlay via the shared `merge_over` helper. Without
+        //    this, a runtime DB write (`mcp_runtime_store = "db"`, #6113) would
+        //    only take effect after a restart, and a hot-reload would drop the
+        //    DB-backed servers the boot merge had applied. Empty table = the
+        //    file-only list, unchanged.
+        let new_configs = {
+            let store = librefang_memory::McpConfigStore::new(self.memory.substrate.pool());
+            match store.merge_over(cfg.mcp_servers.clone()) {
+                Ok((merged, _added, _overridden)) => merged,
+                Err(e) => {
+                    warn!("reload_mcp_servers: failed to merge DB-backed MCP configs: {e}");
+                    cfg.mcp_servers.clone()
+                }
+            }
+        };
 
         // 3. Find servers that aren't already connected
         let already_connected: Vec<String> = self
