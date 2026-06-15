@@ -514,6 +514,7 @@ mod tests {
         // Locale files loaded by the dashboard on boot.
         assert!(is_rate_limit_exempt("/locales/en.json"));
         assert!(is_rate_limit_exempt("/locales/ja.json"));
+        assert!(is_rate_limit_exempt("/locales/uk.json"));
         assert!(is_rate_limit_exempt("/locales/zh-CN.json"));
     }
 

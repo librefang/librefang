@@ -28,6 +28,7 @@ i18n/
   README.ja.md   # Japanese (日本語)
   README.ko.md   # Korean (한국어)
   README.pl.md   # Polish (Polski)
+  README.uk.md   # Ukrainian (Українська)
   README.zh.md   # Chinese (中文)
 
   # Legacy long-form sidecars — slated to migrate into docs/src/app/<locale>/...
@@ -46,7 +47,7 @@ Each `README.<lang>.md` is a translation of the root `README.md`. All translatio
 3. Update the multi-language navigation bar in your new file and in **all existing translation files** (including the root `README.md`). The navigation bar looks like this:
    ```html
    <strong>Multi-language:</strong>
-   <a href="../README.md">English</a> | <a href="README.zh.md">中文</a> | ...
+   <a href="../README.md">English</a> | <a href="README.zh.md">中文</a> | ... | <a href="README.uk.md">Українська</a>
    ```
    Add a link for your new language to this bar in every file.
 

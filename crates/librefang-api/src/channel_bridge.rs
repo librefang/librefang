@@ -311,6 +311,7 @@ fn tr_progress_failed(language: &str) -> &'static str {
         "ja" => "失敗",
         "de" => "fehlgeschlagen",
         "fr" => "échoué",
+        "uk" => "не вдалося",
         _ => "failed",
     }
 }
@@ -3225,6 +3226,7 @@ mod tests {
         assert_eq!(tr_progress_failed("zh-CN"), "失败");
         assert_eq!(tr_progress_failed("zh"), "失败");
         assert_eq!(tr_progress_failed("ja"), "失敗");
+        assert_eq!(tr_progress_failed("uk"), "не вдалося");
         // Unknown language falls back to English.
         assert_eq!(tr_progress_failed("xx"), "failed");
     }
