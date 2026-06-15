@@ -792,8 +792,7 @@ jobs:
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
-      # ubuntu-latest leaves only ~14 GB free; the full-run path debug-compiles every workspace test binary via `cargo test --workspace --no-run` (each `tests/*.rs` is its own executable, plus dev-deps and librefang-desktop's large static archive), which overruns the disk — the runner dies with "No space left on device" mid-build (the full-run shards all do this build, so any one of them can flake on the margin, as shard 1 did on main).
-      # Reclaim ~25 GB by removing preinstalled toolchains this job never uses, mirroring the unit-test (#6089) and nix-build (#6081) fixes.
+      # ubuntu-latest leaves ~14 GB free; the full-run path compiles every workspace test binary and overruns the disk.
       - name: Free runner disk space
         if: steps.gate.outputs.skip != 'true'
         run: |
