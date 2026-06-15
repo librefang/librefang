@@ -87,9 +87,22 @@
       "note": "Found during live deploy: merged C-009 import used seed semantics (Unchanged no-op) so it would NOT convert the daemon's boot-seeded BOOTSTRAP rows to runtime -> the revert would still wipe prod. Fixed: import now promote_or_seed (preserves store value, forces runtime, promotes bootstrap rows). Deploy this image BEFORE running the import."
     },
     "C-005d": {
-      "status": "ASSESSED",
+      "status": "PLANNED",
       "assessed": "2026-06-14",
-      "note": "Migrate memory + channels settings to the DB store. Reuse C-005c config_overrides + a trusted-section apply path; secret VALUES stay out of the DB. See assessment.md C-005d addendum."
+      "planned": "2026-06-14",
+      "note": "Migrate memory + channels settings to the DB store. Reuse C-005c config_overrides + a trusted-section apply path; secret VALUES stay out of the DB. See assessment.md C-005d addendum and plan.md C-005d section. Sub-changes: C-005d.1 (DONE), C-005d.2 (PENDING), C-005d.3 (PENDING).",
+      "sub_changes": {
+        "C-005d.1": {
+          "status": "CODE_DONE",
+          "completed": "2026-06-14",
+          "files": 3,
+          "branch": "feat/memory-channels-to-store",
+          "qa": "overlay-tests(15)+config-unit(18)+clippy+brand",
+          "note": "Trusted-section apply path: TRUSTED_SECTION_KEYS + OR-gate in resolve_config_with_overrides; removed budget from is_writable_config_path EXACT (only the typed budget handler writes budget now). PREREQ: PR #85 (fix runtime clippy 1.95 large_enum_variant) must merge first so api clippy CI is green."
+        },
+        "C-005d.2": { "status": "PENDING", "note": "memory + proactive_memory handler -> store" },
+        "C-005d.3": { "status": "PENDING", "note": "sidecar_channels handler -> store; channel env-file split unchanged" }
+      }
     }
   },
   "merged_pr": [

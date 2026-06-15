@@ -25,8 +25,17 @@ endpoint stays unable to write `memory` / `channels` / `sidecar_channels`.
 | C-005d.2 | `PATCH /api/memory/config` → store `memory` + `proactive_memory` overrides | C-005d.1 |
 | C-005d.3 | `configure_sidecar_channel` → store `sidecar_channels` override; secrets.env untouched; include-shadow guard kept | C-005d.1 |
 
+## Status
+
+- **C-005d.1 — CODE DONE** on `feat/memory-channels-to-store` (trusted-section
+  apply path; budget folded off the `config_set` allowlist). Verified: overlay
+  15/15, config unit 18/18, api clippy + branding clean.
+- **Prerequisite:** PR #85 (`fix(runtime): clippy 1.95 large_enum_variant`) must
+  merge to `main` first — until then the api-clippy CI lane is red because it
+  compiles `librefang-runtime`.
+
 ## Next step
 
 ```
-/kbd-execute C-005d.1
+merge PR #85 → rebase feat/memory-channels-to-store onto main → /kbd-execute C-005d.2
 ```
