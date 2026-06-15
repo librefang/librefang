@@ -256,8 +256,6 @@ impl LibreFangKernel {
         )
     }
 
-    /// Execute the default LLM-based agent loop.
-    #[allow(clippy::too_many_arguments)]
     /// Pre-dispatch per-provider budget gate (#5980, restoring #4807's
     /// intended design).
     ///
