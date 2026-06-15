@@ -89,6 +89,7 @@ const FAVICON_ICO: &[u8] = include_bytes!("../static/favicon.ico");
 const LOCALE_EN: &str = include_str!("../static/locales/en.json");
 const LOCALE_ZH_CN: &str = include_str!("../static/locales/zh-CN.json");
 const LOCALE_JA: &str = include_str!("../static/locales/ja.json");
+const LOCALE_UK: &str = include_str!("../static/locales/uk.json");
 
 const DASHBOARD_SYNC_ERROR_FILE: &str = ".sync-error";
 
@@ -211,6 +212,16 @@ pub async fn locale_ja() -> impl IntoResponse {
             (header::CACHE_CONTROL, "public, max-age=3600"),
         ],
         LOCALE_JA,
+    )
+}
+
+pub async fn locale_uk() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/json; charset=utf-8"),
+            (header::CACHE_CONTROL, "public, max-age=3600"),
+        ],
+        LOCALE_UK,
     )
 }
 

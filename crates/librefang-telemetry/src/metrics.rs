@@ -125,7 +125,8 @@ pub fn record_http_request(path: &str, method: &str, status: u16, duration: Dura
 /// twice just re-registers the same description, which the recorder
 /// dedupes.
 ///
-/// Covers the four metrics added in #3495 plus the existing HTTP pair.
+/// Covers the four metrics added in #3495, the existing HTTP pair, and the
+/// cron-health counters.
 pub fn describe_observability_metrics() {
     metrics::describe_counter!(
         "librefang_http_requests_total",
@@ -154,6 +155,19 @@ pub fn describe_observability_metrics() {
         "librefang_tool_call_total",
         "Tool invocations executed by the agent loop, labeled by tool name \
          and outcome (success|failure) (#3495)."
+    );
+    metrics::describe_counter!(
+        "librefang_cron_fires_total",
+        "Cron job fires recorded by the scheduler, labeled by agent and \
+         outcome (ok|error|timeout). A flat ok-rate with a rising \
+         error/timeout rate flags a degrading job before it auto-disables."
+    );
+    metrics::describe_counter!(
+        "librefang_cron_auto_disabled_total",
+        "Cron jobs auto-disabled by the scheduler after \
+         MAX_CONSECUTIVE_ERRORS consecutive failures/timeouts or \
+         schedule-fallback misses, labeled by agent. Alert on any increase: \
+         the job has silently stopped firing until re-enabled."
     );
 }
 

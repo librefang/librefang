@@ -74,6 +74,14 @@ impl kernel_handle::TaskQueue for LibreFangKernel {
 
         if let Some(ref task) = result {
             let task_id = task["id"].as_str().unwrap_or("").to_string();
+            // The claimed task record carries the original poster so
+            // `TaskClaimed` triggers can scope via `creator_match`. The
+            // substrate stores an unset creator as the empty string — map
+            // that to `None` so an empty value never satisfies a filter.
+            let created_by = task["created_by"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(String::from);
             let event = librefang_types::event::Event::new(
                 AgentId::new(), // system-originated
                 librefang_types::event::EventTarget::Broadcast,
@@ -81,6 +89,7 @@ impl kernel_handle::TaskQueue for LibreFangKernel {
                     librefang_types::event::SystemEvent::TaskClaimed {
                         task_id,
                         claimed_by: resolved.clone(),
+                        created_by,
                     },
                 ),
             );
@@ -106,6 +115,25 @@ impl kernel_handle::TaskQueue for LibreFangKernel {
                 }
             },
         };
+        // Capture the original poster before completing so `TaskCompleted`
+        // triggers can scope via `creator_match`. `task_complete` only flips
+        // status/result, so reading the record first is equivalent to reading
+        // it after. The substrate stores an unset creator as the empty string
+        // — map that to `None` so an empty value never satisfies a filter.
+        let created_by = self
+            .memory
+            .substrate
+            .task_get(task_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|task| {
+                task["created_by"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+            });
+
         self.memory
             .substrate
             .task_complete(task_id, result)
@@ -120,6 +148,7 @@ impl kernel_handle::TaskQueue for LibreFangKernel {
                     task_id: task_id.to_string(),
                     completed_by: resolved,
                     result: result.to_string(),
+                    created_by,
                 },
             ),
         );

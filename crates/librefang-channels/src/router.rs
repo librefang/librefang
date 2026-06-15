@@ -469,52 +469,29 @@ impl AgentRouter {
     }
 
     /// Check if a single binding's match_rule matches the context.
+    ///
+    /// Delegates to [`BindingMatchRule::matches`] in `librefang-types` — the
+    /// single source of truth for binding semantics, shared with the kernel's
+    /// outbound `channel_send` mirror owner resolution so the two matchers can
+    /// never drift (that drift was the root cause of the #4824 mirror regression).
     #[inline]
     fn binding_matches(&self, binding: &AgentBinding, ctx: &BindingContext<'_>) -> bool {
-        let rule = &binding.match_rule;
-
-        // All specified fields must match
-        if let Some(ref ch) = rule.channel {
-            if ch.as_str() != &*ctx.channel {
-                return false;
-            }
-        }
-        if let Some(ref acc) = rule.account_id {
-            match ctx.account_id {
-                Some(ref ctx_acc) => {
-                    if acc.as_str() != &**ctx_acc {
-                        return false;
-                    }
-                }
-                None => return false,
-            }
-        }
-        if let Some(ref pid) = rule.peer_id {
-            if pid.as_str() != &*ctx.peer_id {
-                return false;
-            }
-        }
-        if let Some(ref gid) = rule.guild_id {
-            match ctx.guild_id {
-                Some(ref ctx_gid) => {
-                    if gid.as_str() != &**ctx_gid {
-                        return false;
-                    }
-                }
-                None => return false,
-            }
-        }
-        if !rule.roles.is_empty() {
-            // User must have at least one of the specified roles
-            let has_role = rule
-                .roles
-                .iter()
-                .any(|r| ctx.roles.iter().any(|cr| cr.as_ref() == r.as_str()));
-            if !has_role {
-                return false;
-            }
-        }
-        true
+        // `BindingMatchRule::matches` takes `roles` as `&[String]`; the hot
+        // dispatch path carries `Cow<str>` roles, so materialize them only
+        // when the rule actually gates on roles. The common case is an empty
+        // role list, which never allocates.
+        let roles: Vec<String> = if binding.match_rule.roles.is_empty() {
+            Vec::new()
+        } else {
+            ctx.roles.iter().map(|r| r.as_ref().to_string()).collect()
+        };
+        binding.match_rule.matches(
+            &ctx.channel,
+            ctx.account_id.as_deref(),
+            &ctx.peer_id,
+            ctx.guild_id.as_deref(),
+            &roles,
+        )
     }
 }
 
@@ -1025,6 +1002,64 @@ mod tests {
         assert_eq!(
             router.resolve(&ChannelType::Discord, "alice", None),
             Some(agent)
+        );
+    }
+
+    /// Regression test for #5955: two Telegram sidecars that share the
+    /// `"telegram"` channel type but carry distinct config `name`s must
+    /// register under distinct `"telegram:<name>"` channel-default keys,
+    /// not collide on the bare `"telegram"` key (last-writer-wins).
+    ///
+    /// This reproduces the exact key-building the daemon performs in
+    /// `librefang-api/src/channel_bridge.rs`: with `account_id = Some(name)`
+    /// the key is `"<channel>:<name>"`; the buggy `account_id = None` path
+    /// collapsed both sidecars onto `"<channel>"`, so whichever sidecar
+    /// registered last won every chat. We assert each bot resolves to its
+    /// own default independently.
+    #[test]
+    fn sidecar_default_does_not_collide_across_bots() {
+        let router = AgentRouter::new();
+        let agent_a = AgentId::new();
+        let agent_b = AgentId::new();
+
+        // Mirror channel_bridge.rs: account_id = Some(sidecar.name) ⇒
+        // key = "telegram:<name>".
+        let ct = ChannelType::Telegram;
+        for (name, agent) in [("bot-a", agent_a), ("bot-b", agent_b)] {
+            let channel_key = format!("{}:{}", channel_type_to_str(&ct), name);
+            router.set_channel_default_with_name(channel_key, agent, name.to_string());
+        }
+
+        // Each bot's qualified key resolves to its own default — no
+        // last-writer-wins collision.
+        assert_eq!(
+            router.channel_default("telegram:bot-a"),
+            Some(agent_a),
+            "bot-a must keep its own channel default"
+        );
+        assert_eq!(
+            router.channel_default("telegram:bot-b"),
+            Some(agent_b),
+            "bot-b must keep its own channel default — not bot-a's, and \
+             not lost to a bare `telegram` collision"
+        );
+        // The configured names are preserved per-bot too (used by the
+        // reply-precheck bot-name lookup in bridge.rs).
+        assert_eq!(
+            router.channel_default_name("telegram:bot-a").as_deref(),
+            Some("bot-a")
+        );
+        assert_eq!(
+            router.channel_default_name("telegram:bot-b").as_deref(),
+            Some("bot-b")
+        );
+        // The bare `"telegram"` key was never written under the fixed
+        // keying, so it does not silently shadow either bot.
+        assert_eq!(
+            router.channel_default("telegram"),
+            None,
+            "no sidecar should claim the unqualified `telegram` default \
+             when each carries a distinct account_id"
         );
     }
 }

@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock, RwLock};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
 use tracing::{debug, error, info, warn};
@@ -817,9 +817,13 @@ async fn spawn_once(
     let stderr_name = ctx.name.clone();
     let mut stderr_translator = StderrTranslator::new(&ctx.command);
     tokio::spawn(async move {
-        let reader = BufReader::new(child_stderr);
-        let mut lines = reader.lines();
-        while let Ok(Some(line)) = lines.next_line().await {
+        // Read stderr with the SAME bounded reader as stdout. The unbounded
+        // `lines()` let a runaway adapter that writes to stderr without a
+        // newline grow the buffer without bound and OOM the daemon — the exact
+        // hazard the stdout path was capped against (MAX_EVENT_LINE_BYTES).
+        let mut reader = BufReader::new(child_stderr);
+        let mut line_buf: Vec<u8> = Vec::new();
+        while let Ok(Some(line)) = read_event_line(&mut reader, &mut line_buf).await {
             match stderr_translator.handle_line(&line) {
                 StderrAction::Warn(msg) => {
                     warn!(adapter = %stderr_name, "{msg}");
@@ -977,6 +981,28 @@ async fn spawn_once(
                                             serde_json::Value::String(h),
                                         );
                                     }
+                                    // #5955 — stamp the per-bot account id so
+                                    // the bridge's `metadata["account_id"]`
+                                    // resolution computes the qualified
+                                    // `<channel>:<account_id>` routing key that
+                                    // matches the per-sidecar registration key
+                                    // seeded in `channel_bridge.rs` (which keys
+                                    // off the sidecar's config `name`). Without
+                                    // this, every Telegram sidecar collapses to
+                                    // the bare `"telegram"` key, so a `/agent`
+                                    // selection in bot-A leaks to bot-B for the
+                                    // same platform user. Use `or_insert` so an
+                                    // adapter that already supplies its own
+                                    // `account_id` in the message metadata
+                                    // (dingtalk / email / google_chat) is not
+                                    // overwritten.
+                                    metadata
+                                        .entry("account_id".to_string())
+                                        .or_insert_with(|| {
+                                            serde_json::Value::String(
+                                                adapter_name.clone(),
+                                            )
+                                        });
                                     if !params.group_members.is_empty() {
                                         if let Ok(v) = serde_json::to_value(
                                             &params.group_members,
@@ -2939,7 +2965,7 @@ mod tests {
     fn sidecar_default_agent_roundtrip_5294() {
         // Absent → None (no-op for deployments that don't need routing pin).
         let minimal = cfg("telegram", "python3", vec![]);
-        assert!(minimal.default_agent.is_none());
+        assert!(minimal.agent.is_none());
 
         // Explicit value round-trips so channel_bridge.rs can seed the router.
         let c: librefang_types::config::SidecarChannelConfig =
@@ -2950,7 +2976,7 @@ mod tests {
                 "default_agent": "fandangorodelo",
             }))
             .unwrap();
-        assert_eq!(c.default_agent.as_deref(), Some("fandangorodelo"));
+        assert_eq!(c.agent.as_deref(), Some("fandangorodelo"));
     }
 
     // #5841 — command-policy + message-coalescing ported to sidecars.
@@ -3426,6 +3452,73 @@ mod tests {
             !msg.metadata.contains_key("username"),
             "the dead `username` key must not be written"
         );
+        adapter.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_sidecar_stamps_account_id_from_adapter_name() {
+        // Regression for #5955: the reader must stamp
+        // `metadata["account_id"]` from the sidecar's config `name` so
+        // the bridge computes the per-bot `"<channel>:<account_id>"`
+        // routing key matching the registration key seeded in
+        // `channel_bridge.rs`. Without it, every Telegram sidecar
+        // collapses to the bare `"telegram"` key and a `/agent`
+        // selection in one bot leaks to every other bot. The stamp must
+        // key off the adapter NAME (the config name), NOT the
+        // `ready`-event `account_id`, so the registration key and the
+        // resolution key line up. And an adapter that supplies its own
+        // `account_id` in the message metadata must be preserved.
+        let python = match which_python() {
+            Some(p) => p,
+            None => return,
+        };
+        // The `ready` event advertises a DIFFERENT account_id than the
+        // config name, to prove the stamp uses the name, not the ready
+        // account. First message omits account_id (must be stamped with
+        // the adapter name "bot-a"); second supplies its own ("own-acct",
+        // must be preserved).
+        let script = concat!(
+            "import sys,json;",
+            "print(json.dumps({'method':'ready','params':",
+            "{'capabilities':[],'account_id':'ready-acct'}}),flush=True);",
+            "print(json.dumps({'method':'message','params':",
+            "{'user_id':'u','user_name':'n','text':'one'}}),flush=True);",
+            "print(json.dumps({'method':'message','params':",
+            "{'user_id':'u','user_name':'n','text':'two',",
+            "'metadata':{'account_id':'own-acct'}}}),flush=True);",
+            "sys.exit(0)"
+        );
+        let config = cfg(
+            "bot-a",
+            &python,
+            vec!["-u".to_string(), "-c".to_string(), script.to_string()],
+        );
+        let adapter = SidecarAdapter::new(&config, std::env::temp_dir());
+        let mut stream = adapter.start().await.unwrap();
+        use futures::StreamExt;
+
+        let first = tokio::time::timeout(std::time::Duration::from_secs(30), stream.next())
+            .await
+            .expect("timed out waiting for first message")
+            .expect("stream ended before first message");
+        assert_eq!(
+            first.metadata.get("account_id").and_then(|v| v.as_str()),
+            Some("bot-a"),
+            "account_id must be stamped from the adapter (config) name, \
+             not the ready-event account_id"
+        );
+
+        let second = tokio::time::timeout(std::time::Duration::from_secs(30), stream.next())
+            .await
+            .expect("timed out waiting for second message")
+            .expect("stream ended before second message");
+        assert_eq!(
+            second.metadata.get("account_id").and_then(|v| v.as_str()),
+            Some("own-acct"),
+            "an adapter-supplied account_id in message metadata must be \
+             preserved, not overwritten by the adapter name"
+        );
+
         adapter.stop().await.unwrap();
     }
 

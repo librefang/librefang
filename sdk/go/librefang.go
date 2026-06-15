@@ -800,6 +800,10 @@ func (r *HandsResource) HandStats(id string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/hands/instances/%s/stats", id), nil, nil)
 }
 
+func (r *HandsResource) InstallHandFromMarketplace(data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", "/api/hands/marketplace/install", data, nil)
+}
+
 func (r *HandsResource) ReloadHands() (interface{}, error) {
 	return r.client.request("POST", "/api/hands/reload", nil, nil)
 }
@@ -1382,6 +1386,10 @@ func (r *SkillsResource) ShowPendingCandidate(id string) (interface{}, error) {
 
 func (r *SkillsResource) ApprovePendingCandidate(id string) (interface{}, error) {
 	return r.client.request("POST", fmt.Sprintf("/api/skills/pending/%s/approve", id), nil, nil)
+}
+
+func (r *SkillsResource) ProposePendingToRegistry(id string) (interface{}, error) {
+	return r.client.request("POST", fmt.Sprintf("/api/skills/pending/%s/propose-to-registry", id), nil, nil)
 }
 
 func (r *SkillsResource) RejectPendingCandidate(id string) (interface{}, error) {

@@ -252,7 +252,7 @@ pub async fn run_pkce_flow(oauth: &OAuthTemplate, client_id: &str) -> ExtensionR
     }
 
     // Wait for callback
-    let (code_tx, code_rx) = oneshot::channel::<String>();
+    let (code_tx, code_rx) = oneshot::channel::<Result<String, String>>();
     let code_tx = Arc::new(Mutex::new(Some(code_tx)));
 
     // Spawn callback handler
@@ -298,6 +298,12 @@ pub async fn run_pkce_flow(oauth: &OAuthTemplate, client_id: &str) -> ExtensionR
                         );
                     }
                     if let Some(ref error) = query.error {
+                        // Provider denied / errored (state already verified
+                        // above). Signal the waiter so it fails fast with this
+                        // error instead of hanging until the 5-minute timeout.
+                        if let Some(tx) = code_tx.lock().await.take() {
+                            let _ = tx.send(Err(format!("OAuth error: {error}")));
+                        }
                         return axum::response::Html(format!(
                             "<h1>Error</h1><p>OAuth error: {error}</p>"
                         ));
@@ -308,7 +314,7 @@ pub async fn run_pkce_flow(oauth: &OAuthTemplate, client_id: &str) -> ExtensionR
                         // a replay against the live channel cannot succeed.
                         let mut guard = code_tx.lock().await;
                         if let Some(tx) = guard.take() {
-                            let _ = tx.send(code.clone());
+                            let _ = tx.send(Ok(code.clone()));
                             axum::response::Html(
                                 "<h1>Success!</h1><p>Authorization complete. You can close this tab.</p><script>window.close()</script>"
                                     .to_string(),
@@ -320,6 +326,12 @@ pub async fn run_pkce_flow(oauth: &OAuthTemplate, client_id: &str) -> ExtensionR
                             )
                         }
                     } else {
+                        // Callback arrived with neither `code` nor `error`
+                        // (state already verified). Signal so the waiter doesn't
+                        // hang until the timeout.
+                        if let Some(tx) = code_tx.lock().await.take() {
+                            let _ = tx.send(Err("No authorization code received".to_string()));
+                        }
                         axum::response::Html(
                             "<h1>Error</h1><p>No authorization code received.</p>".to_string(),
                         )
@@ -338,7 +350,8 @@ pub async fn run_pkce_flow(oauth: &OAuthTemplate, client_id: &str) -> ExtensionR
     let code = tokio::time::timeout(std::time::Duration::from_secs(300), code_rx)
         .await
         .map_err(|_| ExtensionError::OAuth("OAuth flow timed out after 5 minutes".to_string()))?
-        .map_err(|_| ExtensionError::OAuth("Callback channel closed".to_string()))?;
+        .map_err(|_| ExtensionError::OAuth("Callback channel closed".to_string()))?
+        .map_err(ExtensionError::OAuth)?;
 
     // Shut down callback server
     server_handle.abort();

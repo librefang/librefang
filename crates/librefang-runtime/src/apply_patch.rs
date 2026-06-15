@@ -415,7 +415,6 @@ pub async fn apply_patch_ext(
                                         result.errors.push(err);
                                         continue;
                                     }
-                                    result.files_moved += 1;
                                     t
                                 }
                                 Err(e) => {
@@ -430,7 +429,13 @@ pub async fn apply_patch_ext(
                         match atomic_write(&target, &patched).await {
                             Ok(()) => {
                                 result.files_updated += 1;
+                                // Count the move only after the write to the new
+                                // path actually lands — previously the counter
+                                // was bumped while resolving the target, so a
+                                // failed write reported "1 moved" for a move that
+                                // never happened.
                                 if move_to.is_some() && target != resolved {
+                                    result.files_moved += 1;
                                     let _ = tokio::fs::remove_file(&resolved).await;
                                 }
                             }
@@ -841,6 +846,46 @@ mod tests {
             .unwrap();
         assert!(updated.contains("replaced"));
         assert!(!updated.contains("line2"));
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn move_is_not_counted_when_the_write_fails() {
+        let dir = std::env::temp_dir().join("librefang_patch_move_fail_test");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("src.txt"), "a\n").await.unwrap();
+        // Make the move target an existing directory so atomic_write's final
+        // rename onto it fails — exercising the write-failure path.
+        tokio::fs::create_dir_all(dir.join("dest")).await.unwrap();
+
+        let ops = vec![PatchOp::UpdateFile {
+            path: "src.txt".to_string(),
+            move_to: Some("dest".to_string()),
+            hunks: vec![Hunk {
+                context_before: vec![],
+                old_lines: vec!["a".to_string()],
+                new_lines: vec!["b".to_string()],
+                context_after: vec![],
+            }],
+        }];
+
+        let result = apply_patch(&ops, &dir, &[]).await;
+        // The write to the directory target fails, so nothing actually moved.
+        // Before the fix, files_moved was bumped while resolving the target and
+        // reported "1 moved" for a move that never happened.
+        assert_eq!(
+            result.files_moved, 0,
+            "no move should be counted when the write fails"
+        );
+        assert_eq!(result.files_updated, 0);
+        assert!(
+            !result.errors.is_empty(),
+            "the failed write should be recorded as an error"
+        );
+        // The source file must be left intact (not removed).
+        assert!(dir.join("src.txt").exists());
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }

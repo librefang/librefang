@@ -144,12 +144,32 @@ docker build -t librefang-rust-dev:latest -f Dockerfile.rust-dev .
 #    point at named volumes (isolated from the host); reuse them across runs
 #    so deps compile once. Set PATH explicitly — a login shell ('bash -l')
 #    drops the image's /usr/local/cargo/bin from PATH.
+#    Prefix link-producing commands (build / test, NOT check) with `mold -run`.
+#    The image ships the mold linker; `mold -run` intercepts the child `ld`
+#    WITHOUT touching RUSTFLAGS, so it leaves the cached target dir valid while
+#    cutting the link phase that every incremental build still pays.
+#    Measured on a warm cache, a one-line edit + relink of the kernel-router
+#    test binary went 7.1s → 1.7s (4.1x). `cargo check` has no link step, so
+#    there is nothing to prefix there.
+# 3. Use a PER-WORKTREE target volume. Sharing one target dir across
+#    worktrees that sit on different branches corrupts cargo's incremental
+#    cache: cargo reuses compiled metadata from another code state and emits
+#    phantom errors — e.g. `missing field 'x'` for a field the current source
+#    does not even define. Derive the volume name from the worktree so each
+#    branch is isolated. The cargo *download* cache (librefang-cargo) is safe
+#    to share — it holds fetched `.crate` files, not compiled artifacts.
+WORKTREE="$(git rev-parse --show-toplevel)"
+TARGET_VOL="librefang-target-$(basename "$WORKTREE")"
 docker run --rm \
-  -v "$(git rev-parse --show-toplevel)":/work \
-  -v librefang-cargo:/cargo -v librefang-target:/target \
+  -v "$WORKTREE":/work \
+  -v librefang-cargo:/cargo -v "$TARGET_VOL":/target \
   -e CARGO_HOME=/cargo -e CARGO_TARGET_DIR=/target -w /work \
   librefang-rust-dev:latest \
-  sh -c 'export PATH=/usr/local/cargo/bin:$PATH; cargo test -p librefang-api --lib'
+  sh -c 'export PATH=/usr/local/cargo/bin:$PATH; mold -run cargo test -p librefang-api --lib'
+# Reclaim a finished worktree's cache: docker volume rm "$TARGET_VOL"
+# On a small Docker VM, back each volume with a host dir on a big disk first:
+#   docker volume create --opt type=none --opt o=bind \
+#     --opt device=/big/disk/target-<wt> librefang-target-<wt>
 ```
 
 Scope is still mandatory: `-p <crate>` (or the `kind(lib)|kind(bin)` nextest
@@ -343,6 +363,7 @@ The daemon command is `start` (not `daemon`).
   too).
 - **Worktree**: Use `git worktree add` on an external disk for new features; fall back to `/tmp/librefang-<feature>` only if no external disk is available. Never develop on the main worktree
 - **Worktree continuation = drive to PR**: When asked to continue half-done work in an existing worktree (uncommitted changes or unmerged commits), the workflow is **commit → push → open or update PR**. Don't stop at "local commits only". A new branch needs a fresh PR; an existing branch with an open PR gets a follow-up push to update it. Anything left in the worktree counts as real work — including a regenerated `Cargo.lock` after rebase. Commit it together with the rest of the change; do not `git checkout` it away.
+- **Re-created worktree → `git fetch` and compare against `origin/<branch>` BEFORE editing.** When you `git worktree add` for a branch that already exists on the remote (e.g. after removing and re-creating its worktree, or resuming an active PR), the remote tip may be **ahead** of your base — collaborator pushes, the `auto-update-branches` cron, or the `openapi-drift` auto-codegen commit all move it without your involvement. Editing on a stale base and force-pushing **silently clobbers that newer work**. A non-fast-forward push rejection is the *last* line of defense, not the plan: fetch first, diff `HEAD..origin/<branch>`, and rebase/rebuild your change on the real tip. Isolation hides drift — compensate by checking the remote, every time you re-enter a worktree you did not just create.
 
 ## Prose wrapping: no column limit; break only at sentence boundaries
 

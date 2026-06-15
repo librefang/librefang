@@ -21,6 +21,64 @@ use tracing::{debug, info, warn};
 const MAX_CONSECUTIVE_ERRORS: u32 = 5;
 
 // ---------------------------------------------------------------------------
+// Observability metrics (cron health)
+// ---------------------------------------------------------------------------
+//
+// Emitted from the scheduler's outcome-recording methods rather than the
+// tick loop's per-action match arms, so every cron action type (AgentTurn,
+// Workflow, payload-encode failures, wake-gate no-ops) funnels through one
+// place and future tick-loop refactors can't silently drop a metric.
+
+/// Classify a cron failure message into a metric `outcome` label.
+///
+/// Best-effort: the tick loop formats timeout failures as
+/// `"timed out after {n}s"` / `"workflow timed out after {n}s"`, so a
+/// substring match is sufficient to separate model/workflow hangs (the
+/// failure mode that silently auto-disabled a job in practice) from
+/// genuine job errors. A non-timeout error whose text happens to contain
+/// `"timed out"` is mislabeled — acceptable for an aggregate health signal.
+fn classify_cron_failure_outcome(error_msg: &str) -> &'static str {
+    if error_msg.contains("timed out") {
+        "timeout"
+    } else {
+        "error"
+    }
+}
+
+/// Emit the cron-fire outcome counter. Labeled by `agent` and `outcome`
+/// (`ok` | `error` | `timeout`).
+///
+/// We deliberately do NOT label by cron job id: one-shot jobs
+/// (`At`-schedule, manual one-shots) mint a fresh id on every fire, which
+/// would make the in-process metric series set grow without bound. The
+/// agent roster is bounded, mirroring the existing
+/// `librefang_tool_call_total{tool,outcome}` cardinality budget.
+fn record_cron_fire_metric(agent: &AgentId, outcome: &str) {
+    metrics::counter!(
+        "librefang_cron_fires_total",
+        "agent" => agent.to_string(),
+        "outcome" => outcome.to_string(),
+    )
+    .increment(1);
+}
+
+/// Emit the auto-disable counter. Labeled by `agent`.
+///
+/// Increments exactly once each time the scheduler turns a job off on its
+/// own — after `MAX_CONSECUTIVE_ERRORS` consecutive failures/timeouts
+/// (`record_failure`) or schedule-fallback misses (`due_jobs`, #5113).
+/// Alert on any increase: a job has stopped firing and will not resume
+/// until re-enabled. Unlike an `enabled` gauge this ignores *intentional*
+/// manual disables and has no stale-series problem when a job is deleted.
+fn record_cron_auto_disabled_metric(agent: &AgentId) {
+    metrics::counter!(
+        "librefang_cron_auto_disabled_total",
+        "agent" => agent.to_string(),
+    )
+    .increment(1);
+}
+
+// ---------------------------------------------------------------------------
 // JobMeta — extra runtime state not stored in CronJob itself
 // ---------------------------------------------------------------------------
 
@@ -665,6 +723,7 @@ impl CronScheduler {
                             );
                             meta.job.enabled = false;
                             meta.auto_disabled = true;
+                            record_cron_auto_disabled_metric(&meta.job.agent_id);
                             // Push next_run far into the future so the disabled
                             // job is never even considered on subsequent ticks
                             // (matches the `At` far-future convention).
@@ -795,6 +854,7 @@ impl CronScheduler {
                 meta.last_status = Some("ok".to_string());
                 meta.consecutive_errors = 0;
                 meta.consecutive_fallbacks = 0;
+                record_cron_fire_metric(&meta.job.agent_id, "ok");
                 // one_shot jobs get removed; recurring jobs keep the next_run
                 // already pre-advanced by due_jobs() — no recompute needed.
                 meta.one_shot
@@ -845,6 +905,7 @@ impl CronScheduler {
                 librefang_types::truncate_str(error_msg, 256)
             ));
             meta.consecutive_errors += 1;
+            record_cron_fire_metric(&meta.job.agent_id, classify_cron_failure_outcome(error_msg));
             if meta.one_shot {
                 // one_shot jobs (e.g. At-schedule) are removed after the first
                 // failure too — there is no meaningful retry for a one-time job
@@ -858,6 +919,7 @@ impl CronScheduler {
                 );
                 meta.job.enabled = false;
                 meta.auto_disabled = true;
+                record_cron_auto_disabled_metric(&meta.job.agent_id);
                 false
             } else {
                 // Use the opt-returning variant so a wedged cron schedule
@@ -960,6 +1022,84 @@ pub fn compute_next_run_after(
     compute_next_run_after_opt(schedule, after).unwrap_or_else(|| after + Duration::hours(1))
 }
 
+/// Remap a POSIX / Vixie day-of-week field to the `cron` crate's 1-7 numbering.
+///
+/// POSIX numbers weekdays 0-7 (`0 == 7 == Sunday`, Mon `1`, … Sat `6`); the
+/// `cron` crate numbers them 1-7 (Sun `1`, … Sat `7`) and rejects `0`. We
+/// expand the field to an explicit, ascending comma list of crate ordinals so
+/// that a range wrapping through Sunday (`5-7` = Fri-Sat-Sun) and the `0`/`7`
+/// Sunday alias both come out valid. `*` and `?` pass through untouched, and
+/// any token we cannot parse is returned verbatim so the crate's own validator
+/// still owns malformed input (and reports it through the existing error path).
+fn remap_posix_dow_to_cron(field: &str) -> String {
+    let field = field.trim();
+    if field == "*" || field == "?" {
+        return field.to_string();
+    }
+
+    // POSIX day (0..=7) -> crate ordinal (1..=7). `7` aliases to `0` (Sunday).
+    fn to_cron(posix: u32) -> u32 {
+        posix % 7 + 1
+    }
+
+    let mut ordinals: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+
+    for part in field.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            return field.to_string();
+        }
+
+        // Optional step: "<range-or-star>/<step>".
+        let (base, step) = match part.split_once('/') {
+            Some((b, s)) => match s.trim().parse::<u32>() {
+                Ok(step) if step >= 1 => (b.trim(), step),
+                _ => return field.to_string(),
+            },
+            None => (part, 1),
+        };
+
+        // Inclusive POSIX range described by `base`.
+        let (start, end) = if base == "*" {
+            (0u32, 6u32)
+        } else if let Some((a, b)) = base.split_once('-') {
+            match (a.trim().parse::<u32>(), b.trim().parse::<u32>()) {
+                (Ok(a), Ok(b)) if a <= 7 && b <= 7 => (a, b),
+                _ => return field.to_string(),
+            }
+        } else {
+            match base.parse::<u32>() {
+                Ok(n) if n <= 7 => (n, n),
+                _ => return field.to_string(),
+            }
+        };
+
+        // Walk the range forward modulo 7, honouring the 7==0 Sunday alias and
+        // a range that wraps through Sunday (e.g. POSIX `5-7` or `6-1`).
+        let norm_start = start % 7;
+        let norm_end = end % 7;
+        let span = if norm_end >= norm_start {
+            norm_end - norm_start
+        } else {
+            7 - norm_start + norm_end
+        };
+        let mut i = 0u32;
+        while i <= span {
+            ordinals.insert(to_cron((norm_start + i) % 7));
+            i += step;
+        }
+    }
+
+    if ordinals.is_empty() {
+        return field.to_string();
+    }
+    ordinals
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 /// Same as [`compute_next_run_after`] but returns `None` when the
 /// schedule could not be advanced — either a `Cron` expression that
 /// failed to parse or one that has no future fire time matching its
@@ -1000,11 +1140,34 @@ pub fn compute_next_run_after_opt(
             // Standard 5-field: min hour dom month dow
             // 6-field:          sec min hour dom month dow
             // cron crate:       sec min hour dom month dow year
+            //
+            // The day-of-week field also needs a value remap. POSIX / Vixie
+            // cron numbers weekdays 0-7 with `0 == 7 == Sunday`, Monday `1`,
+            // … Saturday `6`. The `cron` crate instead numbers them 1-7 with
+            // Sunday `1`, … Saturday `7` and rejects `0` outright. Passing a
+            // POSIX expression through unmapped silently shifts every weekday
+            // (`0 11 * * 1-5`, intended Mon-Fri, parses as the crate's Sun-Thu —
+            // wrongly firing Sunday and skipping Friday) and makes any
+            // Sunday-only schedule (`… * 0`) unschedulable, surfacing to the
+            // caller as the misleading "no future fire time" error. Remap the
+            // dow field from POSIX to the crate's convention before parsing.
             let trimmed = expr.trim();
             let fields: Vec<&str> = trimmed.split_whitespace().collect();
             let seven_field = match fields.len() {
-                5 => format!("0 {trimmed} *"),
-                6 => format!("{trimmed} *"),
+                5 => {
+                    let dow = remap_posix_dow_to_cron(fields[4]);
+                    format!(
+                        "0 {} {} {} {} {dow} *",
+                        fields[0], fields[1], fields[2], fields[3]
+                    )
+                }
+                6 => {
+                    let dow = remap_posix_dow_to_cron(fields[5]);
+                    format!(
+                        "{} {} {} {} {} {dow} *",
+                        fields[0], fields[1], fields[2], fields[3], fields[4]
+                    )
+                }
                 _ => expr.clone(),
             };
 
@@ -1131,6 +1294,29 @@ mod tests {
     use super::*;
     use chrono::{Duration, TimeZone, Timelike};
     use librefang_types::scheduler::{CronAction, CronDelivery};
+
+    #[test]
+    fn classify_cron_failure_outcome_separates_timeouts() {
+        // Tick-loop timeout messages (AgentTurn + Workflow) → "timeout".
+        assert_eq!(
+            classify_cron_failure_outcome("timed out after 180s"),
+            "timeout"
+        );
+        assert_eq!(
+            classify_cron_failure_outcome("workflow timed out after 300s"),
+            "timeout"
+        );
+        // Genuine job/logic errors → "error".
+        assert_eq!(
+            classify_cron_failure_outcome("payload encode failed: x"),
+            "error"
+        );
+        assert_eq!(
+            classify_cron_failure_outcome("workflow not found: nightly"),
+            "error"
+        );
+        assert_eq!(classify_cron_failure_outcome(""), "error");
+    }
 
     #[test]
     fn fire_session_override_persistent_returns_none() {
@@ -1810,6 +1996,100 @@ mod tests {
         assert!(next > now);
         assert!(next <= now + Duration::days(7));
         assert_eq!(next.format("%H:%M").to_string(), "14:30");
+    }
+
+    #[test]
+    fn remap_posix_dow_single_days_match_crate_convention() {
+        // POSIX 0 == Sunday == crate 1; POSIX 7 is the Sunday alias; Mon..Sat
+        // each shift up by one (POSIX 1 Mon -> crate 2, POSIX 6 Sat -> crate 7).
+        assert_eq!(remap_posix_dow_to_cron("0"), "1");
+        assert_eq!(remap_posix_dow_to_cron("7"), "1");
+        assert_eq!(remap_posix_dow_to_cron("1"), "2");
+        assert_eq!(remap_posix_dow_to_cron("6"), "7");
+    }
+
+    #[test]
+    fn remap_posix_dow_passes_through_wildcards() {
+        assert_eq!(remap_posix_dow_to_cron("*"), "*");
+        assert_eq!(remap_posix_dow_to_cron("?"), "?");
+    }
+
+    #[test]
+    fn remap_posix_dow_ranges_and_lists() {
+        // Mon-Fri (POSIX 1-5) -> crate 2-6, emitted as an explicit ascending list.
+        assert_eq!(remap_posix_dow_to_cron("1-5"), "2,3,4,5,6");
+        // Weekend Sat+Sun (POSIX 6,0) -> crate 7,1 -> sorted "1,7".
+        assert_eq!(remap_posix_dow_to_cron("6,0"), "1,7");
+        // Range wrapping through Sunday: Fri-Sun (POSIX 5-7) -> Fri,Sat,Sun.
+        assert_eq!(remap_posix_dow_to_cron("5-7"), "1,6,7");
+    }
+
+    #[test]
+    fn remap_posix_dow_steps() {
+        // POSIX */2 = Sun,Tue,Thu,Sat -> crate 1,3,5,7.
+        assert_eq!(remap_posix_dow_to_cron("*/2"), "1,3,5,7");
+        // POSIX 1-5/2 = Mon,Wed,Fri -> crate 2,4,6.
+        assert_eq!(remap_posix_dow_to_cron("1-5/2"), "2,4,6");
+    }
+
+    #[test]
+    fn remap_posix_dow_returns_malformed_verbatim() {
+        // Out-of-range or garbage is handed back unchanged so the `cron` crate's
+        // own validator still owns and reports malformed input.
+        assert_eq!(remap_posix_dow_to_cron("8"), "8");
+        assert_eq!(remap_posix_dow_to_cron("abc"), "abc");
+    }
+
+    #[test]
+    fn sunday_only_cron_is_schedulable() {
+        // Regression: a POSIX `0` (Sunday) day-of-week previously produced no
+        // future fire because the `cron` crate rejects dow 0, surfacing to the
+        // caller as the misleading "no future fire time" error at add_job.
+        use chrono::Datelike;
+        // Tuesday 2026-06-02 — the next Sunday is 2026-06-07.
+        let after = chrono::DateTime::parse_from_rfc3339("2026-06-02T08:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let schedule = CronSchedule::Cron {
+            expr: "0 16 * * 0".into(),
+            tz: None,
+        };
+        let next = compute_next_run_after_opt(&schedule, after)
+            .expect("Sunday cron must have a future fire time");
+        assert_eq!(
+            next.weekday(),
+            chrono::Weekday::Sun,
+            "must fire on a Sunday"
+        );
+        assert_eq!(next.format("%H:%M").to_string(), "16:00");
+    }
+
+    #[test]
+    fn weekday_range_fires_friday_and_skips_sunday() {
+        // Regression: POSIX `1-5` (Mon-Fri) must include Friday and must NOT
+        // fire on Sunday. Under the old unmapped path `1-5` meant the crate's
+        // Sun-Thu — wrongly firing Sunday and silently skipping Friday.
+        use chrono::Datelike;
+        let schedule = CronSchedule::Cron {
+            expr: "0 9 * * 1-5".into(),
+            tz: None,
+        };
+        // From Saturday 2026-06-06 the next fire is Monday 2026-06-08, never the
+        // intervening Sunday 2026-06-07.
+        let saturday = chrono::DateTime::parse_from_rfc3339("2026-06-06T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let next = compute_next_run_after(&schedule, saturday);
+        assert_ne!(next.weekday(), chrono::Weekday::Sun, "must skip Sunday");
+        assert_eq!(next.weekday(), chrono::Weekday::Mon);
+        // From Thursday 2026-06-04 the next fire is Friday 2026-06-05 (the day
+        // the buggy convention used to skip).
+        let thursday = chrono::DateTime::parse_from_rfc3339("2026-06-04T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let next_fri = compute_next_run_after(&schedule, thursday);
+        assert_eq!(next_fri.weekday(), chrono::Weekday::Fri);
+        assert_eq!(next_fri.format("%H:%M").to_string(), "09:00");
     }
 
     #[test]

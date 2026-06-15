@@ -382,13 +382,16 @@ impl MediaDriver for MiniMaxMediaDriver {
     async fn poll_video(&self, task_id: &str) -> Result<MediaTaskStatus, MediaError> {
         let api_key = self.api_key()?;
 
-        let url = format!(
-            "{}/query/video_generation?task_id={}",
-            self.base_url, task_id
-        );
+        // `task_id` is user-controlled (HTTP path segment, percent-decoded by
+        // axum). Pass it via `.query(...)` so reqwest percent-encodes it rather
+        // than splicing it raw into the query string, where a value like
+        // `id&foo=bar` would smuggle extra parameters into this authenticated
+        // (MINIMAX_API_KEY-bearing) request.
+        let url = format!("{}/query/video_generation", self.base_url);
         let client = librefang_http::proxied_client();
         let response = client
             .get(&url)
+            .query(&[("task_id", task_id)])
             .bearer_auth(&api_key)
             .timeout(std::time::Duration::from_secs(POLL_TIMEOUT_SECS))
             .send()
@@ -432,14 +435,13 @@ impl MediaDriver for MiniMaxMediaDriver {
     async fn get_video_result(&self, task_id: &str) -> Result<MediaVideoResult, MediaError> {
         let api_key = self.api_key()?;
 
-        // First poll to get the file_id
-        let url = format!(
-            "{}/query/video_generation?task_id={}",
-            self.base_url, task_id
-        );
+        // First poll to get the file_id. `task_id` is user-controlled, so pass
+        // it via `.query(...)` for percent-encoding (see poll_video).
+        let url = format!("{}/query/video_generation", self.base_url);
         let client = librefang_http::proxied_client();
         let response = client
             .get(&url)
+            .query(&[("task_id", task_id)])
             .bearer_auth(&api_key)
             .timeout(std::time::Duration::from_secs(POLL_TIMEOUT_SECS))
             .send()
@@ -469,9 +471,10 @@ impl MediaDriver for MiniMaxMediaDriver {
             .ok_or_else(|| MediaError::Other("No file_id in completed video task".into()))?;
 
         // Fetch the file URL via the file retrieval API
-        let file_url = format!("{}/files/retrieve?file_id={}", self.base_url, file_id);
+        let file_url = format!("{}/files/retrieve", self.base_url);
         let file_resp = client
             .get(&file_url)
+            .query(&[("file_id", file_id)])
             .bearer_auth(&api_key)
             .timeout(std::time::Duration::from_secs(POLL_TIMEOUT_SECS))
             .send()
@@ -627,6 +630,31 @@ mod tests {
     fn test_driver_custom_base_url() {
         let driver = MiniMaxMediaDriver::new(Some("https://api.minimaxi.com/v1/"));
         assert_eq!(driver.base_url, "https://api.minimaxi.com/v1");
+    }
+
+    #[test]
+    fn task_id_is_percent_encoded_not_spliced_into_query() {
+        // A user-controlled task_id containing `&`/`=` must NOT smuggle extra
+        // query parameters into the authenticated request. Building the request
+        // the same way the driver now does (`.query(...)`) percent-encodes it,
+        // so the whole value stays a single `task_id` parameter.
+        let client = reqwest::Client::new();
+        let req = client
+            .get("https://api.minimaxi.com/v1/query/video_generation")
+            .query(&[("task_id", "123&group_id=attacker")])
+            .build()
+            .unwrap();
+        assert_eq!(req.url().query(), Some("task_id=123%26group_id%3Dattacker"));
+        // The smuggled `group_id` is encoded, not a separate parameter.
+        let params: Vec<(String, String)> = req
+            .url()
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        assert_eq!(
+            params,
+            vec![("task_id".into(), "123&group_id=attacker".into())]
+        );
     }
 
     #[test]

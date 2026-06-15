@@ -19,7 +19,9 @@ use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use chrono::Utc;
 use librefang_api::routes::{self, AppState};
-use librefang_kernel::skill_workshop::candidate::{CandidateSkill, CaptureSource, Provenance};
+use librefang_kernel::skill_workshop::candidate::{
+    CandidateKind, CandidateSkill, CaptureSource, Provenance,
+};
 use librefang_kernel::skill_workshop::storage;
 use librefang_kernel::AgentSubsystemApi;
 use librefang_kernel::MemorySubsystemApi;
@@ -86,6 +88,32 @@ async fn json_request(h: &Harness, method: Method, path: &str) -> (StatusCode, s
     (status, value)
 }
 
+/// Install a minimal valid active skill at `<root>/<name>/skill.toml` so the
+/// registry's `load_skill` accepts it on the approve path's `reload_skills()`.
+/// Needed because the auto-assign routes through `set_agent_skills`, which
+/// validates EVERY name on the agent's allowlist against the live registry —
+/// a phantom pre-existing entry would fail validation and skip the assign.
+fn install_active_skill(root: &std::path::Path, name: &str) {
+    let dir = root.join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    let toml = format!(
+        "[skill]\n\
+         name = \"{name}\"\n\
+         version = \"0.1.0\"\n\
+         description = \"test skill\"\n\
+         author = \"test\"\n\
+         tags = []\n\
+         \n\
+         [runtime]\n\
+         type = \"promptonly\"\n\
+         \n\
+         [source]\n\
+         type = \"local\"\n"
+    );
+    std::fs::write(dir.join("skill.toml"), toml).unwrap();
+    std::fs::write(dir.join("prompt_context.md"), "# Test\n\nstub").unwrap();
+}
+
 fn fixture_candidate(agent_id: &str, id: &str) -> CandidateSkill {
     CandidateSkill {
         id: id.to_string(),
@@ -103,6 +131,10 @@ fn fixture_candidate(agent_id: &str, id: &str) -> CandidateSkill {
             assistant_response_excerpt: Some("Got it.".to_string()),
             turn_index: 1,
         },
+        kind: CandidateKind::Create,
+        target_skill_id: None,
+        current_version: None,
+        proposed_version: None,
     }
 }
 
@@ -418,6 +450,272 @@ async fn pending_approve_name_collision_with_different_body_returns_409() {
 }
 
 // ---------------------------------------------------------------------------
+// Update-kind candidates over HTTP (#5844 / #6003)
+// ---------------------------------------------------------------------------
+
+/// Approving an `Update` candidate over HTTP must route through
+/// `evolution::update_skill` (not `create_skill`, which would 409 with
+/// `AlreadyInstalled`): the target skill's `prompt_context.md` is rewritten
+/// with the candidate body, the patch version is bumped, and the pending
+/// file is dropped.
+#[tokio::test(flavor = "multi_thread")]
+async fn pending_approve_update_rewrites_target_skill_body() {
+    let h = boot().await;
+    let agent = "11111111-1111-1111-1111-111111111111";
+    let create_id = "cdcdcdcd-0000-0000-0000-000000000001";
+    let update_id = "cdcdcdcd-0000-0000-0000-000000000002";
+    let root = skills_root(&h);
+
+    // Plant the target through the real create-approve flow so skill.toml
+    // is a genuine `evolution::create_skill` manifest (version 0.1.0).
+    storage::save_candidate(&root, &fixture_candidate(agent, create_id), 20, None).unwrap();
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/skills/pending/{create_id}/approve"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "seed create must succeed: {body:?}");
+
+    // Stage an UPDATE candidate carrying a new body for the same skill.
+    let new_body = "# Cargo fmt before commit (v2)\n\nRun `cargo fmt --all` and `cargo clippy`.\n";
+    let mut candidate = fixture_candidate(agent, update_id);
+    candidate.kind = CandidateKind::Update;
+    candidate.target_skill_id = Some("fmt_before_commit".to_string());
+    candidate.prompt_context = new_body.to_string();
+    storage::save_candidate(&root, &candidate, 20, None).unwrap();
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/skills/pending/{update_id}/approve"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "update approve must succeed: {body:?}"
+    );
+    assert_eq!(body["status"], "approved");
+    assert_eq!(body["skill_name"], "fmt_before_commit");
+    assert_eq!(
+        body["version"], "0.1.1",
+        "update must bump the patch version: {body:?}"
+    );
+
+    let on_disk =
+        std::fs::read_to_string(root.join("fmt_before_commit").join("prompt_context.md")).unwrap();
+    assert_eq!(
+        on_disk, new_body,
+        "approved update must rewrite the target skill's body"
+    );
+    assert!(
+        storage::load_candidate(&root, update_id).is_err(),
+        "pending file must be removed after a successful update approve"
+    );
+}
+
+/// An `Update` candidate whose target skill was deleted between capture and
+/// approval is unprocessable, not a naming conflict: the route must return
+/// 422 with `kind: "target_skill_missing"` (409 would mislead the client
+/// into a rename-and-retry) and keep the pending file so the reviewer can
+/// reject it deliberately.
+#[tokio::test(flavor = "multi_thread")]
+async fn pending_approve_update_missing_target_returns_422() {
+    let h = boot().await;
+    let agent = "11111111-1111-1111-1111-111111111111";
+    let id = "cdcdcdcd-0000-0000-0000-000000000003";
+    let root = skills_root(&h);
+
+    let mut candidate = fixture_candidate(agent, id);
+    candidate.kind = CandidateKind::Update;
+    candidate.target_skill_id = Some("vanished_skill".to_string());
+    storage::save_candidate(&root, &candidate, 20, None).unwrap();
+    let pending_path = root.join("pending").join(agent).join(format!("{id}.toml"));
+    assert!(pending_path.exists(), "pending file must be staged");
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/skills/pending/{id}/approve"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "missing update target must surface as 422: {body:?}"
+    );
+    assert_eq!(body["kind"], "target_skill_missing");
+    assert_eq!(body["candidate_id"], id);
+    assert!(body["error"]
+        .as_str()
+        .unwrap_or("")
+        .contains("no longer exists"));
+    assert!(
+        pending_path.exists(),
+        "pending file must survive a 422 so the reviewer can reject deliberately"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Auto-assign promoted skill to the creating agent (#5989)
+// ---------------------------------------------------------------------------
+
+/// Register a real agent in the harness's registry so the approve path
+/// can resolve `CandidateSkill.agent_id` and append the promoted skill to
+/// its allowlist. Returns the agent's id as the canonical UUID string the
+/// candidate fixture must carry.
+fn register_agent(h: &Harness, name: &str) -> String {
+    use librefang_types::agent::{AgentEntry, AgentId};
+    let agent_id = AgentId::new();
+    let manifest = librefang_types::agent::AgentManifest {
+        name: name.to_string(),
+        // Start with a NON-EMPTY allowlist so the append is observable.
+        // An empty allowlist means "all skills", and the approve path
+        // (kernel `assign_skill_to_agent_allowlist`) deliberately leaves
+        // an all-skills agent untouched rather than narrowing it to the
+        // single promoted skill — so a pre-existing entry is required for
+        // the append to be a real, non-destructive addition.
+        skills: vec!["pre_existing_skill".to_string()],
+        skills_disabled: false,
+        ..Default::default()
+    };
+    let entry = AgentEntry {
+        id: agent_id,
+        name: name.to_string(),
+        manifest,
+        ..Default::default()
+    };
+    h.state
+        .kernel
+        .agent_registry()
+        .register(entry)
+        .expect("register agent");
+    agent_id.0.to_string()
+}
+
+fn agent_skills(h: &Harness, agent_id: &str) -> (Vec<String>, bool) {
+    let id: librefang_types::agent::AgentId = agent_id.parse().expect("parse agent id");
+    let entry = h
+        .state
+        .kernel
+        .agent_registry()
+        .get(id)
+        .expect("agent must still be registered");
+    (
+        entry.manifest.skills.clone(),
+        entry.manifest.skills_disabled,
+    )
+}
+
+/// Approving a candidate whose `agent_id` resolves to a live agent must
+/// append the promoted skill to that agent's allowlist and clear
+/// `skills_disabled`, so the workshop loop closes without a manual
+/// `agent.toml` edit.
+#[tokio::test(flavor = "multi_thread")]
+async fn pending_approve_assigns_skill_to_creating_agent() {
+    let h = boot().await;
+    let agent = register_agent(&h, "creator_agent");
+    let id = "f1f1f1f1-0000-0000-0000-000000000001";
+    let root = skills_root(&h);
+    // The pre-existing allowlist entry must be a real installed skill —
+    // `set_agent_skills` validates the whole list.
+    install_active_skill(&root, "pre_existing_skill");
+    storage::save_candidate(&root, &fixture_candidate(&agent, id), 20, None).unwrap();
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/skills/pending/{id}/approve"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(body["skill_name"], "fmt_before_commit");
+
+    let (skills, disabled) = agent_skills(&h, &agent);
+    assert!(
+        skills.contains(&"fmt_before_commit".to_string()),
+        "promoted skill must be appended to the creating agent's allowlist: {skills:?}"
+    );
+    assert!(
+        !disabled,
+        "skills_disabled must be cleared so the new skill is live"
+    );
+}
+
+/// Re-approving the same skill for the same agent (phantom-pending
+/// recovery → `already_promoted`) must be idempotent: the skill appears
+/// exactly once on the allowlist, no duplicate entry.
+#[tokio::test(flavor = "multi_thread")]
+async fn pending_approve_assignment_is_idempotent() {
+    let h = boot().await;
+    let agent = register_agent(&h, "creator_agent");
+    let first_id = "f2f2f2f2-0000-0000-0000-000000000001";
+    let second_id = "f2f2f2f2-0000-0000-0000-000000000002";
+    let root = skills_root(&h);
+    install_active_skill(&root, "pre_existing_skill");
+
+    storage::save_candidate(&root, &fixture_candidate(&agent, first_id), 20, None).unwrap();
+    let (status, _) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/skills/pending/{first_id}/approve"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "first approve must succeed");
+
+    // Re-stage a same-named candidate to mimic the phantom-pending case
+    // (active skill already exists; pending re-approved). The assignment
+    // must not double-append the skill name.
+    storage::save_candidate(&root, &fixture_candidate(&agent, second_id), 20, None).unwrap();
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/skills/pending/{second_id}/approve"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "re-approve must succeed: {body:?}");
+
+    let (skills, _) = agent_skills(&h, &agent);
+    let occurrences = skills.iter().filter(|s| *s == "fmt_before_commit").count();
+    assert_eq!(
+        occurrences, 1,
+        "re-approval must not duplicate the skill on the allowlist: {skills:?}"
+    );
+}
+
+/// Auto-assign is best-effort: when the creating agent was deleted
+/// between capture and approval (its `agent_id` no longer resolves), the
+/// approve must still promote the skill and return 200 — assignment is a
+/// convenience, not a hard precondition.
+#[tokio::test(flavor = "multi_thread")]
+async fn pending_approve_succeeds_when_creating_agent_gone() {
+    let h = boot().await;
+    // A well-formed UUID that was never registered in the harness.
+    let agent = "deadbeef-0000-0000-0000-000000000000";
+    let id = "f3f3f3f3-0000-0000-0000-000000000001";
+    let root = skills_root(&h);
+    storage::save_candidate(&root, &fixture_candidate(agent, id), 20, None).unwrap();
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/skills/pending/{id}/approve"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "approve must succeed even when the creating agent is gone: {body:?}"
+    );
+    assert_eq!(body["status"], "approved");
+    assert!(
+        root.join("fmt_before_commit").join("skill.toml").exists(),
+        "skill must still be promoted when the agent can't be resolved"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // POST /api/skills/pending/{id}/reject
 // ---------------------------------------------------------------------------
 
@@ -490,8 +788,8 @@ async fn auto_policy_promotes_to_active_and_reloads_registry() {
     use librefang_kernel::skill_workshop;
     use librefang_memory::session::Session;
     use librefang_types::agent::{
-        AgentEntry, AgentId, AgentManifest, AgentMode, AgentState, ApprovalPolicy, ReviewMode,
-        SessionId, SkillWorkshopConfig,
+        AgentEntry, AgentId, AgentManifest, AgentMode, AgentState, ApprovalPolicy, EvolutionMode,
+        ReviewMode, SessionId, SkillWorkshopConfig,
     };
     use librefang_types::message::Message;
 
@@ -519,6 +817,7 @@ async fn auto_policy_promotes_to_active_and_reloads_registry() {
             review_mode: ReviewMode::Heuristic,
             max_pending: 20,
             max_pending_age_days: None,
+            evolution_mode: EvolutionMode::Free,
         },
         ..Default::default()
     };
@@ -551,6 +850,7 @@ async fn auto_policy_promotes_to_active_and_reloads_registry() {
         model_override: None,
         messages_generation: 1,
         last_repaired_generation: None,
+        peer_id: None,
     };
     kernel
         .substrate_ref()
@@ -635,6 +935,89 @@ async fn auto_policy_promotes_to_active_and_reloads_registry() {
     );
 }
 
+/// Approving a pending CREATE through the kernel's `approve_pending_skill`
+/// (the path the `POST /api/skills/pending/{id}/approve` route now uses)
+/// auto-assigns the promoted skill to the creating agent's allowlist (#5844).
+/// An agent with a non-empty `skills` allowlist can then actually use the
+/// skill it created.
+#[tokio::test(flavor = "multi_thread")]
+async fn approve_create_auto_assigns_skill_to_creator_allowlist() {
+    use librefang_kernel::skill_workshop::storage;
+    use librefang_types::agent::{
+        AgentEntry, AgentId, AgentManifest, AgentMode, AgentState, EvolutionMode, SessionId,
+        SkillWorkshopConfig,
+    };
+
+    let (kernel, _tmp) = MockKernelBuilder::new().build();
+    let skills_root = kernel.home_dir().join("skills");
+    // The pre-existing allowlist entry must be a real installed skill —
+    // the auto-assign routes through `set_agent_skills`, which validates
+    // the whole list against the reloaded registry.
+    install_active_skill(&skills_root, "preexisting");
+
+    let agent_id = AgentId::new();
+    let session_id = SessionId::new();
+    let manifest = AgentManifest {
+        name: "allowlist_creator".to_string(),
+        description: "test".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        // Non-empty allowlist → auto-assign is meaningful.
+        skills: vec!["preexisting".to_string()],
+        skill_workshop: SkillWorkshopConfig {
+            enabled: true,
+            evolution_mode: EvolutionMode::Free,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let entry = AgentEntry {
+        id: agent_id,
+        name: "allowlist_creator".to_string(),
+        manifest,
+        state: AgentState::Running,
+        mode: AgentMode::default(),
+        created_at: Utc::now(),
+        last_active: Utc::now(),
+        session_id,
+        ..Default::default()
+    };
+    kernel
+        .agent_registry_ref()
+        .register(entry)
+        .expect("register agent");
+
+    // Seed a pending CREATE candidate owned by this agent.
+    let mut candidate = fixture_candidate(&agent_id.to_string(), &uuid::Uuid::new_v4().to_string());
+    candidate.name = "agent_made_skill".to_string();
+    candidate.kind = CandidateKind::Create;
+    let cand_id = candidate.id.clone();
+    storage::save_candidate(&skills_root, &candidate, 20, None).expect("save create candidate");
+
+    // Approve via the kernel path the route uses.
+    let result = kernel
+        .approve_pending_skill(&cand_id)
+        .expect("approve should succeed");
+    assert_eq!(result.skill_name, "agent_made_skill");
+
+    // The creating agent's allowlist now contains the new skill, alongside
+    // the pre-existing entry.
+    let skills = kernel
+        .agent_registry_ref()
+        .get(agent_id)
+        .expect("agent still registered")
+        .manifest
+        .skills;
+    assert!(
+        skills.contains(&"agent_made_skill".to_string()),
+        "created skill must be auto-assigned to creator allowlist; got {skills:?}"
+    );
+    assert!(
+        skills.contains(&"preexisting".to_string()),
+        "pre-existing allowlist entry must be preserved; got {skills:?}"
+    );
+}
+
 /// Regression test for the "orphan-pending death loop" corner: if a
 /// previous `evolution::create_skill` attempt failed and left an
 /// orphan pending file behind, the next turn's auto-promote attempt
@@ -655,8 +1038,8 @@ async fn auto_policy_recovers_orphaned_pending_via_retry() {
     use librefang_kernel::skill_workshop::{self, candidate::CandidateSkill, storage};
     use librefang_memory::session::Session;
     use librefang_types::agent::{
-        AgentEntry, AgentId, AgentManifest, AgentMode, AgentState, ApprovalPolicy, ReviewMode,
-        SessionId, SkillWorkshopConfig,
+        AgentEntry, AgentId, AgentManifest, AgentMode, AgentState, ApprovalPolicy, EvolutionMode,
+        ReviewMode, SessionId, SkillWorkshopConfig,
     };
     use librefang_types::message::Message;
 
@@ -677,6 +1060,7 @@ async fn auto_policy_recovers_orphaned_pending_via_retry() {
             review_mode: ReviewMode::Heuristic,
             max_pending: 20,
             max_pending_age_days: None,
+            evolution_mode: EvolutionMode::Free,
         },
         ..Default::default()
     };
@@ -718,6 +1102,10 @@ async fn auto_policy_recovers_orphaned_pending_via_retry() {
             assistant_response_excerpt: hit.assistant_response_excerpt.clone(),
             turn_index: 1,
         },
+        kind: CandidateKind::Create,
+        target_skill_id: None,
+        current_version: None,
+        proposed_version: None,
     };
     storage::save_candidate(&skills_root_path, &orphan, 20, None)
         .expect("seed orphan pending file");
@@ -733,6 +1121,7 @@ async fn auto_policy_recovers_orphaned_pending_via_retry() {
         model_override: None,
         messages_generation: 1,
         last_repaired_generation: None,
+        peer_id: None,
     };
     kernel
         .substrate_ref()

@@ -829,7 +829,12 @@ fn save_evolution_meta(skill_dir: &Path, meta: &SkillEvolutionMeta) -> Result<()
 ///
 /// Uses the `semver` crate for robust parsing, correctly handling
 /// pre-release tags (e.g., "0.1.0-alpha" → "0.1.1") and build metadata.
-fn bump_patch_version(version: &str) -> String {
+///
+/// Public so the kernel's `controlled` evolution path can compute the
+/// `proposed_version` it records on a pending update draft (#5844 / #5819)
+/// without re-applying the update — the draft only stores the data; the
+/// real bump still happens at approval time.
+pub fn bump_patch_version(version: &str) -> String {
     match semver::Version::parse(version) {
         Ok(mut v) => {
             v.patch += 1;
