@@ -2668,11 +2668,8 @@ async fn test_mcp_http_rehydrates_caller_context_from_agent_header() {
     );
 }
 
-/// #6117: a `channel_send` call routed through the `/mcp` bridge must honour
-/// the cross-chat guard using the peer scope forwarded on the bridge headers
-/// (`X-LibreFang-Current-Peer-Jid` / `-Channel` / `-Chat-Id`). Before the fix
-/// `mcp_http` hardcoded sender_id/channel/chat_id to `None`, so the guard had
-/// no peer to validate against and a mis-targeted recipient leaked.
+/// #6117: a `channel_send` call routed through the `/mcp` bridge must honour the cross-chat guard using the peer scope forwarded on the bridge headers (`X-LibreFang-Current-Peer-Jid` / `-Channel` / `-Chat-Id`).
+/// Before the fix `mcp_http` hardcoded sender_id/channel/chat_id to `None`, so the guard had no peer to validate against and a mis-targeted recipient leaked.
 const MCP_CHANNEL_MANIFEST: &str = r#"
 name = "mcp-channel-agent"
 version = "0.1.0"
