@@ -2965,6 +2965,61 @@ mod tests {
         assert!(msg.contains("No pending approval matching"));
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resolve_bound_agent_reads_seeded_binding_through_real_substrate() {
+        // Injection-site guard (#5671): the real `KernelBridgeAdapter` must
+        // override `resolve_bound_agent` to read the channel-binding store and
+        // resolve the bound name to a live `AgentId`. The trait default returns
+        // `None`, so a missing/incorrect override would silently disable
+        // deterministic dispatch while the bridge's own unit tests (which use a
+        // mock handle that overrides the method) stay green — exactly the
+        // default-None-disables-feature trap this test exists to catch.
+        use librefang_testing::MockKernelBuilder;
+
+        let (kernel, _tmp) = MockKernelBuilder::new().build();
+        // A fresh boot auto-spawns a default `assistant` agent.
+        let assistant = kernel
+            .agent_registry()
+            .find_by_name("assistant")
+            .expect("default assistant agent should exist after boot")
+            .id;
+
+        let adapter = KernelBridgeAdapter {
+            kernel: kernel.clone(),
+            started_at: Instant::now(),
+        };
+
+        // No binding yet -> falls through (None).
+        assert_eq!(adapter.resolve_bound_agent("tg-bot", "peer-1").await, None);
+
+        // Seed an instance default directly (no sidecar subprocess) -> the
+        // adapter resolves it to the live agent id.
+        kernel
+            .memory_substrate()
+            .channel_bindings()
+            .seed_instance_default("tg-bot", "assistant")
+            .expect("seed must succeed");
+        assert_eq!(
+            adapter.resolve_bound_agent("tg-bot", "peer-1").await,
+            Some(assistant),
+            "the kernel adapter must resolve the seeded instance default to the live agent id"
+        );
+
+        // A binding pointing at a non-existent agent yields None (graceful
+        // fallback rather than dropping the message).
+        kernel
+            .memory_substrate()
+            .channel_bindings()
+            .seed_instance_default("ghost-bot", "does-not-exist")
+            .unwrap();
+        assert_eq!(
+            adapter.resolve_bound_agent("ghost-bot", "peer-1").await,
+            None
+        );
+
+        kernel.shutdown();
+    }
+
     #[test]
     fn test_looks_like_tool_call_detects_markdown_tool_call_with_preamble() {
         let text = "Here is the tool call:\n```json\nweb_search {\"query\":\"rust\"}\n```";
