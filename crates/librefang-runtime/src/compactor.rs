@@ -719,6 +719,8 @@ async fn summarize_messages(
         session_id: None,
         step_id: None,
         reasoning_echo_policy,
+
+        ..Default::default()
     };
 
     // Retry logic for transient failures
@@ -851,6 +853,8 @@ async fn summarize_in_chunks(
         session_id: None,
         step_id: None,
         reasoning_echo_policy,
+
+        ..Default::default()
     };
 
     match driver.complete(merge_request).await {
