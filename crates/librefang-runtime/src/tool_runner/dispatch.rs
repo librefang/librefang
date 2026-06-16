@@ -1408,13 +1408,9 @@ pub async fn execute_tool_raw(
         }
     };
 
-    // #3576 slice 5: the dispatch table now yields `Result<String, ToolError>`
-    // natively (each arm returns the typed error instead of narrowing it to a
-    // string at the boundary). Convert through `tool_result_from_typed` so the
-    // error's `execution_status()` reaches the `ToolResult` — a tool-level
-    // `PermissionDenied` lands as the soft `Denied` status (reported to the
-    // model, not counted toward the consecutive-hard-failure abort) instead of
-    // the stringly path's hard default. (#5984 generalised to every tool.)
+    // `PermissionDenied` reaches the `ToolResult` as the soft `Denied` status
+    // (reported to the model, not counted toward the consecutive-hard-failure
+    // abort) rather than the hard default.
     tool_result_from_typed(tool_use_id, result)
 }
 
@@ -1708,12 +1704,6 @@ mod tests {
     use super::*;
     use librefang_types::tool::ToolExecutionStatus;
 
-    // #3576 slice 5: the whole dispatch table now funnels through
-    // `tool_result_from_typed`, so the `ToolError`'s `execution_status()`
-    // reaches the `ToolResult` for *every* tool — not just the ACL-gated
-    // memory/wiki tools that already went through the typed path (#5984).
-    // These pin that single conversion boundary.
-
     #[test]
     fn typed_ok_is_not_an_error() {
         let r = tool_result_from_typed("id-1", Ok("hello".to_string()));
@@ -1746,9 +1736,7 @@ mod tests {
 
     #[test]
     fn typed_not_found_renders_unified_phrasing() {
-        // The `other =>` fallback maps an unknown tool to `NotFound`; the wire
-        // string the model sees is the typed phrasing, not the old
-        // "Unknown tool: …".
+        // The `other =>` fallback maps an unknown tool to `ToolError::NotFound`.
         let r = tool_result_from_typed(
             "id-4",
             Err(ToolError::NotFound {
