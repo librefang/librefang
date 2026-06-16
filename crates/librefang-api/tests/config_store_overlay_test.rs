@@ -626,3 +626,54 @@ fn memory_and_proactive_overrides_resolve_into_config() {
         "resolve must not write config.toml"
     );
 }
+
+// ── C-005d.3: sidecar channel settings to store ──────────────────────────────
+
+/// `POST /api/channels/sidecar/{name}/configure` (surreal path) stores the
+/// NON-secret `[[sidecar_channels]]` array as one trusted-section override;
+/// resolve must fold it into the effective config, `config.toml` is untouched,
+/// and NO secret-valued field is present (secrets live in `secrets.env`).
+#[test]
+fn sidecar_channels_override_resolves_into_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg_path = tmp.path().join("config.toml");
+    std::fs::write(&cfg_path, "log_level = \"info\"\n").unwrap();
+
+    let channel: librefang_types::config::SidecarChannelConfig =
+        serde_json::from_value(serde_json::json!({
+            "name": "telegram",
+            "channel_type": "telegram",
+            "command": "python3",
+            "args": ["-m", "adapter"],
+            "env": { "TELEGRAM_API_BASE": "https://api" },
+        }))
+        .unwrap();
+
+    let mut overrides = BTreeMap::new();
+    overrides.insert(
+        "sidecar_channels".to_string(),
+        serde_json::to_value(vec![channel]).unwrap(),
+    );
+
+    let (merged, _raw) = resolve_config_with_overrides(&cfg_path, &overrides).unwrap();
+    assert_eq!(merged.sidecar_channels.len(), 1);
+    let s = &merged.sidecar_channels[0];
+    assert_eq!(s.name, "telegram");
+    assert_eq!(s.channel_type.as_deref(), Some("telegram"));
+    assert_eq!(s.command, "python3");
+    assert_eq!(
+        s.env.get("TELEGRAM_API_BASE").map(String::as_str),
+        Some("https://api")
+    );
+    // SECURITY: only non-secret env keys are in the override.
+    assert!(
+        !s.env.contains_key("TELEGRAM_BOT_TOKEN"),
+        "no secret value may enter the sidecar_channels override"
+    );
+
+    let on_disk = std::fs::read_to_string(&cfg_path).unwrap();
+    assert_eq!(
+        on_disk, "log_level = \"info\"\n",
+        "resolve must not write config.toml"
+    );
+}

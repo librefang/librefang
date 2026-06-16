@@ -1,13 +1,13 @@
 {
   "active_phase": "phase-9-config-store-migration",
   "previous_phase": "phase-8-fixture-rebuilds",
-  "active_change": "C-005d.3",
-  "last_updated": "2026-06-15T00:00:00Z",
+  "active_change": "C-005d (complete)",
+  "last_updated": "2026-06-16T00:00:00Z",
   "last_updated_by": "kbd-execute",
   "backend": "native-tool",
-  "phase_progress": "C-005d.1 + C-005d.2 CODE DONE on branch feat/memory-channels-to-store (PR #88), rebased onto main after upstream merge #87. C-005d.1: trusted-section apply path (TRUSTED_SECTION_KEYS). C-005d.2: memory_config_patch_surreal stores memory + proactive_memory from the LIVE config (PATCHes accumulate) as trusted-section overrides; ALSO fixed json_to_toml_edit_value to omit JSON-null object keys so Option::None round-trips. Verified: overlay 16/16, config unit 18/18, clippy + branding clean. Remaining: C-005d.3 — configure_sidecar_channel stores the sidecar_channels array as a trusted-section override; the channel-secrets env file write stays unchanged; preserve the include-shadow guard. No secret VALUE may enter the store.",
+  "phase_progress": "C-005d CLUSTER COMPLETE on branch feat/memory-channels-to-store (PR #88), rebased onto main after upstream merge #87. C-005d.1: trusted-section apply path (TRUSTED_SECTION_KEYS). C-005d.2: memory + proactive_memory to store (+ json_to_toml_edit_value null-omit fix for Option round-trip). C-005d.3: sidecar_channels to store via in-memory upsert_sidecar_in_vec; secrets.env write + include-shadow guard unchanged; config.toml never written under surreal. All settings handlers (budget, memory, channels) now persist to the SurrealDB config store under read-only config.toml. Verified: overlay 17/17, config unit 18/18, sidecar unit 1/1, clippy + branding clean. No secret VALUE enters the store. Awaiting PR #88 review/merge.",
   "next_action": {
-    "command": "/kbd-execute C-005d.3",
-    "description": "Implement C-005d.3: configure_sidecar_channel persists the sidecar_channels structure to the DB config store under surreal-backend (channel-secrets env file untouched; include-shadow guard preserved). Then push to PR #88 and the C-005d cluster is complete."
+    "command": "review/merge PR #88; then /kbd-reflect phase-9-config-store-migration",
+    "description": "C-005d (memory + channels settings migration) is code-complete on PR #88. After it merges, the phase-9 config-store migration is fully done (budget #84, memory+channels #88, MCP/default-model/config_set earlier). Run /kbd-reflect to close the phase."
   }
 }
