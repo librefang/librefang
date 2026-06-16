@@ -42,6 +42,7 @@ tower-http = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
 uuid = { workspace = true }
+webauthn-rs = { workspace = true }
 futures = { workspace = true }
 governor = { workspace = true }
 tokio-stream = { workspace = true }

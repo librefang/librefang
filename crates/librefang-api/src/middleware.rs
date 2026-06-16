@@ -131,6 +131,12 @@ fn is_owner_only_write(method: &axum::http::Method, path: &str) -> bool {
             | "/api/approvals/totp/setup"
             | "/api/approvals/totp/confirm"
             | "/api/approvals/totp/revoke"
+            // #5981: registering a passkey grants the holder a phishing-resistant
+            // login credential — an Owner-equivalent action, mirroring TOTP
+            // enrollment above. The two `authentication-*` siblings are public
+            // (they mint a session, gated by the WebAuthn assertion itself).
+            | "/api/auth/passkey/registration-options"
+            | "/api/auth/passkey/registration-verify"
             // A2A discover registers a remote agent into the pending registry,
             // expanding the trust surface; restrict to Owner so non-Owner API keys
             // cannot fill the registry or stage impersonation attempts (#3483).
@@ -151,6 +157,13 @@ fn is_owner_only_write(method: &axum::http::Method, path: &str) -> bool {
         && path.starts_with("/api/hands/")
         && path.ends_with("/install-deps")
     {
+        return true;
+    }
+    // #5981: revoking a passkey (`DELETE /api/auth/passkey/credentials/{id}`)
+    // removes a login credential — Owner-equivalent, matched by prefix because
+    // of the `{id}` path segment. The sibling GET list stays at the generic
+    // Admin-or-above read gate.
+    if *method == axum::http::Method::DELETE && path.starts_with("/api/auth/passkey/credentials/") {
         return true;
     }
     // RBAC user-management surface (M6) — every mutating call under
@@ -905,6 +918,12 @@ pub const PUBLIC_ROUTES_ALWAYS: &[PublicRoute] = &[
     PublicRoute::exact_any("/api/auth/callback"),
     PublicRoute::exact_any("/api/auth/dashboard-check"),
     PublicRoute::exact_any("/api/auth/dashboard-login"),
+    // Passkey login (#5981): both halves of the authentication ceremony run
+    // before any session exists, so they must be public — exactly like
+    // dashboard-login. The `registration-*` siblings are NOT here; they are
+    // auth-gated Owner actions (see `is_owner_only_write`).
+    PublicRoute::exact_any("/api/auth/passkey/authentication-options"),
+    PublicRoute::exact_any("/api/auth/passkey/authentication-verify"),
     // Mobile pairing — phone has no API key yet
     PublicRoute::exact_any("/api/pairing/complete"),
     // Minimal liveness probes

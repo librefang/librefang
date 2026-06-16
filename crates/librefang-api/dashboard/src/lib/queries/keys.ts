@@ -254,6 +254,12 @@ export const totpKeys = {
   status: () => [...totpKeys.all, "status"] as const,
 };
 
+export const passkeyKeys = {
+  all: ["passkeys"] as const,
+  lists: () => [...passkeyKeys.all, "list"] as const,
+  list: () => [...passkeyKeys.lists()] as const,
+};
+
 export const memoryKeys = {
   all: ["memory"] as const,
   lists: () => [...memoryKeys.all, "list"] as const,

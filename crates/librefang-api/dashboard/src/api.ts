@@ -1,4 +1,10 @@
 import { ApiError } from "./lib/http/errors";
+import {
+  startRegistration,
+  startAuthentication,
+  type PublicKeyCredentialCreationOptionsJSON,
+  type PublicKeyCredentialRequestOptionsJSON,
+} from "@simplewebauthn/browser";
 
 export interface HealthCheck {
   name: string;
@@ -3020,6 +3026,98 @@ export async function totpRevoke(code: string): Promise<ApiActionResponse> {
     headers: buildHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ code }),
   });
+  if (!response.ok) throw await parseError(response);
+  return response.json();
+}
+
+// --- Passkey (WebAuthn/FIDO2) login + credential management (#5981) ---
+
+export interface PasskeyCredentialSummary {
+  credential_id: string;
+  label: string | null;
+  created_at: number;
+  last_used_at: number | null;
+}
+
+/** True when this browser exposes the WebAuthn platform API. */
+export function isPasskeySupported(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    typeof window.PublicKeyCredential !== "undefined"
+  );
+}
+
+/** webauthn-rs wraps its options in a top-level `publicKey` object. */
+interface CreationChallenge {
+  ceremony_id: string;
+  options: { publicKey: PublicKeyCredentialCreationOptionsJSON };
+}
+interface RequestChallenge {
+  ceremony_id: string;
+  options: { publicKey: PublicKeyCredentialRequestOptionsJSON };
+}
+
+export async function listPasskeys(): Promise<PasskeyCredentialSummary[]> {
+  const data = await get<{ credentials: PasskeyCredentialSummary[] }>(
+    "/api/auth/passkey/credentials",
+  );
+  return data.credentials;
+}
+
+/**
+ * Run the registration ceremony: fetch creation options, prompt the
+ * platform authenticator via `navigator.credentials.create()`, and persist
+ * the resulting credential. Requires an authenticated session.
+ */
+export async function registerPasskey(
+  label?: string,
+): Promise<{ ok: boolean; credential_id: string }> {
+  const challenge = await post<CreationChallenge>(
+    "/api/auth/passkey/registration-options",
+    {},
+  );
+  const credential = await startRegistration({
+    optionsJSON: challenge.options.publicKey,
+  });
+  return post<{ ok: boolean; credential_id: string }>(
+    "/api/auth/passkey/registration-verify",
+    { ceremony_id: challenge.ceremony_id, credential, label },
+  );
+}
+
+/**
+ * Run the authentication ceremony: fetch request options, prompt the
+ * authenticator via `navigator.credentials.get()`, verify the assertion, and
+ * store the returned session token. Public — no session required.
+ */
+export async function loginWithPasskey(): Promise<{
+  ok: boolean;
+  token?: string;
+}> {
+  const challenge = await post<RequestChallenge>(
+    "/api/auth/passkey/authentication-options",
+    {},
+  );
+  const credential = await startAuthentication({
+    optionsJSON: challenge.options.publicKey,
+  });
+  const result = await post<{ ok: boolean; token?: string }>(
+    "/api/auth/passkey/authentication-verify",
+    { ceremony_id: challenge.ceremony_id, credential },
+  );
+  if (result.ok && result.token) {
+    setApiKey(result.token);
+  }
+  return result;
+}
+
+export async function revokePasskey(
+  credentialId: string,
+): Promise<ApiActionResponse> {
+  const response = await fetchWithTimeout(
+    `/api/auth/passkey/credentials/${encodeURIComponent(credentialId)}`,
+    { method: "DELETE", headers: buildHeaders() },
+  );
   if (!response.ok) throw await parseError(response);
   return response.json();
 }

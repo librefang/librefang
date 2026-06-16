@@ -104,6 +104,9 @@ chrono-tz = "0.10"
 # IDs
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 
+# WebAuthn / passkeys (#5981)
+webauthn-rs = "0.5.5"
+
 # Database
 rusqlite = { version = "0.39.0", features = ["bundled", "serde_json"] }
 r2d2 = "0.8"
