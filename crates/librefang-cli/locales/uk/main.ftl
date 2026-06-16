@@ -887,6 +887,10 @@ launcher-help-title = Усі команди
 launcher-help-subtitle =   — q/Esc для повернення
 launcher-help-hints = ↑↓/jk прокрутка  PgUp/PgDn  g/G вгору/вниз  q назад
 
-
-
-
+# CLI shared UI strings
+ui-brand-tagline = Відкрита операційна система для агентів
+ui-label-hint = підказка:
+ui-label-next-steps = Наступні кроки
+ui-label-fix = виправити:
+ui-label-try = спробувати:
+ui-provider-not-set = { $env_var } не налаштовано

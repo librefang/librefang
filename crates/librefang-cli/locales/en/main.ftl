@@ -887,6 +887,12 @@ launcher-help-title = All commands
 launcher-help-subtitle =   — q/Esc to go back
 launcher-help-hints = ↑↓/jk scroll  PgUp/PgDn  g/G top/bottom  q back
 
-
+# CLI shared UI strings
+ui-brand-tagline = The open-source agent operating system
+ui-label-hint = hint:
+ui-label-next-steps = Next steps
+ui-label-fix = fix:
+ui-label-try = try:
+ui-provider-not-set = { $env_var } not set
 
 

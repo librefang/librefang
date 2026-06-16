@@ -71,7 +71,33 @@ pub fn init(language: &str) {
     });
 }
 
+fn is_utf8_locale() -> bool {
+    let vars = ["LC_ALL", "LC_MESSAGES", "LANG"];
+    for var in vars {
+        if let Ok(val) = std::env::var(var) {
+            let val_lower = val.to_lowercase();
+            if val_lower.contains("utf8") || val_lower.contains("utf-8") {
+                return true;
+            }
+            if val_lower == "c" || val_lower == "posix" {
+                return false;
+            }
+            if let Some(dot_idx) = val.find('.') {
+                let encoding = &val_lower[dot_idx + 1..];
+                if encoding.contains("utf8") || encoding.contains("utf-8") {
+                    return true;
+                }
+                return false;
+            }
+        }
+    }
+    true
+}
+
 pub fn detect_system_language() -> String {
+    if !is_utf8_locale() {
+        return DEFAULT_LANGUAGE.to_string();
+    }
     let vars = ["LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"];
     for var in vars {
         if let Ok(val) = std::env::var(var) {
@@ -186,6 +212,14 @@ mod tests {
         // Test matching "uk" from "uk:en_US"
         std::env::set_var("LANGUAGE", "uk:en_US");
         assert_eq!(detect_system_language(), "uk");
+
+        // Test non-UTF-8 fallback to English even if LANGUAGE=uk:en_US is set
+        std::env::set_var("LANG", "uk_UA.KOI8-U");
+        assert_eq!(detect_system_language(), "en");
+
+        // Test C locale fallback
+        std::env::set_var("LANG", "C");
+        assert_eq!(detect_system_language(), "en");
 
         // Test matching "zh-CN" from "zh_CN.UTF-8"
         std::env::remove_var("LANGUAGE");
