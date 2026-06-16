@@ -300,6 +300,26 @@ pub trait ChannelBridgeHandle: Send + Sync {
         Vec::new()
     }
 
+    /// Resolve the agent bound to a `(channel instance, conversation)` pair via
+    /// the deterministic two-level lookup (#5671 Model A): the per-conversation
+    /// `/agent` override wins, falling back to the instance default seeded from
+    /// `[[sidecar_channels]] agent`. Returns `None` when the instance has no
+    /// binding configured, in which case the bridge falls through to its legacy
+    /// resolver chain.
+    ///
+    /// `conversation_id` is the chat id for groups and the peer id for DMs —
+    /// uniformly `message.sender.platform_id` at the call site.
+    ///
+    /// Default returns `None` so test doubles and the legacy path keep working
+    /// unchanged; the kernel adapter overrides it with the DB-backed lookup.
+    async fn resolve_bound_agent(
+        &self,
+        _instance: &str,
+        _conversation_id: &str,
+    ) -> Option<AgentId> {
+        None
+    }
+
     /// Already-escaped regex patterns from `channel_overrides.group_trigger_patterns`; callers must not re-escape.
     async fn get_agent_group_trigger_patterns(&self, _agent_id: AgentId) -> Vec<String> {
         Vec::new()
@@ -2986,8 +3006,21 @@ async fn handle_send_error<F, Fut>(
         .await;
 }
 
-/// Resolve the target agent for an incoming message using thread routing, binding
-/// context, and fallback logic. Returns `Some(agent_id)` or `None` if no agents exist.
+/// Resolve the target agent for an incoming message.
+///
+/// Routing precedence (#5671 Model A):
+///   1. The deterministic channel-instance binding lookup — a per-conversation
+///      `/agent` override, else the instance default seeded from
+///      `[[sidecar_channels]] agent`. When this resolves, it wins outright:
+///      the operator explicitly bound this agent, so neither the legacy chain
+///      nor the channel allowlist gets a vote.
+///   2. Legacy fallback (transitional) — thread routing, the `AgentRouter`
+///      binding chain, the `"assistant"` agent, then the non-deterministic
+///      `list_agents().first()`. Reached only by instances with no binding
+///      configured; it emits a deprecation WARN at the non-deterministic tail
+///      so operators can see they should set `agent` on the instance.
+///
+/// Returns `Some(agent_id)` or `None` if no agents exist at all.
 ///
 /// Shared by `dispatch_message` and `dispatch_with_blocks` to ensure consistent routing.
 async fn resolve_or_fallback(
@@ -2995,6 +3028,25 @@ async fn resolve_or_fallback(
     handle: &Arc<dyn ChannelBridgeHandle>,
     router: &Arc<AgentRouter>,
 ) -> Option<AgentId> {
+    // (1) Deterministic two-level lookup keyed by (instance, conversation).
+    // `instance` is the sidecar's config `name`, stamped onto inbound messages
+    // as `metadata["account_id"]` (sidecar.rs). `conversation_id` is the chat
+    // id for groups and the peer id for DMs — uniformly `sender.platform_id`.
+    if let Some(instance) = message
+        .metadata
+        .get("account_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        let conversation_id = &message.sender.platform_id;
+        if !conversation_id.is_empty() {
+            if let Some(id) = handle.resolve_bound_agent(instance, conversation_id).await {
+                return Some(id);
+            }
+        }
+    }
+
+    // (2) Legacy fallback chain (transitional; see fn doc).
     // Thread-based agent routing: if the adapter tagged this message with a
     // thread_route_agent, resolve that agent name first.
     let thread_route_agent_id = if let Some(agent_name) = message
@@ -3063,11 +3115,31 @@ async fn resolve_or_fallback(
     let fallback = handle.find_agent_by_name("assistant").await.ok().flatten();
     let fallback = match fallback {
         Some(id) => Some(id),
-        None => handle
-            .list_agents()
-            .await
-            .ok()
-            .and_then(|agents| agents.first().map(|(id, _)| *id)),
+        None => {
+            // The non-deterministic tail (#5671): with no instance binding, no
+            // `"assistant"` agent, and an empty router chain, selection falls
+            // to `HashMap`-iteration order — the DM-rotation bug. Warn so the
+            // operator binds the instance (`[[sidecar_channels]] agent`) and
+            // gets deterministic routing.
+            let picked = handle
+                .list_agents()
+                .await
+                .ok()
+                .and_then(|agents| agents.first().map(|(id, _)| *id));
+            if picked.is_some() {
+                warn!(
+                    channel = %channel_type_str(&message.channel),
+                    instance = message
+                        .metadata
+                        .get("account_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("<none>"),
+                    "Inbound message routed via non-deterministic first-available agent; \
+                     set `agent` on the [[sidecar_channels]] instance for deterministic dispatch (#5671)"
+                );
+            }
+            picked
+        }
     };
     if let Some(id) = fallback {
         let allowlist = handle.agent_channel_allowlist(id).await;
@@ -6788,6 +6860,110 @@ mod tests {
         // Verify router was updated
         let resolved = router.resolve(&ChannelType::Telegram, "user1", None);
         assert_eq!(resolved, Some(agent_id));
+    }
+
+    /// Mock that reports a channel-instance binding for a fixed
+    /// `(instance, conversation)` pair, exercising the #5671 deterministic
+    /// dispatch path in `resolve_or_fallback`.
+    struct BindingMockHandle {
+        agents: Vec<(AgentId, String)>,
+        /// `(instance, conversation_id, agent_id)` the binding lookup returns.
+        bound: Option<(String, String, AgentId)>,
+    }
+
+    #[async_trait]
+    impl ChannelBridgeHandle for BindingMockHandle {
+        async fn send_message(&self, _agent_id: AgentId, message: &str) -> Result<String, String> {
+            Ok(format!("Echo: {message}"))
+        }
+        async fn find_agent_by_name(&self, name: &str) -> Result<Option<AgentId>, String> {
+            Ok(self
+                .agents
+                .iter()
+                .find(|(_, n)| n == name)
+                .map(|(id, _)| *id))
+        }
+        async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String> {
+            Ok(self.agents.clone())
+        }
+        async fn spawn_agent_by_name(&self, _manifest_name: &str) -> Result<AgentId, String> {
+            Err("spawn not implemented in mock".to_string())
+        }
+        async fn resolve_bound_agent(
+            &self,
+            instance: &str,
+            conversation_id: &str,
+        ) -> Option<AgentId> {
+            self.bound
+                .as_ref()
+                .and_then(|(i, c, id)| (i == instance && c == conversation_id).then_some(*id))
+        }
+        fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {
+            // Test mock: no event bus to forward to.
+        }
+    }
+
+    fn inbound_message(conversation_id: &str, instance: &str) -> ChannelMessage {
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(
+            "account_id".to_string(),
+            serde_json::Value::String(instance.to_string()),
+        );
+        ChannelMessage {
+            channel: ChannelType::Telegram,
+            platform_message_id: "1".into(),
+            sender: ChannelUser {
+                platform_id: conversation_id.to_string(),
+                display_name: "user".into(),
+                librefang_user: None,
+            },
+            content: ChannelContent::Text("hi".into()),
+            target_agent: None,
+            timestamp: chrono::Utc::now(),
+            is_group: false,
+            thread_id: None,
+            metadata,
+        }
+    }
+
+    #[tokio::test]
+    async fn bound_agent_wins_over_legacy_fallback() {
+        // Two agents registered; `list_agents().first()` would be the legacy
+        // non-deterministic pick. The instance binding points at the *second*
+        // one, so a correct dispatch must return the bound agent regardless of
+        // registry order.
+        let first = AgentId::new();
+        let bound = AgentId::new();
+        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(BindingMockHandle {
+            agents: vec![(first, "researcher".into()), (bound, "legal".into())],
+            bound: Some(("tg-bot".into(), "peer-42".into(), bound)),
+        });
+        let router = Arc::new(AgentRouter::new());
+        let msg = inbound_message("peer-42", "tg-bot");
+
+        let resolved = resolve_or_fallback(&msg, &handle, &router).await;
+        assert_eq!(
+            resolved,
+            Some(bound),
+            "the channel-instance binding must win over the legacy first-available pick"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_binding_falls_through_to_legacy_chain() {
+        // With no binding for this conversation, dispatch must fall through to
+        // the legacy chain (here: first available agent), preserving today's
+        // behaviour for unconfigured instances.
+        let first = AgentId::new();
+        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(BindingMockHandle {
+            agents: vec![(first, "researcher".into())],
+            bound: None,
+        });
+        let router = Arc::new(AgentRouter::new());
+        let msg = inbound_message("peer-42", "tg-bot");
+
+        let resolved = resolve_or_fallback(&msg, &handle, &router).await;
+        assert_eq!(resolved, Some(first));
     }
 
     /// MockHandle that records which `agent_id` `/model` was dispatched to,

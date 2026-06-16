@@ -1946,6 +1946,44 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .unwrap_or_default()
     }
 
+    async fn resolve_bound_agent(&self, instance: &str, conversation_id: &str) -> Option<AgentId> {
+        // Two-level lookup: per-conversation override, else instance default
+        // (#5671). A bound agent name that no longer resolves to a live agent
+        // (renamed/removed) is logged and treated as "no binding" so the
+        // bridge falls through to its legacy chain rather than dropping the
+        // message.
+        let agent_name = match self
+            .kernel
+            .memory_substrate()
+            .channel_bindings()
+            .resolve(instance, conversation_id)
+        {
+            Ok(Some(name)) => name,
+            Ok(None) => return None,
+            Err(e) => {
+                tracing::warn!(
+                    instance,
+                    conversation_id,
+                    error = %e,
+                    "channel binding lookup failed; falling back to legacy routing"
+                );
+                return None;
+            }
+        };
+        match self.kernel.agent_registry().find_by_name(&agent_name) {
+            Some(entry) => Some(entry.id),
+            None => {
+                tracing::warn!(
+                    instance,
+                    conversation_id,
+                    agent = %agent_name,
+                    "channel-bound agent not found in registry; falling back to legacy routing"
+                );
+                None
+            }
+        }
+    }
+
     async fn authorize_channel_user(
         &self,
         channel_type: &str,
