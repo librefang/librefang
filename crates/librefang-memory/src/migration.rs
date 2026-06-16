@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 43;
+const SCHEMA_VERSION: u32 = 44;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -209,6 +209,11 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     run_step!(42, migrate_v42);
     // v43 (#6021): mcp_server_configs table for SQLite-backed MCP server config.
     run_step!(43, migrate_v43);
+    // v44 (#5671): channel-instance binding tables backing the deterministic
+    // two-level inbound dispatch lookup (instance default + per-conversation
+    // override) that replaces the non-deterministic `list_agents().first()`
+    // fallback chain.
+    run_step!(44, migrate_v44);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1663,6 +1668,41 @@ fn migrate_v43(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (43, datetime('now'), 'Add mcp_server_configs table for SQLite-backed MCP server config (#6021)')",
+        [],
+    )?;
+    Ok(())
+}
+
+fn migrate_v44(conn: &Connection) -> Result<(), rusqlite::Error> {
+    // Two tables backing Model A inbound dispatch (#5671):
+    //   channel_instance_defaults — one row per `[[sidecar_channels]]`
+    //     instance, seeded from config at boot; the default agent a channel
+    //     instance routes to when a conversation has no explicit override.
+    //   conversation_bindings — per (instance, conversation) override written
+    //     by `/agent`; supersedes the instance default. Empty until the
+    //     `/agent` command lands, but the read path consults it first.
+    // Both store the agent *name* (not the per-spawn `AgentId` uuid): config
+    // and the registry resolve agents by stable name, and the bridge maps
+    // name -> id at dispatch.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS channel_instance_defaults (
+            instance_name TEXT PRIMARY KEY,
+            agent_name    TEXT NOT NULL,
+            bound_at      TEXT NOT NULL DEFAULT (datetime('now')),
+            bound_by      TEXT
+        );
+        CREATE TABLE IF NOT EXISTS conversation_bindings (
+            instance_name   TEXT NOT NULL,
+            conversation_id TEXT NOT NULL,
+            agent_name      TEXT NOT NULL,
+            bound_at        TEXT NOT NULL DEFAULT (datetime('now')),
+            bound_by        TEXT,
+            PRIMARY KEY (instance_name, conversation_id)
+        );",
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (44, datetime('now'), 'Add channel_instance_defaults + conversation_bindings tables for deterministic inbound dispatch (#5671)')",
         [],
     )?;
     Ok(())

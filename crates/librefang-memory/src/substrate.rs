@@ -3,6 +3,7 @@
 //! Composes the structured store, semantic store, knowledge store,
 //! session store, and consolidation engine behind a single async API.
 
+use crate::channel_binding_store::ChannelBindingStore;
 use crate::chunker;
 use crate::consolidation::ConsolidationEngine;
 use crate::knowledge::KnowledgeStore;
@@ -41,6 +42,7 @@ pub struct MemorySubstrate {
     consolidation: ConsolidationEngine,
     usage: UsageStore,
     roster: RosterStore,
+    channel_bindings: ChannelBindingStore,
     workflow_store: WorkflowStore,
     chunk_config: ChunkConfig,
 }
@@ -231,6 +233,7 @@ impl MemorySubstrate {
             sessions,
             usage: UsageStore::new(pool.clone()),
             roster: RosterStore::new(pool.clone()),
+            channel_bindings: ChannelBindingStore::new(pool.clone()),
             workflow_store: WorkflowStore::new(pool.clone()),
             consolidation: ConsolidationEngine::new(pool, decay_rate),
             chunk_config,
@@ -267,6 +270,7 @@ impl MemorySubstrate {
             sessions: SessionStore::new(pool.clone()),
             usage: UsageStore::new(pool.clone()),
             roster: RosterStore::new(pool.clone()),
+            channel_bindings: ChannelBindingStore::new(pool.clone()),
             workflow_store: WorkflowStore::new(pool.clone()),
             consolidation: ConsolidationEngine::new(pool, decay_rate),
             chunk_config,
@@ -286,6 +290,11 @@ impl MemorySubstrate {
     /// Get a reference to the group roster store.
     pub fn roster(&self) -> &RosterStore {
         &self.roster
+    }
+
+    /// Get a reference to the channel-instance binding store (#5671).
+    pub fn channel_bindings(&self) -> &ChannelBindingStore {
+        &self.channel_bindings
     }
 
     /// Get a reference to the workflow run store.
