@@ -1593,170 +1593,305 @@ pub async fn memory_config_patch(
     State(state): State<Arc<AppState>>,
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let config_path = state.kernel.home_dir().join("config.toml");
+    // C-005d.2: under the default `surreal-backend`, persist `[memory]` +
+    // `[proactive_memory]` to the SurrealDB config store (one `config_overrides`
+    // entry each) and apply via `replace_config`, so memory settings can be
+    // edited when `config.toml` is a read-only ConfigMap. No secret VALUE enters
+    // the store — `embedding_api_key_env` is an env-var pointer (a name), and the
+    // actual key stays in the env var. The sqlite-only fallback below keeps the
+    // legacy `config.toml` write + `reload_config` path byte-for-byte.
+    #[cfg(feature = "surreal-backend")]
+    return memory_config_patch_surreal(&state, &req).await;
 
-    let content = match std::fs::read_to_string(&config_path) {
-        Ok(c) => c,
-        Err(e) => {
-            return ApiErrorResponse::internal_scrub(e).into_json_tuple();
-        }
-    };
-    let mut table: toml::Value = match toml::from_str(&content) {
-        Ok(t) => t,
-        Err(e) => {
-            return ApiErrorResponse::internal_scrub(e).into_json_tuple();
-        }
-    };
+    #[cfg(not(feature = "surreal-backend"))]
+    {
+        let config_path = state.kernel.home_dir().join("config.toml");
 
-    let root = table.as_table_mut().unwrap();
+        let content = match std::fs::read_to_string(&config_path) {
+            Ok(c) => c,
+            Err(e) => {
+                return ApiErrorResponse::internal_scrub(e).into_json_tuple();
+            }
+        };
+        let mut table: toml::Value = match toml::from_str(&content) {
+            Ok(t) => t,
+            Err(e) => {
+                return ApiErrorResponse::internal_scrub(e).into_json_tuple();
+            }
+        };
 
-    // Update [memory] section
-    let memory_tbl = root
-        .entry("memory")
-        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
-        .as_table_mut()
-        .unwrap();
-    if let Some(v) = req.get("embedding_provider").and_then(|v| v.as_str()) {
-        memory_tbl.insert(
-            "embedding_provider".into(),
-            toml::Value::String(v.to_string()),
-        );
-    }
-    if let Some(v) = req.get("embedding_model").and_then(|v| v.as_str()) {
-        memory_tbl.insert("embedding_model".into(), toml::Value::String(v.to_string()));
-    }
-    if let Some(v) = req.get("embedding_api_key_env").and_then(|v| v.as_str()) {
-        memory_tbl.insert(
-            "embedding_api_key_env".into(),
-            toml::Value::String(v.to_string()),
-        );
-    }
-    if let Some(v) = req.get("decay_rate").and_then(|v| v.as_f64()) {
-        memory_tbl.insert("decay_rate".into(), toml::Value::Float(v));
-    }
+        let root = table.as_table_mut().unwrap();
 
-    // Update [proactive_memory] section
-    if let Some(pm) = req.get("proactive_memory") {
-        let pm_tbl = root
-            .entry("proactive_memory")
+        // Update [memory] section
+        let memory_tbl = root
+            .entry("memory")
             .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
             .as_table_mut()
             .unwrap();
-        if let Some(v) = pm.get("enabled").and_then(|v| v.as_bool()) {
-            pm_tbl.insert("enabled".into(), toml::Value::Boolean(v));
-        }
-        if let Some(v) = pm.get("auto_memorize").and_then(|v| v.as_bool()) {
-            pm_tbl.insert("auto_memorize".into(), toml::Value::Boolean(v));
-        }
-        if let Some(v) = pm.get("auto_retrieve").and_then(|v| v.as_bool()) {
-            pm_tbl.insert("auto_retrieve".into(), toml::Value::Boolean(v));
-        }
-        if let Some(v) = pm.get("extraction_model").and_then(|v| v.as_str()) {
-            pm_tbl.insert(
-                "extraction_model".into(),
+        if let Some(v) = req.get("embedding_provider").and_then(|v| v.as_str()) {
+            memory_tbl.insert(
+                "embedding_provider".into(),
                 toml::Value::String(v.to_string()),
             );
         }
-        if let Some(v) = pm.get("max_retrieve").and_then(|v| v.as_u64()) {
-            pm_tbl.insert("max_retrieve".into(), toml::Value::Integer(v as i64));
+        if let Some(v) = req.get("embedding_model").and_then(|v| v.as_str()) {
+            memory_tbl.insert("embedding_model".into(), toml::Value::String(v.to_string()));
         }
-    }
+        if let Some(v) = req.get("embedding_api_key_env").and_then(|v| v.as_str()) {
+            memory_tbl.insert(
+                "embedding_api_key_env".into(),
+                toml::Value::String(v.to_string()),
+            );
+        }
+        if let Some(v) = req.get("decay_rate").and_then(|v| v.as_f64()) {
+            memory_tbl.insert("decay_rate".into(), toml::Value::Float(v));
+        }
 
-    let new_content = toml::to_string_pretty(&table).unwrap_or_default();
-    if let Err(e) = std::fs::write(&config_path, &new_content) {
+        // Update [proactive_memory] section
+        if let Some(pm) = req.get("proactive_memory") {
+            let pm_tbl = root
+                .entry("proactive_memory")
+                .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
+                .as_table_mut()
+                .unwrap();
+            if let Some(v) = pm.get("enabled").and_then(|v| v.as_bool()) {
+                pm_tbl.insert("enabled".into(), toml::Value::Boolean(v));
+            }
+            if let Some(v) = pm.get("auto_memorize").and_then(|v| v.as_bool()) {
+                pm_tbl.insert("auto_memorize".into(), toml::Value::Boolean(v));
+            }
+            if let Some(v) = pm.get("auto_retrieve").and_then(|v| v.as_bool()) {
+                pm_tbl.insert("auto_retrieve".into(), toml::Value::Boolean(v));
+            }
+            if let Some(v) = pm.get("extraction_model").and_then(|v| v.as_str()) {
+                pm_tbl.insert(
+                    "extraction_model".into(),
+                    toml::Value::String(v.to_string()),
+                );
+            }
+            if let Some(v) = pm.get("max_retrieve").and_then(|v| v.as_u64()) {
+                pm_tbl.insert("max_retrieve".into(), toml::Value::Integer(v as i64));
+            }
+        }
+
+        let new_content = toml::to_string_pretty(&table).unwrap_or_default();
+        if let Err(e) = std::fs::write(&config_path, &new_content) {
+            return ApiErrorResponse::internal_scrub(e).into_json_tuple();
+        }
+
+        // M12: hot-reload the new config so the running kernel picks up the
+        // change without an operator restart. Pre-fix the endpoint just
+        // wrote the file and returned `restart_required: true`, which
+        // confused dashboard users who saw GET return new values but the
+        // live behaviour (ProactiveMemoryStore::config, decay engine, etc.)
+        // stayed on the boot snapshot.
+        //
+        // **Response contract — clients MUST inspect `body.status`, not
+        // just the HTTP status.** PATCH always returns 200 OK on disk
+        // write; `status` discriminates:
+        //   - `"applied"` — file written + live config hot-reloaded.
+        //                   `restart_required` reflects whether any
+        //                   diff field needed a restart anyway.
+        //   - `"partial"` — file written but live reload failed (e.g.
+        //                   operator hand-edited an unrelated section
+        //                   into an invalid shape between PATCH writes).
+        //                   The new values are on disk for the next boot;
+        //                   `reload_error` carries the validator output
+        //                   for the operator. `restart_required` is
+        //                   always `true` in this branch.
+        //
+        // Review-followup #3: 207 / 500 were both considered for the
+        // partial case and both rejected. 500 implies the operator's
+        // PATCH was rejected, which is false — the disk write succeeded.
+        // 207 Multi-Status is awkward for a single-resource PATCH and
+        // would force every existing client to re-classify success. The
+        // body-status pattern mirrors `import_agent_memory` (the
+        // post-#3832 partial-import contract).
+        let reload_result = state.kernel.reload_config().await;
+        let (status, restart_required, reload_error) = match reload_result {
+            Ok(plan) => ("applied", plan.restart_required, None),
+            Err(e) => {
+                tracing::warn!("Memory config PATCH wrote disk but reload failed: {e}");
+                ("partial", true, Some(e))
+            }
+        };
+
+        tracing::info!(status, "Memory config updated via API");
+
+        // Return the canonical entity (matches GET /api/memory/config shape) sourced
+        // from the freshly-written TOML table so callers can `setQueryData` without a
+        // follow-up GET. See issue #3832.
+        let memory_section = table.get("memory").and_then(|v| v.as_table());
+        let proactive_section = table.get("proactive_memory").and_then(|v| v.as_table());
+
+        let toml_str =
+            |t: Option<&toml::map::Map<String, toml::Value>>, k: &str| -> Option<String> {
+                t.and_then(|m| m.get(k))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned)
+            };
+        let toml_bool =
+            |t: Option<&toml::map::Map<String, toml::Value>>, k: &str| -> Option<bool> {
+                t.and_then(|m| m.get(k)).and_then(|v| v.as_bool())
+            };
+        let toml_f64 = |t: Option<&toml::map::Map<String, toml::Value>>, k: &str| -> Option<f64> {
+            t.and_then(|m| m.get(k)).and_then(|v| v.as_float())
+        };
+        let toml_u64 = |t: Option<&toml::map::Map<String, toml::Value>>, k: &str| -> Option<u64> {
+            t.and_then(|m| m.get(k))
+                .and_then(|v| v.as_integer())
+                .and_then(|n| u64::try_from(n).ok())
+        };
+
+        let live = state.kernel.config_ref();
+        let body = serde_json::json!({
+            "embedding_provider": toml_str(memory_section, "embedding_provider")
+                .or_else(|| live.memory.embedding_provider.clone()),
+            "embedding_model": toml_str(memory_section, "embedding_model")
+                .unwrap_or_else(|| live.memory.embedding_model.clone()),
+            "embedding_api_key_env": toml_str(memory_section, "embedding_api_key_env")
+                .or_else(|| live.memory.embedding_api_key_env.clone()),
+            "decay_rate": toml_f64(memory_section, "decay_rate")
+                .unwrap_or(live.memory.decay_rate),
+            "proactive_memory": {
+                "enabled": toml_bool(proactive_section, "enabled")
+                    .unwrap_or(live.proactive_memory.enabled),
+                "auto_memorize": toml_bool(proactive_section, "auto_memorize")
+                    .unwrap_or(live.proactive_memory.auto_memorize),
+                "auto_retrieve": toml_bool(proactive_section, "auto_retrieve")
+                    .unwrap_or(live.proactive_memory.auto_retrieve),
+                "extraction_model": toml_str(proactive_section, "extraction_model")
+                    .or_else(|| live.proactive_memory.extraction_model.clone()),
+                "max_retrieve": toml_u64(proactive_section, "max_retrieve")
+                    .unwrap_or(live.proactive_memory.max_retrieve as u64),
+            },
+            "status": status,
+            "restart_required": restart_required,
+            "reload_error": reload_error,
+        });
+        drop(live);
+
+        (StatusCode::OK, Json(body))
+    }
+}
+
+/// C-005d.2 — surreal-backend persistence path for `PATCH /api/memory/config`.
+///
+/// Merges the patch into the **live** effective config (`config.toml` ⊕ prior
+/// `config_overrides`) so successive PATCHes accumulate, stores the resulting
+/// `[memory]` and `[proactive_memory]` sections as two trusted-section overrides
+/// (C-005d.1 `TRUSTED_SECTION_KEYS`), then applies them via `replace_config`.
+/// `config.toml` is never written. No secret VALUE enters the store.
+#[cfg(feature = "surreal-backend")]
+async fn memory_config_patch_surreal(
+    state: &Arc<AppState>,
+    req: &serde_json::Value,
+) -> (StatusCode, Json<serde_json::Value>) {
+    use crate::config_store_overlay::{
+        read_config_overrides, resolve_config_with_overrides, write_config_overrides,
+    };
+
+    // Serialize the read-modify-write of the single `config_overrides` row so a
+    // concurrent budget/channel/memory PATCH can't lose this update.
+    let _guard = state.config_write_lock.lock().await;
+
+    // Build the new sections from the LIVE config so prior runtime overrides are
+    // preserved (config.toml under surreal is read-only bootstrap defaults).
+    let (new_memory, new_pm) = {
+        let live = state.kernel.config_ref();
+        let mut m = live.memory.clone();
+        if let Some(v) = req.get("embedding_provider").and_then(|v| v.as_str()) {
+            m.embedding_provider = Some(v.to_string());
+        }
+        if let Some(v) = req.get("embedding_model").and_then(|v| v.as_str()) {
+            m.embedding_model = v.to_string();
+        }
+        if let Some(v) = req.get("embedding_api_key_env").and_then(|v| v.as_str()) {
+            m.embedding_api_key_env = Some(v.to_string());
+        }
+        if let Some(v) = req.get("decay_rate").and_then(|v| v.as_f64()) {
+            m.decay_rate = v;
+        }
+        let mut pm = live.proactive_memory.clone();
+        if let Some(p) = req.get("proactive_memory") {
+            if let Some(v) = p.get("enabled").and_then(|v| v.as_bool()) {
+                pm.enabled = v;
+            }
+            if let Some(v) = p.get("auto_memorize").and_then(|v| v.as_bool()) {
+                pm.auto_memorize = v;
+            }
+            if let Some(v) = p.get("auto_retrieve").and_then(|v| v.as_bool()) {
+                pm.auto_retrieve = v;
+            }
+            if let Some(v) = p.get("extraction_model").and_then(|v| v.as_str()) {
+                pm.extraction_model = Some(v.to_string());
+            }
+            if let Some(v) = p.get("max_retrieve").and_then(|v| v.as_u64()) {
+                pm.max_retrieve = v as usize;
+            }
+        }
+        (m, pm)
+    };
+
+    let storage = state.kernel.config_ref().storage.clone();
+    let config_path = state.kernel.home_dir().join("config.toml");
+
+    let mut overrides = match read_config_overrides(&storage).await {
+        Ok(o) => o,
+        Err(e) => return ApiErrorResponse::internal_scrub(e).into_json_tuple(),
+    };
+    let memory_json = match serde_json::to_value(&new_memory) {
+        Ok(v) => v,
+        Err(e) => return ApiErrorResponse::internal_scrub(e.to_string()).into_json_tuple(),
+    };
+    let pm_json = match serde_json::to_value(&new_pm) {
+        Ok(v) => v,
+        Err(e) => return ApiErrorResponse::internal_scrub(e.to_string()).into_json_tuple(),
+    };
+    overrides.insert("memory".to_string(), memory_json);
+    overrides.insert("proactive_memory".to_string(), pm_json);
+
+    let (merged, raw) = match resolve_config_with_overrides(&config_path, &overrides) {
+        Ok(r) => r,
+        Err(e) => {
+            return ApiErrorResponse::internal_scrub(format!("invalid config after edit: {e}"))
+                .into_json_tuple();
+        }
+    };
+    if let Err(errors) = state.kernel.validate_config_for_reload(&merged) {
+        return ApiErrorResponse::bad_request(format!("invalid config: {}", errors.join("; ")))
+            .into_json_tuple();
+    }
+    if let Err(e) = write_config_overrides(&storage, &overrides).await {
         return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
+    let (status, restart_required, reload_error) =
+        match state.kernel.replace_config(merged, raw).await {
+            Ok(plan) => ("applied", plan.restart_required, None),
+            Err(e) => {
+                tracing::warn!("Memory config PATCH stored override but replace failed: {e}");
+                ("partial", true, Some(e))
+            }
+        };
 
-    // M12: hot-reload the new config so the running kernel picks up the
-    // change without an operator restart. Pre-fix the endpoint just
-    // wrote the file and returned `restart_required: true`, which
-    // confused dashboard users who saw GET return new values but the
-    // live behaviour (ProactiveMemoryStore::config, decay engine, etc.)
-    // stayed on the boot snapshot.
-    //
-    // **Response contract — clients MUST inspect `body.status`, not
-    // just the HTTP status.** PATCH always returns 200 OK on disk
-    // write; `status` discriminates:
-    //   - `"applied"` — file written + live config hot-reloaded.
-    //                   `restart_required` reflects whether any
-    //                   diff field needed a restart anyway.
-    //   - `"partial"` — file written but live reload failed (e.g.
-    //                   operator hand-edited an unrelated section
-    //                   into an invalid shape between PATCH writes).
-    //                   The new values are on disk for the next boot;
-    //                   `reload_error` carries the validator output
-    //                   for the operator. `restart_required` is
-    //                   always `true` in this branch.
-    //
-    // Review-followup #3: 207 / 500 were both considered for the
-    // partial case and both rejected. 500 implies the operator's
-    // PATCH was rejected, which is false — the disk write succeeded.
-    // 207 Multi-Status is awkward for a single-resource PATCH and
-    // would force every existing client to re-classify success. The
-    // body-status pattern mirrors `import_agent_memory` (the
-    // post-#3832 partial-import contract).
-    let reload_result = state.kernel.reload_config().await;
-    let (status, restart_required, reload_error) = match reload_result {
-        Ok(plan) => ("applied", plan.restart_required, None),
-        Err(e) => {
-            tracing::warn!("Memory config PATCH wrote disk but reload failed: {e}");
-            ("partial", true, Some(e))
-        }
-    };
+    tracing::info!(status, "Memory config updated via API (config store)");
 
-    tracing::info!(status, "Memory config updated via API");
-
-    // Return the canonical entity (matches GET /api/memory/config shape) sourced
-    // from the freshly-written TOML table so callers can `setQueryData` without a
-    // follow-up GET. See issue #3832.
-    let memory_section = table.get("memory").and_then(|v| v.as_table());
-    let proactive_section = table.get("proactive_memory").and_then(|v| v.as_table());
-
-    let toml_str = |t: Option<&toml::map::Map<String, toml::Value>>, k: &str| -> Option<String> {
-        t.and_then(|m| m.get(k))
-            .and_then(|v| v.as_str())
-            .map(str::to_owned)
-    };
-    let toml_bool = |t: Option<&toml::map::Map<String, toml::Value>>, k: &str| -> Option<bool> {
-        t.and_then(|m| m.get(k)).and_then(|v| v.as_bool())
-    };
-    let toml_f64 = |t: Option<&toml::map::Map<String, toml::Value>>, k: &str| -> Option<f64> {
-        t.and_then(|m| m.get(k)).and_then(|v| v.as_float())
-    };
-    let toml_u64 = |t: Option<&toml::map::Map<String, toml::Value>>, k: &str| -> Option<u64> {
-        t.and_then(|m| m.get(k))
-            .and_then(|v| v.as_integer())
-            .and_then(|n| u64::try_from(n).ok())
-    };
-
-    let live = state.kernel.config_ref();
     let body = serde_json::json!({
-        "embedding_provider": toml_str(memory_section, "embedding_provider")
-            .or_else(|| live.memory.embedding_provider.clone()),
-        "embedding_model": toml_str(memory_section, "embedding_model")
-            .unwrap_or_else(|| live.memory.embedding_model.clone()),
-        "embedding_api_key_env": toml_str(memory_section, "embedding_api_key_env")
-            .or_else(|| live.memory.embedding_api_key_env.clone()),
-        "decay_rate": toml_f64(memory_section, "decay_rate")
-            .unwrap_or(live.memory.decay_rate),
+        "embedding_provider": new_memory.embedding_provider,
+        "embedding_model": new_memory.embedding_model,
+        "embedding_api_key_env": new_memory.embedding_api_key_env,
+        "decay_rate": new_memory.decay_rate,
         "proactive_memory": {
-            "enabled": toml_bool(proactive_section, "enabled")
-                .unwrap_or(live.proactive_memory.enabled),
-            "auto_memorize": toml_bool(proactive_section, "auto_memorize")
-                .unwrap_or(live.proactive_memory.auto_memorize),
-            "auto_retrieve": toml_bool(proactive_section, "auto_retrieve")
-                .unwrap_or(live.proactive_memory.auto_retrieve),
-            "extraction_model": toml_str(proactive_section, "extraction_model")
-                .or_else(|| live.proactive_memory.extraction_model.clone()),
-            "max_retrieve": toml_u64(proactive_section, "max_retrieve")
-                .unwrap_or(live.proactive_memory.max_retrieve as u64),
+            "enabled": new_pm.enabled,
+            "auto_memorize": new_pm.auto_memorize,
+            "auto_retrieve": new_pm.auto_retrieve,
+            "extraction_model": new_pm.extraction_model,
+            "max_retrieve": new_pm.max_retrieve,
         },
         "status": status,
         "restart_required": restart_required,
         "reload_error": reload_error,
     });
-    drop(live);
-
     (StatusCode::OK, Json(body))
 }
 

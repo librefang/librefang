@@ -90,18 +90,27 @@
       "status": "PLANNED",
       "assessed": "2026-06-14",
       "planned": "2026-06-14",
-      "note": "Migrate memory + channels settings to the DB store. Reuse C-005c config_overrides + a trusted-section apply path; secret VALUES stay out of the DB. See assessment.md C-005d addendum and plan.md C-005d section. Sub-changes: C-005d.1 (DONE), C-005d.2 (PENDING), C-005d.3 (PENDING).",
+      "note": "Migrate memory + channels settings to the DB store. Reuse C-005c config_overrides + a trusted-section apply path; secret VALUES stay out of the DB. PR #88 (feat/memory-channels-to-store) carries C-005d.1 + C-005d.2; rebased onto post-upstream-merge main (after #87). Sub-changes: C-005d.1 (DONE), C-005d.2 (DONE), C-005d.3 (PENDING).",
       "sub_changes": {
         "C-005d.1": {
           "status": "CODE_DONE",
           "completed": "2026-06-14",
           "files": 3,
           "branch": "feat/memory-channels-to-store",
+          "pr": 88,
           "qa": "overlay-tests(15)+config-unit(18)+clippy+brand",
-          "note": "Trusted-section apply path: TRUSTED_SECTION_KEYS + OR-gate in resolve_config_with_overrides; removed budget from is_writable_config_path EXACT (only the typed budget handler writes budget now). PREREQ: PR #85 (fix runtime clippy 1.95 large_enum_variant) must merge first so api clippy CI is green."
+          "note": "Trusted-section apply path: TRUSTED_SECTION_KEYS + OR-gate in resolve_config_with_overrides; removed budget from is_writable_config_path EXACT (only the typed budget handler writes budget now). PR #85 (runtime clippy fix) merged; rebased onto main after upstream merge #87."
         },
-        "C-005d.2": { "status": "PENDING", "note": "memory + proactive_memory handler -> store" },
-        "C-005d.3": { "status": "PENDING", "note": "sidecar_channels handler -> store; channel env-file split unchanged" }
+        "C-005d.2": {
+          "status": "CODE_DONE",
+          "completed": "2026-06-15",
+          "files": 3,
+          "branch": "feat/memory-channels-to-store",
+          "pr": 88,
+          "qa": "overlay-tests(16)+config-unit(18)+clippy+brand",
+          "note": "memory_config_patch_surreal: builds memory + proactive_memory from LIVE config (PATCHes accumulate), stores both as trusted-section overrides, resolve+validate+replace_config; config.toml untouched under surreal. ALSO fixed json_to_toml_edit_value to omit JSON-null object keys (Option::None round-trip) — was breaking embedding_dimensions=\"\". No secret VALUE in store (embedding_api_key_env is an env-var pointer)."
+        },
+        "C-005d.3": { "status": "PENDING", "note": "sidecar_channels handler -> store; channel env-file split unchanged; include-shadow guard preserved" }
       }
     }
   },
