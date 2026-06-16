@@ -8,24 +8,15 @@
 //! @-mention wins, sticky-TTL falls off, etc.). The user sees both agents
 //! reply, contradict each other, and run up cost.
 //!
-//! This module adds an in-memory single-process claim registry keyed by a
-//! `ThreadKey` with a TTL. The bridge consults it after routing and before
-//! dispatch, suppressing any agent that isn't the current claim holder. An
-//! explicit @-mention re-claims for the new agent.
+//! This module adds an in-memory single-process claim registry keyed by a `ThreadKey` with a TTL.
+//! The bridge consults it after routing and before dispatch, suppressing any agent that isn't the current claim holder.
+//! An explicit @-mention re-claims for the new agent.
 //!
-//! The key carries more than `(channel, thread)` (#5323): an optional
-//! `account_id` keeps two bot accounts on the same channel-type from
-//! colliding (multi-tenant), an optional `chat_id` distinguishes two chats
-//! that happen to share a forum-topic id, and an optional `peer_id` scopes a
-//! claim to one conversational partner so two users talking to two different
-//! agents in the same thread keep independent stickiness. All three extra
-//! slots default to `None`, which reproduces the original single-account
-//! `(channel, thread)` behaviour byte-for-byte.
+//! The key carries more than `(channel, thread)` (#5323): an optional `account_id` keeps two bot accounts on the same channel-type from colliding (multi-tenant), an optional `chat_id` distinguishes two chats that happen to share a forum-topic id, and an optional `peer_id` scopes a claim to one conversational partner so two users talking to two different agents in the same thread keep independent stickiness.
+//! All three extra slots default to `None`, which reproduces the original single-account `(channel, thread)` behaviour byte-for-byte.
 //!
-//! Multi-process / multi-daemon coordination (sharing the registry across
-//! processes via a forwarder API) is out of scope — see issue #3334. DMs
-//! bypass the registry unless `conversation_ownership_include_dms` is set on
-//! the channel override.
+//! Multi-process / multi-daemon coordination (sharing the registry across processes via a forwarder API) is out of scope — see issue #3334.
+//! DMs bypass the registry unless `conversation_ownership_include_dms` is set on the channel override.
 
 use dashmap::DashMap;
 use librefang_types::agent::AgentId;
@@ -40,36 +31,31 @@ pub const DEFAULT_TTL: Duration = Duration::from_secs(300);
 /// channel-type slug, the platform's thread identifier, and — when known —
 /// the bot account, chat, and conversational peer that further narrow it.
 ///
-/// `channel` and `thread` are mandatory; the remaining three are `None` on
-/// single-account installs and on adapters that do not surface them, which
-/// keeps the key equal to the historical `(channel, thread)` pair.
+/// `channel` and `thread` are mandatory; the remaining three are `None` on single-account installs and on adapters that do not surface them, which keeps the key equal to the historical `(channel, thread)` pair.
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub struct ThreadKey {
     /// Adapter-qualified channel slug (e.g. `"slack"`, `"discord"`).
     pub channel: String,
-    /// Bot account this message reached, when the adapter is multi-tenant
-    /// (e.g. one Slack workspace id, one Telegram bot token slug). Two
-    /// accounts on the same channel-type never share a claim.
+    /// Bot account this message reached, when the adapter is multi-tenant (e.g. one Slack workspace id, one Telegram bot token slug).
+    /// Two accounts on the same channel-type never share a claim.
     pub account_id: Option<String>,
-    /// Chat / group / DM container id. Distinguishes two chats that reuse the
-    /// same platform-side `thread` id (rare but possible for forum topics).
+    /// Chat / group / DM container id.
+    /// Distinguishes two chats that reuse the same platform-side `thread` id (rare but possible for forum topics).
     pub chat_id: Option<String>,
-    /// Platform thread identifier (Slack `thread_ts`, Discord thread ID, a
-    /// forum-topic id, …). Callers without a forum topic pass the `chat_id`
-    /// here so a topic-less group still gets a stable claim. Empty string is
-    /// invalid; callers should not invoke the registry without a real thread.
+    /// Platform thread identifier (Slack `thread_ts`, Discord thread ID, a forum-topic id, …).
+    /// Callers without a forum topic pass the `chat_id` here so a topic-less group still gets a stable claim.
+    /// Empty string is invalid; callers should not invoke the registry without a real thread.
     pub thread: String,
-    /// Conversational partner (the individual sender). Scoping the claim to a
-    /// peer lets two users in the same thread talk to two different agents
-    /// without contaminating each other. `None` => thread-wide claim.
+    /// Conversational partner (the individual sender).
+    /// Scoping the claim to a peer lets two users in the same thread talk to two different agents without contaminating each other.
+    /// `None` => thread-wide claim.
     pub peer_id: Option<String>,
 }
 
 impl ThreadKey {
-    /// Build a key from a channel slug and thread id, leaving the
-    /// `account_id` / `chat_id` / `peer_id` slices unset. Trims whitespace;
-    /// both fields must be non-empty after trimming or the call is
-    /// meaningless. Use the `with_*` builders to narrow the key further.
+    /// Build a key from a channel slug and thread id, leaving the `account_id` / `chat_id` / `peer_id` slices unset.
+    /// Trims whitespace; both fields must be non-empty after trimming or the call is meaningless.
+    /// Use the `with_*` builders to narrow the key further.
     pub fn new(channel: &str, thread: &str) -> Option<Self> {
         let channel = channel.trim();
         let thread = thread.trim();
@@ -85,8 +71,8 @@ impl ThreadKey {
         })
     }
 
-    /// Narrow the key to a specific bot account. An empty / whitespace value
-    /// clears the slot rather than storing a meaningless empty string.
+    /// Narrow the key to a specific bot account.
+    /// An empty / whitespace value clears the slot rather than storing a meaningless empty string.
     pub fn with_account_id(mut self, account_id: Option<&str>) -> Self {
         self.account_id = normalize_opt(account_id);
         self
@@ -105,8 +91,7 @@ impl ThreadKey {
     }
 }
 
-/// Trim an optional string, collapsing empties to `None` so a blank metadata
-/// value never silently widens or splinters a key.
+/// Trim an optional string, collapsing empties to `None` so a blank metadata value never silently widens or splinters a key.
 fn normalize_opt(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)
@@ -195,10 +180,8 @@ impl ThreadOwnershipRegistry {
         self.decide_at(key, candidate, was_mentioned, Instant::now())
     }
 
-    /// Like `decide`, but use `ttl` for any claim this call creates or
-    /// refreshes instead of the registry default. Lets the bridge honour a
-    /// per-channel `conversation_ownership_ttl_seconds` override while every
-    /// channel keeps sharing one registry.
+    /// Like `decide`, but use `ttl` for any claim this call creates or refreshes instead of the registry default.
+    /// Lets the bridge honour a per-channel `conversation_ownership_ttl_seconds` override while every channel keeps sharing one registry.
     pub fn decide_with_ttl(
         &self,
         key: ThreadKey,

@@ -305,16 +305,11 @@ pub trait ChannelBridgeHandle: Send + Sync {
         Vec::new()
     }
 
-    /// Pick the channel-eligible agent whose declared aliases
-    /// (`channel_overrides.group_trigger_patterns`) best match `text` (#5323).
+    /// Pick the channel-eligible agent whose declared aliases (`channel_overrides.group_trigger_patterns`) best match `text` (#5323).
     ///
-    /// Scores every agent whose `manifest.channels` allows `channel_type`
-    /// (empty allowlist = all channels) by how many of its trigger patterns
-    /// match, and returns the single clear winner. Returns `None` when no
-    /// agent's alias matches or when the top score is tied (ambiguous — the
-    /// caller's deterministic binding/default chain decides instead). This is
-    /// the channel-path consultation of the per-agent attention scorer that
-    /// closes the non-deterministic "first available" fallback.
+    /// Scores every agent whose `manifest.channels` allows `channel_type` (empty allowlist = all channels) by how many of its trigger patterns match, and returns the single clear winner.
+    /// Returns `None` when no agent's alias matches or when the top score is tied (ambiguous — the caller's deterministic binding/default chain decides instead).
+    /// This is the channel-path consultation of the per-agent attention scorer that closes the non-deterministic "first available" fallback.
     async fn route_assistant_by_metadata_for_channel(
         &self,
         _channel_type: &str,
@@ -2216,18 +2211,13 @@ fn compile_group_trigger_patterns(patterns: &[String]) -> Arc<CompiledGroupTrigg
     compiled
 }
 
-/// Pick the candidate agent whose declared group-trigger aliases best match
-/// `text` (#5323). Each candidate is `(agent_id, patterns)` where `patterns`
-/// is that agent's `channel_overrides.group_trigger_patterns`. Reuses the
-/// process-wide compiled-regex cache, so repeated calls on a busy group do not
-/// recompile.
+/// Pick the candidate agent whose declared group-trigger aliases best match `text` (#5323).
+/// Each candidate is `(agent_id, patterns)` where `patterns` is that agent's `channel_overrides.group_trigger_patterns`.
+/// Reuses the process-wide compiled-regex cache, so repeated calls on a busy group do not recompile.
 ///
-/// Returns the single clear winner. Returns `None` when fewer than two
-/// candidates exist (nothing to disambiguate — the binding/default chain
-/// already routes a single agent), when no alias matches, or when the top
-/// score is tied (ambiguous: defer to the deterministic chain). The candidate
-/// order does not affect the result — ties resolve to `None` regardless of
-/// iteration order, so a `HashMap`-sourced candidate list stays deterministic.
+/// Returns the single clear winner.
+/// Returns `None` when fewer than two candidates exist (nothing to disambiguate — the binding/default chain already routes a single agent), when no alias matches, or when the top score is tied (ambiguous: defer to the deterministic chain).
+/// The candidate order does not affect the result — ties resolve to `None` regardless of iteration order, so a `HashMap`-sourced candidate list stays deterministic.
 pub fn best_alias_match(text: &str, candidates: &[(AgentId, Vec<String>)]) -> Option<AgentId> {
     if candidates.len() < 2 {
         return None;
@@ -3058,12 +3048,9 @@ async fn handle_send_error<F, Fut>(
 struct RouteResolution {
     /// Resolved agent, or `None` when no eligible agent exists.
     agent_id: Option<AgentId>,
-    /// The message explicitly named this agent — an `@`-mention the adapter
-    /// surfaced, or a match against the agent's own declared alias. The
-    /// conversation-ownership gate treats an addressed dispatch as a re-claim
-    /// so a user can hand the thread from one agent to another mid-conversation
-    /// (#5323). A continuation that merely inherits the sticky holder is *not*
-    /// addressed.
+    /// The message explicitly named this agent — an `@`-mention the adapter surfaced, or a match against the agent's own declared alias.
+    /// The conversation-ownership gate treats an addressed dispatch as a re-claim so a user can hand the thread from one agent to another mid-conversation (#5323).
+    /// A continuation that merely inherits the sticky holder is *not* addressed.
     addressed: bool,
 }
 
@@ -3088,9 +3075,8 @@ impl RouteResolution {
     }
 }
 
-/// Names the message explicitly `@`-mentioned, as surfaced by the adapter in
-/// `metadata["mention_names"]` (leading `@` optional). Empty when the adapter
-/// did not parse any mentions.
+/// Names the message explicitly `@`-mentioned, as surfaced by the adapter in `metadata["mention_names"]` (leading `@` optional).
+/// Empty when the adapter did not parse any mentions.
 fn mention_names(message: &ChannelMessage) -> Vec<String> {
     message
         .metadata
@@ -3115,8 +3101,7 @@ fn platform_was_mentioned(message: &ChannelMessage) -> bool {
         .unwrap_or(false)
 }
 
-/// True when `id` may serve `ct` — its `manifest.channels` allowlist either is
-/// empty (all channels) or contains the channel.
+/// True when `id` may serve `ct` — its `manifest.channels` allowlist either is empty (all channels) or contains the channel.
 async fn agent_allows_channel(
     handle: &Arc<dyn ChannelBridgeHandle>,
     id: AgentId,
@@ -3126,13 +3111,11 @@ async fn agent_allows_channel(
     allowlist.is_empty() || allowlist.iter().any(|c| c == ct)
 }
 
-/// Resolve a specific agent the group message addresses, ahead of the binding
-/// / default chain (#5323). Two ways a message names an agent:
+/// Resolve a specific agent the group message addresses, ahead of the binding / default chain (#5323).
+/// Two ways a message names an agent:
 ///
-/// 1. An explicit `@`-mention the adapter surfaced in `metadata["mention_names"]`
-///    that resolves to a channel-eligible agent.
-/// 2. A non-default agent's declared alias matching the text, scored by the
-///    per-agent attention scorer (`route_assistant_by_metadata_for_channel`).
+/// 1. An explicit `@`-mention the adapter surfaced in `metadata["mention_names"]` that resolves to a channel-eligible agent.
+/// 2. A non-default agent's declared alias matching the text, scored by the per-agent attention scorer (`route_assistant_by_metadata_for_channel`).
 ///
 /// Returns `None` when the message addresses no specific eligible agent.
 async fn resolve_addressed_agent(
@@ -3295,11 +3278,9 @@ async fn resolve_or_fallback(
 
 /// Build the conversation-ownership key for this message (#5323).
 ///
-/// `thread` is the platform forum-topic id when present, else the chat
-/// container id so a topic-less group still gets a stable claim. `account_id`
-/// keeps multi-tenant bots apart; `chat_id` distinguishes chats that reuse a
-/// topic id; `peer_id` scopes the claim to the individual sender. Returns
-/// `None` only when neither a thread nor a chat id is available.
+/// `thread` is the platform forum-topic id when present, else the chat container id so a topic-less group still gets a stable claim.
+/// `account_id` keeps multi-tenant bots apart; `chat_id` distinguishes chats that reuse a topic id; `peer_id` scopes the claim to the individual sender.
+/// Returns `None` only when neither a thread nor a chat id is available.
 fn build_thread_key(message: &ChannelMessage) -> Option<crate::thread_ownership::ThreadKey> {
     let ct = channel_type_str(&message.channel);
     // For groups the bridge keys by `sender.platform_id` (= chat JID); for DMs
@@ -3320,10 +3301,9 @@ fn build_thread_key(message: &ChannelMessage) -> Option<crate::thread_ownership:
     })
 }
 
-/// Conversation-ownership gate (#3334 / #5323). Returns `true` if `agent_id`
-/// may dispatch, `false` if another agent owns this conversation slice and the
-/// message did not explicitly re-address us. Shared by the text and multimodal
-/// dispatch paths.
+/// Conversation-ownership gate (#3334 / #5323).
+/// Returns `true` if `agent_id` may dispatch, `false` if another agent owns this conversation slice and the message did not explicitly re-address us.
+/// Shared by the text and multimodal dispatch paths.
 async fn conversation_ownership_allows(
     message: &ChannelMessage,
     thread_ownership: &Arc<crate::thread_ownership::ThreadOwnershipRegistry>,
