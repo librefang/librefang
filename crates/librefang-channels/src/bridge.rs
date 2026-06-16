@@ -3306,6 +3306,7 @@ fn build_thread_key(message: &ChannelMessage) -> Option<crate::thread_ownership:
 /// Shared by the text and multimodal dispatch paths.
 async fn conversation_ownership_allows(
     message: &ChannelMessage,
+    handle: &Arc<dyn ChannelBridgeHandle>,
     thread_ownership: &Arc<crate::thread_ownership::ThreadOwnershipRegistry>,
     overrides: Option<&ChannelOverrides>,
     agent_id: AgentId,
@@ -3332,8 +3333,21 @@ async fn conversation_ownership_allows(
             .map(|o| o.conversation_ownership_ttl_seconds)
             .unwrap_or(600),
     );
-    // An explicit @-mention or a fresh address re-claims for the new agent.
-    let was_mentioned = platform_was_mentioned(message) || addressed;
+    let ct = channel_type_str(&message.channel);
+    // Stale-claim takeover (#5323 follow-up): if a *different* agent holds the
+    // claim but its `manifest.channels` allowlist was narrowed so it can no
+    // longer serve this channel, the claim is dead weight — honouring it would
+    // silently drop every follow-up until the TTL expires. Treat the dispatch
+    // as a takeover so the now-eligible candidate re-claims immediately. A
+    // killed holder still resolves through `agent_allows_channel` (empty
+    // allowlist) and degrades to a graceful `send_message` error, unchanged.
+    let stale_holder = match thread_ownership.current_holder(&key) {
+        Some(holder) if holder != agent_id => !agent_allows_channel(handle, holder, ct).await,
+        _ => false,
+    };
+    // An explicit @-mention, a fresh address, or a stale holder re-claims for
+    // the new agent.
+    let was_mentioned = platform_was_mentioned(message) || addressed || stale_holder;
     match thread_ownership.decide_with_ttl(key, agent_id, was_mentioned, ttl) {
         crate::thread_ownership::DispatchDecision::Allow { .. } => true,
         crate::thread_ownership::DispatchDecision::Suppress { holder } => {
@@ -4494,6 +4508,7 @@ async fn dispatch_message(
     // agent.
     if !conversation_ownership_allows(
         message,
+        handle,
         thread_ownership,
         overrides.as_ref(),
         agent_id,
@@ -5937,6 +5952,7 @@ async fn dispatch_with_blocks(
     // address surfaced during resolution.
     if !conversation_ownership_allows(
         message,
+        handle,
         thread_ownership,
         overrides,
         agent_id,
@@ -9895,5 +9911,69 @@ mod tests {
             .insert("mention_names".into(), serde_json::json!(["ambrogio"]));
         // @ambrogio routes to ambrogio even though it is not the default.
         assert_eq!(resolve_addressed_agent(&msg, &handle).await, Some(ambrogio));
+    }
+
+    #[tokio::test]
+    async fn stale_holder_loses_claim_when_channel_ineligible() {
+        // A holds a slack thread, then A's allowlist is narrowed to exclude
+        // slack. A non-addressed follow-up from eligible candidate B must take
+        // over the claim rather than being suppressed until TTL (#5323
+        // follow-up). The control: while A is still eligible, B is suppressed.
+        struct AllowlistHandle {
+            lists: std::collections::HashMap<AgentId, Vec<String>>,
+        }
+        #[async_trait]
+        impl ChannelBridgeHandle for AllowlistHandle {
+            async fn send_message(&self, _a: AgentId, m: &str) -> Result<String, String> {
+                Ok(m.to_string())
+            }
+            async fn find_agent_by_name(&self, _n: &str) -> Result<Option<AgentId>, String> {
+                Ok(None)
+            }
+            async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String> {
+                Ok(vec![])
+            }
+            async fn agent_channel_allowlist(&self, id: AgentId) -> Vec<String> {
+                self.lists.get(&id).cloned().unwrap_or_default()
+            }
+            async fn spawn_agent_by_name(&self, _manifest_name: &str) -> Result<AgentId, String> {
+                Err("spawn not implemented in mock".to_string())
+            }
+            fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {}
+        }
+
+        let a = AgentId::new();
+        let b = AgentId::new();
+        let ov = ChannelOverrides::default();
+        let msg = group_thread_message("t1", false);
+        let key = build_thread_key(&msg).expect("key");
+
+        // Control: A still allows slack -> B is suppressed (A keeps the claim).
+        let eligible: std::sync::Arc<dyn ChannelBridgeHandle> = {
+            let mut lists = std::collections::HashMap::new();
+            lists.insert(a, vec!["slack".to_string()]);
+            std::sync::Arc::new(AllowlistHandle { lists })
+        };
+        let reg = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
+        let _ = reg.decide(key.clone(), a, false);
+        assert!(
+            !conversation_ownership_allows(&msg, &eligible, &reg, Some(&ov), b, false).await,
+            "eligible holder must keep its claim against a non-addressed candidate"
+        );
+        assert_eq!(reg.current_holder(&key), Some(a));
+
+        // Stale: A no longer allows slack -> B takes over.
+        let stale: std::sync::Arc<dyn ChannelBridgeHandle> = {
+            let mut lists = std::collections::HashMap::new();
+            lists.insert(a, vec!["discord".to_string()]);
+            std::sync::Arc::new(AllowlistHandle { lists })
+        };
+        let reg2 = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
+        let _ = reg2.decide(key.clone(), a, false);
+        assert!(
+            conversation_ownership_allows(&msg, &stale, &reg2, Some(&ov), b, false).await,
+            "eligible candidate must take over a stale holder's claim"
+        );
+        assert_eq!(reg2.current_holder(&key), Some(b));
     }
 }
