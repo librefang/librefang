@@ -80,7 +80,16 @@ pub(crate) fn cmd_migrate(args: MigrateArgs) {
 
     let target_dir = cli_librefang_home();
 
-    println!("{}", i18n::t_args("migrate-start-msg", &[("source", &source.to_string()), ("path", &source_dir.display().to_string())]));
+    println!(
+        "{}",
+        i18n::t_args(
+            "migrate-start-msg",
+            &[
+                ("source", &source.to_string()),
+                ("path", &source_dir.display().to_string())
+            ]
+        )
+    );
     if args.dry_run {
         println!("{}\n", i18n::t("migrate-dry-run-hint"));
     }
@@ -102,14 +111,29 @@ pub(crate) fn cmd_migrate(args: MigrateArgs) {
             if !args.dry_run {
                 let report_path = options.target_dir.join("migration_report.md");
                 if let Err(e) = std::fs::write(&report_path, report.to_markdown()) {
-                    eprintln!("{}", i18n::t_args("migrate-warn-report-save-failed", &[("error", &e.to_string())]));
+                    eprintln!(
+                        "{}",
+                        i18n::t_args(
+                            "migrate-warn-report-save-failed",
+                            &[("error", &e.to_string())]
+                        )
+                    );
                 } else {
-                    println!("{}", i18n::t_args("migrate-report-saved", &[("path", &report_path.display().to_string())]));
+                    println!(
+                        "{}",
+                        i18n::t_args(
+                            "migrate-report-saved",
+                            &[("path", &report_path.display().to_string())]
+                        )
+                    );
                 }
             }
         }
         Err(e) => {
-            sp.finish_with_failure(&i18n::t_args("migrate-failed-msg", &[("error", &e.to_string())]));
+            sp.finish_with_failure(&i18n::t_args(
+                "migrate-failed-msg",
+                &[("error", &e.to_string())],
+            ));
             std::process::exit(1);
         }
     }

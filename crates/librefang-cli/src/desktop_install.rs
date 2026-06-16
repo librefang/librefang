@@ -78,7 +78,10 @@ pub fn launch(path: &Path) {
         .spawn()
     {
         Ok(_) => ui::success(&i18n::t("desktop-install-launched")),
-        Err(e) => ui::error(&i18n::t_args("desktop-install-launch-fail-generic", &[("error", &e.to_string())])),
+        Err(e) => ui::error(&i18n::t_args(
+            "desktop-install-launch-fail-generic",
+            &[("error", &e.to_string())],
+        )),
     }
 }
 
@@ -126,7 +129,10 @@ fn download_and_install() -> Option<PathBuf> {
     {
         Ok(r) => r,
         Err(e) => {
-            ui::error(&i18n::t_args("desktop-install-github-fail", &[("error", &e.to_string())]));
+            ui::error(&i18n::t_args(
+                "desktop-install-github-fail",
+                &[("error", &e.to_string())],
+            ));
             return None;
         }
     };
@@ -134,7 +140,10 @@ fn download_and_install() -> Option<PathBuf> {
     let body: serde_json::Value = match resp.json() {
         Ok(v) => v,
         Err(e) => {
-            ui::error(&i18n::t_args("desktop-install-parse-fail", &[("error", &e.to_string())]));
+            ui::error(&i18n::t_args(
+                "desktop-install-parse-fail",
+                &[("error", &e.to_string())],
+            ));
             return None;
         }
     };
@@ -157,7 +166,10 @@ fn download_and_install() -> Option<PathBuf> {
         String::new()
     };
 
-    ui::kv(&i18n::t("desktop-install-kv-asset"), &format!("{file_name}{size_display}"));
+    ui::kv(
+        &i18n::t("desktop-install-kv-asset"),
+        &format!("{file_name}{size_display}"),
+    );
     ui::step(&i18n::t("desktop-install-downloading"));
 
     let tmp_dir = std::env::temp_dir().join("librefang-desktop-install");
@@ -165,7 +177,10 @@ fn download_and_install() -> Option<PathBuf> {
     let tmp_file = tmp_dir.join(file_name);
 
     if let Err(e) = download_file(download_url, &tmp_file) {
-        ui::error(&i18n::t_args("desktop-install-download-fail", &[("error", &e.to_string())]));
+        ui::error(&i18n::t_args(
+            "desktop-install-download-fail",
+            &[("error", &e.to_string())],
+        ));
         let _ = std::fs::remove_dir_all(&tmp_dir);
         return None;
     }
@@ -184,7 +199,10 @@ fn download_and_install() -> Option<PathBuf> {
             Some(installed_path)
         }
         Err(e) => {
-            ui::error(&i18n::t_args("desktop-install-fail", &[("error", &e.to_string())]));
+            ui::error(&i18n::t_args(
+                "desktop-install-fail",
+                &[("error", &e.to_string())],
+            ));
             None
         }
     }

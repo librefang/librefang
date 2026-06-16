@@ -86,7 +86,13 @@ pub(crate) fn service_install_linux(binary: &std::path::Path, librefang_home: &s
     };
     let service_dir = home.join(".config/systemd/user");
     if let Err(e) = std::fs::create_dir_all(&service_dir) {
-        ui::error(&i18n::t_args("maintenance-failed-create-dir", &[("path", &service_dir.display().to_string()), ("error", &e.to_string())]));
+        ui::error(&i18n::t_args(
+            "maintenance-failed-create-dir",
+            &[
+                ("path", &service_dir.display().to_string()),
+                ("error", &e.to_string()),
+            ],
+        ));
         return;
     }
 
@@ -114,10 +120,19 @@ pub(crate) fn service_install_linux(binary: &std::path::Path, librefang_home: &s
 
     let service_path = service_dir.join("librefang.service");
     if let Err(e) = std::fs::write(&service_path, &unit) {
-        ui::error(&i18n::t_args("maintenance-failed-write-file", &[("path", &service_path.display().to_string()), ("error", &e.to_string())]));
+        ui::error(&i18n::t_args(
+            "maintenance-failed-write-file",
+            &[
+                ("path", &service_path.display().to_string()),
+                ("error", &e.to_string()),
+            ],
+        ));
         return;
     }
-    ui::success(&i18n::t_args("maintenance-wrote-file", &[("path", &service_path.display().to_string())]));
+    ui::success(&i18n::t_args(
+        "maintenance-wrote-file",
+        &[("path", &service_path.display().to_string())],
+    ));
 
     // Reload and enable
     let reload = std::process::Command::new("systemctl")
@@ -154,7 +169,13 @@ pub(crate) fn service_install_macos(binary: &std::path::Path, librefang_home: &s
     };
     let agents_dir = home.join("Library/LaunchAgents");
     if let Err(e) = std::fs::create_dir_all(&agents_dir) {
-        ui::error(&i18n::t_args("maintenance-failed-create-dir", &[("path", &agents_dir.display().to_string()), ("error", &e.to_string())]));
+        ui::error(&i18n::t_args(
+            "maintenance-failed-create-dir",
+            &[
+                ("path", &agents_dir.display().to_string()),
+                ("error", &e.to_string()),
+            ],
+        ));
         return;
     }
 
@@ -199,10 +220,19 @@ pub(crate) fn service_install_macos(binary: &std::path::Path, librefang_home: &s
     }
 
     if let Err(e) = std::fs::write(&plist_path, &plist) {
-        ui::error(&i18n::t_args("maintenance-failed-write-file", &[("path", &plist_path.display().to_string()), ("error", &e.to_string())]));
+        ui::error(&i18n::t_args(
+            "maintenance-failed-write-file",
+            &[
+                ("path", &plist_path.display().to_string()),
+                ("error", &e.to_string()),
+            ],
+        ));
         return;
     }
-    ui::success(&i18n::t_args("maintenance-wrote-file", &[("path", &plist_path.display().to_string())]));
+    ui::success(&i18n::t_args(
+        "maintenance-wrote-file",
+        &[("path", &plist_path.display().to_string())],
+    ));
 
     let load = std::process::Command::new("launchctl")
         .args(["load", &plist_path.to_string_lossy()])
@@ -213,9 +243,15 @@ pub(crate) fn service_install_macos(binary: &std::path::Path, librefang_home: &s
         }
         Ok(o) => {
             let stderr = String::from_utf8_lossy(&o.stderr);
-            ui::error(&i18n::t_args("maintenance-launchctl-load-failed", &[("error", &stderr.to_string())]));
+            ui::error(&i18n::t_args(
+                "maintenance-launchctl-load-failed",
+                &[("error", &stderr.to_string())],
+            ));
         }
-        Err(e) => ui::error(&i18n::t_args("maintenance-launchctl-run-failed", &[("error", &e.to_string())])),
+        Err(e) => ui::error(&i18n::t_args(
+            "maintenance-launchctl-run-failed",
+            &[("error", &e.to_string())],
+        )),
     }
 }
 
@@ -241,9 +277,15 @@ pub(crate) fn service_install_windows(binary: &std::path::Path) {
         }
         Ok(o) => {
             let stderr = String::from_utf8_lossy(&o.stderr);
-            ui::error(&i18n::t_args("maintenance-windows-registry-write-failed", &[("error", &stderr.to_string())]));
+            ui::error(&i18n::t_args(
+                "maintenance-windows-registry-write-failed",
+                &[("error", &stderr.to_string())],
+            ));
         }
-        Err(e) => ui::error(&i18n::t_args("maintenance-windows-reg-run-failed", &[("error", &e.to_string())])),
+        Err(e) => ui::error(&i18n::t_args(
+            "maintenance-windows-reg-run-failed",
+            &[("error", &e.to_string())],
+        )),
     }
 }
 
@@ -263,7 +305,10 @@ pub(crate) fn cmd_service_uninstall() {
                         .output();
                     ui::success(&i18n::t("maintenance-systemd-removed"));
                 }
-                Err(e) => ui::error(&i18n::t_args("maintenance-systemd-remove-failed", &[("error", &e.to_string())])),
+                Err(e) => ui::error(&i18n::t_args(
+                    "maintenance-systemd-remove-failed",
+                    &[("error", &e.to_string())],
+                )),
             }
         } else {
             ui::hint(&i18n::t("maintenance-systemd-not-found"));
@@ -279,7 +324,10 @@ pub(crate) fn cmd_service_uninstall() {
                 .output();
             match std::fs::remove_file(&plist_path) {
                 Ok(()) => ui::success(&i18n::t("maintenance-launchagent-removed")),
-                Err(e) => ui::error(&i18n::t_args("maintenance-launchagent-remove-failed", &[("error", &e.to_string())])),
+                Err(e) => ui::error(&i18n::t_args(
+                    "maintenance-launchagent-remove-failed",
+                    &[("error", &e.to_string())],
+                )),
             }
         } else {
             ui::hint(&i18n::t("maintenance-launchagent-not-found"));
@@ -350,7 +398,11 @@ pub(crate) fn cmd_service_status() {
                 let running = stdout.lines().any(|l| l.contains("ai.librefang.daemon"));
                 ui::kv(
                     &i18n::t("maintenance-status-label-loaded"),
-                    if running { &i18n::t("label-yes") } else { &i18n::t("label-not-loaded") }
+                    if running {
+                        &i18n::t("label-yes")
+                    } else {
+                        &i18n::t("label-not-loaded")
+                    },
                 );
             }
         } else {
@@ -428,7 +480,10 @@ pub(crate) fn cmd_update(check: bool, version: Option<String>, channel_override:
     use librefang_types::config::UpdateChannel;
 
     let current_exe = std::env::current_exe().unwrap_or_else(|e| {
-        ui::error(&i18n::t_args("maintenance-update-error-exe-path", &[("error", &e.to_string())]));
+        ui::error(&i18n::t_args(
+            "maintenance-update-error-exe-path",
+            &[("error", &e.to_string())],
+        ));
         std::process::exit(1);
     });
 
@@ -462,11 +517,17 @@ pub(crate) fn cmd_update(check: bool, version: Option<String>, channel_override:
             }
             Err(err) => {
                 if check {
-                    ui::error(&i18n::t_args("maintenance-update-error-check-release", &[("error", &err.to_string())]));
+                    ui::error(&i18n::t_args(
+                        "maintenance-update-error-check-release",
+                        &[("error", &err.to_string())],
+                    ));
                     std::process::exit(1);
                 }
                 ui::warn_with_fix(
-                    &i18n::t_args("maintenance-update-warn-resolve-release", &[("error", &err.to_string())]),
+                    &i18n::t_args(
+                        "maintenance-update-warn-resolve-release",
+                        &[("error", &err.to_string())],
+                    ),
                     &i18n::t("maintenance-update-warn-resolve-release-fix"),
                 );
                 None
@@ -583,7 +644,10 @@ pub(crate) fn cmd_update(check: bool, version: Option<String>, channel_override:
                 ui::hint(&i18n::t("maintenance-update-background-hint-restart"));
             }
             Err(err) => {
-                ui::error(&i18n::t_args("maintenance-update-failed-error", &[("error", &err.to_string())]));
+                ui::error(&i18n::t_args(
+                    "maintenance-update-failed-error",
+                    &[("error", &err.to_string())],
+                ));
                 std::process::exit(1);
             }
         }
@@ -592,16 +656,16 @@ pub(crate) fn cmd_update(check: bool, version: Option<String>, channel_override:
 
     if same_path(&current_exe, &cargo_install) {
         let cargo_cmd = cargo_update_command(target_version);
-        ui::warn_with_fix(
-            &i18n::t("maintenance-update-cargo-blocked"),
-            &cargo_cmd,
-        );
+        ui::warn_with_fix(&i18n::t("maintenance-update-cargo-blocked"), &cargo_cmd);
         return;
     }
 
     let official_path = default_install.display().to_string();
     ui::warn_with_fix(
-        &i18n::t_args("maintenance-update-unofficial-path", &[("path", &official_path)]),
+        &i18n::t_args(
+            "maintenance-update-unofficial-path",
+            &[("path", &official_path)],
+        ),
         &manual_installer_command(target_version),
     );
     ui::hint(&i18n::t("maintenance-update-package-manager-hint"));

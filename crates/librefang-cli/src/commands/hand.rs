@@ -163,8 +163,14 @@ pub(crate) fn cmd_hand_status(id: Option<&str>) {
     }
 
     ui::section(&i18n::t("hand-status-title"));
-    ui::kv(&i18n::t("label-hand"), hand_body["id"].as_str().unwrap_or(id));
-    ui::kv(&i18n::t("label-name"), hand_body["name"].as_str().unwrap_or(id));
+    ui::kv(
+        &i18n::t("label-hand"),
+        hand_body["id"].as_str().unwrap_or(id),
+    );
+    ui::kv(
+        &i18n::t("label-name"),
+        hand_body["name"].as_str().unwrap_or(id),
+    );
     ui::kv(&i18n::t("label-status"), &i18n::t("label-status-inactive"));
     if let Some(description) = hand_body["description"].as_str() {
         if !description.is_empty() {
@@ -443,7 +449,7 @@ pub(crate) fn cmd_hand_chat(id: &str) {
     let resolved = match resolve_hand_instance(&active, id) {
         Some(instance) => instance,
         None => {
-            ui::error(&i18n::t_args("hand-no-active-instance", &[( "id", id )]));
+            ui::error(&i18n::t_args("hand-no-active-instance", &[("id", id)]));
             ui::hint(&i18n::t("hand-list-activate-hint"));
             std::process::exit(1);
         }

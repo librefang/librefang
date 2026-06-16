@@ -265,7 +265,10 @@ pub(crate) fn ensure_initialized(config: &Option<PathBuf>) {
         Some(path) => {
             if !path.exists() {
                 ui::error_with_fix(
-                    &i18n::t_args("daemon-config-not-found", &[("path", &path.display().to_string())]),
+                    &i18n::t_args(
+                        "daemon-config-not-found",
+                        &[("path", &path.display().to_string())],
+                    ),
                     &i18n::t("daemon-config-not-found-fix"),
                 );
                 std::process::exit(1);
@@ -611,7 +614,10 @@ pub(crate) fn show_log_file(log_path: &std::path::Path, lines: usize, follow: bo
     if !log_path.exists() {
         ui::error_with_fix(
             &i18n::t("daemon-log-file-not-found"),
-            &i18n::t_args("daemon-log-file-not-found-fix", &[("path", &log_path.display().to_string())]),
+            &i18n::t_args(
+                "daemon-log-file-not-found-fix",
+                &[("path", &log_path.display().to_string())],
+            ),
         );
         std::process::exit(1);
     }
@@ -634,7 +640,13 @@ pub(crate) fn show_log_file(log_path: &std::path::Path, lines: usize, follow: bo
             for line in &all_lines[start..] {
                 println!("{line}");
             }
-            println!("{}", i18n::t_args("log-following", &[("path", &log_path.display().to_string())]));
+            println!(
+                "{}",
+                i18n::t_args(
+                    "log-following",
+                    &[("path", &log_path.display().to_string())]
+                )
+            );
             let mut last_len = content.len();
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(500));

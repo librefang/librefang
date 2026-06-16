@@ -20,9 +20,9 @@
 //! Each check should be a leaf operation that doesn't bleed into others —
 //! tests for one check shouldn't have to set up state for another.
 
+use crate::i18n;
 use base64::Engine;
 use std::path::PathBuf;
-use crate::i18n;
 
 /// Severity of a single audit finding.
 ///
@@ -148,10 +148,7 @@ impl AuditCheck for VaultKeyCheck {
         let raw = match std::env::var("LIBREFANG_VAULT_KEY") {
             Ok(v) => v,
             Err(_) => {
-                return AuditResult::info(
-                    NAME,
-                    i18n::t("doctor-audit-vault-key-unset"),
-                );
+                return AuditResult::info(NAME, i18n::t("doctor-audit-vault-key-unset"));
             }
         };
         // Match production: `decode_master_key` in librefang-extensions/src/vault.rs
@@ -161,15 +158,19 @@ impl AuditCheck for VaultKeyCheck {
         match base64::engine::general_purpose::STANDARD.decode(raw.as_bytes()) {
             Err(e) => AuditResult::error(
                 NAME,
-                i18n::t_args("doctor-audit-vault-key-invalid-base64", &[("error", &e.to_string())]),
+                i18n::t_args(
+                    "doctor-audit-vault-key-invalid-base64",
+                    &[("error", &e.to_string())],
+                ),
                 Some(i18n::t("doctor-audit-vault-key-invalid-base64-hint")),
             ),
             Ok(bytes) if bytes.len() != 32 => AuditResult::error(
                 NAME,
-                i18n::t_args("doctor-audit-vault-key-wrong-length", &[("count", &bytes.len().to_string())]),
-                Some(
-                    i18n::t("doctor-audit-vault-key-wrong-length-hint"),
+                i18n::t_args(
+                    "doctor-audit-vault-key-wrong-length",
+                    &[("count", &bytes.len().to_string())],
                 ),
+                Some(i18n::t("doctor-audit-vault-key-wrong-length-hint")),
             ),
             Ok(_) => AuditResult::pass(NAME, i18n::t("doctor-audit-vault-key-ok")),
         }
@@ -191,10 +192,7 @@ impl AuditCheck for ApiListenAddrCheck {
         let raw = match std::fs::read_to_string(&config_path) {
             Ok(s) => s,
             Err(_) => {
-                return AuditResult::info(
-                    NAME,
-                    i18n::t("doctor-audit-api-listen-no-config"),
-                );
+                return AuditResult::info(NAME, i18n::t("doctor-audit-api-listen-no-config"));
             }
         };
         // Accept any TOML and just look at api_listen if present. Don't
@@ -205,45 +203,52 @@ impl AuditCheck for ApiListenAddrCheck {
             Err(e) => {
                 return AuditResult::error(
                     NAME,
-                    i18n::t_args("doctor-audit-api-listen-invalid-toml", &[("error", &e.to_string())]),
-                    Some(
-                        i18n::t("doctor-audit-api-listen-invalid-toml-hint"),
+                    i18n::t_args(
+                        "doctor-audit-api-listen-invalid-toml",
+                        &[("error", &e.to_string())],
                     ),
+                    Some(i18n::t("doctor-audit-api-listen-invalid-toml-hint")),
                 );
             }
         };
         let listen = match value.get("api_listen").and_then(|v| v.as_str()) {
             Some(s) => s,
             None => {
-                return AuditResult::info(
-                    NAME,
-                    i18n::t("doctor-audit-api-listen-unset"),
-                );
+                return AuditResult::info(NAME, i18n::t("doctor-audit-api-listen-unset"));
             }
         };
         match listen.parse::<std::net::SocketAddr>() {
             Err(e) => AuditResult::error(
                 NAME,
-                i18n::t_args("doctor-audit-api-listen-invalid-addr", &[("address", listen), ("error", &e.to_string())]),
-                Some(
-                    i18n::t("doctor-audit-api-listen-invalid-addr-hint"),
+                i18n::t_args(
+                    "doctor-audit-api-listen-invalid-addr",
+                    &[("address", listen), ("error", &e.to_string())],
                 ),
+                Some(i18n::t("doctor-audit-api-listen-invalid-addr-hint")),
             ),
             Ok(addr) if addr.port() == 0 => AuditResult::warn(
                 NAME,
-                i18n::t_args("doctor-audit-api-listen-port-zero", &[("address", &addr.to_string())]),
-                Some(
-                    i18n::t("doctor-audit-api-listen-port-zero-hint"),
+                i18n::t_args(
+                    "doctor-audit-api-listen-port-zero",
+                    &[("address", &addr.to_string())],
                 ),
+                Some(i18n::t("doctor-audit-api-listen-port-zero-hint")),
             ),
             Ok(addr) if addr.port() < 1024 => AuditResult::warn(
                 NAME,
-                i18n::t_args("doctor-audit-api-listen-privileged", &[("port", &addr.port().to_string())]),
-                Some(
-                    i18n::t("doctor-audit-api-listen-privileged-hint"),
+                i18n::t_args(
+                    "doctor-audit-api-listen-privileged",
+                    &[("port", &addr.port().to_string())],
+                ),
+                Some(i18n::t("doctor-audit-api-listen-privileged-hint")),
+            ),
+            Ok(addr) => AuditResult::pass(
+                NAME,
+                i18n::t_args(
+                    "doctor-audit-api-listen-ok",
+                    &[("address", &addr.to_string())],
                 ),
             ),
-            Ok(addr) => AuditResult::pass(NAME, i18n::t_args("doctor-audit-api-listen-ok", &[("address", &addr.to_string())])),
         }
     }
 }
@@ -264,7 +269,10 @@ impl AuditCheck for ConfigTomlSchemaCheck {
         if !path.exists() {
             return AuditResult::warn(
                 NAME,
-                i18n::t_args("doctor-audit-config-not-found", &[("path", &path.display().to_string())]),
+                i18n::t_args(
+                    "doctor-audit-config-not-found",
+                    &[("path", &path.display().to_string())],
+                ),
                 Some(i18n::t("doctor-audit-config-not-found-hint")),
             );
         }
@@ -273,17 +281,38 @@ impl AuditCheck for ConfigTomlSchemaCheck {
             Err(e) => {
                 return AuditResult::error(
                     NAME,
-                    i18n::t_args("doctor-audit-config-read-fail", &[("path", &path.display().to_string()), ("error", &e.to_string())]),
+                    i18n::t_args(
+                        "doctor-audit-config-read-fail",
+                        &[
+                            ("path", &path.display().to_string()),
+                            ("error", &e.to_string()),
+                        ],
+                    ),
                     None,
                 );
             }
         };
         match toml::from_str::<toml::Value>(&raw) {
-            Ok(_) => AuditResult::pass(NAME, i18n::t_args("doctor-audit-config-ok", &[("path", &path.display().to_string())])),
+            Ok(_) => AuditResult::pass(
+                NAME,
+                i18n::t_args(
+                    "doctor-audit-config-ok",
+                    &[("path", &path.display().to_string())],
+                ),
+            ),
             Err(e) => AuditResult::error(
                 NAME,
-                i18n::t_args("doctor-audit-config-syntax-error", &[("path", &path.display().to_string()), ("error", &e.to_string())]),
-                Some(i18n::t_args("doctor-audit-config-syntax-error-hint", &[("path", &path.display().to_string())])),
+                i18n::t_args(
+                    "doctor-audit-config-syntax-error",
+                    &[
+                        ("path", &path.display().to_string()),
+                        ("error", &e.to_string()),
+                    ],
+                ),
+                Some(i18n::t_args(
+                    "doctor-audit-config-syntax-error-hint",
+                    &[("path", &path.display().to_string())],
+                )),
             ),
         }
     }

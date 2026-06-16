@@ -162,7 +162,10 @@ pub(crate) fn prepared_agent_manifest_from_contents(
 
     let manifest_toml = if name_override.is_some() {
         toml::to_string_pretty(&manifest).unwrap_or_else(|e| {
-            ui::error(&i18n::t_args("agent-manifest-serialize-failed", &[("error", &e.to_string())]));
+            ui::error(&i18n::t_args(
+                "agent-manifest-serialize-failed",
+                &[("error", &e.to_string())],
+            ));
             std::process::exit(1);
         })
     } else {
@@ -193,12 +196,18 @@ pub(crate) fn preview_agent_manifest(prepared: &PreparedAgentManifest) {
         &i18n::t("label-tools"),
         &prepared.manifest.capabilities.tools.len().to_string(),
     );
-    ui::kv(&i18n::t("label-skills"), &prepared.manifest.skills.len().to_string());
+    ui::kv(
+        &i18n::t("label-skills"),
+        &prepared.manifest.skills.len().to_string(),
+    );
     if !prepared.manifest.tags.is_empty() {
         ui::kv(&i18n::t("label-tags"), &prepared.manifest.tags.join(", "));
     }
     if !prepared.manifest.description.is_empty() {
-        ui::kv(&i18n::t("label-description"), &prepared.manifest.description);
+        ui::kv(
+            &i18n::t("label-description"),
+            &prepared.manifest.description,
+        );
     }
     ui::success(&i18n::t("agent-dry-run-success"));
 }

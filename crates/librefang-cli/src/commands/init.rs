@@ -114,19 +114,28 @@ pub(crate) fn cmd_init_upgrade() {
     p.set_message(&i18n::t("init-upgrade-backing-up"));
     let backups_dir = librefang_dir.join("backups");
     if let Err(e) = std::fs::create_dir_all(&backups_dir) {
-        p.finish_with_failure(&i18n::t_args("init-upgrade-failed-create-backups-dir", &[("error", &e.to_string())]));
+        p.finish_with_failure(&i18n::t_args(
+            "init-upgrade-failed-create-backups-dir",
+            &[("error", &e.to_string())],
+        ));
         std::process::exit(1);
     }
     let backup_name = format!("config-{}.toml", format_local_timestamp());
     let backup_path = backups_dir.join(&backup_name);
     if let Err(e) = std::fs::copy(&config_path, &backup_path) {
-        p.finish_with_failure(&i18n::t_args("init-upgrade-failed-backup-config", &[("error", &e.to_string())]));
+        p.finish_with_failure(&i18n::t_args(
+            "init-upgrade-failed-backup-config",
+            &[("error", &e.to_string())],
+        ));
         std::process::exit(1);
     }
     restrict_file_permissions(&backup_path);
     prune_old_config_backups(&backups_dir, 3);
     p.tick(1);
-    ui::success(&i18n::t_args("init-upgrade-backup-success", &[("name", &backup_name)]));
+    ui::success(&i18n::t_args(
+        "init-upgrade-backup-success",
+        &[("name", &backup_name)],
+    ));
 
     // 3. Sync registry (TTL=0 forces refresh regardless of last sync time)
     p.set_message(&i18n::t("init-upgrade-syncing-registry"));
@@ -163,7 +172,10 @@ pub(crate) fn cmd_init_upgrade() {
     let existing_raw = match std::fs::read_to_string(&config_path) {
         Ok(s) => s,
         Err(e) => {
-            p.finish_with_failure(&i18n::t_args("init-upgrade-failed-read", &[("error", &e.to_string())]));
+            p.finish_with_failure(&i18n::t_args(
+                "init-upgrade-failed-read",
+                &[("error", &e.to_string())],
+            ));
             std::process::exit(1);
         }
     };
@@ -171,8 +183,14 @@ pub(crate) fn cmd_init_upgrade() {
     let existing: toml::Value = match toml::from_str(&existing_raw) {
         Ok(v) => v,
         Err(e) => {
-            p.finish_with_failure(&i18n::t_args("init-upgrade-failed-parse", &[("error", &e.to_string())]));
-            ui::hint(&i18n::t_args("init-upgrade-backup-saved-hint", &[("name", &backup_name)]));
+            p.finish_with_failure(&i18n::t_args(
+                "init-upgrade-failed-parse",
+                &[("error", &e.to_string())],
+            ));
+            ui::hint(&i18n::t_args(
+                "init-upgrade-backup-saved-hint",
+                &[("name", &backup_name)],
+            ));
             std::process::exit(1);
         }
     };
@@ -182,7 +200,10 @@ pub(crate) fn cmd_init_upgrade() {
     let defaults: toml::Value = match toml::from_str(&default_config_str) {
         Ok(v) => v,
         Err(e) => {
-            p.finish_with_failure(&i18n::t_args("init-upgrade-failed-parse-template", &[("error", &e.to_string())]));
+            p.finish_with_failure(&i18n::t_args(
+                "init-upgrade-failed-parse-template",
+                &[("error", &e.to_string())],
+            ));
             std::process::exit(1);
         }
     };
@@ -243,12 +264,21 @@ pub(crate) fn cmd_init_upgrade() {
         }
 
         if let Err(e) = std::fs::write(&config_path, &content) {
-            p.finish_with_failure(&i18n::t_args("init-upgrade-failed-write", &[("error", &e.to_string())]));
-            ui::hint(&i18n::t_args("init-upgrade-backup-saved-hint", &[("name", &backup_name)]));
+            p.finish_with_failure(&i18n::t_args(
+                "init-upgrade-failed-write",
+                &[("error", &e.to_string())],
+            ));
+            ui::hint(&i18n::t_args(
+                "init-upgrade-backup-saved-hint",
+                &[("name", &backup_name)],
+            ));
             std::process::exit(1);
         }
         restrict_file_permissions(&config_path);
-        ui::success(&i18n::t_args("init-upgrade-sections-added", &[("count", &added.len().to_string())]));
+        ui::success(&i18n::t_args(
+            "init-upgrade-sections-added",
+            &[("count", &added.len().to_string())],
+        ));
         for key in &added {
             ui::kv("  +", key);
         }
@@ -620,7 +650,10 @@ pub(crate) fn write_config_if_missing(
     let example_path = librefang_dir.join("config.example.toml");
     if !example_path.exists() {
         if let Err(e) = std::fs::write(&example_path, INIT_DEFAULT_CONFIG_TEMPLATE) {
-            ui::hint(&i18n::t_args("init-error-write-config-example", &[("error", &e.to_string())]));
+            ui::hint(&i18n::t_args(
+                "init-error-write-config-example",
+                &[("error", &e.to_string())],
+            ));
         }
     }
 }

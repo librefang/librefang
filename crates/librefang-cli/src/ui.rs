@@ -2,8 +2,8 @@
 //!
 //! Uses `colored` for terminal output. The interactive TUI uses ratatui instead.
 
-use colored::Colorize;
 use crate::i18n;
+use colored::Colorize;
 
 // ---------------------------------------------------------------------------
 // Existing helpers

@@ -151,11 +151,17 @@ pub(crate) fn cmd_audit_reset(config: Option<PathBuf>, confirm: bool) {
         println!("{}", i18n::t("monitoring-audit-reset-would-header"));
         println!(
             "{}",
-            i18n::t_args("monitoring-audit-reset-would-delete", &[("path", &db_path.display().to_string())])
+            i18n::t_args(
+                "monitoring-audit-reset-would-delete",
+                &[("path", &db_path.display().to_string())]
+            )
         );
         println!(
             "{}",
-            i18n::t_args("monitoring-audit-reset-would-remove-anchor", &[("path", &anchor_path.display().to_string())])
+            i18n::t_args(
+                "monitoring-audit-reset-would-remove-anchor",
+                &[("path", &anchor_path.display().to_string())]
+            )
         );
         println!("{}", i18n::t("monitoring-audit-reset-would-restart"));
         std::process::exit(1);
@@ -171,14 +177,23 @@ pub(crate) fn cmd_audit_reset(config: Option<PathBuf>, confirm: bool) {
     }
 
     if !db_path.exists() {
-        ui::error(&i18n::t_args("monitoring-db-not-found", &[("path", &db_path.display().to_string())]));
+        ui::error(&i18n::t_args(
+            "monitoring-db-not-found",
+            &[("path", &db_path.display().to_string())],
+        ));
         std::process::exit(1);
     }
 
     let conn = match rusqlite::Connection::open(&db_path) {
         Ok(c) => c,
         Err(e) => {
-            ui::error(&i18n::t_args("monitoring-db-open-failed", &[("path", &db_path.display().to_string()), ("error", &e.to_string())]));
+            ui::error(&i18n::t_args(
+                "monitoring-db-open-failed",
+                &[
+                    ("path", &db_path.display().to_string()),
+                    ("error", &e.to_string()),
+                ],
+            ));
             std::process::exit(1);
         }
     };
@@ -199,7 +214,10 @@ pub(crate) fn cmd_audit_reset(config: Option<PathBuf>, confirm: bool) {
             Err(e) => {
                 ui::error(&i18n::t_args(
                     "monitoring-anchor-remove-failed",
-                    &[("path", &anchor_path.display().to_string()), ("error", &e.to_string())],
+                    &[
+                        ("path", &anchor_path.display().to_string()),
+                        ("error", &e.to_string()),
+                    ],
                 ));
                 std::process::exit(1);
             }
@@ -209,7 +227,10 @@ pub(crate) fn cmd_audit_reset(config: Option<PathBuf>, confirm: bool) {
     };
 
     if let Err(e) = conn.execute("DELETE FROM audit_entries", []) {
-        ui::error(&i18n::t_args("monitoring-db-truncate-failed", &[("error", &e.to_string())]));
+        ui::error(&i18n::t_args(
+            "monitoring-db-truncate-failed",
+            &[("error", &e.to_string())],
+        ));
         std::process::exit(1);
     }
     drop(conn);
@@ -218,7 +239,10 @@ pub(crate) fn cmd_audit_reset(config: Option<PathBuf>, confirm: bool) {
     // fiddling needed.
 
     let anchor_detail = if anchor_removed {
-        i18n::t_args("monitoring-audit-reset-anchor-deleted", &[("path", &anchor_path.display().to_string())])
+        i18n::t_args(
+            "monitoring-audit-reset-anchor-deleted",
+            &[("path", &anchor_path.display().to_string())],
+        )
     } else {
         i18n::t("monitoring-audit-reset-anchor-none")
     };

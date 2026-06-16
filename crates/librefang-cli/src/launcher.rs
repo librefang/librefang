@@ -592,7 +592,10 @@ fn draw_menu(frame: &mut ratatui::Frame, state: &mut LauncherState) {
         } else {
             lines.push(Line::from(vec![
                 Span::styled("\u{25cb} ", Style::default().fg(theme::YELLOW)),
-                Span::styled(i18n::t("launcher-no-keys"), Style::default().fg(theme::YELLOW)),
+                Span::styled(
+                    i18n::t("launcher-no-keys"),
+                    Style::default().fg(theme::YELLOW),
+                ),
             ]));
             if !state.first_run {
                 lines.push(Line::from(vec![Span::styled(
@@ -631,16 +634,37 @@ fn draw_menu(frame: &mut ratatui::Frame, state: &mut LauncherState) {
             let (label, hint) = match item.choice {
                 LauncherChoice::GetStarted => {
                     if state.first_run {
-                        (i18n::t("launcher-menu-get-started"), i18n::t("launcher-menu-get-started-hint"))
+                        (
+                            i18n::t("launcher-menu-get-started"),
+                            i18n::t("launcher-menu-get-started-hint"),
+                        )
                     } else {
-                        (i18n::t("launcher-menu-settings"), i18n::t("launcher-menu-settings-hint"))
+                        (
+                            i18n::t("launcher-menu-settings"),
+                            i18n::t("launcher-menu-settings-hint"),
+                        )
                     }
                 }
-                LauncherChoice::Chat => (i18n::t("launcher-menu-chat"), i18n::t("launcher-menu-chat-hint")),
-                LauncherChoice::Dashboard => (i18n::t("launcher-menu-dashboard"), i18n::t("launcher-menu-dashboard-hint")),
-                LauncherChoice::DesktopApp => (i18n::t("launcher-menu-desktop"), i18n::t("launcher-menu-desktop-hint")),
-                LauncherChoice::TerminalUI => (i18n::t("launcher-menu-tui"), i18n::t("launcher-menu-tui-hint")),
-                LauncherChoice::ShowHelp => (i18n::t("launcher-menu-help"), i18n::t("launcher-menu-help-hint")),
+                LauncherChoice::Chat => (
+                    i18n::t("launcher-menu-chat"),
+                    i18n::t("launcher-menu-chat-hint"),
+                ),
+                LauncherChoice::Dashboard => (
+                    i18n::t("launcher-menu-dashboard"),
+                    i18n::t("launcher-menu-dashboard-hint"),
+                ),
+                LauncherChoice::DesktopApp => (
+                    i18n::t("launcher-menu-desktop"),
+                    i18n::t("launcher-menu-desktop-hint"),
+                ),
+                LauncherChoice::TerminalUI => (
+                    i18n::t("launcher-menu-tui"),
+                    i18n::t("launcher-menu-tui-hint"),
+                ),
+                LauncherChoice::ShowHelp => (
+                    i18n::t("launcher-menu-help"),
+                    i18n::t("launcher-menu-help-hint"),
+                ),
                 LauncherChoice::Quit => (String::new(), String::new()),
             };
 
@@ -678,10 +702,7 @@ fn draw_menu(frame: &mut ratatui::Frame, state: &mut LauncherState) {
                     i18n::t_args("launcher-migration-question", &[("source", source)]),
                     Style::default().fg(theme::BLUE),
                 ),
-                Span::styled(
-                    i18n::t("launcher-migration-hint"),
-                    theme::hint_style(),
-                ),
+                Span::styled(i18n::t("launcher-migration-hint"), theme::hint_style()),
             ]),
         ];
         frame.render_widget(Paragraph::new(hint_lines), chunks[6]);
