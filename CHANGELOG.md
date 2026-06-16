@@ -5,6 +5,54 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.6.16] - 2026-06-16
+
+_18 PRs from 3 contributors since v2026.6.11-beta.18._
+
+### Highlights
+
+- **External Skill Registry** — agents can now discover and consume skills hosted on a Codeberg registry, with diff and propose-to-registry support for pending evolution drafts
+- **Persistent MCP Server Config** — MCP server configurations are stored in SQLite and survive restarts; runtime writes to `/api/mcp/servers` are also persisted
+- **Ukrainian Language Support** — backend and web UI are now fully localized in Ukrainian
+- **DeepSeek V4 Pro Reasoning** — DeepSeek v4-pro is now treated as a thinking-with-tools model so `reasoning_content` is correctly echoed through
+- **WhatsApp Voice Notes & Matrix Memory** — ElevenLabs voice notes send as Ogg/Opus with proper MIME sniffing; Matrix peers with colons in their IDs can now use the Memory tool
+
+### Added
+
+- Consume a Codeberg-hosted skill registry via registry.registry_host (#6095) (#6103) (@houko)
+- Diff + propose-to-registry for pending evolution drafts (#5819) (#6104) (@houko)
+- SidecarChannelConfig.agent + available_agents (#5671 PR-A) (#6105) (@houko)
+- SQLite-backed MCP server config storage + boot merge (#6021) (#6106) (@houko)
+- Add Ukrainian language support for backend and web UI (#6109) (@pavver)
+- Persist /api/mcp/servers writes to a DB store via mcp_runtime_store (#6113) (#6115) (@houko)
+
+### Fixed
+
+- Accept `version` field in ClawHubInstallRequest (#6038) (#6039) (@DaBlitzStein)
+- Stage Skills-tab edits behind a Save button (#6042) (@DaBlitzStein)
+- Refresh detect-secrets baseline for migrated Cloudflare account_id (#6093) (@houko)
+- Treat deepseek-v4-pro as thinking-with-tools so reasoning_content is echoed (#6098) (@DaBlitzStein)
+- Preserve caller-supplied channel name case in channel_send (#6078) (#6101) (@houko)
+- Percent-encode colons in peer_id so Matrix peers can use Memory (#6100) (#6102) (@houko)
+- Pin brace-expansion override to 2.0.2 to unbreak the Cloudflare docs build (#6110) (@houko)
+- Send ElevenLabs voice notes as Ogg/Opus and sniff audio mime (#6116) (#6118) (@houko)
+
+### Changed
+
+- Migrate web_search.rs to ToolError (#3576 slice) (#6107) (@houko)
+
+<details>
+<summary>Documentation, maintenance, and other internal changes</summary>
+
+### Maintenance
+
+- Migrate worker config to librefang Cloudflare account (#6092) (@houko)
+- Scope frontend pnpm audit to production deps (#6108) (@houko)
+- Free runner disk space before the integration shard build (fixes ENOSPC on main) (#6112) (@houko)
+
+</details>
+
+
 ## [2026.6.11] - 2026-06-11
 
 _8 PRs from 2 contributors since v2026.6.10-beta.17._
