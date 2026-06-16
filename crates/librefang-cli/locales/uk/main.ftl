@@ -62,6 +62,14 @@ label-id = ID
 label-active-agents = Активні агенти
 label-pairing-code = Код пейрингу
 label-expires = Закінчується
+label-yes = так
+label-not-loaded = не завантажено
+label-current = Поточна
+label-channel = Канал
+label-binary = Бінарний файл
+label-latest = Остання
+label-target = Цільова
+label-installed = Встановлено
 
 # --- Hints ---
 hint-open-dashboard = Відкрийте панель приладів у браузері або виконайте `librefang chat`
@@ -402,3 +410,396 @@ reset-fail = Не вдалося видалити { $path }: { $error }
 # --- Logs ---
 log-following = --- Стеження за { $path } (Ctrl+C для зупинки) ---
 log-path-hint = Файл логу: { $path }
+
+# --- Extracted from Rust sources ---
+init-upgrade-existing = Виявлено наявне встановлення — виконується оновлення для збереження ваших налаштувань.
+init-upgrade-fresh-hint = Щоб почати спочатку, видаліть ~/.librefang/config.toml та запустіть `librefang init` знову.
+init-upgrade-no-config = Немає чого оновлювати — config.toml не знайдено. Спочатку запустіть `librefang init`.
+init-upgrade-registry-synced = Реєстр синхронізовано
+init-upgrade-registry-failed = Помилка синхронізації реєстру (проблема з мережею?) — продовжуємо з кешованим вмістом
+init-upgrade-config-up-to-date = Конфігурація вже актуальна — нових полів не додано
+init-upgrade-sections-added = Додано { $count } нових розділів конфігурації:
+init-upgrade-legacy-openclaw = Виявлено застаріле встановлення ~/.openclaw.
+init-upgrade-legacy-openclaw-hint = Виконайте `librefang migrate --from openclaw`, щоб перенести ваші дані.
+init-upgrade-approval-warning = Ваш список require_approval містить лише "shell_exec". Файлові операції (file_write, file_delete) тепер вимагають схвалення за замовчуванням.
+init-upgrade-approval-hint = Щоб увімкнути: додайте "file_write" та "file_delete" до require_approval у config.toml
+init-upgrade-success-summary = Оновлення завершено!
+init-upgrade-title = Оновлення встановлення LibreFang
+init-upgrade-progress-label = Оновлення
+init-upgrade-backing-up = Резервне копіювання конфігурації
+init-upgrade-backup-success = Резервну копію конфігурації збережено у backups/{ $name }
+init-upgrade-syncing-registry = Синхронізація реєстру
+init-upgrade-initializing-vault-git = Ініціалізація сховища/git
+init-upgrade-merging-config = Об'єднання полів конфігурації
+init-upgrade-failed-read = Оновлення перервано: не вдалося прочитати config.toml: { $error }
+init-upgrade-failed-parse = Оновлення перервано: не вдалося розібрати config.toml: { $error }
+init-upgrade-backup-saved-hint = Вашу оригінальну конфігурацію було збережено у backups/{ $name }
+init-upgrade-failed-parse-template = Оновлення перервано: не вдалося розібрати шаблон конфігурації за замовчуванням: { $error }
+init-upgrade-failed-write = Оновлення перервано: не вдалося записати конфігурацію: { $error }
+init-upgrade-steps-complete = Кроки оновлення завершено
+label-backup = Бекап
+label-new-fields = Нові поля
+
+auth-chatgpt-device-requested = Запитано автентифікацію пристрою.
+auth-chatgpt-device-open-url = Відкрийте цю URL-адресу в будь-кому браузері:\n  { $url }\n
+auth-chatgpt-device-one-time-code = Введіть цей одноразовий код:\n  { $code }\n
+auth-chatgpt-device-do-not-share = Не діліться цим кодом.
+auth-chatgpt-device-waiting = Очікування авторизації...
+auth-chatgpt-switching-browser = \nПеремикання на стандартний процес входу через браузер...\n
+auth-chatgpt-opening-browser = Відкриття браузера для автентифікації OpenAI...
+auth-chatgpt-open-manually-hint = Якщо браузер не відкрився, відвідайте:\n  { $url }\n
+auth-chatgpt-open-browser-failed = Не вдалося автоматично відкрити браузер: { $error }
+auth-chatgpt-open-manually = Будь ласка, відкрийте вручну: { $url }
+auth-chatgpt-tokens-saved = \nТокени ChatGPT збережено в { $path }
+auth-chatgpt-detecting-model = Визначення найкращої доступної моделі...
+auth-chatgpt-selected-model = Вибрана модель: { $model }
+auth-chatgpt-config-updated = config.toml оновлено: provider = "chatgpt", model = "{ $model }"
+auth-chatgpt-starting-flow = Запуск процесу автентифікації ChatGPT...\n
+auth-chatgpt-complete = Автентифікацію ChatGPT завершено.
+auth-chatgpt-failed = Помилка автентифікації ChatGPT: { $error }
+
+auth-pool-config-not-array = config.toml `credential_pools` існує, але не є масивом таблиць
+auth-pool-daemon-error-fallback = Демон повернув HTTP { $status } — перехід до перегляду config.toml
+auth-pool-daemon-connect-fallback = Не вдалося зробити запит до демона на { $url }: { $error } — перехід до перегляду config.toml
+auth-pool-no-config-offline = Немає конфігурації в { $path } і демон не запущений.
+auth-pool-config-load-failed = Не вдалося завантажити конфігурацію: { $error }
+auth-pool-none-configured = Не налаштовано жодного пулу облікових даних.
+auth-pool-invalid-env-name = `{ $env_var }` не є коректним ім'ям змінної оточення. Очікуються великі літери, цифри та підкреслення (наприклад, OPENAI_API_KEY_2).
+auth-pool-env-empty = змінна оточення `{ $env_var }` встановлена, але порожня.
+auth-pool-env-empty-fix = Встановіть її у ваш API-ключ перед додаванням запису до пулу, наприклад:\n  export { $env_var }=sk-…\nПотім повторіть спробу.
+auth-pool-env-not-set = змінна оточення `{ $env_var }` не встановлена в поточному шеллі.
+auth-pool-env-not-set-fix = Експортуйте її перед додаванням запису до пулу, наприклад:\n  export { $env_var }=sk-…\nПотім повторіть спробу. (Демон зчитуватиме її зі свого власного оточення під час запуску — переконайтеся, що вона експортована і там.)
+auth-pool-keys-not-array = Пул для `{ $provider }` має поле `keys`, яке не є масивом таблиць.
+auth-pool-key-duplicate = Ключ зі змінною оточення `{ $env_var }` уже існує в пулі для провайдера `{ $provider }`.
+auth-pool-key-added = Додано ключ `{ $label }` (env={ $env_var }, priority={ $priority }) до пулу для `{ $provider }`. Перезапустіть демона або оновіть конфігурацію для застосування.
+auth-pool-not-configured = Не налаштовано жодного пулу облікових даних для провайдера `{ $provider }`.
+auth-pool-no-keys-field = Пул для `{ $provider }` не має масиву ключів.
+auth-pool-key-not-found = Не знайдено ключа зі змінною оточення `{ $env_var }` у пулі для `{ $provider }`.
+auth-pool-key-removed-pool-empty = Вилучено ключ `{ $env_var }` з пулу для `{ $provider }`. Тепер пул порожній і його було повністю видалено. Перезапустіть демона або оновіть конфігурацію для застосування.
+auth-pool-key-removed = Вилучено ключ `{ $env_var }` з пулу для `{ $provider }`. Перезапустіть демона або оновіть конфігурацію для застосування.
+auth-pool-unknown-strategy = Невідома стратегія `{ $strategy }`. Допустимі: fill_first, round_robin, random, least_used.
+auth-pool-strategy-set = Встановлено стратегію пулу для `{ $provider }` на `{ $strategy }`. Перезапустіть демона або оновіть конфігурацію для застосування.
+vault-empty = Сховище порожнє.
+vault-stored-count = Збережені облікові дані ({ $count }):
+
+# --- Scanned & Extracted keys ---
+# init.rs
+init-upgrade-failed-create-backups-dir = Не вдалося створити директорію бекапів: { $error }
+init-upgrade-failed-backup-config = Не вдалося створити бекап конфігурації: { $error }
+init-error-write-config-example = Не вдалося записати config.example.toml: { $error }
+
+# auth.rs
+auth-write-failed = Не вдалося записати { $path }: { $error }
+auth-password-empty = Пароль не може бути порожнім.
+auth-passwords-mismatch = Паролі не збігаються.
+auth-password-hash-failed = Не вдалося захешувати пароль: { $error }
+vault-enter-value-prompt = Введіть значення для { $key }: 
+auth-enter-password-prompt = Введіть пароль: 
+auth-confirm-password-prompt = Підтвердіть пароль: 
+
+# agent.rs
+agent-spawn-choose-target-or-template = Виберіть або позиційну ціль, або `--template`, але не обидва.
+agent-spawn-choose-target-or-template-fix = Використовуйте `librefang spawn coder` або `librefang spawn --template agents/custom/my-agent.toml`.
+agent-spawn-name-requires-template = `--name` вимагає імені темплейту або шляху до маніфесту.
+agent-spawn-name-requires-template-fix = Використовуйте `librefang spawn coder --name backend-coder` або `librefang spawn --template path/to/agent.toml --name backend-coder`.
+agent-spawn-dry-run-requires-template = Холостий запуск потребує імені темплейту або шляху до маніфесту.
+agent-spawn-dry-run-requires-template-fix = Використовуйте `librefang spawn coder --dry-run` or `librefang spawn --template path/to/agent.toml --dry-run`.
+agent-spawn-template-or-path-not-found = Темплейт або шлях до маніфесту не знайдено: { $target }
+agent-spawn-template-or-path-not-found-fix = Запустіть `librefang agent new`, щоб переглянути темплейти, або вкажіть правильний шлях до маніфесту.
+agent-manifest-parse-failed = Не вдалося розібрати маніфест агента з { $source }: { $error }
+agent-manifest-parse-failed-fix = Перевірте синтаксис TOML маніфесту та обов'язкові поля.
+agent-manifest-serialize-failed = Не вдалося серіалізувати оновлений маніфест: { $error }
+agent-dry-run-title = Холостий запуск агента
+agent-dry-run-success = Маніфест успішно розібрано. Жодного агента не було створено.
+agent-delete-warning-text = УВАГА: Видалення агента "{ $name }" назавжди вилучить його канонічний UUID
+    та всі пов'язані спогади й сесії.
+    Цю дію неможливо скасувати.
+label-confirm-prompt = Підтвердити?
+label-aborted = Скасовано.
+agent-delete-no-uuid = Не знайдено запису канонічного UUID для імені агента '{ $name }' — немає чого видаляти.
+agent-deleted-success = Агента "{ $name }" видалено (канонічний UUID очищено).
+agent-delete-failed-with-reason = Не вдалося видалити агента: { $error }
+agent-reset-uuid-warning-text = УВАГА: Скидання канонічного UUID для "{ $name }" призведе до втрати зв'язку з усіма сесіями
+    та спогадами, пов'язаними з поточним UUID. Наступний запуск під цим
+    іменем розпочнеться з новим UUID. Цю дію неможливо скасувати.
+agent-reset-uuid-success = Канонічний UUID для "{ $name }" скинуто (був { $previous }).
+agent-reset-uuid-failed-with-reason = Не вдалося скинути канонічний UUID: { $error }
+agent-reset-uuid-not-found = Не знайдено запису канонічного UUID для імені агента '{ $name }'.
+agent-merge-history-not-implemented = merge-history ще не реалізовано (слідкуючий тикет #4614).
+    Перепризначення сесій / спогадів з { $from } до канонічного UUID
+    для агента "{ $name }" вимагає крос-табличного SQL-втручання в субстрат
+    пам'яті, що відстежується окремо.
+agent-set-model-success = Для агента { $id } встановлено модель { $value }.
+agent-set-model-failed-with-reason = Не вдалося встановити модель: { $error }
+agent-set-no-daemon = Запущеного демона не знайдено. Запустіть його за допомогою: librefang start
+agent-set-unknown-field = Невідоме поле: { $field }. Підтримувані поля: model
+agent-new-no-templates = Не знайдено темплейтів агентів
+agent-new-no-templates-fix = Запустіть `librefang init`, щоб налаштувати директорію агентів
+agent-new-template-not-found = Темплейт '{ $name }' не знайдено
+agent-new-template-not-found-fix = Запустіть `librefang agent new`, щоб переглянути доступні темплейти
+agent-new-choose-template-prompt =   Оберіть темплейт [1]: 
+agent-sessions-none-active = Немає активних сесій.
+agent-sessions-none-found = Сесій не знайдено.
+
+label-source = Джерело
+label-name = Ім'я
+label-module = Модуль
+label-tools = Інструменти
+label-tags = Теги
+label-description = Опис
+
+# daemon.rs
+daemon-first-run-setup = Виявлено перший запуск — виконується швидке налаштування...
+daemon-config-not-found = Файл конфігурації не знайдено: { $path }
+daemon-config-not-found-fix = Запустіть `librefang init`, щоб створити конфігурацію за замовчуванням у ~/.librefang/config.toml, або перевірте шлях у --config.
+daemon-log-file-not-found = Файл логів не знайдено
+daemon-log-file-not-found-fix = Очікувався за шляхом: { $path }
+daemon-log-not-found-showing-tui = Лог демона не знайдено; показуємо лог TUI за шляхом { $path }
+
+# hand.rs
+hand-install-error-no-toml = Помилка: HAND.toml не знайдено в { $path }
+hand-install-error-read-toml = Помилка читання { $path }: { $error }
+hand-error-prefix = Помилка: { $error }
+hand-installed-success = Встановлено Hands: { $name } ({ $id })
+hand-activate-hint = Використовуйте `librefang hand activate { $id }`, щоб запустити його.
+hand-none-available = Немає доступних Hands.
+hand-list-activate-hint =
+    Використовуйте `librefang hand activate <id>`, щоб активувати Hands.
+hand-none-active = Немає активних Hands.
+label-hand = Hands
+label-instance = Інстанс
+label-agent = Агент
+hand-status-title = Статус Hands
+label-status-inactive = неактивний
+hand-not-found = Не знайдено активного або встановленого Hands для '{ $id }'.
+hand-activated-success = Hands '{ $id }' активовано (інстанс: { $instance }, агент: { $agent })
+hand-activate-failed = Не вдалося активувати Hands '{ $id }': { $error }
+hand-deactivated-success = Hands '{ $id }' деактивовано.
+label-failed-reason = Помилка: { $error }
+hand-no-active-instance = Не знайдено активного інстансу для Hands '{ $id }'.
+hand-info-not-found = Hands не знайдено: { $error }
+hand-no-settings = Hands '{ $id }' не має конфігурованих налаштувань.
+hand-settings-title = Налаштування для '{ $id }'
+hand-set-setting-success = Встановлено { $key }={ $value } для Hands '{ $id }'.
+hand-reloaded-summary = Перезавантажено Hands: { $added } додано, { $updated } оновлено, всього { $total }.
+hand-chat-welcome = Чат із { $name } (введіть /quit для виходу)
+
+# mcp_cmds.rs
+mcp-catalog-unknown-entry = Невідомий елемент каталогу MCP: '{ $name }'
+mcp-catalog-available-header =
+    Доступні сервери MCP (каталог):
+mcp-failed-read-config = Не вдалося прочитати { $path }: { $error }
+mcp-invalid-toml = { $path } не є коректним файлом TOML: { $error }
+mcp-already-configured = Сервер MCP '{ $name }' уже налаштований. Спочатку запустіть `librefang mcp remove { $name }`, якщо хочете перевстановити.
+mcp-failed-write-config = Не вдалося записати config.toml: { $error }
+mcp-add-credentials-hint =
+    Щоб додати облікові дані:
+mcp-get-it-here =   Отримайте тут: { $url }
+mcp-not-configured = Сервер MCP '{ $name }' не налаштований
+mcp-failed-update-config = Не вдалося оновити config.toml: { $error }
+mcp-removed-success = { $name } видалено.
+mcp-catalog-no-matches = Не знайдено елементів каталогу MCP, що відповідають '{ $query }'.
+mcp-catalog-none-available = Немає доступних елементів каталогу MCP.
+mcp-catalog-summary =   { $total } елементів каталогу ({ $installed } встановлено)
+mcp-catalog-install-hint =   Використовуйте `librefang mcp add <id>`, щоб встановити сервер MCP.
+mcp-none-configured = Немає налаштованих серверів MCP.
+mcp-list-catalog-hint =   Використовуйте `librefang mcp catalog`, щоб переглянути список доступних для встановлення серверів.
+
+# monitoring.rs
+monitoring-audit-reset-destructive = скидання аудиту є руйнівним — запустіть знову з `--confirm` для продовження
+monitoring-db-not-found = базу даних не знайдено за шляхом { $path }
+monitoring-db-open-failed = не вдалося відкрити { $path }: { $error }
+monitoring-db-truncate-failed = не вдалося очистити audit_entries: { $error }
+monitoring-audit-reset-anchor-deleted = , видалено якір за шляхом { $path }
+monitoring-audit-reset-anchor-none =  (немає якірного файлу для видалення)
+monitoring-audit-reset-success = Скинуто слід аудиту: вилучено { $count } рядків з audit_entries{ $anchor_detail }.
+monitoring-audit-reset-would-header =   Буде виконано:
+monitoring-audit-reset-would-delete =     1. ВИДАЛЕНО всі рядки з `audit_entries` у { $path }
+monitoring-audit-reset-would-remove-anchor =     2. Вилучено якірний файл { $path }
+monitoring-audit-reset-would-restart =   Ланцюг Меркла розпочнеться заново з наступної події аудиту.
+monitoring-daemon-running-error = демон запущений за адресою { $url }; відмовлено у зміні бази даних аудиту
+monitoring-daemon-running-error-fix = спочатку зупиніть демона: `librefang stop`
+monitoring-anchor-remove-failed = не вдалося вилучити якір { $path }: { $error }
+monitoring-audit-reset-seed-fresh = Наступний запуск демона створить свіжий ланцюг Меркла з поточного кінця.
+monitoring-memory-no-entries = Не знайдено записів пам'яті для агента '{ $agent }'.
+monitoring-devices-none-paired = Немає спарених пристроїв.
+monitoring-webhooks-none-configured = Вебхуки не налаштовані.
+
+# skill.rs
+skill-install-progress = Встановлення { $source }
+
+# system.rs
+migrate-error-home-dir = Помилка: не вдалося визначити домашню директорію
+migrate-start-msg = Міграція з { $source } ({ $path })...
+migrate-dry-run-hint =   (холостий запуск — жодних змін не буде внесено)
+migrate-progress-label = Виконання міграції
+migrate-complete-msg = Міграцію завершено
+migrate-warn-report-save-failed = Попередження: не вдалося зберегти звіт міграції: { $error }
+migrate-report-saved =
+      Звіт збережено за шляхом: { $path }
+migrate-failed-msg = Міграція завершилась невдачею: { $error }
+
+# maintenance.rs
+maintenance-service-install-root-error = Запущено від імені root — службу буде встановлено для облікового запису root, а не для вашого користувача. Запустіть без sudo.
+maintenance-service-unsupported = Автозапуск служби не підтримується на цій платформі.
+maintenance-failed-create-dir = Не вдалося створити { $path }: { $error }
+maintenance-failed-write-file = Не вдалося записати { $path }: { $error }
+maintenance-wrote-file = Записано { $path }
+maintenance-systemctl-reload-failed = помилка виконання systemctl --user daemon-reload
+maintenance-service-enabled = Службу увімкнено (запуститься при наступному вході в систему)
+maintenance-service-start-hint = Запустіть зараз за допомогою: systemctl --user start librefang.service
+maintenance-service-linger-hint = Для серверів без графічної оболонки також виконайте: loginctl enable-linger
+maintenance-systemctl-enable-failed = помилка виконання systemctl --user enable librefang.service
+maintenance-launchagent-loaded = LaunchAgent завантажено (запускатиметься при вході в систему та зараз)
+maintenance-launchctl-load-failed = помилка виконання launchctl load: { $error }
+maintenance-launchctl-run-failed = Не вдалося запустити launchctl: { $error }
+maintenance-windows-startup-added = Додано до автозавантаження Windows (HKCU\Software\Microsoft\Windows\CurrentVersion\Run)
+maintenance-windows-registry-write-failed = Не вдалося записати до реєстру Windows: { $error }
+maintenance-windows-reg-run-failed = Не вдалося запустити reg.exe: { $error }
+maintenance-systemd-removed = Вилучено користувацьку службу systemd
+maintenance-systemd-remove-failed = Не вдалося вилучити файл служби: { $error }
+maintenance-systemd-not-found = Користувацької служби systemd не знайдено — немає чого вилучати.
+maintenance-launchagent-removed = Вилучено LaunchAgent
+maintenance-launchagent-remove-failed = Не вдалося вилучити файл plist: { $error }
+maintenance-launchagent-not-found = LaunchAgent не знайдено — немає чого вилучати.
+maintenance-windows-startup-removed = Вилучено з автозавантаження Windows
+maintenance-windows-startup-not-found = Запису автозавантаження не знайдено — немає чого вилучати.
+maintenance-systemd-status-registered = Користувацьку службу systemd зареєстровано
+maintenance-status-label-enabled =   Увімкнено
+maintenance-status-label-active =   Активно
+maintenance-systemd-status-not-registered = Користувацьку службу systemd не зареєстровано.
+maintenance-service-install-hint = Запустіть `librefang service install`, щоб налаштувати її.
+maintenance-launchagent-status-registered = LaunchAgent зареєстровано
+maintenance-status-label-loaded =   Завантажено
+maintenance-launchagent-status-not-registered = LaunchAgent не зареєстровано.
+maintenance-windows-status-registered = Запис автозавантаження Windows зареєстровано
+maintenance-windows-status-not-registered = Запис автозавантаження не зареєстровано.
+reset-confirm-message =   Це видалить всі дані в { $path }
+      Включаючи: конфігурацію, базу даних, маніфести агентів, облікові дані.
+reset-confirm-prompt =   Ви впевнені? Введіть 'yes' для підтвердження: 
+reset-not-needed = Немає чого скидати — { $path } не існує.
+maintenance-update-section = Оновлення
+maintenance-update-error-exe-path = Не вдалося визначити шлях до поточного виконуваного файлу: { $error }
+maintenance-update-error-check-release = Не вдалося перевірити останній реліз: { $error }
+maintenance-update-warn-resolve-release = Не вдалося визначити останній опублікований реліз: { $error }
+maintenance-update-warn-resolve-release-fix = Спробуйте пізніше або передайте `--version <tag>`, щоб вказати конкретний реліз.
+maintenance-update-available = Доступний новіший опублікований реліз: { $tag }
+maintenance-update-run-hint = Запустіть `librefang update`, щоб встановити його.
+maintenance-update-same-core = Опублікований реліз { $tag } використовує ту саму версію ядра CLI, що й поточний виконуваний файл ({ $current }).
+maintenance-update-same-core-hint = Запустіть `librefang update`, якщо хочете отримати останню опубліковану збірку для цієї версії.
+maintenance-update-ahead = Поточна версія виконуваного файлу { $current } випереджає опублікований реліз { $tag }.
+maintenance-update-compare-unknown = Не вдалося порівняти поточну версію виконуваного файлу з тегом релізу { $tag }.
+maintenance-update-compare-unknown-hint = Якщо вам потрібен саме цей реліз, запустіть `librefang update --version <tag>`.
+maintenance-update-unable-to-determine = Не вдалося визначити наявність оновлення.
+maintenance-update-unable-to-determine-hint = Спробуйте пізніше, коли сервіс GitHub Releases буде доступним.
+maintenance-update-cannot-compare-safely = Не вдалося безпечно порівняти поточний виконуваний файл з тегом релізу { $tag }.
+maintenance-update-cannot-compare-safely-hint = Запустіть знову як `librefang update --version { $tag }`, щоб встановити його явно.
+maintenance-update-windows-daemon-running-error = Перед оновленням у Windows зупиніть працюючого демона.
+maintenance-update-windows-daemon-running-error-fix = Виконайте `librefang stop`, потім `librefang update`, а тоді `librefang start`.
+maintenance-update-cli-success = Локальний LibreFang CLI оновлено.
+maintenance-update-merging-config-defaults = Об'єднання нових налаштувань конфігурації за замовчуванням...
+maintenance-update-restart-daemon-hint = Якщо демон запущений, перезапустіть його за допомогою `librefang restart`.
+maintenance-update-background-launched = Оновлення запущено у фоновому режимі.
+maintenance-update-background-hint-terminal = Після завершення оновлення відкрийте новий термінал та запустіть `librefang --version`.
+maintenance-update-background-hint-restart = Якщо демон запущений, перезапустіть його після завершення оновлення.
+maintenance-update-failed-error = Помилка оновлення: { $error }
+maintenance-update-cargo-blocked = Цей виконуваний файл було встановлено через cargo. Запуск `cargo install` зсередини активного виконуваного файлу навмисно заблокований.
+maintenance-update-unofficial-path = Автоматичне оновлення підтримує лише офіційний шлях встановлення ({ $path }). Цей виконуваний файл запущено з іншого місця.
+maintenance-update-package-manager-hint = Якщо цей файл було встановлено через інший менеджер пакетів, оновіть його за допомогою цього менеджера.
+
+# doctor_cmd.rs
+doctor-check-librefang-dir-ok = Директорія LibreFang: { $path }
+doctor-check-librefang-dir-fail = Директорію LibreFang не знайдено.
+doctor-check-librefang-dir-created = Створено директорію LibreFang
+doctor-check-librefang-dir-create-fail = Не вдалося створити директорію
+doctor-check-librefang-dir-not-found-init = Директорію LibreFang не знайдено. Спочатку запустіть `librefang init`.
+doctor-check-env-ok = Файл .env (права доступу в нормі)
+doctor-check-env-fixed = Файл .env (права доступу виправлено на 0600)
+doctor-check-env-ok-generic = Файл .env
+doctor-check-env-loose-warn = Файл .env має занадто відкриті права доступу ({ $mode }), має бути 0600
+doctor-check-env-not-found-warn = Файл .env не знайдено (створіть за допомогою: librefang config set-key <provider>)
+doctor-check-config-ok = Файл конфігурації: { $path }
+doctor-check-config-syntax-fail = Файл конфігурації містить синтаксичні помилки: { $error }
+doctor-check-config-not-found = Файл конфігурації не знайдено.
+doctor-check-config-created = Створено config.toml за замовчуванням
+doctor-check-config-create-fail = Не вдалося створити config.toml
+doctor-check-cli-version = Версія CLI: { $version } (канал: { $channel })
+doctor-check-update-available-warn = Доступне оновлення: { $current } -> { $latest } (див. https://github.com/librefang/librefang/releases)
+doctor-check-cli-up-to-date = CLI оновлений до останньої версії
+doctor-check-update-fail-warn = Не вдалося перевірити наявність оновлень (мережа недоступна)
+doctor-check-daemon-running = Демон запущений за адресою { $url }
+doctor-check-daemon-not-running-warn = Демон не запущений (запустіть за допомогою `librefang start`)
+doctor-check-port-available = Порт { $address } вільний
+doctor-check-port-in-use-warn = Порт { $address } використовується іншим процесом
+doctor-check-stale-daemon-json-removed = Вилучено застарілий daemon.json
+doctor-check-stale-daemon-json-warn = Знайдено застарілий daemon.json (демон не запущений). Запустіть з --repair для очищення.
+doctor-check-db-ok = Файл бази даних (коректний SQLite)
+doctor-check-db-invalid-fail = Файл бази даних існує, але не є коректним SQLite
+doctor-check-db-not-found-warn = Файлу бази даних немає (буде створено при першому запуску)
+doctor-check-disk-space-low-warn = Мало вільного місця на диску: доступно { $count }МБ
+doctor-check-disk-space-ok = Вільне місце на диску: доступно { $count }МБ
+doctor-check-manifests-ok = Маніфести агентів коректні
+doctor-check-manifest-invalid-fail = Некоректний маніфест { $file }: { $error }
+doctor-check-home-dir-fail = Не вдалося визначити домашню директорію
+doctor-check-provider-key-rejected-warn = { $name } ({ $env_var }) - ключ відхилено (401/403)
+doctor-check-endpoint-reachable = Ендпоінт { $name } доступний ({ $endpoint })
+doctor-check-endpoint-unreachable-warn = Ендпоінт { $name } недоступний ({ $endpoint })
+doctor-check-channel-token-format-warn = { $name } ({ $env_var }) - неочікуваний формат токена
+doctor-check-config-env-missing-warn = Конфігурація посилається на { $env_var }, але його не встановлено в оточенні або у .env
+doctor-check-config-deser-ok = Конфігурація успішно десеріалізується в KernelConfig
+doctor-check-exec-policy = Політика виконання: mode={ $mode }, safe_bins={ $count }
+doctor-check-include-file-ok = Підключений файл: { $path }
+doctor-check-include-file-missing-warn = Підключений файл відсутній: { $path }
+doctor-check-include-file-not-found-fail = Підключений файл не знайдено: { $path }
+doctor-check-mcp-servers-count = Налаштовано серверів MCP: { $count }
+doctor-check-mcp-empty-command-warn = Сервер MCP '{ $name }' має порожню команду
+doctor-check-mcp-empty-url-warn = Сервер MCP '{ $name }' має порожню URL-адресу
+doctor-check-mcp-empty-base-url-warn = Сервер MCP '{ $name }' має порожній base_url
+doctor-check-mcp-no-compat-tools-warn = Сервер MCP '{ $name }' не має налаштованих інструментів http_compat
+doctor-check-mcp-compat-header-empty-name-warn = Сервер MCP '{ $name }' має заголовок http_compat з порожнім ім'ям
+doctor-check-mcp-compat-header-no-value-warn = Сервер MCP '{ $name }' має заголовок http_compat без value/value_env
+doctor-check-mcp-compat-tool-empty-name-warn = Сервер MCP '{ $name }' має інструмент http_compat з порожнім ім'ям
+doctor-check-mcp-compat-tool-empty-path-warn = Сервер MCP '{ $name }' має інструмент http_compat з порожнім шляхом
+doctor-check-config-deser-fail = Помилка десеріалізації конфігурації в KernelConfig: { $error }
+doctor-check-skills-loaded = Завантажено скілів: { $count }
+doctor-check-skills-load-fail-warn = Не вдалося завантажити скіли: { $error }
+doctor-check-skills-injection-ok = Усі скіли пройшли перевірку на ін'єкції промптів
+doctor-check-mcp-catalog-templates = Шаблони каталогу MCP: { $templates }
+doctor-check-mcp-configured-servers = Налаштовано серверів MCP: { $configured }
+doctor-check-running-agents = Запущено агентів: { $count }
+doctor-check-daemon-uptime = Час роботи демона: { $hours }год { $mins }хв
+doctor-check-db-connectivity-ok = Підключення до бази даних: OK
+doctor-check-db-status-fail = Стан бази даних: { $status }
+doctor-check-health-detail-status-warn = Ендпоінт стану повернув { $status }
+doctor-check-health-detail-fail-warn = Не вдалося запитати стан демона: { $error }
+doctor-check-skills-loaded-daemon = Завантажено скілів у демоні: { $count }
+doctor-check-rust-version = Rust: { $version }
+doctor-check-rust-not-found-fail = Інструментарій Rust не знайдено
+doctor-check-python-version = Python: { $version }
+doctor-check-python-not-found-warn = Python не знайдено (необхідний для скілів на Python)
+doctor-check-node-version = Node.js: { $version }
+doctor-check-node-not-found-warn = Node.js не знайдено (необхідний для скілів на Node.js)
+doctor-prompt-create-dir =     Створити зараз? [Y/n] 
+doctor-prompt-create-config =     Створити конфігурацію за замовчуванням? [Y/n] 
+doctor-section-providers =   LLM Провайдери:
+doctor-section-connectivity = 
+
+  Підключення до Мережі:
+doctor-section-channels = 
+
+  Інтеграція Каналів:
+doctor-section-config-val = 
+
+  Валідація Конфігурації:
+doctor-section-skills = 
+
+  Скіли:
+doctor-check-skills-injection-critical-warn = Скіл '{ $name }' має { $count } критичних попереджень:
+doctor-check-skills-injection-warn = Попередження про ін'єкцію промпту в скілі: { $name }
+doctor-section-mcp-servers =
+  MCP-сервери:
+doctor-section-daemon-health =
+  Здоров'я демона:
+doctor-check-daemon-mcp-status = MCP-сервери: { $configured } налаштовано, { $connected } підключено
+doctor-check-daemon-mcp-health = Здоров'я MCP-серверів: { $healthy }/{ $total } здорових
+
