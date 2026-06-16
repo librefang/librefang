@@ -201,9 +201,11 @@ impl PasskeyStore for SqlitePasskeyStore {
             "SELECT credential_id, user_name, cred, label, created_at, last_used_at \
              FROM webauthn_credentials WHERE credential_id = ?1",
         )?;
-        let row = stmt
-            .query_row(rusqlite::params![credential_id], row_to_record)
-            .ok();
+        let row = match stmt.query_row(rusqlite::params![credential_id], row_to_record) {
+            Ok(record) => Some(record),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => return Err(PasskeyStoreError::Sqlite(e)),
+        };
         Ok(row)
     }
 

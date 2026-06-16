@@ -29,10 +29,8 @@ impl Drop for Harness {
     }
 }
 
-fn base_config(tmp: &tempfile::TempDir) -> KernelConfig {
+fn base_config() -> KernelConfig {
     KernelConfig {
-        home_dir: tmp.path().to_path_buf(),
-        data_dir: tmp.path().join("data"),
         default_model: DefaultModelConfig {
             provider: "ollama".to_string(),
             model: "test-model".to_string(),
@@ -54,8 +52,6 @@ async fn boot(config: KernelConfig) -> Harness {
         "",
         None,
     );
-    // `config` was built against a *different* tmp in the caller only for the
-    // fields it cares about; re-anchor home/data to this tmp.
     let config = KernelConfig {
         home_dir: tmp.path().to_path_buf(),
         data_dir: tmp.path().join("data"),
@@ -73,8 +69,7 @@ async fn boot(config: KernelConfig) -> Harness {
 
 /// Passkey enabled, api_key set so auth is enforced on non-public routes.
 async fn boot_enabled() -> Harness {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let mut cfg = base_config(&tmp);
+    let mut cfg = base_config();
     cfg.api_key = "test-secret-key".to_string();
     cfg.dashboard_user = "admin".to_string();
     cfg.passkey_enabled = true;
@@ -183,9 +178,7 @@ async fn list_and_revoke_require_auth() {
 async fn endpoints_503_when_disabled() {
     // Default config: passkey_enabled = false → engine None → 503 on the
     // public authentication-options (api_key unset, so auth isn't the gate).
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let cfg = base_config(&tmp);
-    let h = boot(cfg).await;
+    let h = boot(base_config()).await;
     let status = send(
         &h,
         Method::POST,
