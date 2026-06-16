@@ -132,4 +132,12 @@ mod tests {
             "12 models available"
         );
     }
+
+    #[test]
+    fn auto_initializes_when_not_initialized() {
+        I18N.with(|cell| {
+            *cell.borrow_mut() = None;
+        });
+        assert_eq!(t("daemon-starting"), "Starting daemon...");
+    }
 }
