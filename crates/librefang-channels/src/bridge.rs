@@ -300,18 +300,12 @@ pub trait ChannelBridgeHandle: Send + Sync {
         Vec::new()
     }
 
-    /// Resolve the agent bound to a `(channel instance, conversation)` pair via
-    /// the deterministic two-level lookup (#5671 Model A): the per-conversation
-    /// `/agent` override wins, falling back to the instance default seeded from
-    /// `[[sidecar_channels]] agent`. Returns `None` when the instance has no
-    /// binding configured, in which case the bridge falls through to its legacy
-    /// resolver chain.
+    /// Resolve the agent bound to a `(channel instance, conversation)` pair via the deterministic two-level lookup (#5671 Model A): the per-conversation `/agent` override wins, falling back to the instance default seeded from `[[sidecar_channels]] agent`.
+    /// Returns `None` when the instance has no binding configured, in which case the bridge falls through to its legacy resolver chain.
     ///
-    /// `conversation_id` is the chat id for groups and the peer id for DMs —
-    /// uniformly `message.sender.platform_id` at the call site.
+    /// `conversation_id` is the chat id for groups and the peer id for DMs — uniformly `message.sender.platform_id` at the call site.
     ///
-    /// Default returns `None` so test doubles and the legacy path keep working
-    /// unchanged; the kernel adapter overrides it with the DB-backed lookup.
+    /// Default returns `None` so test doubles and the legacy path keep working unchanged; the kernel adapter overrides it with the DB-backed lookup.
     async fn resolve_bound_agent(
         &self,
         _instance: &str,
@@ -3009,16 +3003,10 @@ async fn handle_send_error<F, Fut>(
 /// Resolve the target agent for an incoming message.
 ///
 /// Routing precedence (#5671 Model A):
-///   1. The deterministic channel-instance binding lookup — a per-conversation
-///      `/agent` override, else the instance default seeded from
-///      `[[sidecar_channels]] agent`. When this resolves, it wins outright:
-///      the operator explicitly bound this agent, so neither the legacy chain
-///      nor the channel allowlist gets a vote.
-///   2. Legacy fallback (transitional) — thread routing, the `AgentRouter`
-///      binding chain, the `"assistant"` agent, then the non-deterministic
-///      `list_agents().first()`. Reached only by instances with no binding
-///      configured; it emits a deprecation WARN at the non-deterministic tail
-///      so operators can see they should set `agent` on the instance.
+///   1. The deterministic channel-instance binding lookup — a per-conversation `/agent` override, else the instance default seeded from `[[sidecar_channels]] agent`.
+///      When this resolves, it wins outright: the operator explicitly bound this agent, so neither the legacy chain nor the channel allowlist gets a vote.
+///   2. Legacy fallback (transitional) — thread routing, the `AgentRouter` binding chain, the `"assistant"` agent, then the non-deterministic `list_agents().first()`.
+///      Reached only by instances with no binding configured; it emits a deprecation WARN at the non-deterministic tail so operators can see they should set `agent` on the instance.
 ///
 /// Returns `Some(agent_id)` or `None` if no agents exist at all.
 ///

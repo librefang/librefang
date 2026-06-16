@@ -2,18 +2,11 @@
 //!
 //! Holds the two tables that drive Model A inbound dispatch:
 //!
-//! - `channel_instance_defaults` — one row per `[[sidecar_channels]]`
-//!   instance, seeded from config at boot, giving the agent a channel
-//!   instance routes to by default.
-//! - `conversation_bindings` — a per-`(instance, conversation)` override
-//!   written by the `/agent` command; supersedes the instance default.
+//! - `channel_instance_defaults` — one row per `[[sidecar_channels]]` instance, seeded from config at boot, giving the agent a channel instance routes to by default.
+//! - `conversation_bindings` — a per-`(instance, conversation)` override written by the `/agent` command; supersedes the instance default.
 //!
-//! [`ChannelBindingStore::resolve`] performs the two-level lookup
-//! (conversation override first, then instance default) that replaces the
-//! non-deterministic `list_agents().first()` fallback the bridge used to
-//! reach for. Both tables store the agent *name*, not the per-spawn
-//! `AgentId` uuid: config and the agent registry resolve agents by stable
-//! name, and the bridge maps name -> id at dispatch.
+//! [`ChannelBindingStore::resolve`] performs the two-level lookup (conversation override first, then instance default) that replaces the non-deterministic `list_agents().first()` fallback the bridge used to reach for.
+//! Both tables store the agent *name*, not the per-spawn `AgentId` uuid: config and the agent registry resolve agents by stable name, and the bridge maps name -> id at dispatch.
 
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use r2d2::Pool;
@@ -35,11 +28,8 @@ impl ChannelBindingStore {
 
     /// Seed (or refresh) the instance default from config at boot.
     ///
-    /// Upserts via `ON CONFLICT DO UPDATE` (not `INSERT OR REPLACE`, which
-    /// would delete+reinsert the row) because config is the source of truth
-    /// for the instance default: a changed `[[sidecar_channels]] agent` value
-    /// must win on the next boot. Per-conversation overrides live in a
-    /// separate table and are never touched here.
+    /// Upserts via `ON CONFLICT DO UPDATE` (not `INSERT OR REPLACE`, which would delete+reinsert the row) because config is the source of truth for the instance default: a changed `[[sidecar_channels]] agent` value must win on the next boot.
+    /// Per-conversation overrides live in a separate table and are never touched here.
     pub fn seed_instance_default(&self, instance: &str, agent: &str) -> LibreFangResult<()> {
         let c = self.pool.get().map_err(LibreFangError::memory)?;
         c.execute(
@@ -57,8 +47,8 @@ impl ChannelBindingStore {
         Ok(())
     }
 
-    /// Operator/runtime rebind of an instance default (e.g. via the REST
-    /// mirror). `bound_by` records who set it for the audit trail.
+    /// Operator/runtime rebind of an instance default (e.g. via the REST mirror).
+    /// `bound_by` records who set it for the audit trail.
     pub fn set_instance_default(
         &self,
         instance: &str,
@@ -175,8 +165,8 @@ impl ChannelBindingStore {
         })
     }
 
-    /// Clear a conversation override (the `/agent reset` action). Returns
-    /// true if a row was deleted.
+    /// Clear a conversation override (the `/agent reset` action).
+    /// Returns true if a row was deleted.
     pub fn clear_conversation_binding(
         &self,
         instance: &str,
@@ -210,9 +200,7 @@ impl ChannelBindingStore {
 
     // --- the two-level dispatch lookup --------------------------------------
 
-    /// Resolve the agent name bound to `(instance, conversation_id)`:
-    /// the per-conversation override wins, falling back to the instance
-    /// default, then `None` (the bridge falls through to its legacy chain).
+    /// Resolve the agent name bound to `(instance, conversation_id)`: the per-conversation override wins, falling back to the instance default, then `None` (the bridge falls through to its legacy chain).
     pub fn resolve(
         &self,
         instance: &str,
