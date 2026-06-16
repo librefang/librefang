@@ -3334,19 +3334,12 @@ async fn conversation_ownership_allows(
             .unwrap_or(600),
     );
     let ct = channel_type_str(&message.channel);
-    // Stale-claim takeover (#5323 follow-up): if a *different* agent holds the
-    // claim but its `manifest.channels` allowlist was narrowed so it can no
-    // longer serve this channel, the claim is dead weight — honouring it would
-    // silently drop every follow-up until the TTL expires. Treat the dispatch
-    // as a takeover so the now-eligible candidate re-claims immediately. A
-    // killed holder still resolves through `agent_allows_channel` (empty
-    // allowlist) and degrades to a graceful `send_message` error, unchanged.
+    // A different holder that can no longer serve this channel yields immediately to avoid silent drops until TTL (#5323).
     let stale_holder = match thread_ownership.current_holder(&key) {
         Some(holder) if holder != agent_id => !agent_allows_channel(handle, holder, ct).await,
         _ => false,
     };
-    // An explicit @-mention, a fresh address, or a stale holder re-claims for
-    // the new agent.
+    // An explicit @-mention, a fresh address, or a stale holder re-claims for the new agent.
     let was_mentioned = platform_was_mentioned(message) || addressed || stale_holder;
     match thread_ownership.decide_with_ttl(key, agent_id, was_mentioned, ttl) {
         crate::thread_ownership::DispatchDecision::Allow { .. } => true,
@@ -9915,10 +9908,7 @@ mod tests {
 
     #[tokio::test]
     async fn stale_holder_loses_claim_when_channel_ineligible() {
-        // A holds a slack thread, then A's allowlist is narrowed to exclude
-        // slack. A non-addressed follow-up from eligible candidate B must take
-        // over the claim rather than being suppressed until TTL (#5323
-        // follow-up). The control: while A is still eligible, B is suppressed.
+        // A holds the thread, A's allowlist is narrowed to exclude slack → B must take over rather than being suppressed (#5323).
         struct AllowlistHandle {
             lists: std::collections::HashMap<AgentId, Vec<String>>,
         }
