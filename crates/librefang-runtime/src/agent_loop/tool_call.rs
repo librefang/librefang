@@ -1183,11 +1183,7 @@ pub(super) fn handle_mid_turn_signal(
         }
     };
     if let Some(text) = injected_text {
-        let inject_msg = Message {
-            pinned: true,
-            timestamp: None,
-            ..Message::user(&text)
-        };
+        let inject_msg = Message::user(&text);
         session.push_message(inject_msg.clone());
         messages.push(inject_msg);
     }

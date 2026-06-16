@@ -7,6 +7,11 @@ use librefang_types::agent::*;
 
 use super::super::{manifest_to_capabilities, LibreFangKernel};
 
+/// Threshold above which a delegation result is spilled to the artifact
+/// store so the caller can `read_artifact` the full content instead of
+/// receiving a truncated `[ASYNC_RESULT]` preview.
+const SPILL_DELEGATION_RESULT_ABOVE: usize = 500;
+
 #[async_trait::async_trait]
 impl kernel_handle::AgentControl for LibreFangKernel {
     async fn spawn_agent(
@@ -212,10 +217,46 @@ impl kernel_handle::AgentControl for LibreFangKernel {
                 None => kernel_arc.send_message_as(target_id, &msg, parent_id).await,
             };
             let terminal_status = match exec {
-                Ok(result) => TaskStatus::Completed(serde_json::json!({
-                    "agent_id": target_id.to_string(),
-                    "response": result.response,
-                })),
+                Ok(result) => {
+                    let mut payload = serde_json::json!({
+                        "agent_id": target_id.to_string(),
+                        "response": result.response,
+                    });
+                    // Spill large delegation results to the artifact store
+                    // so the caller gets a real handle instead of a
+                    // truncated preview that provokes hallucinated hashes.
+                    let resp_bytes = result.response.as_bytes();
+                    if resp_bytes.len() > SPILL_DELEGATION_RESULT_ABOVE {
+                        let artifact_dir =
+                            librefang_runtime::artifact_store::default_artifact_storage_dir();
+                        match librefang_runtime::artifact_store::write(
+                            resp_bytes,
+                            &artifact_dir,
+                            librefang_runtime::artifact_store::DEFAULT_MAX_ARTIFACT_BYTES,
+                        ) {
+                            Ok(handle) => {
+                                payload["artifact_handle"] =
+                                    serde_json::Value::String(handle.to_string());
+                                tracing::debug!(
+                                    task_id = %task_id,
+                                    target = %target_id,
+                                    handle = %handle,
+                                    bytes = resp_bytes.len(),
+                                    "Spilled delegation result to artifact store"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    task_id = %task_id,
+                                    target = %target_id,
+                                    error = %e,
+                                    "Failed to spill delegation result; falling back to inline text"
+                                );
+                            }
+                        }
+                    }
+                    TaskStatus::Completed(payload)
+                }
                 Err(e) => TaskStatus::Failed(format!("agent_send delegation failed: {e}")),
             };
             if let Err(err) = kernel_arc
