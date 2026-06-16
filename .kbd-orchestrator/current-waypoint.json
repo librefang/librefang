@@ -1,13 +1,13 @@
 {
   "active_phase": "phase-9-config-store-migration",
   "previous_phase": "phase-8-fixture-rebuilds",
-  "active_change": "C-005d.2",
-  "last_updated": "2026-06-14T00:00:00Z",
+  "active_change": "C-005d (complete)",
+  "last_updated": "2026-06-16T00:00:00Z",
   "last_updated_by": "kbd-execute",
   "backend": "native-tool",
-  "phase_progress": "C-005d.1 CODE DONE on branch feat/memory-channels-to-store (trusted-section apply path: TRUSTED_SECTION_KEYS + OR-gate in resolve_config_with_overrides; budget removed from is_writable_config_path EXACT so only the typed budget handler writes budget). Verified: overlay tests 15/15, config unit 18/18, api clippy + branding clean. PREREQUISITE: PR #85 (fix(runtime): clippy 1.95 large_enum_variant in tool_call) must merge to main first — until then api clippy CI is red because it compiles librefang-runtime. After #85 merges: rebase feat/memory-channels-to-store onto main, open the C-005d PR. Then implement C-005d.2 (memory + proactive_memory -> store) and C-005d.3 (sidecar_channels -> store; channel env-file split unchanged; include-shadow guard preserved) on the same branch.",
+  "phase_progress": "C-005d CLUSTER COMPLETE on branch feat/memory-channels-to-store (PR #88), rebased onto main after upstream merge #87. C-005d.1: trusted-section apply path (TRUSTED_SECTION_KEYS). C-005d.2: memory + proactive_memory to store (+ json_to_toml_edit_value null-omit fix for Option round-trip). C-005d.3: sidecar_channels to store via in-memory upsert_sidecar_in_vec; secrets.env write + include-shadow guard unchanged; config.toml never written under surreal. All settings handlers (budget, memory, channels) now persist to the SurrealDB config store under read-only config.toml. Verified: overlay 17/17, config unit 18/18, sidecar unit 1/1, clippy + branding clean. No secret VALUE enters the store. Awaiting PR #88 review/merge.",
   "next_action": {
-    "command": "merge PR #85, then /kbd-execute C-005d.2",
-    "description": "Merge the prerequisite runtime clippy fix (PR #85), rebase feat/memory-channels-to-store onto main, then implement C-005d.2 (memory handler -> store) and C-005d.3 (channels handler -> store). No secret VALUE may enter the store at any step."
+    "command": "review/merge PR #88; then /kbd-reflect phase-9-config-store-migration",
+    "description": "C-005d (memory + channels settings migration) is code-complete on PR #88. After it merges, the phase-9 config-store migration is fully done (budget #84, memory+channels #88, MCP/default-model/config_set earlier). Run /kbd-reflect to close the phase."
   }
 }

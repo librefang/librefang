@@ -1,7 +1,7 @@
 # Change C-005d.3 — Persist channel (sidecar) settings to the DB store
 
 **Phase:** phase-9-config-store-migration
-**Status:** PLANNED
+**Status:** CODE_DONE (2026-06-16)
 **Gap:** G-d3 · **Effort:** M · **Depends on:** C-005d.1 · **Agent:** claude
 
 ## Goal
@@ -42,15 +42,21 @@ sqlite-only build keeps the `config.toml` path.
 - `crates/librefang-api/tests/config_store_overlay_test.rs` (tests)
 
 ## Tasks
-- [ ] cfg-branch the config.toml write only; secrets.env write unchanged.
-- [ ] In-memory `sidecar_channels` upsert-by-name → store override + resolve +
-  `replace_config`.
-- [ ] Preserve the include-shadow guard before the store write.
-- [ ] Tests: configure → `sidecar_channels` override applied + live config has the
-  channel; `config.toml` untouched; bridge reload still fires; **security** — no
-  secret-valued field in the stored override.
+- [x] cfg-branch the config.toml write only; secrets.env write unchanged; the
+  surreal branch stores the `sidecar_channels` array + resolve + validate +
+  `write_config_overrides`, then applies via `replace_config` after the lock.
+- [x] `sidecar_toml::upsert_sidecar_in_vec` — in-memory upsert-by-name mirroring
+  `upsert_sidecar_block` (backfill command/args only when absent; managed env
+  keys overwrite/remove; non-schema env + supervision fields preserved; new
+  entries built via serde so `#[serde(default)]` supervision defaults apply).
+- [x] Include-shadow guard (`included_files_with_sidecars`) runs before the store
+  write — unchanged, applies to both backends.
+- [x] Tests: `sidecar_channels_override_resolves_into_config` (resolve folds the
+  channel in; config.toml untouched; no secret key in the override) +
+  `upsert_in_vec_inserts_then_updates_managed_keys_only` (security: non-managed
+  secret key never enters the struct; supervision fields + hand-edits preserved).
 
-## Done when
-`cargo test -p librefang-api` green; under surreal `configure_sidecar_channel`
-writes only `secrets.env` (secrets) + the DB store (structure), never
-`config.toml`.
+## Done when ✓
+overlay suite green (17 passed incl. the sidecar test); `upsert_sidecar_in_vec`
+unit test green; clippy + branding clean. Under surreal `configure_sidecar_channel`
+writes only `secrets.env` (secrets) + the DB store (structure), never `config.toml`.

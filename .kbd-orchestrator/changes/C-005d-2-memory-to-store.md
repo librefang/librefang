@@ -1,7 +1,7 @@
 # Change C-005d.2 — Persist memory settings to the DB store
 
 **Phase:** phase-9-config-store-migration
-**Status:** PLANNED
+**Status:** CODE_DONE (2026-06-15)
 **Gap:** G-d1/G-d2 · **Effort:** S · **Depends on:** C-005d.1 · **Agent:** claude
 
 ## Goal
@@ -35,11 +35,19 @@ config) so reads are correct after `replace_config` with no further change.
 - `crates/librefang-api/tests/config_store_overlay_test.rs` (tests)
 
 ## Tasks
-- [ ] cfg-branch `memory_config_patch`: surreal → store `memory` +
-  `proactive_memory` overrides + resolve + `replace_config`; sqlite → existing.
-- [ ] Test: PATCH-equivalent override → store → live config reflects it →
-  survives restart via `overlay_config_overrides`; `config.toml` untouched.
+- [x] cfg-branch `memory_config_patch`: surreal → `memory_config_patch_surreal`
+  builds `memory` + `proactive_memory` from the LIVE config ⊕ patch (so PATCHes
+  accumulate), stores both as trusted-section overrides, resolves + validates +
+  `replace_config`; sqlite → existing config.toml path unchanged.
+- [x] Test `memory_and_proactive_overrides_resolve_into_config`: both sections
+  fold into the merged config; `config.toml` untouched; `embedding_api_key_env`
+  (env-var pointer) round-trips.
+- [x] Root-cause fix in `json_to_toml_edit_value`: a JSON `null` inside an object
+  is omitted (absent key) instead of `""`, so `Option<…>` fields in a
+  whole-section override round-trip (was: `embedding_dimensions = ""` → parse
+  error). Fixes the whole class of Option-bearing trusted sections.
 
-## Done when
-`cargo test -p librefang-api --test config_store_overlay_test` green; under
-surreal `PATCH /api/memory/config` no longer writes `config.toml`.
+## Done when ✓
+`config_store_overlay_test` green (16 passed incl. the memory test); config unit
+tests 18 passed; clippy + branding clean. Under surreal `PATCH /api/memory/config`
+no longer writes `config.toml`.

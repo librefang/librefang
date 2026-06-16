@@ -146,3 +146,140 @@ pub fn upsert_sidecar_block(
     fs::rename(&tmp, path).map_err(|e| format!("rename {tmp:?} -> {path:?}: {e}"))?;
     Ok(())
 }
+
+/// In-memory counterpart of [`upsert_sidecar_block`] for the surreal config
+/// store (C-005d.3). Upserts one `SidecarChannelConfig` by `name` in a `Vec`,
+/// mirroring the toml_edit semantics: on update, catalog `command`/`args`
+/// defaults are backfilled only when absent (preserving operator hand-edits);
+/// `name`/`channel_type` are set; within `env`, only the schema-managed keys are
+/// overwritten (non-empty) or removed (empty/absent) while every other env key
+/// and all supervision fields survive. On insert, a fresh entry is built via
+/// serde so each `#[serde(default)]` supervision field (restart/backoff/…) gets
+/// its canonical default.
+///
+/// **Security:** the caller passes only the NON-secret schema fields here
+/// (`nonsecret_env` + `managed_env_keys`). Secret-typed fields are written to
+/// `secrets.env` and never reach this Vec, so they cannot enter the
+/// `sidecar_channels` config-store override.
+#[cfg(feature = "surreal-backend")]
+pub fn upsert_sidecar_in_vec(
+    sidecars: &mut Vec<librefang_types::config::SidecarChannelConfig>,
+    name: &str,
+    channel_type: &str,
+    command: &str,
+    args: &[&str],
+    env: &BTreeMap<String, String>,
+    managed_env_keys: &[&str],
+) -> Result<(), String> {
+    let apply_managed = |env_map: &mut std::collections::HashMap<String, String>| {
+        for key in managed_env_keys {
+            match env.get(*key) {
+                Some(v) if !v.is_empty() => {
+                    env_map.insert((*key).to_string(), v.clone());
+                }
+                _ => {
+                    env_map.remove(*key);
+                }
+            }
+        }
+    };
+
+    if let Some(existing) = sidecars.iter_mut().find(|s| s.name == name) {
+        // Backfill catalog defaults only if the operator never set them.
+        if existing.command.is_empty() && existing.args.is_empty() {
+            existing.command = command.to_string();
+            existing.args = args.iter().map(|a| a.to_string()).collect();
+        }
+        existing.name = name.to_string();
+        existing.channel_type = Some(channel_type.to_string());
+        apply_managed(&mut existing.env);
+    } else {
+        // Build via serde so every `#[serde(default)]` supervision field is set.
+        let mut block: librefang_types::config::SidecarChannelConfig =
+            serde_json::from_value(serde_json::json!({
+                "name": name,
+                "channel_type": channel_type,
+                "command": command,
+                "args": args,
+                "env": {},
+            }))
+            .map_err(|e| format!("construct sidecar entry: {e}"))?;
+        apply_managed(&mut block.env);
+        sidecars.push(block);
+    }
+    Ok(())
+}
+
+#[cfg(all(test, feature = "surreal-backend"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upsert_in_vec_inserts_then_updates_managed_keys_only() {
+        let mut sidecars = Vec::new();
+        let mut env = BTreeMap::new();
+        env.insert("TELEGRAM_API_BASE".to_string(), "https://api".to_string());
+        // A secret-shaped key the caller would NEVER pass (not in managed set):
+        env.insert("TELEGRAM_BOT_TOKEN".to_string(), "SECRET".to_string());
+        let managed = ["TELEGRAM_API_BASE"];
+
+        upsert_sidecar_in_vec(
+            &mut sidecars,
+            "telegram",
+            "telegram",
+            "python3",
+            &["-m", "adapter"],
+            &env,
+            &managed,
+        )
+        .unwrap();
+
+        assert_eq!(sidecars.len(), 1);
+        let s = &sidecars[0];
+        assert_eq!(s.name, "telegram");
+        assert_eq!(s.channel_type.as_deref(), Some("telegram"));
+        assert_eq!(s.command, "python3");
+        assert_eq!(s.args, vec!["-m", "adapter"]);
+        assert_eq!(
+            s.env.get("TELEGRAM_API_BASE").map(String::as_str),
+            Some("https://api")
+        );
+        // SECURITY: a non-managed (secret) key must never land in the struct,
+        // even when present in the input map.
+        assert!(
+            !s.env.contains_key("TELEGRAM_BOT_TOKEN"),
+            "non-managed (secret) key must not enter the sidecar override"
+        );
+
+        // Update: preserve a hand-edited env key + supervision defaults; clear a
+        // managed key when the form sends it empty.
+        sidecars[0]
+            .env
+            .insert("PYTHONPATH".to_string(), "/custom".to_string());
+        sidecars[0].restart = true;
+        let mut env2 = BTreeMap::new();
+        env2.insert("TELEGRAM_API_BASE".to_string(), String::new()); // cleared
+        upsert_sidecar_in_vec(
+            &mut sidecars,
+            "telegram",
+            "telegram",
+            "python3",
+            &["-m", "adapter"],
+            &env2,
+            &managed,
+        )
+        .unwrap();
+        assert_eq!(sidecars.len(), 1, "update must not append a duplicate");
+        let s = &sidecars[0];
+        assert!(
+            !s.env.contains_key("TELEGRAM_API_BASE"),
+            "empty managed key removed"
+        );
+        assert_eq!(
+            s.env.get("PYTHONPATH").map(String::as_str),
+            Some("/custom"),
+            "hand-edit preserved"
+        );
+        assert!(s.restart, "supervision field preserved across update");
+    }
+}

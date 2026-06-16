@@ -889,11 +889,23 @@ pub(crate) fn json_to_toml_edit_value(value: &serde_json::Value) -> toml_edit::V
         serde_json::Value::Object(map) => {
             let mut t = toml_edit::InlineTable::new();
             for (k, v) in map {
+                // A JSON null inside an object means "field absent" — typically a
+                // serialized `Option::None`. Emitting an empty string would break
+                // round-trip for typed `Option<…>` fields: a whole-section
+                // override like `memory` (C-005d.2) serializes
+                // `embedding_dimensions: None` to `null`, and `embedding_dimensions
+                // = ""` then fails to deserialize (`expected usize`). Omit the key
+                // so it deserializes back as `None`.
+                if v.is_null() {
+                    continue;
+                }
                 t.insert(k, json_to_toml_edit_value(v));
             }
             toml_edit::Value::InlineTable(t)
         }
-        // null is handled by the caller (remove key) — fallback to empty string
+        // A bare null at the top level is handled by the caller (remove key);
+        // reaching here means a null in a non-object context — emit an empty
+        // string so the value still round-trips rather than panicking.
         serde_json::Value::Null => "".into(),
     }
 }

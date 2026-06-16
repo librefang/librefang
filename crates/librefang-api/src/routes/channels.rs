@@ -904,6 +904,12 @@ pub async fn configure_sidecar_channel(
     let mut nonsecret_env: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
     let shadowed_secrets: Vec<String>;
+    // C-005d.3: under surreal-backend the resolved config is computed under the
+    // lock (store write) and applied via `replace_config` after the lock, in
+    // place of the legacy `reload_config` that re-reads config.toml. This carries
+    // `(merged, raw)` out of the lock block.
+    #[cfg(feature = "surreal-backend")]
+    let surreal_apply: (librefang_types::config::KernelConfig, String);
     {
         let _config_guard = state.config_write_lock.lock().await;
 
@@ -1004,6 +1010,51 @@ pub async fn configure_sidecar_channel(
             .filter(|f| f.field_type != "secret")
             .map(|f| f.key.as_str())
             .collect();
+        #[cfg(feature = "surreal-backend")]
+        {
+            // Persist the NON-secret `[[sidecar_channels]]` structure to the
+            // SurrealDB config store; config.toml stays read-only. Secret fields
+            // already went to secrets.env above and never reach the override.
+            use crate::config_store_overlay::{
+                read_config_overrides, resolve_config_with_overrides, write_config_overrides,
+            };
+            let mut sidecars = state.kernel.config_ref().sidecar_channels.clone();
+            super::sidecar_toml::upsert_sidecar_in_vec(
+                &mut sidecars,
+                entry.name,
+                entry.name, // channel_type defaults to the catalog name
+                entry.command,
+                entry.args,
+                &nonsecret_env,
+                &managed_env_keys,
+            )
+            .map_err(|e| ApiErrorResponse::internal_scrub(e).into_json_tuple())?;
+
+            let storage = state.kernel.config_ref().storage.clone();
+            let mut overrides = read_config_overrides(&storage)
+                .await
+                .map_err(|e| ApiErrorResponse::internal_scrub(e).into_json_tuple())?;
+            let sidecars_json = serde_json::to_value(&sidecars)
+                .map_err(|e| ApiErrorResponse::internal_scrub(e.to_string()).into_json_tuple())?;
+            overrides.insert("sidecar_channels".to_string(), sidecars_json);
+            let (merged, raw) =
+                resolve_config_with_overrides(&config_path, &overrides).map_err(|e| {
+                    ApiErrorResponse::internal_scrub(format!("invalid config after edit: {e}"))
+                        .into_json_tuple()
+                })?;
+            if let Err(errors) = state.kernel.validate_config_for_reload(&merged) {
+                return Err(ApiErrorResponse::bad_request(format!(
+                    "invalid config: {}",
+                    errors.join("; ")
+                ))
+                .into_json_tuple());
+            }
+            write_config_overrides(&storage, &overrides)
+                .await
+                .map_err(|e| ApiErrorResponse::internal_scrub(e).into_json_tuple())?;
+            surreal_apply = (merged, raw);
+        }
+        #[cfg(not(feature = "surreal-backend"))]
         super::sidecar_toml::upsert_sidecar_block(
             &config_path,
             entry.name,
@@ -1020,6 +1071,19 @@ pub async fn configure_sidecar_channel(
     //    against the live snapshot and returns the resulting plan;
     //    the dashboard surfaces `restart_required` so the operator
     //    knows whether further action is needed.
+    // Under surreal-backend the override is already stored; apply the resolved
+    // config in place (no config.toml re-read). The sqlite path keeps the
+    // legacy reload that re-reads the freshly-written config.toml.
+    #[cfg(feature = "surreal-backend")]
+    let plan = {
+        let (merged, raw) = surreal_apply;
+        state
+            .kernel
+            .replace_config(merged, raw)
+            .await
+            .map_err(|e| ApiErrorResponse::internal_scrub(e).into_json_tuple())?
+    };
+    #[cfg(not(feature = "surreal-backend"))]
     let plan = state
         .kernel
         .reload_config()

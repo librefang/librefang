@@ -577,3 +577,103 @@ fn trusted_section_applies_blocked_and_unknown_are_skipped() {
         "non-trusted vault override must not reach the merged config"
     );
 }
+
+// ── C-005d.2: memory + proactive_memory settings to store ────────────────────
+
+/// `PATCH /api/memory/config` (surreal path) stores `[memory]` and
+/// `[proactive_memory]` as two trusted-section overrides; resolve must fold both
+/// into the effective config, and the on-disk `config.toml` is never written.
+/// `embedding_api_key_env` is an env-var POINTER (a name), so it lives in the
+/// store as config — no secret VALUE is persisted.
+#[test]
+fn memory_and_proactive_overrides_resolve_into_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg_path = tmp.path().join("config.toml");
+    std::fs::write(&cfg_path, "log_level = \"info\"\n").unwrap();
+
+    let mut memory = KernelConfig::default().memory;
+    memory.embedding_model = "text-embedding-3-large".to_string();
+    memory.embedding_api_key_env = Some("MY_EMBED_KEY".to_string());
+    memory.decay_rate = 0.25;
+
+    let mut pm = KernelConfig::default().proactive_memory;
+    pm.enabled = true;
+    pm.auto_memorize = true;
+    pm.max_retrieve = 7;
+
+    let mut overrides = BTreeMap::new();
+    overrides.insert("memory".to_string(), serde_json::to_value(&memory).unwrap());
+    overrides.insert(
+        "proactive_memory".to_string(),
+        serde_json::to_value(&pm).unwrap(),
+    );
+
+    let (merged, _raw) = resolve_config_with_overrides(&cfg_path, &overrides).unwrap();
+    assert_eq!(merged.memory.embedding_model, "text-embedding-3-large");
+    assert_eq!(
+        merged.memory.embedding_api_key_env.as_deref(),
+        Some("MY_EMBED_KEY"),
+        "env-var pointer (not a secret) folds into the merged config"
+    );
+    assert_eq!(merged.memory.decay_rate, 0.25);
+    assert!(merged.proactive_memory.enabled);
+    assert!(merged.proactive_memory.auto_memorize);
+    assert_eq!(merged.proactive_memory.max_retrieve, 7);
+
+    let on_disk = std::fs::read_to_string(&cfg_path).unwrap();
+    assert_eq!(
+        on_disk, "log_level = \"info\"\n",
+        "resolve must not write config.toml"
+    );
+}
+
+// ── C-005d.3: sidecar channel settings to store ──────────────────────────────
+
+/// `POST /api/channels/sidecar/{name}/configure` (surreal path) stores the
+/// NON-secret `[[sidecar_channels]]` array as one trusted-section override;
+/// resolve must fold it into the effective config, `config.toml` is untouched,
+/// and NO secret-valued field is present (secrets live in `secrets.env`).
+#[test]
+fn sidecar_channels_override_resolves_into_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg_path = tmp.path().join("config.toml");
+    std::fs::write(&cfg_path, "log_level = \"info\"\n").unwrap();
+
+    let channel: librefang_types::config::SidecarChannelConfig =
+        serde_json::from_value(serde_json::json!({
+            "name": "telegram",
+            "channel_type": "telegram",
+            "command": "python3",
+            "args": ["-m", "adapter"],
+            "env": { "TELEGRAM_API_BASE": "https://api" },
+        }))
+        .unwrap();
+
+    let mut overrides = BTreeMap::new();
+    overrides.insert(
+        "sidecar_channels".to_string(),
+        serde_json::to_value(vec![channel]).unwrap(),
+    );
+
+    let (merged, _raw) = resolve_config_with_overrides(&cfg_path, &overrides).unwrap();
+    assert_eq!(merged.sidecar_channels.len(), 1);
+    let s = &merged.sidecar_channels[0];
+    assert_eq!(s.name, "telegram");
+    assert_eq!(s.channel_type.as_deref(), Some("telegram"));
+    assert_eq!(s.command, "python3");
+    assert_eq!(
+        s.env.get("TELEGRAM_API_BASE").map(String::as_str),
+        Some("https://api")
+    );
+    // SECURITY: only non-secret env keys are in the override.
+    assert!(
+        !s.env.contains_key("TELEGRAM_BOT_TOKEN"),
+        "no secret value may enter the sidecar_channels override"
+    );
+
+    let on_disk = std::fs::read_to_string(&cfg_path).unwrap();
+    assert_eq!(
+        on_disk, "log_level = \"info\"\n",
+        "resolve must not write config.toml"
+    );
+}
