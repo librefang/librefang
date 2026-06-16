@@ -305,6 +305,19 @@ pub trait ChannelBridgeHandle: Send + Sync {
         Vec::new()
     }
 
+    /// Pick the channel-eligible agent whose declared aliases (`channel_overrides.group_trigger_patterns`) best match `text` (#5323).
+    ///
+    /// Scores every agent whose `manifest.channels` allows `channel_type` (empty allowlist = all channels) by how many of its trigger patterns match, and returns the single clear winner.
+    /// Returns `None` when no agent's alias matches or when the top score is tied (ambiguous — the caller's deterministic binding/default chain decides instead).
+    /// This is the channel-path consultation of the per-agent attention scorer that closes the non-deterministic "first available" fallback.
+    async fn route_assistant_by_metadata_for_channel(
+        &self,
+        _channel_type: &str,
+        _text: &str,
+    ) -> Option<AgentId> {
+        None
+    }
+
     /// Persist a group roster member to the kernel's persistent storage.
     async fn roster_upsert(
         &self,
@@ -2198,6 +2211,47 @@ fn compile_group_trigger_patterns(patterns: &[String]) -> Arc<CompiledGroupTrigg
     compiled
 }
 
+/// Pick the candidate agent whose declared group-trigger aliases best match `text` (#5323).
+/// Each candidate is `(agent_id, patterns)` where `patterns` is that agent's `channel_overrides.group_trigger_patterns`.
+/// Reuses the process-wide compiled-regex cache, so repeated calls on a busy group do not recompile.
+///
+/// Returns the single clear winner.
+/// Returns `None` when fewer than two candidates exist (nothing to disambiguate — the binding/default chain already routes a single agent), when no alias matches, or when the top score is tied (ambiguous: defer to the deterministic chain).
+/// The candidate order does not affect the result — ties resolve to `None` regardless of iteration order, so a `HashMap`-sourced candidate list stays deterministic.
+pub fn best_alias_match(text: &str, candidates: &[(AgentId, Vec<String>)]) -> Option<AgentId> {
+    if candidates.len() < 2 {
+        return None;
+    }
+    let mut best: Option<(AgentId, usize)> = None;
+    let mut tied = false;
+    for (id, patterns) in candidates {
+        if patterns.is_empty() {
+            continue;
+        }
+        let compiled = compile_group_trigger_patterns(patterns);
+        let Some(set) = compiled.regex_set.as_ref() else {
+            continue;
+        };
+        let score = set.matches(text).iter().count();
+        if score == 0 {
+            continue;
+        }
+        match best {
+            Some((_, b)) if score > b => {
+                best = Some((*id, score));
+                tied = false;
+            }
+            Some((_, b)) if score == b => tied = true,
+            Some(_) => {}
+            None => best = Some((*id, score)),
+        }
+    }
+    if tied {
+        return None;
+    }
+    best.map(|(id, _)| id)
+}
+
 fn text_content(message: &ChannelMessage) -> Option<&str> {
     match &message.content {
         ChannelContent::Text(text) => Some(text.as_str()),
@@ -2990,11 +3044,110 @@ async fn handle_send_error<F, Fut>(
 /// context, and fallback logic. Returns `Some(agent_id)` or `None` if no agents exist.
 ///
 /// Shared by `dispatch_message` and `dispatch_with_blocks` to ensure consistent routing.
+/// Outcome of routing one inbound message to an agent.
+struct RouteResolution {
+    /// Resolved agent, or `None` when no eligible agent exists.
+    agent_id: Option<AgentId>,
+    /// The message explicitly named this agent — an `@`-mention the adapter surfaced, or a match against the agent's own declared alias.
+    /// The conversation-ownership gate treats an addressed dispatch as a re-claim so a user can hand the thread from one agent to another mid-conversation (#5323).
+    /// A continuation that merely inherits the sticky holder is *not* addressed.
+    addressed: bool,
+}
+
+impl RouteResolution {
+    fn none() -> Self {
+        Self {
+            agent_id: None,
+            addressed: false,
+        }
+    }
+    fn plain(id: AgentId) -> Self {
+        Self {
+            agent_id: Some(id),
+            addressed: false,
+        }
+    }
+    fn addressed(id: AgentId) -> Self {
+        Self {
+            agent_id: Some(id),
+            addressed: true,
+        }
+    }
+}
+
+/// Names the message explicitly `@`-mentioned, as surfaced by the adapter in `metadata["mention_names"]` (leading `@` optional).
+/// Empty when the adapter did not parse any mentions.
+fn mention_names(message: &ChannelMessage) -> Vec<String> {
+    message
+        .metadata
+        .get("mention_names")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.trim_start_matches('@').trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether the adapter flagged the bot's own handle as mentioned.
+fn platform_was_mentioned(message: &ChannelMessage) -> bool {
+    message
+        .metadata
+        .get("was_mentioned")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// True when `id` may serve `ct` — its `manifest.channels` allowlist either is empty (all channels) or contains the channel.
+async fn agent_allows_channel(
+    handle: &Arc<dyn ChannelBridgeHandle>,
+    id: AgentId,
+    ct: &str,
+) -> bool {
+    let allowlist = handle.agent_channel_allowlist(id).await;
+    allowlist.is_empty() || allowlist.iter().any(|c| c == ct)
+}
+
+/// Resolve a specific agent the group message addresses, ahead of the binding / default chain (#5323).
+/// Two ways a message names an agent:
+///
+/// 1. An explicit `@`-mention the adapter surfaced in `metadata["mention_names"]` that resolves to a channel-eligible agent.
+/// 2. A non-default agent's declared alias matching the text, scored by the per-agent attention scorer (`route_assistant_by_metadata_for_channel`).
+///
+/// Returns `None` when the message addresses no specific eligible agent.
+async fn resolve_addressed_agent(
+    message: &ChannelMessage,
+    handle: &Arc<dyn ChannelBridgeHandle>,
+) -> Option<AgentId> {
+    let ct = channel_type_str(&message.channel);
+
+    // 1. Explicit @-mention of a specific agent by name / handle.
+    for name in mention_names(message) {
+        if let Ok(Some(id)) = handle.find_agent_by_name(&name).await {
+            if agent_allows_channel(handle, id, ct).await {
+                return Some(id);
+            }
+        }
+    }
+
+    // 2. A (possibly non-default) eligible agent's alias matches the text.
+    let text = text_content(message)?;
+    handle
+        .route_assistant_by_metadata_for_channel(ct, text)
+        .await
+}
+
 async fn resolve_or_fallback(
     message: &ChannelMessage,
     handle: &Arc<dyn ChannelBridgeHandle>,
     router: &Arc<AgentRouter>,
-) -> Option<AgentId> {
+    thread_ownership: &Arc<crate::thread_ownership::ThreadOwnershipRegistry>,
+) -> RouteResolution {
+    let ct = channel_type_str(&message.channel);
+
     // Thread-based agent routing: if the adapter tagged this message with a
     // thread_route_agent, resolve that agent name first.
     let thread_route_agent_id = if let Some(agent_name) = message
@@ -3018,6 +3171,28 @@ async fn resolve_or_fallback(
     } else {
         None
     };
+
+    // Multi-agent group routing (#5323). An explicit @-mention or a
+    // non-default agent's alias takes priority over the binding/default chain
+    // and over the sticky holder, so a user can address agentB even while
+    // agentA holds the conversation. Only relevant for groups; DMs route to
+    // their single bound agent.
+    if thread_route_agent_id.is_none() && message.is_group {
+        if let Some(id) = resolve_addressed_agent(message, handle).await {
+            return RouteResolution::addressed(id);
+        }
+        // Sticky continuation: a live conversation-ownership claim for this
+        // (thread, peer) slice keeps the follow-up on the same agent even
+        // without a fresh mention, so the holder is not stranded by the
+        // default chain re-resolving to a different agent.
+        if let Some(key) = build_thread_key(message) {
+            if let Some(holder) = thread_ownership.current_holder(&key) {
+                if agent_allows_channel(handle, holder, ct).await {
+                    return RouteResolution::plain(holder);
+                }
+            }
+        }
+    }
 
     // Route to agent — use resolve_with_context to support account_id, guild_id, etc.
     let agent_id = if let Some(id) = thread_route_agent_id {
@@ -3049,14 +3224,23 @@ async fn resolve_or_fallback(
     };
 
     if let Some(id) = agent_id {
-        let allowlist = handle.agent_channel_allowlist(id).await;
-        if !allowlist.is_empty() {
-            let ct = channel_type_str(&message.channel);
-            if !allowlist.iter().any(|c| c == ct) {
-                return None;
-            }
+        if agent_allows_channel(handle, id, ct).await {
+            return RouteResolution::plain(id);
         }
-        return Some(id);
+        return RouteResolution::none();
+    }
+
+    // Attention scorer (#5323 step 4): before the non-deterministic
+    // "first available" tail, consult the per-agent alias scorer so a message
+    // that clearly names one channel-eligible agent reaches it deterministically
+    // rather than whichever agent happens to be listed first.
+    if let Some(text) = text_content(message) {
+        if let Some(id) = handle
+            .route_assistant_by_metadata_for_channel(ct, text)
+            .await
+        {
+            return RouteResolution::addressed(id);
+        }
     }
 
     // Fallback: try "assistant" agent, then first available agent
@@ -3070,12 +3254,8 @@ async fn resolve_or_fallback(
             .and_then(|agents| agents.first().map(|(id, _)| *id)),
     };
     if let Some(id) = fallback {
-        let allowlist = handle.agent_channel_allowlist(id).await;
-        if !allowlist.is_empty() {
-            let ct = channel_type_str(&message.channel);
-            if !allowlist.iter().any(|c| c == ct) {
-                return None;
-            }
+        if !agent_allows_channel(handle, id, ct).await {
+            return RouteResolution::none();
         }
         // Auto-set this as the user's default so future messages route
         // directly. Scope the cache entry to (channel, account_id) when we
@@ -3091,8 +3271,81 @@ async fn resolve_or_fallback(
             ),
             None => router.set_user_default(message.sender.platform_id.clone(), id),
         }
+        return RouteResolution::plain(id);
     }
-    fallback
+    RouteResolution::none()
+}
+
+/// Build the conversation-ownership key for this message (#5323).
+///
+/// `thread` is the platform forum-topic id when present, else the chat container id so a topic-less group still gets a stable claim.
+/// `account_id` keeps multi-tenant bots apart; `chat_id` distinguishes chats that reuse a topic id; `peer_id` scopes the claim to the individual sender.
+/// Returns `None` only when neither a thread nor a chat id is available.
+fn build_thread_key(message: &ChannelMessage) -> Option<crate::thread_ownership::ThreadKey> {
+    let ct = channel_type_str(&message.channel);
+    // For groups the bridge keys by `sender.platform_id` (= chat JID); for DMs
+    // that same field is the peer's id, which is also the conversation id.
+    let chat_id = message.sender.platform_id.as_str();
+    let thread = message
+        .thread_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(chat_id);
+    let account_id = message.metadata.get("account_id").and_then(|v| v.as_str());
+    let peer = sender_user_id(message);
+    crate::thread_ownership::ThreadKey::new(ct, thread).map(|k| {
+        k.with_account_id(account_id)
+            .with_chat_id(Some(chat_id))
+            .with_peer_id(Some(peer))
+    })
+}
+
+/// Conversation-ownership gate (#3334 / #5323).
+/// Returns `true` if `agent_id` may dispatch, `false` if another agent owns this conversation slice and the message did not explicitly re-address us.
+/// Shared by the text and multimodal dispatch paths.
+async fn conversation_ownership_allows(
+    message: &ChannelMessage,
+    thread_ownership: &Arc<crate::thread_ownership::ThreadOwnershipRegistry>,
+    overrides: Option<&ChannelOverrides>,
+    agent_id: AgentId,
+    addressed: bool,
+) -> bool {
+    let enabled = overrides
+        .map(|o| o.thread_ownership_enabled)
+        .unwrap_or(true);
+    if !enabled {
+        return true;
+    }
+    // DMs bypass the registry unless explicitly opted in (#5323 step 5).
+    let include_dms = overrides
+        .map(|o| o.conversation_ownership_include_dms)
+        .unwrap_or(false);
+    if !message.is_group && !include_dms {
+        return true;
+    }
+    let Some(key) = build_thread_key(message) else {
+        return true;
+    };
+    let ttl = std::time::Duration::from_secs(
+        overrides
+            .map(|o| o.conversation_ownership_ttl_seconds)
+            .unwrap_or(600),
+    );
+    // An explicit @-mention or a fresh address re-claims for the new agent.
+    let was_mentioned = platform_was_mentioned(message) || addressed;
+    match thread_ownership.decide_with_ttl(key, agent_id, was_mentioned, ttl) {
+        crate::thread_ownership::DispatchDecision::Allow { .. } => true,
+        crate::thread_ownership::DispatchDecision::Suppress { holder } => {
+            debug!(
+                channel = channel_type_str(&message.channel),
+                candidate = %agent_id,
+                holder = %holder,
+                "conversation_ownership: suppressing dispatch — another agent owns this conversation"
+            );
+            false
+        }
+    }
 }
 
 /// Dispatch a single incoming message — handles bot commands or routes to an agent.
@@ -3219,7 +3472,9 @@ async fn dispatch_message(
     }
 
     // Resolve target agent early so per-agent overrides can take priority
-    let early_agent_id = resolve_or_fallback(message, handle, router).await;
+    let resolution = resolve_or_fallback(message, handle, router, thread_ownership).await;
+    let early_agent_id = resolution.agent_id;
+    let agent_addressed = resolution.addressed;
 
     // Fetch overrides: agent-level (from agent.toml) wins, channel-level is fallback.
     // Per-instance adapter overrides (a sidecar's `[[sidecar_channels]]`
@@ -4233,37 +4488,20 @@ async fn dispatch_message(
         }
     };
 
-    // Thread-ownership gate (#3334). Only meaningful for group threads with
-    // a platform thread id; DMs and untreaded channels bypass entirely.
-    // An explicit @-mention re-claims the thread for the new agent.
-    if message.is_group
-        && overrides
-            .as_ref()
-            .map(|o| o.thread_ownership_enabled)
-            .unwrap_or(true)
+    // Conversation-ownership gate (#3334 / #5323). A topic-less group now
+    // claims by chat id, DMs can opt in, and the key is scoped per peer /
+    // account. An explicit @-mention or a fresh address re-claims for the new
+    // agent.
+    if !conversation_ownership_allows(
+        message,
+        thread_ownership,
+        overrides.as_ref(),
+        agent_id,
+        agent_addressed,
+    )
+    .await
     {
-        if let Some(thread_str) = message.thread_id.as_deref() {
-            if let Some(key) = crate::thread_ownership::ThreadKey::new(ct_str, thread_str) {
-                let was_mentioned = message
-                    .metadata
-                    .get("was_mentioned")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                match thread_ownership.decide(key, agent_id, was_mentioned) {
-                    crate::thread_ownership::DispatchDecision::Allow { .. } => {}
-                    crate::thread_ownership::DispatchDecision::Suppress { holder } => {
-                        debug!(
-                            channel = ct_str,
-                            thread_id = thread_str,
-                            candidate = %agent_id,
-                            holder = %holder,
-                            "thread_ownership: suppressing dispatch — another agent owns this thread"
-                        );
-                        return;
-                    }
-                }
-            }
-        }
+        return;
     }
 
     let channel_key = channel_type_str(&message.channel).to_string();
@@ -5676,7 +5914,8 @@ async fn dispatch_with_blocks(
     journal: Option<&crate::message_journal::MessageJournal>,
     thread_ownership: &Arc<crate::thread_ownership::ThreadOwnershipRegistry>,
 ) {
-    let agent_id = match resolve_or_fallback(message, handle, router).await {
+    let resolution = resolve_or_fallback(message, handle, router, thread_ownership).await;
+    let agent_id = match resolution.agent_id {
         Some(id) => id,
         None => {
             send_response(
@@ -5692,36 +5931,20 @@ async fn dispatch_with_blocks(
         }
     };
 
-    // Thread-ownership gate (#3334). Mirrors the text-path check in
-    // `dispatch_message`. Multimodal messages may not include a
-    // platform-level @-mention marker; treat absence as "no override".
-    if message.is_group
-        && overrides
-            .map(|o| o.thread_ownership_enabled)
-            .unwrap_or(true)
+    // Conversation-ownership gate (#3334 / #5323). Mirrors the text-path check
+    // in `dispatch_message`. Multimodal messages may not include a
+    // platform-level @-mention marker; the shared helper still honours a fresh
+    // address surfaced during resolution.
+    if !conversation_ownership_allows(
+        message,
+        thread_ownership,
+        overrides,
+        agent_id,
+        resolution.addressed,
+    )
+    .await
     {
-        if let Some(thread_str) = message.thread_id.as_deref() {
-            if let Some(key) = crate::thread_ownership::ThreadKey::new(ct_str, thread_str) {
-                let was_mentioned = message
-                    .metadata
-                    .get("was_mentioned")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                match thread_ownership.decide(key, agent_id, was_mentioned) {
-                    crate::thread_ownership::DispatchDecision::Allow { .. } => {}
-                    crate::thread_ownership::DispatchDecision::Suppress { holder } => {
-                        debug!(
-                            channel = ct_str,
-                            thread_id = thread_str,
-                            candidate = %agent_id,
-                            holder = %holder,
-                            "thread_ownership: suppressing block dispatch — another agent owns this thread"
-                        );
-                        return;
-                    }
-                }
-            }
-        }
+        return;
     }
 
     let channel_key = channel_type_str(&message.channel).to_string();
@@ -9593,5 +9816,84 @@ mod tests {
             "operator-typed `Custom(\"cron\")` must NOT collide with the \
              kernel's cron-fire SessionId after sanitize"
         );
+    }
+
+    // ── Multi-agent group routing (#5323) ──
+
+    #[test]
+    fn best_alias_match_picks_unique_winner() {
+        let a = AgentId::new();
+        let b = AgentId::new();
+        let candidates = vec![
+            (a, vec![r"(?i)\bfandango\b".to_string()]),
+            (b, vec![r"(?i)\bambrogio\b".to_string()]),
+        ];
+        // A non-default agent's alias routes to that agent, not the default.
+        assert_eq!(best_alias_match("ambrogio, ayúdame", &candidates), Some(b));
+        assert_eq!(best_alias_match("oye fandango", &candidates), Some(a));
+        // No alias matches -> defer to the binding/default chain.
+        assert_eq!(best_alias_match("hello there", &candidates), None);
+    }
+
+    #[test]
+    fn best_alias_match_tie_and_single_yield_none() {
+        let a = AgentId::new();
+        let b = AgentId::new();
+        // Both agents match -> ambiguous -> None (deterministic regardless of
+        // candidate order).
+        let tie = vec![
+            (a, vec![r"(?i)\bhelp\b".to_string()]),
+            (b, vec![r"(?i)\bhelp\b".to_string()]),
+        ];
+        assert_eq!(best_alias_match("i need help", &tie), None);
+        let tie_rev = vec![
+            (b, vec![r"(?i)\bhelp\b".to_string()]),
+            (a, vec![r"(?i)\bhelp\b".to_string()]),
+        ];
+        assert_eq!(best_alias_match("i need help", &tie_rev), None);
+        // Fewer than two candidates -> nothing to disambiguate.
+        let single = vec![(a, vec![r"(?i)\bhelp\b".to_string()])];
+        assert_eq!(best_alias_match("i need help", &single), None);
+    }
+
+    #[test]
+    fn build_thread_key_falls_back_to_chat_id_without_topic() {
+        let mut msg = group_thread_message("topic-1", false);
+        let k = build_thread_key(&msg).expect("key");
+        assert_eq!(k.thread, "topic-1");
+        assert_eq!(k.chat_id.as_deref(), Some("u1"));
+        // A topic-less group still gets a stable claim keyed by chat id.
+        msg.thread_id = None;
+        let k2 = build_thread_key(&msg).expect("key");
+        assert_eq!(k2.thread, "u1");
+    }
+
+    #[test]
+    fn build_thread_key_carries_account_and_peer() {
+        let mut msg = group_thread_message("t", false);
+        msg.metadata
+            .insert("account_id".into(), serde_json::json!("acct-1"));
+        msg.metadata
+            .insert(SENDER_USER_ID_KEY.into(), serde_json::json!("peer-9"));
+        let k = build_thread_key(&msg).expect("key");
+        assert_eq!(k.account_id.as_deref(), Some("acct-1"));
+        assert_eq!(k.peer_id.as_deref(), Some("peer-9"));
+    }
+
+    #[tokio::test]
+    async fn resolve_addressed_agent_routes_explicit_mention() {
+        let fandango = AgentId::new();
+        let ambrogio = AgentId::new();
+        let handle: std::sync::Arc<dyn ChannelBridgeHandle> = std::sync::Arc::new(MockHandle {
+            agents: Mutex::new(vec![
+                (fandango, "fandango".to_string()),
+                (ambrogio, "ambrogio".to_string()),
+            ]),
+        });
+        let mut msg = group_thread_message("t", false);
+        msg.metadata
+            .insert("mention_names".into(), serde_json::json!(["ambrogio"]));
+        // @ambrogio routes to ambrogio even though it is not the default.
+        assert_eq!(resolve_addressed_agent(&msg, &handle).await, Some(ambrogio));
     }
 }

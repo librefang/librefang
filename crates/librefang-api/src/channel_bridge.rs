@@ -914,6 +914,38 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .unwrap_or_default()
     }
 
+    async fn route_assistant_by_metadata_for_channel(
+        &self,
+        channel_type: &str,
+        text: &str,
+    ) -> Option<AgentId> {
+        // Candidate set: every non-hand agent whose channel allowlist admits
+        // this channel (empty allowlist = all channels). Hand the per-agent
+        // alias lists to the channels-crate scorer, which reuses the compiled
+        // regex cache and picks the single clear winner deterministically.
+        let candidates: Vec<(AgentId, Vec<String>)> = self
+            .kernel
+            .agent_registry()
+            .list()
+            .into_iter()
+            .filter(|e| !e.is_hand)
+            .filter(|e| {
+                e.manifest.channels.is_empty()
+                    || e.manifest.channels.iter().any(|c| c == channel_type)
+            })
+            .map(|e| {
+                let patterns = e
+                    .manifest
+                    .channel_overrides
+                    .as_ref()
+                    .map(|ov| ov.group_trigger_patterns.clone())
+                    .unwrap_or_default();
+                (e.id, patterns)
+            })
+            .collect();
+        librefang_channels::bridge::best_alias_match(text, &candidates)
+    }
+
     async fn roster_upsert(
         &self,
         channel: &str,

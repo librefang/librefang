@@ -822,6 +822,14 @@ In-crate only; no cross-crate error-shape changes.
 
 ### Added
 
+- **channels(routing): per-conversation agent routing for multi-agent groups** (#5323) (@houko) — the AITL routing layer on top of #5671 PR-A's `agent` / `available_agents` schema.
+  When more than one agent serves a channel, a group message that names a specific non-default agent now reaches that agent instead of the channel default.
+  Two addressing paths: an explicit `@`-mention the adapter surfaces in `metadata["mention_names"]` (resolved against agent names/handles), and a non-default agent's declared `channel_overrides.group_trigger_patterns` alias matching the text — scored by a new deterministic per-agent attention scorer (`librefang_channels::bridge::best_alias_match`, reusing the compiled-regex cache) that the channel dispatch path consults before the previously non-deterministic "first available" fallback (closes layer (c) of #5294).
+  `ThreadKey` (the conversation-ownership claim key) grows three optional slices — `account_id` (multi-tenant: two bot accounts on one channel-type no longer collide, the unlanded #3419/#3420 fix), `chat_id` (two chats reusing a forum-topic id), and `peer_id` (per-sender stickiness so two users in one thread can talk to two different agents without contaminating each other) — all defaulting to `None`, reproducing the historical `(channel, thread)` key byte-for-byte.
+  A topic-less group now claims by chat id instead of bypassing the registry, and a live claim makes a follow-up sticky to the same agent without a fresh mention; an explicit address re-claims for the new agent, preserving the #3334 TTL semantics.
+  New per-channel `[channel_overrides]` knobs: `conversation_ownership_ttl_seconds` (default `600`) and `conversation_ownership_include_dms` (default `false`).
+  The Telegram / Discord / Slack / Matrix sidecar adapters now surface `mention_names` and a per-group `sender_user_id` so the bridge can route and scope per peer.
+  Additive and backward-compatible: single-agent channels and existing configs are unchanged.
 - **hands/registry: consume a Codeberg-hosted skill registry via `registry.registry_host`** (#6095) (@houko) — the registry sync path hardcoded GitHub's tarball/clone URLs.
   A new optional `registry_host` (full base URL, e.g. `https://codeberg.org`) derives the archive URL, git-clone URL, and tarball top-level prefix from that host; unset (default `None`) reproduces the exact GitHub URLs, so existing setups stay byte-identical and need no migration.
   GitHub and Forgejo/Codeberg differ in more than the host (archive path `/archive/refs/heads/main.tar.gz` vs `/archive/main.tar.gz`; prefix `librefang-registry-main/` vs `librefang-registry/`), handled in a small `registry_urls()` helper without a forge trait/enum.
