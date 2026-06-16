@@ -178,13 +178,21 @@ pub(super) async fn tool_channel_send(
     // legitimately reach a different contact, the agent uses `notify_owner`
     // (kernel-mediated) or waits for that contact's own inbound message.
     if let (Some(explicit), Some(turn_channel)) = (explicit_recipient, sender_channel) {
-        let expected_chat = sender_chat_id.or(sender_id);
+        // Filter an empty `sender_chat_id` before the DM fallback: the
+        // in-process path stamps the raw metadata value (unlike the `/mcp`
+        // bridge, which drops empty headers), so `Some("")` must not mask the
+        // `sender_id` fallback and silently disable the guard.
+        let expected_chat = sender_chat_id.filter(|s| !s.is_empty()).or(sender_id);
         if let Some(expected) = expected_chat {
-            let explicit = explicit.trim();
+            // Compare the recipient case-SENSITIVELY: `send_channel_*` lookups
+            // are case-sensitive (#6078), so a case-insensitive match here would
+            // let `recipient = "OWNER"` pass while the send routes to a distinct
+            // case-sensitive chat. The channel match stays case-insensitive so
+            // the guard still fires when the model varies the channel's casing.
             if !expected.is_empty()
                 && !turn_channel.is_empty()
                 && turn_channel.eq_ignore_ascii_case(&channel)
-                && !explicit.eq_ignore_ascii_case(expected)
+                && explicit != expected
             {
                 return Err(format!(
                     "channel_send recipient '{explicit}' does not match the current chat '{expected}' on channel '{channel}'. Cross-chat dispatch is forbidden — to reach a different contact use notify_owner, or wait for that contact's inbound message."

@@ -532,6 +532,58 @@ async fn channel_send_out_of_band_no_peer_scope_passes_guard() {
     );
 }
 
+#[tokio::test]
+async fn channel_send_explicit_case_variant_is_blocked() {
+    // `send_channel_*` lookups are case-sensitive (#6078), so a case-variant
+    // recipient is a DISTINCT chat and must be blocked — the guard compares the
+    // recipient case-sensitively rather than letting "OWNER-JID" pass as
+    // "owner-jid".
+    let kernel = guard_kernel();
+    let input = serde_json::json!({
+        "channel": "whatsapp",
+        "recipient": "OWNER-JID",
+        "message": "case bypass attempt",
+    });
+    let err = tool_channel_send(
+        &input,
+        Some(&kernel),
+        None,
+        Some("owner-jid"),
+        Some("whatsapp"),
+        None,
+        Some("agent-x"),
+        &[],
+    )
+    .await
+    .expect_err("case-variant recipient must be blocked");
+    assert!(err.contains(GUARD_MSG), "expected guard error, got: {err}");
+}
+
+#[tokio::test]
+async fn channel_send_empty_chat_id_falls_back_to_sender_id_guard() {
+    // An empty `sender_chat_id` (stamped raw on the in-process path) must not
+    // mask the `sender_id` DM fallback and silently disable the guard.
+    let kernel = guard_kernel();
+    let input = serde_json::json!({
+        "channel": "whatsapp",
+        "recipient": "stranger-jid",
+        "message": "leak via empty chat_id",
+    });
+    let err = tool_channel_send(
+        &input,
+        Some(&kernel),
+        None,
+        Some("owner-jid"),
+        Some("whatsapp"),
+        Some(""), // empty chat_id must fall back to sender_id, not disable the guard
+        Some("agent-x"),
+        &[],
+    )
+    .await
+    .expect_err("empty chat_id must still enforce via sender_id fallback");
+    assert!(err.contains(GUARD_MSG), "expected guard error, got: {err}");
+}
+
 // ── agent_send conversation_key routing tests ─────────────────────────────
 //
 // Verify that tool_agent_send routes to the correct KernelHandle method
