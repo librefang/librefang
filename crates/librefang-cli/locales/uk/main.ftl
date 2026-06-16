@@ -855,5 +855,38 @@ doctor-audit-config-ok = { $path } успішно розбирається як 
 doctor-audit-config-syntax-error = { $path } містить синтаксичні помилки TOML: { $error }
 doctor-audit-config-syntax-error-hint = Відредагуйте { $path } або відновіть її з бекапу.
 
+# launcher menu items
+launcher-menu-get-started = Налаштувати та запустити
+launcher-menu-get-started-hint = Провайдери, API-ключі, моделі, міграція
+launcher-menu-settings = Налаштування
+launcher-menu-settings-hint = Провайдери, API-ключі, моделі, воркфлоу
+launcher-menu-chat = Чат з агентом
+launcher-menu-chat-hint = Швидкий чат у терміналі
+launcher-menu-dashboard = Відкрити панель приладів
+launcher-menu-dashboard-hint = Запустити веб-інтерфейс у браузері
+launcher-menu-desktop = Відкрити десктопний додаток
+launcher-menu-desktop-hint = Запустити нативний десктопний додаток
+launcher-menu-tui = Запустити термінальний UI
+launcher-menu-tui-hint = Інтерактивна консольна панель керування
+launcher-menu-help = Показати всі команди
+launcher-menu-help-hint = Вивести повну довідку --help
+
+# launcher screen strings
+launcher-welcome = Ласкаво просимо! Давайте налаштуємо систему.
+launcher-checking-daemon = Перевірка стану демона…
+launcher-daemon-running = Демон запущений за адресою { $url }
+launcher-daemon-no-running = Демон не запущений
+launcher-provider = Провайдер: { $provider }
+launcher-no-keys = API-ключі не виявлено
+launcher-hint-re-run =   Запустіть 'Налаштування' для вибору провайдера
+launcher-hint-get-started =   Оберіть 'Налаштувати та запустити' для конфігурації
+launcher-migration-question = Переходите з { $source }? 
+launcher-migration-hint = 'Налаштувати та запустити' включає автоматичну міграцію.
+launcher-menu-hints = ↑↓/jk навігація  1-9 швидкий вибір  enter підтвердити  q вихід
+launcher-help-title = Усі команди
+launcher-help-subtitle =   — q/Esc для повернення
+launcher-help-hints = ↑↓/jk прокрутка  PgUp/PgDn  g/G вгору/вниз  q назад
+
+
 
 

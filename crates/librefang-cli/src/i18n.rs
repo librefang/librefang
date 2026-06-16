@@ -71,6 +71,43 @@ pub fn init(language: &str) {
     });
 }
 
+pub fn detect_system_language() -> String {
+    let vars = ["LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"];
+    for var in vars {
+        if let Ok(val) = std::env::var(var) {
+            let parts = val.split([':', ';']);
+            for part in parts {
+                let part = part.trim();
+                if part.is_empty() {
+                    continue;
+                }
+                let base = part.split(['.', '@']).next().unwrap_or(part);
+                let normalized = base.replace('_', "-");
+
+                // Try exact match
+                for lang in SUPPORTED_LANGUAGES {
+                    if lang.eq_ignore_ascii_case(&normalized) {
+                        return lang.to_string();
+                    }
+                }
+
+                // Try match by prefix before '-'
+                let prefix = normalized.split('-').next().unwrap_or(&normalized);
+                for lang in SUPPORTED_LANGUAGES {
+                    if lang.eq_ignore_ascii_case(prefix) {
+                        return lang.to_string();
+                    }
+                    let lang_prefix = lang.split('-').next().unwrap_or(lang);
+                    if lang_prefix.eq_ignore_ascii_case(prefix) {
+                        return lang.to_string();
+                    }
+                }
+            }
+        }
+    }
+    DEFAULT_LANGUAGE.to_string()
+}
+
 pub fn t(key: &str) -> String {
     I18N.with(|cell| {
         let mut borrow = cell.borrow_mut();
@@ -139,5 +176,36 @@ mod tests {
             *cell.borrow_mut() = None;
         });
         assert_eq!(t("daemon-starting"), "Starting daemon...");
+    }
+
+    #[test]
+    fn test_detect_system_language() {
+        let backup_language = std::env::var("LANGUAGE").ok();
+        let backup_lang = std::env::var("LANG").ok();
+
+        // Test matching "uk" from "uk:en_US"
+        std::env::set_var("LANGUAGE", "uk:en_US");
+        assert_eq!(detect_system_language(), "uk");
+
+        // Test matching "zh-CN" from "zh_CN.UTF-8"
+        std::env::remove_var("LANGUAGE");
+        std::env::set_var("LANG", "zh_CN.UTF-8");
+        assert_eq!(detect_system_language(), "zh-CN");
+
+        // Test fallback to default
+        std::env::set_var("LANG", "fr_FR.UTF-8");
+        assert_eq!(detect_system_language(), "en");
+
+        // Restore env vars
+        if let Some(val) = backup_language {
+            std::env::set_var("LANGUAGE", val);
+        } else {
+            std::env::remove_var("LANGUAGE");
+        }
+        if let Some(val) = backup_lang {
+            std::env::set_var("LANG", val);
+        } else {
+            std::env::remove_var("LANG");
+        }
     }
 }

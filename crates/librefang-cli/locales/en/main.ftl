@@ -855,5 +855,38 @@ doctor-audit-config-ok = { $path } parses as TOML.
 doctor-audit-config-syntax-error = { $path } has TOML syntax errors: { $error }
 doctor-audit-config-syntax-error-hint = Edit { $path } or restore from a backup.
 
+# launcher menu items
+launcher-menu-get-started = Get started
+launcher-menu-get-started-hint = Providers, API keys, models, migration
+launcher-menu-settings = Settings
+launcher-menu-settings-hint = Providers, API keys, models, routing
+launcher-menu-chat = Chat with an agent
+launcher-menu-chat-hint = Quick chat in the terminal
+launcher-menu-dashboard = Open dashboard
+launcher-menu-dashboard-hint = Launch the web UI in your browser
+launcher-menu-desktop = Open desktop app
+launcher-menu-desktop-hint = Launch the native desktop app
+launcher-menu-tui = Launch terminal UI
+launcher-menu-tui-hint = Full interactive TUI dashboard
+launcher-menu-help = Show all commands
+launcher-menu-help-hint = Print full --help output
+
+# launcher screen strings
+launcher-welcome = Welcome! Let's get you set up.
+launcher-checking-daemon = Checking for daemon…
+launcher-daemon-running = Daemon running at { $url }
+launcher-daemon-no-running = No daemon running
+launcher-provider = Provider: { $provider }
+launcher-no-keys = No API keys detected
+launcher-hint-re-run =   Run 'Re-run setup' to configure a provider
+launcher-hint-get-started =   Select 'Get started' to configure
+launcher-migration-question = Coming from { $source }? 
+launcher-migration-hint = 'Get started' includes automatic migration.
+launcher-menu-hints = ↑↓/jk navigate  1-9 quick select  enter confirm  q quit
+launcher-help-title = All commands
+launcher-help-subtitle =   — q/Esc to go back
+launcher-help-hints = ↑↓/jk scroll  PgUp/PgDn  g/G top/bottom  q back
+
+
 
 
