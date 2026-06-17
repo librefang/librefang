@@ -1375,6 +1375,78 @@ impl AuthResource {
         .await
     }
 
+    pub async fn authentication_options(&self, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &"/api/auth/passkey/authentication-options".to_string(),
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn authentication_verify(&self, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &"/api/auth/passkey/authentication-verify".to_string(),
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn list_credentials(&self) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &"/api/auth/passkey/credentials".to_string(),
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn revoke_credential(&self, id: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::DELETE,
+            &format!("/api/auth/passkey/credentials/{}", id),
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn registration_options(&self, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &"/api/auth/passkey/registration-options".to_string(),
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn registration_verify(&self, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &"/api/auth/passkey/registration-verify".to_string(),
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
     pub async fn auth_providers(&self) -> Result<Value> {
         do_req(
             &self.client,

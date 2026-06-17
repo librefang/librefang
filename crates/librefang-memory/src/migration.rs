@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 44;
+const SCHEMA_VERSION: u32 = 45;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -209,11 +209,15 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     run_step!(42, migrate_v42);
     // v43 (#6021): mcp_server_configs table for SQLite-backed MCP server config.
     run_step!(43, migrate_v43);
-    // v44 (#5671): channel-instance binding tables backing the deterministic
+    // v44 (#5981): webauthn_credentials table for passkey (WebAuthn/FIDO2)
+    // login. Stores the whole serialized webauthn-rs `Passkey` so the
+    // updated sign-count can be persisted after each assertion.
+    run_step!(44, migrate_v44);
+    // v45 (#5671): channel-instance binding tables backing the deterministic
     // two-level inbound dispatch lookup (instance default + per-conversation
     // override) that replaces the non-deterministic `list_agents().first()`
     // fallback chain.
-    run_step!(44, migrate_v44);
+    run_step!(45, migrate_v45);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1674,6 +1678,27 @@ fn migrate_v43(conn: &Connection) -> Result<(), rusqlite::Error> {
 }
 
 fn migrate_v44(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS webauthn_credentials (
+             credential_id TEXT PRIMARY KEY,
+             user_name     TEXT NOT NULL,
+             cred          TEXT NOT NULL,
+             label         TEXT,
+             created_at    INTEGER NOT NULL,
+             last_used_at  INTEGER
+         );
+         CREATE INDEX IF NOT EXISTS idx_webauthn_credentials_user_name
+             ON webauthn_credentials(user_name);",
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (44, datetime('now'), 'Add webauthn_credentials table for passkey (WebAuthn/FIDO2) login (#5981)')",
+        [],
+    )?;
+    Ok(())
+}
+
+fn migrate_v45(conn: &Connection) -> Result<(), rusqlite::Error> {
     // Two tables backing Model A inbound dispatch (#5671):
     //   channel_instance_defaults — one row per `[[sidecar_channels]]`
     //     instance, seeded from config at boot; the default agent a channel
@@ -1702,7 +1727,7 @@ fn migrate_v44(conn: &Connection) -> Result<(), rusqlite::Error> {
     )?;
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
-         VALUES (44, datetime('now'), 'Add channel_instance_defaults + conversation_bindings tables for deterministic inbound dispatch (#5671)')",
+         VALUES (45, datetime('now'), 'Add channel_instance_defaults + conversation_bindings tables for deterministic inbound dispatch (#5671)')",
         [],
     )?;
     Ok(())

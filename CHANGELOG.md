@@ -822,6 +822,12 @@ In-crate only; no cross-crate error-shape changes.
 
 ### Added
 
+- **auth/dashboard: passkey (WebAuthn/FIDO2) login** (#5981) (@houko) — sign in to the dashboard with Touch ID, Face ID, Windows Hello, Android biometrics, or a roaming security key instead of typing a password.
+  Opt-in per deployment via `passkey_enabled` + `passkey_rp_id` / `passkey_rp_origin` in `config.toml`; password login is untouched and remains the fallback.
+  Adds the `webauthn_credentials` table (SQLite migration v44) storing the serialized `webauthn-rs` `Passkey` so the sign-count persists across assertions, a `PasskeyEngine` owning the two WebAuthn ceremonies with short-TTL in-memory challenge state, and six routes under `/api/auth/passkey/*` (registration-options/verify gated Owner-only, authentication-options/verify public and rate-limited, plus list/revoke).
+  A successful passkey assertion mints a session identical to `dashboard_login` and bypasses the password-path TOTP challenge (a passkey is already a phishing-resistant second factor).
+  Dashboard gains a "Sign in with passkey" button on the login screen and a Passkeys panel under Settings → Security to register / list / revoke devices, via `@simplewebauthn/browser`.
+  See `docs/architecture/passkey-webauthn.md`.
 - **channels(routing): per-conversation agent routing for multi-agent groups** (#5323) (@houko) — the AITL routing layer on top of #5671 PR-A's `agent` / `available_agents` schema.
   When more than one agent serves a channel, a group message that names a specific non-default agent now reaches that agent instead of the channel default.
   Two addressing paths: an explicit `@`-mention the adapter surfaces in `metadata["mention_names"]` (resolved against agent names/handles), and a non-default agent's declared `channel_overrides.group_trigger_patterns` alias matching the text — scored by a new deterministic per-agent attention scorer (`librefang_channels::bridge::best_alias_match`, reusing the compiled-regex cache) that the channel dispatch path consults before the previously non-deterministic "first available" fallback (closes layer (c) of #5294).

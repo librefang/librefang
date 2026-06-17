@@ -7438,8 +7438,10 @@ mod tests {
         // the legacy chain (here: first available agent), preserving today's
         // behaviour for unconfigured instances.
         let first = AgentId::new();
-        let handle: Arc<dyn ChannelBridgeHandle> =
-            Arc::new(BindingMockHandle::unbound(vec![(first, "researcher".into())]));
+        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(BindingMockHandle::unbound(vec![(
+            first,
+            "researcher".into(),
+        )]));
         let router = Arc::new(AgentRouter::new());
         let thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
         let msg = inbound_message("peer-42", "tg-bot", false);

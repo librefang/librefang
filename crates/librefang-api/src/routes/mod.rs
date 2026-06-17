@@ -33,6 +33,7 @@ pub mod media;
 pub mod memory;
 pub mod network;
 pub mod pairing;
+pub mod passkey;
 pub mod plugins;
 pub mod prompts;
 pub mod providers;
@@ -212,4 +213,11 @@ pub struct AppState {
     /// substrate's SQLite connection so replays survive daemon
     /// restarts within the 24h TTL window.
     pub idempotency_store: Arc<dyn librefang_memory::idempotency::IdempotencyStore + Send + Sync>,
+    /// Registered passkey (WebAuthn/FIDO2) credentials (#5981). Reuses the
+    /// substrate's SQLite connection so passkeys persist across restarts.
+    pub passkey_store: Arc<dyn librefang_memory::passkey_store::PasskeyStore + Send + Sync>,
+    /// Passkey ceremony engine — `Some` only when `passkey_enabled` is set and
+    /// the RP config built successfully at boot; `None` otherwise (the
+    /// `/api/auth/passkey/*` routes then answer `503`).
+    pub passkey_engine: Option<Arc<crate::passkey::PasskeyEngine>>,
 }

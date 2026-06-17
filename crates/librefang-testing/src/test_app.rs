@@ -202,6 +202,27 @@ impl TestAppState {
             kernel.substrate_ref().pool(),
         ));
 
+        // Passkey (#5981) — store always wired; engine built only when the
+        // test config opts in via `passkey_enabled`, mirroring production.
+        let passkey_store: Arc<dyn librefang_memory::passkey_store::PasskeyStore + Send + Sync> =
+            Arc::new(librefang_memory::passkey_store::SqlitePasskeyStore::new(
+                kernel.substrate_ref().pool(),
+            ));
+        let passkey_engine = {
+            let cfg = kernel.config_ref();
+            if cfg.passkey_enabled {
+                librefang_api::passkey::PasskeyEngine::new(
+                    &cfg.passkey_rp_id,
+                    &cfg.passkey_rp_origin,
+                    &cfg.dashboard_user,
+                )
+                .ok()
+                .map(Arc::new)
+            } else {
+                None
+            }
+        };
+
         Arc::new(AppState {
             kernel,
             started_at: Instant::now(),
@@ -231,6 +252,8 @@ impl TestAppState {
             trusted_proxies: Arc::new(librefang_api::client_ip::TrustedProxies::default()),
             trust_forwarded_for: false,
             idempotency_store,
+            passkey_store,
+            passkey_engine,
         })
     }
 }
