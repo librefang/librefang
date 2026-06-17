@@ -1241,6 +1241,13 @@ function RegistrySourceSelector() {
   const configQuery = useFullConfig();
   const setConfig = useSetConfigValue({
     onSuccess: (res) => {
+      // The value persisted, but a failed live reload means the change is
+      // NOT in effect yet — surface that as an error, mirroring ConfigPage,
+      // rather than a misleading success toast.
+      if (res.reload_error) {
+        addToast(res.reload_error, "error");
+        return;
+      }
       addToast(
         res.restart_required
           ? t("hands.registry_source_updated_restart")
@@ -1256,19 +1263,24 @@ function RegistrySourceSelector() {
     | undefined)?.registry;
   const host = (registry?.registry_host ?? "").trim();
   const normalized = host.replace(/\/+$/, "").toLowerCase();
+  // ONLY an unset host is the GitHub default. An explicit "https://github.com"
+  // is NOT equivalent: registry_sync treats any Some(host) as the Forgejo
+  // archive scheme (`/archive/{branch}.tar.gz`, prefix `{repo}/`), which does
+  // not match GitHub's tarball layout — so it is a broken/custom value, shown
+  // as "custom" so the operator can see it and pick GitHub (→ null) to fix it.
   const current: "github" | "codeberg" | "custom" =
-    normalized === "" || normalized === "https://github.com"
+    normalized === ""
       ? "github"
       : normalized === CODEBERG_HOST
         ? "codeberg"
         : "custom";
 
   const options = [
-    { value: "github", label: t("hands.registry_source_github"), disabled: false },
-    { value: "codeberg", label: t("hands.registry_source_codeberg"), disabled: false },
-    // Custom host: option shown disabled so it's never misrepresented as GitHub/Codeberg; switching to either is still allowed.
+    { value: "github", label: t("hands.registry_source_github") },
+    { value: "codeberg", label: t("hands.registry_source_codeberg") },
+    // Custom host shown (enabled — a disabled <option> can't be a controlled select's value); re-selecting it is a no-op.
     ...(current === "custom"
-      ? [{ value: "custom", label: t("hands.registry_source_custom", { host }), disabled: true }]
+      ? [{ value: "custom", label: t("hands.registry_source_custom", { host }) }]
       : []),
   ];
 
@@ -1281,7 +1293,16 @@ function RegistrySourceSelector() {
     });
   };
 
-  const busy = configQuery.isLoading || setConfig.isPending;
+  // Disable while the config is loading/refetching, errored, or a write is in
+  // flight. Including isFetching covers the post-write invalidation window so
+  // the controlled <select> cannot snap back to the stale value before the
+  // refetch resolves; isError prevents a stray click from overwriting the real
+  // config with `null` when we could not read the current value.
+  const busy =
+    configQuery.isLoading ||
+    configQuery.isFetching ||
+    configQuery.isError ||
+    setConfig.isPending;
 
   return (
     <div className="flex items-center gap-2">
@@ -1301,7 +1322,7 @@ function RegistrySourceSelector() {
         className="rounded-lg border border-border-subtle bg-surface px-2.5 py-1.5 text-xs font-semibold text-text-main focus:border-brand focus:outline-none focus:ring-1 focus:ring-brand/30 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
       >
         {options.map((o) => (
-          <option key={o.value} value={o.value} disabled={o.disabled}>
+          <option key={o.value} value={o.value}>
             {o.label}
           </option>
         ))}
