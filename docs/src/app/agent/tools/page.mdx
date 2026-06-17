@@ -155,18 +155,23 @@ Subprocesses inherit the agent's workspace as `cwd` by default, the agent's envi
 
 ## Runtime Scheduling
 
-Manifest `[[cron]]` entries are the static way to schedule turns. These tools let an agent **dynamically** create / list / cancel scheduled work from the loop itself.
+Manifest `[[cron]]` entries are the static way to schedule turns. These tools let an agent **dynamically** create / list / pause / resume scheduled work from the loop itself.
 
 | Tool | Purpose |
 |---|---|
 | `schedule_create(when, prompt, channel?)` | Schedule a single future turn at a one-shot timestamp. |
 | `schedule_list()` | List the agent's scheduled turns. |
-| `schedule_delete(schedule_id)` | Cancel a scheduled turn. |
+| `schedule_delete(schedule_id)` | Pause (disable) a scheduled turn — its config is preserved, not deleted. |
+| `schedule_resume(schedule_id)` | Resume a paused scheduled turn. |
 | `cron_create(expression, prompt, channel?)` | Schedule a recurring turn (5-field cron). |
 | `cron_list()` | List the agent's runtime-created cron jobs. |
-| `cron_cancel(cron_id)` | Cancel a runtime cron job. |
+| `cron_cancel(cron_id)` | Pause (disable) a runtime cron job — its config is preserved, not deleted. |
+| `cron_enable(cron_id)` | Re-enable a paused runtime cron job. |
 
-Runtime jobs created with these tools are persisted in the same store as manifest crons — they survive daemon restarts. Their `cron_id` / `schedule_id` is opaque; round-trip through `cron_list()` to discover it.
+Agents cannot hard-delete a scheduled job: `schedule_delete` / `cron_cancel` only pause it, so a misbehaving or over-eager agent can never silently lose a configured schedule.
+Permanent deletion is a human-only operation via the dashboard (#6159).
+Runtime jobs created with these tools are persisted in the same store as manifest crons — they survive daemon restarts.
+Their `cron_id` / `schedule_id` is opaque; round-trip through `cron_list()` to discover it.
 
 ---
 

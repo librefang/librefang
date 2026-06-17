@@ -29,4 +29,13 @@ pub trait CronControl: Send + Sync {
         let _ = job_id;
         Err(KernelOpError::unavailable("Cron scheduler"))
     }
+
+    /// Enable or disable a cron job by ID, preserving its configuration.
+    ///
+    /// This is the agent-facing alternative to `cron_cancel`: disabling a job pauses it without losing the schedule / action / delivery config, so an operator can recover what was set up and re-enable it later.
+    /// Agent tools route their "stop this job" action here rather than to `cron_cancel`; hard deletion stays a human-only dashboard operation (#6159).
+    async fn cron_set_enabled(&self, job_id: &str, enabled: bool) -> Result<(), KernelOpError> {
+        let _ = (job_id, enabled);
+        Err(KernelOpError::unavailable("Cron scheduler"))
+    }
 }
