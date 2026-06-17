@@ -319,6 +319,19 @@ pub trait ChannelBridgeHandle: Send + Sync {
         Vec::new()
     }
 
+    /// Pick the channel-eligible agent whose declared aliases (`channel_overrides.group_trigger_patterns`) best match `text` (#5323).
+    ///
+    /// Scores every agent whose `manifest.channels` allows `channel_type` (empty allowlist = all channels) by how many of its trigger patterns match, and returns the single clear winner.
+    /// Returns `None` when no agent's alias matches or when the top score is tied (ambiguous — the caller's deterministic binding/default chain decides instead).
+    /// This is the channel-path consultation of the per-agent attention scorer that closes the non-deterministic "first available" fallback.
+    async fn route_assistant_by_metadata_for_channel(
+        &self,
+        _channel_type: &str,
+        _text: &str,
+    ) -> Option<AgentId> {
+        None
+    }
+
     /// Persist a group roster member to the kernel's persistent storage.
     async fn roster_upsert(
         &self,
@@ -1126,7 +1139,7 @@ fn flush_debounced(
                 }
             }
 
-            let overrides = match adapter.channel_overrides() {
+            let channel_overrides = match adapter.channel_overrides() {
                 Some(ov) => Some(ov),
                 None => {
                     channel_handle
@@ -1140,6 +1153,23 @@ fn flush_debounced(
                         .await
                 }
             };
+            // Per-agent overrides (agent.toml) take priority over channel-level,
+            // exactly as `dispatch_message` does for text. Without this the media
+            // path would gate (and pick output_format / threading) off the
+            // channel-level overrides only, bypassing per-agent group/DM policy
+            // and rate limits. `resolve_or_fallback` is read-only — the
+            // ownership claim happens later inside `dispatch_with_blocks` — so
+            // resolving here in addition to there has no side effect.
+            let media_resolution =
+                resolve_or_fallback(&merged_msg, &channel_handle, &router, &thread_ownership).await;
+            let overrides = if let Some(aid) = media_resolution.agent_id {
+                channel_handle
+                    .agent_channel_overrides(aid)
+                    .await
+                    .or(channel_overrides)
+            } else {
+                channel_overrides
+            };
             let channel_default_format = default_output_format_for_channel(ct_str);
             let output_format = overrides
                 .as_ref()
@@ -1151,6 +1181,34 @@ fn flush_debounced(
             } else {
                 None
             };
+
+            // --- Gate the debounced media path (parity with dispatch_message) ---
+            // The text branch below routes through `dispatch_message`, which
+            // enforces group_policy / dm_policy / rate-limits before
+            // dispatching. The media branch reaches `dispatch_with_blocks`
+            // directly, so without this it would skip those gates entirely —
+            // letting an attacker bypass a `mention_only`/`ignore` group (or a
+            // DM `dm_policy=ignore`) and per-user throttling by sending media
+            // instead of text. Run the identical gating here, on the only
+            // entry point that lacks it. (The five `dispatch_with_blocks`
+            // call sites inside `dispatch_message` itself are already gated,
+            // so the gate intentionally lives here, not inside
+            // `dispatch_with_blocks`, to avoid double-counting rate limits.)
+            if !media_dispatch_allowed(
+                &merged_msg,
+                &channel_handle,
+                &router,
+                adapter.as_ref(),
+                &rate_limiter,
+                ct_str,
+                overrides.as_ref(),
+                output_format,
+                thread_id,
+            )
+            .await
+            {
+                return;
+            }
 
             dispatch_with_blocks(
                 blocks,
@@ -2212,6 +2270,47 @@ fn compile_group_trigger_patterns(patterns: &[String]) -> Arc<CompiledGroupTrigg
     compiled
 }
 
+/// Pick the candidate agent whose declared group-trigger aliases best match `text` (#5323).
+/// Each candidate is `(agent_id, patterns)` where `patterns` is that agent's `channel_overrides.group_trigger_patterns`.
+/// Reuses the process-wide compiled-regex cache, so repeated calls on a busy group do not recompile.
+///
+/// Returns the single clear winner.
+/// Returns `None` when fewer than two candidates exist (nothing to disambiguate — the binding/default chain already routes a single agent), when no alias matches, or when the top score is tied (ambiguous: defer to the deterministic chain).
+/// The candidate order does not affect the result — ties resolve to `None` regardless of iteration order, so a `HashMap`-sourced candidate list stays deterministic.
+pub fn best_alias_match(text: &str, candidates: &[(AgentId, Vec<String>)]) -> Option<AgentId> {
+    if candidates.len() < 2 {
+        return None;
+    }
+    let mut best: Option<(AgentId, usize)> = None;
+    let mut tied = false;
+    for (id, patterns) in candidates {
+        if patterns.is_empty() {
+            continue;
+        }
+        let compiled = compile_group_trigger_patterns(patterns);
+        let Some(set) = compiled.regex_set.as_ref() else {
+            continue;
+        };
+        let score = set.matches(text).iter().count();
+        if score == 0 {
+            continue;
+        }
+        match best {
+            Some((_, b)) if score > b => {
+                best = Some((*id, score));
+                tied = false;
+            }
+            Some((_, b)) if score == b => tied = true,
+            Some(_) => {}
+            None => best = Some((*id, score)),
+        }
+    }
+    if tied {
+        return None;
+    }
+    best.map(|(id, _)| id)
+}
+
 fn text_content(message: &ChannelMessage) -> Option<&str> {
     match &message.content {
         ChannelContent::Text(text) => Some(text.as_str()),
@@ -3000,26 +3099,134 @@ async fn handle_send_error<F, Fut>(
         .await;
 }
 
+/// Outcome of routing one inbound message to an agent.
+struct RouteResolution {
+    /// Resolved agent, or `None` when no eligible agent exists.
+    agent_id: Option<AgentId>,
+    /// The message explicitly named this agent — an `@`-mention the adapter surfaced, or a match against the agent's own declared alias.
+    /// The conversation-ownership gate treats an addressed dispatch as a re-claim so a user can hand the thread from one agent to another mid-conversation (#5323).
+    /// A continuation that merely inherits the sticky holder is *not* addressed.
+    addressed: bool,
+}
+
+impl RouteResolution {
+    fn none() -> Self {
+        Self {
+            agent_id: None,
+            addressed: false,
+        }
+    }
+    fn plain(id: AgentId) -> Self {
+        Self {
+            agent_id: Some(id),
+            addressed: false,
+        }
+    }
+    fn addressed(id: AgentId) -> Self {
+        Self {
+            agent_id: Some(id),
+            addressed: true,
+        }
+    }
+}
+
+/// Names the message explicitly `@`-mentioned, as surfaced by the adapter in `metadata["mention_names"]` (leading `@` optional).
+/// Empty when the adapter did not parse any mentions.
+fn mention_names(message: &ChannelMessage) -> Vec<String> {
+    message
+        .metadata
+        .get("mention_names")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.trim_start_matches('@').trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether the adapter flagged the bot's own handle as mentioned.
+fn platform_was_mentioned(message: &ChannelMessage) -> bool {
+    message
+        .metadata
+        .get("was_mentioned")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// True when `id` may serve `ct` — its `manifest.channels` allowlist either is empty (all channels) or contains the channel.
+async fn agent_allows_channel(
+    handle: &Arc<dyn ChannelBridgeHandle>,
+    id: AgentId,
+    ct: &str,
+) -> bool {
+    let allowlist = handle.agent_channel_allowlist(id).await;
+    allowlist.is_empty() || allowlist.iter().any(|c| c == ct)
+}
+
+/// Resolve a specific agent the group message addresses, ahead of the binding / default chain (#5323).
+/// Two ways a message names an agent:
+///
+/// 1. An explicit `@`-mention the adapter surfaced in `metadata["mention_names"]` that resolves to a channel-eligible agent.
+/// 2. A non-default agent's declared alias matching the text, scored by the per-agent attention scorer (`route_assistant_by_metadata_for_channel`).
+///
+/// Returns `None` when the message addresses no specific eligible agent.
+async fn resolve_addressed_agent(
+    message: &ChannelMessage,
+    handle: &Arc<dyn ChannelBridgeHandle>,
+) -> Option<AgentId> {
+    let ct = channel_type_str(&message.channel);
+
+    // 1. Explicit @-mention of a specific agent by name / handle.
+    for name in mention_names(message) {
+        if let Ok(Some(id)) = handle.find_agent_by_name(&name).await {
+            if agent_allows_channel(handle, id, ct).await {
+                return Some(id);
+            }
+        }
+    }
+
+    // 2. A (possibly non-default) eligible agent's alias matches the text.
+    let text = text_content(message)?;
+    handle
+        .route_assistant_by_metadata_for_channel(ct, text)
+        .await
+}
+
 /// Resolve the target agent for an incoming message.
 ///
 /// Routing precedence (#5671 Model A):
 ///   1. The deterministic channel-instance binding lookup — a per-conversation `/agent` override, else the instance default seeded from `[[sidecar_channels]] agent`.
 ///      When this resolves, it wins outright: the operator explicitly bound this agent, so neither the legacy chain nor the channel allowlist gets a vote.
-///   2. Legacy fallback (transitional) — thread routing, the `AgentRouter` binding chain, the `"assistant"` agent, then the non-deterministic `list_agents().first()`.
+///   2. Legacy fallback (transitional) — thread routing, multi-agent group addressing (#5323), the `AgentRouter` binding chain, the `"assistant"` agent, then the non-deterministic `list_agents().first()`.
 ///      Reached only by instances with no binding configured; it emits a deprecation WARN at the non-deterministic tail so operators can see they should set `agent` on the instance.
 ///
-/// Returns `Some(agent_id)` or `None` if no agents exist at all.
+/// Returns a [`RouteResolution`] whose `agent_id` is `None` only when no eligible agent exists at all.
 ///
 /// Shared by `dispatch_message` and `dispatch_with_blocks` to ensure consistent routing.
 async fn resolve_or_fallback(
     message: &ChannelMessage,
     handle: &Arc<dyn ChannelBridgeHandle>,
     router: &Arc<AgentRouter>,
-) -> Option<AgentId> {
+    thread_ownership: &Arc<crate::thread_ownership::ThreadOwnershipRegistry>,
+) -> RouteResolution {
+    let ct = channel_type_str(&message.channel);
+
     // (1) Deterministic two-level lookup keyed by (instance, conversation).
     // `instance` is the sidecar's config `name`, stamped onto inbound messages
     // as `metadata["account_id"]` (sidecar.rs). `conversation_id` is the chat
     // id for groups and the peer id for DMs — uniformly `sender.platform_id`.
+    //
+    // The group case is uniform on purpose: `derive_sidecar_sender_identity`
+    // (sidecar.rs) and the in-process Discord/Slack adapters set
+    // `sender.platform_id` to the *chat* id for a group (the per-user sender id
+    // lives in `metadata[SENDER_USER_ID_KEY]`; see `build_sender_context` /
+    // `sender_user_id`). So every sender in one group resolves to the same
+    // conversation, and a binding seeded for the group-chat id matches — do not
+    // "fix" this to the sender id. When this resolves, the operator bound this
+    // agent explicitly, so it wins outright over the legacy chain below.
     if let Some(instance) = message
         .metadata
         .get("account_id")
@@ -3029,7 +3236,7 @@ async fn resolve_or_fallback(
         let conversation_id = &message.sender.platform_id;
         if !conversation_id.is_empty() {
             if let Some(id) = handle.resolve_bound_agent(instance, conversation_id).await {
-                return Some(id);
+                return RouteResolution::plain(id);
             }
         }
     }
@@ -3058,6 +3265,28 @@ async fn resolve_or_fallback(
     } else {
         None
     };
+
+    // Multi-agent group routing (#5323). An explicit @-mention or a
+    // non-default agent's alias takes priority over the binding/default chain
+    // and over the sticky holder, so a user can address agentB even while
+    // agentA holds the conversation. Only relevant for groups; DMs route to
+    // their single bound agent.
+    if thread_route_agent_id.is_none() && message.is_group {
+        if let Some(id) = resolve_addressed_agent(message, handle).await {
+            return RouteResolution::addressed(id);
+        }
+        // Sticky continuation: a live conversation-ownership claim for this
+        // (thread, peer) slice keeps the follow-up on the same agent even
+        // without a fresh mention, so the holder is not stranded by the
+        // default chain re-resolving to a different agent.
+        if let Some(key) = build_thread_key(message) {
+            if let Some(holder) = thread_ownership.current_holder(&key) {
+                if agent_allows_channel(handle, holder, ct).await {
+                    return RouteResolution::plain(holder);
+                }
+            }
+        }
+    }
 
     // Route to agent — use resolve_with_context to support account_id, guild_id, etc.
     let agent_id = if let Some(id) = thread_route_agent_id {
@@ -3089,14 +3318,23 @@ async fn resolve_or_fallback(
     };
 
     if let Some(id) = agent_id {
-        let allowlist = handle.agent_channel_allowlist(id).await;
-        if !allowlist.is_empty() {
-            let ct = channel_type_str(&message.channel);
-            if !allowlist.iter().any(|c| c == ct) {
-                return None;
-            }
+        if agent_allows_channel(handle, id, ct).await {
+            return RouteResolution::plain(id);
         }
-        return Some(id);
+        return RouteResolution::none();
+    }
+
+    // Attention scorer (#5323 step 4): before the non-deterministic
+    // "first available" tail, consult the per-agent alias scorer so a message
+    // that clearly names one channel-eligible agent reaches it deterministically
+    // rather than whichever agent happens to be listed first.
+    if let Some(text) = text_content(message) {
+        if let Some(id) = handle
+            .route_assistant_by_metadata_for_channel(ct, text)
+            .await
+        {
+            return RouteResolution::addressed(id);
+        }
     }
 
     // Fallback: try "assistant" agent, then first available agent
@@ -3130,12 +3368,8 @@ async fn resolve_or_fallback(
         }
     };
     if let Some(id) = fallback {
-        let allowlist = handle.agent_channel_allowlist(id).await;
-        if !allowlist.is_empty() {
-            let ct = channel_type_str(&message.channel);
-            if !allowlist.iter().any(|c| c == ct) {
-                return None;
-            }
+        if !agent_allows_channel(handle, id, ct).await {
+            return RouteResolution::none();
         }
         // Auto-set this as the user's default so future messages route
         // directly. Scope the cache entry to (channel, account_id) when we
@@ -3151,8 +3385,88 @@ async fn resolve_or_fallback(
             ),
             None => router.set_user_default(message.sender.platform_id.clone(), id),
         }
+        return RouteResolution::plain(id);
     }
-    fallback
+    RouteResolution::none()
+}
+
+/// Build the conversation-ownership key for this message (#5323).
+///
+/// `thread` is the platform forum-topic id when present, else the chat container id so a topic-less group still gets a stable claim.
+/// `account_id` keeps multi-tenant bots apart; `chat_id` distinguishes chats that reuse a topic id; `peer_id` scopes the claim to the individual sender.
+/// Returns `None` only when neither a thread nor a chat id is available.
+fn build_thread_key(message: &ChannelMessage) -> Option<crate::thread_ownership::ThreadKey> {
+    let ct = channel_type_str(&message.channel);
+    // For groups the bridge keys by `sender.platform_id` (= chat JID); for DMs
+    // that same field is the peer's id, which is also the conversation id.
+    let chat_id = message.sender.platform_id.as_str();
+    let thread = message
+        .thread_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(chat_id);
+    let account_id = message.metadata.get("account_id").and_then(|v| v.as_str());
+    let peer = sender_user_id(message);
+    crate::thread_ownership::ThreadKey::new(ct, thread).map(|k| {
+        k.with_account_id(account_id)
+            .with_chat_id(Some(chat_id))
+            .with_peer_id(Some(peer))
+    })
+}
+
+/// Conversation-ownership gate (#3334 / #5323).
+/// Returns `true` if `agent_id` may dispatch, `false` if another agent owns this conversation slice and the message did not explicitly re-address us.
+/// Shared by the text and multimodal dispatch paths.
+async fn conversation_ownership_allows(
+    message: &ChannelMessage,
+    handle: &Arc<dyn ChannelBridgeHandle>,
+    thread_ownership: &Arc<crate::thread_ownership::ThreadOwnershipRegistry>,
+    overrides: Option<&ChannelOverrides>,
+    agent_id: AgentId,
+    addressed: bool,
+) -> bool {
+    let enabled = overrides
+        .map(|o| o.thread_ownership_enabled)
+        .unwrap_or(true);
+    if !enabled {
+        return true;
+    }
+    // DMs bypass the registry unless explicitly opted in (#5323 step 5).
+    let include_dms = overrides
+        .map(|o| o.conversation_ownership_include_dms)
+        .unwrap_or(false);
+    if !message.is_group && !include_dms {
+        return true;
+    }
+    let Some(key) = build_thread_key(message) else {
+        return true;
+    };
+    let ttl = std::time::Duration::from_secs(
+        overrides
+            .map(|o| o.conversation_ownership_ttl_seconds)
+            .unwrap_or(600),
+    );
+    let ct = channel_type_str(&message.channel);
+    // A different holder that can no longer serve this channel yields immediately to avoid silent drops until TTL (#5323).
+    let stale_holder = match thread_ownership.current_holder(&key) {
+        Some(holder) if holder != agent_id => !agent_allows_channel(handle, holder, ct).await,
+        _ => false,
+    };
+    // An explicit @-mention, a fresh address, or a stale holder re-claims for the new agent.
+    let was_mentioned = platform_was_mentioned(message) || addressed || stale_holder;
+    match thread_ownership.decide_with_ttl(key, agent_id, was_mentioned, ttl) {
+        crate::thread_ownership::DispatchDecision::Allow { .. } => true,
+        crate::thread_ownership::DispatchDecision::Suppress { holder } => {
+            debug!(
+                channel = channel_type_str(&message.channel),
+                candidate = %agent_id,
+                holder = %holder,
+                "conversation_ownership: suppressing dispatch — another agent owns this conversation"
+            );
+            false
+        }
+    }
 }
 
 /// Dispatch a single incoming message — handles bot commands or routes to an agent.
@@ -3279,7 +3593,9 @@ async fn dispatch_message(
     }
 
     // Resolve target agent early so per-agent overrides can take priority
-    let early_agent_id = resolve_or_fallback(message, handle, router).await;
+    let resolution = resolve_or_fallback(message, handle, router, thread_ownership).await;
+    let early_agent_id = resolution.agent_id;
+    let agent_addressed = resolution.addressed;
 
     // Fetch overrides: agent-level (from agent.toml) wins, channel-level is fallback.
     // Per-instance adapter overrides (a sidecar's `[[sidecar_channels]]`
@@ -4293,37 +4609,21 @@ async fn dispatch_message(
         }
     };
 
-    // Thread-ownership gate (#3334). Only meaningful for group threads with
-    // a platform thread id; DMs and untreaded channels bypass entirely.
-    // An explicit @-mention re-claims the thread for the new agent.
-    if message.is_group
-        && overrides
-            .as_ref()
-            .map(|o| o.thread_ownership_enabled)
-            .unwrap_or(true)
+    // Conversation-ownership gate (#3334 / #5323). A topic-less group now
+    // claims by chat id, DMs can opt in, and the key is scoped per peer /
+    // account. An explicit @-mention or a fresh address re-claims for the new
+    // agent.
+    if !conversation_ownership_allows(
+        message,
+        handle,
+        thread_ownership,
+        overrides.as_ref(),
+        agent_id,
+        agent_addressed,
+    )
+    .await
     {
-        if let Some(thread_str) = message.thread_id.as_deref() {
-            if let Some(key) = crate::thread_ownership::ThreadKey::new(ct_str, thread_str) {
-                let was_mentioned = message
-                    .metadata
-                    .get("was_mentioned")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                match thread_ownership.decide(key, agent_id, was_mentioned) {
-                    crate::thread_ownership::DispatchDecision::Allow { .. } => {}
-                    crate::thread_ownership::DispatchDecision::Suppress { holder } => {
-                        debug!(
-                            channel = ct_str,
-                            thread_id = thread_str,
-                            candidate = %agent_id,
-                            holder = %holder,
-                            "thread_ownership: suppressing dispatch — another agent owns this thread"
-                        );
-                        return;
-                    }
-                }
-            }
-        }
+        return;
     }
 
     let channel_key = channel_type_str(&message.channel).to_string();
@@ -5720,6 +6020,155 @@ async fn download_image_to_blocks(
     blocks
 }
 
+/// The user-authored text of a message — the `Text` body, a slash command's
+/// rendered form, or a media `caption` — or `None` for media without a caption
+/// and other contentless variants. Unlike `content_to_text`, this never
+/// synthesizes a `[Photo: url]` placeholder, so it is the right source for
+/// group-history record-on-skip and reply-intent classification (it mirrors the
+/// inline caption extraction at the input-sanitizer and `dispatch_message`
+/// sites).
+fn extracted_user_text(content: &ChannelContent) -> Option<String> {
+    match content {
+        ChannelContent::Text(t) => Some(t.clone()),
+        ChannelContent::Command { name, args } => Some(if args.is_empty() {
+            format!("/{name}")
+        } else {
+            format!("/{name} {}", args.join(" "))
+        }),
+        ChannelContent::Image { caption, .. } => caption.clone(),
+        ChannelContent::Voice { caption, .. } => caption.clone(),
+        ChannelContent::Video { caption, .. } => caption.clone(),
+        _ => None,
+    }
+}
+
+/// Group-policy / DM-policy / reply-precheck / rate-limit gate for the debounced
+/// **media** dispatch path, mirroring the gating `dispatch_message` runs for
+/// text (its `--- DM/Group policy check ---` and `--- Rate limiting ---`
+/// blocks). Returns `true` if the message should proceed to
+/// `dispatch_with_blocks`, `false` if it was gated out (caller returns early).
+///
+/// This lives at the `flush_debounced` media branch — the only
+/// `dispatch_with_blocks` entry point that does NOT already pass through
+/// `dispatch_message`'s gating — so rate-limit tokens are not double-counted
+/// for media that arrived via `dispatch_message` (which already gated and then
+/// forwards downloaded blocks to `dispatch_with_blocks`).
+///
+/// It runs the same gates as the text path so media and text behave
+/// identically: `should_process_group_message` for groups (recording the
+/// skipped caption into the per-group buffer), the reply-intent precheck for
+/// `group_policy = all`, the `dm_policy` match for DMs, and both
+/// `rate_limiter.check` calls (global + per-user). `overrides` here are the
+/// agent-merged overrides resolved by the caller, matching the text path.
+#[allow(clippy::too_many_arguments)]
+async fn media_dispatch_allowed(
+    message: &ChannelMessage,
+    handle: &Arc<dyn ChannelBridgeHandle>,
+    router: &Arc<AgentRouter>,
+    adapter: &dyn ChannelAdapter,
+    rate_limiter: &ChannelRateLimiter,
+    ct_str: &str,
+    overrides: Option<&ChannelOverrides>,
+    output_format: OutputFormat,
+    thread_id: Option<&str>,
+) -> bool {
+    // --- DM/Group policy check ---
+    if let Some(ov) = overrides {
+        if message.is_group {
+            // The bridge keys group messages by `sender.platform_id`
+            // (= chat JID for groups); capture it for record-on-skip.
+            let group_id = message.sender.platform_id.clone();
+
+            if !should_process_group_message(ct_str, ov, message) {
+                // Record the user's caption (not the `[Photo: url]` placeholder)
+                // into the per-group buffer so the next addressed turn can
+                // recover it, matching the text path's record-on-skip behavior.
+                if let Some(buffer) = crate::group_history::global() {
+                    if let Some(text) = extracted_user_text(&message.content) {
+                        if !text.is_empty() {
+                            let entry = crate::group_history::HistoryEntry {
+                                sender_display_name: message.sender.display_name.clone(),
+                                text,
+                                captured_at: std::time::Instant::now(),
+                            };
+                            buffer
+                                .record(&crate::group_history::group_key(ct_str, &group_id), entry)
+                                .await;
+                        }
+                    }
+                }
+                return false;
+            }
+
+            // Reply-intent precheck: lightweight LLM classification when
+            // group_policy is "all" and precheck is enabled, mirroring the text
+            // path so a stray captioned media message does not get a reply where
+            // the same text would have stayed silent.
+            if ov.reply_precheck && matches!(ov.group_policy, GroupPolicy::All) {
+                let text = extracted_user_text(&message.content).unwrap_or_default();
+                let sender = &message.sender.display_name;
+                let model = ov.reply_precheck_model.as_deref();
+                let account_id = message.metadata.get("account_id").and_then(|v| v.as_str());
+                let channel_key_for_name = match account_id {
+                    Some(aid) => format!("{ct_str}:{aid}"),
+                    None => ct_str.to_string(),
+                };
+                let bot_name = router.channel_default_name(&channel_key_for_name);
+                let aliases = if ov.group_trigger_patterns.is_empty() {
+                    None
+                } else {
+                    Some(ov.group_trigger_patterns.as_slice())
+                };
+                if !handle
+                    .classify_reply_intent(&text, sender, model, bot_name.as_deref(), aliases)
+                    .await
+                {
+                    debug!(
+                        channel = ct_str,
+                        sender = %sender,
+                        "Reply precheck declined — staying silent (media)"
+                    );
+                    return false;
+                }
+            }
+        } else {
+            // DM
+            match ov.dm_policy {
+                DmPolicy::Ignore => {
+                    debug!("Ignoring DM on {ct_str} (dm_policy=ignore)");
+                    return false;
+                }
+                DmPolicy::AllowedOnly => {
+                    // Rely on RBAC authorize_channel_user in dispatch_with_blocks
+                }
+                DmPolicy::Respond => {}
+            }
+        }
+    }
+
+    // --- Rate limiting ---
+    if let Some(ov) = overrides {
+        // Global per-channel rate limit (all users combined)
+        if ov.rate_limit_per_minute > 0 {
+            if let Err(msg) = rate_limiter.check(ct_str, "__global__", ov.rate_limit_per_minute) {
+                send_response(adapter, &message.sender, msg, thread_id, output_format).await;
+                return false;
+            }
+        }
+        // Per-user rate limit
+        if ov.rate_limit_per_user > 0 {
+            if let Err(msg) =
+                rate_limiter.check(ct_str, sender_user_id(message), ov.rate_limit_per_user)
+            {
+                send_response(adapter, &message.sender, msg, thread_id, output_format).await;
+                return false;
+            }
+        }
+    }
+
+    true
+}
+
 /// Dispatch a multimodal message (content blocks) to an agent, handling routing
 /// and RBAC the same way as the text path.
 #[allow(clippy::too_many_arguments)]
@@ -5736,7 +6185,8 @@ async fn dispatch_with_blocks(
     journal: Option<&crate::message_journal::MessageJournal>,
     thread_ownership: &Arc<crate::thread_ownership::ThreadOwnershipRegistry>,
 ) {
-    let agent_id = match resolve_or_fallback(message, handle, router).await {
+    let resolution = resolve_or_fallback(message, handle, router, thread_ownership).await;
+    let agent_id = match resolution.agent_id {
         Some(id) => id,
         None => {
             send_response(
@@ -5752,43 +6202,28 @@ async fn dispatch_with_blocks(
         }
     };
 
-    // Thread-ownership gate (#3334). Mirrors the text-path check in
-    // `dispatch_message`. Multimodal messages may not include a
-    // platform-level @-mention marker; treat absence as "no override".
-    if message.is_group
-        && overrides
-            .map(|o| o.thread_ownership_enabled)
-            .unwrap_or(true)
+    // Conversation-ownership gate (#3334 / #5323). Mirrors the text-path check
+    // in `dispatch_message`. Multimodal messages may not include a
+    // platform-level @-mention marker; the shared helper still honours a fresh
+    // address surfaced during resolution.
+    if !conversation_ownership_allows(
+        message,
+        handle,
+        thread_ownership,
+        overrides,
+        agent_id,
+        resolution.addressed,
+    )
+    .await
     {
-        if let Some(thread_str) = message.thread_id.as_deref() {
-            if let Some(key) = crate::thread_ownership::ThreadKey::new(ct_str, thread_str) {
-                let was_mentioned = message
-                    .metadata
-                    .get("was_mentioned")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                match thread_ownership.decide(key, agent_id, was_mentioned) {
-                    crate::thread_ownership::DispatchDecision::Allow { .. } => {}
-                    crate::thread_ownership::DispatchDecision::Suppress { holder } => {
-                        debug!(
-                            channel = ct_str,
-                            thread_id = thread_str,
-                            candidate = %agent_id,
-                            holder = %holder,
-                            "thread_ownership: suppressing block dispatch — another agent owns this thread"
-                        );
-                        return;
-                    }
-                }
-            }
-        }
+        return;
     }
 
     let channel_key = channel_type_str(&message.channel).to_string();
 
     // RBAC check
     if let Err(denied) = handle
-        .authorize_channel_user(ct_str, &message.sender.platform_id, "chat")
+        .authorize_channel_user(ct_str, sender_user_id(message), "chat")
         .await
     {
         send_response(
@@ -6891,7 +7326,11 @@ mod tests {
         }
     }
 
-    fn inbound_message(conversation_id: &str, instance: &str) -> ChannelMessage {
+    /// Build an inbound message whose `sender.platform_id` is the conversation
+    /// id (the chat id for groups, the peer id for DMs — the bridge convention,
+    /// see `derive_sidecar_sender_identity`). For `is_group = true` this models
+    /// a group where every sender shares the same `platform_id` (= chat id).
+    fn inbound_message(conversation_id: &str, instance: &str, is_group: bool) -> ChannelMessage {
         let mut metadata = std::collections::HashMap::new();
         metadata.insert(
             "account_id".to_string(),
@@ -6908,7 +7347,7 @@ mod tests {
             content: ChannelContent::Text("hi".into()),
             target_agent: None,
             timestamp: chrono::Utc::now(),
-            is_group: false,
+            is_group,
             thread_id: None,
             metadata,
         }
@@ -6927,11 +7366,12 @@ mod tests {
             bound: Some(("tg-bot".into(), "peer-42".into(), bound)),
         });
         let router = Arc::new(AgentRouter::new());
-        let msg = inbound_message("peer-42", "tg-bot");
+        let thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
+        let msg = inbound_message("peer-42", "tg-bot", false);
 
-        let resolved = resolve_or_fallback(&msg, &handle, &router).await;
+        let resolved = resolve_or_fallback(&msg, &handle, &router, &thread_ownership).await;
         assert_eq!(
-            resolved,
+            resolved.agent_id,
             Some(bound),
             "the channel-instance binding must win over the legacy first-available pick"
         );
@@ -6948,10 +7388,40 @@ mod tests {
             bound: None,
         });
         let router = Arc::new(AgentRouter::new());
-        let msg = inbound_message("peer-42", "tg-bot");
+        let thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
+        let msg = inbound_message("peer-42", "tg-bot", false);
 
-        let resolved = resolve_or_fallback(&msg, &handle, &router).await;
-        assert_eq!(resolved, Some(first));
+        let resolved = resolve_or_fallback(&msg, &handle, &router, &thread_ownership).await;
+        assert_eq!(resolved.agent_id, Some(first));
+    }
+
+    #[tokio::test]
+    async fn group_binding_keyed_on_chat_id_resolves_uniformly() {
+        // Group case (#5671): the binding is seeded for the group-chat id, and
+        // the bridge keys the lookup on `sender.platform_id`, which for a group
+        // IS the chat id (the per-user sender lives in metadata, not here — see
+        // `derive_sidecar_sender_identity`). So a group message resolves to the
+        // bound agent regardless of which member sent it; this guards against a
+        // future "fix" that swaps the key to the sender's user id and breaks
+        // group binding. Also confirms groups reach the bound path (the early
+        // `resolve_or_fallback` call precedes all group gating in dispatch).
+        let first = AgentId::new();
+        let bound = AgentId::new();
+        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(BindingMockHandle {
+            agents: vec![(first, "researcher".into()), (bound, "legal".into())],
+            // Binding keyed on the group-chat id, not any member's user id.
+            bound: Some(("tg-bot".into(), "group-chat-9".into(), bound)),
+        });
+        let router = Arc::new(AgentRouter::new());
+        let thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
+        let msg = inbound_message("group-chat-9", "tg-bot", true);
+
+        let resolved = resolve_or_fallback(&msg, &handle, &router, &thread_ownership).await;
+        assert_eq!(
+            resolved.agent_id,
+            Some(bound),
+            "a group binding keyed on the chat id must resolve via sender.platform_id"
+        );
     }
 
     /// MockHandle that records which `agent_id` `/model` was dispatched to,
@@ -7164,6 +7634,132 @@ mod tests {
         // Test that DmPolicy::Ignore would be checked
         assert_eq!(DmPolicy::default(), DmPolicy::Respond);
         assert_eq!(GroupPolicy::default(), GroupPolicy::MentionOnly);
+    }
+
+    /// Build a GROUP media (Image) message whose `platform_id` is the group
+    /// JID and whose individual sender lives in `SENDER_USER_ID_KEY` metadata.
+    /// Mirrors how real group payloads are shaped (see `build_thread_key`
+    /// tests that also stuff the peer id under `SENDER_USER_ID_KEY`).
+    fn group_image_message(group_jid: &str, sender_id: &str) -> ChannelMessage {
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(SENDER_USER_ID_KEY.to_string(), serde_json::json!(sender_id));
+        ChannelMessage {
+            channel: ChannelType::WhatsApp,
+            platform_message_id: "m-img-1".to_string(),
+            sender: ChannelUser {
+                platform_id: group_jid.to_string(),
+                display_name: "Mallory".to_string(),
+                librefang_user: None,
+            },
+            content: ChannelContent::Image {
+                url: "https://example.com/payload.jpg".to_string(),
+                caption: None,
+                mime_type: None,
+            },
+            target_agent: None,
+            timestamp: chrono::Utc::now(),
+            is_group: true,
+            thread_id: None,
+            metadata,
+        }
+    }
+
+    /// Parity lock between the media path (`dispatch_with_blocks`) and the
+    /// text path (`dispatch_message`) for the two fixes in this file:
+    ///
+    /// 1. RBAC principal: the media path now authorizes the *individual*
+    ///    sender (`sender_user_id`, read from `SENDER_USER_ID_KEY`), not the
+    ///    group JID (`sender.platform_id`). Previously a group's chat JID was
+    ///    handed to `authorize_channel_user`, so an unauthorized individual
+    ///    member's media sailed past per-user RBAC.
+    /// 2. group_policy gating: the media path now runs the same
+    ///    `should_process_group_message` gate, so an image sent into a
+    ///    `mention_only` group with no mention is dropped exactly like text.
+    ///
+    /// The full `dispatch_with_blocks` end-to-end drive needs a `ChannelAdapter`
+    /// mock that does not exist in this test module; following the established
+    /// pattern in this file we assert the two gate predicates the dispatcher
+    /// now consults, which is what the fixes changed.
+    #[test]
+    fn group_media_uses_individual_principal_and_group_policy_gate() {
+        with_guard_off_locked(|| {
+            let message = group_image_message("group-123@g.us", "mallory@s.whatsapp.net");
+
+            // Fix 1: the principal fed to authorize_channel_user is the
+            // individual sender, not the group JID.
+            assert_eq!(
+                sender_user_id(&message),
+                "mallory@s.whatsapp.net",
+                "media path must authorize the individual sender, not the group JID"
+            );
+            assert_ne!(
+                sender_user_id(&message),
+                message.sender.platform_id,
+                "the group JID must NOT be used as the RBAC principal"
+            );
+
+            // Fix 2: under mention_only with no mention/trigger, the same gate
+            // the text path runs drops this media message.
+            let overrides = ChannelOverrides {
+                group_policy: GroupPolicy::MentionOnly,
+                ..Default::default()
+            };
+            assert!(
+                !should_process_group_message("whatsapp", &overrides, &message),
+                "unmentioned media in a mention_only group must be gated out, matching the text path"
+            );
+
+            // And an explicit `ignore` group policy drops it unconditionally.
+            let ignore_overrides = ChannelOverrides {
+                group_policy: GroupPolicy::Ignore,
+                ..Default::default()
+            };
+            assert!(
+                !should_process_group_message("whatsapp", &ignore_overrides, &message),
+                "group_policy=ignore must drop media just like text"
+            );
+        });
+    }
+
+    /// `extracted_user_text` must yield the user's caption for media (so the
+    /// record-on-skip and reply-precheck paths see real text), and `None` for
+    /// captionless media — never the `[Photo: url]` placeholder that
+    /// `content_to_text` synthesizes. A prior version used `text_content`,
+    /// which returns `None` for all media, so captions were silently dropped.
+    #[test]
+    fn extracted_user_text_prefers_caption_over_placeholder() {
+        assert_eq!(
+            extracted_user_text(&ChannelContent::Text("hello".to_string())).as_deref(),
+            Some("hello")
+        );
+        assert_eq!(
+            extracted_user_text(&ChannelContent::Image {
+                url: "https://example.com/p.jpg".to_string(),
+                caption: Some("look at this".to_string()),
+                mime_type: None,
+            })
+            .as_deref(),
+            Some("look at this"),
+            "media caption must be extracted (not the [Photo: url] placeholder)"
+        );
+        assert_eq!(
+            extracted_user_text(&ChannelContent::Image {
+                url: "https://example.com/p.jpg".to_string(),
+                caption: None,
+                mime_type: None,
+            }),
+            None,
+            "captionless media must yield None, not a synthesized placeholder"
+        );
+        assert_eq!(
+            extracted_user_text(&ChannelContent::Voice {
+                url: "https://example.com/v.ogg".to_string(),
+                duration_seconds: 3,
+                caption: Some("voice note text".to_string()),
+            })
+            .as_deref(),
+            Some("voice note text")
+        );
     }
 
     fn group_text_message(text: &str) -> ChannelMessage {
@@ -9757,5 +10353,145 @@ mod tests {
             "operator-typed `Custom(\"cron\")` must NOT collide with the \
              kernel's cron-fire SessionId after sanitize"
         );
+    }
+
+    // ── Multi-agent group routing (#5323) ──
+
+    #[test]
+    fn best_alias_match_picks_unique_winner() {
+        let a = AgentId::new();
+        let b = AgentId::new();
+        let candidates = vec![
+            (a, vec![r"(?i)\bfandango\b".to_string()]),
+            (b, vec![r"(?i)\bambrogio\b".to_string()]),
+        ];
+        // A non-default agent's alias routes to that agent, not the default.
+        assert_eq!(best_alias_match("ambrogio, ayúdame", &candidates), Some(b));
+        assert_eq!(best_alias_match("oye fandango", &candidates), Some(a));
+        // No alias matches -> defer to the binding/default chain.
+        assert_eq!(best_alias_match("hello there", &candidates), None);
+    }
+
+    #[test]
+    fn best_alias_match_tie_and_single_yield_none() {
+        let a = AgentId::new();
+        let b = AgentId::new();
+        // Both agents match -> ambiguous -> None (deterministic regardless of
+        // candidate order).
+        let tie = vec![
+            (a, vec![r"(?i)\bhelp\b".to_string()]),
+            (b, vec![r"(?i)\bhelp\b".to_string()]),
+        ];
+        assert_eq!(best_alias_match("i need help", &tie), None);
+        let tie_rev = vec![
+            (b, vec![r"(?i)\bhelp\b".to_string()]),
+            (a, vec![r"(?i)\bhelp\b".to_string()]),
+        ];
+        assert_eq!(best_alias_match("i need help", &tie_rev), None);
+        // Fewer than two candidates -> nothing to disambiguate.
+        let single = vec![(a, vec![r"(?i)\bhelp\b".to_string()])];
+        assert_eq!(best_alias_match("i need help", &single), None);
+    }
+
+    #[test]
+    fn build_thread_key_falls_back_to_chat_id_without_topic() {
+        let mut msg = group_thread_message("topic-1", false);
+        let k = build_thread_key(&msg).expect("key");
+        assert_eq!(k.thread, "topic-1");
+        assert_eq!(k.chat_id.as_deref(), Some("u1"));
+        // A topic-less group still gets a stable claim keyed by chat id.
+        msg.thread_id = None;
+        let k2 = build_thread_key(&msg).expect("key");
+        assert_eq!(k2.thread, "u1");
+    }
+
+    #[test]
+    fn build_thread_key_carries_account_and_peer() {
+        let mut msg = group_thread_message("t", false);
+        msg.metadata
+            .insert("account_id".into(), serde_json::json!("acct-1"));
+        msg.metadata
+            .insert(SENDER_USER_ID_KEY.into(), serde_json::json!("peer-9"));
+        let k = build_thread_key(&msg).expect("key");
+        assert_eq!(k.account_id.as_deref(), Some("acct-1"));
+        assert_eq!(k.peer_id.as_deref(), Some("peer-9"));
+    }
+
+    #[tokio::test]
+    async fn resolve_addressed_agent_routes_explicit_mention() {
+        let fandango = AgentId::new();
+        let ambrogio = AgentId::new();
+        let handle: std::sync::Arc<dyn ChannelBridgeHandle> = std::sync::Arc::new(MockHandle {
+            agents: Mutex::new(vec![
+                (fandango, "fandango".to_string()),
+                (ambrogio, "ambrogio".to_string()),
+            ]),
+        });
+        let mut msg = group_thread_message("t", false);
+        msg.metadata
+            .insert("mention_names".into(), serde_json::json!(["ambrogio"]));
+        // @ambrogio routes to ambrogio even though it is not the default.
+        assert_eq!(resolve_addressed_agent(&msg, &handle).await, Some(ambrogio));
+    }
+
+    #[tokio::test]
+    async fn stale_holder_loses_claim_when_channel_ineligible() {
+        // A holds the thread, A's allowlist is narrowed to exclude slack → B must take over rather than being suppressed (#5323).
+        struct AllowlistHandle {
+            lists: std::collections::HashMap<AgentId, Vec<String>>,
+        }
+        #[async_trait]
+        impl ChannelBridgeHandle for AllowlistHandle {
+            async fn send_message(&self, _a: AgentId, m: &str) -> Result<String, String> {
+                Ok(m.to_string())
+            }
+            async fn find_agent_by_name(&self, _n: &str) -> Result<Option<AgentId>, String> {
+                Ok(None)
+            }
+            async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String> {
+                Ok(vec![])
+            }
+            async fn agent_channel_allowlist(&self, id: AgentId) -> Vec<String> {
+                self.lists.get(&id).cloned().unwrap_or_default()
+            }
+            async fn spawn_agent_by_name(&self, _manifest_name: &str) -> Result<AgentId, String> {
+                Err("spawn not implemented in mock".to_string())
+            }
+            fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {}
+        }
+
+        let a = AgentId::new();
+        let b = AgentId::new();
+        let ov = ChannelOverrides::default();
+        let msg = group_thread_message("t1", false);
+        let key = build_thread_key(&msg).expect("key");
+
+        // Control: A still allows slack -> B is suppressed (A keeps the claim).
+        let eligible: std::sync::Arc<dyn ChannelBridgeHandle> = {
+            let mut lists = std::collections::HashMap::new();
+            lists.insert(a, vec!["slack".to_string()]);
+            std::sync::Arc::new(AllowlistHandle { lists })
+        };
+        let reg = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
+        let _ = reg.decide(key.clone(), a, false);
+        assert!(
+            !conversation_ownership_allows(&msg, &eligible, &reg, Some(&ov), b, false).await,
+            "eligible holder must keep its claim against a non-addressed candidate"
+        );
+        assert_eq!(reg.current_holder(&key), Some(a));
+
+        // Stale: A no longer allows slack -> B takes over.
+        let stale: std::sync::Arc<dyn ChannelBridgeHandle> = {
+            let mut lists = std::collections::HashMap::new();
+            lists.insert(a, vec!["discord".to_string()]);
+            std::sync::Arc::new(AllowlistHandle { lists })
+        };
+        let reg2 = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
+        let _ = reg2.decide(key.clone(), a, false);
+        assert!(
+            conversation_ownership_allows(&msg, &stale, &reg2, Some(&ov), b, false).await,
+            "eligible candidate must take over a stale holder's claim"
+        );
+        assert_eq!(reg2.current_holder(&key), Some(b));
     }
 }

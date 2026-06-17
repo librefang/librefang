@@ -792,6 +792,8 @@ impl LibreFangKernel {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: echo_policy,
+
+            ..Default::default()
         };
 
         let start = std::time::Instant::now();

@@ -116,6 +116,8 @@ async fn generate_search_queries(
         session_id: None,
         step_id: None,
         reasoning_echo_policy,
+
+        ..Default::default()
     };
 
     let response =

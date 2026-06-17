@@ -1404,6 +1404,60 @@ class TelegramAdapter(SidecarAdapter):
             metadata={"user_id": str(uid), "sender_user_id": str(uid)},
         )
 
+    @staticmethod
+    def _extract_mentions(message: dict) -> list:
+        """`@`-mention handles in this message (#5323).
+
+        Telegram surfaces ``@username`` tokens as ``mention`` entities and
+        username-less user references as ``text_mention``. Entity offsets are
+        UTF-16 code-unit indices, so slice the text in UTF-16 to stay correct
+        when emoji or other astral characters precede the mention. The bridge
+        resolves these against agent names/handles to route a group message to
+        a specific non-default agent.
+        """
+        txt = message.get("text")
+        ents = message.get("entities")
+        if not isinstance(txt, str):
+            txt = message.get("caption")
+            ents = message.get("caption_entities")
+        if not isinstance(txt, str) or not isinstance(ents, list):
+            return []
+        utf16 = txt.encode("utf-16-le")
+        names: list = []
+        for e in ents:
+            etype = e.get("type")
+            if etype == "mention":
+                off, ln = e.get("offset"), e.get("length")
+                if isinstance(off, int) and isinstance(ln, int):
+                    frag = utf16[off * 2:(off + ln) * 2].decode(
+                        "utf-16-le", "ignore")
+                    handle = frag.lstrip("@").strip()
+                    if handle and handle not in names:
+                        names.append(handle)
+            elif etype == "text_mention":
+                uname = (e.get("user") or {}).get("username")
+                if uname and uname not in names:
+                    names.append(uname)
+        return names
+
+    def _message_metadata(self, message: dict, user_id: str,
+                          is_group: bool):
+        """Metadata that lets the bridge route and scope per-conversation.
+
+        ``sender_user_id`` is the individual sender (the group ``channel_id``
+        is the chat, not the user), so the conversation-ownership registry can
+        key per peer. ``mention_names`` carries any ``@``-mention so a specific
+        agent can be addressed in a multi-agent group (#5323). Returns ``None``
+        when there is nothing to attach so DMs keep their lean envelope.
+        """
+        meta: dict = {}
+        if is_group:
+            meta["sender_user_id"] = user_id
+        mentions = self._extract_mentions(message)
+        if mentions:
+            meta["mention_names"] = mentions
+        return meta or None
+
     def _update_to_event(self, update: dict):
         callback = update.get("callback_query")
         if callback:
@@ -1429,6 +1483,7 @@ class TelegramAdapter(SidecarAdapter):
             return None
         content = self._apply_reply(content, message)
         thread = message.get("message_thread_id")
+        is_group = chat.get("type") in ("group", "supergroup")
         return protocol.message(
             user_id=user_id,
             user_name=name,
@@ -1436,9 +1491,10 @@ class TelegramAdapter(SidecarAdapter):
             message_id=str(message.get("message_id", "")),
             channel_id=str(chat_id),
             username=username,
-            is_group=chat.get("type") in ("group", "supergroup"),
+            is_group=is_group,
             thread_id=str(thread) if thread is not None else None,
             platform="telegram",
+            metadata=self._message_metadata(message, user_id, is_group),
         )
 
     def _poll_once(self, emit, state: dict) -> None:

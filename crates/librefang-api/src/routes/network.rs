@@ -1419,6 +1419,22 @@ pub async fn mcp_http(
         .and_then(|s| s.parse::<librefang_types::agent::AgentId>().ok())
         .and_then(|id| state.kernel.agent_registry().get(id));
 
+    // #6117: inbound peer scope of the turn that spawned the subprocess driver,
+    // forwarded by `claude-code`'s `write_mcp_config` on the bridge connection.
+    // Rehydrated into `ToolExecContext` below so `channel_send` rejects a
+    // cross-chat recipient mismatch on the same channel. External MCP clients
+    // that omit these headers run unguarded (the guard no-ops on `None`).
+    let header_str = |name: &str| -> Option<String> {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+            .filter(|s| !s.is_empty())
+    };
+    let current_peer_jid = header_str("x-librefang-current-peer-jid");
+    let current_channel = header_str("x-librefang-current-channel");
+    let current_chat_id = header_str("x-librefang-current-chat-id");
+
     // Check if this is a tools/call that needs real execution
     let method = request["method"].as_str().unwrap_or("");
     if method == "tools/call" {
@@ -1517,9 +1533,9 @@ pub async fn mcp_http(
             docker_opt,
             Some(state.kernel.processes()),
             None, // process_registry (network bridge doesn't run agent tools)
-            None, // sender_id (MCP HTTP has no sender context)
-            None, // channel
-            None, // chat_id (MCP HTTP has no conversation context either)
+            current_peer_jid.as_deref(), // sender_id (X-LibreFang-Current-Peer-Jid, #6117)
+            current_channel.as_deref(), // channel (X-LibreFang-Current-Channel, #6117)
+            current_chat_id.as_deref(), // chat_id (X-LibreFang-Current-Chat-Id, #6117)
             None, // checkpoint_manager (network bridge doesn't run agent tools)
             None, // interrupt (MCP HTTP calls have no session-scoped cancellation)
             None, // session_id (MCP HTTP is not tied to a live session)

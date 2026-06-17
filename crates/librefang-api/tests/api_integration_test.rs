@@ -2668,6 +2668,98 @@ async fn test_mcp_http_rehydrates_caller_context_from_agent_header() {
     );
 }
 
+/// #6117: a `channel_send` call routed through the `/mcp` bridge must honour the cross-chat guard using the peer scope forwarded on the bridge headers (`X-LibreFang-Current-Peer-Jid` / `-Channel` / `-Chat-Id`).
+/// Before the fix `mcp_http` hardcoded sender_id/channel/chat_id to `None`, so the guard had no peer to validate against and a mis-targeted recipient leaked.
+const MCP_CHANNEL_MANIFEST: &str = r#"
+name = "mcp-channel-agent"
+version = "0.1.0"
+description = "Integration test agent for /mcp channel_send guard"
+author = "test"
+module = "builtin:chat"
+
+[model]
+provider = "ollama"
+model = "test-model"
+system_prompt = "You are a test agent."
+
+[capabilities]
+tools = ["channel_send"]
+"#;
+
+async fn call_mcp_channel_send(
+    server: &TestServer,
+    agent_id: &str,
+    recipient: &str,
+    peer_headers: Option<(&str, &str)>,
+) -> serde_json::Value {
+    let client = reqwest::Client::new();
+    let mut req = client
+        .post(format!("{}/mcp", server.base_url))
+        .header("X-LibreFang-Agent-Id", agent_id)
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "channel_send",
+                "arguments": {"channel": "whatsapp", "recipient": recipient, "message": "hi"},
+            },
+        }));
+    if let Some((peer, channel)) = peer_headers {
+        req = req
+            .header("X-LibreFang-Current-Peer-Jid", peer)
+            .header("X-LibreFang-Current-Channel", channel);
+    }
+    let resp = req.send().await.expect("mcp request send");
+    assert_eq!(resp.status(), 200);
+    resp.json().await.expect("mcp body parse")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_mcp_http_channel_send_cross_chat_guard_uses_peer_headers() {
+    let server = start_test_server().await;
+    let client = reqwest::Client::new();
+    let spawn = client
+        .post(format!("{}/api/agents", server.base_url))
+        .json(&serde_json::json!({"manifest_toml": MCP_CHANNEL_MANIFEST}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(spawn.status(), 201);
+    let agent_id = spawn.json::<serde_json::Value>().await.unwrap()["agent_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Inbound turn from `owner-jid` on `whatsapp`; the model targets a stranger
+    // on the SAME channel → the guard must reject it before any send.
+    let body = call_mcp_channel_send(
+        &server,
+        &agent_id,
+        "stranger-jid",
+        Some(("owner-jid", "whatsapp")),
+    )
+    .await;
+    let content = body["result"]["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        body["result"]["isError"].as_bool().unwrap_or(false),
+        "cross-chat send must be an error: {content}"
+    );
+    assert!(
+        content.contains("Cross-chat dispatch is forbidden"),
+        "expected the cross-chat guard message, got: {content}"
+    );
+
+    // Same mis-targeted send WITHOUT peer headers (e.g. an external MCP client):
+    // the guard no-ops, so the failure — if any — must NOT be the guard's.
+    let body = call_mcp_channel_send(&server, &agent_id, "stranger-jid", None).await;
+    let content = body["result"]["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        !content.contains("Cross-chat dispatch is forbidden"),
+        "without peer headers the guard must not fire: {content}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_mcp_http_invalid_agent_header_falls_back_to_unauthenticated() {
     // An unparseable or unknown agent ID must degrade gracefully to
