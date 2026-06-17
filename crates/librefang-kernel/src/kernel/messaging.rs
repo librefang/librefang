@@ -708,7 +708,9 @@ impl LibreFangKernel {
         let usage_record = librefang_memory::usage::UsageRecord {
             agent_id,
             provider: billed_provider,
-            model: model.clone(),
+            // #6134: honour `actual_model` so a driver that resolved its own
+            // model (e.g. codex-cli) records the model it actually ran.
+            model: result.actual_model.clone().unwrap_or_else(|| model.clone()),
             input_tokens: result.total_usage.input_tokens,
             output_tokens: result.total_usage.output_tokens,
             cost_usd: cost,
@@ -2983,7 +2985,9 @@ impl LibreFangKernel {
                     let usage_record = librefang_memory::usage::UsageRecord {
                         agent_id,
                         provider: billed_provider,
-                        model: model.clone(),
+                        // #6134: honour `actual_model` so a driver that resolved its own
+                        // model (e.g. codex-cli) records the model it actually ran.
+                        model: result.actual_model.clone().unwrap_or_else(|| model.clone()),
                         input_tokens: result.total_usage.input_tokens,
                         output_tokens: result.total_usage.output_tokens,
                         cost_usd: cost,

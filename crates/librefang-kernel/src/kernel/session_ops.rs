@@ -1796,6 +1796,7 @@ mod session_summary_tests {
                     cache_read_input_tokens: 0,
                 },
                 actual_provider: None,
+                actual_model: None,
             })
         }
 

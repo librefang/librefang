@@ -461,6 +461,7 @@ async fn test_summary_engine_compact_called_once_on_threshold_cross() {
                     ..Default::default()
                 },
                 actual_provider: None,
+                actual_model: None,
             })
         }
     }

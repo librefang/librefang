@@ -1051,6 +1051,7 @@ fn agent_loop_result_actual_provider_can_be_set() {
     // when this is None, and bills the named provider when set.
     let r = AgentLoopResult {
         actual_provider: Some("anthropic-backup".into()),
+        actual_model: None,
         ..AgentLoopResult::default()
     };
     assert_eq!(r.actual_provider.as_deref(), Some("anthropic-backup"));

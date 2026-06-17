@@ -54,6 +54,9 @@ pub(super) struct FinalizeEndTurnResultData {
     /// Provider slot that actually served the LLM request (#4807 nit
     /// 10). Carried through to [`AgentLoopResult::actual_provider`].
     pub(super) actual_provider: Option<String>,
+    /// Model the last LLM call actually ran (#6134). Carried through to
+    /// [`AgentLoopResult::actual_model`].
+    pub(super) actual_model: Option<String>,
 }
 
 pub(super) struct EndTurnRetryContext<'a> {
@@ -115,6 +118,7 @@ pub(super) fn build_silent_agent_loop_result(
         skill_evolution_suggested: false,
         owner_notice: None,
         actual_provider: None,
+        actual_model: None,
     }
 }
 
@@ -381,6 +385,7 @@ pub(super) async fn finalize_successful_end_turn(
         skill_evolution_suggested: tool_call_count >= 5,
         owner_notice: end_turn.owner_notice.clone(),
         actual_provider: end_turn.actual_provider,
+        actual_model: end_turn.actual_model,
     })
 }
 

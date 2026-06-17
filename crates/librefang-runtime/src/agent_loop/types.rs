@@ -240,6 +240,13 @@ pub struct AgentLoopResult {
     /// (the call hit the originally nominated provider or no slot at
     /// all is identifiable — e.g. CLI drivers).
     pub actual_provider: Option<String>,
+    /// The model the last LLM call actually ran, when it differs from the
+    /// requested model id (#6134). Carried up from
+    /// [`librefang_llm_driver::CompletionResponse::actual_model`]; the kernel's
+    /// `UsageRecord` construction honours it so metering reflects the model the
+    /// provider really used (e.g. a `codex-cli` CLI that resolves its own
+    /// model). `None` means "use the requested model".
+    pub actual_model: Option<String>,
 }
 
 #[derive(Debug, Clone)]

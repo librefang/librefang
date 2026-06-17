@@ -897,6 +897,7 @@ impl ChatGptDriver {
             tool_calls,
             usage,
             actual_provider: None,
+            actual_model: None,
         })
     }
 

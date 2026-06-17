@@ -150,6 +150,7 @@ impl LibreFangKernel {
             skill_evolution_suggested: false,
             owner_notice: None,
             actual_provider: None,
+            actual_model: None,
         })
     }
 
@@ -226,6 +227,7 @@ impl LibreFangKernel {
             skill_evolution_suggested: false,
             owner_notice: None,
             actual_provider: None,
+            actual_model: None,
         })
     }
 

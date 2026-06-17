@@ -175,6 +175,83 @@ impl CodexCliDriver {
         }
     }
 
+    /// Strip ANSI CSI escape sequences (e.g. `\x1b[1m` … `\x1b[0m`) from a
+    /// line. codex styles its banner keys with bold when it thinks the stream
+    /// is a terminal; we read it from a pipe where that detection is usually
+    /// off, but strip defensively so a `--color always` or future detection
+    /// change can't break model extraction.
+    fn strip_ansi(line: &str) -> String {
+        let bytes = line.as_bytes();
+        let mut out = String::with_capacity(line.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == 0x1b {
+                // ESC: skip an optional '[' then everything up to and including
+                // the final byte in 0x40..=0x7e (the CSI terminator, e.g. 'm').
+                i += 1;
+                if i < bytes.len() && bytes[i] == b'[' {
+                    i += 1;
+                    while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
+                        i += 1;
+                    }
+                    if i < bytes.len() {
+                        i += 1; // consume the terminator byte
+                    }
+                }
+                continue;
+            }
+            // `line` is valid UTF-8 and ANSI bytes are ASCII; copy this byte's
+            // full char to preserve multi-byte content (e.g. workdir paths).
+            let ch_len = line[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+            out.push_str(&line[i..i + ch_len]);
+            i += ch_len;
+        }
+        out
+    }
+
+    /// Extract the model codex actually resolved, from its stderr startup
+    /// banner.
+    ///
+    /// `codex exec` prints a human-readable preamble to **stderr** (even when
+    /// piped to a non-TTY), with a `model:` line, e.g.:
+    ///
+    /// ```text
+    /// OpenAI Codex v0.114.0 (research preview)
+    /// --------
+    /// workdir: /path/to/repo
+    /// model: gpt-5.3-codex
+    /// provider: openai
+    /// --------
+    /// ```
+    ///
+    /// The `--json` event stream carries no model field (confirmed against
+    /// codex-rs `exec_events.rs`; the request to add one was closed
+    /// unimplemented), so the banner is the only authoritative source for the
+    /// model the CLI actually used (librefang/librefang#6134). The summary is
+    /// emitted by codex's `print_config_summary` via `eprintln!`, so it always
+    /// lands on stderr regardless of `--json`.
+    ///
+    /// Tolerant by design: strips ANSI styling, scans for the first line whose
+    /// key is `model` (case-insensitive), returns the trimmed value, and
+    /// yields `None` on any banner shape we don't recognise so the caller can
+    /// fall back to the requested model id. Never panics, never assumes a fixed
+    /// line position.
+    fn parse_model_from_banner(stderr: &str) -> Option<String> {
+        for line in stderr.lines() {
+            let clean = Self::strip_ansi(line);
+            let trimmed = clean.trim();
+            if let Some((key, value)) = trimmed.split_once(':') {
+                if key.trim().eq_ignore_ascii_case("model") {
+                    let model = value.trim();
+                    if !model.is_empty() {
+                        return Some(model.to_string());
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Apply security env filtering to a command.
     fn apply_env_filter(cmd: &mut tokio::process::Command) {
         for key in SENSITIVE_ENV_EXACT {
@@ -257,6 +334,22 @@ impl LlmDriver for CodexCliDriver {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let text = stdout.trim().to_string();
 
+        // Recover the model codex actually resolved from its stderr startup
+        // banner (#6134). codex's `--json` events carry no model field, but the
+        // banner's `model:` line does — and stderr was already piped above.
+        // Stamp it into `actual_model` so kernel-side metering records the real
+        // model rather than the requested id. Degrade safely: fall back to the
+        // requested model id when the banner can't be parsed so attribution is
+        // never empty and the call never breaks.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let resolved_model = match Self::parse_model_from_banner(&stderr) {
+            Some(banner_model) => {
+                debug!(requested = %request.model, actual = %banner_model, "Codex CLI resolved model");
+                banner_model
+            }
+            None => Self::model_flag(&request.model).unwrap_or_else(|| request.model.clone()),
+        };
+
         Ok(CompletionResponse {
             content: vec![ContentBlock::Text {
                 text,
@@ -270,6 +363,7 @@ impl LlmDriver for CodexCliDriver {
                 ..Default::default()
             },
             actual_provider: None,
+            actual_model: Some(resolved_model),
         })
     }
 
@@ -372,6 +466,52 @@ mod tests {
             CodexCliDriver::model_flag("custom-model"),
             Some("custom-model".to_string())
         );
+    }
+
+    #[test]
+    fn test_parse_model_from_banner_extracts_model() {
+        // Verbatim shape of codex exec's stderr startup banner. The `model:`
+        // line sits mid-banner, so extraction must not depend on line position.
+        let banner = "OpenAI Codex v0.114.0 (research preview)\n\
+--------\n\
+workdir: /Users/codex-user/Documents/repo\n\
+model: gpt-5.3-codex\n\
+provider: openai\n\
+approval: never\n\
+sandbox: read-only\n\
+--------\n";
+        assert_eq!(
+            CodexCliDriver::parse_model_from_banner(banner),
+            Some("gpt-5.3-codex".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_model_from_banner_strips_ansi() {
+        // codex bolds the banner keys with ANSI when it thinks the stream is a
+        // terminal; the parser must see through `\x1b[1mmodel:\x1b[0m`.
+        let banner = "\u{1b}[1mworkdir:\u{1b}[0m /repo\n\
+\u{1b}[1mmodel:\u{1b}[0m o4-mini\n\
+\u{1b}[1mprovider:\u{1b}[0m openai\n";
+        assert_eq!(
+            CodexCliDriver::parse_model_from_banner(banner),
+            Some("o4-mini".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_model_from_banner_absent_returns_none() {
+        // No `model:` line → None, so the caller falls back to the requested
+        // model id rather than fabricating one.
+        let no_model = "OpenAI Codex v0.114.0\n\
+--------\n\
+workdir: /repo\n\
+provider: openai\n\
+--------\n";
+        assert_eq!(CodexCliDriver::parse_model_from_banner(no_model), None);
+        assert_eq!(CodexCliDriver::parse_model_from_banner(""), None);
+        // A `model:` key with an empty value is also rejected.
+        assert_eq!(CodexCliDriver::parse_model_from_banner("model: \n"), None);
     }
 
     #[test]

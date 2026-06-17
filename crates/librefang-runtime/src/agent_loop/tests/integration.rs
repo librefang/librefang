@@ -53,6 +53,7 @@ impl LlmDriver for EmptyAfterToolUseDriver {
                     ..Default::default()
                 },
                 actual_provider: None,
+                actual_model: None,
             })
         } else {
             // Second call: LLM returns EndTurn with EMPTY text (the bug)
@@ -66,6 +67,7 @@ impl LlmDriver for EmptyAfterToolUseDriver {
                     ..Default::default()
                 },
                 actual_provider: None,
+                actual_model: None,
             })
         }
     }
@@ -109,6 +111,7 @@ impl LlmDriver for FailThenTextDriver {
                     ..Default::default()
                 },
                 actual_provider: None,
+                actual_model: None,
             })
         } else {
             Ok(CompletionResponse {
@@ -124,6 +127,7 @@ impl LlmDriver for FailThenTextDriver {
                     ..Default::default()
                 },
                 actual_provider: None,
+                actual_model: None,
             })
         }
     }
@@ -155,6 +159,7 @@ impl LlmDriver for AlwaysFailingToolDriver {
                 ..Default::default()
             },
             actual_provider: None,
+            actual_model: None,
         })
     }
 }
@@ -176,6 +181,7 @@ impl LlmDriver for EmptyMaxTokensDriver {
                 ..Default::default()
             },
             actual_provider: None,
+            actual_model: None,
         })
     }
 }
@@ -199,6 +205,7 @@ impl LlmDriver for NormalDriver {
                 ..Default::default()
             },
             actual_provider: None,
+            actual_model: None,
         })
     }
 }
@@ -224,6 +231,7 @@ impl LlmDriver for DirectiveDriver {
                 ..Default::default()
             },
             actual_provider: None,
+            actual_model: None,
         })
     }
 }
@@ -272,6 +280,7 @@ impl LlmDriver for NotifyOwnerThenMaxTokensDriver {
                     ..Default::default()
                 },
                 actual_provider: Some("fallback-a".to_string()),
+                actual_model: None,
             }),
             _ if self.final_tool_calls => Ok(CompletionResponse {
                 content: vec![
@@ -304,6 +313,7 @@ impl LlmDriver for NotifyOwnerThenMaxTokensDriver {
                     ..Default::default()
                 },
                 actual_provider: Some("fallback-b".to_string()),
+                actual_model: Some("actual-model-x".to_string()),
             }),
             _ => Ok(CompletionResponse {
                 content: vec![ContentBlock::Text {
@@ -318,6 +328,7 @@ impl LlmDriver for NotifyOwnerThenMaxTokensDriver {
                     ..Default::default()
                 },
                 actual_provider: Some("fallback-b".to_string()),
+                actual_model: Some("actual-model-x".to_string()),
             }),
         }
     }
@@ -832,6 +843,8 @@ async fn test_max_tokens_owner_notice_and_actual_provider_survive_non_streaming(
         Some("[NOTIFY] handoff_needed: Fallback provider needs owner visibility.")
     );
     assert_eq!(result.actual_provider.as_deref(), Some("fallback-b"));
+    // #6134: the model the call actually ran threads through to AgentLoopResult.
+    assert_eq!(result.actual_model.as_deref(), Some("actual-model-x"));
 }
 
 #[tokio::test]
@@ -964,6 +977,7 @@ impl LlmDriver for MultiToolCycleDriver {
                     ..Default::default()
                 },
                 actual_provider: None,
+                actual_model: None,
             })
         } else {
             Ok(CompletionResponse {
@@ -979,6 +993,7 @@ impl LlmDriver for MultiToolCycleDriver {
                     ..Default::default()
                 },
                 actual_provider: None,
+                actual_model: None,
             })
         }
     }
@@ -1004,6 +1019,7 @@ impl LlmDriver for FoldSummaryDriver {
                 ..Default::default()
             },
             actual_provider: None,
+            actual_model: None,
         })
     }
 }
@@ -1418,6 +1434,8 @@ async fn test_streaming_max_tokens_owner_notice_and_actual_provider_survive_resu
         Some("[NOTIFY] handoff_needed: Fallback provider needs owner visibility.")
     );
     assert_eq!(result.actual_provider.as_deref(), Some("fallback-b"));
+    // #6134: the model the call actually ran threads through to AgentLoopResult.
+    assert_eq!(result.actual_model.as_deref(), Some("actual-model-x"));
     let mut events = Vec::new();
     while let Ok(event) = rx.try_recv() {
         events.push(event);
@@ -1898,6 +1916,7 @@ impl LlmDriver for EmptyThenNormalDriver {
                     ..Default::default()
                 },
                 actual_provider: None,
+                actual_model: None,
             })
         } else {
             // Second call (retry): normal response
@@ -1914,6 +1933,7 @@ impl LlmDriver for EmptyThenNormalDriver {
                     ..Default::default()
                 },
                 actual_provider: None,
+                actual_model: None,
             })
         }
     }
@@ -1936,6 +1956,7 @@ impl LlmDriver for AlwaysEmptyDriver {
                 ..Default::default()
             },
             actual_provider: None,
+            actual_model: None,
         })
     }
 }
@@ -2268,6 +2289,7 @@ impl LlmDriver for BatchFileReadDriver {
                     ..Default::default()
                 },
                 actual_provider: None,
+                actual_model: None,
             })
         } else {
             Ok(CompletionResponse {
@@ -2283,6 +2305,7 @@ impl LlmDriver for BatchFileReadDriver {
                     ..Default::default()
                 },
                 actual_provider: None,
+                actual_model: None,
             })
         }
     }

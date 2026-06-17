@@ -614,6 +614,7 @@ fn convert_response(resp: GeminiResponse) -> Result<CompletionResponse, LlmError
         tool_calls,
         usage,
         actual_provider: None,
+        actual_model: None,
     })
 }
 
@@ -883,6 +884,7 @@ pub(crate) async fn stream_gemini_sse(
         tool_calls,
         usage,
         actual_provider: None,
+        actual_model: None,
     })
 }
 
@@ -1422,6 +1424,7 @@ impl LlmDriver for GeminiDriver {
                 tool_calls,
                 usage,
                 actual_provider: None,
+                actual_model: None,
             });
         }
 

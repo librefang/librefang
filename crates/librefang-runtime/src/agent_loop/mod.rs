@@ -685,6 +685,9 @@ pub async fn run_agent_loop(
     // and stamps the matching `UsageRecord.provider` so billing rolls
     // up against the slot that did the work.
     let mut last_actual_provider: Option<String> = None;
+    // Model the last LLM call actually ran (#6134) — threaded into
+    // `AgentLoopResult.actual_model` so the kernel records the real model.
+    let mut last_actual_model: Option<String> = None;
     // Accumulate text content from intermediate tool_use iterations. A turn
     // that yields a tool_use response may also carry user-facing text (e.g.
     // "Looking that up for you..." before a memory_store call). Without this
@@ -1141,6 +1144,12 @@ pub async fn run_agent_loop(
         if let Some(ref p) = response.actual_provider {
             last_actual_provider = Some(p.clone());
         }
+        // Track the model the call actually ran (#6134) — e.g. a CLI driver
+        // that resolves its own model. Stays None for drivers that honour the
+        // requested model, so billing falls back to the nominated model.
+        if let Some(ref m) = response.actual_model {
+            last_actual_model = Some(m.clone());
+        }
 
         // Snapshot prompt tokens for the next iteration's should_compress check.
         // This is the per-turn input cost, NOT a running sum — we deliberately
@@ -1406,6 +1415,7 @@ pub async fn run_agent_loop(
                         new_messages_start,
                         owner_notice: pending_owner_notice.take(),
                         actual_provider: last_actual_provider.clone(),
+                        actual_model: last_actual_model.clone(),
                     },
                 )
                 .await;
@@ -1870,6 +1880,7 @@ pub async fn run_agent_loop(
                         new_messages_start,
                         owner_notice: std::mem::take(&mut pending_owner_notice),
                         actual_provider: last_actual_provider.clone(),
+                        actual_model: last_actual_model.clone(),
                     });
                 }
                 // Model hit token limit — add partial response and continue

@@ -416,6 +416,18 @@ pub struct CompletionResponse {
     /// on inner leaf drivers; populated by the outermost chain
     /// wrapper. See librefang/librefang#4807 review nit 10.
     pub actual_provider: Option<String>,
+    /// The model the provider actually used, when it differs from the
+    /// requested model id.
+    ///
+    /// Most drivers honour the requested model verbatim and leave this
+    /// `None`, so billing records the nominated model. Some drivers delegate
+    /// model selection to an external process that resolves its own model —
+    /// e.g. the `codex-cli` driver, where the CLI may run a different model
+    /// than the one requested (librefang/librefang#6134). Those drivers set
+    /// this to the model the call actually ran, and the kernel's
+    /// `UsageRecord` construction honours it so metering reflects reality
+    /// rather than the nominated id. `None` means "use the requested model".
+    pub actual_model: Option<String>,
 }
 
 impl CompletionResponse {
@@ -868,6 +880,7 @@ mod tests {
             tool_calls: vec![],
             usage: TokenUsage::default(),
             actual_provider: None,
+            actual_model: None,
         };
         assert_eq!(response.text(), "Hello world!");
     }
@@ -1010,6 +1023,7 @@ mod tests {
                         ..Default::default()
                     },
                     actual_provider: None,
+                    actual_model: None,
                 })
             }
         }
@@ -1078,6 +1092,7 @@ mod tests {
                     tool_calls: vec![],
                     usage: TokenUsage::default(),
                     actual_provider: None,
+                    actual_model: None,
                 })
             }
         }

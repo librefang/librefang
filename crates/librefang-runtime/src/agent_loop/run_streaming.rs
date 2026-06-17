@@ -337,6 +337,8 @@ pub async fn run_agent_loop_streaming(
     // Track the slot that actually served the most recent LLM call (#4807
     // review nit 10). See run_agent_loop for rationale.
     let mut last_actual_provider: Option<String> = None;
+    // Model the last LLM call actually ran (#6134) — see run_agent_loop.
+    let mut last_actual_model: Option<String> = None;
     // Accumulated text from intermediate tool_use iterations — see the
     // matching declaration in run_agent_loop for full rationale.
     let mut accumulated_text = String::new();
@@ -860,6 +862,10 @@ pub async fn run_agent_loop_streaming(
         if let Some(ref p) = response.actual_provider {
             last_actual_provider = Some(p.clone());
         }
+        // Track the model the call actually ran (#6134).
+        if let Some(ref m) = response.actual_model {
+            last_actual_model = Some(m.clone());
+        }
 
         // Snapshot prompt tokens for the next iteration's should_compress check.
         // Some drivers (gemini_cli, codex_cli) return input_tokens = 0.  Fall
@@ -1114,6 +1120,7 @@ pub async fn run_agent_loop_streaming(
                         new_messages_start,
                         owner_notice: pending_owner_notice.take(),
                         actual_provider: last_actual_provider.clone(),
+                        actual_model: last_actual_model.clone(),
                     },
                 )
                 .await;
@@ -1587,6 +1594,7 @@ pub async fn run_agent_loop_streaming(
                         new_messages_start,
                         owner_notice: std::mem::take(&mut pending_owner_notice),
                         actual_provider: last_actual_provider.clone(),
+                        actual_model: last_actual_model.clone(),
                     });
                 }
                 let text = response.text();
