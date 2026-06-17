@@ -25,6 +25,7 @@ export {
   listAgentSessions,
   listAgentTemplates,
   listPromptVersions,
+  listPromptsOverview,
   listExperiments,
   getExperimentMetrics,
   // analytics / usage / budget
