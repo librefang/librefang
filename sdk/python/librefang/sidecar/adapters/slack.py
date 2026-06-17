@@ -246,6 +246,26 @@ def parse_slack_event(
         metadata["was_mentioned"] = True
     if account_id is not None:
         metadata["account_id"] = account_id
+    # Named mentions so the bridge can route to a specific non-default agent
+    # in a multi-agent channel (#5323). Slack encodes mentions as
+    # `<@USERID>` or `<@USERID|handle>`; surface both the id and the optional
+    # handle and let the bridge match them against agent names/handles.
+    mention_names: list[str] = []
+    idx = 0
+    while True:
+        start = text.find("<@", idx)
+        if start == -1:
+            break
+        end = text.find(">", start)
+        if end == -1:
+            break
+        for part in text[start + 2:end].split("|", 1):
+            handle = part.strip()
+            if handle and handle not in mention_names:
+                mention_names.append(handle)
+        idx = end + 1
+    if mention_names:
+        metadata["mention_names"] = mention_names
 
     return protocol.message(
         # platform_id is the channel id (D… for DMs, C… for channels,

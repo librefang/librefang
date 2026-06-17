@@ -362,6 +362,24 @@ pub struct CompletionRequest {
     /// wire as `x-librefang-step-id`. `None` for callers that don't
     /// distinguish between steps.
     pub step_id: Option<String>,
+    /// Inbound peer identity for the turn that triggered this LLM call.
+    ///
+    /// Identifies the user / contact whose message the agent is currently responding to (a WhatsApp / Telegram JID, an email address, …).
+    /// Drivers that spawn a subprocess and re-expose LibreFang's tool surface through an MCP bridge (notably `claude-code`) forward it as `x-librefang-current-peer-jid` so the bridge endpoint can rehydrate `ToolExecContext::sender_id` — which `channel_send` uses (as the DM fallback) to reject cross-chat recipient mismatches on the same channel (#6117).
+    /// `None` for out-of-band callers (cron, automation triggers, compaction, routing probes) with no inbound peer scope.
+    pub sender_user_id: Option<String>,
+    /// Inbound channel for the turn that triggered this LLM call.
+    ///
+    /// Paired with [`Self::sender_user_id`]: the channel name (`"whatsapp"`, `"telegram"`, `"email"`, …) the peer reached the agent through.
+    /// Forwarded by subprocess drivers as `x-librefang-current-channel` so the `channel_send` guard scopes the cross-chat check to the **same** channel — a different-channel dispatch stays allowed; only intra-channel re-targeting is the cross-chat-leak pattern.
+    /// `None` out-of-band.
+    pub sender_channel: Option<String>,
+    /// Platform conversation id (Telegram chat_id, WhatsApp group jid, …) the inbound turn arrived on.
+    ///
+    /// Distinct from [`Self::sender_user_id`] for **group chats** — there the chat id is the conversation while `sender_user_id` is the individual speaker; they coincide in DMs.
+    /// Forwarded as `x-librefang-current-chat-id` so the bridge can rehydrate `ToolExecContext::chat_id`; the cross-chat guard compares the outbound `recipient` against this value (with `sender_user_id` as DM fallback) so legitimate group replies pass.
+    /// `None` out-of-band.
+    pub sender_chat_id: Option<String>,
     /// How the OpenAI-compat driver should handle `reasoning_content` on
     /// historical assistant turns for this request's model.
     ///
@@ -1016,6 +1034,8 @@ mod tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+
+            ..Default::default()
         };
 
         let response = driver.stream(request, tx).await.unwrap();
@@ -1083,6 +1103,8 @@ mod tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+
+            ..Default::default()
         };
         let err = driver.stream(request, tx).await.unwrap_err();
         assert!(

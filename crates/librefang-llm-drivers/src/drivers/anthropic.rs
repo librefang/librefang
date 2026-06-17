@@ -1700,6 +1700,8 @@ mod tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+
+            ..Default::default()
         };
         let api_request = build_anthropic_request(&request);
         assert_eq!(api_request.tools.len(), 2);
@@ -1742,6 +1744,8 @@ mod tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+
+            ..Default::default()
         };
         let api_request = build_anthropic_request(&request);
         assert!(api_request.tools[0].cache_control.is_none());
@@ -1792,6 +1796,8 @@ mod tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+
+            ..Default::default()
         };
         let api_request = build_anthropic_request(&request);
         // Trailing 3 must carry the marker.
@@ -1846,6 +1852,8 @@ mod tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+
+            ..Default::default()
         };
         let api_request = build_anthropic_request(&request);
         // Last 2 messages carry the marker.
@@ -1897,6 +1905,8 @@ mod tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+
+            ..Default::default()
         };
         let api_request = build_anthropic_request(&request);
         let last = api_request.messages.last().expect("has last message");
@@ -1937,6 +1947,8 @@ mod tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+
+            ..Default::default()
         };
         let api_request = build_anthropic_request(&request);
         let system = api_request.system.expect("system field set");
@@ -1981,6 +1993,8 @@ mod tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+
+            ..Default::default()
         };
         // HTTP-layer header gate.
         assert!(request_uses_1h_cache(&request));
@@ -2027,6 +2041,8 @@ mod tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+
+            ..Default::default()
         };
         assert!(!request_uses_1h_cache(&request));
         let api_request = build_anthropic_request(&request);
@@ -2063,6 +2079,8 @@ mod tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+
+            ..Default::default()
         };
         let api_request = build_anthropic_request(&request);
         let last = api_request.messages.last().expect("has last message");
@@ -2184,6 +2202,8 @@ mod tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+
+            ..Default::default()
         };
         let api_request = build_anthropic_request(&request);
         let mut total = 0usize;
@@ -2278,6 +2298,8 @@ mod tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+
+            ..Default::default()
         };
         let api_request = build_anthropic_request(&request);
         assert!(api_request.tools.is_empty());
@@ -2317,6 +2339,8 @@ mod tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+
+            ..Default::default()
         }
     }
 

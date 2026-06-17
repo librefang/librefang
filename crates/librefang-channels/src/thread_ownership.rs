@@ -8,14 +8,15 @@
 //! @-mention wins, sticky-TTL falls off, etc.). The user sees both agents
 //! reply, contradict each other, and run up cost.
 //!
-//! This module adds an in-memory single-process claim registry keyed
-//! `(channel, thread)` with a TTL. The bridge consults it after routing and
-//! before dispatch, suppressing any agent that isn't the current claim
-//! holder. An explicit @-mention re-claims for the new agent.
+//! This module adds an in-memory single-process claim registry keyed by a `ThreadKey` with a TTL.
+//! The bridge consults it after routing and before dispatch, suppressing any agent that isn't the current claim holder.
+//! An explicit @-mention re-claims for the new agent.
 //!
-//! Multi-process / multi-daemon coordination (sharing the registry across
-//! processes via a forwarder API) is out of scope — see issue #3334. DMs
-//! bypass the registry entirely (no overlap risk by definition).
+//! The key carries more than `(channel, thread)` (#5323): an optional `account_id` keeps two bot accounts on the same channel-type from colliding (multi-tenant), an optional `chat_id` distinguishes two chats that happen to share a forum-topic id, and an optional `peer_id` scopes a claim to one conversational partner so two users talking to two different agents in the same thread keep independent stickiness.
+//! All three extra slots default to `None`, which reproduces the original single-account `(channel, thread)` behaviour byte-for-byte.
+//!
+//! Multi-process / multi-daemon coordination (sharing the registry across processes via a forwarder API) is out of scope — see issue #3334.
+//! DMs bypass the registry unless `conversation_ownership_include_dms` is set on the channel override.
 
 use dashmap::DashMap;
 use librefang_types::agent::AgentId;
@@ -26,21 +27,35 @@ use std::time::{Duration, Instant};
 /// the next agent to dispatch can take ownership.
 pub const DEFAULT_TTL: Duration = Duration::from_secs(300);
 
-/// Identity of a single (channel, thread) pair. Built per-message from the
-/// canonical channel-type slug and the platform's thread identifier.
+/// Identity of one ownership slice. Built per-message from the canonical
+/// channel-type slug, the platform's thread identifier, and — when known —
+/// the bot account, chat, and conversational peer that further narrow it.
+///
+/// `channel` and `thread` are mandatory; the remaining three are `None` on single-account installs and on adapters that do not surface them, which keeps the key equal to the historical `(channel, thread)` pair.
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub struct ThreadKey {
     /// Adapter-qualified channel slug (e.g. `"slack"`, `"discord"`).
     pub channel: String,
-    /// Platform thread identifier (Slack `thread_ts`, Discord thread ID,
-    /// etc.). Empty string is invalid; callers should not invoke the
-    /// registry without a real thread.
+    /// Bot account this message reached, when the adapter is multi-tenant (e.g. one Slack workspace id, one Telegram bot token slug).
+    /// Two accounts on the same channel-type never share a claim.
+    pub account_id: Option<String>,
+    /// Chat / group / DM container id.
+    /// Distinguishes two chats that reuse the same platform-side `thread` id (rare but possible for forum topics).
+    pub chat_id: Option<String>,
+    /// Platform thread identifier (Slack `thread_ts`, Discord thread ID, a forum-topic id, …).
+    /// Callers without a forum topic pass the `chat_id` here so a topic-less group still gets a stable claim.
+    /// Empty string is invalid; callers should not invoke the registry without a real thread.
     pub thread: String,
+    /// Conversational partner (the individual sender).
+    /// Scoping the claim to a peer lets two users in the same thread talk to two different agents without contaminating each other.
+    /// `None` => thread-wide claim.
+    pub peer_id: Option<String>,
 }
 
 impl ThreadKey {
-    /// Build a key from a channel slug and thread id. Trims whitespace; both
-    /// fields must be non-empty after trimming or the call is meaningless.
+    /// Build a key from a channel slug and thread id, leaving the `account_id` / `chat_id` / `peer_id` slices unset.
+    /// Trims whitespace; both fields must be non-empty after trimming or the call is meaningless.
+    /// Use the `with_*` builders to narrow the key further.
     pub fn new(channel: &str, thread: &str) -> Option<Self> {
         let channel = channel.trim();
         let thread = thread.trim();
@@ -49,9 +64,39 @@ impl ThreadKey {
         }
         Some(Self {
             channel: channel.to_string(),
+            account_id: None,
+            chat_id: None,
             thread: thread.to_string(),
+            peer_id: None,
         })
     }
+
+    /// Narrow the key to a specific bot account.
+    /// An empty / whitespace value clears the slot rather than storing a meaningless empty string.
+    pub fn with_account_id(mut self, account_id: Option<&str>) -> Self {
+        self.account_id = normalize_opt(account_id);
+        self
+    }
+
+    /// Narrow the key to a specific chat / group container.
+    pub fn with_chat_id(mut self, chat_id: Option<&str>) -> Self {
+        self.chat_id = normalize_opt(chat_id);
+        self
+    }
+
+    /// Narrow the key to a specific conversational peer.
+    pub fn with_peer_id(mut self, peer_id: Option<&str>) -> Self {
+        self.peer_id = normalize_opt(peer_id);
+        self
+    }
+}
+
+/// Trim an optional string, collapsing empties to `None` so a blank metadata value never silently widens or splinters a key.
+fn normalize_opt(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 /// One ownership record. Stored values are immutable — `extend` writes a new
@@ -135,6 +180,18 @@ impl ThreadOwnershipRegistry {
         self.decide_at(key, candidate, was_mentioned, Instant::now())
     }
 
+    /// Like `decide`, but use `ttl` for any claim this call creates or refreshes instead of the registry default.
+    /// Lets the bridge honour a per-channel `conversation_ownership_ttl_seconds` override while every channel keeps sharing one registry.
+    pub fn decide_with_ttl(
+        &self,
+        key: ThreadKey,
+        candidate: AgentId,
+        was_mentioned: bool,
+        ttl: Duration,
+    ) -> DispatchDecision {
+        self.decide_at_with_ttl(key, candidate, was_mentioned, Instant::now(), ttl)
+    }
+
     /// Test seam: like `decide` but with a caller-supplied `now`.
     pub fn decide_at(
         &self,
@@ -143,16 +200,34 @@ impl ThreadOwnershipRegistry {
         was_mentioned: bool,
         now: Instant,
     ) -> DispatchDecision {
+        self.decide_at_with_ttl(key, candidate, was_mentioned, now, self.default_ttl)
+    }
+
+    /// Test seam: like `decide_with_ttl` but with a caller-supplied `now`.
+    pub fn decide_at_with_ttl(
+        &self,
+        key: ThreadKey,
+        candidate: AgentId,
+        was_mentioned: bool,
+        now: Instant,
+        ttl: Duration,
+    ) -> DispatchDecision {
+        let ttl = if ttl.is_zero() {
+            Duration::from_secs(1)
+        } else {
+            ttl
+        };
         let mut entry = self.claims.entry(key).or_insert_with(|| Claim {
             agent_id: candidate,
             claimed_at: now,
-            ttl: self.default_ttl,
+            ttl,
         });
 
         // Existing entry path. Three cases: same holder (extend), expired
         // (take over), different live holder (suppress unless mentioned).
         if entry.agent_id == candidate {
             entry.claimed_at = now;
+            entry.ttl = ttl;
             return DispatchDecision::Allow {
                 agent_id: candidate,
             };
@@ -162,7 +237,7 @@ impl ThreadOwnershipRegistry {
             *entry = Claim {
                 agent_id: candidate,
                 claimed_at: now,
-                ttl: self.default_ttl,
+                ttl,
             };
             return DispatchDecision::Allow {
                 agent_id: candidate,
@@ -174,7 +249,7 @@ impl ThreadOwnershipRegistry {
             *entry = Claim {
                 agent_id: candidate,
                 claimed_at: now,
-                ttl: self.default_ttl,
+                ttl,
             };
             return DispatchDecision::Allow {
                 agent_id: candidate,
@@ -348,6 +423,73 @@ mod tests {
         match reg.decide_at(key("T2"), bob, false, now) {
             DispatchDecision::Allow { agent_id } => assert_eq!(agent_id, bob),
             other => panic!("expected Allow on disjoint thread, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn same_thread_distinct_account_id_does_not_collide() {
+        // Regression for #3419/#3420: two bot accounts on the same
+        // channel-type with an identical platform thread id must not share a
+        // claim.
+        let reg = ThreadOwnershipRegistry::new();
+        let alice = fresh_id();
+        let bob = fresh_id();
+        let now = Instant::now();
+        let k_a = key("T1").with_account_id(Some("acct-a"));
+        let k_b = key("T1").with_account_id(Some("acct-b"));
+        let _ = reg.decide_at(k_a.clone(), alice, false, now);
+        match reg.decide_at(k_b, bob, false, now) {
+            DispatchDecision::Allow { agent_id } => assert_eq!(agent_id, bob),
+            other => panic!("expected Allow across accounts, got {:?}", other),
+        }
+        // The first account's claim is untouched.
+        assert_eq!(reg.current_holder(&k_a), Some(alice));
+    }
+
+    #[test]
+    fn same_thread_distinct_peer_does_not_collide() {
+        // Per-peer stickiness (#5323): two users in the same thread can talk
+        // to two different agents without contaminating each other.
+        let reg = ThreadOwnershipRegistry::new();
+        let alice = fresh_id();
+        let bob = fresh_id();
+        let now = Instant::now();
+        let k_u1 = key("T1").with_peer_id(Some("user-1"));
+        let k_u2 = key("T1").with_peer_id(Some("user-2"));
+        let _ = reg.decide_at(k_u1.clone(), alice, false, now);
+        match reg.decide_at(k_u2.clone(), bob, false, now) {
+            DispatchDecision::Allow { agent_id } => assert_eq!(agent_id, bob),
+            other => panic!("expected Allow across peers, got {:?}", other),
+        }
+        assert_eq!(reg.current_holder(&k_u1), Some(alice));
+        assert_eq!(reg.current_holder(&k_u2), Some(bob));
+    }
+
+    #[test]
+    fn blank_optional_slices_collapse_to_none() {
+        // A blank metadata value must not splinter the key away from the
+        // unset form.
+        let bare = key("T1");
+        let blanked = key("T1")
+            .with_account_id(Some("  "))
+            .with_chat_id(Some(""))
+            .with_peer_id(None);
+        assert_eq!(bare, blanked);
+    }
+
+    #[test]
+    fn per_channel_ttl_overrides_default() {
+        // A 10s override expires the claim where the 300s default would not.
+        let reg = ThreadOwnershipRegistry::new();
+        let alice = fresh_id();
+        let bob = fresh_id();
+        let t0 = Instant::now();
+        let ttl = Duration::from_secs(10);
+        let _ = reg.decide_at_with_ttl(key("T1"), alice, false, t0, ttl);
+        let after_ttl = t0 + Duration::from_secs(11);
+        match reg.decide_at_with_ttl(key("T1"), bob, false, after_ttl, ttl) {
+            DispatchDecision::Allow { agent_id } => assert_eq!(agent_id, bob),
+            other => panic!("expected Allow after per-call TTL expiry, got {:?}", other),
         }
     }
 }

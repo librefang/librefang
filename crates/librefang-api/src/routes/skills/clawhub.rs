@@ -310,6 +310,18 @@ pub async fn clawhub_install(
     Json(req): Json<crate::types::ClawHubInstallRequest>,
 ) -> impl IntoResponse {
     let home = state.kernel.home_dir();
+    // Reject path-traversal payloads in `hand` before it reaches any
+    // `Path::join` below — mirrors the guard `install_skill` applies to
+    // the same field. Without this, `{"hand":"../../something"}` escapes
+    // `~/.librefang/workspaces/hands/`. (audit: clawhub-install-path-traversal)
+    if let Some(ref hand_id) = req.hand {
+        if let Err(reason) = validate_skill_identifier(hand_id, "hand") {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": reason})),
+            );
+        }
+    }
     let skills_dir = if let Some(ref hand_id) = req.hand {
         let hand_dir = home.join("workspaces").join("hands").join(hand_id);
         if !hand_dir.exists() {
@@ -689,6 +701,18 @@ pub async fn clawhub_cn_install(
     Json(req): Json<crate::types::ClawHubInstallRequest>,
 ) -> impl IntoResponse {
     let home = state.kernel.home_dir();
+    // Reject path-traversal payloads in `hand` before it reaches any
+    // `Path::join` below — mirrors the guard `install_skill` applies to
+    // the same field. Without this, `{"hand":"../../something"}` escapes
+    // `~/.librefang/workspaces/hands/`. (audit: clawhub-install-path-traversal)
+    if let Some(ref hand_id) = req.hand {
+        if let Err(reason) = validate_skill_identifier(hand_id, "hand") {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": reason})),
+            );
+        }
+    }
     let skills_dir = if let Some(ref hand_id) = req.hand {
         let hand_dir = home.join("workspaces").join("hands").join(hand_id);
         if !hand_dir.exists() {

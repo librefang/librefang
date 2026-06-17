@@ -225,10 +225,27 @@ pub struct ChannelOverrides {
     /// agent). DMs always bypass the registry. See #3334.
     #[serde(default = "default_thread_ownership_enabled")]
     pub thread_ownership_enabled: bool,
+    /// How long (in seconds) a conversation-ownership claim stays valid before
+    /// the next agent may take over a thread. Overrides the registry default
+    /// for this channel only. A value of `0` is clamped up to one second by
+    /// the registry. Default `600` (#5323). The refresh-on-holder and
+    /// re-claim-on-@-mention semantics from #3334 are unchanged.
+    #[serde(default = "default_conversation_ownership_ttl_seconds")]
+    pub conversation_ownership_ttl_seconds: u64,
+    /// When `true`, direct messages also participate in the conversation
+    /// ownership registry (keyed per peer), so a DM that rotates agents after
+    /// the TTL is held stable. Default `false`: DMs bypass the registry, the
+    /// historical behaviour (#3334).
+    #[serde(default)]
+    pub conversation_ownership_include_dms: bool,
 }
 
 fn default_thread_ownership_enabled() -> bool {
     true
+}
+
+fn default_conversation_ownership_ttl_seconds() -> u64 {
+    600
 }
 
 impl Default for ChannelOverrides {
@@ -261,6 +278,8 @@ impl Default for ChannelOverrides {
             auto_route_divergence_count: default_auto_route_divergence(),
             prefix_agent_name: PrefixStyle::Off,
             thread_ownership_enabled: true,
+            conversation_ownership_ttl_seconds: default_conversation_ownership_ttl_seconds(),
+            conversation_ownership_include_dms: false,
         }
     }
 }

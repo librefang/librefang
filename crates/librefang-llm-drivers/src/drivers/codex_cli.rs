@@ -405,6 +405,8 @@ mod tests {
             session_id: Some("sess-xyz".to_string()),
             step_id: Some("step-001".to_string()),
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+
+            ..Default::default()
         };
         CodexCliDriver::apply_caller_trace_envs(&mut cmd, &request);
         let envs: std::collections::HashMap<_, _> = cmd
@@ -464,6 +466,8 @@ mod tests {
             session_id: Some(String::new()),
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+
+            ..Default::default()
         };
         CodexCliDriver::apply_caller_trace_envs(&mut cmd, &request);
         let envs: std::collections::HashMap<_, _> = cmd
