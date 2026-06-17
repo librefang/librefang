@@ -300,17 +300,27 @@ pub trait ChannelBridgeHandle: Send + Sync {
         Vec::new()
     }
 
-    /// Resolve the agent bound to a `(channel instance, conversation)` pair via the deterministic two-level lookup (#5671 Model A): the per-conversation `/agent` override wins, falling back to the instance default seeded from `[[sidecar_channels]] agent`.
-    /// Returns `None` when the instance has no binding configured, in which case the bridge falls through to its legacy resolver chain.
+    /// Resolve the explicit per-conversation `/agent` override for a `(channel instance, conversation)` pair (#5671 Model A) — a deliberate user command, the upper of the two binding levels.
+    /// Returns `None` when this conversation has no override, in which case the bridge tries the sticky holder, then [`resolve_instance_default`](Self::resolve_instance_default).
     ///
-    /// `conversation_id` is the chat id for groups and the peer id for DMs — uniformly `message.sender.platform_id` at the call site.
+    /// Split from the instance default on purpose: the override outranks the #5323 sticky conversation holder (a deliberate `/agent` must win), whereas the instance default ranks below it. `conversation_id` is the chat id for groups and the peer id for DMs — uniformly `message.sender.platform_id` at the call site.
     ///
     /// Default returns `None` so test doubles and the legacy path keep working unchanged; the kernel adapter overrides it with the DB-backed lookup.
-    async fn resolve_bound_agent(
+    async fn resolve_conversation_override(
         &self,
         _instance: &str,
         _conversation_id: &str,
     ) -> Option<AgentId> {
+        None
+    }
+
+    /// Resolve the instance default agent for a channel instance (#5671 Model A) — seeded from `[[sidecar_channels]] agent`, the lower of the two binding levels.
+    /// Returns `None` when the instance has no default configured, in which case the bridge falls through to its legacy resolver chain.
+    ///
+    /// Ranks below the #5323 sticky holder: a standing default should not steamroll an in-flight multi-agent conversation. See [`resolve_conversation_override`](Self::resolve_conversation_override) for the upper level.
+    ///
+    /// Default returns `None` so test doubles and the legacy path keep working unchanged; the kernel adapter overrides it with the DB-backed lookup.
+    async fn resolve_instance_default(&self, _instance: &str) -> Option<AgentId> {
         None
     }
 
@@ -3199,9 +3209,11 @@ async fn resolve_addressed_agent(
 ///
 /// Routing precedence (highest first):
 ///   1. Adapter-tagged `thread_route_agent` — an explicit forced route from the adapter.
-///   2. Explicit group addressing (#5323) — an `@`-mention or a non-default agent's alias, then a sticky conversation-ownership holder. The strongest user signal; overrides the binding so a user can address agentB even while agentA is bound or holds the conversation.
-///   3. Deterministic channel-instance binding (#5671 Model A) — a per-conversation `/agent` override, else the instance default seeded from `[[sidecar_channels]] agent`. The operator's standing default for otherwise-unaddressed traffic; wins over the legacy chain below.
-///   4. Legacy fallback (transitional) — the `AgentRouter` binding chain, the attention scorer, the `"assistant"` agent, then the non-deterministic `list_agents().first()`. Reached only when nothing above resolves; it emits a deprecation WARN at the non-deterministic tail so operators can see they should set `agent` on the instance.
+///   2. Explicit group addressing (#5323) — an `@`-mention or a non-default agent's alias. The strongest user signal; overrides every binding so a user can address agentB even while agentA is otherwise routed.
+///   3. Explicit per-conversation `/agent` override (#5671 Model A, upper binding level) — a deliberate user command; outranks the sticky holder so a fresh `/agent` can re-point a conversation that already has a claim.
+///   4. Sticky conversation-ownership holder (#5323) — keeps an already-claimed group conversation on its holder without a fresh mention.
+///   5. Instance-default binding (#5671 Model A, lower binding level) — seeded from `[[sidecar_channels]] agent`; the operator's standing default for otherwise-unaddressed traffic.
+///   6. Legacy fallback (transitional) — the `AgentRouter` binding chain, the attention scorer, the `"assistant"` agent, then the non-deterministic `list_agents().first()`. Reached only when nothing above resolves; it emits a deprecation WARN at the non-deterministic tail so operators can see they should set `agent` on the instance.
 ///
 /// Returns a [`RouteResolution`] whose `agent_id` is `None` only when no eligible agent exists at all.
 ///
@@ -3238,20 +3250,59 @@ async fn resolve_or_fallback(
         None
     };
 
-    // Multi-agent group routing (#5323). An explicit @-mention or a
-    // non-default agent's alias takes priority over the binding/default chain
-    // and over the sticky holder, so a user can address agentB even while
-    // agentA holds the conversation. A sticky continuation then keeps an
-    // already-claimed conversation on its holder without a fresh mention.
-    // Only relevant for groups; DMs route to their single bound agent.
+    // Channel-instance binding keys (#5671 Model A), extracted once and reused
+    // by both binding levels below. `instance` is the sidecar's config `name`,
+    // stamped onto inbound messages as `metadata["account_id"]` (sidecar.rs).
+    // `conversation_id` is the chat id for groups and the peer id for DMs —
+    // uniformly `sender.platform_id`.
+    //
+    // The group case is uniform on purpose: `derive_sidecar_sender_identity`
+    // (sidecar.rs) and the in-process Discord/Slack adapters set
+    // `sender.platform_id` to the *chat* id for a group (the per-user sender id
+    // lives in `metadata[SENDER_USER_ID_KEY]`; see `build_sender_context` /
+    // `sender_user_id`). So every sender in one group resolves to the same
+    // conversation, and a binding seeded for the group-chat id matches — do not
+    // "fix" this to the sender id.
+    let binding_keys = message
+        .metadata
+        .get("account_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|instance| (instance, message.sender.platform_id.as_str()))
+        .filter(|(_, conversation_id)| !conversation_id.is_empty());
+
+    // Multi-agent group addressing (#5323). An explicit @-mention or a
+    // non-default agent's alias is the strongest user signal and wins over
+    // everything below — the explicit `/agent` override, the sticky holder, the
+    // instance default, and the legacy chain — so a user can address agentB even
+    // while agentA is otherwise routed. Only relevant for groups; DMs have no
+    // addressing surface here.
     if thread_route_agent_id.is_none() && message.is_group {
         if let Some(id) = resolve_addressed_agent(message, handle).await {
             return RouteResolution::addressed(id);
         }
-        // Sticky continuation: a live conversation-ownership claim for this
-        // (thread, peer) slice keeps the follow-up on the same agent even
-        // without a fresh mention, so the holder is not stranded by the
-        // default chain re-resolving to a different agent.
+    }
+
+    // Explicit per-conversation `/agent` override (#5671, upper binding level).
+    // A deliberate user command, so it outranks the #5323 sticky holder below:
+    // a fresh `/agent` must be able to re-point a conversation that already has
+    // a sticky claim. Applies to DMs and groups alike (not gated on is_group).
+    if let Some((instance, conversation_id)) = binding_keys {
+        if let Some(id) = handle
+            .resolve_conversation_override(instance, conversation_id)
+            .await
+        {
+            return RouteResolution::plain(id);
+        }
+    }
+
+    // Sticky continuation (#5323): a live conversation-ownership claim for this
+    // (thread, peer) slice keeps the follow-up on the same agent even without a
+    // fresh mention, so the holder is not stranded by the default chain
+    // re-resolving to a different agent. Below the explicit `/agent` override
+    // (above) but above the instance default (below): a standing default should
+    // not steamroll an in-flight multi-agent conversation.
+    if thread_route_agent_id.is_none() && message.is_group {
         if let Some(key) = build_thread_key(message) {
             if let Some(holder) = thread_ownership.current_holder(&key) {
                 if agent_allows_channel(handle, holder, ct).await {
@@ -3261,35 +3312,13 @@ async fn resolve_or_fallback(
         }
     }
 
-    // Deterministic two-level lookup keyed by (instance, conversation) (#5671
-    // Model A). Runs *after* #5323 group addressing (above) but *before* the
-    // legacy default chain (below): an explicit @-mention always overrides the
-    // binding, but a configured binding is the operator's standing default for
-    // otherwise-unaddressed traffic and wins over the router/assistant/
-    // first-available fallback.
-    //
-    // `instance` is the sidecar's config `name`, stamped onto inbound messages
-    // as `metadata["account_id"]` (sidecar.rs). `conversation_id` is the chat
-    // id for groups and the peer id for DMs — uniformly `sender.platform_id`.
-    //
-    // The group case is uniform on purpose: `derive_sidecar_sender_identity`
-    // (sidecar.rs) and the in-process Discord/Slack adapters set
-    // `sender.platform_id` to the *chat* id for a group (the per-user sender id
-    // lives in `metadata[SENDER_USER_ID_KEY]`; see `build_sender_context` /
-    // `sender_user_id`). So every sender in one group resolves to the same
-    // conversation, and a binding seeded for the group-chat id matches — do not
-    // "fix" this to the sender id.
-    if let Some(instance) = message
-        .metadata
-        .get("account_id")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-    {
-        let conversation_id = &message.sender.platform_id;
-        if !conversation_id.is_empty() {
-            if let Some(id) = handle.resolve_bound_agent(instance, conversation_id).await {
-                return RouteResolution::plain(id);
-            }
+    // Instance default (#5671, lower binding level) seeded from
+    // `[[sidecar_channels]] agent`. The operator's standing default for
+    // otherwise-unaddressed traffic; wins over the router/assistant/
+    // first-available legacy fallback below.
+    if let Some((instance, _)) = binding_keys {
+        if let Some(id) = handle.resolve_instance_default(instance).await {
+            return RouteResolution::plain(id);
         }
     }
 
@@ -7290,13 +7319,28 @@ mod tests {
         assert_eq!(resolved, Some(agent_id));
     }
 
-    /// Mock that reports a channel-instance binding for a fixed
-    /// `(instance, conversation)` pair, exercising the #5671 deterministic
-    /// dispatch path in `resolve_or_fallback`.
+    /// Mock that reports channel-instance bindings, exercising the #5671
+    /// two-level deterministic dispatch path in `resolve_or_fallback`. The two
+    /// levels are modelled separately so tests can pin their precedence around
+    /// the #5323 sticky holder: a per-conversation `/agent` override (upper) and
+    /// an instance default (lower).
     struct BindingMockHandle {
         agents: Vec<(AgentId, String)>,
-        /// `(instance, conversation_id, agent_id)` the binding lookup returns.
-        bound: Option<(String, String, AgentId)>,
+        /// `(instance, conversation_id, agent_id)` the override lookup returns.
+        conversation_override: Option<(String, String, AgentId)>,
+        /// `(instance, agent_id)` the instance-default lookup returns.
+        instance_default: Option<(String, AgentId)>,
+    }
+
+    impl BindingMockHandle {
+        /// No bindings at either level (legacy-fallback cases).
+        fn unbound(agents: Vec<(AgentId, String)>) -> Self {
+            Self {
+                agents,
+                conversation_override: None,
+                instance_default: None,
+            }
+        }
     }
 
     #[async_trait]
@@ -7317,14 +7361,19 @@ mod tests {
         async fn spawn_agent_by_name(&self, _manifest_name: &str) -> Result<AgentId, String> {
             Err("spawn not implemented in mock".to_string())
         }
-        async fn resolve_bound_agent(
+        async fn resolve_conversation_override(
             &self,
             instance: &str,
             conversation_id: &str,
         ) -> Option<AgentId> {
-            self.bound
+            self.conversation_override
                 .as_ref()
                 .and_then(|(i, c, id)| (i == instance && c == conversation_id).then_some(*id))
+        }
+        async fn resolve_instance_default(&self, instance: &str) -> Option<AgentId> {
+            self.instance_default
+                .as_ref()
+                .and_then(|(i, id)| (i == instance).then_some(*id))
         }
         fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {
             // Test mock: no event bus to forward to.
@@ -7368,7 +7417,8 @@ mod tests {
         let bound = AgentId::new();
         let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(BindingMockHandle {
             agents: vec![(first, "researcher".into()), (bound, "legal".into())],
-            bound: Some(("tg-bot".into(), "peer-42".into(), bound)),
+            conversation_override: None,
+            instance_default: Some(("tg-bot".into(), bound)),
         });
         let router = Arc::new(AgentRouter::new());
         let thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
@@ -7388,10 +7438,8 @@ mod tests {
         // the legacy chain (here: first available agent), preserving today's
         // behaviour for unconfigured instances.
         let first = AgentId::new();
-        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(BindingMockHandle {
-            agents: vec![(first, "researcher".into())],
-            bound: None,
-        });
+        let handle: Arc<dyn ChannelBridgeHandle> =
+            Arc::new(BindingMockHandle::unbound(vec![(first, "researcher".into())]));
         let router = Arc::new(AgentRouter::new());
         let thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
         let msg = inbound_message("peer-42", "tg-bot", false);
@@ -7414,8 +7462,10 @@ mod tests {
         let bound = AgentId::new();
         let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(BindingMockHandle {
             agents: vec![(first, "researcher".into()), (bound, "legal".into())],
-            // Binding keyed on the group-chat id, not any member's user id.
-            bound: Some(("tg-bot".into(), "group-chat-9".into(), bound)),
+            // A per-conversation override keyed on the group-chat id (not any
+            // member's user id) — the lookup must hit it via sender.platform_id.
+            conversation_override: Some(("tg-bot".into(), "group-chat-9".into(), bound)),
+            instance_default: None,
         });
         let router = Arc::new(AgentRouter::new());
         let thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
@@ -7440,8 +7490,10 @@ mod tests {
         let bound = AgentId::new();
         let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(BindingMockHandle {
             agents: vec![(mentioned, "researcher".into()), (bound, "legal".into())],
-            // Binding for this group chat points at `legal`.
-            bound: Some(("tg-bot".into(), "group-chat-9".into(), bound)),
+            // Both binding levels for this group chat point at `legal` — the
+            // @-mention must still win over even the explicit override.
+            conversation_override: Some(("tg-bot".into(), "group-chat-9".into(), bound)),
+            instance_default: Some(("tg-bot".into(), bound)),
         });
         let router = Arc::new(AgentRouter::new());
         let thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
@@ -7461,6 +7513,62 @@ mod tests {
         assert!(
             resolved.addressed,
             "a mention-resolved dispatch must be marked addressed (#5323 re-claim semantics)"
+        );
+    }
+
+    #[tokio::test]
+    async fn sticky_holder_outranks_instance_default() {
+        // Provenance split (#5671 lower level vs #5323 sticky): a plain group
+        // continuation (no @-mention) on a conversation that already has a
+        // sticky holder must stay on the holder — the instance DEFAULT is a weak
+        // standing fallback and must not steamroll an in-flight conversation.
+        let sticky = AgentId::new();
+        let default_agent = AgentId::new();
+        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(BindingMockHandle {
+            agents: vec![(sticky, "sticky".into()), (default_agent, "legal".into())],
+            conversation_override: None,
+            instance_default: Some(("tg-bot".into(), default_agent)),
+        });
+        let router = Arc::new(AgentRouter::new());
+        let thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
+        let msg = inbound_message("group-chat-9", "tg-bot", true);
+        // Seed a live sticky claim for this conversation slice.
+        let key = build_thread_key(&msg).expect("group message must build a thread key");
+        thread_ownership.decide(key, sticky, false);
+
+        let resolved = resolve_or_fallback(&msg, &handle, &router, &thread_ownership).await;
+        assert_eq!(
+            resolved.agent_id,
+            Some(sticky),
+            "the sticky holder must outrank the instance default"
+        );
+    }
+
+    #[tokio::test]
+    async fn conversation_override_outranks_sticky_holder() {
+        // Provenance split (#5671 upper level over #5323 sticky): an explicit
+        // per-conversation `/agent` override is a deliberate user command and
+        // must re-point the conversation even when a different agent currently
+        // holds the sticky claim.
+        let sticky = AgentId::new();
+        let overridden = AgentId::new();
+        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(BindingMockHandle {
+            agents: vec![(sticky, "sticky".into()), (overridden, "legal".into())],
+            conversation_override: Some(("tg-bot".into(), "group-chat-9".into(), overridden)),
+            instance_default: None,
+        });
+        let router = Arc::new(AgentRouter::new());
+        let thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
+        let msg = inbound_message("group-chat-9", "tg-bot", true);
+        // Seed a live sticky claim held by a *different* agent.
+        let key = build_thread_key(&msg).expect("group message must build a thread key");
+        thread_ownership.decide(key, sticky, false);
+
+        let resolved = resolve_or_fallback(&msg, &handle, &router, &thread_ownership).await;
+        assert_eq!(
+            resolved.agent_id,
+            Some(overridden),
+            "the explicit per-conversation override must outrank the sticky holder"
         );
     }
 
