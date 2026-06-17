@@ -1235,14 +1235,6 @@ const HandCard = React.memo(function HandCard({
 /** Codeberg base URL stored in `registry.registry_host` when that source is picked. */
 const CODEBERG_HOST = "https://codeberg.org";
 
-/**
- * Source selector for the hand / skill registry forge. Surfaces the
- * backend `registry.registry_host` config (#6095/#6103) in the UI so an
- * operator can switch the catalogue between GitHub (the default) and
- * Codeberg without editing config.toml (issue #6137). Reads/writes through
- * the shared config query + mutation hooks; the mutation invalidates the
- * config cache so the control reflects the persisted value.
- */
 function RegistrySourceSelector() {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
@@ -1274,8 +1266,7 @@ function RegistrySourceSelector() {
   const options = [
     { value: "github", label: t("hands.registry_source_github"), disabled: false },
     { value: "codeberg", label: t("hands.registry_source_codeberg"), disabled: false },
-    // A pre-existing custom forge URL is shown read-only so we never
-    // misrepresent it as GitHub/Codeberg, but switching away is still allowed.
+    // Custom host: option shown disabled so it's never misrepresented as GitHub/Codeberg; switching to either is still allowed.
     ...(current === "custom"
       ? [{ value: "custom", label: t("hands.registry_source_custom", { host }), disabled: true }]
       : []),
@@ -1306,7 +1297,6 @@ function RegistrySourceSelector() {
         value={current}
         onChange={handleChange}
         disabled={busy}
-        aria-label={t("hands.registry_source")}
         title={t("hands.registry_source_desc")}
         className="rounded-lg border border-border-subtle bg-surface px-2.5 py-1.5 text-xs font-semibold text-text-main focus:border-brand focus:outline-none focus:ring-1 focus:ring-brand/30 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
       >
