@@ -60,9 +60,12 @@ export const agentKeys = {
 export const promptsKeys = {
   all: ["prompts"] as const,
   lists: () => [...promptsKeys.all, "list"] as const,
-  // The overview is a single fleet-wide list; no per-filter variants yet,
-  // but keep the hierarchical shape so a future `list(filters)` slots in.
-  list: () => [...promptsKeys.lists()] as const,
+  // The overview is the only fleet-wide list today; tag it with a distinguishing
+  // segment so `list()` is strictly more specific than `lists()`. This keeps the
+  // two-level invariant intact — `invalidateQueries({ queryKey: lists() })` still
+  // matches the overview, while a future `list(filters)` slots in as a sibling
+  // without a breaking rename of the current key.
+  list: () => [...promptsKeys.lists(), "overview"] as const,
   details: () => [...promptsKeys.all, "detail"] as const,
   detail: (agentId: string) => [...promptsKeys.details(), agentId] as const,
 };

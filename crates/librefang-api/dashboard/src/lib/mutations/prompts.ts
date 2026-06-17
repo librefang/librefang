@@ -12,10 +12,13 @@ import { agentKeys, promptsKeys } from "../queries/keys";
 //
 // These are the repository-page counterparts of the per-agent prompt
 // mutations in `mutations/agents.ts`. They wrap the same backend calls but
-// additionally invalidate `promptsKeys.list()` so the fleet-wide overview
-// (version counts, active version) refetches alongside the per-agent version
-// list. Use these from the prompt repository page; the agent-detail modal
-// keeps its own hooks.
+// additionally invalidate the repository overview (`promptsKeys.list()`) and the
+// per-agent repo-detail subtree (`promptsKeys.details()`) so both the fleet-wide
+// counts/active-version and any single-agent repo-detail view refetch alongside
+// the per-agent version list. `details()` has no subscriber yet, but invalidating
+// the whole subtree keeps a future `promptsKeys.detail(agentId)` consumer
+// forward-compatible (per the colocate-invalidation rule in CLAUDE.md). Use these
+// from the prompt repository page; the agent-detail modal keeps its own hooks.
 
 /**
  * Create a new prompt version for an agent (repository surface).
@@ -38,6 +41,7 @@ export function useCreatePromptVersionForRepo() {
         queryKey: agentKeys.promptVersions(variables.agentId),
       });
       qc.invalidateQueries({ queryKey: promptsKeys.list() });
+      qc.invalidateQueries({ queryKey: promptsKeys.details() });
     },
   });
 }
@@ -61,6 +65,7 @@ export function useDeletePromptVersionForRepo() {
         queryKey: agentKeys.promptVersions(variables.agentId),
       });
       qc.invalidateQueries({ queryKey: promptsKeys.list() });
+      qc.invalidateQueries({ queryKey: promptsKeys.details() });
     },
   });
 }
@@ -80,7 +85,8 @@ export function useDeletePromptVersionForRepo() {
  *      the repository UI shows this version as the active one.
  *
  * Invalidates the per-agent version list, the agent detail, the agent list
- * (the model/prompt badge), and the repository overview.
+ * (the model/prompt badge), the repository overview, and the per-agent
+ * repo-detail subtree.
  */
 export function useBindPromptVersionToAgent() {
   const qc = useQueryClient();
@@ -104,6 +110,7 @@ export function useBindPromptVersionToAgent() {
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
       qc.invalidateQueries({ queryKey: promptsKeys.list() });
+      qc.invalidateQueries({ queryKey: promptsKeys.details() });
     },
   });
 }
