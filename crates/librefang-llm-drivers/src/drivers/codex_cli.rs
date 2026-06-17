@@ -449,7 +449,10 @@ pub async fn fetch_codex_cli_models(cli_path: &str) -> Vec<(String, String)> {
         Ok(Ok(output)) if output.status.success() => {
             let json = String::from_utf8_lossy(&output.stdout);
             let models = parse_codex_models_json(&json);
-            tracing::debug!(count = models.len(), "Fetched codex-cli models via `codex debug models`");
+            tracing::debug!(
+                count = models.len(),
+                "Fetched codex-cli models via `codex debug models`"
+            );
             models
         }
         Ok(Ok(output)) => {
@@ -727,7 +730,11 @@ provider: openai\n\
             ]
         }"#;
         let models = parse_codex_models_json(json);
-        assert_eq!(models.len(), 2, "only 'list' visibility models should be included");
+        assert_eq!(
+            models.len(),
+            2,
+            "only 'list' visibility models should be included"
+        );
         assert_eq!(models[0].0, "codex-cli/deepseek-v4-flash");
         assert_eq!(models[0].1, "DeepSeek V4 Flash");
         assert_eq!(models[1].0, "codex-cli/o4-mini");
@@ -783,6 +790,9 @@ provider: openai\n\
         // so the model must be excluded.
         let json = r#"{"models": [{"slug": "mystery", "display_name": "Mystery"}]}"#;
         let models = parse_codex_models_json(json);
-        assert!(models.is_empty(), "models without explicit visibility='list' must be excluded");
+        assert!(
+            models.is_empty(),
+            "models without explicit visibility='list' must be excluded"
+        );
     }
 }
