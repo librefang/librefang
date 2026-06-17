@@ -2679,7 +2679,15 @@ fn build_sender_context(
         None => (AutoRouteStrategy::Off, 0, 0, 0, 0),
     };
     let chat_id = if message.sender.platform_id.is_empty() {
-        None
+        // Adapters that don't populate platform_id (e.g. Telegram
+        // sets it on the sidecar message but the field might be
+        // stripped). Fall back to user_id — for DMs they coincide.
+        let uid = sender_user_id(message).to_string();
+        if uid.is_empty() {
+            None
+        } else {
+            Some(uid)
+        }
     } else {
         Some(message.sender.platform_id.clone())
     };

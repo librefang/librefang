@@ -130,6 +130,7 @@ impl kernel_handle::AgentControl for LibreFangKernel {
         caller_agent_id: &str,
         caller_session_id: Option<&str>,
         conversation_key: Option<&str>,
+        chat_id: Option<&str>,
     ) -> Result<String, kernel_handle::KernelOpError> {
         use kernel_handle::KernelOpError;
         use librefang_types::task::{TaskKind, TaskStatus};
@@ -190,6 +191,7 @@ impl kernel_handle::AgentControl for LibreFangKernel {
                 agent_id: target_id,
                 prompt_hash,
             },
+            chat_id.map(String::from),
         );
         let task_id = handle.id;
 

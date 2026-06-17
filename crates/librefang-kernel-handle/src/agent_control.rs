@@ -128,8 +128,9 @@ pub trait AgentControl: Send + Sync {
         caller_agent_id: &str,
         caller_session_id: Option<&str>,
         conversation_key: Option<&str>,
+        chat_id: Option<&str>,
     ) -> Result<String, KernelOpError> {
-        let _ = (caller_session_id, conversation_key);
+        let _ = (caller_session_id, conversation_key, chat_id);
         tracing::trace!(
             agent = %agent_id,
             "send_to_agent_async_tracked: default impl — async tracking not supported by this handle; falling back to blocking send_to_agent_as"

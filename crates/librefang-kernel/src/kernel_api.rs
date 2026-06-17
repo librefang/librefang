@@ -696,6 +696,7 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         agent_id: AgentId,
         session_id: SessionId,
         kind: librefang_types::task::TaskKind,
+        chat_id: Option<String>,
     ) -> librefang_types::task::TaskHandle;
 
     /// Mark a registered async task as terminated with `status`. The
@@ -1559,8 +1560,9 @@ impl KernelApi for LibreFangKernel {
         agent_id: AgentId,
         session_id: SessionId,
         kind: librefang_types::task::TaskKind,
+        chat_id: Option<String>,
     ) -> librefang_types::task::TaskHandle {
-        LibreFangKernel::register_async_task(self, agent_id, session_id, kind)
+        LibreFangKernel::register_async_task(self, agent_id, session_id, kind, chat_id)
     }
     async fn complete_async_task(
         &self,
