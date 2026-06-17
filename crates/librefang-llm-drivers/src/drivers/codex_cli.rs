@@ -439,6 +439,8 @@ pub async fn fetch_codex_cli_models(cli_path: &str) -> Vec<(String, String)> {
         std::time::Duration::from_secs(10),
         tokio::process::Command::new(cli_path)
             .args(["debug", "models"])
+            .kill_on_drop(true)
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .output(),
