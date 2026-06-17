@@ -168,7 +168,10 @@ Manifest `[[cron]]` entries are the static way to schedule turns. These tools le
 | `cron_cancel(cron_id)` | Pause (disable) a runtime cron job — its config is preserved, not deleted. |
 | `cron_enable(cron_id)` | Re-enable a paused runtime cron job. |
 
-Agents cannot hard-delete a scheduled job: `schedule_delete` / `cron_cancel` only pause it, so a misbehaving or over-eager agent can never silently lose a configured schedule. Permanent deletion is a human-only operation via the dashboard (#6159). Runtime jobs created with these tools are persisted in the same store as manifest crons — they survive daemon restarts. Their `cron_id` / `schedule_id` is opaque; round-trip through `cron_list()` to discover it.
+Agents cannot hard-delete a scheduled job: `schedule_delete` / `cron_cancel` only pause it, so a misbehaving or over-eager agent can never silently lose a configured schedule.
+Permanent deletion is a human-only operation via the dashboard (#6159).
+Runtime jobs created with these tools are persisted in the same store as manifest crons — they survive daemon restarts.
+Their `cron_id` / `schedule_id` is opaque; round-trip through `cron_list()` to discover it.
 
 ---
 

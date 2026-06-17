@@ -168,7 +168,10 @@ manifest `[[cron]]` 是静态的安排方式。这些工具让 agent **从循环
 | `cron_cancel(cron_id)` | 暂停（禁用）运行时 cron 任务 —— 保留配置而非删除。 |
 | `cron_enable(cron_id)` | 重新启用被暂停的运行时 cron 任务。 |
 
-agent 不能硬删除已调度的任务:`schedule_delete` / `cron_cancel` 只会暂停它,因此即使是行为异常或过于激进的 agent 也无法静默丢失一个已配置好的调度。永久删除是仅限人类的操作,通过 dashboard 完成(#6159)。这些工具创建的运行时任务和 manifest cron 共用持久化存储 —— 跨 daemon 重启依然存在。`cron_id` / `schedule_id` 是不透明的;通过 `cron_list()` 往返获取。
+agent 不能硬删除已调度的任务:`schedule_delete` / `cron_cancel` 只会暂停它,因此即使是行为异常或过于激进的 agent 也无法静默丢失一个已配置好的调度。
+永久删除是仅限人类的操作,通过 dashboard 完成(#6159)。
+这些工具创建的运行时任务和 manifest cron 共用持久化存储 —— 跨 daemon 重启依然存在。
+`cron_id` / `schedule_id` 是不透明的;通过 `cron_list()` 往返获取。
 
 ---
 

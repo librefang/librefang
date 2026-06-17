@@ -56,11 +56,9 @@ pub(super) async fn tool_cron_list(
 
 /// Disable a cron job by ID — the agent-facing "stop this job" action.
 ///
-/// Despite the historical `cron_cancel` tool name, this pauses the job via
-/// `cron_set_enabled(false)` rather than hard-deleting it: the schedule /
-/// action / delivery config is preserved so the operator can recover what was
-/// set up and the agent (or a human) can re-enable it later. Hard deletion is
-/// a human-only dashboard operation (#6159). Re-enable via `tool_cron_enable`.
+/// Despite the historical `cron_cancel` tool name, this pauses the job via `cron_set_enabled(false)` rather than hard-deleting it: the schedule / action / delivery config is preserved so the operator can recover what was set up and the agent (or a human) can re-enable it later.
+/// Hard deletion is a human-only dashboard operation (#6159).
+/// Re-enable via `tool_cron_enable`.
 pub(super) async fn tool_cron_cancel(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
@@ -92,12 +90,8 @@ pub(super) async fn tool_cron_enable(
 
 /// Validate the `job_id` parameter and confirm the caller owns the job.
 ///
-/// `KernelHandle::cron_set_enabled` toggles by UUID with no ownership check
-/// (see `kernel/handles/cron_control.rs`), so the ownership guard must live at
-/// the tool layer — otherwise any agent could pause/resume another agent's job
-/// by learning its UUID. Returns the validated, owned `job_id` as an owned
-/// `String` (the borrow on `kh.cron_list(...)` ends before the caller's own
-/// kernel call).
+/// `KernelHandle::cron_set_enabled` toggles by UUID with no ownership check (see `kernel/handles/cron_control.rs`), so the ownership guard must live at the tool layer — otherwise any agent could pause/resume another agent's job by learning its UUID.
+/// Returns the validated, owned `job_id` as an owned `String` (the borrow on `kh.cron_list(...)` ends before the caller's own kernel call).
 async fn require_owned_job_id(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,

@@ -342,14 +342,10 @@ pub(super) async fn tool_schedule_list(
     Ok(output)
 }
 
-/// Disable (pause) a scheduled task — the agent-facing "stop this schedule"
-/// action.
+/// Disable (pause) a scheduled task — the agent-facing "stop this schedule" action.
 ///
-/// Despite the historical `schedule_delete` tool name, this pauses the job via
-/// `cron_set_enabled(false)` rather than hard-deleting it, so the schedule and
-/// its action survive and the operator can recover what was set up. Hard
-/// deletion is a human-only dashboard operation (#6159); the agent re-enables
-/// a paused schedule with `schedule_resume`.
+/// Despite the historical `schedule_delete` tool name, this pauses the job via `cron_set_enabled(false)` rather than hard-deleting it, so the schedule and its action survive and the operator can recover what was set up.
+/// Hard deletion is a human-only dashboard operation (#6159); the agent re-enables a paused schedule with `schedule_resume`.
 pub(super) async fn tool_schedule_delete(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
@@ -379,15 +375,10 @@ pub(super) async fn tool_schedule_resume(
     Ok(format!("Schedule '{id}' resumed (re-enabled)."))
 }
 
-/// Resolve the schedule id (accepting `id` or `job_id`) and confirm the caller
-/// owns it.
+/// Resolve the schedule id (accepting `id` or `job_id`) and confirm the caller owns it.
 ///
-/// `KernelHandle::cron_set_enabled` toggles by UUID with no ownership check
-/// (see `kernel/handles/cron_control.rs`), so the ownership guard lives at the
-/// tool layer — otherwise any agent with this tool could pause/resume another
-/// agent's job by learning its UUID. Returns the validated, owned id as an
-/// owned `String` so the borrow on `kh.cron_list(...)` ends before the
-/// caller's own kernel mutation.
+/// `KernelHandle::cron_set_enabled` toggles by UUID with no ownership check (see `kernel/handles/cron_control.rs`), so the ownership guard lives at the tool layer — otherwise any agent with this tool could pause/resume another agent's job by learning its UUID.
+/// Returns the validated, owned id as an owned `String` so the borrow on `kh.cron_list(...)` ends before the caller's own kernel mutation.
 async fn require_owned_schedule_id(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
