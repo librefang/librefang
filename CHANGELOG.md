@@ -5,6 +5,13 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [Unreleased]
+
+### Fixed
+
+- Resolve link-preview-js peer conflict with baileys by downgrading to ^3.0.0, commit package-lock.json to enable CI audit (@mrchn)
+  Known: link-preview-js has an unfixed SSRF vulnerability (GHSA-4gp8-rjrq-ch6q) affecting all published versions; no upstream fix available.
+
 ## [2026.6.16] - 2026-06-16
 
 _18 PRs from 3 contributors since v2026.6.11-beta.18._
