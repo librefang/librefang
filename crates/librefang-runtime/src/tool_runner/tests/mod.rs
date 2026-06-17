@@ -658,6 +658,7 @@ impl AgentControl for DispatchCapture {
         _caller_agent_id: &str,
         caller_session_id: Option<&str>,
         _conversation_key: Option<&str>,
+        _chat_id: Option<&str>,
     ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         // Record that the async path was taken and echo back whether a caller
         // session was threaded through (the tool must forward it).
@@ -852,7 +853,7 @@ async fn agent_send_no_key_no_caller_routes_to_send_to_agent() {
     let kernel: Arc<dyn KernelHandle> = cap.clone();
     let input = serde_json::json!({ "agent_id": "target", "message": "hi" });
 
-    let result = super::agent::tool_agent_send(&input, Some(&kernel), None, None).await;
+    let result = super::agent::tool_agent_send(&input, Some(&kernel), None, None, None).await;
 
     assert_eq!(result.unwrap(), "no-key-no-parent");
     let calls = cap.calls.lock().unwrap();
@@ -868,7 +869,8 @@ async fn agent_send_no_key_with_caller_routes_to_send_to_agent_as() {
     let input = serde_json::json!({ "agent_id": "target", "message": "hi" });
 
     let result =
-        super::agent::tool_agent_send(&input, Some(&kernel), Some("parent-agent"), None).await;
+        super::agent::tool_agent_send(&input, Some(&kernel), Some("parent-agent"), None, None)
+            .await;
 
     assert_eq!(result.unwrap(), "no-key-with-parent");
     let calls = cap.calls.lock().unwrap();
@@ -888,7 +890,7 @@ async fn agent_send_same_key_routes_to_as_with_key_both_calls() {
         "conversation_key": "thread-abc",
     });
 
-    super::agent::tool_agent_send(&input, Some(&kernel), Some("parent-agent"), None)
+    super::agent::tool_agent_send(&input, Some(&kernel), Some("parent-agent"), None, None)
         .await
         .unwrap();
 
@@ -897,7 +899,7 @@ async fn agent_send_same_key_routes_to_as_with_key_both_calls() {
         "message": "turn two",
         "conversation_key": "thread-abc",
     });
-    super::agent::tool_agent_send(&input2, Some(&kernel), Some("parent-agent"), None)
+    super::agent::tool_agent_send(&input2, Some(&kernel), Some("parent-agent"), None, None)
         .await
         .unwrap();
 
@@ -924,7 +926,7 @@ async fn agent_send_distinct_keys_produce_isolated_dispatch() {
                 "message": "msg",
                 "conversation_key": key,
             });
-            super::agent::tool_agent_send(&input, Some(&kernel), Some("parent-agent"), None)
+            super::agent::tool_agent_send(&input, Some(&kernel), Some("parent-agent"), None, None)
                 .await
                 .unwrap()
         }
@@ -959,9 +961,15 @@ async fn agent_send_async_routes_to_tracked_path_and_returns_task_id() {
     let session = SessionId(uuid::Uuid::new_v4());
 
     let out =
-        super::agent::tool_agent_send(&input, Some(&kernel), Some("parent-agent"), Some(session))
-            .await
-            .unwrap();
+        super::agent::tool_agent_send(
+            &input,
+            Some(&kernel),
+            Some("parent-agent"),
+            Some(session),
+            None,
+        )
+        .await
+        .unwrap();
 
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v["task_id"], "task-fake-1234");
@@ -990,7 +998,7 @@ async fn agent_send_async_without_caller_is_invalid_parameter() {
         "async": true,
     });
 
-    let err = super::agent::tool_agent_send(&input, Some(&kernel), None, None)
+    let err = super::agent::tool_agent_send(&input, Some(&kernel), None, None, None)
         .await
         .expect_err("async without a caller must be rejected");
     assert!(matches!(
@@ -1023,7 +1031,8 @@ async fn agent_send_depth_exceeded_is_permission_denied() {
     // task-local depth to 10 reaches the `>= max_depth` branch.
     let result = AGENT_CALL_DEPTH
         .scope(std::cell::Cell::new(10), async {
-            super::agent::tool_agent_send(&input, Some(&kernel), Some("parent-agent"), None).await
+            super::agent::tool_agent_send(&input, Some(&kernel), Some("parent-agent"), None, None)
+                .await
         })
         .await;
 
