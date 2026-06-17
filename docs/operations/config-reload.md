@@ -90,6 +90,9 @@ classified differently — the row note spells out which is which.
 | `dashboard_user` | H | Dashboard login username (config swap suffices). |
 | `dashboard_pass` | H | Dashboard login password. |
 | `dashboard_pass_hash` | H | Argon2id hash of the dashboard password. |
+| `passkey_enabled` | R | Opt-in flag for passkey (WebAuthn/FIDO2) login — the route gating is fixed at boot. |
+| `passkey_rp_id` | R | WebAuthn Relying Party ID — the `Webauthn` instance is built once at boot. |
+| `passkey_rp_origin` | R | WebAuthn Relying Party origin — baked into the `Webauthn` instance at boot. |
 | `users` | H | RBAC user list — rebuilds the `AuthManager`. |
 | `require_auth_for_reads` | R | Whether the dashboard-reads allowlist requires auth. |
 | `external_auth_proxy` | R | Acknowledges an external auth proxy is in front. |

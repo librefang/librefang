@@ -7,6 +7,7 @@
 //! All MCP tools are namespaced with `mcp_{server}_{tool}` to prevent collisions.
 
 pub mod mcp_oauth;
+mod trace_context;
 
 use arc_swap::ArcSwap;
 use http::{HeaderName, HeaderValue};
@@ -2378,6 +2379,20 @@ impl McpConnection {
                     }
                 }
 
+                // Ride in `_meta` because rmcp 1.7 exposes no per-request header hook (#6128).
+                let trace_pairs = crate::trace_context::current_w3c_trace_meta();
+                if !trace_pairs.is_empty() {
+                    let trace_obj: serde_json::Map<String, serde_json::Value> = trace_pairs
+                        .into_iter()
+                        .map(|(k, v)| (k, serde_json::Value::String(v)))
+                        .collect();
+                    let meta = params.meta.get_or_insert_with(rmcp::model::Meta::new);
+                    meta.insert(
+                        crate::trace_context::TRACE_CONTEXT_META_KEY.to_string(),
+                        serde_json::Value::Object(trace_obj),
+                    );
+                }
+
                 let timeout = std::time::Duration::from_secs(self.config.timeout_secs);
                 let result: rmcp::model::CallToolResult =
                     tokio::time::timeout(timeout, client.call_tool(params))
@@ -2440,6 +2455,26 @@ impl McpConnection {
                         params["_meta"] = serde_json::json!({
                             (CALLER_CONTEXT_META_KEY): v,
                         });
+                    }
+                }
+
+                // Ride in `_meta` because `sse_send_request` takes no per-request header argument (#6128).
+                let trace_pairs = crate::trace_context::current_w3c_trace_meta();
+                if !trace_pairs.is_empty() {
+                    let trace_obj: serde_json::Map<String, serde_json::Value> = trace_pairs
+                        .into_iter()
+                        .map(|(k, v)| (k, serde_json::Value::String(v)))
+                        .collect();
+                    let meta = params
+                        .as_object_mut()
+                        .expect("params is a json object literal")
+                        .entry("_meta")
+                        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+                    if let Some(meta_obj) = meta.as_object_mut() {
+                        meta_obj.insert(
+                            crate::trace_context::TRACE_CONTEXT_META_KEY.to_string(),
+                            serde_json::Value::Object(trace_obj),
+                        );
                     }
                 }
 
@@ -2643,6 +2678,11 @@ impl McpConnection {
                     );
                 }
             }
+        }
+
+        // HttpCompat builds the reqwest request per call, so real per-request headers are available (#6128).
+        for (name, value) in crate::trace_context::current_w3c_trace_headers().iter() {
+            request = request.header(name.clone(), value.clone());
         }
 
         match tool.request_mode {

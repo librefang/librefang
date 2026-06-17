@@ -34,7 +34,7 @@ members = [
 ]
 
 [workspace.package]
-version = "2026.6.11-beta.18"
+version = "2026.6.16-beta.19"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/librefang/librefang"
@@ -103,6 +103,9 @@ chrono-tz = "0.10"
 
 # IDs
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
+
+# WebAuthn / passkeys (#5981)
+webauthn-rs = "0.5.5"
 
 # Database
 rusqlite = { version = "0.39.0", features = ["bundled", "serde_json"] }
@@ -227,7 +230,7 @@ wasmtime-wasi-http = "=45.0.2"
 # HTTP server (for API daemon)
 axum = { version = "0.8", features = ["ws"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip", "compression-br", "limit"] }
+tower-http = { version = "0.7", features = ["cors", "trace", "compression-gzip", "compression-br", "limit"] }
 
 # Home directory resolution
 dirs = "6"

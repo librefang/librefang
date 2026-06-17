@@ -330,6 +330,37 @@ impl LibreFangKernel {
 
         let memory = Arc::new(substrate);
 
+        // Seed channel-instance defaults from `[[sidecar_channels]] agent`
+        // (#5671 Model A). Each instance that declares an agent gets a row in
+        // `channel_instance_defaults`, the first level of the deterministic
+        // two-level inbound dispatch lookup. Config is the source of truth for
+        // the default, so this re-seeds (upsert) on every boot;
+        // per-conversation `/agent` overrides live in a separate table and are
+        // untouched. An instance with no `agent` is skipped — its traffic
+        // keeps falling through to the legacy resolver chain until the
+        // operator sets one.
+        {
+            let bindings = memory.channel_bindings();
+            let mut seeded = 0usize;
+            for sc in &config.sidecar_channels {
+                if let Some(agent) = sc.agent.as_deref().filter(|a| !a.is_empty()) {
+                    if let Err(e) = bindings.seed_instance_default(&sc.name, agent) {
+                        warn!(
+                            instance = %sc.name,
+                            agent,
+                            error = %e,
+                            "Failed to seed channel instance default"
+                        );
+                    } else {
+                        seeded += 1;
+                    }
+                }
+            }
+            if seeded > 0 {
+                info!("Channel dispatch: seeded {seeded} instance default(s) from config");
+            }
+        }
+
         // Check if Ollama is reachable on localhost:11434 (TCP probe, 500ms timeout).
         fn is_ollama_reachable() -> bool {
             std::net::TcpStream::connect_timeout(

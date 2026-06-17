@@ -21,6 +21,14 @@ vi.mock("../lib/queries/channels", () => ({
   useChannelQr: vi.fn(),
 }));
 
+// ChannelsPage now reads URL search params via `useSearch({ strict: false })`
+// (upstream channel-routing work). The test renders the page outside a
+// RouterProvider, so stub the router hook — same pattern as the other page
+// tests (McpServersPage, ApprovalsPage, …). No search params in these cases.
+vi.mock("@tanstack/react-router", () => ({
+  useSearch: () => ({}),
+}));
+
 // The `qrcode` package writes to <canvas>; jsdom's canvas is a no-op
 // stub but `QRCode.toCanvas` throws if it can't find a 2d context.
 // Replace with a spy so we can both prevent the throw and assert the

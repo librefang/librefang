@@ -302,6 +302,23 @@ pub fn build_reload_plan_with_caps(
         plan.hot_actions.push(HotAction::UpdateDashboardCredentials);
     }
 
+    // Passkey (#5981): the `Webauthn` instance is built once at boot from
+    // `passkey_rp_id` / `passkey_rp_origin` and the route gating reads
+    // `passkey_enabled` at construction time. Toggling the flag or changing
+    // the RP identity cannot be picked up without a rebuild — mark
+    // restart-required so an operator gets a loud signal rather than a
+    // silent no-op.
+    if old.passkey_enabled != new.passkey_enabled
+        || old.passkey_rp_id != new.passkey_rp_id
+        || old.passkey_rp_origin != new.passkey_rp_origin
+    {
+        plan.restart_required = true;
+        plan.restart_reasons.push(
+            "passkey config changed (passkey_enabled / passkey_rp_id / passkey_rp_origin)"
+                .to_string(),
+        );
+    }
+
     if old.network_enabled != new.network_enabled {
         plan.restart_required = true;
         plan.restart_reasons
@@ -911,6 +928,9 @@ pub fn classified_reload_fields() -> std::collections::BTreeSet<&'static str> {
         "dashboard_user",
         "dashboard_pass",
         "dashboard_pass_hash",
+        "passkey_enabled",
+        "passkey_rp_id",
+        "passkey_rp_origin",
         "network_enabled",
         "network",
         "memory",

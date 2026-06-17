@@ -6,6 +6,7 @@ import { Badge } from "../components/ui/Badge";
 import {
   Globe, Sun, Moon, Settings, PanelLeftClose, PanelLeft, Languages, LayoutDashboard,
   Shield, CheckCircle, XCircle, Download, Eye, EyeOff,
+  KeyRound, Plus, Trash2,
 } from "lucide-react";
 import { useUIStore } from "../lib/store";
 import { useTotpStatus } from "../lib/queries/approvals";
@@ -14,6 +15,12 @@ import {
   useTotpConfirm,
   useTotpRevoke,
 } from "../lib/mutations/approvals";
+import { usePasskeys } from "../lib/queries/passkeys";
+import {
+  useRegisterPasskey,
+  useRevokePasskey,
+} from "../lib/mutations/passkeys";
+import { isPasskeySupported } from "../api";
 
 interface SegmentOption<T extends string> {
   value: T;
@@ -163,8 +170,225 @@ export function SettingsPage() {
       {/* TOTP Second Factor */}
       <TotpSection />
 
+      {/* Passkeys (WebAuthn/FIDO2) */}
+      <PasskeysSection />
+
       {/* Config Backup */}
       <ConfigBackupSection />
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Passkey (WebAuthn/FIDO2) Management Section                        */
+/* ------------------------------------------------------------------ */
+
+function PasskeysSection() {
+  const { t } = useTranslation();
+  const [label, setLabel] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+  const [confirmRevoke, setConfirmRevoke] = useState<string | null>(null);
+
+  const supported = isPasskeySupported();
+  const passkeysQuery = usePasskeys({ enabled: supported });
+  const registerPasskey = useRegisterPasskey();
+  const revokePasskey = useRevokePasskey();
+
+  const passkeys = passkeysQuery.data ?? [];
+  // A 503 means the operator has not enabled passkeys server-side; treat the
+  // panel as informational rather than broken.
+  const disabledServerSide =
+    passkeysQuery.isError &&
+    passkeysQuery.error instanceof Error &&
+    passkeysQuery.error.message.toLowerCase().includes("not enabled");
+  const busy = registerPasskey.isPending || revokePasskey.isPending;
+
+  const dateFmt = (secs: number) =>
+    new Date(secs * 1000).toLocaleDateString(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+    });
+
+  async function handleAdd() {
+    if (busy) return;
+    setError(null);
+    setSuccess(null);
+    try {
+      await registerPasskey.mutateAsync(label.trim() || undefined);
+      setLabel("");
+      setSuccess(t("settings.passkey_added", "Passkey added."));
+    } catch (e) {
+      // The user cancelling the OS prompt throws a DOMException — show a
+      // friendly note rather than a stack-y error string.
+      const msg =
+        e instanceof DOMException && e.name === "NotAllowedError"
+          ? t("settings.passkey_cancelled", "Passkey registration was cancelled.")
+          : e instanceof Error
+            ? e.message
+            : t("settings.passkey_add_failed", "Could not add passkey.");
+      setError(msg);
+    }
+  }
+
+  async function handleRevoke(credentialId: string) {
+    if (busy) return;
+    setError(null);
+    setSuccess(null);
+    try {
+      await revokePasskey.mutateAsync(credentialId);
+      setConfirmRevoke(null);
+      setSuccess(t("settings.passkey_revoked", "Passkey revoked."));
+    } catch (e) {
+      setError(
+        e instanceof Error
+          ? e.message
+          : t("settings.passkey_revoke_failed", "Could not revoke passkey."),
+      );
+    }
+  }
+
+  return (
+    <div className="rounded-2xl border border-border-subtle bg-surface">
+      <div className="px-5 py-3 border-b border-border-subtle/50">
+        <p className="text-[10px] font-black uppercase tracking-widest text-text-dim">
+          {t("settings.passkeys", "Passkeys")}
+        </p>
+      </div>
+      <div className="px-5">
+        <SettingRow
+          icon={KeyRound}
+          iconColor="text-indigo-500"
+          label={t("settings.passkey_title", "Passkeys")}
+          description={t(
+            "settings.passkey_desc",
+            "Sign in with Touch ID, Face ID, Windows Hello, or a security key — no password typed.",
+          )}
+        >
+          <Badge variant={passkeys.length > 0 ? "success" : "default"}>
+            {passkeys.length > 0 ? (
+              <CheckCircle className="w-3 h-3 mr-1" />
+            ) : (
+              <XCircle className="w-3 h-3 mr-1" />
+            )}
+            {t("settings.passkey_count", "{{count}} registered", {
+              count: passkeys.length,
+            })}
+          </Badge>
+        </SettingRow>
+
+        {!supported && (
+          <div className="px-1 py-3 text-sm text-text-dim">
+            {t(
+              "settings.passkey_unsupported",
+              "This browser does not support passkeys.",
+            )}
+          </div>
+        )}
+
+        {supported && disabledServerSide && (
+          <div className="px-1 py-3 text-sm text-text-dim">
+            {t(
+              "settings.passkey_server_disabled",
+              "Passkey login is not enabled on this server. Set passkey_enabled and the RP config in config.toml.",
+            )}
+          </div>
+        )}
+
+        {supported && !disabledServerSide && (
+          <div className="py-4 space-y-4">
+            {passkeys.length > 0 && (
+              <ul className="space-y-2">
+                {passkeys.map((pk) => (
+                  <li
+                    key={pk.credential_id}
+                    className="flex items-center gap-3 rounded-lg border border-border-subtle bg-main px-3 py-2"
+                  >
+                    <KeyRound className="w-4 h-4 shrink-0 text-indigo-500" />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-semibold truncate">
+                        {pk.label ||
+                          t("settings.passkey_unnamed", "Unnamed passkey")}
+                      </p>
+                      <p className="text-xs text-text-dim">
+                        {t("settings.passkey_added_on", "Added {{date}}", {
+                          date: dateFmt(pk.created_at),
+                        })}
+                        {pk.last_used_at
+                          ? ` · ${t("settings.passkey_last_used", "last used {{date}}", { date: dateFmt(pk.last_used_at) })}`
+                          : ` · ${t("settings.passkey_never_used", "never used")}`}
+                      </p>
+                    </div>
+                    {confirmRevoke === pk.credential_id ? (
+                      <div className="flex items-center gap-2 shrink-0">
+                        <Button
+                          variant="danger"
+                          size="sm"
+                          disabled={busy}
+                          onClick={() => handleRevoke(pk.credential_id)}
+                        >
+                          {t("settings.passkey_confirm_revoke", "Confirm")}
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          disabled={busy}
+                          onClick={() => setConfirmRevoke(null)}
+                        >
+                          {t("common.cancel", "Cancel")}
+                        </Button>
+                      </div>
+                    ) : (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="shrink-0"
+                        aria-label={t("settings.passkey_revoke", "Revoke passkey")}
+                        disabled={busy}
+                        onClick={() => setConfirmRevoke(pk.credential_id)}
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </Button>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={label}
+                onChange={(e) => setLabel(e.target.value)}
+                placeholder={t(
+                  "settings.passkey_label_placeholder",
+                  "Device name (optional, e.g. MacBook Touch ID)",
+                )}
+                maxLength={64}
+                className="flex-1 rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand/30"
+              />
+              <Button
+                variant="primary"
+                size="sm"
+                disabled={busy}
+                onClick={handleAdd}
+                className="shrink-0"
+              >
+                <Plus className="w-4 h-4 mr-1" />
+                {t("settings.passkey_add", "Add passkey")}
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {error && (
+          <div className="px-1 pb-3 text-sm text-danger">{error}</div>
+        )}
+        {success && (
+          <div className="px-1 pb-3 text-sm text-emerald-500">{success}</div>
+        )}
+      </div>
     </div>
   );
 }

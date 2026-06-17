@@ -200,3 +200,53 @@ async fn streaming_sse_aggregates_text_deltas_into_final_response() {
         "stream must terminate with ContentComplete"
     );
 }
+
+/// A streamed chunk carrying `cachedContentTokenCount` must populate
+/// `cache_read_input_tokens` so metering can apply the cache-read rate.
+/// Regression: the streaming per-chunk usage block previously set
+/// `input_tokens` / `output_tokens` but dropped the cached-token field,
+/// over-charging cached prompt tokens at the full input rate (matches the
+/// `convert_response` / `stream_gemini_sse` non-streaming behaviour).
+#[tokio::test]
+#[serial_test::serial]
+async fn streaming_usage_captures_cached_content_tokens() {
+    let _env = isolated_env();
+    let server = MockServer::start().await;
+
+    let chunk = serde_json::json!({
+        "candidates": [{
+            "content": {"parts": [{"text": "ok"}]},
+            "finishReason": "STOP"
+        }],
+        "usageMetadata": {
+            "promptTokenCount": 100,
+            "candidatesTokenCount": 3,
+            "cachedContentTokenCount": 80
+        }
+    });
+    let body = format!("data: {chunk}\n\n");
+    let sse = ResponseTemplate::new(200)
+        .insert_header("content-type", "text/event-stream")
+        .set_body_string(body);
+
+    Mock::given(method("POST"))
+        .and(path(
+            "/v1beta/models/gemini-2.0-flash:streamGenerateContent",
+        ))
+        .respond_with(sse)
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let driver = mock_gemini_driver(&server);
+    let req = simple_request("gemini-2.0-flash");
+    let (result, _events) = collect_stream(&driver, req).await;
+    let resp = result.expect("stream should succeed");
+
+    assert_eq!(resp.usage.input_tokens, 100);
+    assert_eq!(
+        resp.usage.cache_read_input_tokens, 80,
+        "cachedContentTokenCount from the streamed chunk must populate \
+         cache_read_input_tokens"
+    );
+}

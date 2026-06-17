@@ -23,12 +23,19 @@ uar-driver = ["dep:universal-agent-runtime"]
 #   conflict with librefang's own `rusqlite`/`libsqlite3-sys` versions.
 # * `surreal-backend` is enabled explicitly so UAR uses embedded SurrealDB
 #   (RocksDB) for persistence — fully self-contained, no external services.
-# * 2026-06-01 update: GQAdonis fork synced to Prometheus-AGS 745b4c1 with fixed
-#   .gitmodules (SCP SSH URLs -> HTTPS so libgit2 can parse them). Branch
-#   sync-gqadonis-745b4c1 == Prometheus-AGS 745b4c1 + one .gitmodules fix commit.
-#   surreal-memory pinned at 7072370 in both workspaces. kreuzberg now public HTTPS
-#   (kreuzberg-dev/kreuzberg tag v4.9.8), no SSH source redirect needed.
-#   See: https://github.com/GQAdonis/universal-agent-runtime/tree/sync-gqadonis-745b4c1
+# * 2026-06-17: tried bumping the in-process link to UAR `main` (rev 0f9385d4) —
+#   which ships the new standalone `universal-agent-runtime` Axum+gRPC binary (the
+#   "sidecar" option) — but REVERTED. UAR `main` fetches its `kreuzberg` submodule
+#   over private SSH (`ssh://git@github.com/GQAdonis/kreuzberg.git`); the
+#   `sync-gqadonis-745b4c1` branch exists precisely to rewrite those submodule URLs
+#   to public HTTPS so CI can resolve them without a deploy key. Pointing at `main`
+#   breaks `cargo` dep-resolution on every CI lane (fmt/clippy/test/build), not just
+#   the daemon. **To bump the in-process UAR, first cut a fresh `sync-gqadonis-<sha>`
+#   branch in GQAdonis/universal-agent-runtime that rebases the new UAR onto the
+#   .gitmodules→HTTPS fix, then point here at that branch.**
+#   This SSH-submodule fragility is itself another reason to migrate UAR to a
+#   supervised SIDECAR (a prebuilt binary sidesteps the whole submodule fetch).
+#   See docs/architecture/uar-sidecar-assessment.md.
 universal-agent-runtime = { git = "https://github.com/GQAdonis/universal-agent-runtime.git", branch = "sync-gqadonis-745b4c1", optional = true, default-features = false, features = ["surreal-backend"] }
 
 librefang-types = { path = "../librefang-types" }

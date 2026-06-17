@@ -234,6 +234,12 @@ fn every_kernel_config_struct_field_is_exposed_via_overlay() {
         "dashboard_user",
         "dashboard_pass",
         "dashboard_pass_hash",
+        // Passkey/WebAuthn RP config (#5981) — operator-level auth settings
+        // managed via config.toml alongside the dashboard credentials above,
+        // not surfaced as ConfigPage rows.
+        "passkey_enabled",
+        "passkey_rp_id",
+        "passkey_rp_origin",
         "mode",
         "language",
         "usage_footer",

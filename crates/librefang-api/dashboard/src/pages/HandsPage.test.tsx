@@ -20,6 +20,8 @@ import {
   useUninstallHand,
 } from "../lib/mutations/hands";
 import { useCronJobs } from "../lib/queries/runtime";
+import { useFullConfig } from "../lib/queries/config";
+import { useSetConfigValue } from "../lib/mutations/config";
 
 vi.mock("../lib/queries/hands", () => ({
   useHands: vi.fn(),
@@ -51,6 +53,14 @@ vi.mock("../lib/queries/runtime", () => ({
   useCronJobs: vi.fn(),
 }));
 
+vi.mock("../lib/queries/config", () => ({
+  useFullConfig: vi.fn(),
+}));
+
+vi.mock("../lib/mutations/config", () => ({
+  useSetConfigValue: vi.fn(),
+}));
+
 vi.mock("react-i18next", async () => {
   const actual = await vi.importActual<typeof import("react-i18next")>(
     "react-i18next",
@@ -72,9 +82,10 @@ vi.mock("../router", () => ({
   router: { preloadRoute: vi.fn().mockResolvedValue(undefined) },
 }));
 
+const addToastSpy = vi.hoisted(() => vi.fn());
 vi.mock("../lib/store", () => ({
   useUIStore: (selector: (state: { addToast: (m: string, t?: string) => void }) => unknown) =>
-    selector({ addToast: vi.fn() }),
+    selector({ addToast: addToastSpy }),
 }));
 
 const useHandsMock = useHands as unknown as ReturnType<typeof vi.fn>;
@@ -90,6 +101,33 @@ const usePauseHandMock = usePauseHand as unknown as ReturnType<typeof vi.fn>;
 const useResumeHandMock = useResumeHand as unknown as ReturnType<typeof vi.fn>;
 const useUninstallHandMock = useUninstallHand as unknown as ReturnType<typeof vi.fn>;
 const useCronJobsMock = useCronJobs as unknown as ReturnType<typeof vi.fn>;
+const useFullConfigMock = useFullConfig as unknown as ReturnType<typeof vi.fn>;
+const useSetConfigValueMock = useSetConfigValue as unknown as ReturnType<typeof vi.fn>;
+const setConfigMutate = vi.fn();
+// Captures the {onSuccess,onError} the component passes to useSetConfigValue so
+// tests can drive the toast branches the production wrapper would invoke.
+let lastSetConfigOpts:
+  | {
+      onSuccess?: (res: { restart_required?: boolean; reload_error?: string }) => void;
+      onError?: (err: Error) => void;
+    }
+  | undefined;
+
+function setConfigDefaults(
+  registryHost: string | null = null,
+  configState: { isLoading?: boolean; isFetching?: boolean; isError?: boolean } = {},
+): void {
+  useFullConfigMock.mockReturnValue({
+    data: { registry: { registry_host: registryHost } },
+    isLoading: configState.isLoading ?? false,
+    isFetching: configState.isFetching ?? false,
+    isError: configState.isError ?? false,
+  });
+  useSetConfigValueMock.mockImplementation((opts?: typeof lastSetConfigOpts) => {
+    lastSetConfigOpts = opts;
+    return { mutate: setConfigMutate, isPending: false };
+  });
+}
 
 function setMutationDefaults(): void {
   const mut = { mutateAsync: vi.fn().mockResolvedValue(undefined), isPending: false };
@@ -126,6 +164,7 @@ describe("HandsPage", () => {
     vi.clearAllMocks();
     setMutationDefaults();
     setSidecarDefaults();
+    setConfigDefaults();
   });
 
   it("shows the grid skeleton while hands are loading", () => {
@@ -157,6 +196,100 @@ describe("HandsPage", () => {
     renderPage();
 
     expect(screen.getByText("common.no_data")).toBeInTheDocument();
+  });
+
+  it("defaults the registry source selector to GitHub when registry_host is unset", () => {
+    useHandsMock.mockReturnValue({ data: [], isLoading: false, isFetching: false, refetch: vi.fn() });
+    setConfigDefaults(null);
+
+    renderPage();
+
+    const select = screen.getByRole("combobox", { name: "hands.registry_source" }) as HTMLSelectElement;
+    expect(select.value).toBe("github");
+  });
+
+  it("writes the Codeberg host when the source is switched to Codeberg", async () => {
+    useHandsMock.mockReturnValue({ data: [], isLoading: false, isFetching: false, refetch: vi.fn() });
+    setConfigDefaults(null);
+
+    renderPage();
+
+    const select = screen.getByRole("combobox", { name: "hands.registry_source" });
+    await userEvent.selectOptions(select, "codeberg");
+
+    expect(setConfigMutate).toHaveBeenCalledWith({
+      path: "registry.registry_host",
+      value: "https://codeberg.org",
+    });
+  });
+
+  it("clears registry_host back to null when switching from Codeberg to GitHub", async () => {
+    useHandsMock.mockReturnValue({ data: [], isLoading: false, isFetching: false, refetch: vi.fn() });
+    setConfigDefaults("https://codeberg.org");
+
+    renderPage();
+
+    const select = screen.getByRole("combobox", { name: "hands.registry_source" }) as HTMLSelectElement;
+    expect(select.value).toBe("codeberg");
+    await userEvent.selectOptions(select, "github");
+
+    expect(setConfigMutate).toHaveBeenCalledWith({
+      path: "registry.registry_host",
+      value: null,
+    });
+  });
+
+  it("treats an explicit github.com host as GitHub (registry_sync folds it to the default)", () => {
+    // registry_sync maps an explicit github.com host back to the GitHub
+    // default, so the selector must show it as GitHub, not Codeberg/custom.
+    useHandsMock.mockReturnValue({ data: [], isLoading: false, isFetching: false, refetch: vi.fn() });
+    setConfigDefaults("https://github.com/");
+
+    renderPage();
+
+    const select = screen.getByRole("combobox", { name: "hands.registry_source" }) as HTMLSelectElement;
+    expect(select.value).toBe("github");
+  });
+
+  it("disables the source selector when the config query errored", () => {
+    useHandsMock.mockReturnValue({ data: [], isLoading: false, isFetching: false, refetch: vi.fn() });
+    setConfigDefaults(null, { isError: true });
+
+    renderPage();
+
+    const select = screen.getByRole("combobox", { name: "hands.registry_source" }) as HTMLSelectElement;
+    expect(select).toBeDisabled();
+  });
+
+  it("disables the source selector during the post-write refetch window", () => {
+    useHandsMock.mockReturnValue({ data: [], isLoading: false, isFetching: false, refetch: vi.fn() });
+    setConfigDefaults(null, { isFetching: true });
+
+    renderPage();
+
+    const select = screen.getByRole("combobox", { name: "hands.registry_source" }) as HTMLSelectElement;
+    expect(select).toBeDisabled();
+  });
+
+  it("toasts an error instead of success when the live config reload failed", () => {
+    useHandsMock.mockReturnValue({ data: [], isLoading: false, isFetching: false, refetch: vi.fn() });
+    setConfigDefaults(null);
+
+    renderPage();
+
+    lastSetConfigOpts?.onSuccess?.({ reload_error: "bad toml" });
+    expect(addToastSpy).toHaveBeenCalledWith("bad toml", "error");
+    expect(addToastSpy).not.toHaveBeenCalledWith("hands.registry_source_updated", "success");
+  });
+
+  it("toasts the restart-required variant when the backend reports it", () => {
+    useHandsMock.mockReturnValue({ data: [], isLoading: false, isFetching: false, refetch: vi.fn() });
+    setConfigDefaults(null);
+
+    renderPage();
+
+    lastSetConfigOpts?.onSuccess?.({ restart_required: true });
+    expect(addToastSpy).toHaveBeenCalledWith("hands.registry_source_updated_restart", "success");
   });
 
   it("shows total and active badges in the header", () => {

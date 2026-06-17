@@ -480,6 +480,30 @@ class AuthResource {
     return this._c._request("POST", "/api/auth/logout");
   }
 
+  async authenticationOptions(data) {
+    return this._c._request("POST", "/api/auth/passkey/authentication-options", data, undefined);
+  }
+
+  async authenticationVerify(data) {
+    return this._c._request("POST", "/api/auth/passkey/authentication-verify", data, undefined);
+  }
+
+  async listCredentials() {
+    return this._c._request("GET", "/api/auth/passkey/credentials");
+  }
+
+  async revokeCredential(id) {
+    return this._c._request("DELETE", `/api/auth/passkey/credentials/${id}`);
+  }
+
+  async registrationOptions(data) {
+    return this._c._request("POST", "/api/auth/passkey/registration-options", data, undefined);
+  }
+
+  async registrationVerify(data) {
+    return this._c._request("POST", "/api/auth/passkey/registration-verify", data, undefined);
+  }
+
   async authProviders() {
     return this._c._request("GET", "/api/auth/providers");
   }

@@ -333,6 +333,26 @@ def parse_message_create(
         metadata["was_mentioned"] = True
     if account_id is not None:
         metadata["account_id"] = account_id
+    # Named mentions so the bridge can route a guild message to a specific
+    # non-default agent (#5323). Each mentioned user contributes its username
+    # and (when set) global display name; the bridge matches them against
+    # agent names/handles.
+    mention_names: list[str] = []
+    mentions_arr = d.get("mentions")
+    if isinstance(mentions_arr, list):
+        for m in mentions_arr:
+            if not isinstance(m, dict):
+                continue
+            for key in ("username", "global_name"):
+                val = m.get(key)
+                if isinstance(val, str) and val and val not in mention_names:
+                    mention_names.append(val)
+    if mention_names:
+        metadata["mention_names"] = mention_names
+    # Individual author so the registry can scope per-peer claims; the
+    # platform_id here is the channel, not the sender.
+    if is_group and isinstance(author_id, str) and author_id:
+        metadata["sender_user_id"] = author_id
 
     return protocol.message(
         user_id=channel_id,  # Rust adapter uses channel_id as platform_id

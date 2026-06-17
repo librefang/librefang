@@ -505,6 +505,42 @@
       "owner": "integration-coverage-matrix"
     },
     {
+      "path": "/api/auth/passkey/authentication-options",
+      "status": "covered",
+      "scenario": "passkey_webauthn_http",
+      "proof": "crates/librefang-api/tests/passkey_routes_integration.rs"
+    },
+    {
+      "path": "/api/auth/passkey/authentication-verify",
+      "status": "covered",
+      "scenario": "passkey_webauthn_http",
+      "proof": "crates/librefang-api/tests/passkey_routes_integration.rs"
+    },
+    {
+      "path": "/api/auth/passkey/credentials",
+      "status": "covered",
+      "scenario": "passkey_webauthn_http",
+      "proof": "crates/librefang-api/tests/passkey_routes_integration.rs"
+    },
+    {
+      "path": "/api/auth/passkey/credentials/{id}",
+      "status": "covered",
+      "scenario": "passkey_webauthn_http",
+      "proof": "crates/librefang-api/tests/passkey_routes_integration.rs"
+    },
+    {
+      "path": "/api/auth/passkey/registration-options",
+      "status": "covered",
+      "scenario": "passkey_webauthn_http",
+      "proof": "crates/librefang-api/tests/passkey_routes_integration.rs"
+    },
+    {
+      "path": "/api/auth/passkey/registration-verify",
+      "status": "covered",
+      "scenario": "passkey_webauthn_http",
+      "proof": "crates/librefang-api/tests/passkey_routes_integration.rs"
+    },
+    {
       "path": "/api/auth/providers",
       "status": "exempt",
       "reason": "requires external provider, credential, browser, or long-running scheduler fixture",

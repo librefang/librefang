@@ -7,10 +7,14 @@
 //! error string.
 //!
 //! Migration is per-module — see [`docs/architecture/error-contracts.md`] for
-//! the full sequence. The dispatch site continues to consume
-//! `Result<String, String>`; modules that have migrated convert at their own
-//! boundary via `.map_err(|e: ToolError| e.to_string())` so the migration can
-//! land incrementally without cascading edits across ~180 sites.
+//! the full sequence. As of slice 5 the dispatch table itself
+//! (`dispatch.rs`) yields `Result<String, ToolError>` natively and converts
+//! once, at the boundary, via `tool_result_from_typed` — so the error's
+//! `execution_status()` reaches the `ToolResult` for every tool. The only
+//! remaining `.map_err(ToolError::upstream_msg)` calls are bridges over the
+//! handful of still-stringly downstreams (`browser_tools`, `web_fetch_to_file`,
+//! `channel::tool_channel_send`, MCP / skill providers) pending their own
+//! slices.
 //!
 //! Refs: #3576.
 

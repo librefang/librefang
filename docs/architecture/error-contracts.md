@@ -257,13 +257,20 @@ Smallest-blast-radius first. Each module is independently reviewable.
    `a2a` / `task` / `process` are already typed.
 4. **`tool_runner/{shell,knowledge,image,meta,canvas,wiki,web_legacy,hand}.rs`** —
    the long tail. Each PR migrates one file + adds tests.
-5. **`tool_runner/{fs,dispatch}.rs`** — last, because `dispatch.rs` is the
-   boundary that finally upgrades from
-   `match result { Ok(s) => …, Err(s) => … }` to
-   `match result { Ok(s) => …, Err(e) => match e.kind() … }`, and lifts
-   `require_kernel` (stringly) into the typed `require_kernel_typed` everywhere.
-   (`a2a.rs` is migrated in slice 3 above; the earlier listing here was a
-   duplicate.)
+5. **`tool_runner/{fs,dispatch}.rs`** — **Done.** `dispatch.rs` is the
+   boundary: the whole `match tool_name { … }` table now yields
+   `Result<String, ToolError>` natively (no per-arm
+   `.map_err(|e| e.to_string())` narrowing) and converts once, at the end,
+   through `tool_result_from_typed`. That routes every tool's
+   `ToolError::execution_status()` onto the `ToolResult` — so a tool-level
+   `PermissionDenied` now lands as the soft `Denied` status (reported to the
+   model, not counted toward the consecutive-hard-failure abort), generalising
+   the #5984 fix from the ACL-gated memory/wiki tools to every tool. The only
+   `.map_err(ToolError::upstream_msg)` calls left in the table are boundary
+   bridges over the handful of still-stringly downstreams (`browser_tools`,
+   `web_fetch_to_file`, `channel::tool_channel_send`, MCP / skill providers),
+   each pending its own slice. (`a2a.rs` is migrated in slice 3 above; the
+   earlier listing here was a duplicate.)
 6. **`librefang-channels::bridge`** — 24 sites. After tool_runner is done so the
    shared `ToolError` shape is settled.
 7. **`librefang-api::channel_bridge`** — 16 sites. Same reason.

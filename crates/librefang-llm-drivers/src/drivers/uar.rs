@@ -184,6 +184,9 @@ impl LlmDriver for UarDriver {
             // UarDriver is a leaf driver — the outermost chain wrapper
             // populates actual_provider for failover billing attribution.
             actual_provider: None,
+            // UAR/liter-llm does not surface the resolved model id back to us;
+            // leave unset like the other leaf drivers (#6134).
+            actual_model: None,
         })
     }
 
@@ -322,6 +325,9 @@ impl LlmDriver for UarDriver {
             // UarDriver is a leaf driver — the outermost chain wrapper
             // populates actual_provider for failover billing attribution.
             actual_provider: None,
+            // UAR/liter-llm does not surface the resolved model id back to us;
+            // leave unset like the other leaf drivers (#6134).
+            actual_model: None,
         })
     }
 }

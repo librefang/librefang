@@ -160,6 +160,45 @@ def test_inbound_text_command_sender_allowed():
     assert sc["user_id"] == "-55" and sc["user_name"] == "Chan"
 
 
+def test_inbound_mentions_and_sender_user_id():
+    a = _adapter()
+    # "@ambrogio help me" in a supergroup: a mention entity is surfaced as a
+    # routable name, and the individual sender id is attached so the bridge
+    # can scope a per-peer conversation claim (#5323).
+    ev = a._update_to_event({
+        "message": {
+            "text": "@ambrogio help me",
+            "entities": [{"type": "mention", "offset": 0, "length": 9}],
+            "from": {"id": 42, "first_name": "Alice"},
+            "chat": {"id": -100123, "type": "supergroup"},
+            "message_id": 9,
+        },
+    })
+    meta = ev["params"]["metadata"]
+    assert meta["mention_names"] == ["ambrogio"]
+    assert meta["sender_user_id"] == "42"
+
+    # Emoji before the mention: entity offsets are UTF-16 code units, so the
+    # extractor must slice in UTF-16 to stay correct.
+    ev2 = a._update_to_event({
+        "message": {
+            "text": "😀 @ambrogio",
+            "entities": [{"type": "mention", "offset": 3, "length": 9}],
+            "from": {"id": 7, "first_name": "Bob"},
+            "chat": {"id": -100123, "type": "supergroup"},
+            "message_id": 10,
+        },
+    })
+    assert ev2["params"]["metadata"]["mention_names"] == ["ambrogio"]
+
+    # DM with no mentions: lean envelope, no metadata block.
+    dm = a._update_to_event({
+        "message": {"text": "hi", "from": {"id": 42, "first_name": "A"},
+                    "chat": {"id": 42, "type": "private"}, "message_id": 1},
+    })
+    assert dm["params"].get("metadata") is None
+
+
 def test_inbound_allowed_users_by_id_and_username():
     a = _adapter(ALLOWED_USERS="111, @Alice")
     mk = lambda f: {"message": {"text": "hi", "from": f,  # noqa: E731

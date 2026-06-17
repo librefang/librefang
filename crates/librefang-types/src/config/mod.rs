@@ -401,6 +401,24 @@ admin_role = "admin"
         assert!(!ov.threading);
         assert!(ov.output_format.is_none());
         assert!(ov.model.is_none());
+        assert!(ov.thread_ownership_enabled);
+        assert_eq!(ov.conversation_ownership_ttl_seconds, 600);
+        assert!(!ov.conversation_ownership_include_dms);
+    }
+
+    #[test]
+    fn test_conversation_ownership_knobs_roundtrip() {
+        let toml_str = r#"
+            conversation_ownership_ttl_seconds = 120
+            conversation_ownership_include_dms = true
+        "#;
+        let ov: ChannelOverrides = toml::from_str(toml_str).unwrap();
+        assert_eq!(ov.conversation_ownership_ttl_seconds, 120);
+        assert!(ov.conversation_ownership_include_dms);
+        // Unset knobs keep their #5323 defaults.
+        let bare: ChannelOverrides = toml::from_str("").unwrap();
+        assert_eq!(bare.conversation_ownership_ttl_seconds, 600);
+        assert!(!bare.conversation_ownership_include_dms);
     }
 
     #[test]

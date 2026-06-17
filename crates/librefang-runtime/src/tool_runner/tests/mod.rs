@@ -246,9 +246,18 @@ async fn test_tool_channel_send_blocks_secret_in_text_message() {
         "recipient": "@user",
         "message": "here is the api_key=sk-abcdefghijklmnop",
     });
-    let err = tool_channel_send(&input, Some(&kernel), None, Some("test_user_id"), None, &[])
-        .await
-        .expect_err("channel_send must reject tainted message");
+    let err = tool_channel_send(
+        &input,
+        Some(&kernel),
+        None,
+        Some("test_user_id"),
+        None,
+        None,
+        None,
+        &[],
+    )
+    .await
+    .expect_err("channel_send must reject tainted message");
     assert!(
         err.contains("taint") || err.contains("violation"),
         "expected taint violation, got: {err}"
@@ -267,9 +276,18 @@ async fn test_tool_channel_send_blocks_secret_in_image_caption() {
         "image_url": "https://example.com/cat.png",
         "message": "see attached. token=sk-abcdefghijklmnop",
     });
-    let err = tool_channel_send(&input, Some(&kernel), None, Some("test_user_id"), None, &[])
-        .await
-        .expect_err("image caption must be sink-checked");
+    let err = tool_channel_send(
+        &input,
+        Some(&kernel),
+        None,
+        Some("test_user_id"),
+        None,
+        None,
+        None,
+        &[],
+    )
+    .await
+    .expect_err("image caption must be sink-checked");
     assert!(
         err.contains("taint") || err.contains("violation"),
         "expected taint violation, got: {err}"
@@ -288,9 +306,18 @@ async fn test_tool_channel_send_blocks_secret_in_poll_question() {
         "poll_question": "guess my api_key=sk-abcdefghijklmnop",
         "poll_options": ["yes", "no"],
     });
-    let err = tool_channel_send(&input, Some(&kernel), None, Some("test_user_id"), None, &[])
-        .await
-        .expect_err("poll question must be sink-checked");
+    let err = tool_channel_send(
+        &input,
+        Some(&kernel),
+        None,
+        Some("test_user_id"),
+        None,
+        None,
+        None,
+        &[],
+    )
+    .await
+    .expect_err("poll question must be sink-checked");
     assert!(
         err.contains("taint") || err.contains("violation"),
         "expected taint violation, got: {err}"
@@ -318,6 +345,8 @@ async fn test_tool_channel_send_auto_fills_recipient_from_sender_id() {
         None,
         Some("12345_telegram"),
         None,
+        None,
+        None,
         &[],
     )
     .await;
@@ -341,13 +370,218 @@ async fn test_tool_channel_send_requires_recipient_without_sender_id() {
         // recipient intentionally omitted
         "message": "Hello!",
     });
-    let err = tool_channel_send(&input, Some(&kernel), None, None, None, &[])
+    let err = tool_channel_send(&input, Some(&kernel), None, None, None, None, None, &[])
         .await
         .expect_err("channel_send must require recipient without sender_id");
     assert!(
         err.contains("Missing 'recipient'"),
         "Expected missing recipient error, got: {err}"
     );
+}
+
+// ── #6117 cross-chat dispatch guard ───────────────────────────────────────
+//
+// The guard rejects an EXPLICIT `recipient` that targets a different chat on
+// the SAME channel the turn arrived on (the audio cross-chat leak 2026-05-19).
+// `ApprovalKernel` does not implement `send_channel_*`, so a send that passes
+// the guard fails later with a generic transport error — the assertions key on
+// the presence/absence of the guard's distinctive message, not on send success.
+
+const GUARD_MSG: &str = "Cross-chat dispatch is forbidden";
+
+fn guard_kernel() -> Arc<dyn KernelHandle> {
+    Arc::new(ApprovalKernel {
+        approval_requests: Arc::new(AtomicUsize::new(0)),
+        user_gate_override: None,
+    })
+}
+
+#[tokio::test]
+async fn channel_send_explicit_mismatch_same_channel_is_blocked() {
+    let kernel = guard_kernel();
+    let input = serde_json::json!({
+        "channel": "whatsapp",
+        "recipient": "stranger-jid",
+        "message": "leaked voice note",
+    });
+    // Turn arrived from `owner-jid` on `whatsapp`; model targets a stranger.
+    let err = tool_channel_send(
+        &input,
+        Some(&kernel),
+        None,
+        Some("owner-jid"), // sender_id
+        Some("whatsapp"),  // sender_channel
+        None,              // sender_chat_id (DM: falls back to sender_id)
+        Some("agent-x"),
+        &[],
+    )
+    .await
+    .expect_err("cross-chat dispatch must be blocked");
+    assert!(err.contains(GUARD_MSG), "expected guard error, got: {err}");
+    assert!(err.contains("stranger-jid") && err.contains("owner-jid"));
+}
+
+#[tokio::test]
+async fn channel_send_explicit_match_same_channel_passes_guard() {
+    let kernel = guard_kernel();
+    let input = serde_json::json!({
+        "channel": "whatsapp",
+        "recipient": "owner-jid",
+        "message": "legit reply",
+    });
+    let err = tool_channel_send(
+        &input,
+        Some(&kernel),
+        None,
+        Some("owner-jid"),
+        Some("whatsapp"),
+        None,
+        Some("agent-x"),
+        &[],
+    )
+    .await
+    .expect_err("send fails at the transport mock, not the guard");
+    assert!(
+        !err.contains(GUARD_MSG),
+        "recipient matches current chat; guard must NOT fire: {err}"
+    );
+}
+
+#[tokio::test]
+async fn channel_send_group_reply_to_chat_id_passes_guard() {
+    // Group chat: the legitimate reply target is the GROUP (chat_id), not the
+    // individual speaker (sender_id). Explicit recipient == chat_id must pass
+    // even though it differs from sender_id.
+    let kernel = guard_kernel();
+    let input = serde_json::json!({
+        "channel": "telegram",
+        "recipient": "group-123",
+        "message": "hi group",
+    });
+    let err = tool_channel_send(
+        &input,
+        Some(&kernel),
+        None,
+        Some("speaker-42"), // individual speaker
+        Some("telegram"),
+        Some("group-123"), // conversation id (the group)
+        Some("agent-x"),
+        &[],
+    )
+    .await
+    .expect_err("send fails at the transport mock, not the guard");
+    assert!(
+        !err.contains(GUARD_MSG),
+        "group reply to chat_id must pass the guard: {err}"
+    );
+}
+
+#[tokio::test]
+async fn channel_send_different_channel_passes_guard() {
+    // Replying on a DIFFERENT channel than the inbound turn is allowed — only
+    // intra-channel re-targeting is the leak pattern.
+    let kernel = guard_kernel();
+    let input = serde_json::json!({
+        "channel": "email",
+        "recipient": "someone@example.com",
+        "message": "cross-channel is fine",
+    });
+    let err = tool_channel_send(
+        &input,
+        Some(&kernel),
+        None,
+        Some("owner-jid"),
+        Some("whatsapp"), // inbound channel differs from the send channel
+        None,
+        Some("agent-x"),
+        &[],
+    )
+    .await
+    .expect_err("send fails at the transport mock, not the guard");
+    assert!(
+        !err.contains(GUARD_MSG),
+        "different-channel dispatch must pass the guard: {err}"
+    );
+}
+
+#[tokio::test]
+async fn channel_send_out_of_band_no_peer_scope_passes_guard() {
+    // Out-of-band callers (cron, triggers, external MCP) carry no peer scope —
+    // the guard no-ops so their existing unrestricted behaviour is preserved.
+    let kernel = guard_kernel();
+    let input = serde_json::json!({
+        "channel": "whatsapp",
+        "recipient": "anyone-jid",
+        "message": "scheduled broadcast",
+    });
+    let err = tool_channel_send(
+        &input,
+        Some(&kernel),
+        None,
+        None, // no sender_id
+        None, // no sender_channel
+        None, // no sender_chat_id
+        Some("agent-x"),
+        &[],
+    )
+    .await
+    .expect_err("send fails at the transport mock, not the guard");
+    assert!(
+        !err.contains(GUARD_MSG),
+        "out-of-band send must pass the guard: {err}"
+    );
+}
+
+#[tokio::test]
+async fn channel_send_explicit_case_variant_is_blocked() {
+    // `send_channel_*` lookups are case-sensitive (#6078), so a case-variant
+    // recipient is a DISTINCT chat and must be blocked — the guard compares the
+    // recipient case-sensitively rather than letting "OWNER-JID" pass as
+    // "owner-jid".
+    let kernel = guard_kernel();
+    let input = serde_json::json!({
+        "channel": "whatsapp",
+        "recipient": "OWNER-JID",
+        "message": "case bypass attempt",
+    });
+    let err = tool_channel_send(
+        &input,
+        Some(&kernel),
+        None,
+        Some("owner-jid"),
+        Some("whatsapp"),
+        None,
+        Some("agent-x"),
+        &[],
+    )
+    .await
+    .expect_err("case-variant recipient must be blocked");
+    assert!(err.contains(GUARD_MSG), "expected guard error, got: {err}");
+}
+
+#[tokio::test]
+async fn channel_send_empty_chat_id_falls_back_to_sender_id_guard() {
+    // An empty `sender_chat_id` (stamped raw on the in-process path) must not
+    // mask the `sender_id` DM fallback and silently disable the guard.
+    let kernel = guard_kernel();
+    let input = serde_json::json!({
+        "channel": "whatsapp",
+        "recipient": "stranger-jid",
+        "message": "leak via empty chat_id",
+    });
+    let err = tool_channel_send(
+        &input,
+        Some(&kernel),
+        None,
+        Some("owner-jid"),
+        Some("whatsapp"),
+        Some(""), // empty chat_id must fall back to sender_id, not disable the guard
+        Some("agent-x"),
+        &[],
+    )
+    .await
+    .expect_err("empty chat_id must still enforce via sender_id fallback");
+    assert!(err.contains(GUARD_MSG), "expected guard error, got: {err}");
 }
 
 // ── agent_send conversation_key routing tests ─────────────────────────────
@@ -987,6 +1221,8 @@ async fn test_channel_send_mirrors_to_channel_owner_session() {
         Some(&kernel),
         None,
         Some("99999"),
+        None,
+        None,
         Some("caller-agent-id"),
         &[],
     )
@@ -1038,6 +1274,8 @@ async fn test_channel_send_mirrors_when_caller_is_channel_owner() {
         Some(&kernel),
         None,
         Some("42"),
+        None,
+        None,
         Some("same-agent"),
         &[],
     )
@@ -1076,6 +1314,8 @@ async fn test_channel_send_succeeds_even_when_mirror_fails() {
         Some(&kernel),
         None,
         Some("77"),
+        None,
+        None,
         Some("caller-id"),
         &[],
     )

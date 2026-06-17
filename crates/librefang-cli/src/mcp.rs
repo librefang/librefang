@@ -132,16 +132,35 @@ pub fn run_mcp_server(config: Option<std::path::PathBuf>) {
 
     loop {
         match read_message(&mut reader) {
-            Ok(Some(msg)) => {
+            Ok(Frame::Message(msg)) => {
                 let response = handle_message(&backend, &msg);
                 if let Some(resp) = response {
                     write_message(&mut writer, &resp);
                 }
             }
-            Ok(None) => break,
+            Ok(Frame::ProtocolError(id)) => {
+                // A single malformed or oversized frame must not kill the
+                // session: reply with a JSON-RPC parse error and keep reading.
+                let resp = jsonrpc_error(id, -32700, "Parse error");
+                write_message(&mut writer, &resp);
+            }
+            Ok(Frame::Eof) => break,
+            // Genuine I/O failure on the underlying stream — nothing left to do.
             Err(_) => break,
         }
     }
+}
+
+/// Outcome of reading one Content-Length framed message.
+enum Frame {
+    /// Stream closed cleanly (true EOF / connection closed).
+    Eof,
+    /// A well-formed JSON-RPC message body.
+    Message(Value),
+    /// A malformed or oversized frame whose body was fully drained. The
+    /// payload carries the request id if it could be recovered, else
+    /// `Value::Null`. The run loop replies with a JSON-RPC error and continues.
+    ProtocolError(Value),
 }
 
 fn create_backend(config: Option<std::path::PathBuf>) -> McpBackend {
@@ -174,14 +193,32 @@ fn create_backend(config: Option<std::path::PathBuf>) -> McpBackend {
 }
 
 /// Read a Content-Length framed JSON-RPC message from the reader.
-fn read_message(reader: &mut impl BufRead) -> io::Result<Option<Value>> {
-    // Read headers until empty line
-    let mut content_length: usize = 0;
+///
+/// Distinguishes true end-of-stream (`Frame::Eof`) from recoverable
+/// protocol errors (`Frame::ProtocolError`): a malformed or oversized body
+/// is drained from the stream and surfaced as a `ProtocolError` so the run
+/// loop can reply with a JSON-RPC error and keep the session alive, rather
+/// than collapsing the connection. `Err` is reserved for genuine I/O
+/// failures on the underlying stream.
+fn read_message(reader: &mut impl BufRead) -> io::Result<Frame> {
+    // Read headers until empty line.
+    //
+    // `saw_header` distinguishes a genuine end-of-stream (the very first
+    // `read_line` returns 0 bytes — connection closed, no data) from a frame
+    // that carried headers but no usable `Content-Length`. The former is a
+    // clean `Frame::Eof`; the latter is a malformed frame and must surface as
+    // `Frame::ProtocolError` so the run loop replies -32700 and keeps the
+    // session alive instead of breaking. `content_length` stays `None` until
+    // a `Content-Length` header parses to a valid value; a parse failure is a
+    // protocol error in its own right (never silently coerced to 0).
+    let mut saw_header = false;
+    let mut malformed = false;
+    let mut content_length: Option<usize> = None;
     loop {
         let mut header = String::new();
         let bytes_read = reader.read_line(&mut header)?;
         if bytes_read == 0 {
-            return Ok(None); // EOF
+            return Ok(Frame::Eof); // True EOF — stream closed.
         }
 
         let trimmed = header.trim();
@@ -189,32 +226,57 @@ fn read_message(reader: &mut impl BufRead) -> io::Result<Option<Value>> {
             break; // End of headers
         }
 
+        saw_header = true;
+
         if let Some(len_str) = trimmed.strip_prefix("Content-Length: ") {
-            content_length = len_str.parse().unwrap_or(0);
+            match len_str.parse::<usize>() {
+                Ok(n) => content_length = Some(n),
+                // Malformed value (e.g. `Content-Length: abc`) — a protocol
+                // error, not EOF. Flag it but keep consuming the rest of this
+                // frame's header block (down to the terminating empty line) so
+                // the stream stays aligned on a frame boundary; returning here
+                // would leave the empty-line terminator unread and desync the
+                // next frame. Do NOT coerce to 0 and collapse to Eof.
+                Err(_) => malformed = true,
+            }
         }
     }
 
-    if content_length == 0 {
-        return Ok(None);
+    if malformed {
+        return Ok(Frame::ProtocolError(Value::Null));
     }
+
+    // After the headers terminate: a missing or zero-length Content-Length is
+    // only a clean EOF / empty keepalive when no header line was read at all.
+    // If headers were present but none gave a valid positive length, the frame
+    // is malformed and recoverable, not end-of-stream.
+    let content_length = match content_length {
+        Some(n) if n > 0 => n,
+        _ => {
+            if saw_header {
+                return Ok(Frame::ProtocolError(Value::Null));
+            }
+            return Ok(Frame::Eof);
+        }
+    };
 
     // SECURITY: Reject oversized messages to prevent OOM.
     const MAX_MCP_MESSAGE_SIZE: usize = 10 * 1024 * 1024; // 10MB
     if content_length > MAX_MCP_MESSAGE_SIZE {
-        // Drain the oversized body to avoid stream desync
+        // Drain the oversized body to avoid stream desync, then surface a
+        // recoverable protocol error so the session continues. The id is
+        // unknown (we never parse the body), so report it as Null.
         let mut discard = [0u8; 4096];
         let mut remaining = content_length;
         while remaining > 0 {
             let to_read = remaining.min(4096);
             if reader.read_exact(&mut discard[..to_read]).is_err() {
-                break;
+                // Stream truncated mid-drain — treat as connection closed.
+                return Ok(Frame::Eof);
             }
             remaining -= to_read;
         }
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("MCP message too large: {content_length} bytes (max {MAX_MCP_MESSAGE_SIZE})"),
-        ));
+        return Ok(Frame::ProtocolError(Value::Null));
     }
 
     // Read the body
@@ -222,8 +284,10 @@ fn read_message(reader: &mut impl BufRead) -> io::Result<Option<Value>> {
     reader.read_exact(&mut body)?;
 
     match serde_json::from_slice(&body) {
-        Ok(v) => Ok(Some(v)),
-        Err(_) => Ok(None),
+        Ok(v) => Ok(Frame::Message(v)),
+        // Body was fully read but is not valid JSON — id is unrecoverable.
+        // Surface a recoverable protocol error instead of faking EOF.
+        Err(_) => Ok(Frame::ProtocolError(Value::Null)),
     }
 }
 
@@ -446,8 +510,148 @@ mod tests {
         let body = r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#;
         let input = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
         let mut reader = io::BufReader::new(input.as_bytes());
-        let msg = read_message(&mut reader).unwrap().unwrap();
-        assert_eq!(msg["method"], "initialize");
-        assert_eq!(msg["id"], 1);
+        match read_message(&mut reader).unwrap() {
+            Frame::Message(msg) => {
+                assert_eq!(msg["method"], "initialize");
+                assert_eq!(msg["id"], 1);
+            }
+            _ => panic!("expected Frame::Message for a well-formed body"),
+        }
+    }
+
+    #[test]
+    fn test_read_message_true_eof() {
+        // Empty stream — read_line returns 0 bytes immediately.
+        let mut reader = io::BufReader::new(&b""[..]);
+        assert!(matches!(read_message(&mut reader).unwrap(), Frame::Eof));
+    }
+
+    #[test]
+    fn test_read_message_malformed_body_is_protocol_error() {
+        // A Content-Length header with a body that is not valid JSON must
+        // surface as a recoverable protocol error, NOT EOF — otherwise the
+        // run loop would break and kill the whole session.
+        let body = "this is not json";
+        let input = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+        let mut reader = io::BufReader::new(input.as_bytes());
+        match read_message(&mut reader).unwrap() {
+            Frame::ProtocolError(id) => assert_eq!(id, Value::Null),
+            Frame::Eof => panic!("malformed body must not be reported as EOF"),
+            Frame::Message(_) => panic!("malformed body must not parse as a message"),
+        }
+    }
+
+    #[test]
+    fn test_read_message_malformed_content_length_is_protocol_error() {
+        // A non-numeric Content-Length value must surface as a recoverable
+        // protocol error, NOT EOF — the old `unwrap_or(0)` collapsed this to
+        // `content_length == 0` and reported Eof, killing the session. The
+        // following valid frame must still parse from the same stream (no
+        // desync): a malformed header has no body, so the next bytes are the
+        // next frame's header.
+        let good = r#"{"jsonrpc":"2.0","id":3,"method":"initialize"}"#;
+        let input = format!(
+            "Content-Length: abc\r\n\r\nContent-Length: {}\r\n\r\n{}",
+            good.len(),
+            good,
+        );
+        let mut reader = io::BufReader::new(input.as_bytes());
+
+        match read_message(&mut reader).unwrap() {
+            Frame::ProtocolError(id) => assert_eq!(id, Value::Null),
+            Frame::Eof => panic!("malformed Content-Length must not be reported as EOF"),
+            Frame::Message(_) => panic!("malformed Content-Length must not parse as a message"),
+        }
+
+        // Subsequent valid frame still parses — stream stayed in sync.
+        match read_message(&mut reader).unwrap() {
+            Frame::Message(msg) => {
+                assert_eq!(msg["method"], "initialize");
+                assert_eq!(msg["id"], 3);
+            }
+            _ => panic!("expected the subsequent valid request to parse"),
+        }
+    }
+
+    #[test]
+    fn test_read_message_headers_without_content_length_is_protocol_error() {
+        // Headers present (a non-empty line) but no Content-Length, terminated
+        // by the empty line. This is a malformed frame, not end-of-stream, so
+        // it must be a recoverable ProtocolError rather than Frame::Eof.
+        let input = "X-Custom: value\r\n\r\n";
+        let mut reader = io::BufReader::new(input.as_bytes());
+        match read_message(&mut reader).unwrap() {
+            Frame::ProtocolError(id) => assert_eq!(id, Value::Null),
+            Frame::Eof => panic!("a frame with headers but no Content-Length must not be EOF"),
+            Frame::Message(_) => panic!("no body to parse as a message"),
+        }
+    }
+
+    #[test]
+    fn test_read_message_malformed_then_valid_continues() {
+        // Feed a malformed frame immediately followed by a valid request.
+        // The malformed frame must be a recoverable ProtocolError (so the
+        // run loop continues), and the subsequent valid request must still
+        // be readable from the same stream — proving the stream stays in
+        // sync and the session is not terminated.
+        let bad = "not json at all";
+        let good = r#"{"jsonrpc":"2.0","id":7,"method":"initialize"}"#;
+        let input = format!(
+            "Content-Length: {}\r\n\r\n{}Content-Length: {}\r\n\r\n{}",
+            bad.len(),
+            bad,
+            good.len(),
+            good,
+        );
+        let mut reader = io::BufReader::new(input.as_bytes());
+
+        // First frame: malformed -> recoverable protocol error.
+        assert!(matches!(
+            read_message(&mut reader).unwrap(),
+            Frame::ProtocolError(_)
+        ));
+
+        // Second frame: the valid request still parses, proving the stream
+        // was not desynced and the loop would have continued.
+        match read_message(&mut reader).unwrap() {
+            Frame::Message(msg) => {
+                assert_eq!(msg["method"], "initialize");
+                assert_eq!(msg["id"], 7);
+            }
+            _ => panic!("expected the subsequent valid request to parse"),
+        }
+
+        // And then a clean EOF.
+        assert!(matches!(read_message(&mut reader).unwrap(), Frame::Eof));
+    }
+
+    #[test]
+    fn test_read_message_oversized_is_protocol_error() {
+        // Declare a body just over the 10MB cap and actually supply that many
+        // bytes. read_message must drain the full body and report a
+        // recoverable protocol error (NOT Err, which would kill the session),
+        // leaving the stream in sync for the following valid request.
+        const MAX: usize = 10 * 1024 * 1024;
+        let oversize = MAX + 1;
+        let good = r#"{"jsonrpc":"2.0","id":9,"method":"initialize"}"#;
+        let mut input: Vec<u8> = Vec::with_capacity(oversize + 128);
+        input.extend_from_slice(format!("Content-Length: {oversize}\r\n\r\n").as_bytes());
+        input.extend(std::iter::repeat_n(b'x', oversize));
+        input.extend_from_slice(
+            format!("Content-Length: {}\r\n\r\n{}", good.len(), good).as_bytes(),
+        );
+        let mut reader = io::BufReader::new(&input[..]);
+
+        // Oversized frame -> recoverable protocol error, body fully drained.
+        assert!(matches!(
+            read_message(&mut reader).unwrap(),
+            Frame::ProtocolError(_)
+        ));
+
+        // Stream stayed in sync: the following valid request parses.
+        match read_message(&mut reader).unwrap() {
+            Frame::Message(msg) => assert_eq!(msg["id"], 9),
+            _ => panic!("expected the post-oversize valid request to parse"),
+        }
     }
 }
