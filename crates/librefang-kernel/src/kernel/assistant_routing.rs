@@ -187,17 +187,7 @@ impl LibreFangKernel {
         let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
-        // Auto-routing eligibility (#6139). Engage intent classification when
-        // either:
-        //   - the agent is the legacy "assistant" dispatcher — this also covers
-        //     the `/message/stream` classify-and-route path, which carries no
-        //     channel `sender_context` (see `send_message_streaming_with_routing`),
-        //   - or the channel explicitly opted into routing via `auto_route != Off`.
-        // Previously this gated solely on the literal name "assistant", so an
-        // operator who set e.g. `auto_route = "sticky_ttl"` on a channel whose
-        // default agent was named anything else got silently no routing — the
-        // `AutoRouteStrategy` gate below was unreachable. Keying on the strategy
-        // makes routing a config capability rather than a magic agent name.
+        // Route on AutoRouteStrategy, not just the literal "assistant" name — the legacy name check silently bypassed opt-in strategies on other agents.
         let is_assistant_dispatcher = entry.name == "assistant";
         drop(entry);
 
@@ -388,14 +378,6 @@ impl LibreFangKernel {
         Ok(agent_id)
     }
 
-    /// Whether auto-routing should be skipped entirely for this invocation,
-    /// short-circuiting straight to the requested agent (#6139).
-    ///
-    /// Routing engages for the legacy `"assistant"` dispatcher (which also
-    /// covers the no-`sender_context` `/message/stream` classify path) or
-    /// whenever a channel explicitly opted in via `auto_route != Off`. Any
-    /// other agent on an `Off` channel — the default for every channel — is
-    /// answered directly, preserving pre-#6139 behaviour.
     fn auto_route_bypasses(is_assistant_dispatcher: bool, auto_route: &AutoRouteStrategy) -> bool {
         !is_assistant_dispatcher && *auto_route == AutoRouteStrategy::Off
     }
@@ -507,15 +489,8 @@ impl LibreFangKernel {
 mod tests {
     use super::*;
 
-    // #6139: routing eligibility is keyed on `AutoRouteStrategy`, not on the
-    // literal agent name. The legacy "assistant" dispatcher always stays
-    // eligible (it carries the no-`sender_context` `/message/stream` path);
-    // any other agent becomes eligible only once its channel opts in.
-
     #[test]
     fn assistant_dispatcher_is_never_bypassed() {
-        // The "assistant" agent classifies regardless of strategy — including
-        // `Off`, which is what the no-`sender_context` stream path resolves to.
         for strategy in [
             AutoRouteStrategy::Off,
             AutoRouteStrategy::ExplicitOnly,
@@ -531,8 +506,6 @@ mod tests {
 
     #[test]
     fn non_assistant_bypasses_only_when_off() {
-        // The regression this fixes: a non-"assistant" front-door agent on a
-        // channel with `auto_route != Off` must now route, not bypass.
         assert!(
             LibreFangKernel::auto_route_bypasses(false, &AutoRouteStrategy::Off),
             "non-assistant + Off → bypass (legacy default, no routing)",
