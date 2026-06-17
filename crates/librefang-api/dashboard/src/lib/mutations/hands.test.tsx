@@ -194,7 +194,7 @@ describe("useUpdateHandSettings", () => {
     expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: handKeys.detail("h1"),
     });
-    // #6145: the settings query backs the editor's displayed values, so it
+    // The settings query backs the editor's displayed values, so it
     // must be invalidated for saved inputs to reappear after save.
     expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: handKeys.settings("h1"),
