@@ -4122,6 +4122,34 @@ export interface ExperimentVariantMetrics {
   total_cost_usd: number;
 }
 
+/**
+ * One row of the cross-agent prompt repository overview
+ * (`GET /api/prompts/overview`). Aggregates each non-hand agent's
+ * prompt-version store into a single fleet-wide summary so the prompt
+ * repository page can render every agent without N per-agent round trips.
+ *
+ * `active_version` mirrors the version flagged `is_active` in the store;
+ * `live_system_prompt` is the prompt actually used in LLM calls
+ * (`manifest.model.system_prompt`). The two diverge until a version is
+ * bound back onto the agent manifest.
+ */
+export interface PromptOverviewItem {
+  agent_id: string;
+  agent_name: string;
+  version_count: number;
+  active_version?: number | null;
+  active_version_id?: string | null;
+  live_system_prompt: string;
+  latest_version_at?: string | null;
+}
+
+export async function listPromptsOverview(): Promise<PromptOverviewItem[]> {
+  const data = await get<PaginatedResponse<PromptOverviewItem>>(
+    "/api/prompts/overview",
+  );
+  return data.items ?? [];
+}
+
 export async function listPromptVersions(agentId: string): Promise<PromptVersion[]> {
   const data = await get<PaginatedResponse<PromptVersion>>(
     `/api/agents/${encodeURIComponent(agentId)}/prompts/versions`,
