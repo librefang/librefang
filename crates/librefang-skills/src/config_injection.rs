@@ -201,6 +201,7 @@ mod tests {
     fn make_skill(name: &str, config_vars: Vec<SkillConfigVar>) -> InstalledSkill {
         InstalledSkill {
             manifest: SkillManifest {
+                host_capabilities: Vec::new(),
                 skill: SkillMeta {
                     name: name.to_string(),
                     version: "0.1.0".to_string(),
