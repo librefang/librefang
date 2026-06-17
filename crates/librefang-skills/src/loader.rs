@@ -1346,6 +1346,7 @@ echo '{"greeting": "hello from shell"}'
         std::fs::write(dir.path().join("run.sh"), script).unwrap();
 
         let manifest = SkillManifest {
+            host_capabilities: Vec::new(),
             skill: SkillMeta {
                 name: "test-shell".to_string(),
                 version: librefang_types::VERSION.to_string(),
@@ -1399,6 +1400,7 @@ echo '{"greeting": "hello from shell"}'
         std::fs::write(dir.path().join("run.sh"), script).unwrap();
 
         let manifest = SkillManifest {
+            host_capabilities: Vec::new(),
             skill: SkillMeta {
                 name: "test-shell-plain".to_string(),
                 version: librefang_types::VERSION.to_string(),
@@ -1457,6 +1459,7 @@ echo '{"greeting": "hello from shell"}'
         std::fs::write(dir.path().join("fail.sh"), script).unwrap();
 
         let manifest = SkillManifest {
+            host_capabilities: Vec::new(),
             skill: SkillMeta {
                 name: "test-shell-fail".to_string(),
                 version: librefang_types::VERSION.to_string(),
@@ -1511,6 +1514,7 @@ echo '{"greeting": "hello from shell"}'
         let dir = TempDir::new().unwrap();
 
         let manifest = SkillManifest {
+            host_capabilities: Vec::new(),
             skill: SkillMeta {
                 name: "test-shell-missing".to_string(),
                 version: librefang_types::VERSION.to_string(),
@@ -1561,6 +1565,7 @@ echo '{"greeting": "hello from shell"}'
 
         let dir = TempDir::new().unwrap();
         let manifest = SkillManifest {
+            host_capabilities: Vec::new(),
             skill: SkillMeta {
                 name: "test-prompt".to_string(),
                 version: librefang_types::VERSION.to_string(),
@@ -1644,6 +1649,7 @@ echo '{"greeting": "hello from shell"}'
         std::fs::write(dir.path().join("run.sh"), script).unwrap();
 
         let manifest = SkillManifest {
+            host_capabilities: Vec::new(),
             skill: SkillMeta {
                 name: "test-env-passthrough".to_string(),
                 version: librefang_types::VERSION.to_string(),
@@ -1710,6 +1716,7 @@ echo '{"greeting": "hello from shell"}'
         std::fs::write(&evil_script, "#!/bin/bash\necho PWNED\n").unwrap();
 
         let manifest = SkillManifest {
+            host_capabilities: Vec::new(),
             skill: SkillMeta {
                 name: "test-traversal".to_string(),
                 version: librefang_types::VERSION.to_string(),
@@ -1946,6 +1953,7 @@ echo '{"greeting": "hello from shell"}'
         .unwrap();
 
         let manifest = SkillManifest {
+            host_capabilities: Vec::new(),
             skill: SkillMeta {
                 name: "schema-guard".to_string(),
                 version: librefang_types::VERSION.to_string(),
@@ -2016,6 +2024,7 @@ echo '{"greeting": "hello from shell"}'
         std::fs::write(dir.path().join("flood.sh"), script).unwrap();
 
         let manifest = SkillManifest {
+            host_capabilities: Vec::new(),
             skill: SkillMeta {
                 name: "flood".to_string(),
                 version: librefang_types::VERSION.to_string(),
@@ -2093,6 +2102,7 @@ echo '{"greeting": "hello from shell"}'
         std::fs::write(dir.path().join("sleeper.sh"), script).unwrap();
 
         let manifest = SkillManifest {
+            host_capabilities: Vec::new(),
             skill: SkillMeta {
                 name: "sleeper".to_string(),
                 version: librefang_types::VERSION.to_string(),
