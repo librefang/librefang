@@ -293,6 +293,15 @@ pub async fn get_hand(
                             "provider": if a.manifest.model.provider == "default" { &dm.provider } else { &a.manifest.model.provider },
                             "model": if a.manifest.model.model == "default" { &dm.model } else { &a.manifest.model.model },
                             "steps": steps,
+                            // #6151 / #6152: the manifest system prompt and tool
+                            // allowlist double as the "default" baseline the
+                            // dashboard editors restore to. They come straight
+                            // from HAND.toml and are never overwritten by the
+                            // per-agent edit endpoints (which target the live
+                            // AgentRegistry / agent.toml), so they remain an
+                            // honest reset target.
+                            "system_prompt": a.manifest.model.system_prompt,
+                            "capabilities_tools": a.manifest.capabilities.tools,
                         })
                     }).collect::<Vec<_>>(),
                     "dashboard": def.dashboard.metrics.iter().map(|m| serde_json::json!({
