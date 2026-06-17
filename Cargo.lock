@@ -17436,7 +17436,7 @@ checksum = "39ec24b3121d976906ece63c9daad25b85969647682eee313cb5779fdd69e14e"
 [[package]]
 name = "universal-agent-runtime"
 version = "0.1.0"
-source = "git+https://github.com/GQAdonis/universal-agent-runtime.git?rev=0f9385d416ec957cf4ed66d1f9e7640fb15c269a#0f9385d416ec957cf4ed66d1f9e7640fb15c269a"
+source = "git+https://github.com/GQAdonis/universal-agent-runtime.git?branch=sync-gqadonis-745b4c1#23fb39db44fe627e2c25155b2e94e264fae64209"
 dependencies = [
  "aes-gcm 0.10.3",
  "anyhow",
