@@ -20,6 +20,8 @@ import {
   useUninstallHand,
 } from "../lib/mutations/hands";
 import { useCronJobs } from "../lib/queries/runtime";
+import { useFullConfig } from "../lib/queries/config";
+import { useSetConfigValue } from "../lib/mutations/config";
 
 vi.mock("../lib/queries/hands", () => ({
   useHands: vi.fn(),
@@ -49,6 +51,14 @@ vi.mock("../lib/mutations/schedules", () => ({
 
 vi.mock("../lib/queries/runtime", () => ({
   useCronJobs: vi.fn(),
+}));
+
+vi.mock("../lib/queries/config", () => ({
+  useFullConfig: vi.fn(),
+}));
+
+vi.mock("../lib/mutations/config", () => ({
+  useSetConfigValue: vi.fn(),
 }));
 
 vi.mock("react-i18next", async () => {
@@ -90,6 +100,17 @@ const usePauseHandMock = usePauseHand as unknown as ReturnType<typeof vi.fn>;
 const useResumeHandMock = useResumeHand as unknown as ReturnType<typeof vi.fn>;
 const useUninstallHandMock = useUninstallHand as unknown as ReturnType<typeof vi.fn>;
 const useCronJobsMock = useCronJobs as unknown as ReturnType<typeof vi.fn>;
+const useFullConfigMock = useFullConfig as unknown as ReturnType<typeof vi.fn>;
+const useSetConfigValueMock = useSetConfigValue as unknown as ReturnType<typeof vi.fn>;
+const setConfigMutate = vi.fn();
+
+function setConfigDefaults(registryHost: string | null = null): void {
+  useFullConfigMock.mockReturnValue({
+    data: { registry: { registry_host: registryHost } },
+    isLoading: false,
+  });
+  useSetConfigValueMock.mockReturnValue({ mutate: setConfigMutate, isPending: false });
+}
 
 function setMutationDefaults(): void {
   const mut = { mutateAsync: vi.fn().mockResolvedValue(undefined), isPending: false };
@@ -126,6 +147,7 @@ describe("HandsPage", () => {
     vi.clearAllMocks();
     setMutationDefaults();
     setSidecarDefaults();
+    setConfigDefaults();
   });
 
   it("shows the grid skeleton while hands are loading", () => {
@@ -157,6 +179,47 @@ describe("HandsPage", () => {
     renderPage();
 
     expect(screen.getByText("common.no_data")).toBeInTheDocument();
+  });
+
+  it("defaults the registry source selector to GitHub when registry_host is unset", () => {
+    useHandsMock.mockReturnValue({ data: [], isLoading: false, isFetching: false, refetch: vi.fn() });
+    setConfigDefaults(null);
+
+    renderPage();
+
+    const select = screen.getByRole("combobox", { name: "hands.registry_source" }) as HTMLSelectElement;
+    expect(select.value).toBe("github");
+  });
+
+  it("writes the Codeberg host when the source is switched to Codeberg", async () => {
+    useHandsMock.mockReturnValue({ data: [], isLoading: false, isFetching: false, refetch: vi.fn() });
+    setConfigDefaults(null);
+
+    renderPage();
+
+    const select = screen.getByRole("combobox", { name: "hands.registry_source" });
+    await userEvent.selectOptions(select, "codeberg");
+
+    expect(setConfigMutate).toHaveBeenCalledWith({
+      path: "registry.registry_host",
+      value: "https://codeberg.org",
+    });
+  });
+
+  it("clears registry_host back to null when switching from Codeberg to GitHub", async () => {
+    useHandsMock.mockReturnValue({ data: [], isLoading: false, isFetching: false, refetch: vi.fn() });
+    setConfigDefaults("https://codeberg.org");
+
+    renderPage();
+
+    const select = screen.getByRole("combobox", { name: "hands.registry_source" }) as HTMLSelectElement;
+    expect(select.value).toBe("codeberg");
+    await userEvent.selectOptions(select, "github");
+
+    expect(setConfigMutate).toHaveBeenCalledWith({
+      path: "registry.registry_host",
+      value: null,
+    });
   });
 
   it("shows total and active badges in the header", () => {

@@ -31,6 +31,7 @@ import {
   AlertCircle,
   FileText,
   Plus,
+  GitBranch,
 } from "lucide-react";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Skeleton } from "../components/ui/Skeleton";
@@ -58,6 +59,8 @@ import {
   useSetHandSecret,
   useUpdateHandSettings,
 } from "../lib/mutations/hands";
+import { useFullConfig } from "../lib/queries/config";
+import { useSetConfigValue } from "../lib/mutations/config";
 import { useCreateSchedule, useUpdateSchedule, useDeleteSchedule } from "../lib/mutations/schedules";
 import { ScheduleModal } from "../components/ui/ScheduleModal";
 import { DrawerPanel } from "../components/ui/DrawerPanel";
@@ -1229,6 +1232,97 @@ const HandCard = React.memo(function HandCard({
 
 /* ── Main page ────────────────────────────────────────────── */
 
+/** Codeberg base URL stored in `registry.registry_host` when that source is picked. */
+const CODEBERG_HOST = "https://codeberg.org";
+
+/**
+ * Source selector for the hand / skill registry forge. Surfaces the
+ * backend `registry.registry_host` config (#6095/#6103) in the UI so an
+ * operator can switch the catalogue between GitHub (the default) and
+ * Codeberg without editing config.toml (issue #6137). Reads/writes through
+ * the shared config query + mutation hooks; the mutation invalidates the
+ * config cache so the control reflects the persisted value.
+ */
+function RegistrySourceSelector() {
+  const { t } = useTranslation();
+  const addToast = useUIStore((s) => s.addToast);
+  const configQuery = useFullConfig();
+  const setConfig = useSetConfigValue({
+    onSuccess: (res) => {
+      addToast(
+        res.restart_required
+          ? t("hands.registry_source_updated_restart")
+          : t("hands.registry_source_updated"),
+        "success",
+      );
+    },
+    onError: (err) => addToast(err.message, "error"),
+  });
+
+  const registry = (configQuery.data as
+    | { registry?: { registry_host?: string | null } }
+    | undefined)?.registry;
+  const host = (registry?.registry_host ?? "").trim();
+  const normalized = host.replace(/\/+$/, "").toLowerCase();
+  const current: "github" | "codeberg" | "custom" =
+    normalized === "" || normalized === "https://github.com"
+      ? "github"
+      : normalized === CODEBERG_HOST
+        ? "codeberg"
+        : "custom";
+
+  const options = [
+    { value: "github", label: t("hands.registry_source_github"), disabled: false },
+    { value: "codeberg", label: t("hands.registry_source_codeberg"), disabled: false },
+    // A pre-existing custom forge URL is shown read-only so we never
+    // misrepresent it as GitHub/Codeberg, but switching away is still allowed.
+    ...(current === "custom"
+      ? [{ value: "custom", label: t("hands.registry_source_custom", { host }), disabled: true }]
+      : []),
+  ];
+
+  const handleChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const next = e.target.value;
+    if (next === current || next === "custom") return;
+    setConfig.mutate({
+      path: "registry.registry_host",
+      value: next === "codeberg" ? CODEBERG_HOST : null,
+    });
+  };
+
+  const busy = configQuery.isLoading || setConfig.isPending;
+
+  return (
+    <div className="flex items-center gap-2">
+      <GitBranch className="h-3.5 w-3.5 text-text-dim" aria-hidden />
+      <label
+        htmlFor="hands-registry-source"
+        className="text-[11px] font-bold uppercase tracking-wider text-text-dim"
+      >
+        {t("hands.registry_source")}
+      </label>
+      <select
+        id="hands-registry-source"
+        value={current}
+        onChange={handleChange}
+        disabled={busy}
+        aria-label={t("hands.registry_source")}
+        title={t("hands.registry_source_desc")}
+        className="rounded-lg border border-border-subtle bg-surface px-2.5 py-1.5 text-xs font-semibold text-text-main focus:border-brand focus:outline-none focus:ring-1 focus:ring-brand/30 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+      >
+        {options.map((o) => (
+          <option key={o.value} value={o.value} disabled={o.disabled}>
+            {o.label}
+          </option>
+        ))}
+      </select>
+      {setConfig.isPending && (
+        <Loader2 className="h-3.5 w-3.5 animate-spin text-text-dim" aria-hidden />
+      )}
+    </div>
+  );
+}
+
 export function HandsPage() {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
@@ -1447,6 +1541,7 @@ export function HandsPage() {
         helpText={t("hands.help")}
         actions={
           <div className="flex items-center gap-3">
+            <RegistrySourceSelector />
             <Badge variant="success" dot>
               {activeCount} {t("hands.active_label")}
             </Badge>
