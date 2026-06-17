@@ -884,7 +884,7 @@ In-crate only; no cross-crate error-shape changes.
   No NASM setup step is needed — the vendored builder auto-detects `nasm` and falls back to a no-asm build when it is absent, and both Windows runner images already ship the Perl the build requires.
   Closes #6161.
 
-- **ci: point the vendored-OpenSSL build at Strawberry Perl on the Windows test lane** (#6161) (@houko).
+- **ci: point the vendored-OpenSSL build at Strawberry Perl on the Windows test lane** (#6171) (@houko).
   Follow-up to the entry above: #6163's CI never exercised this because the Windows test lane is main-push-only, and it broke `main` on merge.
   The `Test / Windows` job runs `cargo nextest` under `shell: bash`, so Git Bash's MSYS Perl (`/usr/share/perl5/core_perl`) shadows the Strawberry Perl the previous entry was counting on, and it cannot configure OpenSSL's `VC-WIN64A` build — its `IPC::Cmd` / `Params::Check` modules fail to compile, aborting `./Configure`.
   `openssl-src` shells out to whichever `perl` is first on `PATH`; the `OPENSSL_SRC_PERL` env var (its documented override, ahead of `PERL` and the bare `perl` fallback) now pins the job at the runner's Windows-native `C:/Strawberry/perl/bin/perl.exe`.

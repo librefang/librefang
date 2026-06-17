@@ -905,13 +905,7 @@ jobs:
         shell: bash
       - name: Run tests
         shell: bash
-        # webauthn-rs pulls openssl-sys, which builds vendored on Windows (#6161).
-        # openssl-src shells out to `perl` to run OpenSSL's Configure; under
-        # `shell: bash` the Git-Bash MSYS perl (/usr/share/perl5/core_perl) wins
-        # on PATH and cannot configure the VC-WIN64A build (its IPC::Cmd /
-        # Params::Check fail to compile). Point openssl-src at the runner's
-        # Windows-native Strawberry Perl instead — OPENSSL_SRC_PERL is the
-        # documented override, ahead of PERL and the bare `perl` fallback.
+        # Under shell:bash, Git Bash's MSYS perl shadows Strawberry Perl; OPENSSL_SRC_PERL pins openssl-src to Strawberry for the VC-WIN64A build.
         env:
           OPENSSL_SRC_PERL: C:/Strawberry/perl/bin/perl.exe
         run: |
