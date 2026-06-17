@@ -1125,7 +1125,7 @@ fn flush_debounced(
                 }
             }
 
-            let overrides = match adapter.channel_overrides() {
+            let channel_overrides = match adapter.channel_overrides() {
                 Some(ov) => Some(ov),
                 None => {
                     channel_handle
@@ -1138,6 +1138,23 @@ fn flush_debounced(
                         )
                         .await
                 }
+            };
+            // Per-agent overrides (agent.toml) take priority over channel-level,
+            // exactly as `dispatch_message` does for text. Without this the media
+            // path would gate (and pick output_format / threading) off the
+            // channel-level overrides only, bypassing per-agent group/DM policy
+            // and rate limits. `resolve_or_fallback` is read-only — the
+            // ownership claim happens later inside `dispatch_with_blocks` — so
+            // resolving here in addition to there has no side effect.
+            let media_resolution =
+                resolve_or_fallback(&merged_msg, &channel_handle, &router, &thread_ownership).await;
+            let overrides = if let Some(aid) = media_resolution.agent_id {
+                channel_handle
+                    .agent_channel_overrides(aid)
+                    .await
+                    .or(channel_overrides)
+            } else {
+                channel_overrides
             };
             let channel_default_format = default_output_format_for_channel(ct_str);
             let output_format = overrides
@@ -1165,6 +1182,8 @@ fn flush_debounced(
             // `dispatch_with_blocks`, to avoid double-counting rate limits.)
             if !media_dispatch_allowed(
                 &merged_msg,
+                &channel_handle,
+                &router,
                 adapter.as_ref(),
                 &rate_limiter,
                 ct_str,
@@ -5932,9 +5951,31 @@ async fn download_image_to_blocks(
     blocks
 }
 
-/// Group-policy / DM-policy / rate-limit gate for the debounced **media**
-/// dispatch path, mirroring the same gating `dispatch_message` runs for text
-/// (see its `--- DM/Group policy check ---` and `--- Rate limiting ---`
+/// The user-authored text of a message — the `Text` body, a slash command's
+/// rendered form, or a media `caption` — or `None` for media without a caption
+/// and other contentless variants. Unlike `content_to_text`, this never
+/// synthesizes a `[Photo: url]` placeholder, so it is the right source for
+/// group-history record-on-skip and reply-intent classification (it mirrors the
+/// inline caption extraction at the input-sanitizer and `dispatch_message`
+/// sites).
+fn extracted_user_text(content: &ChannelContent) -> Option<String> {
+    match content {
+        ChannelContent::Text(t) => Some(t.clone()),
+        ChannelContent::Command { name, args } => Some(if args.is_empty() {
+            format!("/{name}")
+        } else {
+            format!("/{name} {}", args.join(" "))
+        }),
+        ChannelContent::Image { caption, .. } => caption.clone(),
+        ChannelContent::Voice { caption, .. } => caption.clone(),
+        ChannelContent::Video { caption, .. } => caption.clone(),
+        _ => None,
+    }
+}
+
+/// Group-policy / DM-policy / reply-precheck / rate-limit gate for the debounced
+/// **media** dispatch path, mirroring the gating `dispatch_message` runs for
+/// text (its `--- DM/Group policy check ---` and `--- Rate limiting ---`
 /// blocks). Returns `true` if the message should proceed to
 /// `dispatch_with_blocks`, `false` if it was gated out (caller returns early).
 ///
@@ -5944,13 +5985,17 @@ async fn download_image_to_blocks(
 /// for media that arrived via `dispatch_message` (which already gated and then
 /// forwards downloaded blocks to `dispatch_with_blocks`).
 ///
-/// The function calls are byte-for-byte the same as the text path so media and
-/// text behave identically: `should_process_group_message` for groups
-/// (recording the skipped message into the per-group buffer exactly as the
-/// text path does), the `dm_policy` match for DMs, and both
-/// `rate_limiter.check` calls (global + per-user).
+/// It runs the same gates as the text path so media and text behave
+/// identically: `should_process_group_message` for groups (recording the
+/// skipped caption into the per-group buffer), the reply-intent precheck for
+/// `group_policy = all`, the `dm_policy` match for DMs, and both
+/// `rate_limiter.check` calls (global + per-user). `overrides` here are the
+/// agent-merged overrides resolved by the caller, matching the text path.
+#[allow(clippy::too_many_arguments)]
 async fn media_dispatch_allowed(
     message: &ChannelMessage,
+    handle: &Arc<dyn ChannelBridgeHandle>,
+    router: &Arc<AgentRouter>,
     adapter: &dyn ChannelAdapter,
     rate_limiter: &ChannelRateLimiter,
     ct_str: &str,
@@ -5966,15 +6011,15 @@ async fn media_dispatch_allowed(
             let group_id = message.sender.platform_id.clone();
 
             if !should_process_group_message(ct_str, ov, message) {
-                // Record any extractable text (a media caption) into the
-                // per-group buffer so the next addressed turn can recover it,
-                // matching the text path's record-on-skip behavior.
+                // Record the user's caption (not the `[Photo: url]` placeholder)
+                // into the per-group buffer so the next addressed turn can
+                // recover it, matching the text path's record-on-skip behavior.
                 if let Some(buffer) = crate::group_history::global() {
-                    if let Some(text) = text_content(message) {
+                    if let Some(text) = extracted_user_text(&message.content) {
                         if !text.is_empty() {
                             let entry = crate::group_history::HistoryEntry {
                                 sender_display_name: message.sender.display_name.clone(),
-                                text: text.to_string(),
+                                text,
                                 captured_at: std::time::Instant::now(),
                             };
                             buffer
@@ -5984,6 +6029,38 @@ async fn media_dispatch_allowed(
                     }
                 }
                 return false;
+            }
+
+            // Reply-intent precheck: lightweight LLM classification when
+            // group_policy is "all" and precheck is enabled, mirroring the text
+            // path so a stray captioned media message does not get a reply where
+            // the same text would have stayed silent.
+            if ov.reply_precheck && matches!(ov.group_policy, GroupPolicy::All) {
+                let text = extracted_user_text(&message.content).unwrap_or_default();
+                let sender = &message.sender.display_name;
+                let model = ov.reply_precheck_model.as_deref();
+                let account_id = message.metadata.get("account_id").and_then(|v| v.as_str());
+                let channel_key_for_name = match account_id {
+                    Some(aid) => format!("{ct_str}:{aid}"),
+                    None => ct_str.to_string(),
+                };
+                let bot_name = router.channel_default_name(&channel_key_for_name);
+                let aliases = if ov.group_trigger_patterns.is_empty() {
+                    None
+                } else {
+                    Some(ov.group_trigger_patterns.as_slice())
+                };
+                if !handle
+                    .classify_reply_intent(&text, sender, model, bot_name.as_deref(), aliases)
+                    .await
+                {
+                    debug!(
+                        channel = ct_str,
+                        sender = %sender,
+                        "Reply precheck declined — staying silent (media)"
+                    );
+                    return false;
+                }
             }
         } else {
             // DM
@@ -7434,6 +7511,47 @@ mod tests {
                 "group_policy=ignore must drop media just like text"
             );
         });
+    }
+
+    /// `extracted_user_text` must yield the user's caption for media (so the
+    /// record-on-skip and reply-precheck paths see real text), and `None` for
+    /// captionless media — never the `[Photo: url]` placeholder that
+    /// `content_to_text` synthesizes. A prior version used `text_content`,
+    /// which returns `None` for all media, so captions were silently dropped.
+    #[test]
+    fn extracted_user_text_prefers_caption_over_placeholder() {
+        assert_eq!(
+            extracted_user_text(&ChannelContent::Text("hello".to_string())).as_deref(),
+            Some("hello")
+        );
+        assert_eq!(
+            extracted_user_text(&ChannelContent::Image {
+                url: "https://example.com/p.jpg".to_string(),
+                caption: Some("look at this".to_string()),
+                mime_type: None,
+            })
+            .as_deref(),
+            Some("look at this"),
+            "media caption must be extracted (not the [Photo: url] placeholder)"
+        );
+        assert_eq!(
+            extracted_user_text(&ChannelContent::Image {
+                url: "https://example.com/p.jpg".to_string(),
+                caption: None,
+                mime_type: None,
+            }),
+            None,
+            "captionless media must yield None, not a synthesized placeholder"
+        );
+        assert_eq!(
+            extracted_user_text(&ChannelContent::Voice {
+                url: "https://example.com/v.ogg".to_string(),
+                duration_seconds: 3,
+                caption: Some("voice note text".to_string()),
+            })
+            .as_deref(),
+            Some("voice note text")
+        );
     }
 
     fn group_text_message(text: &str) -> ChannelMessage {
