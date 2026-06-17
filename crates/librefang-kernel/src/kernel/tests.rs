@@ -11297,6 +11297,7 @@ mod provider_budget_gate_5980 {
                     tool_calls: vec![],
                     usage: TokenUsage::default(),
                     actual_provider: None,
+                    actual_model: None,
                 })
             }
         }
