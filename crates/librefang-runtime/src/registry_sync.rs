@@ -39,13 +39,24 @@ struct RegistryUrls {
 /// - Forgejo/Codeberg: `…/archive/{branch}.tar.gz`, prefix `{repo}/`.
 ///
 /// The git clone URL is `{host}/{repo}.git` on both.
-/// We branch on whether a host override is set: `None` keeps the GitHub scheme, any explicit host uses the Forgejo scheme (the only non-GitHub forge this slice targets).
+/// We branch on whether a *non-GitHub* host override is set: an unset host —
+/// or an explicit `github.com` (any case, trailing slash, or empty string) —
+/// keeps the GitHub scheme; any other host uses the Forgejo scheme. Treating an
+/// explicit `https://github.com` as a Forgejo forge would derive
+/// `…/archive/{branch}.tar.gz` with prefix `{repo}/`, neither of which matches
+/// GitHub's tarball layout, so the sync would silently fail to find the files.
 fn registry_urls(registry_host: Option<&str>) -> RegistryUrls {
     let repo_name = REGISTRY_REPO_PATH
         .rsplit('/')
         .next()
         .unwrap_or(REGISTRY_REPO_PATH);
-    match registry_host {
+    // Trim trailing slashes, drop an empty string, and fold an explicit
+    // github.com host back to the GitHub default so it never reaches the
+    // Forgejo branch with an incompatible archive scheme.
+    let forge_host = registry_host
+        .map(|h| h.trim_end_matches('/'))
+        .filter(|h| !h.is_empty() && !h.eq_ignore_ascii_case("https://github.com"));
+    match forge_host {
         None => RegistryUrls {
             tarball_url: format!(
                 "https://github.com/{REGISTRY_REPO_PATH}/archive/refs/heads/{REGISTRY_BRANCH}.tar.gz"
@@ -53,16 +64,11 @@ fn registry_urls(registry_host: Option<&str>) -> RegistryUrls {
             clone_url: format!("https://github.com/{REGISTRY_REPO_PATH}.git"),
             tarball_prefix: format!("{repo_name}-{REGISTRY_BRANCH}/"),
         },
-        Some(host) => {
-            let host = host.trim_end_matches('/');
-            RegistryUrls {
-                tarball_url: format!(
-                    "{host}/{REGISTRY_REPO_PATH}/archive/{REGISTRY_BRANCH}.tar.gz"
-                ),
-                clone_url: format!("{host}/{REGISTRY_REPO_PATH}.git"),
-                tarball_prefix: format!("{repo_name}/"),
-            }
-        }
+        Some(host) => RegistryUrls {
+            tarball_url: format!("{host}/{REGISTRY_REPO_PATH}/archive/{REGISTRY_BRANCH}.tar.gz"),
+            clone_url: format!("{host}/{REGISTRY_REPO_PATH}.git"),
+            tarball_prefix: format!("{repo_name}/"),
+        },
     }
 }
 
@@ -865,6 +871,36 @@ mod tests {
             urls.clone_url,
             "https://codeberg.org/librefang/librefang-registry.git"
         );
+    }
+
+    /// #6137: an explicit `github.com` host (any case, trailing slash) is the
+    /// GitHub default, not a Forgejo forge — it must use GitHub's archive
+    /// scheme and `{repo}-{branch}/` prefix, never the Forgejo layout that
+    /// would 404 / mis-prefix the tarball. An empty host string is likewise
+    /// treated as unset.
+    #[test]
+    fn registry_urls_explicit_github_host_uses_github_scheme() {
+        for host in [
+            "https://github.com",
+            "https://github.com/",
+            "https://GitHub.com",
+            "",
+        ] {
+            let urls = registry_urls(Some(host));
+            assert_eq!(
+                urls.tarball_url,
+                "https://github.com/librefang/librefang-registry/archive/refs/heads/main.tar.gz",
+                "host {host:?}"
+            );
+            assert_eq!(
+                urls.clone_url, "https://github.com/librefang/librefang-registry.git",
+                "host {host:?}"
+            );
+            assert_eq!(
+                urls.tarball_prefix, "librefang-registry-main/",
+                "host {host:?}"
+            );
+        }
     }
 
     #[test]

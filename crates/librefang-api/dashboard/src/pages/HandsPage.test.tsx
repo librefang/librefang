@@ -239,19 +239,16 @@ describe("HandsPage", () => {
     });
   });
 
-  it("treats an explicit github.com host as a custom (non-default) value, not GitHub", async () => {
-    // registry_sync maps Some(host) to the Forgejo scheme, so an explicit
-    // "https://github.com" is a broken value distinct from the null default —
-    // it must surface as custom, and picking GitHub must clear it to null.
+  it("treats an explicit github.com host as GitHub (registry_sync folds it to the default)", () => {
+    // registry_sync maps an explicit github.com host back to the GitHub
+    // default, so the selector must show it as GitHub, not Codeberg/custom.
     useHandsMock.mockReturnValue({ data: [], isLoading: false, isFetching: false, refetch: vi.fn() });
-    setConfigDefaults("https://github.com");
+    setConfigDefaults("https://github.com/");
 
     renderPage();
 
     const select = screen.getByRole("combobox", { name: "hands.registry_source" }) as HTMLSelectElement;
-    expect(select.value).toBe("custom");
-    await userEvent.selectOptions(select, "github");
-    expect(setConfigMutate).toHaveBeenCalledWith({ path: "registry.registry_host", value: null });
+    expect(select.value).toBe("github");
   });
 
   it("disables the source selector when the config query errored", () => {

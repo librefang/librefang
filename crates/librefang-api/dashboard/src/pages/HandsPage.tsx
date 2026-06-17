@@ -1262,14 +1262,14 @@ function RegistrySourceSelector() {
     | { registry?: { registry_host?: string | null } }
     | undefined)?.registry;
   const host = (registry?.registry_host ?? "").trim();
+  // Normalize for comparison: strip trailing slashes and lowercase, matching how
+  // registry_sync treats the host (it folds an unset or github.com host to the
+  // GitHub default and trims trailing slashes). An unset host or an explicit
+  // github.com both mean GitHub; codeberg.org (any case / trailing slash) means
+  // Codeberg; anything else is a custom forge.
   const normalized = host.replace(/\/+$/, "").toLowerCase();
-  // ONLY an unset host is the GitHub default. An explicit "https://github.com"
-  // is NOT equivalent: registry_sync treats any Some(host) as the Forgejo
-  // archive scheme (`/archive/{branch}.tar.gz`, prefix `{repo}/`), which does
-  // not match GitHub's tarball layout — so it is a broken/custom value, shown
-  // as "custom" so the operator can see it and pick GitHub (→ null) to fix it.
   const current: "github" | "codeberg" | "custom" =
-    normalized === ""
+    normalized === "" || normalized === "https://github.com"
       ? "github"
       : normalized === CODEBERG_HOST
         ? "codeberg"
