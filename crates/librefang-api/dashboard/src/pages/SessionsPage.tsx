@@ -30,7 +30,7 @@ export function SessionsPage() {
 
   const sessionsQuery = useSessions();
   // Include hand-spawned agents so a session owned by a Hand agent resolves to
-  // its real name instead of falling back to "unknown agent" (#6156). The
+  // its real name instead of falling back to "unknown agent". The
   // bare `/api/agents` list excludes hand agents by default, but session rows
   // carry the hand agent's `agent_id`, so the name lookup must see them too.
   const agentsQuery = useAgents({ includeHands: true });
