@@ -848,7 +848,11 @@ impl LibreFangKernel {
             let usage_record = librefang_memory::usage::UsageRecord {
                 agent_id: triggering_agent_id,
                 provider: billed_provider,
-                model: default_model.model.clone(),
+                // #6134: honour `actual_model` from the aux response.
+                model: response
+                    .actual_model
+                    .clone()
+                    .unwrap_or_else(|| default_model.model.clone()),
                 input_tokens: response.usage.input_tokens,
                 output_tokens: response.usage.output_tokens,
                 cost_usd: cost,

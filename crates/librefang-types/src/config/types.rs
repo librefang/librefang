@@ -3259,6 +3259,28 @@ pub struct KernelConfig {
     /// first successful login (transparent upgrade from plaintext).
     #[serde(default)]
     pub dashboard_pass_hash: String,
+    /// Opt-in flag for passkey (WebAuthn/FIDO2) dashboard login (#5981).
+    /// Default OFF: when false the `/api/auth/passkey/*` endpoints return
+    /// `503 Service Unavailable` and the dashboard hides the passkey UI.
+    /// Passkey login is additive — username/password login keeps working
+    /// regardless of this flag.
+    #[serde(default)]
+    pub passkey_enabled: bool,
+    /// WebAuthn Relying Party ID — the registrable domain the dashboard is
+    /// served from (e.g. `librefang.example.com` or `localhost`). It must be
+    /// the effective domain of `passkey_rp_origin` (no scheme, no port). When
+    /// empty, the RP-ID is derived from `passkey_rp_origin`'s host. Passkeys
+    /// are bound to this value and stop working if it changes, so set it
+    /// explicitly in production.
+    #[serde(default)]
+    pub passkey_rp_id: String,
+    /// WebAuthn Relying Party origin — the full scheme+host+port the browser
+    /// loads the dashboard from (e.g. `https://librefang.example.com`). Used
+    /// verbatim for origin validation during ceremonies. When empty it
+    /// defaults to `http://<passkey_rp_id>` for local development. Production
+    /// deployments behind TLS must set the `https://` origin explicitly.
+    #[serde(default)]
+    pub passkey_rp_origin: String,
     /// Kernel operating mode (stable, default, dev).
     #[serde(default)]
     pub mode: KernelMode,
@@ -6203,6 +6225,9 @@ impl Default for KernelConfig {
             dashboard_user: String::new(),
             dashboard_pass: String::new(),
             dashboard_pass_hash: String::new(),
+            passkey_enabled: false,
+            passkey_rp_id: String::new(),
+            passkey_rp_origin: String::new(),
             mode: KernelMode::default(),
             language: "en".to_string(),
             users: Vec::new(),

@@ -632,6 +632,47 @@ fn resolve_no_pending_message(
     }
 }
 
+impl KernelBridgeAdapter {
+    /// Resolve a channel-binding store lookup to a live `AgentId` (#5671),
+    /// shared by `resolve_conversation_override` and `resolve_instance_default`.
+    ///
+    /// A lookup error, or a bound agent name that no longer resolves to a live
+    /// agent (renamed/removed), is logged and treated as "no binding" so the
+    /// bridge falls through to its legacy chain rather than dropping the message.
+    fn resolve_binding_lookup(
+        &self,
+        lookup: librefang_types::error::LibreFangResult<Option<String>>,
+        instance: &str,
+        conversation_id: Option<&str>,
+    ) -> Option<AgentId> {
+        let agent_name = match lookup {
+            Ok(Some(name)) => name,
+            Ok(None) => return None,
+            Err(e) => {
+                warn!(
+                    instance,
+                    conversation_id = ?conversation_id,
+                    error = %e,
+                    "channel binding lookup failed; falling back to legacy routing"
+                );
+                return None;
+            }
+        };
+        match self.kernel.agent_registry().find_by_name(&agent_name) {
+            Some(entry) => Some(entry.id),
+            None => {
+                warn!(
+                    instance,
+                    conversation_id = ?conversation_id,
+                    agent = %agent_name,
+                    "channel-bound agent not found in registry; falling back to legacy routing"
+                );
+                None
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl ChannelBridgeHandle for KernelBridgeAdapter {
     async fn send_message(&self, agent_id: AgentId, message: &str) -> Result<String, String> {
@@ -1978,6 +2019,34 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .unwrap_or_default()
     }
 
+    async fn resolve_conversation_override(
+        &self,
+        instance: &str,
+        conversation_id: &str,
+    ) -> Option<AgentId> {
+        // Upper binding level (#5671): an explicit per-conversation `/agent`
+        // override only. The instance default is resolved separately by
+        // `resolve_instance_default` so the bridge can rank the two levels
+        // around the #5323 sticky holder.
+        let lookup = self
+            .kernel
+            .memory_substrate()
+            .channel_bindings()
+            .conversation_binding(instance, conversation_id);
+        self.resolve_binding_lookup(lookup, instance, Some(conversation_id))
+    }
+
+    async fn resolve_instance_default(&self, instance: &str) -> Option<AgentId> {
+        // Lower binding level (#5671): the instance default seeded from
+        // `[[sidecar_channels]] agent`.
+        let lookup = self
+            .kernel
+            .memory_substrate()
+            .channel_bindings()
+            .instance_default(instance);
+        self.resolve_binding_lookup(lookup, instance, None)
+    }
+
     async fn authorize_channel_user(
         &self,
         channel_type: &str,
@@ -2957,6 +3026,94 @@ mod tests {
         let mgr = fresh_approval_manager();
         let msg = resolve_no_pending_message(&mgr, "");
         assert!(msg.contains("No pending approval matching"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resolve_binding_levels_read_seeded_bindings_through_real_substrate() {
+        // Injection-site guard (#5671): the real `KernelBridgeAdapter` must
+        // override `resolve_conversation_override` / `resolve_instance_default`
+        // to read the channel-binding store and resolve the bound name to a live
+        // `AgentId`. The trait defaults return `None`, so a missing/incorrect
+        // override would silently disable deterministic dispatch while the
+        // bridge's own unit tests (which use a mock handle that overrides the
+        // methods) stay green — exactly the default-None-disables-feature trap
+        // this test exists to catch. It also pins the provenance split: the
+        // instance default and the per-conversation override read distinct
+        // tables, so the dispatcher can rank them around the sticky holder.
+        use librefang_testing::MockKernelBuilder;
+
+        let (kernel, _tmp) = MockKernelBuilder::new().build();
+        // A fresh boot auto-spawns a default `assistant` agent.
+        let assistant = kernel
+            .agent_registry()
+            .find_by_name("assistant")
+            .expect("default assistant agent should exist after boot")
+            .id;
+
+        let adapter = KernelBridgeAdapter {
+            kernel: kernel.clone(),
+            started_at: Instant::now(),
+        };
+
+        // No binding of either level yet -> both fall through (None).
+        assert_eq!(
+            adapter.resolve_instance_default("tg-bot").await,
+            None,
+            "no instance default seeded yet"
+        );
+        assert_eq!(
+            adapter
+                .resolve_conversation_override("tg-bot", "peer-1")
+                .await,
+            None,
+            "no conversation override seeded yet"
+        );
+
+        // Seed an instance default directly (no sidecar subprocess) -> the
+        // lower level resolves it to the live agent id, but the upper level
+        // (conversation override) is still empty — they read distinct tables.
+        kernel
+            .memory_substrate()
+            .channel_bindings()
+            .seed_instance_default("tg-bot", "assistant")
+            .expect("seed must succeed");
+        assert_eq!(
+            adapter.resolve_instance_default("tg-bot").await,
+            Some(assistant),
+            "the kernel adapter must resolve the seeded instance default to the live agent id"
+        );
+        assert_eq!(
+            adapter
+                .resolve_conversation_override("tg-bot", "peer-1")
+                .await,
+            None,
+            "an instance default must NOT be visible to the conversation-override lookup"
+        );
+
+        // Seed a per-conversation override -> the upper level now resolves it.
+        kernel
+            .memory_substrate()
+            .channel_bindings()
+            .set_conversation_binding("tg-bot", "peer-1", "assistant", "user")
+            .expect("override seed must succeed");
+        assert_eq!(
+            adapter
+                .resolve_conversation_override("tg-bot", "peer-1")
+                .await,
+            Some(assistant),
+            "the kernel adapter must resolve the seeded conversation override to the live agent id"
+        );
+
+        // A binding pointing at a non-existent agent yields None (graceful
+        // fallback rather than dropping the message), at both levels.
+        kernel
+            .memory_substrate()
+            .channel_bindings()
+            .seed_instance_default("ghost-bot", "does-not-exist")
+            .unwrap();
+        assert_eq!(adapter.resolve_instance_default("ghost-bot").await, None);
+
+        kernel.shutdown();
     }
 
     #[test]

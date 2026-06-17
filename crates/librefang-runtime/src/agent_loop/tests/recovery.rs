@@ -654,6 +654,7 @@ impl LlmDriver for TextToolCallDriver {
                     ..Default::default()
                 },
                 actual_provider: None,
+                actual_model: None,
             })
         } else {
             // After tool result, return normal response
@@ -670,6 +671,7 @@ impl LlmDriver for TextToolCallDriver {
                     ..Default::default()
                 },
                 actual_provider: None,
+                actual_model: None,
             })
         }
     }

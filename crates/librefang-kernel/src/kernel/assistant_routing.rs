@@ -187,10 +187,15 @@ impl LibreFangKernel {
         let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
-        if entry.name != "assistant" {
+        // Route on AutoRouteStrategy, not just the literal "assistant" name — the legacy name check silently bypassed opt-in strategies on other agents.
+        let is_assistant_dispatcher = entry.name == "assistant";
+        drop(entry);
+
+        let off = AutoRouteStrategy::Off;
+        let strategy = sender_context.map(|ctx| &ctx.auto_route).unwrap_or(&off);
+        if Self::auto_route_bypasses(is_assistant_dispatcher, strategy) {
             return Ok(agent_id);
         }
-        drop(entry);
 
         // Per-channel auto-routing strategy gate.
         //
@@ -373,6 +378,10 @@ impl LibreFangKernel {
         Ok(agent_id)
     }
 
+    fn auto_route_bypasses(is_assistant_dispatcher: bool, auto_route: &AutoRouteStrategy) -> bool {
+        !is_assistant_dispatcher && *auto_route == AutoRouteStrategy::Off
+    }
+
     fn route_assistant_by_metadata(&self, message: &str) -> Option<AssistantRouteTarget> {
         let hand_selection = router::auto_select_hand(message, None);
         let template_selection = router::auto_select_template(
@@ -473,5 +482,43 @@ impl LibreFangKernel {
     pub(crate) fn should_skip_intent_classification(message: &str) -> bool {
         let trimmed = message.trim();
         trimmed.len() < 15 && !trimmed.contains("http")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn assistant_dispatcher_is_never_bypassed() {
+        for strategy in [
+            AutoRouteStrategy::Off,
+            AutoRouteStrategy::ExplicitOnly,
+            AutoRouteStrategy::StickyTtl,
+            AutoRouteStrategy::StickyHeuristic,
+        ] {
+            assert!(
+                !LibreFangKernel::auto_route_bypasses(true, &strategy),
+                "assistant dispatcher must stay eligible under {strategy:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn non_assistant_bypasses_only_when_off() {
+        assert!(
+            LibreFangKernel::auto_route_bypasses(false, &AutoRouteStrategy::Off),
+            "non-assistant + Off → bypass (legacy default, no routing)",
+        );
+        for strategy in [
+            AutoRouteStrategy::ExplicitOnly,
+            AutoRouteStrategy::StickyTtl,
+            AutoRouteStrategy::StickyHeuristic,
+        ] {
+            assert!(
+                !LibreFangKernel::auto_route_bypasses(false, &strategy),
+                "non-assistant + {strategy:?} → route (the #6139 fix)",
+            );
+        }
     }
 }

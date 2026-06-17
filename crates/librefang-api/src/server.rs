@@ -70,6 +70,8 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         .merge(routes::terminal::router())
         .merge(routes::users::router())
         .merge(routes::webhooks::router())
+        // Passkey (WebAuthn/FIDO2) login + credential management (#5981)
+        .merge(routes::passkey::router())
         // Dashboard credential login (handler defined locally in server.rs)
         .route(
             "/auth/dashboard-login",
@@ -631,6 +633,45 @@ pub(crate) async fn dashboard_login(
         )
             .into_response(),
     }
+}
+
+/// Mint a dashboard session for `user_name` / `role` and return the standard
+/// `{ok, token, created_at, expires_at}` JSON body plus a `Set-Cookie` header,
+/// identical to the successful `dashboard_login` path. Shared so alternate
+/// login methods (passkey, #5981) issue a byte-for-byte equivalent session —
+/// middleware, RBAC, logout, and the frontend Bearer flow all work unchanged.
+pub(crate) async fn mint_dashboard_session(
+    state: &routes::AppState,
+    user_name: &str,
+    role: &str,
+    peer_ip: std::net::IpAddr,
+    headers: &axum::http::HeaderMap,
+) -> axum::response::Response {
+    let mut token = crate::password_hash::generate_session_token();
+    token.user_name = Some(user_name.to_string());
+    token.user_role = Some(role.to_string());
+    {
+        let mut sessions = state.active_sessions.write().await;
+        sessions.insert(token.token.clone(), token.clone());
+        save_sessions(state.kernel.home_dir(), &sessions);
+    }
+    let cookie = format!(
+        "librefang_session={}; {}; Max-Age={}",
+        token.token,
+        session_cookie_attrs(peer_ip, headers, &state.trusted_proxies),
+        crate::password_hash::DEFAULT_SESSION_TTL_SECS
+    );
+    (
+        axum::http::StatusCode::OK,
+        [(axum::http::header::SET_COOKIE, cookie)],
+        axum::response::Json(serde_json::json!({
+            "ok": true,
+            "token": token.token,
+            "created_at": token.created_at,
+            "expires_at": token.created_at + crate::password_hash::DEFAULT_SESSION_TTL_SECS,
+        })),
+    )
+        .into_response()
 }
 
 /// Check what auth mode the dashboard needs.
@@ -1281,6 +1322,52 @@ pub async fn build_router(
             kernel.memory_substrate().pool(),
         ));
 
+    // Passkey (WebAuthn/FIDO2) credential store (#5981), on the same
+    // substrate pool so registered passkeys survive a restart.
+    let passkey_store: Arc<dyn librefang_memory::passkey_store::PasskeyStore + Send + Sync> =
+        Arc::new(librefang_memory::passkey_store::SqlitePasskeyStore::new(
+            kernel.memory_substrate().pool(),
+        ));
+
+    // Build the passkey ceremony engine only when opted in. A bad RP config
+    // is logged loudly and leaves the engine `None` (routes answer 503)
+    // rather than aborting daemon boot — password login must keep working.
+    let passkey_engine: Option<Arc<crate::passkey::PasskeyEngine>> = {
+        let cfg = kernel.config_ref();
+        if cfg.passkey_enabled {
+            let principal = resolve_dashboard_credential(
+                &cfg.dashboard_user,
+                "LIBREFANG_DASHBOARD_USER",
+                kernel.home_dir(),
+            );
+            match crate::passkey::PasskeyEngine::new(
+                &cfg.passkey_rp_id,
+                &cfg.passkey_rp_origin,
+                &principal,
+            ) {
+                Ok(engine) => {
+                    tracing::info!(
+                        rp_id = %cfg.passkey_rp_id,
+                        rp_origin = %cfg.passkey_rp_origin,
+                        "passkey (WebAuthn) login enabled"
+                    );
+                    Some(Arc::new(engine))
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "passkey_enabled = true but the RP configuration is invalid; \
+                         passkey login is DISABLED. Fix passkey_rp_id / passkey_rp_origin \
+                         in config.toml. Password login is unaffected."
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    };
+
     let state = Arc::new(AppState {
         kernel: kernel.clone(),
         started_at: Instant::now(),
@@ -1308,6 +1395,8 @@ pub async fn build_router(
         trusted_proxies: trusted_proxies_arc.clone(),
         trust_forwarded_for: trust_forwarded_for_cached,
         idempotency_store,
+        passkey_store,
+        passkey_engine,
     });
 
     // CORS: allow localhost origins by default, plus any configured in cors_origin.

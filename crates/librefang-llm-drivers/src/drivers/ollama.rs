@@ -741,6 +741,7 @@ impl LlmDriver for OllamaDriver {
             tool_calls,
             usage,
             actual_provider: None,
+            actual_model: None,
         })
     }
 
@@ -989,6 +990,7 @@ impl LlmDriver for OllamaDriver {
             tool_calls,
             usage,
             actual_provider: None,
+            actual_model: None,
         })
     }
 

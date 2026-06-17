@@ -31,6 +31,7 @@
     "e2e": "playwright test"
   },
   "dependencies": {
+    "@simplewebauthn/browser": "^13.3.0",
     "@tanstack/history": "^1.162.0",
     "@tanstack/react-query": "^5.101.0",
     "@tanstack/react-router": "^1.170.15",

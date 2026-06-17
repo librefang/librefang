@@ -31,6 +31,7 @@ import {
   AlertCircle,
   FileText,
   Plus,
+  GitBranch,
 } from "lucide-react";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Skeleton } from "../components/ui/Skeleton";
@@ -58,6 +59,8 @@ import {
   useSetHandSecret,
   useUpdateHandSettings,
 } from "../lib/mutations/hands";
+import { useFullConfig } from "../lib/queries/config";
+import { useSetConfigValue } from "../lib/mutations/config";
 import { useCreateSchedule, useUpdateSchedule, useDeleteSchedule } from "../lib/mutations/schedules";
 import { ScheduleModal } from "../components/ui/ScheduleModal";
 import { DrawerPanel } from "../components/ui/DrawerPanel";
@@ -1229,6 +1232,108 @@ const HandCard = React.memo(function HandCard({
 
 /* ── Main page ────────────────────────────────────────────── */
 
+/** Codeberg base URL stored in `registry.registry_host` when that source is picked. */
+const CODEBERG_HOST = "https://codeberg.org";
+
+function RegistrySourceSelector() {
+  const { t } = useTranslation();
+  const addToast = useUIStore((s) => s.addToast);
+  const configQuery = useFullConfig();
+  const setConfig = useSetConfigValue({
+    onSuccess: (res) => {
+      // The value persisted, but a failed live reload means the change is
+      // NOT in effect yet — surface that as an error, mirroring ConfigPage,
+      // rather than a misleading success toast.
+      if (res.reload_error) {
+        addToast(res.reload_error, "error");
+        return;
+      }
+      addToast(
+        res.restart_required
+          ? t("hands.registry_source_updated_restart")
+          : t("hands.registry_source_updated"),
+        "success",
+      );
+    },
+    onError: (err) => addToast(err.message, "error"),
+  });
+
+  const registry = (configQuery.data as
+    | { registry?: { registry_host?: string | null } }
+    | undefined)?.registry;
+  const host = (registry?.registry_host ?? "").trim();
+  // Normalize for comparison: strip trailing slashes and lowercase, matching how
+  // registry_sync treats the host (it folds an unset or github.com host to the
+  // GitHub default and trims trailing slashes). An unset host or an explicit
+  // github.com both mean GitHub; codeberg.org (any case / trailing slash) means
+  // Codeberg; anything else is a custom forge.
+  const normalized = host.replace(/\/+$/, "").toLowerCase();
+  const current: "github" | "codeberg" | "custom" =
+    normalized === "" || normalized === "https://github.com"
+      ? "github"
+      : normalized === CODEBERG_HOST
+        ? "codeberg"
+        : "custom";
+
+  const options = [
+    { value: "github", label: t("hands.registry_source_github") },
+    { value: "codeberg", label: t("hands.registry_source_codeberg") },
+    // Custom host shown (enabled — a disabled <option> can't be a controlled select's value); re-selecting it is a no-op.
+    ...(current === "custom"
+      ? [{ value: "custom", label: t("hands.registry_source_custom", { host }) }]
+      : []),
+  ];
+
+  const handleChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const next = e.target.value;
+    if (next === current || next === "custom") return;
+    setConfig.mutate({
+      path: "registry.registry_host",
+      value: next === "codeberg" ? CODEBERG_HOST : null,
+    });
+  };
+
+  // Disable while the config is loading/refetching, errored, or a write is in
+  // flight. Including isFetching covers the post-write invalidation window so
+  // the controlled <select> cannot snap back to the stale value before the
+  // refetch resolves; isError prevents a stray click from overwriting the real
+  // config with `null` when we could not read the current value.
+  const busy =
+    configQuery.isLoading ||
+    configQuery.isFetching ||
+    configQuery.isError ||
+    setConfig.isPending;
+
+  return (
+    <div className="flex items-center gap-2">
+      <GitBranch className="h-3.5 w-3.5 text-text-dim" aria-hidden />
+      <label
+        htmlFor="hands-registry-source"
+        className="text-[11px] font-bold uppercase tracking-wider text-text-dim"
+      >
+        {t("hands.registry_source")}
+      </label>
+      <select
+        id="hands-registry-source"
+        value={current}
+        onChange={handleChange}
+        disabled={busy}
+        title={t("hands.registry_source_desc")}
+        className="rounded-lg border border-border-subtle bg-surface px-2.5 py-1.5 text-xs font-semibold text-text-main focus:border-brand focus:outline-none focus:ring-1 focus:ring-brand/30 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+      >
+        {options.map((o) => (
+          <option key={o.value} value={o.value}>
+            {o.label}
+          </option>
+        ))}
+      </select>
+      {setConfig.isPending && (
+        <Loader2 className="h-3.5 w-3.5 animate-spin text-text-dim" aria-hidden />
+      )}
+    </div>
+  );
+}
+
 export function HandsPage() {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
@@ -1447,6 +1552,7 @@ export function HandsPage() {
         helpText={t("hands.help")}
         actions={
           <div className="flex items-center gap-3">
+            <RegistrySourceSelector />
             <Badge variant="success" dot>
               {activeCount} {t("hands.active_label")}
             </Badge>

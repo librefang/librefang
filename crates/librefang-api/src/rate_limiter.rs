@@ -372,7 +372,14 @@ pub async fn auth_rate_limit_layer(
         || (path.starts_with("/api/approvals/") && path.ends_with("/approve"))
         || (path.starts_with("/api/v1/approvals/") && path.ends_with("/approve"))
         || path == "/api/approvals/totp/confirm"
-        || path == "/api/v1/approvals/totp/confirm";
+        || path == "/api/v1/approvals/totp/confirm"
+        // #5981: passkey authentication mints a session, so its two ceremony
+        // endpoints are a login brute-force surface — meter them alongside
+        // dashboard-login.
+        || path == "/api/auth/passkey/authentication-options"
+        || path == "/api/v1/auth/passkey/authentication-options"
+        || path == "/api/auth/passkey/authentication-verify"
+        || path == "/api/v1/auth/passkey/authentication-verify";
 
     if !is_auth_path {
         return next.run(request).await;

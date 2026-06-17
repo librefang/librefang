@@ -44,6 +44,7 @@ import {
   Terminal,
   Plug,
   Kanban,
+  KeyRound,
 } from "lucide-react";
 import { useUIStore } from "./lib/store";
 import { toastErr } from "./lib/errors";
@@ -51,7 +52,7 @@ import { CommandPalette, useCommandPalette } from "./components/ui/CommandPalett
 import { PushDrawer } from "./components/ui/PushDrawer";
 import { ShortcutsHelp } from "./components/ui/ShortcutsHelp";
 import { useKeyboardShortcuts } from "./lib/useKeyboardShortcuts";
-import { changePassword, checkDashboardAuthMode, clearApiKey, dashboardLogin, dashboardLogout, getDashboardUsername, getStatus, getVersionInfo, setApiKey, setOnUnauthorized, verifyStoredAuth, type AuthMode } from "./api";
+import { changePassword, checkDashboardAuthMode, clearApiKey, dashboardLogin, dashboardLogout, getDashboardUsername, getStatus, getVersionInfo, isPasskeySupported, loginWithPasskey, setApiKey, setOnUnauthorized, verifyStoredAuth, type AuthMode } from "./api";
 import { NotificationCenter } from "./components/NotificationCenter";
 import { OfflineBanner } from "./components/OfflineBanner";
 
@@ -108,6 +109,9 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
   const [submitting, setSubmitting] = useState(false);
   const [totpRequired, setTotpRequired] = useState(false);
   const [totpCode, setTotpCode] = useState("");
+  const [passkeySubmitting, setPasskeySubmitting] = useState(false);
+  const [passkeyError, setPasskeyError] = useState<string | null>(null);
+  const passkeySupported = isPasskeySupported();
 
   useEffect(() => {
     setAuthMethod(mode === "api_key" ? "api_key" : "credentials");
@@ -182,8 +186,37 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
     }
   }
 
+  async function handlePasskeyLogin() {
+    if (passkeySubmitting) return;
+    setPasskeySubmitting(true);
+    setPasskeyError(null);
+    try {
+      const result = await loginWithPasskey();
+      if (!result.ok || !result.token) {
+        setPasskeyError(t("auth.passkey_failed", "Passkey sign-in failed."));
+        return;
+      }
+      onAuthenticated();
+    } catch (e) {
+      // User dismissed the OS prompt (NotAllowedError) or no credential matched.
+      if (e instanceof DOMException && e.name === "NotAllowedError") {
+        setPasskeyError(t("auth.passkey_cancelled", "Passkey sign-in was cancelled."));
+      } else {
+        setPasskeyError(
+          e instanceof Error ? e.message : t("auth.passkey_failed", "Passkey sign-in failed."),
+        );
+      }
+    } finally {
+      setPasskeySubmitting(false);
+    }
+  }
+
   const isHybrid = mode === "hybrid";
   const isCredentials = authMethod === "credentials";
+  // Offer passkey login on the credentials path (its session matches the
+  // dashboard principal). Hidden during the TOTP step and on unsupported
+  // browsers.
+  const showPasskey = passkeySupported && isCredentials && !totpRequired;
 
   return (
     <div className="fixed inset-0 z-200 flex items-center justify-center bg-black/70 backdrop-blur-md">
@@ -290,6 +323,27 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
               {totpRequired ? t("auth.verify_totp") : t("auth.submit")}
             </button>
           </form>
+          {showPasskey && (
+            <>
+              <div className="my-4 flex items-center gap-3">
+                <div className="h-px flex-1 bg-border-subtle" />
+                <span className="text-xs text-text-dim">{t("auth.or", "or")}</span>
+                <div className="h-px flex-1 bg-border-subtle" />
+              </div>
+              <button
+                type="button"
+                onClick={handlePasskeyLogin}
+                disabled={passkeySubmitting}
+                className="flex w-full items-center justify-center gap-2 rounded-xl border border-border-subtle bg-main py-3 text-sm font-bold text-text-main hover:border-brand/40 hover:text-brand transition-colors disabled:opacity-60"
+              >
+                <KeyRound className="h-4 w-4" />
+                {t("auth.passkey_signin", "Sign in with passkey")}
+              </button>
+              {passkeyError && (
+                <p className="mt-2 text-xs text-error font-medium">{passkeyError}</p>
+              )}
+            </>
+          )}
         </div>
       </motion.div>
     </div>

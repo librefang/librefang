@@ -758,6 +758,7 @@ impl QwenCodeDriver {
                     ..Default::default()
                 },
                 actual_provider: None,
+                actual_model: None,
             });
         }
 
@@ -775,6 +776,7 @@ impl QwenCodeDriver {
             tool_calls: Vec::new(),
             usage,
             actual_provider: None,
+            actual_model: None,
         })
     }
 
@@ -991,6 +993,7 @@ impl QwenCodeDriver {
             tool_calls: Vec::new(),
             usage: final_usage,
             actual_provider: None,
+            actual_model: None,
         })
     }
 }

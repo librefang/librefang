@@ -524,6 +524,7 @@ pub fn spawn_daemon_stream(
             // the daemon side has already billed against the right
             // provider; no value to forward here.
             actual_provider: None,
+            actual_model: None,
         })));
     });
     token
@@ -576,6 +577,7 @@ fn daemon_fallback(
             // daemon side has already billed against the right
             // provider; no value to forward here.
             actual_provider: None,
+            actual_model: None,
         })
     } else {
         Err(body["error"]

@@ -3770,6 +3770,213 @@
         }
       }
     },
+    "/api/auth/passkey/authentication-options": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Begin a passkey login. Public — no session exists yet. Returns the\n`PublicKeyCredentialRequestOptions` for `navigator.credentials.get()`.",
+        "operationId": "authentication_options",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Request options + ceremony id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "No passkeys registered"
+          },
+          "503": {
+            "description": "Passkey login not enabled"
+          }
+        }
+      }
+    },
+    "/api/auth/passkey/authentication-verify": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Finish a passkey login: verify the assertion, persist the updated\nsign-count, and mint a dashboard session identical to `dashboard_login`.",
+        "operationId": "authentication_verify",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Session token (same shape as dashboard-login)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Assertion verification failed"
+          },
+          "503": {
+            "description": "Passkey login not enabled"
+          }
+        }
+      }
+    },
+    "/api/auth/passkey/credentials": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "List the authenticated account's registered passkeys (metadata only — the\ncredential blob is never exposed).",
+        "operationId": "list_credentials",
+        "responses": {
+          "200": {
+            "description": "Registered passkeys",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated"
+          }
+        }
+      }
+    },
+    "/api/auth/passkey/credentials/{id}": {
+      "delete": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Revoke (delete) a registered passkey by its base64url credential id.\nScoped to the authenticated principal — one account can never delete\nanother's credential.",
+        "operationId": "revoke_credential",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Base64url credential id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "404": {
+            "description": "No such credential for this account"
+          }
+        }
+      }
+    },
+    "/api/auth/passkey/registration-options": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Begin adding a passkey to the authenticated account. Returns a\n`ceremony_id` plus the `PublicKeyCredentialCreationOptions` for\n`navigator.credentials.create()`.",
+        "operationId": "registration_options",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Creation options + ceremony id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "503": {
+            "description": "Passkey login not enabled"
+          }
+        }
+      }
+    },
+    "/api/auth/passkey/registration-verify": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Finish adding a passkey: verify the attestation and persist the credential.",
+        "operationId": "registration_verify",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Credential stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Verification failed"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "503": {
+            "description": "Passkey login not enabled"
+          }
+        }
+      }
+    },
     "/api/auth/providers": {
       "get": {
         "tags": [

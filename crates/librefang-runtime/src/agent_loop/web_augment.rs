@@ -297,6 +297,7 @@ mod tests {
                 stop_reason: StopReason::EndTurn,
                 usage: TokenUsage::default(),
                 actual_provider: None,
+                actual_model: None,
             })
         }
     }
@@ -313,6 +314,7 @@ mod tests {
                 stop_reason: StopReason::EndTurn,
                 usage: TokenUsage::default(),
                 actual_provider: None,
+                actual_model: None,
             })
         }
     }
