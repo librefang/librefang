@@ -3197,11 +3197,11 @@ async fn resolve_addressed_agent(
 
 /// Resolve the target agent for an incoming message.
 ///
-/// Routing precedence (#5671 Model A):
-///   1. The deterministic channel-instance binding lookup — a per-conversation `/agent` override, else the instance default seeded from `[[sidecar_channels]] agent`.
-///      When this resolves, it wins outright: the operator explicitly bound this agent, so neither the legacy chain nor the channel allowlist gets a vote.
-///   2. Legacy fallback (transitional) — thread routing, multi-agent group addressing (#5323), the `AgentRouter` binding chain, the `"assistant"` agent, then the non-deterministic `list_agents().first()`.
-///      Reached only by instances with no binding configured; it emits a deprecation WARN at the non-deterministic tail so operators can see they should set `agent` on the instance.
+/// Routing precedence (highest first):
+///   1. Adapter-tagged `thread_route_agent` — an explicit forced route from the adapter.
+///   2. Explicit group addressing (#5323) — an `@`-mention or a non-default agent's alias, then a sticky conversation-ownership holder. The strongest user signal; overrides the binding so a user can address agentB even while agentA is bound or holds the conversation.
+///   3. Deterministic channel-instance binding (#5671 Model A) — a per-conversation `/agent` override, else the instance default seeded from `[[sidecar_channels]] agent`. The operator's standing default for otherwise-unaddressed traffic; wins over the legacy chain below.
+///   4. Legacy fallback (transitional) — the `AgentRouter` binding chain, the attention scorer, the `"assistant"` agent, then the non-deterministic `list_agents().first()`. Reached only when nothing above resolves; it emits a deprecation WARN at the non-deterministic tail so operators can see they should set `agent` on the instance.
 ///
 /// Returns a [`RouteResolution`] whose `agent_id` is `None` only when no eligible agent exists at all.
 ///
@@ -3214,34 +3214,6 @@ async fn resolve_or_fallback(
 ) -> RouteResolution {
     let ct = channel_type_str(&message.channel);
 
-    // (1) Deterministic two-level lookup keyed by (instance, conversation).
-    // `instance` is the sidecar's config `name`, stamped onto inbound messages
-    // as `metadata["account_id"]` (sidecar.rs). `conversation_id` is the chat
-    // id for groups and the peer id for DMs — uniformly `sender.platform_id`.
-    //
-    // The group case is uniform on purpose: `derive_sidecar_sender_identity`
-    // (sidecar.rs) and the in-process Discord/Slack adapters set
-    // `sender.platform_id` to the *chat* id for a group (the per-user sender id
-    // lives in `metadata[SENDER_USER_ID_KEY]`; see `build_sender_context` /
-    // `sender_user_id`). So every sender in one group resolves to the same
-    // conversation, and a binding seeded for the group-chat id matches — do not
-    // "fix" this to the sender id. When this resolves, the operator bound this
-    // agent explicitly, so it wins outright over the legacy chain below.
-    if let Some(instance) = message
-        .metadata
-        .get("account_id")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-    {
-        let conversation_id = &message.sender.platform_id;
-        if !conversation_id.is_empty() {
-            if let Some(id) = handle.resolve_bound_agent(instance, conversation_id).await {
-                return RouteResolution::plain(id);
-            }
-        }
-    }
-
-    // (2) Legacy fallback chain (transitional; see fn doc).
     // Thread-based agent routing: if the adapter tagged this message with a
     // thread_route_agent, resolve that agent name first.
     let thread_route_agent_id = if let Some(agent_name) = message
@@ -3269,8 +3241,9 @@ async fn resolve_or_fallback(
     // Multi-agent group routing (#5323). An explicit @-mention or a
     // non-default agent's alias takes priority over the binding/default chain
     // and over the sticky holder, so a user can address agentB even while
-    // agentA holds the conversation. Only relevant for groups; DMs route to
-    // their single bound agent.
+    // agentA holds the conversation. A sticky continuation then keeps an
+    // already-claimed conversation on its holder without a fresh mention.
+    // Only relevant for groups; DMs route to their single bound agent.
     if thread_route_agent_id.is_none() && message.is_group {
         if let Some(id) = resolve_addressed_agent(message, handle).await {
             return RouteResolution::addressed(id);
@@ -3284,6 +3257,38 @@ async fn resolve_or_fallback(
                 if agent_allows_channel(handle, holder, ct).await {
                     return RouteResolution::plain(holder);
                 }
+            }
+        }
+    }
+
+    // Deterministic two-level lookup keyed by (instance, conversation) (#5671
+    // Model A). Runs *after* #5323 group addressing (above) but *before* the
+    // legacy default chain (below): an explicit @-mention always overrides the
+    // binding, but a configured binding is the operator's standing default for
+    // otherwise-unaddressed traffic and wins over the router/assistant/
+    // first-available fallback.
+    //
+    // `instance` is the sidecar's config `name`, stamped onto inbound messages
+    // as `metadata["account_id"]` (sidecar.rs). `conversation_id` is the chat
+    // id for groups and the peer id for DMs — uniformly `sender.platform_id`.
+    //
+    // The group case is uniform on purpose: `derive_sidecar_sender_identity`
+    // (sidecar.rs) and the in-process Discord/Slack adapters set
+    // `sender.platform_id` to the *chat* id for a group (the per-user sender id
+    // lives in `metadata[SENDER_USER_ID_KEY]`; see `build_sender_context` /
+    // `sender_user_id`). So every sender in one group resolves to the same
+    // conversation, and a binding seeded for the group-chat id matches — do not
+    // "fix" this to the sender id.
+    if let Some(instance) = message
+        .metadata
+        .get("account_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        let conversation_id = &message.sender.platform_id;
+        if !conversation_id.is_empty() {
+            if let Some(id) = handle.resolve_bound_agent(instance, conversation_id).await {
+                return RouteResolution::plain(id);
             }
         }
     }
@@ -7421,6 +7426,41 @@ mod tests {
             resolved.agent_id,
             Some(bound),
             "a group binding keyed on the chat id must resolve via sender.platform_id"
+        );
+    }
+
+    #[tokio::test]
+    async fn group_mention_overrides_channel_binding() {
+        // Precedence (#5323 over #5671): in a group, an explicit @-mention of a
+        // *different* agent must win over the configured channel-instance
+        // binding for that chat. `resolve_addressed_agent` runs before the
+        // binding lookup, so the addressed agent is returned (and flagged
+        // `addressed`), not the bound one.
+        let mentioned = AgentId::new();
+        let bound = AgentId::new();
+        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(BindingMockHandle {
+            agents: vec![(mentioned, "researcher".into()), (bound, "legal".into())],
+            // Binding for this group chat points at `legal`.
+            bound: Some(("tg-bot".into(), "group-chat-9".into(), bound)),
+        });
+        let router = Arc::new(AgentRouter::new());
+        let thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
+        let mut msg = inbound_message("group-chat-9", "tg-bot", true);
+        // The message @-mentions `researcher`, a different agent than the bound one.
+        msg.metadata.insert(
+            "mention_names".to_string(),
+            serde_json::Value::Array(vec![serde_json::Value::String("researcher".into())]),
+        );
+
+        let resolved = resolve_or_fallback(&msg, &handle, &router, &thread_ownership).await;
+        assert_eq!(
+            resolved.agent_id,
+            Some(mentioned),
+            "an explicit @-mention must override the channel-instance binding"
+        );
+        assert!(
+            resolved.addressed,
+            "a mention-resolved dispatch must be marked addressed (#5323 re-claim semantics)"
         );
     }
 
