@@ -878,6 +878,10 @@ In-crate only; no cross-crate error-shape changes.
 
 ### Fixed
 
+- **fix(sec): wrap `EmbeddingConfig.api_key` in `Zeroizing<String>` to ensure credential zeroization on drop** (@mrchn).
+  The embedding config struct held the API key as a plain `String`, which stayed in memory after deallocation.
+  Wrapping in `Zeroizing<String>` ensures the key is zeroed on drop, consistent with how the internal driver structs already stored it.
+
 - **ci: the Windows test lane is green again — `librefang-api` now builds vendored OpenSSL on Windows so `webauthn-rs` links** (#6161) (@houko).
   The passkey/WebAuthn work (#5981) added `webauthn-rs`, which pulls in `webauthn-rs-core` → native `openssl-sys`; the Windows MSVC runners have no discoverable system OpenSSL, so `cargo test --no-run --workspace` failed there with "Could not find directory of OpenSSL installation".
   A Windows-gated `openssl = { features = ["vendored"] }` dependency in `crates/librefang-api/Cargo.toml` makes cargo feature-unification build `openssl-sys` from source on Windows only; Unix keeps using the system library and is unaffected.

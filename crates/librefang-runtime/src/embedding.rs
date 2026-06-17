@@ -51,7 +51,7 @@ pub struct EmbeddingConfig {
     /// Model name (e.g., "text-embedding-3-small", "all-MiniLM-L6-v2").
     pub model: String,
     /// API key (resolved from env var).
-    pub api_key: String,
+    pub api_key: Zeroizing<String>,
     /// Base URL for the API.
     pub base_url: String,
     /// Optional override for embedding dimensions.
@@ -132,7 +132,7 @@ impl OpenAIEmbeddingDriver {
             .unwrap_or_else(|| infer_dimensions(&config.model));
 
         Ok(Self {
-            api_key: Zeroizing::new(config.api_key),
+            api_key: config.api_key,
             base_url: config.base_url,
             model: config.model,
             client: crate::http_client::proxied_client(),
@@ -330,7 +330,7 @@ impl CohereEmbeddingDriver {
             .unwrap_or_else(|| infer_cohere_dimensions(&config.model));
 
         Ok(Self {
-            api_key: Zeroizing::new(config.api_key),
+            api_key: config.api_key,
             base_url: config.base_url,
             model: config.model,
             input_type: resolve_cohere_input_type(),
@@ -776,7 +776,7 @@ pub fn create_embedding_driver(
         } else {
             api_key_env
         };
-        let api_key = std::env::var(resolved_key_env).unwrap_or_default();
+        let api_key = Zeroizing::new(std::env::var(resolved_key_env).unwrap_or_default());
         if api_key.is_empty() {
             return Err(EmbeddingError::MissingApiKey(format!(
                 "Cohere embedding driver requires {resolved_key_env} (currently unset or empty)"
@@ -842,11 +842,11 @@ pub fn create_embedding_driver(
         return Ok(Box::new(driver));
     }
 
-    let api_key = if api_key_env.is_empty() {
+    let api_key = Zeroizing::new(if api_key_env.is_empty() {
         String::new()
     } else {
         std::env::var(api_key_env).unwrap_or_default()
-    };
+    });
 
     let base_url = custom_base_url
         .filter(|u| !u.is_empty())
@@ -1258,7 +1258,7 @@ mod tests {
         let cfg = EmbeddingConfig {
             provider: "cohere".to_string(),
             model: "embed-english-v3.0".to_string(),
-            api_key: String::new(),
+            api_key: Zeroizing::new(String::new()),
             base_url: "https://api.cohere.com/v2".to_string(),
             dimensions_override: None,
         };
@@ -1278,7 +1278,7 @@ mod tests {
         let cfg = EmbeddingConfig {
             provider: "cohere".to_string(),
             model: "embed-english-light-v3.0".to_string(),
-            api_key: "bogus".to_string(),
+            api_key: Zeroizing::new("bogus".to_string()),
             base_url: "https://api.cohere.com/v2".to_string(),
             dimensions_override: None,
         };
@@ -1291,7 +1291,7 @@ mod tests {
         let cfg = EmbeddingConfig {
             provider: "cohere".to_string(),
             model: "embed-english-v3.0".to_string(),
-            api_key: "bogus".to_string(),
+            api_key: Zeroizing::new("bogus".to_string()),
             base_url: "https://api.cohere.com/v2".to_string(),
             dimensions_override: Some(512),
         };
@@ -1304,7 +1304,7 @@ mod tests {
         let cfg = EmbeddingConfig {
             provider: "cohere".to_string(),
             model: "embed-english-v3.0".to_string(),
-            api_key: "bogus".to_string(),
+            api_key: Zeroizing::new("bogus".to_string()),
             base_url: "https://api.cohere.com/v2".to_string(),
             dimensions_override: None,
         };
@@ -1319,7 +1319,7 @@ mod tests {
         let cfg = EmbeddingConfig {
             provider: "cohere".to_string(),
             model: "embed-english-v3.0".to_string(),
-            api_key: "bogus".to_string(),
+            api_key: Zeroizing::new("bogus".to_string()),
             base_url: "https://api.cohere.com/v2".to_string(),
             dimensions_override: None,
         };
