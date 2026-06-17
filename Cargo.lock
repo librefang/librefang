@@ -5017,6 +5017,9 @@ dependencies = [
  "http",
  "librefang-http",
  "librefang-types",
+ "opentelemetry",
+ "opentelemetry-http",
+ "opentelemetry_sdk",
  "psl",
  "rand 0.10.1",
  "reqwest",
@@ -5027,6 +5030,8 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
  "url",
  "wiremock",
 ]
