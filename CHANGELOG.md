@@ -878,6 +878,12 @@ In-crate only; no cross-crate error-shape changes.
 
 ### Fixed
 
+- **ci: the Windows test lane is green again — `librefang-api` now builds vendored OpenSSL on Windows so `webauthn-rs` links** (#6161) (@houko).
+  The passkey/WebAuthn work (#5981) added `webauthn-rs`, which pulls in `webauthn-rs-core` → native `openssl-sys`; the Windows MSVC runners have no discoverable system OpenSSL, so `cargo test --no-run --workspace` failed there with "Could not find directory of OpenSSL installation".
+  A Windows-gated `openssl = { features = ["vendored"] }` dependency in `crates/librefang-api/Cargo.toml` makes cargo feature-unification build `openssl-sys` from source on Windows only; Unix keeps using the system library and is unaffected.
+  No NASM setup step is needed — the vendored builder auto-detects `nasm` and falls back to a no-asm build when it is absent, and both Windows runner images already ship the Perl the build requires.
+  Closes #6161.
+
 - **channels: a conversation-ownership claim held by an agent that can no longer serve the channel is now taken over instead of silently dropping follow-ups** (#5323) (@houko).
   Follow-up to #6127: if agent A claimed a thread and A's `manifest.channels` allowlist was then narrowed to exclude that channel, the still-live claim suppressed every non-addressed follow-up (routed to an eligible agent B) until the TTL expired — a silent message drop.
   `conversation_ownership_allows` now checks the current holder's channel eligibility and, when the holder can no longer serve the channel, treats the dispatch as a takeover so the eligible candidate re-claims immediately.
