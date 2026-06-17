@@ -646,11 +646,6 @@ function TemplateBrowser({
 const inputClass = "mt-1 w-full rounded-lg border border-border-subtle bg-main px-2 py-1.5 text-xs outline-none focus:border-brand";
 const labelClass = "text-[10px] font-bold text-text-dim uppercase";
 
-// Docked agent-config sidebar width (#6154). The panel is no longer a
-// floating popup pinned to the canvas corner — it docks to the right of
-// the canvas and the user can drag its left edge to resize it. The chosen
-// width survives reloads via localStorage. Clamp to a usable band so a
-// stored/dragged value can never collapse the panel or starve the canvas.
 const AGENT_PANEL_WIDTH_KEY = "canvas.agentPanelWidth";
 const AGENT_PANEL_MIN_WIDTH = 300;
 const AGENT_PANEL_MAX_WIDTH = 720;
@@ -659,11 +654,6 @@ const AGENT_PANEL_DEFAULT_WIDTH = 380;
 const clampAgentPanelWidth = (w: number): number =>
   Math.min(AGENT_PANEL_MAX_WIDTH, Math.max(AGENT_PANEL_MIN_WIDTH, Math.round(w)));
 
-/**
- * Persisted, clamped width for the docked agent-config sidebar. Reads the
- * stored value once on mount (guarded `safeStorage`, so private-mode /
- * SSR degrade to the default) and writes back on every committed change.
- */
 function useAgentPanelWidth(): [number, (next: number) => void] {
   const [width, setWidth] = useState<number>(() => {
     const stored = safeStorageGet(AGENT_PANEL_WIDTH_KEY);
@@ -682,13 +672,8 @@ function NodeConfigPanel({
   node, agents, onUpdate, onClose, onDelete, siblingNodes, width, onResize, t
 }: {
   node: CanvasNode; agents: AgentItem[]; onUpdate: (id: string, data: CanvasNodeData) => void;
-  /** Sibling step nodes available as `depends_on` candidates. Passed in
-   *  alongside `node` so we don't have to stuff this onto the ReactFlow
-   *  Node type (which doesn't allow arbitrary fields). */
+  /** Avoids stuffing arbitrary fields onto ReactFlow's Node type. */
   siblingNodes?: Array<{ id: string; label: string }>;
-  /** Docked sidebar width (px) and its commit callback. The panel renders
-   *  at `width` and reports a new value when the user finishes dragging the
-   *  left-edge handle (#6154). */
   width: number; onResize: (next: number) => void;
   onClose: () => void; onDelete: (id: string) => void; t: (key: string) => string;
 }) {
@@ -710,11 +695,7 @@ function NodeConfigPanel({
   const [maxRetries, setMaxRetries] = useState<number>(d.maxRetries || 3);
   const [dependsOn, setDependsOn] = useState<string[]>(d.dependsOn || []);
 
-  // Left-edge drag-to-resize. While dragging we track the width in local
-  // state (`dragWidth`) for a smooth frame-by-frame update, then commit the
-  // final value to the persisted store on pointer-up. A plain pointer-event
-  // handler keeps this dependency-free; pointer capture lets the drag
-  // continue even when the cursor leaves the thin handle.
+  // pointer capture keeps the drag alive past the thin handle boundary
   const [dragWidth, setDragWidth] = useState<number | null>(null);
   const dragWidthRef = useRef(width);
   useEffect(() => { dragWidthRef.current = dragWidth ?? width; }, [dragWidth, width]);
@@ -772,20 +753,11 @@ function NodeConfigPanel({
       initial="initial"
       animate="animate"
       exit="exit"
-      // Docked to the right of the canvas (#6154). The persisted/dragged
-      // width (`--agent-panel-w`) only applies from `sm` up via
-      // `sm:w-[var(...)]`; on phones the panel spans the full row (`w-full`)
-      // since there's no room to dock a fixed column and drag-resize it.
-      // Driving width through a CSS var (not an inline `width`) lets the
-      // responsive class decide the breakpoint instead of being overridden
-      // at every size. `shrink-0` keeps the canvas (`flex-1`) from squeezing it.
       style={{ "--agent-panel-w": `${effectiveWidth}px` } as React.CSSProperties}
       className="relative z-20 flex shrink-0 h-full w-full sm:w-[var(--agent-panel-w)] flex-col border-l border-border-subtle bg-surface"
       aria-label={t("canvas.node_config")}
     >
-      {/* Left-edge resize handle (`sm` and up only — see width note above).
-          Sits on the border; widens its hit area on hover and shows a brand
-          tint while active. */}
+      {/* Left-edge resize handle (sm+ only) */}
       <div
         role="separator"
         aria-orientation="vertical"
@@ -827,10 +799,7 @@ function NodeConfigPanel({
           </select>
         </div>
 
-        {/* Prompt — larger default editor with manual vertical resize
-            (#6155). The docked sidebar gives the textarea real width; a
-            taller default (min-h-32) plus `resize-y` lets the user drag it
-            taller for long prompts, capped so it can't swallow the panel. */}
+        {/* Prompt */}
         {hasAgent && (
           <div>
             <label className={labelClass}>
@@ -2659,10 +2628,7 @@ function CanvasPageInner() {
           )}
         </main>
 
-        {/* Docked agent-config sidebar (#6154). A flex sibling of <main> so
-            the canvas shrinks to make room instead of being overlaid. Hidden
-            while the run-input dialog is open (same guard as before).
-            AnimatePresence plays the slide-out on close. */}
+        {/* Docked agent-config sidebar — flex sibling of main, hidden during run-input */}
         <AnimatePresence>
           {editingNode && !showRunInput && (
             <NodeConfigPanel
