@@ -275,7 +275,11 @@ impl LibreFangKernel {
                 std::sync::Arc<dyn librefang_runtime::llm_driver::LlmDriver>,
                 String,
                 String,
-            )> = vec![(primary.clone(), String::new(), agent_provider.clone())];
+            )> = vec![(
+                primary.clone(),
+                agent_provider.clone(),
+                agent_provider.clone(),
+            )];
             for fb in &effective_fallbacks {
                 // Resolve "default" to the actual default provider, but if the
                 // model name implies a specific provider (e.g. "gemini-2.0-flash"
