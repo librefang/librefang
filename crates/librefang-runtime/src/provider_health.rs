@@ -312,7 +312,11 @@ pub async fn probe_provider(provider: &str, base_url: &str, api_key: Option<&str
     // subprocess instead of making an HTTP request.
     // `base_url` is empty for codex-cli; the binary is resolved from PATH.
     if lower == "codex-cli" {
-        let cli_path = if base_url.is_empty() { "codex" } else { base_url };
+        let cli_path = if base_url.is_empty() {
+            "codex"
+        } else {
+            base_url
+        };
         let pairs =
             librefang_llm_drivers::drivers::codex_cli::fetch_codex_cli_models(cli_path).await;
         if pairs.is_empty() {
