@@ -471,7 +471,7 @@ impl LibreFangKernel {
                 .await
             {
                 Ok(result) => {
-                    tracing::warn!(
+                    tracing::debug!(
                         agent_id = %agent_id,
                         session_id = %session_id,
                         has_chat_id = chat_id.is_some(),
