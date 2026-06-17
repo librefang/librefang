@@ -1402,7 +1402,14 @@ export function ProvidersPage() {
     && !config.keyInput.trim()
     && config.urlInput === (config.provider.base_url || "")
     && config.proxyInput === (config.provider.proxy_url || "");
-  const saveDisabled = !config.provider || config.saving || config.testing || isUnchanged;
+  // A successful Test (#6144) already persists the key — `testKey` calls
+  // `set_provider_key` and then clears `keyInput`, which makes `isUnchanged`
+  // true even though the user just configured the provider. Keep Save
+  // actionable after a passing test so the user has a clear confirm-and-close
+  // affordance; otherwise the greyed-out button reads as "provider can't be
+  // added" even though the credential is already saved.
+  const testedOk = config.testResult?.ok === true;
+  const saveDisabled = !config.provider || config.saving || config.testing || (isUnchanged && !testedOk);
   // Local providers (Ollama / vLLM / LM Studio) declare `key_required: false`
   // — for them, the Test button must NOT require a key, otherwise users have
   // no way to verify their custom base_url. Issue #3138.

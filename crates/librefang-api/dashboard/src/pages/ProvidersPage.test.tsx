@@ -359,4 +359,49 @@ describe("ProvidersPage", () => {
     expect(testMutateAsync).toHaveBeenCalledTimes(1);
     expect(typeof testMutateAsync.mock.calls[0][0]).toBe("string");
   });
+
+  it("keeps Save actionable after a passing Test in the configure drawer (#6144)", async () => {
+    useProvidersMock.mockReturnValue({
+      data: PROVIDERS,
+      isLoading: false,
+      isFetching: false,
+      refetch: vi.fn(),
+    });
+
+    renderPage();
+
+    // Add → pick an unconfigured provider (Groq) to open the configure
+    // drawer, mirroring a user adding a fresh provider.
+    fireEvent.click(screen.getByRole("button", { name: /providers\.add/ }));
+    const picker = await screen.findByTestId("drawer-slot");
+    fireEvent.click(within(picker).getByText("Groq"));
+
+    // Configure drawer now owns the slot. Enter an API key — Save is
+    // enabled at this point because the key input is dirty.
+    let drawer = await screen.findByTestId("drawer-slot");
+    fireEvent.change(
+      within(drawer).getByPlaceholderText("providers.key_placeholder"),
+      { target: { value: "sk-test-key" } },
+    );
+    expect(
+      within(drawer).getByRole("button", { name: /common\.save/ }),
+    ).not.toBeDisabled();
+
+    // Click Test. `testKey` persists the key (which clears `keyInput`) then
+    // runs the test mutation, which resolves ok.
+    fireEvent.click(
+      within(drawer).getByRole("button", { name: /providers\.test/ }),
+    );
+    // Wait for the success banner so the test result has landed in state.
+    drawer = await screen.findByTestId("drawer-slot");
+    await within(drawer).findByText("providers.reachable");
+
+    // Regression (#6144): the passing Test cleared `keyInput`, so the form
+    // looks "unchanged" — but the credential is already saved. Save must
+    // stay actionable; otherwise the greyed-out button reads as "the
+    // provider can't be added".
+    expect(
+      within(drawer).getByRole("button", { name: /common\.save/ }),
+    ).not.toBeDisabled();
+  });
 });
