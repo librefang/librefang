@@ -1151,6 +1151,32 @@ fn flush_debounced(
                 None
             };
 
+            // --- Gate the debounced media path (parity with dispatch_message) ---
+            // The text branch below routes through `dispatch_message`, which
+            // enforces group_policy / dm_policy / rate-limits before
+            // dispatching. The media branch reaches `dispatch_with_blocks`
+            // directly, so without this it would skip those gates entirely —
+            // letting an attacker bypass a `mention_only`/`ignore` group (or a
+            // DM `dm_policy=ignore`) and per-user throttling by sending media
+            // instead of text. Run the identical gating here, on the only
+            // entry point that lacks it. (The five `dispatch_with_blocks`
+            // call sites inside `dispatch_message` itself are already gated,
+            // so the gate intentionally lives here, not inside
+            // `dispatch_with_blocks`, to avoid double-counting rate limits.)
+            if !media_dispatch_allowed(
+                &merged_msg,
+                adapter.as_ref(),
+                &rate_limiter,
+                ct_str,
+                overrides.as_ref(),
+                output_format,
+                thread_id,
+            )
+            .await
+            {
+                return;
+            }
+
             dispatch_with_blocks(
                 blocks,
                 &merged_msg,
@@ -5906,6 +5932,97 @@ async fn download_image_to_blocks(
     blocks
 }
 
+/// Group-policy / DM-policy / rate-limit gate for the debounced **media**
+/// dispatch path, mirroring the same gating `dispatch_message` runs for text
+/// (see its `--- DM/Group policy check ---` and `--- Rate limiting ---`
+/// blocks). Returns `true` if the message should proceed to
+/// `dispatch_with_blocks`, `false` if it was gated out (caller returns early).
+///
+/// This lives at the `flush_debounced` media branch — the only
+/// `dispatch_with_blocks` entry point that does NOT already pass through
+/// `dispatch_message`'s gating — so rate-limit tokens are not double-counted
+/// for media that arrived via `dispatch_message` (which already gated and then
+/// forwards downloaded blocks to `dispatch_with_blocks`).
+///
+/// The function calls are byte-for-byte the same as the text path so media and
+/// text behave identically: `should_process_group_message` for groups
+/// (recording the skipped message into the per-group buffer exactly as the
+/// text path does), the `dm_policy` match for DMs, and both
+/// `rate_limiter.check` calls (global + per-user).
+async fn media_dispatch_allowed(
+    message: &ChannelMessage,
+    adapter: &dyn ChannelAdapter,
+    rate_limiter: &ChannelRateLimiter,
+    ct_str: &str,
+    overrides: Option<&ChannelOverrides>,
+    output_format: OutputFormat,
+    thread_id: Option<&str>,
+) -> bool {
+    // --- DM/Group policy check ---
+    if let Some(ov) = overrides {
+        if message.is_group {
+            // The bridge keys group messages by `sender.platform_id`
+            // (= chat JID for groups); capture it for record-on-skip.
+            let group_id = message.sender.platform_id.clone();
+
+            if !should_process_group_message(ct_str, ov, message) {
+                // Record any extractable text (a media caption) into the
+                // per-group buffer so the next addressed turn can recover it,
+                // matching the text path's record-on-skip behavior.
+                if let Some(buffer) = crate::group_history::global() {
+                    if let Some(text) = text_content(message) {
+                        if !text.is_empty() {
+                            let entry = crate::group_history::HistoryEntry {
+                                sender_display_name: message.sender.display_name.clone(),
+                                text: text.to_string(),
+                                captured_at: std::time::Instant::now(),
+                            };
+                            buffer
+                                .record(&crate::group_history::group_key(ct_str, &group_id), entry)
+                                .await;
+                        }
+                    }
+                }
+                return false;
+            }
+        } else {
+            // DM
+            match ov.dm_policy {
+                DmPolicy::Ignore => {
+                    debug!("Ignoring DM on {ct_str} (dm_policy=ignore)");
+                    return false;
+                }
+                DmPolicy::AllowedOnly => {
+                    // Rely on RBAC authorize_channel_user in dispatch_with_blocks
+                }
+                DmPolicy::Respond => {}
+            }
+        }
+    }
+
+    // --- Rate limiting ---
+    if let Some(ov) = overrides {
+        // Global per-channel rate limit (all users combined)
+        if ov.rate_limit_per_minute > 0 {
+            if let Err(msg) = rate_limiter.check(ct_str, "__global__", ov.rate_limit_per_minute) {
+                send_response(adapter, &message.sender, msg, thread_id, output_format).await;
+                return false;
+            }
+        }
+        // Per-user rate limit
+        if ov.rate_limit_per_user > 0 {
+            if let Err(msg) =
+                rate_limiter.check(ct_str, sender_user_id(message), ov.rate_limit_per_user)
+            {
+                send_response(adapter, &message.sender, msg, thread_id, output_format).await;
+                return false;
+            }
+        }
+    }
+
+    true
+}
+
 /// Dispatch a multimodal message (content blocks) to an agent, handling routing
 /// and RBAC the same way as the text path.
 #[allow(clippy::too_many_arguments)]
@@ -5960,7 +6077,7 @@ async fn dispatch_with_blocks(
 
     // RBAC check
     if let Err(denied) = handle
-        .authorize_channel_user(ct_str, &message.sender.platform_id, "chat")
+        .authorize_channel_user(ct_str, sender_user_id(message), "chat")
         .await
     {
         send_response(
@@ -7232,6 +7349,91 @@ mod tests {
         // Test that DmPolicy::Ignore would be checked
         assert_eq!(DmPolicy::default(), DmPolicy::Respond);
         assert_eq!(GroupPolicy::default(), GroupPolicy::MentionOnly);
+    }
+
+    /// Build a GROUP media (Image) message whose `platform_id` is the group
+    /// JID and whose individual sender lives in `SENDER_USER_ID_KEY` metadata.
+    /// Mirrors how real group payloads are shaped (see `build_thread_key`
+    /// tests that also stuff the peer id under `SENDER_USER_ID_KEY`).
+    fn group_image_message(group_jid: &str, sender_id: &str) -> ChannelMessage {
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(SENDER_USER_ID_KEY.to_string(), serde_json::json!(sender_id));
+        ChannelMessage {
+            channel: ChannelType::WhatsApp,
+            platform_message_id: "m-img-1".to_string(),
+            sender: ChannelUser {
+                platform_id: group_jid.to_string(),
+                display_name: "Mallory".to_string(),
+                librefang_user: None,
+            },
+            content: ChannelContent::Image {
+                url: "https://example.com/payload.jpg".to_string(),
+                caption: None,
+                mime_type: None,
+            },
+            target_agent: None,
+            timestamp: chrono::Utc::now(),
+            is_group: true,
+            thread_id: None,
+            metadata,
+        }
+    }
+
+    /// Parity lock between the media path (`dispatch_with_blocks`) and the
+    /// text path (`dispatch_message`) for the two fixes in this file:
+    ///
+    /// 1. RBAC principal: the media path now authorizes the *individual*
+    ///    sender (`sender_user_id`, read from `SENDER_USER_ID_KEY`), not the
+    ///    group JID (`sender.platform_id`). Previously a group's chat JID was
+    ///    handed to `authorize_channel_user`, so an unauthorized individual
+    ///    member's media sailed past per-user RBAC.
+    /// 2. group_policy gating: the media path now runs the same
+    ///    `should_process_group_message` gate, so an image sent into a
+    ///    `mention_only` group with no mention is dropped exactly like text.
+    ///
+    /// The full `dispatch_with_blocks` end-to-end drive needs a `ChannelAdapter`
+    /// mock that does not exist in this test module; following the established
+    /// pattern in this file we assert the two gate predicates the dispatcher
+    /// now consults, which is what the fixes changed.
+    #[test]
+    fn group_media_uses_individual_principal_and_group_policy_gate() {
+        with_guard_off_locked(|| {
+            let message = group_image_message("group-123@g.us", "mallory@s.whatsapp.net");
+
+            // Fix 1: the principal fed to authorize_channel_user is the
+            // individual sender, not the group JID.
+            assert_eq!(
+                sender_user_id(&message),
+                "mallory@s.whatsapp.net",
+                "media path must authorize the individual sender, not the group JID"
+            );
+            assert_ne!(
+                sender_user_id(&message),
+                message.sender.platform_id,
+                "the group JID must NOT be used as the RBAC principal"
+            );
+
+            // Fix 2: under mention_only with no mention/trigger, the same gate
+            // the text path runs drops this media message.
+            let overrides = ChannelOverrides {
+                group_policy: GroupPolicy::MentionOnly,
+                ..Default::default()
+            };
+            assert!(
+                !should_process_group_message("whatsapp", &overrides, &message),
+                "unmentioned media in a mention_only group must be gated out, matching the text path"
+            );
+
+            // And an explicit `ignore` group policy drops it unconditionally.
+            let ignore_overrides = ChannelOverrides {
+                group_policy: GroupPolicy::Ignore,
+                ..Default::default()
+            };
+            assert!(
+                !should_process_group_message("whatsapp", &ignore_overrides, &message),
+                "group_policy=ignore must drop media just like text"
+            );
+        });
     }
 
     fn group_text_message(text: &str) -> ChannelMessage {

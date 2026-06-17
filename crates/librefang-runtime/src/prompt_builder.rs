@@ -82,10 +82,42 @@ pub const SKILL_PROMPT_CONTEXT_TOTAL_CAP: usize = MAX_SKILLS_IN_PROMPT_CONTEXT
 /// - Leading/trailing whitespace is trimmed.
 /// - The result is capped at `max_chars` via the same UTF-8-safe slicing
 ///   used for skill prompt context, with `...` appended if truncated.
+/// Invisible / format code points that carry no legitimate semantic content
+/// in a prompt and are a known injection vector (zero-width characters used to
+/// split an otherwise-flagged literal, bidi overrides used to reorder visible
+/// text). Mirrors the `INVISIBLE_CHARS` set in
+/// `librefang-skills::verify` — duplicated as a local const rather than taken
+/// as a cross-crate dependency. These are DROPPED outright by
+/// [`sanitize_for_prompt`].
+pub(crate) const INVISIBLE_PROMPT_CHARS: &[char] = &[
+    '\u{200B}', // zero-width space
+    '\u{200C}', // zero-width non-joiner
+    '\u{200D}', // zero-width joiner
+    '\u{2060}', // word joiner
+    '\u{FEFF}', // zero-width no-break space / BOM
+    '\u{200E}', // left-to-right mark
+    '\u{200F}', // right-to-left mark
+    '\u{202A}', // left-to-right embedding
+    '\u{202B}', // right-to-left embedding
+    '\u{202C}', // pop directional formatting
+    '\u{202D}', // left-to-right override
+    '\u{202E}', // right-to-left override
+    '\u{2066}', // left-to-right isolate
+    '\u{2067}', // right-to-left isolate
+    '\u{2069}', // pop directional isolate
+];
+
 pub fn sanitize_for_prompt(s: &str, max_chars: usize) -> String {
     let mut cleaned = String::with_capacity(s.len());
     let mut prev_space = false;
     for ch in s.chars() {
+        // Drop invisible / format code points before any whitespace handling:
+        // they would otherwise survive (they are neither control nor
+        // whitespace) and let a hostile author splice them mid-literal to
+        // defeat downstream pattern scanning.
+        if INVISIBLE_PROMPT_CHARS.contains(&ch) {
+            continue;
+        }
         if ch.is_control() || ch.is_whitespace() {
             if !prev_space {
                 cleaned.push(' ');

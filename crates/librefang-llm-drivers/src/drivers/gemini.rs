@@ -1234,6 +1234,9 @@ impl LlmDriver for GeminiDriver {
                         usage.input_tokens = u.prompt_token_count;
                         // #3479: thinking tokens are billed as output.
                         usage.output_tokens = u.candidates_token_count + u.thoughts_token_count;
+                        // Cached prompt tokens (subset of input_tokens) for
+                        // cache-read pricing.
+                        usage.cache_read_input_tokens = u.cached_content_token_count;
                     }
 
                     for candidate in &json.candidates {

@@ -317,6 +317,39 @@ impl LibreFangKernel {
                 ctx.clone()
             };
 
+            // Strip invisible / format code points from the content slot
+            // before interpolation. The content is intentionally kept
+            // verbatim inside the trust boundary (newlines and formatting
+            // preserved), so we do NOT run the full `sanitize_for_prompt`
+            // here — that would collapse whitespace and neutralize brackets,
+            // changing behavior for normal multi-line skill context. We only
+            // drop the zero-width / bidi-override code points, which carry no
+            // legitimate semantic content and are a known injection vector
+            // (e.g. splitting a literal mid-word to defeat the skills
+            // prompt-injection scanner). Same set as
+            // `librefang-skills::verify::INVISIBLE_CHARS`.
+            const INVISIBLE_PROMPT_CHARS: &[char] = &[
+                '\u{200B}', // zero-width space
+                '\u{200C}', // zero-width non-joiner
+                '\u{200D}', // zero-width joiner
+                '\u{2060}', // word joiner
+                '\u{FEFF}', // zero-width no-break space / BOM
+                '\u{200E}', // left-to-right mark
+                '\u{200F}', // right-to-left mark
+                '\u{202A}', // left-to-right embedding
+                '\u{202B}', // right-to-left embedding
+                '\u{202C}', // pop directional formatting
+                '\u{202D}', // left-to-right override
+                '\u{202E}', // right-to-left override
+                '\u{2066}', // left-to-right isolate
+                '\u{2067}', // right-to-left isolate
+                '\u{2069}', // pop directional isolate
+            ];
+            let capped: String = capped
+                .chars()
+                .filter(|c| !INVISIBLE_PROMPT_CHARS.contains(c))
+                .collect();
+
             // Sanitize the name slot so a hostile skill author cannot
             // smuggle bracket/newline sequences through the boilerplate
             // header and forge a fake `[END EXTERNAL SKILL CONTEXT]`
