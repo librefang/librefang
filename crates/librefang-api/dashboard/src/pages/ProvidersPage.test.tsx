@@ -370,14 +370,13 @@ describe("ProvidersPage", () => {
 
     renderPage();
 
-    // Add → pick an unconfigured provider (Groq) to open the configure
-    // drawer, mirroring a user adding a fresh provider.
+    // Add → pick an unconfigured provider (Groq) to open the configure drawer, mirroring a user adding a fresh provider.
     fireEvent.click(screen.getByRole("button", { name: /providers\.add/ }));
     const picker = await screen.findByTestId("drawer-slot");
     fireEvent.click(within(picker).getByText("Groq"));
 
-    // Configure drawer now owns the slot. Enter an API key — Save is
-    // enabled at this point because the key input is dirty.
+    // Configure drawer now owns the slot.
+    // Enter an API key — Save is enabled at this point because the key input is dirty.
     let drawer = await screen.findByTestId("drawer-slot");
     fireEvent.change(
       within(drawer).getByPlaceholderText("providers.key_placeholder"),
@@ -387,8 +386,7 @@ describe("ProvidersPage", () => {
       within(drawer).getByRole("button", { name: /common\.save/ }),
     ).not.toBeDisabled();
 
-    // Click Test. `testKey` persists the key (which clears `keyInput`) then
-    // runs the test mutation, which resolves ok.
+    // Click Test. `testKey` persists the key (which clears `keyInput`) then runs the test mutation, which resolves ok.
     fireEvent.click(
       within(drawer).getByRole("button", { name: /providers\.test/ }),
     );
@@ -396,10 +394,8 @@ describe("ProvidersPage", () => {
     drawer = await screen.findByTestId("drawer-slot");
     await within(drawer).findByText("providers.reachable");
 
-    // Regression (#6144): the passing Test cleared `keyInput`, so the form
-    // looks "unchanged" — but the credential is already saved. Save must
-    // stay actionable; otherwise the greyed-out button reads as "the
-    // provider can't be added".
+    // The passing Test clears `keyInput`, making the form look "unchanged" — but the credential is already saved.
+    // Save must stay actionable; otherwise the greyed-out button reads as "provider can't be added".
     expect(
       within(drawer).getByRole("button", { name: /common\.save/ }),
     ).not.toBeDisabled();
