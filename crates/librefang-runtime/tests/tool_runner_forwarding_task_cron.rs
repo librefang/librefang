@@ -8,6 +8,7 @@ type TaskPostCalls = Arc<Mutex<Vec<Option<String>>>>;
 type CronCreateCalls = Arc<Mutex<Vec<(String, serde_json::Value)>>>;
 type CronListCalls = Arc<Mutex<Vec<String>>>;
 type CronCancelCalls = Arc<Mutex<Vec<String>>>;
+type CronSetEnabledCalls = Arc<Mutex<Vec<(String, bool)>>>;
 type TaskGetCalls = Arc<Mutex<Vec<String>>>;
 
 struct CapturedCalls {
@@ -15,6 +16,7 @@ struct CapturedCalls {
     cron_create: CronCreateCalls,
     cron_list: CronListCalls,
     cron_cancel: CronCancelCalls,
+    cron_set_enabled: CronSetEnabledCalls,
     task_get: TaskGetCalls,
 }
 
@@ -23,6 +25,7 @@ struct CapturingKernel {
     cron_create_calls: CronCreateCalls,
     cron_list_calls: CronListCalls,
     cron_cancel_calls: CronCancelCalls,
+    cron_set_enabled_calls: CronSetEnabledCalls,
     task_get_calls: TaskGetCalls,
     // When set, task_get returns Some(this) regardless of id; otherwise None.
     task_get_response: Mutex<Option<serde_json::Value>>,
@@ -37,12 +40,14 @@ impl CapturingKernel {
         let cron_create = Arc::new(Mutex::new(Vec::new()));
         let cron_list = Arc::new(Mutex::new(Vec::new()));
         let cron_cancel = Arc::new(Mutex::new(Vec::new()));
+        let cron_set_enabled = Arc::new(Mutex::new(Vec::new()));
         let task_get = Arc::new(Mutex::new(Vec::new()));
         let kernel = Self {
             task_post_calls: Arc::clone(&task_post),
             cron_create_calls: Arc::clone(&cron_create),
             cron_list_calls: Arc::clone(&cron_list),
             cron_cancel_calls: Arc::clone(&cron_cancel),
+            cron_set_enabled_calls: Arc::clone(&cron_set_enabled),
             task_get_calls: Arc::clone(&task_get),
             task_get_response: Mutex::new(None),
             cron_list_response: Mutex::new(Vec::new()),
@@ -54,6 +59,7 @@ impl CapturingKernel {
                 cron_create,
                 cron_list,
                 cron_cancel,
+                cron_set_enabled,
                 task_get,
             },
         )
@@ -251,6 +257,18 @@ impl CronControl for CapturingKernel {
             .lock()
             .unwrap()
             .push(job_id.to_string());
+        Ok(())
+    }
+
+    async fn cron_set_enabled(
+        &self,
+        job_id: &str,
+        enabled: bool,
+    ) -> Result<(), librefang_kernel_handle::KernelOpError> {
+        self.cron_set_enabled_calls
+            .lock()
+            .unwrap()
+            .push((job_id.to_string(), enabled));
         Ok(())
     }
 }
@@ -549,7 +567,12 @@ async fn test_cron_list_returns_serialized_jobs() {
 }
 
 #[tokio::test]
-async fn test_cron_cancel_succeeds_when_caller_owns_the_job() {
+async fn test_cron_cancel_disables_and_does_not_hard_delete() {
+    // #6159: the agent-facing "cron_cancel" tool must pause the job via
+    // `cron_set_enabled(false)`, NOT hard-delete it via `cron_cancel`. The job
+    // therefore still exists (with enabled=false) after the agent invokes it,
+    // and `KernelHandle::cron_cancel` (the destructive deletion path) is never
+    // reached.
     let (kernel, calls) = CapturingKernel::new();
     kernel.set_cron_list_response(vec![json!({"id": "cron-99"})]);
     let kernel: Arc<dyn KernelHandle> = Arc::new(kernel);
@@ -562,9 +585,66 @@ async fn test_cron_cancel_succeeds_when_caller_owns_the_job() {
         "cron_cancel should succeed when caller owns the job: {}",
         result.content
     );
-    let cancel_calls = calls.cron_cancel.lock().unwrap();
-    assert_eq!(cancel_calls.len(), 1);
-    assert_eq!(cancel_calls[0], "cron-99");
+    // Disables, not deletes.
+    let set_enabled_calls = calls.cron_set_enabled.lock().unwrap();
+    assert_eq!(set_enabled_calls.len(), 1);
+    assert_eq!(set_enabled_calls[0], ("cron-99".to_string(), false));
+    // The destructive deletion path is never touched.
+    assert!(
+        calls.cron_cancel.lock().unwrap().is_empty(),
+        "cron_cancel tool must NOT hard-delete via KernelHandle::cron_cancel"
+    );
+    assert!(
+        result.content.contains("disabled") || result.content.contains("paused"),
+        "user-facing message should say the job was paused/disabled, got: {}",
+        result.content
+    );
+}
+
+#[tokio::test]
+async fn test_cron_enable_resumes_owned_job() {
+    // The agent can re-enable a paused job, so the pause is reversible.
+    let (kernel, calls) = CapturingKernel::new();
+    kernel.set_cron_list_response(vec![json!({"id": "cron-99"})]);
+    let kernel: Arc<dyn KernelHandle> = Arc::new(kernel);
+
+    let ctx = make_ctx(&kernel, None, Some("agent-1"));
+    let result = execute_tool_raw("ce1", "cron_enable", &json!({"job_id": "cron-99"}), &ctx).await;
+
+    assert!(
+        !result.is_error,
+        "cron_enable should succeed when caller owns the job: {}",
+        result.content
+    );
+    let set_enabled_calls = calls.cron_set_enabled.lock().unwrap();
+    assert_eq!(set_enabled_calls.len(), 1);
+    assert_eq!(set_enabled_calls[0], ("cron-99".to_string(), true));
+}
+
+#[tokio::test]
+async fn test_cron_enable_unowned_job_renders_as_not_found() {
+    let (kernel, calls) = CapturingKernel::new();
+    kernel.set_cron_list_response(vec![json!({"id": "cron-mine"})]);
+    let kernel: Arc<dyn KernelHandle> = Arc::new(kernel);
+
+    let ctx = make_ctx(&kernel, None, Some("agent-1"));
+    let result =
+        execute_tool_raw("ce2", "cron_enable", &json!({"job_id": "cron-other"}), &ctx).await;
+
+    assert!(
+        result.is_error,
+        "cron_enable on unowned job must error: {}",
+        result.content
+    );
+    assert!(
+        result.content.contains("Cron job 'cron-other' not found"),
+        "expected NotFound display, got: {}",
+        result.content
+    );
+    assert!(
+        calls.cron_set_enabled.lock().unwrap().is_empty(),
+        "cron_enable must NOT reach the kernel when the caller doesn't own the job"
+    );
 }
 
 #[tokio::test]
@@ -602,6 +682,10 @@ async fn test_cron_cancel_unowned_job_renders_as_not_found() {
         cancel_was_never_called(&calls),
         "cron_cancel must NOT reach the kernel when the caller doesn't own the job"
     );
+    assert!(
+        calls.cron_set_enabled.lock().unwrap().is_empty(),
+        "cron_cancel must NOT toggle a job the caller doesn't own"
+    );
 }
 
 #[tokio::test]
@@ -633,14 +717,19 @@ fn cancel_was_never_called(calls: &CapturedCalls) -> bool {
     calls.cron_cancel.lock().unwrap().is_empty()
 }
 
-// schedule_delete ownership coverage (#3576 second-slice migration). The
-// natural-language `schedule_delete` shares `KernelHandle::cron_cancel` with
-// `cron_cancel`, which cancels by UUID with no ownership filtering. These pin
-// that `schedule_delete` enforces the same tool-layer ownership guard as
-// `cron_cancel` — previously it did not, so it was a bypass.
+// schedule_delete ownership coverage (#3576 second-slice migration, extended
+// by #6159). The natural-language `schedule_delete` enforces the same
+// tool-layer ownership guard as `cron_cancel`. Since #6159 it pauses via
+// `cron_set_enabled(false)` instead of hard-deleting, so the config survives
+// and a human can recover it; these pin both the ownership guard and the
+// disable-not-delete behaviour.
 
 #[tokio::test]
-async fn test_schedule_delete_succeeds_when_caller_owns_the_job() {
+async fn test_schedule_delete_disables_and_does_not_hard_delete() {
+    // #6159: the agent-facing "schedule_delete" tool pauses the job via
+    // `cron_set_enabled(false)`, NOT hard-delete via `cron_cancel`. The job
+    // still exists (enabled=false) afterwards, and the destructive deletion
+    // path is never reached.
     let (kernel, calls) = CapturingKernel::new();
     kernel.set_cron_list_response(vec![json!({"id": "sched-99"})]);
     let kernel: Arc<dyn KernelHandle> = Arc::new(kernel);
@@ -653,9 +742,37 @@ async fn test_schedule_delete_succeeds_when_caller_owns_the_job() {
         "schedule_delete should succeed when caller owns the job: {}",
         result.content
     );
-    let cancel_calls = calls.cron_cancel.lock().unwrap();
-    assert_eq!(cancel_calls.len(), 1);
-    assert_eq!(cancel_calls[0], "sched-99");
+    let set_enabled_calls = calls.cron_set_enabled.lock().unwrap();
+    assert_eq!(set_enabled_calls.len(), 1);
+    assert_eq!(set_enabled_calls[0], ("sched-99".to_string(), false));
+    assert!(
+        calls.cron_cancel.lock().unwrap().is_empty(),
+        "schedule_delete tool must NOT hard-delete via KernelHandle::cron_cancel"
+    );
+    assert!(
+        result.content.contains("disabled") || result.content.contains("paused"),
+        "user-facing message should say the schedule was paused/disabled, got: {}",
+        result.content
+    );
+}
+
+#[tokio::test]
+async fn test_schedule_resume_resumes_owned_job() {
+    let (kernel, calls) = CapturingKernel::new();
+    kernel.set_cron_list_response(vec![json!({"id": "sched-99"})]);
+    let kernel: Arc<dyn KernelHandle> = Arc::new(kernel);
+
+    let ctx = make_ctx(&kernel, None, Some("agent-1"));
+    let result = execute_tool_raw("sr1", "schedule_resume", &json!({"id": "sched-99"}), &ctx).await;
+
+    assert!(
+        !result.is_error,
+        "schedule_resume should succeed when caller owns the job: {}",
+        result.content
+    );
+    let set_enabled_calls = calls.cron_set_enabled.lock().unwrap();
+    assert_eq!(set_enabled_calls.len(), 1);
+    assert_eq!(set_enabled_calls[0], ("sched-99".to_string(), true));
 }
 
 #[tokio::test]
@@ -692,6 +809,10 @@ async fn test_schedule_delete_unowned_job_renders_as_not_found() {
     assert!(
         cancel_was_never_called(&calls),
         "schedule_delete must NOT reach the kernel when the caller doesn't own the job"
+    );
+    assert!(
+        calls.cron_set_enabled.lock().unwrap().is_empty(),
+        "schedule_delete must NOT toggle a job the caller doesn't own"
     );
 }
 

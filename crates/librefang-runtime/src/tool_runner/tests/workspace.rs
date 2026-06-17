@@ -142,6 +142,7 @@ fn test_builtin_tool_definitions() {
     assert!(names.contains(&"schedule_create"));
     assert!(names.contains(&"schedule_list"));
     assert!(names.contains(&"schedule_delete"));
+    assert!(names.contains(&"schedule_resume"));
     assert!(names.contains(&"image_analyze"));
     assert!(names.contains(&"location_get"));
     assert!(names.contains(&"system_time"));
@@ -164,10 +165,11 @@ fn test_builtin_tool_definitions() {
     assert!(names.contains(&"video_generate"));
     assert!(names.contains(&"video_status"));
     assert!(names.contains(&"music_generate"));
-    // 3 cron tools
+    // 4 cron tools
     assert!(names.contains(&"cron_create"));
     assert!(names.contains(&"cron_list"));
     assert!(names.contains(&"cron_cancel"));
+    assert!(names.contains(&"cron_enable"));
     // 1 channel send tool
     assert!(names.contains(&"channel_send"));
     // 4 hand tools
