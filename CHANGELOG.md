@@ -5,6 +5,50 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.6.17] - 2026-06-17
+
+_22 PRs from 3 contributors since v2026.6.16-beta.19._
+
+### Added
+
+- Per-conversation agent routing for multi-agent groups (#5323) (#6127) (@houko)
+- Passkey (WebAuthn/FIDO2) dashboard login (#5981) (#6129) (@houko)
+- Deterministic inbound dispatch — channel-instance binding lookup (#5671 Model A) (#6131) (@houko)
+- GitHub/Codeberg registry source selector (#6142) (@houko)
+- Gate auto-routing on AutoRouteStrategy, not the "assistant" name (#6139) (#6148) (@houko)
+- Propagate W3C traceparent on outbound MCP tool calls (#6128) (#6153) (@houko)
+- Report the model codex actually used (#6134) (#6157) (@houko)
+- Dock the agent panel as a resizable sidebar with a larger prompt editor (#6154 #6155) (#6164) (@houko)
+- The cron-management tool disables jobs instead of deleting them (#6159) (#6165) (@houko)
+- Enlarge TOML view, edit agent system prompt and tools with reset-to-default (#6150 #6151 #6152) (#6166) (@houko)
+- Central prompt repository page with versions and agent binding (#6160) (#6167) (@houko)
+
+### Fixed
+
+- Enforce cross-chat dispatch guard through the /mcp bridge (#6117) (#6125) (@houko)
+- Take over a stale conversation-ownership claim from a channel-ineligible holder (#5323) (#6132) (@houko)
+- Respect `LIBREFANG_HOME` when resolving plugin directory (#6136) (@HuaGu-Dragon)
+- Close channel media RBAC bypass and audit findings (#6141) (@houko)
+- Keep Save actionable after a passing Test (#6144) (#6146) (@houko)
+- Refetch hand settings after save so inputs persist (#6145) (#6147) (@houko)
+- Show the correct Hand agent name in the sessions view (#6156) (#6162) (@houko)
+- Build vendored OpenSSL on Windows so webauthn-rs links (#6161) (#6163) (@houko)
+- Pin vendored OpenSSL to Strawberry Perl on the Windows test lane (#6171) (@houko)
+
+### Changed
+
+- Lift tool dispatch table to typed ToolError (#3576 slice 5) (#6124) (@houko)
+
+<details>
+<summary>Documentation, maintenance, and other internal changes</summary>
+
+### Maintenance
+
+- Bump the actions-minor-patch group with 2 updates (#6140) (@app/dependabot)
+
+</details>
+
+
 ## [2026.6.16] - 2026-06-16
 
 _18 PRs from 3 contributors since v2026.6.11-beta.18._
