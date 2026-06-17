@@ -884,6 +884,12 @@ In-crate only; no cross-crate error-shape changes.
   No NASM setup step is needed — the vendored builder auto-detects `nasm` and falls back to a no-asm build when it is absent, and both Windows runner images already ship the Perl the build requires.
   Closes #6161.
 
+- **ci: point the vendored-OpenSSL build at Strawberry Perl on the Windows test lane** (#6171) (@houko).
+  Follow-up to the entry above: #6163's CI never exercised this because the Windows test lane is main-push-only, and it broke `main` on merge.
+  The `Test / Windows` job runs `cargo nextest` under `shell: bash`, so Git Bash's MSYS Perl (`/usr/share/perl5/core_perl`) shadows the Strawberry Perl the previous entry was counting on, and it cannot configure OpenSSL's `VC-WIN64A` build — its `IPC::Cmd` / `Params::Check` modules fail to compile, aborting `./Configure`.
+  `openssl-src` shells out to whichever `perl` is first on `PATH`; the `OPENSSL_SRC_PERL` env var (its documented override, ahead of `PERL` and the bare `perl` fallback) now pins the job at the runner's Windows-native `C:/Strawberry/perl/bin/perl.exe`.
+  The release Windows jobs are unaffected — their `cargo build` step runs under the default `pwsh`, where the system `PATH` resolves `perl` to Strawberry directly.
+
 - **channels: a conversation-ownership claim held by an agent that can no longer serve the channel is now taken over instead of silently dropping follow-ups** (#5323) (@houko).
   Follow-up to #6127: if agent A claimed a thread and A's `manifest.channels` allowlist was then narrowed to exclude that channel, the still-live claim suppressed every non-addressed follow-up (routed to an eligible agent B) until the TTL expired — a silent message drop.
   `conversation_ownership_allows` now checks the current holder's channel eligibility and, when the holder can no longer serve the channel, treats the dispatch as a takeover so the eligible candidate re-claims immediately.

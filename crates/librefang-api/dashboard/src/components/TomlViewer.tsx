@@ -75,7 +75,7 @@ export function TomlViewer({
   }, [body, tab, downloadName]);
 
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title={title} size="3xl">
+    <Modal isOpen={isOpen} onClose={onClose} title={title} size="7xl">
       <div className="p-5 space-y-3">
         <div className="flex items-center justify-between gap-2">
           {markdown !== undefined ? (
@@ -155,7 +155,8 @@ export function TomlViewer({
               initial="initial"
               animate="animate"
               exit="exit"
-              className="max-h-[65vh] overflow-x-auto overflow-y-auto rounded-xl border border-border-subtle bg-main"
+              // Modal shell caps at 90vh; 78vh fills it while leaving room for the title bar.
+              className="max-h-[78vh] overflow-x-auto overflow-y-auto rounded-xl border border-border-subtle bg-main"
             >
               <pre className="min-w-full px-3 py-2 text-[11px] font-mono text-text whitespace-pre-wrap">
                 {body}

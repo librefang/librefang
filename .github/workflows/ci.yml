@@ -905,6 +905,9 @@ jobs:
         shell: bash
       - name: Run tests
         shell: bash
+        # Under shell:bash, Git Bash's MSYS perl shadows Strawberry Perl; OPENSSL_SRC_PERL pins openssl-src to Strawberry for the VC-WIN64A build.
+        env:
+          OPENSSL_SRC_PERL: C:/Strawberry/perl/bin/perl.exe
         run: |
           echo "Running workspace tests (shard ${{ matrix.shard }}/2)…"
           # `--partition hash:N/M` deterministically buckets each test into
