@@ -20,6 +20,7 @@
 //! Each check should be a leaf operation that doesn't bleed into others —
 //! tests for one check shouldn't have to set up state for another.
 
+use crate::i18n;
 use base64::Engine;
 use std::path::PathBuf;
 
@@ -208,10 +209,7 @@ impl AuditCheck for ApiListenAddrCheck {
         let raw = match std::fs::read_to_string(&config_path) {
             Ok(s) => s,
             Err(_) => {
-                return AuditResult::info(
-                    NAME,
-                    "config.toml not found — skipping api_listen check.",
-                );
+                return AuditResult::info(NAME, i18n::t("doctor-audit-api-listen-no-config"));
             }
         };
         // Accept any TOML and just look at api_listen if present. Don't
@@ -222,54 +220,52 @@ impl AuditCheck for ApiListenAddrCheck {
             Err(e) => {
                 return AuditResult::error(
                     NAME,
-                    format!("config.toml is not valid TOML: {e}"),
-                    Some(
-                        "Edit ~/.librefang/config.toml or run `librefang doctor --repair`.".into(),
+                    i18n::t_args(
+                        "doctor-audit-api-listen-invalid-toml",
+                        &[("error", &e.to_string())],
                     ),
+                    Some(i18n::t("doctor-audit-api-listen-invalid-toml-hint")),
                 );
             }
         };
         let listen = match value.get("api_listen").and_then(|v| v.as_str()) {
             Some(s) => s,
             None => {
-                return AuditResult::info(
-                    NAME,
-                    "api_listen not set in config — kernel will use the default.",
-                );
+                return AuditResult::info(NAME, i18n::t("doctor-audit-api-listen-unset"));
             }
         };
         match listen.parse::<std::net::SocketAddr>() {
             Err(e) => AuditResult::error(
                 NAME,
-                format!("api_listen `{listen}` is not a valid socket address: {e}"),
-                Some(
-                    "Use `host:port` form, e.g. `127.0.0.1:4545` or `[::1]:4545`."
-                        .into(),
+                i18n::t_args(
+                    "doctor-audit-api-listen-invalid-addr",
+                    &[("address", listen), ("error", &e.to_string())],
                 ),
+                Some(i18n::t("doctor-audit-api-listen-invalid-addr-hint")),
             ),
             Ok(addr) if addr.port() == 0 => AuditResult::warn(
                 NAME,
-                format!(
-                    "api_listen `{addr}` uses port 0 (OS-assigned ephemeral); clients can't \
-                     discover the daemon URL after bind."
+                i18n::t_args(
+                    "doctor-audit-api-listen-port-zero",
+                    &[("address", &addr.to_string())],
                 ),
-                Some(
-                    "Pick an explicit port (default 4545), e.g. `127.0.0.1:4545`."
-                        .into(),
-                ),
+                Some(i18n::t("doctor-audit-api-listen-port-zero-hint")),
             ),
             Ok(addr) if addr.port() < 1024 => AuditResult::warn(
                 NAME,
-                format!(
-                    "api_listen port {} is privileged (<1024); daemon will fail to bind without root.",
-                    addr.port()
+                i18n::t_args(
+                    "doctor-audit-api-listen-privileged",
+                    &[("port", &addr.port().to_string())],
                 ),
-                Some(
-                    "Use a port >= 1024 (default 4545) unless you intentionally need root."
-                        .into(),
+                Some(i18n::t("doctor-audit-api-listen-privileged-hint")),
+            ),
+            Ok(addr) => AuditResult::pass(
+                NAME,
+                i18n::t_args(
+                    "doctor-audit-api-listen-ok",
+                    &[("address", &addr.to_string())],
                 ),
             ),
-            Ok(addr) => AuditResult::pass(NAME, format!("api_listen `{addr}` parses cleanly.")),
         }
     }
 }
@@ -290,8 +286,11 @@ impl AuditCheck for ConfigTomlSchemaCheck {
         if !path.exists() {
             return AuditResult::warn(
                 NAME,
-                format!("{} does not exist.", path.display()),
-                Some("Run `librefang init` to create a default config.".into()),
+                i18n::t_args(
+                    "doctor-audit-config-not-found",
+                    &[("path", &path.display().to_string())],
+                ),
+                Some(i18n::t("doctor-audit-config-not-found-hint")),
             );
         }
         let raw = match std::fs::read_to_string(&path) {
@@ -299,17 +298,38 @@ impl AuditCheck for ConfigTomlSchemaCheck {
             Err(e) => {
                 return AuditResult::error(
                     NAME,
-                    format!("Failed to read {}: {e}", path.display()),
+                    i18n::t_args(
+                        "doctor-audit-config-read-fail",
+                        &[
+                            ("path", &path.display().to_string()),
+                            ("error", &e.to_string()),
+                        ],
+                    ),
                     None,
                 );
             }
         };
         match toml::from_str::<toml::Value>(&raw) {
-            Ok(_) => AuditResult::pass(NAME, format!("{} parses as TOML.", path.display())),
+            Ok(_) => AuditResult::pass(
+                NAME,
+                i18n::t_args(
+                    "doctor-audit-config-ok",
+                    &[("path", &path.display().to_string())],
+                ),
+            ),
             Err(e) => AuditResult::error(
                 NAME,
-                format!("{} has TOML syntax errors: {e}", path.display()),
-                Some(format!("Edit {} or restore from a backup.", path.display())),
+                i18n::t_args(
+                    "doctor-audit-config-syntax-error",
+                    &[
+                        ("path", &path.display().to_string()),
+                        ("error", &e.to_string()),
+                    ],
+                ),
+                Some(i18n::t_args(
+                    "doctor-audit-config-syntax-error-hint",
+                    &[("path", &path.display().to_string())],
+                )),
             ),
         }
     }

@@ -155,18 +155,23 @@ Agent 打开的页面绑在该 agent 的 tab 池里(默认 4)。池满时 `brows
 
 ## 运行时调度
 
-manifest `[[cron]]` 是静态的安排方式。这些工具让 agent **从循环里动态**创建/列出/取消调度。
+manifest `[[cron]]` 是静态的安排方式。这些工具让 agent **从循环里动态**创建/列出/暂停/恢复调度。
 
 | 工具 | 用途 |
 |---|---|
 | `schedule_create(when, prompt, channel?)` | 在某未来时间戳调度一次性轮次。 |
 | `schedule_list()` | 列出 agent 已调度的轮次。 |
-| `schedule_delete(schedule_id)` | 取消已调度的轮次。 |
+| `schedule_delete(schedule_id)` | 暂停（禁用）已调度的轮次 —— 保留配置而非删除。 |
+| `schedule_resume(schedule_id)` | 恢复被暂停的已调度轮次。 |
 | `cron_create(expression, prompt, channel?)` | 5 字段 cron 调度循环轮次。 |
 | `cron_list()` | 列出 agent 运行时创建的 cron 任务。 |
-| `cron_cancel(cron_id)` | 取消运行时 cron 任务。 |
+| `cron_cancel(cron_id)` | 暂停（禁用）运行时 cron 任务 —— 保留配置而非删除。 |
+| `cron_enable(cron_id)` | 重新启用被暂停的运行时 cron 任务。 |
 
-这些工具创建的运行时任务和 manifest cron 共用持久化存储 —— 跨 daemon 重启依然存在。`cron_id` / `schedule_id` 是不透明的;通过 `cron_list()` 往返获取。
+agent 不能硬删除已调度的任务:`schedule_delete` / `cron_cancel` 只会暂停它,因此即使是行为异常或过于激进的 agent 也无法静默丢失一个已配置好的调度。
+永久删除是仅限人类的操作,通过 dashboard 完成(#6159)。
+这些工具创建的运行时任务和 manifest cron 共用持久化存储 —— 跨 daemon 重启依然存在。
+`cron_id` / `schedule_id` 是不透明的;通过 `cron_list()` 往返获取。
 
 ---
 

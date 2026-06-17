@@ -50,7 +50,7 @@ use self::artifact::tool_read_artifact;
 pub use self::canvas::sanitize_canvas_html;
 use self::canvas::tool_canvas_present;
 use self::channel::tool_channel_send;
-use self::cron::{tool_cron_cancel, tool_cron_create, tool_cron_list};
+use self::cron::{tool_cron_cancel, tool_cron_create, tool_cron_enable, tool_cron_list};
 pub use self::definitions::{builtin_tool_definitions, select_native_tools, ALWAYS_NATIVE_TOOLS};
 pub use self::dispatch::{current_agent_depth, execute_tool, execute_tool_raw, ToolExecContext};
 #[allow(unused_imports)] // Re-exported for incremental migration of submodules (#3576).
@@ -80,7 +80,9 @@ use self::process::{
 };
 #[cfg(feature = "docker-sandbox")]
 use self::sandbox::tool_docker_exec;
-use self::schedule::{tool_schedule_create, tool_schedule_delete, tool_schedule_list};
+use self::schedule::{
+    tool_schedule_create, tool_schedule_delete, tool_schedule_list, tool_schedule_resume,
+};
 use self::shell::tool_shell_exec;
 use self::shell_safety::{classify_shell_exec_ro_safety, RoSafety};
 use self::skill::{

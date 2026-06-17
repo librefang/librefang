@@ -968,6 +968,7 @@ pub async fn execute_tool_raw(
         }
         "schedule_list" => tool_schedule_list(*kernel, *caller_agent_id).await,
         "schedule_delete" => tool_schedule_delete(input, *kernel, *caller_agent_id).await,
+        "schedule_resume" => tool_schedule_resume(input, *kernel, *caller_agent_id).await,
 
         // Knowledge graph tools.
         "knowledge_add_entity" => tool_knowledge_add_entity(input, *kernel).await,
@@ -1082,6 +1083,7 @@ pub async fn execute_tool_raw(
         "cron_create" => tool_cron_create(input, *kernel, *caller_agent_id, *sender_id).await,
         "cron_list" => tool_cron_list(*kernel, *caller_agent_id).await,
         "cron_cancel" => tool_cron_cancel(input, *kernel, *caller_agent_id).await,
+        "cron_enable" => tool_cron_enable(input, *kernel, *caller_agent_id).await,
 
         // Channel send tool (proactive outbound messaging)
         "channel_send" => {

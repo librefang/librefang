@@ -54,11 +54,50 @@ pub(super) async fn tool_cron_list(
     Ok(serde_json::to_string_pretty(&jobs)?)
 }
 
+/// Disable a cron job by ID — the agent-facing "stop this job" action.
+///
+/// Despite the historical `cron_cancel` tool name, this pauses the job via `cron_set_enabled(false)` rather than hard-deleting it: the schedule / action / delivery config is preserved so the operator can recover what was set up and the agent (or a human) can re-enable it later.
+/// Hard deletion is a human-only dashboard operation (#6159).
+/// Re-enable via `tool_cron_enable`.
 pub(super) async fn tool_cron_cancel(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
     caller_agent_id: Option<&str>,
 ) -> ToolResult {
+    let job_id = require_owned_job_id(input, kernel, caller_agent_id, "cron_cancel").await?;
+    let kh = require_kernel_typed(kernel)?;
+    kh.cron_set_enabled(&job_id, false)
+        .await
+        .map_err(ToolError::upstream)?;
+    Ok(format!(
+        "Cron job '{job_id}' disabled (paused). Its configuration is preserved — re-enable it with cron_enable."
+    ))
+}
+
+/// Enable (resume) a previously disabled cron job by ID.
+pub(super) async fn tool_cron_enable(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
+) -> ToolResult {
+    let job_id = require_owned_job_id(input, kernel, caller_agent_id, "cron_enable").await?;
+    let kh = require_kernel_typed(kernel)?;
+    kh.cron_set_enabled(&job_id, true)
+        .await
+        .map_err(ToolError::upstream)?;
+    Ok(format!("Cron job '{job_id}' enabled (resumed)."))
+}
+
+/// Validate the `job_id` parameter and confirm the caller owns the job.
+///
+/// `KernelHandle::cron_set_enabled` toggles by UUID with no ownership check (see `kernel/handles/cron_control.rs`), so the ownership guard must live at the tool layer — otherwise any agent could pause/resume another agent's job by learning its UUID.
+/// Returns the validated, owned `job_id` as an owned `String` (the borrow on `kh.cron_list(...)` ends before the caller's own kernel call).
+async fn require_owned_job_id(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
+    tool: &'static str,
+) -> Result<String, ToolError> {
     let job_id = input["job_id"]
         .as_str()
         .ok_or(ToolError::MissingParameter("job_id"))?;
@@ -69,7 +108,7 @@ pub(super) async fn tool_cron_cancel(
         });
     }
     let kh = require_kernel_typed(kernel)?;
-    let agent_id = caller_agent_id.ok_or_else(|| caller_agent_id_missing("cron_cancel"))?;
+    let agent_id = caller_agent_id.ok_or_else(|| caller_agent_id_missing(tool))?;
     let owned = kh.cron_list(agent_id).await.map_err(ToolError::upstream)?;
     let owned_ids: HashSet<&str> = owned
         .iter()
@@ -81,8 +120,7 @@ pub(super) async fn tool_cron_cancel(
             id: job_id.to_string(),
         });
     }
-    kh.cron_cancel(job_id).await.map_err(ToolError::upstream)?;
-    Ok(format!("Cron job '{job_id}' cancelled."))
+    Ok(job_id.to_string())
 }
 
 #[cfg(test)]
@@ -122,6 +160,27 @@ mod tests {
     #[tokio::test]
     async fn cron_cancel_empty_job_id_rejected() {
         let r = tool_cron_cancel(&json!({"job_id": ""}), None, Some("agent-a")).await;
+        match r {
+            Err(ToolError::InvalidParameter { name, reason }) => {
+                assert_eq!(name, "job_id");
+                assert!(
+                    reason.contains("empty"),
+                    "reason should mention empty: {reason}"
+                );
+            }
+            other => panic!("expected InvalidParameter, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cron_enable_without_kernel_returns_unavailable() {
+        let r = tool_cron_enable(&json!({"job_id": "x"}), None, Some("agent-a")).await;
+        assert!(matches!(r, Err(ToolError::Unavailable("Kernel handle"))));
+    }
+
+    #[tokio::test]
+    async fn cron_enable_empty_job_id_rejected() {
+        let r = tool_cron_enable(&json!({"job_id": ""}), None, Some("agent-a")).await;
         match r {
             Err(ToolError::InvalidParameter { name, reason }) => {
                 assert_eq!(name, "job_id");

@@ -1135,3 +1135,71 @@ async fn marketplace_install_rejects_unverified_third_party_registry() {
 
     server.abort();
 }
+
+// ---------------------------------------------------------------------------
+// GET /api/hands/{id} — per-agent system_prompt + capabilities_tools
+// ---------------------------------------------------------------------------
+
+/// Asserts that each agent entry in `GET /api/hands/{id}` exposes `system_prompt` and `capabilities_tools` from the parsed HAND.toml manifest.
+#[tokio::test(flavor = "multi_thread")]
+async fn get_hand_agents_expose_system_prompt_and_tools() {
+    let h = boot_router_open().await;
+    // The nested `[agent.model]` form is required: the flat/legacy form silently drops `[agent.capabilities]`.
+    let toml = r#"
+id = "agent-config-test"
+name = "Agent Config Test"
+description = "Exercises per-agent prompt/tools exposure."
+category = "data"
+
+[routing]
+aliases = ["agent config test"]
+
+[agent]
+name = "agent-config-test-agent"
+description = "Test hand agent"
+
+[agent.model]
+provider = "ollama"
+model = "test-model"
+system_prompt = "You are the agent-config test prompt."
+
+[agent.capabilities]
+tools = ["web_fetch", "file_read"]
+"#;
+    let (status, _body) = json_request(
+        &h.app,
+        Method::POST,
+        "/api/hands/install",
+        Some(serde_json::json!({
+            "toml_content": toml,
+            "skill_content": "# Test skill\n",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "install failed: {_body}");
+
+    let (status, body) = get_json(&h.app, "/api/hands/agent-config-test").await;
+    assert_eq!(status, StatusCode::OK, "get_hand body: {body}");
+
+    let agents = body["agents"].as_array().expect("agents array");
+    assert!(!agents.is_empty(), "expected at least one agent: {body}");
+    let agent = &agents[0];
+
+    assert_eq!(
+        agent["system_prompt"].as_str(),
+        Some("You are the agent-config test prompt."),
+        "agent entry must expose the manifest system_prompt: {body}"
+    );
+
+    let tools: Vec<&str> = agent["capabilities_tools"]
+        .as_array()
+        .expect("capabilities_tools array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(
+        tools,
+        vec!["web_fetch", "file_read"],
+        "agent entry must expose the manifest capabilities.tools: {body}"
+    );
+}

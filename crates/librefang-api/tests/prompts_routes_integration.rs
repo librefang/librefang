@@ -66,6 +66,59 @@ const AGENT_UUID: &str = "11111111-1111-1111-1111-111111111111";
 const VERSION_ID: &str = "22222222-2222-2222-2222-222222222222";
 const EXPERIMENT_ID: &str = "33333333-3333-3333-3333-333333333333";
 
+// ----- repository overview -----
+
+#[tokio::test(flavor = "multi_thread")]
+async fn prompts_overview_returns_paginated_envelope() {
+    // The MockKernelBuilder seeds the default "assistant" agent, so the
+    // overview is non-empty. Assert the standard paginated envelope (200 +
+    // `items`/`total`/`offset`/`limit`) and that the seeded agent appears as
+    // one summary row with the expected shape: its live system prompt is
+    // surfaced, and with no rows in the prompt-version store it reports zero
+    // versions and no active version. This pins the cross-agent aggregation
+    // route wiring and its per-agent row contract.
+    let h = boot().await;
+    let (status, body) = json_request(&h, Method::GET, "/api/prompts/overview", None).await;
+    assert_eq!(status, StatusCode::OK, "body={body:?}");
+    let items = body["items"].as_array().expect("items is array");
+    assert!(
+        !items.is_empty(),
+        "expected at least the seeded agent: {body:?}"
+    );
+    assert_eq!(body["total"], items.len());
+    assert_eq!(body["offset"], 0);
+    assert!(body.get("limit").is_some(), "limit field present: {body:?}");
+
+    let row = &items[0];
+    // agent_id parses as a UUID; agent_name is non-empty.
+    let agent_id = row["agent_id"].as_str().expect("agent_id string");
+    assert!(
+        uuid::Uuid::parse_str(agent_id).is_ok(),
+        "agent_id must be a UUID: {row:?}"
+    );
+    assert!(
+        !row["agent_name"].as_str().unwrap_or_default().is_empty(),
+        "agent_name must be non-empty: {row:?}"
+    );
+    // The live system prompt is surfaced from the manifest.
+    assert!(
+        row["live_system_prompt"].is_string(),
+        "live_system_prompt must be present: {row:?}"
+    );
+    // No versions persisted for the seeded agent → zero count, null active.
+    assert_eq!(row["version_count"], 0, "row={row:?}");
+    assert_eq!(
+        row["active_version"],
+        serde_json::Value::Null,
+        "row={row:?}"
+    );
+    assert_eq!(
+        row["active_version_id"],
+        serde_json::Value::Null,
+        "row={row:?}"
+    );
+}
+
 // ----- prompt versions -----
 
 #[tokio::test(flavor = "multi_thread")]

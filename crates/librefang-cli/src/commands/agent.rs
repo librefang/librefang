@@ -162,7 +162,10 @@ pub(crate) fn prepared_agent_manifest_from_contents(
 
     let manifest_toml = if name_override.is_some() {
         toml::to_string_pretty(&manifest).unwrap_or_else(|e| {
-            ui::error(&format!("Failed to serialize updated manifest: {e}"));
+            ui::error(&i18n::t_args(
+                "agent-manifest-serialize-failed",
+                &[("error", &e.to_string())],
+            ));
             std::process::exit(1);
         })
     } else {
@@ -177,30 +180,36 @@ pub(crate) fn prepared_agent_manifest_from_contents(
 }
 
 pub(crate) fn preview_agent_manifest(prepared: &PreparedAgentManifest) {
-    ui::section("Agent Dry Run");
-    ui::kv("Source", &prepared.source_label);
-    ui::kv("Name", &prepared.manifest.name);
-    ui::kv("Version", &prepared.manifest.version);
-    ui::kv("Module", &prepared.manifest.module);
+    ui::section(&i18n::t("agent-dry-run-title"));
+    ui::kv(&i18n::t("label-source"), &prepared.source_label);
+    ui::kv(&i18n::t("label-name"), &prepared.manifest.name);
+    ui::kv(&i18n::t("label-version"), &prepared.manifest.version);
+    ui::kv(&i18n::t("label-module"), &prepared.manifest.module);
     ui::kv(
-        "Model",
+        &i18n::t("label-model"),
         &format!(
             "{}/{}",
             prepared.manifest.model.provider, prepared.manifest.model.model
         ),
     );
     ui::kv(
-        "Tools",
+        &i18n::t("label-tools"),
         &prepared.manifest.capabilities.tools.len().to_string(),
     );
-    ui::kv("Skills", &prepared.manifest.skills.len().to_string());
+    ui::kv(
+        &i18n::t("label-skills"),
+        &prepared.manifest.skills.len().to_string(),
+    );
     if !prepared.manifest.tags.is_empty() {
-        ui::kv("Tags", &prepared.manifest.tags.join(", "));
+        ui::kv(&i18n::t("label-tags"), &prepared.manifest.tags.join(", "));
     }
     if !prepared.manifest.description.is_empty() {
-        ui::kv("Description", &prepared.manifest.description);
+        ui::kv(
+            &i18n::t("label-description"),
+            &prepared.manifest.description,
+        );
     }
-    ui::success("Manifest parsed successfully. No agent was spawned.");
+    ui::success(&i18n::t("agent-dry-run-success"));
 }
 
 pub(crate) fn spawn_prepared_agent(config: Option<PathBuf>, prepared: PreparedAgentManifest) {

@@ -32,6 +32,9 @@ import {
   FileText,
   Plus,
   GitBranch,
+  RotateCcw,
+  Save,
+  Bot,
 } from "lucide-react";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Skeleton } from "../components/ui/Skeleton";
@@ -59,6 +62,8 @@ import {
   useSetHandSecret,
   useUpdateHandSettings,
 } from "../lib/mutations/hands";
+import { usePatchAgent, useUpdateAgentTools } from "../lib/mutations/agents";
+import { useAgentDetail, useAgentTools } from "../lib/queries/agents";
 import { useFullConfig } from "../lib/queries/config";
 import { useSetConfigValue } from "../lib/mutations/config";
 import { useCreateSchedule, useUpdateSchedule, useDeleteSchedule } from "../lib/mutations/schedules";
@@ -394,6 +399,302 @@ function RequirementsForm({ handId, requirements }: { handId: string; requiremen
   );
 }
 
+/* ── Agent config (system prompt + tools) editor ─────────── */
+
+type WorkspaceAgent = {
+  role: string;
+  name: string;
+  description?: string;
+  coordinator?: boolean;
+  provider: string;
+  model: string;
+  steps?: string[];
+  system_prompt?: string;
+  capabilities_tools?: string[];
+};
+
+function HandAgentConfigTab({
+  workspaceAgents,
+  instance,
+  isActive,
+}: {
+  workspaceAgents: WorkspaceAgent[];
+  instance: HandInstanceItem | undefined;
+  isActive: boolean;
+}) {
+  const { t } = useTranslation();
+  const [selectedRole, setSelectedRole] = useState<string>(
+    () => workspaceAgents[0]?.role ?? "",
+  );
+
+  const selected =
+    workspaceAgents.find((a) => a.role === selectedRole) ?? workspaceAgents[0];
+
+  // multi-agent hands expose a role→id map; single-agent hands fall back to the instance-level id.
+  const agentId = isActive
+    ? instance?.agent_ids?.[selected?.role ?? ""] ?? instance?.agent_id
+    : undefined;
+
+  if (!selected) {
+    return <p className="text-xs text-text-dim/50 py-4 text-center">{t("hands.settings_empty")}</p>;
+  }
+
+  return (
+    <div className="space-y-3">
+      {!isActive && (
+        <div className="flex items-start gap-2 rounded-lg border border-warning/30 bg-warning/5 px-3 py-2 text-[11px] text-warning">
+          <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+          <span>{t("hands.agent_config_activate_first")}</span>
+        </div>
+      )}
+
+      {workspaceAgents.length > 1 && (
+        <div>
+          <label htmlFor="hand-agent-role" className="text-[10px] font-bold text-text-dim uppercase tracking-wide block mb-1">
+            {t("hands.agent_select")}
+          </label>
+          <select
+            id="hand-agent-role"
+            value={selected.role}
+            onChange={(e) => setSelectedRole(e.target.value)}
+            className="w-full rounded-lg border border-border-subtle bg-surface px-2.5 py-1.5 text-xs font-semibold focus:outline-none focus:border-brand"
+          >
+            {workspaceAgents.map((a) => (
+              <option key={a.role} value={a.role}>
+                {a.name || a.role}
+                {a.coordinator ? " · coordinator" : ""}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+
+      <HandAgentEditor
+        key={selected.role}
+        agent={selected}
+        agentId={agentId}
+        canEdit={isActive}
+      />
+    </div>
+  );
+}
+
+function HandAgentEditor({
+  agent,
+  agentId,
+  canEdit,
+}: {
+  agent: WorkspaceAgent;
+  agentId: string | undefined;
+  canEdit: boolean;
+}) {
+  const { t } = useTranslation();
+  const addToast = useUIStore((s) => s.addToast);
+
+  // Manifest baseline (HAND.toml) — the "restore default" target.
+  const defaultPrompt = agent.system_prompt ?? "";
+  const defaultTools = useMemo(() => agent.capabilities_tools ?? [], [agent.capabilities_tools]);
+
+  const agentDetailQuery = useAgentDetail(agentId ?? "", { enabled: !!agentId });
+  const agentToolsQuery = useAgentTools(agentId ?? "", { enabled: !!agentId });
+  const livePrompt = agentDetailQuery.data?.system_prompt;
+  const liveTools = agentToolsQuery.data?.capabilities_tools;
+
+  const currentPrompt = livePrompt ?? defaultPrompt;
+  const currentTools = useMemo<string[]>(
+    () => liveTools ?? defaultTools,
+    [liveTools, defaultTools],
+  );
+
+  const [prompt, setPrompt] = useState(currentPrompt);
+  const [tools, setTools] = useState<string[]>(currentTools);
+  const [newTool, setNewTool] = useState("");
+
+  useEffect(() => { setPrompt(currentPrompt); }, [currentPrompt]);
+  useEffect(() => { setTools(currentTools); }, [currentTools]);
+
+  const patchAgent = usePatchAgent();
+  const updateTools = useUpdateAgentTools();
+
+  const editable = canEdit && !!agentId;
+  const promptDirty = prompt !== currentPrompt;
+  // Dirty = draft differs from the live/current value (what's saved).
+  const toolsDirty = useMemo(
+    () => tools.length !== currentTools.length || tools.some((tt, i) => tt !== currentTools[i]),
+    [tools, currentTools],
+  );
+  // Whether the draft already matches the manifest default (disables reset).
+  const promptIsDefault = prompt === defaultPrompt;
+  const toolsAreDefault = useMemo(
+    () => tools.length === defaultTools.length && tools.every((tt, i) => tt === defaultTools[i]),
+    [tools, defaultTools],
+  );
+
+  const savePrompt = () => {
+    if (!agentId) {
+      addToast(t("hands.edit_agent_unavailable"), "error");
+      return;
+    }
+    patchAgent.mutate(
+      { agentId, body: { system_prompt: prompt } },
+      {
+        onSuccess: () => addToast(t("hands.saved"), "success"),
+        onError: (e: Error) => addToast(e.message || t("common.error"), "error"),
+      },
+    );
+  };
+
+  const saveTools = (next: string[]) => {
+    if (!agentId) {
+      addToast(t("hands.edit_agent_unavailable"), "error");
+      return;
+    }
+    updateTools.mutate(
+      { agentId, payload: { capabilities_tools: next } },
+      {
+        onSuccess: () => addToast(t("hands.saved"), "success"),
+        onError: (e: Error) => addToast(e.message || t("common.error"), "error"),
+      },
+    );
+  };
+
+  const addTool = () => {
+    const tool = newTool.trim();
+    if (!tool || tools.includes(tool)) {
+      setNewTool("");
+      return;
+    }
+    setTools((prev) => [...prev, tool]);
+    setNewTool("");
+  };
+
+  const removeTool = (tool: string) => {
+    setTools((prev) => prev.filter((x) => x !== tool));
+  };
+
+  return (
+    <div className="space-y-4">
+      {/* System prompt (#6151) */}
+      <div className="rounded-xl border border-border-subtle bg-main/30 p-3 space-y-2">
+        <div className="flex items-center justify-between gap-2">
+          <label htmlFor={`hand-agent-prompt-${agent.role}`} className="flex items-center gap-1.5 text-xs font-bold">
+            <Bot className="w-3.5 h-3.5 text-text-dim/60" />
+            {t("hands.system_prompt")}
+          </label>
+          <button
+            type="button"
+            disabled={!editable || promptIsDefault}
+            onClick={() => setPrompt(defaultPrompt)}
+            title={t("hands.reset_default_title")}
+            className="inline-flex items-center gap-1 text-[10px] font-bold text-text-dim hover:text-brand disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+          >
+            <RotateCcw className="w-3 h-3" />
+            {t("hands.reset_default")}
+          </button>
+        </div>
+        <textarea
+          id={`hand-agent-prompt-${agent.role}`}
+          value={prompt}
+          disabled={!editable || patchAgent.isPending}
+          onChange={(e) => setPrompt(e.target.value)}
+          placeholder={t("hands.system_prompt_placeholder")}
+          rows={8}
+          className="w-full rounded-lg border border-border-subtle bg-surface px-3 py-2 text-xs font-mono leading-relaxed resize-y disabled:opacity-50 focus:outline-none focus:border-brand"
+        />
+        <div className="flex justify-end">
+          <button
+            type="button"
+            disabled={!editable || !promptDirty || patchAgent.isPending}
+            onClick={savePrompt}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-brand text-white text-xs font-bold disabled:opacity-40 disabled:cursor-not-allowed hover:bg-brand/90 transition-colors"
+          >
+            {patchAgent.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />}
+            {t("hands.save")}
+          </button>
+        </div>
+      </div>
+
+      {/* Tools (#6152) */}
+      <div className="rounded-xl border border-border-subtle bg-main/30 p-3 space-y-2">
+        <div className="flex items-center justify-between gap-2">
+          <span className="flex items-center gap-1.5 text-xs font-bold">
+            <Wrench className="w-3.5 h-3.5 text-text-dim/60" />
+            {t("hands.agent_tools")}
+          </span>
+          <button
+            type="button"
+            disabled={!editable || toolsAreDefault}
+            onClick={() => setTools(defaultTools)}
+            title={t("hands.reset_default_title")}
+            className="inline-flex items-center gap-1 text-[10px] font-bold text-text-dim hover:text-brand disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+          >
+            <RotateCcw className="w-3 h-3" />
+            {t("hands.reset_default")}
+          </button>
+        </div>
+
+        {tools.length === 0 ? (
+          <p className="text-[11px] text-text-dim/50 py-1">{t("hands.agent_tools_empty")}</p>
+        ) : (
+          <div className="flex flex-wrap gap-1.5">
+            {tools.map((tool) => (
+              <span
+                key={tool}
+                className="inline-flex items-center gap-1 text-[11px] font-mono text-text-dim px-2 py-1 rounded-lg bg-surface border border-border-subtle/60"
+              >
+                {tool === "*" ? t("hands.agent_tools_wildcard") : tool}
+                {editable && (
+                  <button
+                    type="button"
+                    onClick={() => removeTool(tool)}
+                    aria-label={`${t("common.delete", { defaultValue: "Remove" })} ${tool}`}
+                    className="text-text-dim/40 hover:text-error transition-colors"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                )}
+              </span>
+            ))}
+          </div>
+        )}
+
+        <div className="flex gap-2">
+          <input
+            type="text"
+            value={newTool}
+            disabled={!editable}
+            onChange={(e) => setNewTool(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addTool(); } }}
+            placeholder={t("hands.agent_tools_add_placeholder")}
+            className="flex-1 rounded-lg border border-border-subtle bg-surface px-3 py-1.5 text-xs font-mono disabled:opacity-50 focus:outline-none focus:border-brand placeholder:text-text-dim/30"
+          />
+          <button
+            type="button"
+            disabled={!editable || !newTool.trim()}
+            onClick={addTool}
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-border-subtle text-xs font-bold text-text-dim hover:text-brand hover:border-brand/40 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          >
+            <Plus className="w-3 h-3" />
+            {t("hands.agent_tools_add")}
+          </button>
+        </div>
+
+        <div className="flex justify-end">
+          <button
+            type="button"
+            disabled={!editable || !toolsDirty || updateTools.isPending}
+            onClick={() => saveTools(tools)}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-brand text-white text-xs font-bold disabled:opacity-40 disabled:cursor-not-allowed hover:bg-brand/90 transition-colors"
+          >
+            {updateTools.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />}
+            {t("hands.save")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function DetailTabs({ hand, instance, isActive, settings, settingsQuery }: {
   hand: HandDefinitionItem; instance: HandInstanceItem | undefined; isActive: boolean;
   settings: HandSettingsResponse;
@@ -404,16 +705,18 @@ function DetailTabs({ hand, instance, isActive, settings, settingsQuery }: {
   // Fetch hand detail with agents list
   const detailQuery = useHandDetail(hand.id);
   const detail = detailQuery.data as Record<string, unknown> | undefined;
-  const workspaceAgents = (detail?.agents as { role: string; name: string; description?: string; coordinator?: boolean; provider: string; model: string; steps?: string[] }[] | undefined) ?? [];
+  const workspaceAgents = (detail?.agents as WorkspaceAgent[] | undefined) ?? [];
 
   // Fetch cron jobs for this hand's agent
   const agentId = instance?.agent_id;
   const cronJobsQuery = useCronJobs(isActive ? agentId : undefined);
   const cronJobs = cronJobsQuery.data ?? [];
 
-  type Tab = "agents" | "settings" | "requirements" | "tools" | "schedules";
+  type Tab = "agents" | "agent_config" | "settings" | "requirements" | "tools" | "schedules";
   const tabs: { id: Tab; label: string; count?: number; show: boolean }[] = [
     { id: "agents", label: t("nav.agents"), count: workspaceAgents.length, show: workspaceAgents.length > 0 },
+    // shown when agents are declared; write ops are gated inside the editor (active hand required).
+    { id: "agent_config", label: t("hands.agent_config"), count: workspaceAgents.length, show: workspaceAgents.length > 0 },
     { id: "schedules", label: t("hands.tab_schedules"), count: cronJobs.length, show: isActive && !!agentId },
     { id: "settings", label: t("hands.settings"), count: settings.settings?.length, show: true },
     { id: "requirements", label: t("hands.requirements"), count: hand.requirements?.length, show: !!(hand.requirements && hand.requirements.length > 0) },
@@ -491,6 +794,14 @@ function DetailTabs({ hand, instance, isActive, settings, settingsQuery }: {
               </div>
             ))}
           </div>
+        )}
+
+        {activeTab === "agent_config" && (
+          <HandAgentConfigTab
+            workspaceAgents={workspaceAgents}
+            instance={instance}
+            isActive={isActive}
+          />
         )}
 
         {activeTab === "settings" && (

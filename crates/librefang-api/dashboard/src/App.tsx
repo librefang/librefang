@@ -41,6 +41,7 @@ import {
   UserCircle,
   X,
   Sparkles,
+  ScrollText,
   Terminal,
   Plug,
   Kanban,
@@ -75,6 +76,7 @@ type DashboardRoute =
   | "/media"
   | "/sessions"
   | "/skills"
+  | "/prompts"
   | "/workflows"
   | "/scheduler"
   | "/tasks"
@@ -1023,6 +1025,7 @@ export function App() {
           { to: "/chat", label: t("nav.chat"), icon: MessageCircle },
           { to: "/sessions", label: t("nav.sessions", { defaultValue: "Sessions" }), icon: History },
           { to: "/skills", label: t("nav.skills"), icon: Sparkles },
+          { to: "/prompts", label: t("nav.prompts"), icon: ScrollText },
           { to: "/workflows", label: t("nav.workflows"), icon: Layers },
           { to: "/scheduler", label: t("nav.scheduler"), icon: Calendar },
           { to: "/tasks", label: t("nav.tasks", { defaultValue: "Tasks" }), icon: Kanban },

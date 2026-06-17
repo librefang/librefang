@@ -44,6 +44,7 @@ mod tool_name {
     pub const SCHEDULE_CREATE: &str = "schedule_create";
     pub const SCHEDULE_LIST: &str = "schedule_list";
     pub const SCHEDULE_DELETE: &str = "schedule_delete";
+    pub const SCHEDULE_RESUME: &str = "schedule_resume";
     pub const KNOWLEDGE_ADD_ENTITY: &str = "knowledge_add_entity";
     pub const KNOWLEDGE_ADD_RELATION: &str = "knowledge_add_relation";
     pub const KNOWLEDGE_QUERY: &str = "knowledge_query";
@@ -68,6 +69,7 @@ mod tool_name {
     pub const CRON_CREATE: &str = "cron_create";
     pub const CRON_LIST: &str = "cron_list";
     pub const CRON_CANCEL: &str = "cron_cancel";
+    pub const CRON_ENABLE: &str = "cron_enable";
     pub const CHANNEL_SEND: &str = "channel_send";
     pub const HAND_LIST: &str = "hand_list";
     pub const HAND_ACTIVATE: &str = "hand_activate";
@@ -564,11 +566,22 @@ use instead of web_fetch + file_write (which round-trips the entire body through
             },
             ToolDefinition {
                 name: tool_name::SCHEDULE_DELETE.to_string(),
-                description: "Remove a scheduled task by its ID.".to_string(),
+                description: "Pause (disable) a scheduled task by its ID. The task stops running but its configuration is preserved, so it can be resumed later with schedule_resume. This does NOT permanently delete the task — only a human operator can hard-delete a schedule via the dashboard.".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "id": { "type": "string", "description": "The schedule ID to remove" }
+                        "id": { "type": "string", "description": "The schedule ID to pause" }
+                    },
+                    "required": ["id"]
+                }),
+            },
+            ToolDefinition {
+                name: tool_name::SCHEDULE_RESUME.to_string(),
+                description: "Resume (re-enable) a scheduled task that was previously paused with schedule_delete. The task starts running on its original schedule again.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "The schedule ID to resume" }
                     },
                     "required": ["id"]
                 }),
@@ -861,11 +874,22 @@ use instead of web_fetch + file_write (which round-trips the entire body through
             },
             ToolDefinition {
                 name: tool_name::CRON_CANCEL.to_string(),
-                description: "Cancel a scheduled/cron job by its ID.".to_string(),
+                description: "Pause (disable) a scheduled/cron job by its ID. The job stops firing but its configuration is preserved, so it can be re-enabled later with cron_enable. This does NOT permanently delete the job — only a human operator can hard-delete a cron job via the dashboard.".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "job_id": { "type": "string", "description": "The UUID of the cron job to cancel" }
+                        "job_id": { "type": "string", "description": "The UUID of the cron job to pause" }
+                    },
+                    "required": ["job_id"]
+                }),
+            },
+            ToolDefinition {
+                name: tool_name::CRON_ENABLE.to_string(),
+                description: "Re-enable (resume) a scheduled/cron job that was previously paused with cron_cancel. The job starts firing on its original schedule again.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "job_id": { "type": "string", "description": "The UUID of the cron job to re-enable" }
                     },
                     "required": ["job_id"]
                 }),
