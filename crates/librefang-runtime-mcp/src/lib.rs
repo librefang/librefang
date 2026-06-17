@@ -2379,12 +2379,7 @@ impl McpConnection {
                     }
                 }
 
-                // Stitch the agent's trace into the server's tool span (#6128).
-                // rmcp 1.7 sets `custom_headers` once at connect time and
-                // exposes no per-request header hook, so the W3C trace context
-                // rides in `_meta` under `io.librefang/trace`, alongside (never
-                // replacing) the caller entry. Empty when telemetry is off / no
-                // active span — then nothing is added and the call is unchanged.
+                // Ride in `_meta` because rmcp 1.7 exposes no per-request header hook (#6128).
                 let trace_pairs = crate::trace_context::current_w3c_trace_meta();
                 if !trace_pairs.is_empty() {
                     let trace_obj: serde_json::Map<String, serde_json::Value> = trace_pairs
@@ -2463,12 +2458,7 @@ impl McpConnection {
                     }
                 }
 
-                // Stitch the agent's trace into the server's tool span (#6128).
-                // `sse_send_request` is shared by every SSE JSON-RPC call and
-                // takes no per-request header argument, so the W3C trace context
-                // rides in the params `_meta`, merged with (never overwriting)
-                // any caller `_meta` set just above. Empty when telemetry is off
-                // / no active span.
+                // Ride in `_meta` because `sse_send_request` takes no per-request header argument (#6128).
                 let trace_pairs = crate::trace_context::current_w3c_trace_meta();
                 if !trace_pairs.is_empty() {
                     let trace_obj: serde_json::Map<String, serde_json::Value> = trace_pairs
@@ -2690,10 +2680,7 @@ impl McpConnection {
             }
         }
 
-        // Stitch the agent's trace into the backend's span (#6128): HttpCompat
-        // builds the reqwest request per call, so the W3C trace context goes on
-        // as real per-request headers next to the caller header. No headers are
-        // added when telemetry is off / there is no active span.
+        // HttpCompat builds the reqwest request per call, so real per-request headers are available (#6128).
         for (name, value) in crate::trace_context::current_w3c_trace_headers().iter() {
             request = request.header(name.clone(), value.clone());
         }

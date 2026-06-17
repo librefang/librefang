@@ -1,45 +1,13 @@
-//! Outbound W3C Trace Context propagation for MCP tool calls (#6128).
-//!
-//! Mirrors `librefang-llm-drivers`' `drivers::trace_headers::inject_w3c_trace_context`:
-//! it sources the active trace from [`opentelemetry::Context::current()`] (NOT
-//! `tracing::Span::current().context()`, which silently yields an invalid
-//! context behind LibreFang's `tracing_subscriber::reload::Layer` — see the
-//! root-cause analysis in `trace_headers.rs`) and injects via the
-//! globally-registered text-map propagator.
-//!
-//! Two transports can set per-request headers (HttpCompat builds the reqwest
-//! request per call), so they take the [`http::HeaderMap`] view. The
-//! streamable-HTTP / Rmcp transport sets its `custom_headers` once at connect
-//! time and rmcp 1.7 exposes no per-request header hook; the SSE transport
-//! sends through a shared `sse_send_request` helper that takes no per-request
-//! header argument. Both therefore carry the context in the request `_meta`
-//! under [`TRACE_CONTEXT_META_KEY`] via the `Vec<(String, String)>` view,
-//! alongside (never replacing) the existing `io.librefang/caller` entry.
-//!
-//! **Unconditional and self-disabling.** Like the LLM-driver helper this is not
-//! gated on any config flag — W3C Trace Context is a standard interop
-//! primitive. When telemetry is disabled the global propagator is the default
-//! `NoopTextMapPropagator` (writes nothing); when a real propagator is
-//! registered but there is no recording span the context's `SpanContext` is
-//! invalid and `TraceContextPropagator::inject_context` writes nothing. In both
-//! cases the returned carrier is empty and the tool call proceeds unchanged.
+//! Outbound W3C traceparent propagation for MCP tool calls; uses `opentelemetry::Context::current()` (not `tracing::Span`) to survive the `reload::Layer` downcast limitation (#6128).
 
 use opentelemetry::global;
 use opentelemetry::Context;
 use opentelemetry_http::HeaderInjector;
 
-/// `_meta` key under which the outbound W3C trace context is shipped on the
-/// Rmcp (streamable-HTTP) and SSE transports. Reverse-DNS namespaced per the
-/// MCP `_meta` convention, matching the sibling caller key `io.librefang/caller`.
-/// The value is a JSON object whose keys are the lowercase W3C field names
-/// (`traceparent`, and `tracestate` when non-empty), so an OTel-instrumented
-/// server can read them back the same way a `HeaderExtractor` would.
+/// MCP `_meta` key for the W3C trace context; value is `{"traceparent": "…"}` so OTel-instrumented servers can extract it the same way they would an HTTP header.
 pub(crate) const TRACE_CONTEXT_META_KEY: &str = "io.librefang/trace";
 
-/// Inject the current W3C trace context into a fresh [`http::HeaderMap`] and
-/// return it. Empty when telemetry is disabled or there is no active recording
-/// span (see module docs). Used by the HttpCompat per-request path, which can
-/// attach real per-request headers.
+/// Returns the active W3C trace context as an HTTP header map; empty when no recording span is active.
 pub(crate) fn current_w3c_trace_headers() -> http::HeaderMap {
     let mut map = http::HeaderMap::new();
     let cx = Context::current();
@@ -49,13 +17,7 @@ pub(crate) fn current_w3c_trace_headers() -> http::HeaderMap {
     map
 }
 
-/// Same context as [`current_w3c_trace_headers`], rendered as a list of
-/// `(name, value)` pairs (e.g. `("traceparent", "00-…")`) for embedding in the
-/// MCP request `_meta`. Header names are already lowercase ASCII as emitted by
-/// the W3C propagator; values are guaranteed valid ASCII (a `traceparent` is
-/// hex + dashes, a `tracestate` is restricted to ASCII per the spec). Empty
-/// when telemetry is disabled or there is no active recording span — callers
-/// must then add nothing to `_meta`.
+/// Same as `current_w3c_trace_headers` but as `(name, value)` pairs for embedding in MCP `_meta`; empty when no recording span is active.
 pub(crate) fn current_w3c_trace_meta() -> Vec<(String, String)> {
     current_w3c_trace_headers()
         .iter()
@@ -81,13 +43,7 @@ mod tests {
 
     type BoxedReloadLayer = Box<dyn tracing_subscriber::Layer<Registry> + Send + Sync + 'static>;
 
-    /// Reproduce the production wiring: the `OpenTelemetryLayer` installed
-    /// *behind a `tracing_subscriber::reload::Layer`*, exactly as
-    /// `librefang_api::telemetry` does at runtime. This is the load-bearing
-    /// difference — behind the reload slot the `OpenTelemetrySpanExt::context()`
-    /// downcast can never succeed, so a test that installed the OTel layer
-    /// directly would mask the real bug `current_w3c_trace_*` is built to
-    /// avoid (see `trace_headers.rs`).
+    /// Wires OTel behind a `reload::Layer` (production topology) so the `OpenTelemetrySpanExt::context()` downcast failure is exercised rather than masked.
     fn otel_subscriber_behind_reload() -> (impl Subscriber + Send + Sync, SdkTracerProvider) {
         let provider = SdkTracerProvider::builder()
             .with_sampler(Sampler::AlwaysOn)
@@ -104,9 +60,6 @@ mod tests {
         (subscriber, provider)
     }
 
-    /// Under a recording span (production reload-layer wiring) the helper must
-    /// surface a `traceparent` whose trace id matches the active span — both in
-    /// the `_meta` view and the header view.
     #[test]
     fn recording_span_yields_non_all_zero_traceparent() {
         opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
@@ -162,10 +115,6 @@ mod tests {
         );
     }
 
-    /// With no active recording span the context is invalid, so the propagator
-    /// writes nothing — proving the no-op-when-disabled guarantee. Runs without
-    /// entering any span; `Context::current()` is thread-local, so this is
-    /// robust even when the recording-span test runs concurrently.
     #[test]
     fn no_active_span_yields_empty() {
         assert!(
@@ -178,12 +127,6 @@ mod tests {
         );
     }
 
-    /// The `_meta` view and the header view are derived from one injection, so
-    /// they must carry exactly the same key/value pairs — a server reading
-    /// either surface sees the same context. (We faithfully pass through
-    /// whatever the global propagator emits, e.g. a possibly-empty `tracestate`,
-    /// matching the `trace_headers.rs` LLM-egress precedent rather than
-    /// second-guessing the propagator.)
     #[test]
     fn meta_and_header_views_are_consistent() {
         opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
