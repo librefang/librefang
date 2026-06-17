@@ -342,24 +342,56 @@ pub(super) async fn tool_schedule_list(
     Ok(output)
 }
 
+/// Disable (pause) a scheduled task — the agent-facing "stop this schedule" action.
+///
+/// Despite the historical `schedule_delete` tool name, this pauses the job via `cron_set_enabled(false)` rather than hard-deleting it, so the schedule and its action survive and the operator can recover what was set up.
+/// Hard deletion is a human-only dashboard operation (#6159); the agent re-enables a paused schedule with `schedule_resume`.
 pub(super) async fn tool_schedule_delete(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
     caller_agent_id: Option<&str>,
 ) -> ToolResult {
+    let id = require_owned_schedule_id(input, kernel, caller_agent_id, "schedule_delete").await?;
+    let kh = require_kernel_typed(kernel)?;
+    kh.cron_set_enabled(&id, false)
+        .await
+        .map_err(ToolError::upstream)?;
+    Ok(format!(
+        "Schedule '{id}' disabled (paused). Its configuration is preserved — resume it with schedule_resume."
+    ))
+}
+
+/// Re-enable (resume) a previously paused scheduled task.
+pub(super) async fn tool_schedule_resume(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
+) -> ToolResult {
+    let id = require_owned_schedule_id(input, kernel, caller_agent_id, "schedule_resume").await?;
+    let kh = require_kernel_typed(kernel)?;
+    kh.cron_set_enabled(&id, true)
+        .await
+        .map_err(ToolError::upstream)?;
+    Ok(format!("Schedule '{id}' resumed (re-enabled)."))
+}
+
+/// Resolve the schedule id (accepting `id` or `job_id`) and confirm the caller owns it.
+///
+/// `KernelHandle::cron_set_enabled` toggles by UUID with no ownership check (see `kernel/handles/cron_control.rs`), so the ownership guard lives at the tool layer — otherwise any agent with this tool could pause/resume another agent's job by learning its UUID.
+/// Returns the validated, owned id as an owned `String` so the borrow on `kh.cron_list(...)` ends before the caller's own kernel mutation.
+async fn require_owned_schedule_id(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
+    tool: &'static str,
+) -> Result<String, ToolError> {
     let kh = require_kernel_typed(kernel)?;
     // Accept either "id" or "job_id" for backward compatibility
     let id = input["id"]
         .as_str()
         .or_else(|| input["job_id"].as_str())
         .ok_or(ToolError::MissingParameter("id"))?;
-    let agent_id = caller_agent_id.ok_or_else(|| caller_agent_id_missing("schedule_delete"))?;
-    // Authorize: the caller may only delete jobs that belong to them.
-    // `KernelHandle::cron_cancel` removes by UUID with no ownership check
-    // (see `kernel/handles/cron_control.rs`), and the sibling `cron_cancel`
-    // tool already enforces this guard at the tool layer — `schedule_delete`
-    // must too, or it is a trivial bypass: any agent with this tool could
-    // cancel another agent's job by learning its UUID.
+    let agent_id = caller_agent_id.ok_or_else(|| caller_agent_id_missing(tool))?;
     let owned = kh.cron_list(agent_id).await.map_err(ToolError::upstream)?;
     let owns_job = owned.iter().any(|job| {
         job.get("id")
@@ -375,8 +407,7 @@ pub(super) async fn tool_schedule_delete(
             id: id.to_string(),
         });
     }
-    kh.cron_cancel(id).await.map_err(ToolError::upstream)?;
-    Ok(format!("Schedule '{id}' deleted."))
+    Ok(id.to_string())
 }
 
 #[cfg(test)]
@@ -405,6 +436,12 @@ mod tests {
     #[tokio::test]
     async fn schedule_delete_without_kernel_returns_unavailable() {
         let r = tool_schedule_delete(&json!({"id": "x"}), None, Some("agent-a")).await;
+        assert!(matches!(r, Err(ToolError::Unavailable("Kernel handle"))));
+    }
+
+    #[tokio::test]
+    async fn schedule_resume_without_kernel_returns_unavailable() {
+        let r = tool_schedule_resume(&json!({"id": "x"}), None, Some("agent-a")).await;
         assert!(matches!(r, Err(ToolError::Unavailable("Kernel handle"))));
     }
 

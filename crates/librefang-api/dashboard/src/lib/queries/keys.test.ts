@@ -37,6 +37,7 @@ import {
   userKeys,
   userBudgetKeys,
   permissionPolicyKeys,
+  promptsKeys,
 } from "./keys";
 
 describe("query key factories", () => {
@@ -508,6 +509,43 @@ describe("query key factories", () => {
 
     it("different event limits produce different keys", () => {
       expect(commsKeys.events(100)).not.toEqual(commsKeys.events(200));
+    });
+  });
+
+  describe("promptsKeys (#6160)", () => {
+    it("exposes the standard all / lists() / list / details() / detail hierarchy", () => {
+      expect(promptsKeys.all).toEqual(["prompts"]);
+      expect(promptsKeys.lists()).toEqual(["prompts", "list"]);
+      expect(promptsKeys.list()).toEqual(["prompts", "list", "overview"]);
+      expect(promptsKeys.details()).toEqual(["prompts", "detail"]);
+      expect(promptsKeys.detail("agent-1")).toEqual([
+        "prompts",
+        "detail",
+        "agent-1",
+      ]);
+    });
+
+    it("all sub-keys are anchored on promptsKeys.all", () => {
+      const prefix = promptsKeys.all;
+      expect(promptsKeys.lists().slice(0, prefix.length)).toEqual(prefix);
+      expect(promptsKeys.list().slice(0, prefix.length)).toEqual(prefix);
+      expect(promptsKeys.details().slice(0, prefix.length)).toEqual(prefix);
+      expect(promptsKeys.detail("x").slice(0, prefix.length)).toEqual(prefix);
+    });
+
+    it("details() prefixes detail(id) and is disjoint from lists()", () => {
+      const ds = promptsKeys.details();
+      expect(promptsKeys.detail("agent-1").slice(0, ds.length)).toEqual(ds);
+      expect(promptsKeys.details()).not.toEqual(promptsKeys.lists());
+    });
+
+    it("lists() prefixes list() but is not equal to it (two-level hierarchy)", () => {
+      const ls = promptsKeys.lists();
+      expect(promptsKeys.list().slice(0, ls.length)).toEqual(ls);
+      // The distinguishing segment must keep list() strictly more specific than
+      // lists(), so a broad `invalidateQueries({ queryKey: lists() })` matches it
+      // while a targeted `list()` invalidation does not collapse into `lists()`.
+      expect(promptsKeys.list()).not.toEqual(promptsKeys.lists());
     });
   });
 });

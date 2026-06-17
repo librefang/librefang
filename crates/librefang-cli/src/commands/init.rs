@@ -25,8 +25,8 @@ pub(crate) fn cmd_init(quick: bool) {
     // The interactive wizard unconditionally overwrites config.toml, which
     // would silently delete channels and custom configuration (#1862).
     if !quick && librefang_dir.join("config.toml").exists() {
-        ui::hint("Existing installation detected — running upgrade to preserve your settings.");
-        ui::hint("To start fresh, remove ~/.librefang/config.toml and run `librefang init` again.");
+        ui::hint(&i18n::t("init-upgrade-existing"));
+        ui::hint(&i18n::t("init-upgrade-fresh-hint"));
         cmd_init_upgrade();
         return;
     }
@@ -99,47 +99,56 @@ pub(crate) fn cmd_init_upgrade() {
 
     // 1. Must have an existing installation
     if !config_path.exists() {
-        ui::error("Nothing to upgrade — no config.toml found. Run `librefang init` first.");
+        ui::error(&i18n::t("init-upgrade-no-config"));
         std::process::exit(1);
     }
 
     ui::banner();
     ui::blank();
-    ui::section("Upgrading LibreFang installation");
+    ui::section(&i18n::t("init-upgrade-title"));
 
     // Four upgrade steps: backup, registry sync, vault/git, config merge.
-    let mut p = progress::auto("Upgrading", Some(4));
+    let mut p = progress::auto(&i18n::t("init-upgrade-progress-label"), Some(4));
 
     // 2. Backup existing config under backups/ (keep last 3)
-    p.set_message("Backing up config");
+    p.set_message(&i18n::t("init-upgrade-backing-up"));
     let backups_dir = librefang_dir.join("backups");
     if let Err(e) = std::fs::create_dir_all(&backups_dir) {
-        p.finish_with_failure(&format!("Failed to create backups dir: {e}"));
+        p.finish_with_failure(&i18n::t_args(
+            "init-upgrade-failed-create-backups-dir",
+            &[("error", &e.to_string())],
+        ));
         std::process::exit(1);
     }
     let backup_name = format!("config-{}.toml", format_local_timestamp());
     let backup_path = backups_dir.join(&backup_name);
     if let Err(e) = std::fs::copy(&config_path, &backup_path) {
-        p.finish_with_failure(&format!("Failed to backup config: {e}"));
+        p.finish_with_failure(&i18n::t_args(
+            "init-upgrade-failed-backup-config",
+            &[("error", &e.to_string())],
+        ));
         std::process::exit(1);
     }
     restrict_file_permissions(&backup_path);
     prune_old_config_backups(&backups_dir, 3);
     p.tick(1);
-    ui::success(&format!("Backed up config to backups/{backup_name}"));
+    ui::success(&i18n::t_args(
+        "init-upgrade-backup-success",
+        &[("name", &backup_name)],
+    ));
 
     // 3. Sync registry (TTL=0 forces refresh regardless of last sync time)
-    p.set_message("Syncing registry");
+    p.set_message(&i18n::t("init-upgrade-syncing-registry"));
     if librefang_runtime::registry_sync::sync_registry(&librefang_dir, 0, "", None) {
         p.tick(1);
-        ui::success("Registry synced");
+        ui::success(&i18n::t("init-upgrade-registry-synced"));
     } else {
         p.tick(1);
-        ui::hint("Registry sync failed (network issue?) — continuing with cached content");
+        ui::hint(&i18n::t("init-upgrade-registry-failed"));
     }
 
     // 4. Ensure data dir, vault, and git exist
-    p.set_message("Initialising vault/git");
+    p.set_message(&i18n::t("init-upgrade-initializing-vault-git"));
     let data_dir = librefang_dir.join("data");
     if !data_dir.exists() {
         let _ = std::fs::create_dir_all(&data_dir);
@@ -159,11 +168,14 @@ pub(crate) fn cmd_init_upgrade() {
     p.tick(1);
 
     // 5. Merge new default config fields
-    p.set_message("Merging config fields");
+    p.set_message(&i18n::t("init-upgrade-merging-config"));
     let existing_raw = match std::fs::read_to_string(&config_path) {
         Ok(s) => s,
         Err(e) => {
-            p.finish_with_failure(&format!("Upgrade aborted: failed to read config.toml: {e}"));
+            p.finish_with_failure(&i18n::t_args(
+                "init-upgrade-failed-read",
+                &[("error", &e.to_string())],
+            ));
             std::process::exit(1);
         }
     };
@@ -171,11 +183,13 @@ pub(crate) fn cmd_init_upgrade() {
     let existing: toml::Value = match toml::from_str(&existing_raw) {
         Ok(v) => v,
         Err(e) => {
-            p.finish_with_failure(&format!(
-                "Upgrade aborted: failed to parse config.toml: {e}"
+            p.finish_with_failure(&i18n::t_args(
+                "init-upgrade-failed-parse",
+                &[("error", &e.to_string())],
             ));
-            ui::hint(&format!(
-                "Your original config was saved to backups/{backup_name}"
+            ui::hint(&i18n::t_args(
+                "init-upgrade-backup-saved-hint",
+                &[("name", &backup_name)],
             ));
             std::process::exit(1);
         }
@@ -186,8 +200,9 @@ pub(crate) fn cmd_init_upgrade() {
     let defaults: toml::Value = match toml::from_str(&default_config_str) {
         Ok(v) => v,
         Err(e) => {
-            p.finish_with_failure(&format!(
-                "Upgrade aborted: failed to parse default config template: {e}"
+            p.finish_with_failure(&i18n::t_args(
+                "init-upgrade-failed-parse-template",
+                &[("error", &e.to_string())],
             ));
             std::process::exit(1);
         }
@@ -198,7 +213,7 @@ pub(crate) fn cmd_init_upgrade() {
     let added = find_missing_toplevel_keys(&existing, &defaults);
 
     if added.is_empty() {
-        ui::success("Config is already up to date — no new fields added");
+        ui::success(&i18n::t("init-upgrade-config-up-to-date"));
     } else {
         // Partition into scalars (must stay in TOML root scope) and tables.
         // Scalars appended after a [table] header would be absorbed into that
@@ -249,28 +264,35 @@ pub(crate) fn cmd_init_upgrade() {
         }
 
         if let Err(e) = std::fs::write(&config_path, &content) {
-            p.finish_with_failure(&format!("Upgrade aborted: failed to write config: {e}"));
-            ui::hint(&format!(
-                "Your original config was saved to backups/{backup_name}"
+            p.finish_with_failure(&i18n::t_args(
+                "init-upgrade-failed-write",
+                &[("error", &e.to_string())],
+            ));
+            ui::hint(&i18n::t_args(
+                "init-upgrade-backup-saved-hint",
+                &[("name", &backup_name)],
             ));
             std::process::exit(1);
         }
         restrict_file_permissions(&config_path);
-        ui::success(&format!("Added {} new config section(s):", added.len()));
+        ui::success(&i18n::t_args(
+            "init-upgrade-sections-added",
+            &[("count", &added.len().to_string())],
+        ));
         for key in &added {
             ui::kv("  +", key);
         }
     }
     p.tick(1);
-    p.finish("Upgrade steps complete");
+    p.finish(&i18n::t("init-upgrade-steps-complete"));
 
     // 6. Check for legacy ~/.openclaw installation
     if let Some(home) = dirs::home_dir() {
         let openclaw_dir = home.join(".openclaw");
         if openclaw_dir.exists() {
             ui::blank();
-            ui::hint("Legacy ~/.openclaw installation detected.");
-            ui::hint("Run `librefang migrate --from openclaw` to migrate your data.");
+            ui::hint(&i18n::t("init-upgrade-legacy-openclaw"));
+            ui::hint(&i18n::t("init-upgrade-legacy-openclaw-hint"));
         }
     }
 
@@ -291,21 +313,16 @@ pub(crate) fn cmd_init_upgrade() {
         });
     if approval_needs_update {
         ui::blank();
-        ui::hint(
-            "Your require_approval list only contains \"shell_exec\". \
-             File operations (file_write, file_delete) now require approval by default.",
-        );
-        ui::hint(
-            "To enable: add \"file_write\" and \"file_delete\" to require_approval in config.toml",
-        );
+        ui::hint(&i18n::t("init-upgrade-approval-warning"));
+        ui::hint(&i18n::t("init-upgrade-approval-hint"));
     }
 
     // 8. Summary
     ui::blank();
-    ui::success("Upgrade complete!");
-    ui::kv("Backup", &format!("backups/{backup_name}"));
+    ui::success(&i18n::t("init-upgrade-success-summary"));
+    ui::kv(&i18n::t("label-backup"), &format!("backups/{backup_name}"));
     if !added.is_empty() {
-        ui::kv("New fields", &added.len().to_string());
+        ui::kv(&i18n::t("label-new-fields"), &added.len().to_string());
     }
     ui::blank();
 }
@@ -633,7 +650,10 @@ pub(crate) fn write_config_if_missing(
     let example_path = librefang_dir.join("config.example.toml");
     if !example_path.exists() {
         if let Err(e) = std::fs::write(&example_path, INIT_DEFAULT_CONFIG_TEMPLATE) {
-            ui::hint(&format!("Could not write config.example.toml: {e}"));
+            ui::hint(&i18n::t_args(
+                "init-error-write-config-example",
+                &[("error", &e.to_string())],
+            ));
         }
     }
 }

@@ -40,14 +40,17 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
         // --- Check 1: LibreFang directory ---
         if librefang_dir.exists() {
             if !json {
-                ui::check_ok(&format!("LibreFang directory: {}", librefang_dir.display()));
+                ui::check_ok(&i18n::t_args(
+                    "doctor-check-librefang-dir-ok",
+                    &[("path", &librefang_dir.display().to_string())],
+                ));
             }
             checks.push(serde_json::json!({"check": "librefang_dir", "status": "ok", "path": librefang_dir.display().to_string()}));
         } else if repair {
             if !json {
-                ui::check_fail("LibreFang directory not found.");
+                ui::check_fail(&i18n::t("doctor-check-librefang-dir-fail"));
             }
-            let answer = prompt_input("    Create it now? [Y/n] ");
+            let answer = prompt_input(&i18n::t("doctor-prompt-create-dir"));
             if answer.is_empty() || answer.starts_with('y') || answer.starts_with('Y') {
                 if std::fs::create_dir_all(&librefang_dir).is_ok() {
                     restrict_dir_permissions(&librefang_dir);
@@ -55,12 +58,12 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
                     let _ =
                         std::fs::create_dir_all(librefang_dir.join("workspaces").join("agents"));
                     if !json {
-                        ui::check_ok("Created LibreFang directory");
+                        ui::check_ok(&i18n::t("doctor-check-librefang-dir-created"));
                     }
                     repaired = true;
                 } else {
                     if !json {
-                        ui::check_fail("Failed to create directory");
+                        ui::check_fail(&i18n::t("doctor-check-librefang-dir-create-fail"));
                     }
                     all_ok = false;
                 }
@@ -70,7 +73,7 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
             checks.push(serde_json::json!({"check": "librefang_dir", "status": if repaired { "repaired" } else { "fail" }}));
         } else {
             if !json {
-                ui::check_fail("LibreFang directory not found. Run `librefang init` first.");
+                ui::check_fail(&i18n::t("doctor-check-librefang-dir-not-found-init"));
             }
             checks.push(serde_json::json!({"check": "librefang_dir", "status": "fail"}));
             all_ok = false;
@@ -86,7 +89,7 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
                     let mode = meta.permissions().mode() & 0o777;
                     if mode == 0o600 {
                         if !json {
-                            ui::check_ok(".env file (permissions OK)");
+                            ui::check_ok(&i18n::t("doctor-check-env-ok"));
                         }
                     } else if repair {
                         let _ = std::fs::set_permissions(
@@ -94,31 +97,29 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
                             std::fs::Permissions::from_mode(0o600),
                         );
                         if !json {
-                            ui::check_ok(".env file (permissions fixed to 0600)");
+                            ui::check_ok(&i18n::t("doctor-check-env-fixed"));
                         }
                         repaired = true;
                     } else if !json {
-                        ui::check_warn(&format!(
-                            ".env file has loose permissions ({:o}), should be 0600",
-                            mode
+                        ui::check_warn(&i18n::t_args(
+                            "doctor-check-env-loose-warn",
+                            &[("mode", &format!("{:o}", mode))],
                         ));
                     }
                 } else if !json {
-                    ui::check_ok(".env file");
+                    ui::check_ok(&i18n::t("doctor-check-env-ok-generic"));
                 }
             }
             #[cfg(not(unix))]
             {
                 if !json {
-                    ui::check_ok(".env file");
+                    ui::check_ok(&i18n::t("doctor-check-env-ok-generic"));
                 }
             }
             checks.push(serde_json::json!({"check": "env_file", "status": "ok"}));
         } else {
             if !json {
-                ui::check_warn(
-                    ".env file not found (create with: librefang config set-key <provider>)",
-                );
+                ui::check_warn(&i18n::t("doctor-check-env-not-found-warn"));
             }
             checks.push(serde_json::json!({"check": "env_file", "status": "warn"}));
         }
@@ -130,13 +131,19 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
             match toml::from_str::<toml::Value>(&config_content) {
                 Ok(_) => {
                     if !json {
-                        ui::check_ok(&format!("Config file: {}", config_path.display()));
+                        ui::check_ok(&i18n::t_args(
+                            "doctor-check-config-ok",
+                            &[("path", &config_path.display().to_string())],
+                        ));
                     }
                     checks.push(serde_json::json!({"check": "config_file", "status": "ok"}));
                 }
                 Err(e) => {
                     if !json {
-                        ui::check_fail(&format!("Config file has syntax errors: {e}"));
+                        ui::check_fail(&i18n::t_args(
+                            "doctor-check-config-syntax-fail",
+                            &[("error", &e.to_string())],
+                        ));
                         ui::hint(&i18n::t("hint-config-edit"));
                     }
                     checks.push(serde_json::json!({"check": "config_syntax", "status": "fail", "error": e.to_string()}));
@@ -145,9 +152,9 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
             }
         } else if repair {
             if !json {
-                ui::check_fail("Config file not found.");
+                ui::check_fail(&i18n::t("doctor-check-config-not-found"));
             }
-            let answer = prompt_input("    Create default config? [Y/n] ");
+            let answer = prompt_input(&i18n::t("doctor-prompt-create-config"));
             if answer.is_empty() || answer.starts_with('y') || answer.starts_with('Y') {
                 let (provider, api_key_env, model) = detect_best_provider();
                 let default_config = render_init_default_config(&provider, &model, &api_key_env);
@@ -155,12 +162,12 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
                 if std::fs::write(&config_path, default_config).is_ok() {
                     restrict_file_permissions(&config_path);
                     if !json {
-                        ui::check_ok("Created default config.toml");
+                        ui::check_ok(&i18n::t("doctor-check-config-created"));
                     }
                     repaired = true;
                 } else {
                     if !json {
-                        ui::check_fail("Failed to create config.toml");
+                        ui::check_fail(&i18n::t("doctor-check-config-create-fail"));
                     }
                     all_ok = false;
                 }
@@ -170,7 +177,7 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
             checks.push(serde_json::json!({"check": "config_file", "status": if repaired { "repaired" } else { "fail" }}));
         } else {
             if !json {
-                ui::check_fail("Config file not found.");
+                ui::check_fail(&i18n::t("doctor-check-config-not-found"));
             }
             checks.push(serde_json::json!({"check": "config_file", "status": "fail"}));
             all_ok = false;
@@ -181,8 +188,12 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
             let current_version = env!("CARGO_PKG_VERSION");
             let update_channel = load_update_channel_from_config().unwrap_or_default();
             if !json {
-                ui::check_ok(&format!(
-                    "CLI version: {current_version} (channel: {update_channel})"
+                ui::check_ok(&i18n::t_args(
+                    "doctor-check-cli-version",
+                    &[
+                        ("version", current_version),
+                        ("channel", &update_channel.to_string()),
+                    ],
                 ));
             }
             checks.push(serde_json::json!({"check": "cli_version", "status": "ok", "version": current_version, "channel": update_channel.to_string()}));
@@ -193,21 +204,22 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
                     let latest = tag.strip_prefix('v').unwrap_or(&tag);
                     if latest != current_version {
                         if !json {
-                            ui::check_warn(&format!(
-                                "Update available: {current_version} -> {latest} (see https://github.com/librefang/librefang/releases)"
+                            ui::check_warn(&i18n::t_args(
+                                "doctor-check-update-available-warn",
+                                &[("current", current_version), ("latest", latest)],
                             ));
                         }
                         checks.push(serde_json::json!({"check": "version_update", "status": "warn", "current": current_version, "latest": latest}));
                     } else {
                         if !json {
-                            ui::check_ok("CLI is up to date");
+                            ui::check_ok(&i18n::t("doctor-check-cli-up-to-date"));
                         }
                         checks.push(serde_json::json!({"check": "version_update", "status": "ok"}));
                     }
                 }
                 Err(_) => {
                     if !json {
-                        ui::check_warn("Could not check for updates (network unavailable)");
+                        ui::check_warn(&i18n::t("doctor-check-update-fail-warn"));
                     }
                     checks.push(serde_json::json!({"check": "version_update", "status": "warn", "reason": "network_error"}));
                 }
@@ -234,12 +246,15 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
         let daemon_running = find_daemon();
         if let Some(ref base) = daemon_running {
             if !json {
-                ui::check_ok(&format!("Daemon running at {base}"));
+                ui::check_ok(&i18n::t_args(
+                    "doctor-check-daemon-running",
+                    &[("url", base)],
+                ));
             }
             checks.push(serde_json::json!({"check": "daemon", "status": "ok", "url": base}));
         } else {
             if !json {
-                ui::check_warn("Daemon not running (start with `librefang start`)");
+                ui::check_warn(&i18n::t("doctor-check-daemon-not-running-warn"));
             }
             checks.push(serde_json::json!({"check": "daemon", "status": "warn"}));
 
@@ -252,7 +267,10 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
             match std::net::TcpListener::bind(&bind_addr) {
                 Ok(_) => {
                     if !json {
-                        ui::check_ok(&format!("Port {api_listen} is available"));
+                        ui::check_ok(&i18n::t_args(
+                            "doctor-check-port-available",
+                            &[("address", &api_listen)],
+                        ));
                     }
                     checks.push(
                         serde_json::json!({"check": "port", "status": "ok", "address": api_listen}),
@@ -260,7 +278,10 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
                 }
                 Err(_) => {
                     if !json {
-                        ui::check_warn(&format!("Port {api_listen} is in use by another process"));
+                        ui::check_warn(&i18n::t_args(
+                            "doctor-check-port-in-use-warn",
+                            &[("address", &api_listen)],
+                        ));
                     }
                     checks.push(serde_json::json!({"check": "port", "status": "warn", "address": api_listen}));
                 }
@@ -273,13 +294,11 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
             if repair {
                 let _ = std::fs::remove_file(&daemon_json_path);
                 if !json {
-                    ui::check_ok("Removed stale daemon.json");
+                    ui::check_ok(&i18n::t("doctor-check-stale-daemon-json-removed"));
                 }
                 repaired = true;
             } else if !json {
-                ui::check_warn(
-                    "Stale daemon.json found (daemon not running). Run with --repair to clean up.",
-                );
+                ui::check_warn(&i18n::t("doctor-check-stale-daemon-json-warn"));
             }
             checks.push(serde_json::json!({"check": "stale_daemon_json", "status": if repair { "repaired" } else { "warn" }}));
         }
@@ -291,12 +310,12 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
             if let Ok(bytes) = std::fs::read(&db_path) {
                 if bytes.len() >= 16 && bytes.starts_with(b"SQLite format 3") {
                     if !json {
-                        ui::check_ok("Database file (valid SQLite)");
+                        ui::check_ok(&i18n::t("doctor-check-db-ok"));
                     }
                     checks.push(serde_json::json!({"check": "database", "status": "ok"}));
                 } else {
                     if !json {
-                        ui::check_fail("Database file exists but is not valid SQLite");
+                        ui::check_fail(&i18n::t("doctor-check-db-invalid-fail"));
                     }
                     checks.push(serde_json::json!({"check": "database", "status": "fail"}));
                     all_ok = false;
@@ -304,7 +323,7 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
             }
         } else {
             if !json {
-                ui::check_warn("No database file (will be created on first run)");
+                ui::check_warn(&i18n::t("doctor-check-db-not-found-warn"));
             }
             checks.push(serde_json::json!({"check": "database", "status": "warn"}));
         }
@@ -324,15 +343,17 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
                         if let Ok(available_mb) = cols[3].parse::<u64>() {
                             if available_mb < 100 {
                                 if !json {
-                                    ui::check_warn(&format!(
-                                        "Low disk space: {available_mb}MB available"
+                                    ui::check_warn(&i18n::t_args(
+                                        "doctor-check-disk-space-low-warn",
+                                        &[("count", &available_mb.to_string())],
                                     ));
                                 }
                                 checks.push(serde_json::json!({"check": "disk_space", "status": "warn", "available_mb": available_mb}));
                             } else {
                                 if !json {
-                                    ui::check_ok(&format!(
-                                        "Disk space: {available_mb}MB available"
+                                    ui::check_ok(&i18n::t_args(
+                                        "doctor-check-disk-space-ok",
+                                        &[("count", &available_mb.to_string())],
                                     ));
                                 }
                                 checks.push(serde_json::json!({"check": "disk_space", "status": "ok", "available_mb": available_mb}));
@@ -367,13 +388,16 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
             }
             if agent_errors.is_empty() {
                 if !json {
-                    ui::check_ok("Agent manifests are valid");
+                    ui::check_ok(&i18n::t("doctor-check-manifests-ok"));
                 }
                 checks.push(serde_json::json!({"check": "agent_manifests", "status": "ok"}));
             } else {
                 for (file, err) in &agent_errors {
                     if !json {
-                        ui::check_fail(&format!("Invalid manifest {file}: {err}"));
+                        ui::check_fail(&i18n::t_args(
+                            "doctor-check-manifest-invalid-fail",
+                            &[("file", file), ("error", err)],
+                        ));
                     }
                 }
                 checks.push(serde_json::json!({"check": "agent_manifests", "status": "fail", "errors": agent_errors.len()}));
@@ -382,7 +406,7 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
         }
     } else {
         if !json {
-            ui::check_fail("Could not determine home directory");
+            ui::check_fail(&i18n::t("doctor-check-home-dir-fail"));
         }
         checks.push(serde_json::json!({"check": "home_dir", "status": "fail"}));
         all_ok = false;
@@ -390,7 +414,7 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
 
     // --- LLM providers ---
     if !json {
-        println!("\n  LLM Providers:");
+        println!("{}", i18n::t("doctor-section-providers"));
     }
     // Pretty display names for known provider IDs. Anything not listed
     // here falls back to a Title-Case derivation of the raw provider id
@@ -449,7 +473,10 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
                     ui::provider_status(name, env_var, true);
                 }
             } else if !json {
-                ui::check_warn(&format!("{name} ({env_var}) - key rejected (401/403)"));
+                ui::check_warn(&i18n::t_args(
+                    "doctor-check-provider-key-rejected-warn",
+                    &[("name", name), ("env_var", env_var)],
+                ));
             }
             any_key_set = true;
             checks.push(serde_json::json!({"check": "provider", "name": name, "env_var": env_var, "status": if valid { "ok" } else { "warn" }, "live_test": !valid}));
@@ -467,9 +494,9 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
             ui::check_fail(&i18n::t("doctor-no-api-keys"));
             ui::blank();
             ui::section(&i18n::t("section-getting-api-key"));
-            ui::suggest_cmd("Groq:", "https://console.groq.com       (free, fast)");
-            ui::suggest_cmd("Gemini:", "https://aistudio.google.com    (free tier)");
-            ui::suggest_cmd("DeepSeek:", "https://platform.deepseek.com  (low cost)");
+            ui::suggest_cmd("Groq:", &i18n::t("doctor-suggest-groq"));
+            ui::suggest_cmd("Gemini:", &i18n::t("doctor-suggest-gemini"));
+            ui::suggest_cmd("DeepSeek:", &i18n::t("doctor-suggest-deepseek"));
             ui::blank();
             ui::hint(&i18n::t("hint-set-key"));
         }
@@ -506,7 +533,7 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
 
         if !configured.is_empty() {
             if !json {
-                println!("\n  Network Connectivity:");
+                println!("{}", i18n::t("doctor-section-connectivity"));
             }
             for (env_var, name, endpoint) in &configured {
                 use std::net::{TcpStream, ToSocketAddrs};
@@ -521,12 +548,18 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
 
                 if reachable {
                     if !json {
-                        ui::check_ok(&format!("{name} endpoint reachable ({endpoint})"));
+                        ui::check_ok(&i18n::t_args(
+                            "doctor-check-endpoint-reachable",
+                            &[("name", name), ("endpoint", endpoint)],
+                        ));
                     }
                     checks.push(serde_json::json!({"check": "network_connectivity", "provider": name, "endpoint": endpoint, "env_var": env_var, "status": "ok"}));
                 } else {
                     if !json {
-                        ui::check_warn(&format!("{name} endpoint unreachable ({endpoint})"));
+                        ui::check_warn(&i18n::t_args(
+                            "doctor-check-endpoint-unreachable-warn",
+                            &[("name", name), ("endpoint", endpoint)],
+                        ));
                     }
                     checks.push(serde_json::json!({"check": "network_connectivity", "provider": name, "endpoint": endpoint, "env_var": env_var, "status": "warn"}));
                 }
@@ -536,7 +569,7 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
 
     // --- Check 10: Channel token format validation ---
     if !json {
-        println!("\n  Channel Integrations:");
+        println!("{}", i18n::t("doctor-section-channels"));
     }
     let channel_keys = [
         ("TELEGRAM_BOT_TOKEN", "Telegram"),
@@ -561,7 +594,10 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
                     ui::provider_status(name, env_var, true);
                 }
             } else if !json {
-                ui::check_warn(&format!("{name} ({env_var}) - unexpected token format"));
+                ui::check_warn(&i18n::t_args(
+                    "doctor-check-channel-token-format-warn",
+                    &[("name", name), ("env_var", env_var)],
+                ));
             }
             checks.push(serde_json::json!({"check": "channel", "name": name, "env_var": env_var, "status": if format_ok { "ok" } else { "warn" }}));
         } else {
@@ -586,8 +622,9 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
                         let val = val_part.trim().trim_matches('"');
                         if !val.is_empty() && std::env::var(val).is_err() {
                             if !json {
-                                ui::check_warn(&format!(
-                                    "Config references {val} but it is not set in env or .env"
+                                ui::check_warn(&i18n::t_args(
+                                    "doctor-check-config-env-missing-warn",
+                                    &[("env_var", val)],
                                 ));
                             }
                             checks.push(serde_json::json!({"check": "env_consistency", "status": "warn", "missing_var": val}));
@@ -604,13 +641,13 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
         let config_path = librefang_dir.join("config.toml");
         if config_path.exists() {
             if !json {
-                println!("\n  Config Validation:");
+                println!("{}", i18n::t("doctor-section-config-val"));
             }
             let config_content = std::fs::read_to_string(&config_path).unwrap_or_default();
             match toml::from_str::<librefang_types::config::KernelConfig>(&config_content) {
                 Ok(cfg) => {
                     if !json {
-                        ui::check_ok("Config deserializes into KernelConfig");
+                        ui::check_ok(&i18n::t("doctor-check-config-deser-ok"));
                     }
                     checks.push(serde_json::json!({"check": "config_deser", "status": "ok"}));
 
@@ -618,8 +655,9 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
                     let mode = format!("{:?}", cfg.exec_policy.mode);
                     let safe_bins_count = cfg.exec_policy.safe_bins.len();
                     if !json {
-                        ui::check_ok(&format!(
-                            "Exec policy: mode={mode}, safe_bins={safe_bins_count}"
+                        ui::check_ok(&i18n::t_args(
+                            "doctor-check-exec-policy",
+                            &[("mode", &mode), ("count", &safe_bins_count.to_string())],
                         ));
                     }
                     checks.push(serde_json::json!({"check": "exec_policy", "status": "ok", "mode": mode, "safe_bins": safe_bins_count}));
@@ -631,16 +669,25 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
                             let inc_path = librefang_dir.join(inc);
                             if inc_path.exists() {
                                 if !json {
-                                    ui::check_ok(&format!("Include file: {inc}"));
+                                    ui::check_ok(&i18n::t_args(
+                                        "doctor-check-include-file-ok",
+                                        &[("path", inc)],
+                                    ));
                                 }
                             } else if repair {
                                 if !json {
-                                    ui::check_warn(&format!("Include file missing: {inc}"));
+                                    ui::check_warn(&i18n::t_args(
+                                        "doctor-check-include-file-missing-warn",
+                                        &[("path", inc)],
+                                    ));
                                 }
                                 include_ok = false;
                             } else {
                                 if !json {
-                                    ui::check_fail(&format!("Include file not found: {inc}"));
+                                    ui::check_fail(&i18n::t_args(
+                                        "doctor-check-include-file-not-found-fail",
+                                        &[("path", inc)],
+                                    ));
                                 }
                                 include_ok = false;
                                 all_ok = false;
@@ -653,7 +700,10 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
                     if !cfg.mcp_servers.is_empty() {
                         let mcp_count = cfg.mcp_servers.len();
                         if !json {
-                            ui::check_ok(&format!("MCP servers configured: {mcp_count}"));
+                            ui::check_ok(&i18n::t_args(
+                                "doctor-check-mcp-servers-count",
+                                &[("count", &mcp_count.to_string())],
+                            ));
                         }
                         for server in &cfg.mcp_servers {
                             // Validate transport config
@@ -667,9 +717,9 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
                                 } => {
                                     if command.is_empty() {
                                         if !json {
-                                            ui::check_warn(&format!(
-                                                "MCP server '{}' has empty command",
-                                                server.name
+                                            ui::check_warn(&i18n::t_args(
+                                                "doctor-check-mcp-empty-command-warn",
+                                                &[("name", &server.name)],
                                             ));
                                         }
                                         checks.push(serde_json::json!({"check": "mcp_server_config", "status": "warn", "name": server.name}));
@@ -679,9 +729,9 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
                                 | librefang_types::config::McpTransportEntry::Http { url } => {
                                     if url.is_empty() {
                                         if !json {
-                                            ui::check_warn(&format!(
-                                                "MCP server '{}' has empty URL",
-                                                server.name
+                                            ui::check_warn(&i18n::t_args(
+                                                "doctor-check-mcp-empty-url-warn",
+                                                &[("name", &server.name)],
                                             ));
                                         }
                                         checks.push(serde_json::json!({"check": "mcp_server_config", "status": "warn", "name": server.name}));
@@ -694,27 +744,27 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
                                 } => {
                                     if base_url.is_empty() {
                                         if !json {
-                                            ui::check_warn(&format!(
-                                                "MCP server '{}' has empty base_url",
-                                                server.name
+                                            ui::check_warn(&i18n::t_args(
+                                                "doctor-check-mcp-empty-base-url-warn",
+                                                &[("name", &server.name)],
                                             ));
                                         }
                                         checks.push(serde_json::json!({"check": "mcp_server_config", "status": "warn", "name": server.name}));
                                     }
                                     if tools.is_empty() {
                                         if !json {
-                                            ui::check_warn(&format!(
-                                                "MCP server '{}' has no http_compat tools configured",
-                                                server.name
+                                            ui::check_warn(&i18n::t_args(
+                                                "doctor-check-mcp-no-compat-tools-warn",
+                                                &[("name", &server.name)],
                                             ));
                                         }
                                         checks.push(serde_json::json!({"check": "mcp_server_config", "status": "warn", "name": server.name}));
                                     }
                                     if headers.iter().any(|h| h.name.trim().is_empty()) {
                                         if !json {
-                                            ui::check_warn(&format!(
-                                                "MCP server '{}' has an http_compat header with empty name",
-                                                server.name
+                                            ui::check_warn(&i18n::t_args(
+                                                "doctor-check-mcp-compat-header-empty-name-warn",
+                                                &[("name", &server.name)],
                                             ));
                                         }
                                         checks.push(serde_json::json!({"check": "mcp_server_config", "status": "warn", "name": server.name}));
@@ -726,27 +776,27 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
                                                 .is_none_or(|value| value.trim().is_empty())
                                     }) {
                                         if !json {
-                                            ui::check_warn(&format!(
-                                                "MCP server '{}' has an http_compat header without value/value_env",
-                                                server.name
+                                            ui::check_warn(&i18n::t_args(
+                                                "doctor-check-mcp-compat-header-no-value-warn",
+                                                &[("name", &server.name)],
                                             ));
                                         }
                                         checks.push(serde_json::json!({"check": "mcp_server_config", "status": "warn", "name": server.name}));
                                     }
                                     if tools.iter().any(|tool| tool.name.trim().is_empty()) {
                                         if !json {
-                                            ui::check_warn(&format!(
-                                                "MCP server '{}' has an http_compat tool with empty name",
-                                                server.name
+                                            ui::check_warn(&i18n::t_args(
+                                                "doctor-check-mcp-compat-tool-empty-name-warn",
+                                                &[("name", &server.name)],
                                             ));
                                         }
                                         checks.push(serde_json::json!({"check": "mcp_server_config", "status": "warn", "name": server.name}));
                                     }
                                     if tools.iter().any(|tool| tool.path.trim().is_empty()) {
                                         if !json {
-                                            ui::check_warn(&format!(
-                                                "MCP server '{}' has an http_compat tool with empty path",
-                                                server.name
+                                            ui::check_warn(&i18n::t_args(
+                                                "doctor-check-mcp-compat-tool-empty-path-warn",
+                                                &[("name", &server.name)],
                                             ));
                                         }
                                         checks.push(serde_json::json!({"check": "mcp_server_config", "status": "warn", "name": server.name}));
@@ -759,7 +809,10 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
                 }
                 Err(e) => {
                     if !json {
-                        ui::check_fail(&format!("Config fails KernelConfig deserialization: {e}"));
+                        ui::check_fail(&i18n::t_args(
+                            "doctor-check-config-deser-fail",
+                            &[("error", &e.to_string())],
+                        ));
                     }
                     checks.push(serde_json::json!({"check": "config_deser", "status": "fail", "error": e.to_string()}));
                     all_ok = false;
@@ -771,20 +824,26 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
     // --- Check 13: Skill registry health ---
     {
         if !json {
-            println!("\n  Skills:");
+            println!("{}", i18n::t("doctor-section-skills"));
         }
         let skills_dir = cli_librefang_home().join("skills");
         let mut skill_reg = librefang_skills::registry::SkillRegistry::new(skills_dir.clone());
         match skill_reg.load_all() {
             Ok(count) => {
                 if !json {
-                    ui::check_ok(&format!("Skills loaded: {count}"));
+                    ui::check_ok(&i18n::t_args(
+                        "doctor-check-skills-loaded",
+                        &[("count", &count.to_string())],
+                    ));
                 }
                 checks.push(serde_json::json!({"check": "skills", "status": "ok", "count": count}));
             }
             Err(e) => {
                 if !json {
-                    ui::check_warn(&format!("Failed to load skills: {e}"));
+                    ui::check_warn(&i18n::t_args(
+                        "doctor-check-skills-load-fail-warn",
+                        &[("error", &e.to_string())],
+                    ));
                 }
                 checks.push(serde_json::json!({"check": "skills", "status": "warn", "error": e.to_string()}));
             }
@@ -806,9 +865,9 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
                 if has_critical {
                     injection_warnings += 1;
                     if !json {
-                        ui::check_warn(&format!(
-                            "Prompt injection warning in skill: {}",
-                            skill.manifest.skill.name
+                        ui::check_warn(&i18n::t_args(
+                            "doctor-check-skills-injection-warn",
+                            &[("name", &skill.manifest.skill.name)],
                         ));
                     }
                 }
@@ -818,7 +877,7 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
             checks.push(serde_json::json!({"check": "skill_injection_scan", "status": "warn", "warnings": injection_warnings}));
         } else {
             if !json {
-                ui::check_ok("All skills pass prompt injection scan");
+                ui::check_ok(&i18n::t("doctor-check-skills-injection-ok"));
             }
             checks.push(serde_json::json!({"check": "skill_injection_scan", "status": "ok"}));
         }
@@ -827,7 +886,7 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
     // --- Check 14: MCP catalog + configured servers ---
     {
         if !json {
-            println!("\n  MCP servers:");
+            println!("\n{}", i18n::t("doctor-section-mcp-servers"));
         }
         let librefang_dir = cli_librefang_home();
         let mut catalog = librefang_extensions::catalog::McpCatalog::new(&librefang_dir);
@@ -851,8 +910,14 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
             }
         };
         if !json {
-            ui::check_ok(&format!("MCP catalog templates: {template_count}"));
-            ui::check_ok(&format!("Configured MCP servers: {configured_count}"));
+            ui::check_ok(&i18n::t_args(
+                "doctor-check-mcp-catalog-templates",
+                &[("templates", &template_count.to_string())],
+            ));
+            ui::check_ok(&i18n::t_args(
+                "doctor-check-mcp-configured-servers",
+                &[("configured", &configured_count.to_string())],
+            ));
         }
         checks.push(
             serde_json::json!({"check": "mcp_catalog", "status": "ok", "count": template_count}),
@@ -863,7 +928,7 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
     // --- Check 15: Daemon health detail (if running) ---
     if let Some(ref base) = find_daemon() {
         if !json {
-            println!("\n  Daemon Health:");
+            println!("\n{}", i18n::t("doctor-section-daemon-health"));
         }
         let client = daemon_client();
         match client.get(format!("{base}/api/health/detail")).send() {
@@ -871,7 +936,10 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
                     if let Some(agents) = body.get("agent_count").and_then(|v| v.as_u64()) {
                         if !json {
-                            ui::check_ok(&format!("Running agents: {agents}"));
+                            ui::check_ok(&i18n::t_args(
+                                "doctor-check-running-agents",
+                                &[("count", &agents.to_string())],
+                            ));
                         }
                         checks.push(serde_json::json!({"check": "daemon_agents", "status": "ok", "count": agents}));
                     }
@@ -879,18 +947,24 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
                         let hours = uptime / 3600;
                         let mins = (uptime % 3600) / 60;
                         if !json {
-                            ui::check_ok(&format!("Daemon uptime: {hours}h {mins}m"));
+                            ui::check_ok(&i18n::t_args(
+                                "doctor-check-daemon-uptime",
+                                &[("hours", &hours.to_string()), ("mins", &mins.to_string())],
+                            ));
                         }
                         checks.push(serde_json::json!({"check": "daemon_uptime", "status": "ok", "secs": uptime}));
                     }
                     if let Some(db_status) = body.get("database").and_then(|v| v.as_str()) {
                         if db_status == "connected" || db_status == "ok" {
                             if !json {
-                                ui::check_ok("Database connectivity: OK");
+                                ui::check_ok(&i18n::t("doctor-check-db-connectivity-ok"));
                             }
                         } else {
                             if !json {
-                                ui::check_fail(&format!("Database status: {db_status}"));
+                                ui::check_fail(&i18n::t_args(
+                                    "doctor-check-db-status-fail",
+                                    &[("status", db_status)],
+                                ));
                             }
                             all_ok = false;
                         }
@@ -900,13 +974,19 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
             }
             Ok(resp) => {
                 if !json {
-                    ui::check_warn(&format!("Health detail returned {}", resp.status()));
+                    ui::check_warn(&i18n::t_args(
+                        "doctor-check-health-detail-status-warn",
+                        &[("status", &resp.status().to_string())],
+                    ));
                 }
                 checks.push(serde_json::json!({"check": "daemon_health", "status": "warn"}));
             }
             Err(e) => {
                 if !json {
-                    ui::check_warn(&format!("Failed to query daemon health: {e}"));
+                    ui::check_warn(&i18n::t_args(
+                        "doctor-check-health-detail-fail-warn",
+                        &[("error", &e.to_string())],
+                    ));
                 }
                 checks.push(serde_json::json!({"check": "daemon_health", "status": "warn", "error": e.to_string()}));
             }
@@ -922,7 +1002,10 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
                         .or_else(|| body.as_array())
                     {
                         if !json {
-                            ui::check_ok(&format!("Skills loaded in daemon: {}", arr.len()));
+                            ui::check_ok(&i18n::t_args(
+                                "doctor-check-skills-loaded-daemon",
+                                &[("count", &arr.len().to_string())],
+                            ));
                         }
                         checks.push(serde_json::json!({"check": "daemon_skills", "status": "ok", "count": arr.len()}));
                     }
@@ -949,10 +1032,12 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
                             })
                             .count();
                         if !json {
-                            ui::check_ok(&format!(
-                                "MCP servers: {} configured, {} connected",
-                                arr.len(),
-                                connected
+                            ui::check_ok(&i18n::t_args(
+                                "doctor-check-daemon-mcp-status",
+                                &[
+                                    ("configured", &arr.len().to_string()),
+                                    ("connected", &connected.to_string()),
+                                ],
                             ));
                         }
                         checks.push(serde_json::json!({"check": "daemon_mcp", "status": "ok", "configured": arr.len(), "connected": connected}));
@@ -980,13 +1065,21 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
                         let total = arr.len();
                         if healthy == total {
                             if !json {
-                                ui::check_ok(&format!(
-                                    "MCP server health: {healthy}/{total} healthy"
+                                ui::check_ok(&i18n::t_args(
+                                    "doctor-check-daemon-mcp-health",
+                                    &[
+                                        ("healthy", &healthy.to_string()),
+                                        ("total", &total.to_string()),
+                                    ],
                                 ));
                             }
                         } else if !json {
-                            ui::check_warn(&format!(
-                                "MCP server health: {healthy}/{total} healthy"
+                            ui::check_warn(&i18n::t_args(
+                                "doctor-check-daemon-mcp-health",
+                                &[
+                                    ("healthy", &healthy.to_string()),
+                                    ("total", &total.to_string()),
+                                ],
                             ));
                         }
                         checks.push(serde_json::json!({"check": "mcp_health", "status": if healthy == total { "ok" } else { "warn" }, "healthy": healthy, "total": total}));
@@ -1007,13 +1100,16 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
         Ok(output) => {
             let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !json {
-                ui::check_ok(&format!("Rust: {version}"));
+                ui::check_ok(&i18n::t_args(
+                    "doctor-check-rust-version",
+                    &[("version", &version)],
+                ));
             }
             checks.push(serde_json::json!({"check": "rust", "status": "ok", "version": version}));
         }
         Err(_) => {
             if !json {
-                ui::check_fail("Rust toolchain not found");
+                ui::check_fail(&i18n::t("doctor-check-rust-not-found-fail"));
             }
             checks.push(serde_json::json!({"check": "rust", "status": "fail"}));
             all_ok = false;
@@ -1028,7 +1124,10 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !json {
-                ui::check_ok(&format!("Python: {version}"));
+                ui::check_ok(&i18n::t_args(
+                    "doctor-check-python-version",
+                    &[("version", &version)],
+                ));
             }
             checks.push(serde_json::json!({"check": "python", "status": "ok", "version": version}));
         }
@@ -1041,7 +1140,10 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
                 Ok(output) if output.status.success() => {
                     let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
                     if !json {
-                        ui::check_ok(&format!("Python: {version}"));
+                        ui::check_ok(&i18n::t_args(
+                            "doctor-check-python-version",
+                            &[("version", &version)],
+                        ));
                     }
                     checks.push(
                         serde_json::json!({"check": "python", "status": "ok", "version": version}),
@@ -1049,7 +1151,7 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
                 }
                 _ => {
                     if !json {
-                        ui::check_warn("Python not found (needed for Python skill runtime)");
+                        ui::check_warn(&i18n::t("doctor-check-python-not-found-warn"));
                     }
                     checks.push(serde_json::json!({"check": "python", "status": "warn"}));
                 }
@@ -1062,13 +1164,16 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !json {
-                ui::check_ok(&format!("Node.js: {version}"));
+                ui::check_ok(&i18n::t_args(
+                    "doctor-check-node-version",
+                    &[("version", &version)],
+                ));
             }
             checks.push(serde_json::json!({"check": "node", "status": "ok", "version": version}));
         }
         _ => {
             if !json {
-                ui::check_warn("Node.js not found (needed for Node skill runtime)");
+                ui::check_warn(&i18n::t("doctor-check-node-not-found-warn"));
             }
             checks.push(serde_json::json!({"check": "node", "status": "warn"}));
         }

@@ -5,6 +5,50 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.6.17] - 2026-06-17
+
+_22 PRs from 3 contributors since v2026.6.16-beta.19._
+
+### Added
+
+- Per-conversation agent routing for multi-agent groups (#5323) (#6127) (@houko)
+- Passkey (WebAuthn/FIDO2) dashboard login (#5981) (#6129) (@houko)
+- Deterministic inbound dispatch — channel-instance binding lookup (#5671 Model A) (#6131) (@houko)
+- GitHub/Codeberg registry source selector (#6142) (@houko)
+- Gate auto-routing on AutoRouteStrategy, not the "assistant" name (#6139) (#6148) (@houko)
+- Propagate W3C traceparent on outbound MCP tool calls (#6128) (#6153) (@houko)
+- Report the model codex actually used (#6134) (#6157) (@houko)
+- Dock the agent panel as a resizable sidebar with a larger prompt editor (#6154 #6155) (#6164) (@houko)
+- The cron-management tool disables jobs instead of deleting them (#6159) (#6165) (@houko)
+- Enlarge TOML view, edit agent system prompt and tools with reset-to-default (#6150 #6151 #6152) (#6166) (@houko)
+- Central prompt repository page with versions and agent binding (#6160) (#6167) (@houko)
+
+### Fixed
+
+- Enforce cross-chat dispatch guard through the /mcp bridge (#6117) (#6125) (@houko)
+- Take over a stale conversation-ownership claim from a channel-ineligible holder (#5323) (#6132) (@houko)
+- Respect `LIBREFANG_HOME` when resolving plugin directory (#6136) (@HuaGu-Dragon)
+- Close channel media RBAC bypass and audit findings (#6141) (@houko)
+- Keep Save actionable after a passing Test (#6144) (#6146) (@houko)
+- Refetch hand settings after save so inputs persist (#6145) (#6147) (@houko)
+- Show the correct Hand agent name in the sessions view (#6156) (#6162) (@houko)
+- Build vendored OpenSSL on Windows so webauthn-rs links (#6161) (#6163) (@houko)
+- Pin vendored OpenSSL to Strawberry Perl on the Windows test lane (#6171) (@houko)
+
+### Changed
+
+- Lift tool dispatch table to typed ToolError (#3576 slice 5) (#6124) (@houko)
+
+<details>
+<summary>Documentation, maintenance, and other internal changes</summary>
+
+### Maintenance
+
+- Bump the actions-minor-patch group with 2 updates (#6140) (@app/dependabot)
+
+</details>
+
+
 ## [2026.6.16] - 2026-06-16
 
 _18 PRs from 3 contributors since v2026.6.11-beta.18._
@@ -887,6 +931,23 @@ In-crate only; no cross-crate error-shape changes.
   `install.sh` / `install.ps1` install the bundled binary when present and stay silent on older tarballs that lack it.
 
 ### Fixed
+
+- **ci: the Windows test lane is green again — `librefang-api` now builds vendored OpenSSL on Windows so `webauthn-rs` links** (#6161) (@houko).
+  The passkey/WebAuthn work (#5981) added `webauthn-rs`, which pulls in `webauthn-rs-core` → native `openssl-sys`; the Windows MSVC runners have no discoverable system OpenSSL, so `cargo test --no-run --workspace` failed there with "Could not find directory of OpenSSL installation".
+  A Windows-gated `openssl = { features = ["vendored"] }` dependency in `crates/librefang-api/Cargo.toml` makes cargo feature-unification build `openssl-sys` from source on Windows only; Unix keeps using the system library and is unaffected.
+  No NASM setup step is needed — the vendored builder auto-detects `nasm` and falls back to a no-asm build when it is absent, and both Windows runner images already ship the Perl the build requires.
+  Closes #6161.
+
+- **ci: point the vendored-OpenSSL build at Strawberry Perl on the Windows test lane** (#6171) (@houko).
+  Follow-up to the entry above: #6163's CI never exercised this because the Windows test lane is main-push-only, and it broke `main` on merge.
+  The `Test / Windows` job runs `cargo nextest` under `shell: bash`, so Git Bash's MSYS Perl (`/usr/share/perl5/core_perl`) shadows the Strawberry Perl the previous entry was counting on, and it cannot configure OpenSSL's `VC-WIN64A` build — its `IPC::Cmd` / `Params::Check` modules fail to compile, aborting `./Configure`.
+  `openssl-src` shells out to whichever `perl` is first on `PATH`; the `OPENSSL_SRC_PERL` env var (its documented override, ahead of `PERL` and the bare `perl` fallback) now pins the job at the runner's Windows-native `C:/Strawberry/perl/bin/perl.exe`.
+  The release Windows jobs are unaffected — their `cargo build` step runs under the default `pwsh`, where the system `PATH` resolves `perl` to Strawberry directly.
+
+- **ci: raise the Windows test-lane timeout to 90min so the heavier vendored-OpenSSL cold build fits** (#6161) (@houko).
+  Follow-up to #6171: with the Perl fix in place both Windows shards' tests passed, but the first cold run after #6163 had no warm cache, so the from-source OpenSSL build pushed one shard to the 60min ceiling — it passed its tests and was then cancelled mid cache-save, leaving `main` red on a non-test failure.
+  The vendored build recurs cold on every `Cargo.lock` change that busts the `test-windows` cache, so the ceiling is raised from 60min to 90min (macOS keeps 60min — its system-OpenSSL build is lighter).
+  The cap never inflates a green run: the job ends when nextest and the cache save finish, not at the ceiling, so a warm shard still lands in ~15min.
 
 - **channels: a conversation-ownership claim held by an agent that can no longer serve the channel is now taken over instead of silently dropping follow-ups** (#5323) (@houko).
   Follow-up to #6127: if agent A claimed a thread and A's `manifest.channels` allowlist was then narrowed to exclude that channel, the still-live claim suppressed every non-addressed follow-up (routed to an eligible agent B) until the TTL expired — a silent message drop.

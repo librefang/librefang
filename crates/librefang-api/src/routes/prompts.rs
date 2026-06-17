@@ -6,14 +6,42 @@ use axum::{
     Json, Router,
 };
 use librefang_types::agent::{PromptExperiment, PromptVersion};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use super::AppState;
 use std::sync::Arc;
 
 use crate::types::ApiErrorResponse;
+
+/// One row of the cross-agent prompt repository overview.
+///
+/// Aggregates the per-agent prompt-version store into a single fleet-wide
+/// summary so the dashboard repository page can list every agent's prompt
+/// at a glance. `active_*` mirror the version currently flagged
+/// `is_active` in the store (the agent's recorded "active" prompt
+/// snapshot); `live_system_prompt` is the prompt that actually rides LLM
+/// calls (`manifest.model.system_prompt`) — the two can differ until a
+/// version is bound back onto the manifest.
+#[derive(Debug, Serialize)]
+struct PromptOverviewItem {
+    agent_id: String,
+    agent_name: String,
+    version_count: usize,
+    active_version: Option<u32>,
+    active_version_id: Option<String>,
+    /// The prompt text currently used in live LLM calls for this agent.
+    live_system_prompt: String,
+    /// Creation timestamp (RFC 3339) of the most recent version, if any.
+    latest_version_at: Option<String>,
+}
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
+        // Cross-agent repository overview: one summary row per non-hand
+        // agent (version count + active version), so the dashboard prompt
+        // repository page can render the whole fleet without N round-trips
+        // to the per-agent `/agents/{id}/prompts/versions` endpoint.
+        .route("/prompts/overview", get(list_prompts_overview))
         .route(
             "/agents/{agent_id}/prompts/versions",
             get(list_prompt_versions),
@@ -47,6 +75,55 @@ pub fn router() -> Router<Arc<AppState>> {
             "/prompts/experiments/{id}/metrics",
             get(get_experiment_metrics),
         )
+}
+
+/// `GET /api/prompts/overview` — fleet-wide prompt repository summary.
+///
+/// Walks every non-hand agent in the registry and folds its prompt-version
+/// store into one summary row. Hand agents are excluded for the same
+/// reason `list_agents` excludes them by default — they are managed
+/// through their HAND.toml, not as standalone prompt-owning agents.
+///
+/// This is a read-only aggregation over existing kernel methods
+/// (`agent_registry().list_arcs()` + `list_prompt_versions`); it adds no
+/// new storage and no new kernel trait method. A store error for any
+/// single agent degrades that agent's row to a zero-version summary
+/// rather than failing the whole response.
+async fn list_prompts_overview(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let agents = state.kernel.agent_registry().list_arcs();
+    let mut items: Vec<PromptOverviewItem> = Vec::with_capacity(agents.len());
+    for entry in agents.iter().filter(|e| !e.is_hand) {
+        // Store errors are non-fatal: surface the agent with zero versions
+        // rather than 500-ing the whole repository view on one bad row.
+        let versions = state
+            .kernel
+            .list_prompt_versions(entry.id)
+            .unwrap_or_default();
+        let active = versions.iter().find(|v| v.is_active);
+        // `list_versions` orders by `version DESC`, so the first row is the
+        // most recent; fall back to a max scan in case the ordering changes.
+        let latest_at = versions
+            .iter()
+            .max_by_key(|v| v.version)
+            .map(|v| v.created_at.to_rfc3339());
+        items.push(PromptOverviewItem {
+            agent_id: entry.id.to_string(),
+            agent_name: entry.name.clone(),
+            version_count: versions.len(),
+            active_version: active.map(|v| v.version),
+            active_version_id: active.map(|v| v.id.to_string()),
+            live_system_prompt: entry.manifest.model.system_prompt.clone(),
+            latest_version_at: latest_at,
+        });
+    }
+    let total = items.len();
+    Json(crate::types::PaginatedResponse {
+        items,
+        total,
+        offset: 0,
+        limit: None,
+    })
+    .into_response()
 }
 
 async fn list_prompt_versions(

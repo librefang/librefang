@@ -67,7 +67,7 @@ pub(crate) fn cmd_migrate(args: MigrateArgs) {
 
     let source_dir = args.source_dir.unwrap_or_else(|| {
         let home = dirs::home_dir().unwrap_or_else(|| {
-            eprintln!("Error: Could not determine home directory");
+            eprintln!("{}", i18n::t("migrate-error-home-dir"));
             std::process::exit(1);
         });
         match source {
@@ -80,9 +80,18 @@ pub(crate) fn cmd_migrate(args: MigrateArgs) {
 
     let target_dir = cli_librefang_home();
 
-    println!("Migrating from {} ({})...", source, source_dir.display());
+    println!(
+        "{}",
+        i18n::t_args(
+            "migrate-start-msg",
+            &[
+                ("source", &source.to_string()),
+                ("path", &source_dir.display().to_string())
+            ]
+        )
+    );
     if args.dry_run {
-        println!("  (dry run — no changes will be made)\n");
+        println!("{}\n", i18n::t("migrate-dry-run-hint"));
     }
 
     let options = librefang_import::MigrateOptions {
@@ -92,24 +101,39 @@ pub(crate) fn cmd_migrate(args: MigrateArgs) {
         dry_run: args.dry_run,
     };
 
-    let mut sp = progress::auto("Running migration", None);
+    let mut sp = progress::auto(&i18n::t("migrate-progress-label"), None);
     match librefang_import::run_migration(&options) {
         Ok(report) => {
-            sp.finish("Migration complete");
+            sp.finish(&i18n::t("migrate-complete-msg"));
             report.print_summary();
 
             // Save migration report
             if !args.dry_run {
                 let report_path = options.target_dir.join("migration_report.md");
                 if let Err(e) = std::fs::write(&report_path, report.to_markdown()) {
-                    eprintln!("Warning: Could not save migration report: {e}");
+                    eprintln!(
+                        "{}",
+                        i18n::t_args(
+                            "migrate-warn-report-save-failed",
+                            &[("error", &e.to_string())]
+                        )
+                    );
                 } else {
-                    println!("\n  Report saved to: {}", report_path.display());
+                    println!(
+                        "{}",
+                        i18n::t_args(
+                            "migrate-report-saved",
+                            &[("path", &report_path.display().to_string())]
+                        )
+                    );
                 }
             }
         }
         Err(e) => {
-            sp.finish_with_failure(&format!("Migration failed: {e}"));
+            sp.finish_with_failure(&i18n::t_args(
+                "migrate-failed-msg",
+                &[("error", &e.to_string())],
+            ));
             std::process::exit(1);
         }
     }

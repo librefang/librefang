@@ -293,6 +293,9 @@ pub async fn get_hand(
                             "provider": if a.manifest.model.provider == "default" { &dm.provider } else { &a.manifest.model.provider },
                             "model": if a.manifest.model.model == "default" { &dm.model } else { &a.manifest.model.model },
                             "steps": steps,
+                            // manifest values; per-agent edit endpoints target AgentRegistry/agent.toml, not HAND.toml, so these remain an honest restore-default target.
+                            "system_prompt": a.manifest.model.system_prompt,
+                            "capabilities_tools": a.manifest.capabilities.tools,
                         })
                     }).collect::<Vec<_>>(),
                     "dashboard": def.dashboard.metrics.iter().map(|m| serde_json::json!({
