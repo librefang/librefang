@@ -29,7 +29,11 @@ export function SessionsPage() {
   const addToast = useUIStore((s) => s.addToast);
 
   const sessionsQuery = useSessions();
-  const agentsQuery = useAgents();
+  // Include hand-spawned agents so a session owned by a Hand agent resolves to
+  // its real name instead of falling back to "unknown agent" (#6156). The
+  // bare `/api/agents` list excludes hand agents by default, but session rows
+  // carry the hand agent's `agent_id`, so the name lookup must see them too.
+  const agentsQuery = useAgents({ includeHands: true });
 
   const deleteMutation = useDeleteAgentSession();
   const navigate = useNavigate();
