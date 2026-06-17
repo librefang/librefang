@@ -16,6 +16,11 @@ use std::time::{Duration, Instant};
 pub struct DiscoveredModelInfo {
     /// Model name/ID (e.g., "llama3.2:latest").
     pub name: String,
+    /// Human-readable display name.
+    /// When set, `merge_discovered_models` uses it instead of the auto-generated
+    /// `"{name} ({provider})"` string.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     /// Parameter count string from Ollama (e.g., "8.0B").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parameter_size: Option<String>,
@@ -303,6 +308,46 @@ pub async fn probe_provider(provider: &str, base_url: &str, api_key: Option<&str
     let lower = provider.to_lowercase();
     let is_loopback = is_loopback_base_url(base_url);
 
+    // Codex CLI provider: discover models by running `codex debug models` as a
+    // subprocess instead of making an HTTP request.
+    // `base_url` is empty for codex-cli; the binary is resolved from PATH.
+    if lower == "codex-cli" {
+        let cli_path = if base_url.is_empty() { "codex" } else { base_url };
+        let pairs =
+            librefang_llm_drivers::drivers::codex_cli::fetch_codex_cli_models(cli_path).await;
+        if pairs.is_empty() {
+            return ProbeResult {
+                latency_ms: start.elapsed().as_millis() as u64,
+                error: Some(
+                    "`codex debug models` returned no models — CLI may be unauthenticated or unavailable".to_string(),
+                ),
+                ..Default::default()
+            };
+        }
+        let discovered_models: Vec<String> = pairs.iter().map(|(id, _)| id.clone()).collect();
+        let discovered_model_info: Vec<DiscoveredModelInfo> = pairs
+            .into_iter()
+            .map(|(id, display)| DiscoveredModelInfo {
+                name: id,
+                display_name: Some(display),
+                parameter_size: None,
+                quantization_level: None,
+                family: None,
+                families: None,
+                size: None,
+                capabilities: vec!["completion".to_string(), "tools".to_string()],
+            })
+            .collect();
+        return ProbeResult {
+            reachable: true,
+            latency_ms: start.elapsed().as_millis() as u64,
+            discovered_models,
+            discovered_model_info,
+            error: None,
+            ..Default::default()
+        };
+    }
+
     // For the "ollama" provider slot we try the native /api/tags first, then
     // fall back to the OpenAI-compatible /v1/models. Lemonade Server, LM Studio
     // run with OpenAI-only mode, llama.cpp's server, and any other "looks like
@@ -567,6 +612,7 @@ fn parse_ollama_tags(body: &serde_json::Value) -> EndpointOutcome {
 
             Some(DiscoveredModelInfo {
                 name,
+                display_name: None,
                 parameter_size: details
                     .and_then(|d| d.get("parameter_size"))
                     .and_then(|v| v.as_str())
@@ -835,6 +881,7 @@ mod tests {
     fn test_discovered_model_info_serialization() {
         let info = DiscoveredModelInfo {
             name: "llama3.2:latest".to_string(),
+            display_name: None,
             parameter_size: Some("3.2B".to_string()),
             quantization_level: Some("Q4_K_M".to_string()),
             family: Some("llama".to_string()),
@@ -854,6 +901,7 @@ mod tests {
     fn test_discovered_model_info_skips_none_fields() {
         let info = DiscoveredModelInfo {
             name: "gpt-4".to_string(),
+            display_name: None,
             parameter_size: None,
             quantization_level: None,
             family: None,

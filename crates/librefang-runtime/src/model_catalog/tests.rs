@@ -13,6 +13,7 @@ fn names_to_info(names: &[&str]) -> Vec<DiscoveredModelInfo> {
         .iter()
         .map(|n| DiscoveredModelInfo {
             name: n.to_string(),
+            display_name: None,
             parameter_size: None,
             quantization_level: None,
             family: None,
@@ -651,6 +652,7 @@ fn test_merge_infers_capabilities_from_ollama_metadata() {
         // Vision model: families includes "clip"
         DiscoveredModelInfo {
             name: "llava:latest".to_string(),
+            display_name: None,
             families: Some(vec!["llama".to_string(), "clip".to_string()]),
             family: Some("llama".to_string()),
             parameter_size: None,
@@ -661,6 +663,7 @@ fn test_merge_infers_capabilities_from_ollama_metadata() {
         // Embedding model: name contains "embed"
         DiscoveredModelInfo {
             name: "nomic-embed-text:latest".to_string(),
+            display_name: None,
             families: None,
             family: None,
             parameter_size: None,
@@ -671,6 +674,7 @@ fn test_merge_infers_capabilities_from_ollama_metadata() {
         // Thinking model: name contains "deepseek-r1"
         DiscoveredModelInfo {
             name: "deepseek-r1:8b".to_string(),
+            display_name: None,
             families: None,
             family: None,
             parameter_size: None,
@@ -681,6 +685,7 @@ fn test_merge_infers_capabilities_from_ollama_metadata() {
         // Plain chat model
         DiscoveredModelInfo {
             name: "llama3.2:latest".to_string(),
+            display_name: None,
             families: Some(vec!["llama".to_string()]),
             family: Some("llama".to_string()),
             parameter_size: None,
@@ -722,6 +727,7 @@ fn test_merge_honours_explicit_thinking_and_vision_capabilities() {
     let mut catalog = test_catalog();
     let models = vec![DiscoveredModelInfo {
         name: "Gemma-4-26B-A4B-it-GGUF:latest".to_string(),
+        display_name: None,
         families: Some(vec!["gemma".to_string()]),
         family: Some("gemma".to_string()),
         parameter_size: None,
@@ -760,6 +766,7 @@ fn test_merge_upgrades_existing_local_entry_capabilities() {
         "ollama",
         &[DiscoveredModelInfo {
             name: "Gemma-4-26B-A4B-it-GGUF:latest".to_string(),
+            display_name: None,
             families: None,
             family: None,
             parameter_size: None,
@@ -779,6 +786,7 @@ fn test_merge_upgrades_existing_local_entry_capabilities() {
         "ollama",
         &[DiscoveredModelInfo {
             name: "Gemma-4-26B-A4B-it-GGUF:latest".to_string(),
+            display_name: None,
             families: None,
             family: None,
             parameter_size: None,
@@ -813,6 +821,7 @@ fn test_merge_never_downgrades_capabilities() {
         "ollama",
         &[DiscoveredModelInfo {
             name: "vlm-model:latest".to_string(),
+            display_name: None,
             families: None,
             family: None,
             parameter_size: None,
@@ -827,6 +836,7 @@ fn test_merge_never_downgrades_capabilities() {
         "ollama",
         &[DiscoveredModelInfo {
             name: "vlm-model:latest".to_string(),
+            display_name: None,
             families: None,
             family: None,
             parameter_size: None,

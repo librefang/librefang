@@ -286,6 +286,96 @@ pub fn codex_cli_available() -> bool {
     CodexCliDriver::detect().is_some() || codex_cli_credentials_exist()
 }
 
+/// Lightweight model entry parsed from `codex debug models` JSON output.
+#[derive(Debug, serde::Deserialize)]
+struct CodexModelEntry {
+    slug: String,
+    #[serde(default)]
+    display_name: String,
+    #[serde(default)]
+    visibility: String,
+}
+
+/// Container for the `codex debug models` JSON response.
+#[derive(Debug, serde::Deserialize)]
+struct CodexModelsResponse {
+    #[serde(default)]
+    models: Vec<CodexModelEntry>,
+}
+
+/// Parse the JSON output of `codex debug models`.
+///
+/// Returns `(prefixed_id, display_name)` pairs for every model whose
+/// `visibility` field equals `"list"`.
+/// Model IDs are prefixed with `"codex-cli/"` so they match the existing
+/// catalog convention (e.g. `"codex-cli/o4-mini"`).
+pub fn parse_codex_models_json(json: &str) -> Vec<(String, String)> {
+    let response: CodexModelsResponse = match serde_json::from_str(json) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::debug!("Failed to parse codex models JSON: {e}");
+            return Vec::new();
+        }
+    };
+    response
+        .models
+        .into_iter()
+        .filter(|m| m.visibility == "list")
+        .filter(|m| !m.slug.is_empty())
+        .map(|m| {
+            let id = format!("codex-cli/{}", m.slug);
+            let display = if m.display_name.is_empty() {
+                m.slug.clone()
+            } else {
+                m.display_name.clone()
+            };
+            (id, display)
+        })
+        .collect()
+}
+
+/// Fetch the list of available models from the Codex CLI.
+///
+/// Runs `<cli_path> debug models` with a 10-second timeout and returns
+/// `(model_id, display_name)` pairs.
+/// Model IDs are prefixed with `"codex-cli/"` (e.g. `"codex-cli/deepseek-v4-flash"`).
+/// Returns an empty vec on any error (binary not found, timeout, JSON parse failure, etc.).
+pub async fn fetch_codex_cli_models(cli_path: &str) -> Vec<(String, String)> {
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::process::Command::new(cli_path)
+            .args(["debug", "models"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output(),
+    )
+    .await;
+
+    match result {
+        Ok(Ok(output)) if output.status.success() => {
+            let json = String::from_utf8_lossy(&output.stdout);
+            let models = parse_codex_models_json(&json);
+            tracing::debug!(count = models.len(), "Fetched codex-cli models via `codex debug models`");
+            models
+        }
+        Ok(Ok(output)) => {
+            tracing::debug!(
+                code = ?output.status.code(),
+                "`codex debug models` exited with non-zero status"
+            );
+            Vec::new()
+        }
+        Ok(Err(e)) => {
+            tracing::debug!("Failed to spawn `codex debug models`: {e}");
+            Vec::new()
+        }
+        Err(_) => {
+            tracing::debug!("`codex debug models` timed out after 10s");
+            Vec::new()
+        }
+    }
+}
+
 /// Check if Codex CLI credentials exist.
 fn codex_cli_credentials_exist() -> bool {
     if let Some(home) = home_dir() {
@@ -485,5 +575,74 @@ mod tests {
         assert!(!envs.contains_key("LIBREFANG_AGENT_ID"));
         assert!(!envs.contains_key("LIBREFANG_SESSION_ID"));
         assert!(!envs.contains_key("LIBREFANG_STEP_ID"));
+    }
+
+    #[test]
+    fn test_parse_codex_models_json_typical() {
+        let json = r#"{
+            "models": [
+                {"slug": "deepseek-v4-flash", "display_name": "DeepSeek V4 Flash", "visibility": "list"},
+                {"slug": "o4-mini", "display_name": "o4-mini", "visibility": "list"},
+                {"slug": "hidden-model", "display_name": "Hidden", "visibility": "none"}
+            ]
+        }"#;
+        let models = parse_codex_models_json(json);
+        assert_eq!(models.len(), 2, "only 'list' visibility models should be included");
+        assert_eq!(models[0].0, "codex-cli/deepseek-v4-flash");
+        assert_eq!(models[0].1, "DeepSeek V4 Flash");
+        assert_eq!(models[1].0, "codex-cli/o4-mini");
+        assert_eq!(models[1].1, "o4-mini");
+    }
+
+    #[test]
+    fn test_parse_codex_models_json_empty_display_name_falls_back_to_slug() {
+        let json = r#"{"models": [{"slug": "gpt-5.5", "display_name": "", "visibility": "list"}]}"#;
+        let models = parse_codex_models_json(json);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].0, "codex-cli/gpt-5.5");
+        assert_eq!(models[0].1, "gpt-5.5");
+    }
+
+    #[test]
+    fn test_parse_codex_models_json_filters_hide_and_none_visibility() {
+        let json = r#"{
+            "models": [
+                {"slug": "a", "display_name": "A", "visibility": "list"},
+                {"slug": "b", "display_name": "B", "visibility": "hide"},
+                {"slug": "c", "display_name": "C", "visibility": "none"},
+                {"slug": "d", "display_name": "D", "visibility": ""}
+            ]
+        }"#;
+        let models = parse_codex_models_json(json);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].0, "codex-cli/a");
+    }
+
+    #[test]
+    fn test_parse_codex_models_json_empty_slug_skipped() {
+        let json = r#"{"models": [{"slug": "", "display_name": "Broken", "visibility": "list"}]}"#;
+        let models = parse_codex_models_json(json);
+        assert!(models.is_empty(), "entries with empty slug must be skipped");
+    }
+
+    #[test]
+    fn test_parse_codex_models_json_invalid_json() {
+        let models = parse_codex_models_json("not-json");
+        assert!(models.is_empty());
+    }
+
+    #[test]
+    fn test_parse_codex_models_json_empty_models_list() {
+        let json = r#"{"models": []}"#;
+        assert!(parse_codex_models_json(json).is_empty());
+    }
+
+    #[test]
+    fn test_parse_codex_models_json_missing_visibility_field_excluded() {
+        // If visibility is missing entirely it defaults to "" which != "list",
+        // so the model must be excluded.
+        let json = r#"{"models": [{"slug": "mystery", "display_name": "Mystery"}]}"#;
+        let models = parse_codex_models_json(json);
+        assert!(models.is_empty(), "models without explicit visibility='list' must be excluded");
     }
 }

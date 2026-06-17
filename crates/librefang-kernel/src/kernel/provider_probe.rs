@@ -56,6 +56,7 @@ pub async fn probe_and_update_local_provider(
                         .map(
                             |name| librefang_runtime::provider_health::DiscoveredModelInfo {
                                 name: name.clone(),
+                                display_name: None,
                                 parameter_size: None,
                                 quantization_level: None,
                                 family: None,
@@ -78,10 +79,15 @@ pub async fn probe_and_update_local_provider(
             // outside the gate so a Test click still refreshes the model list
             // the user might want to inspect before re-enabling.
             if !catalog.is_suppressed(provider_id) {
-                catalog.set_provider_auth_status(
-                    provider_id,
-                    librefang_types::model_catalog::AuthStatus::NotRequired,
-                );
+                // CLI providers authenticate through their own CLI login flow;
+                // their auth_status is set to Configured by detect_auth() and
+                // must not be overwritten with NotRequired by the probe loop.
+                if !librefang_llm_drivers::drivers::is_cli_provider(provider_id) {
+                    catalog.set_provider_auth_status(
+                        provider_id,
+                        librefang_types::model_catalog::AuthStatus::NotRequired,
+                    );
+                }
             }
             if let Some(ref info) = merged_info {
                 catalog.merge_discovered_models(provider_id, info);
@@ -111,8 +117,17 @@ pub async fn probe_and_update_local_provider(
         // user-triggered Test on a suppressed provider must not silently
         // promote `Missing` to `LocalOffline`, which would re-add the
         // provider to the dashboard's "configured but offline" bucket.
+        //
+        // CLI providers (codex-cli, claude-code, …): a failed probe means
+        // the CLI could not enumerate models (e.g. network unavailable for
+        // `codex debug models`) but the CLI itself is still installed and
+        // authenticated. Preserve their Configured status so the provider
+        // card stays visible — LocalOffline is only meaningful for HTTP
+        // servers that are expected to be always reachable.
         kernel.model_catalog_update(|catalog| {
-            if !catalog.is_suppressed(provider_id) {
+            if !catalog.is_suppressed(provider_id)
+                && !librefang_llm_drivers::drivers::is_cli_provider(provider_id)
+            {
                 catalog.set_provider_auth_status(
                     provider_id,
                     librefang_types::model_catalog::AuthStatus::LocalOffline,

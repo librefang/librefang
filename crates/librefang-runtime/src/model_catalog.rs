@@ -630,19 +630,34 @@ impl ModelCatalog {
         self.suppressed_providers.contains(id)
     }
 
-    /// Return `(id, base_url)` for every local HTTP provider that the
-    /// periodic probe loop should poll. Filters out providers the user has
-    /// explicitly suppressed — without this, the next probe tick would
-    /// overwrite the `Missing` status set by `delete_provider_key` with
-    /// `NotRequired`/`LocalOffline` and the provider would re-appear in
-    /// the configured grid (#4803).
+    /// Return `(id, base_url)` for every local provider that the
+    /// periodic probe loop should poll. Includes:
+    /// - HTTP-based local providers (ollama, vllm, lmstudio, lemonade) that have a non-empty `base_url`
+    /// - codex-cli when it is `Configured` (authenticated via the CLI)
+    ///
+    /// Filters out providers the user has explicitly suppressed — without this,
+    /// the next probe tick would overwrite the `Missing` status set by
+    /// `delete_provider_key` with `NotRequired`/`LocalOffline` and the provider
+    /// would re-appear in the configured grid (#4803).
     pub fn local_provider_probe_targets(&self) -> Vec<(String, String)> {
         self.providers
             .iter()
             .filter(|p| {
-                crate::provider_health::is_local_provider(&p.id)
-                    && !p.base_url.is_empty()
-                    && !self.suppressed_providers.contains(&p.id)
+                if self.suppressed_providers.contains(&p.id) {
+                    return false;
+                }
+                // HTTP-based local providers need a non-empty base_url to probe.
+                if crate::provider_health::is_local_provider(&p.id) {
+                    return !p.base_url.is_empty();
+                }
+                // codex-cli reports models via `codex debug models`; include it
+                // when the CLI is authenticated so the probe can discover the
+                // user's actual available models.
+                if p.id == "codex-cli" {
+                    return p.auth_status
+                        == librefang_types::model_catalog::AuthStatus::Configured;
+                }
+                false
             })
             .map(|p| (p.id.clone(), p.base_url.clone()))
             .collect()
@@ -986,7 +1001,12 @@ impl ModelCatalog {
                 }
                 continue;
             }
-            let display = format!("{} ({})", info.name, provider);
+            let display = info
+                .display_name
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("{} ({})", info.name, provider));
             self.models.push(ModelCatalogEntry {
                 id: info.name.clone(),
                 display_name: display,

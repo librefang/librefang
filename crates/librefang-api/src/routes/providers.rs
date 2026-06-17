@@ -474,6 +474,7 @@ fn attach_probe_result(
                     .map(
                         |name| librefang_kernel::provider_health::DiscoveredModelInfo {
                             name: name.clone(),
+                            display_name: None,
                             parameter_size: None,
                             quantization_level: None,
                             family: None,
@@ -1808,6 +1809,7 @@ pub async fn set_provider_url(
                     .iter()
                     .map(|n| librefang_kernel::provider_health::DiscoveredModelInfo {
                         name: n.clone(),
+                        display_name: None,
                         parameter_size: None,
                         quantization_level: None,
                         family: None,
