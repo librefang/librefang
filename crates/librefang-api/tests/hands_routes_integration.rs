@@ -1137,20 +1137,14 @@ async fn marketplace_install_rejects_unverified_third_party_registry() {
 }
 
 // ---------------------------------------------------------------------------
-// GET /api/hands/{id} — per-agent system_prompt + capabilities_tools (#6151/#6152)
+// GET /api/hands/{id} — per-agent system_prompt + capabilities_tools
 // ---------------------------------------------------------------------------
 
-/// The dashboard's per-agent system-prompt / tools editor reads the manifest
-/// baseline (the "restore default" target) from `GET /api/hands/{id}`. Assert
-/// the per-role entry in the `agents` array carries `system_prompt` and
-/// `capabilities_tools` straight from the parsed HAND.toml so the editor can
-/// seed an inactive hand and offer a meaningful reset.
+/// Asserts that each agent entry in `GET /api/hands/{id}` exposes `system_prompt` and `capabilities_tools` from the parsed HAND.toml manifest.
 #[tokio::test(flavor = "multi_thread")]
 async fn get_hand_agents_expose_system_prompt_and_tools() {
     let h = boot_router_open().await;
-    // Nested single-agent form: a `[agent.model]` sub-table makes the parser
-    // deserialize the full AgentManifest (the flat/legacy form drops the
-    // `capabilities` table), so `[agent.capabilities]` is honoured here.
+    // The nested `[agent.model]` form is required: the flat/legacy form silently drops `[agent.capabilities]`.
     let toml = r#"
 id = "agent-config-test"
 name = "Agent Config Test"

@@ -75,8 +75,6 @@ export function TomlViewer({
   }, [body, tab, downloadName]);
 
   return (
-    // #6150: the manifest is a long, dense TOML body — give it a near-fullscreen
-    // shell (7xl cap) so the user doesn't read it through a postage-stamp window.
     <Modal isOpen={isOpen} onClose={onClose} title={title} size="7xl">
       <div className="p-5 space-y-3">
         <div className="flex items-center justify-between gap-2">
@@ -157,9 +155,7 @@ export function TomlViewer({
               initial="initial"
               animate="animate"
               exit="exit"
-              // #6150: fill most of the viewport height (the centred Modal caps
-              // itself at 90vh) instead of a fixed 65vh, so long manifests scroll
-              // inside a large pane rather than a cramped one.
+              // Modal shell caps at 90vh; 78vh fills it while leaving room for the title bar.
               className="max-h-[78vh] overflow-x-auto overflow-y-auto rounded-xl border border-border-subtle bg-main"
             >
               <pre className="min-w-full px-3 py-2 text-[11px] font-mono text-text whitespace-pre-wrap">

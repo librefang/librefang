@@ -401,10 +401,6 @@ function RequirementsForm({ handId, requirements }: { handId: string; requiremen
 
 /* ── Agent config (system prompt + tools) editor ─────────── */
 
-/** One workspace agent as surfaced by `GET /api/hands/{id}` (the parsed
- *  HAND.toml). `system_prompt` and `capabilities_tools` are the manifest
- *  baseline — they double as the "restore default" target since the edit
- *  endpoints write the live AgentRegistry / agent.toml, never HAND.toml. */
 type WorkspaceAgent = {
   role: string;
   name: string;
@@ -417,10 +413,6 @@ type WorkspaceAgent = {
   capabilities_tools?: string[];
 };
 
-/* Container for the per-hand "Agent" tab: an agent selector (when the hand
- * declares more than one) plus the system-prompt / tools editor for the
- * selected role. Editing requires a live agent_id, which only exists while
- * the hand is active — so the whole surface degrades to a hint otherwise. */
 function HandAgentConfigTab({
   workspaceAgents,
   instance,
@@ -438,8 +430,7 @@ function HandAgentConfigTab({
   const selected =
     workspaceAgents.find((a) => a.role === selectedRole) ?? workspaceAgents[0];
 
-  // Resolve the live agent id for the selected role. Multi-agent hands expose
-  // a role→id map; single-agent hands fall back to the instance-level agent_id.
+  // multi-agent hands expose a role→id map; single-agent hands fall back to the instance-level id.
   const agentId = isActive
     ? instance?.agent_ids?.[selected?.role ?? ""] ?? instance?.agent_id
     : undefined;
@@ -488,12 +479,6 @@ function HandAgentConfigTab({
   );
 }
 
-/* The actual edit surface for one agent role: a system-prompt textarea
- * (#6151) and a tool-chip editor (#6152), each with its own Save and
- * "Restore default" (一键恢复默认) control. The manifest values carried on
- * `agent` are the default baseline; Save writes through the existing
- * per-agent endpoints (`PATCH /api/agents/{id}` for the prompt,
- * `PUT /api/agents/{id}/tools` for tools). */
 function HandAgentEditor({
   agent,
   agentId,
@@ -510,11 +495,6 @@ function HandAgentEditor({
   const defaultPrompt = agent.system_prompt ?? "";
   const defaultTools = useMemo(() => agent.capabilities_tools ?? [], [agent.capabilities_tools]);
 
-  // Live values for the active agent. These are the current effective config
-  // (which may already diverge from the manifest after a prior edit), so the
-  // editor seeds from them when present and falls back to the manifest baseline
-  // for an inactive hand. `?? undefined` so the queries stay disabled when
-  // there is no live agent to read.
   const agentDetailQuery = useAgentDetail(agentId ?? "", { enabled: !!agentId });
   const agentToolsQuery = useAgentTools(agentId ?? "", { enabled: !!agentId });
   const livePrompt = agentDetailQuery.data?.system_prompt;
@@ -530,8 +510,6 @@ function HandAgentEditor({
   const [tools, setTools] = useState<string[]>(currentTools);
   const [newTool, setNewTool] = useState("");
 
-  // Re-seed local drafts when the live value resolves / changes (e.g. the
-  // tools query lands after first render, or a save invalidates and refetches).
   useEffect(() => { setPrompt(currentPrompt); }, [currentPrompt]);
   useEffect(() => { setTools(currentTools); }, [currentTools]);
 
@@ -737,9 +715,7 @@ function DetailTabs({ hand, instance, isActive, settings, settingsQuery }: {
   type Tab = "agents" | "agent_config" | "settings" | "requirements" | "tools" | "schedules";
   const tabs: { id: Tab; label: string; count?: number; show: boolean }[] = [
     { id: "agents", label: t("nav.agents"), count: workspaceAgents.length, show: workspaceAgents.length > 0 },
-    // #6151 / #6152: per-agent system-prompt + tool editing. Always shown when
-    // the hand declares agents; the editor itself gates writes on the hand
-    // being active (a live agent_id only exists for an active instance).
+    // shown when agents are declared; write ops are gated inside the editor (active hand required).
     { id: "agent_config", label: t("hands.agent_config"), count: workspaceAgents.length, show: workspaceAgents.length > 0 },
     { id: "schedules", label: t("hands.tab_schedules"), count: cronJobs.length, show: isActive && !!agentId },
     { id: "settings", label: t("hands.settings"), count: settings.settings?.length, show: true },
