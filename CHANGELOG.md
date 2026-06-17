@@ -890,6 +890,11 @@ In-crate only; no cross-crate error-shape changes.
   `openssl-src` shells out to whichever `perl` is first on `PATH`; the `OPENSSL_SRC_PERL` env var (its documented override, ahead of `PERL` and the bare `perl` fallback) now pins the job at the runner's Windows-native `C:/Strawberry/perl/bin/perl.exe`.
   The release Windows jobs are unaffected — their `cargo build` step runs under the default `pwsh`, where the system `PATH` resolves `perl` to Strawberry directly.
 
+- **ci: raise the Windows test-lane timeout to 90min so the heavier vendored-OpenSSL cold build fits** (#6161) (@houko).
+  Follow-up to #6171: with the Perl fix in place both Windows shards' tests passed, but the first cold run after #6163 had no warm cache, so the from-source OpenSSL build pushed one shard to the 60min ceiling — it passed its tests and was then cancelled mid cache-save, leaving `main` red on a non-test failure.
+  The vendored build recurs cold on every `Cargo.lock` change that busts the `test-windows` cache, so the ceiling is raised from 60min to 90min (macOS keeps 60min — its system-OpenSSL build is lighter).
+  The cap never inflates a green run: the job ends when nextest and the cache save finish, not at the ceiling, so a warm shard still lands in ~15min.
+
 - **channels: a conversation-ownership claim held by an agent that can no longer serve the channel is now taken over instead of silently dropping follow-ups** (#5323) (@houko).
   Follow-up to #6127: if agent A claimed a thread and A's `manifest.channels` allowlist was then narrowed to exclude that channel, the still-live claim suppressed every non-addressed follow-up (routed to an eligible agent B) until the TTL expired — a silent message drop.
   `conversation_ownership_allows` now checks the current holder's channel eligibility and, when the holder can no longer serve the channel, treats the dispatch as a takeover so the eligible candidate re-claims immediately.
