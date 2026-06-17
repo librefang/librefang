@@ -117,6 +117,12 @@ windows-sys = { version = "0.61", features = [
     "Win32_Security",
     "Win32_Security_Authorization",
 ] }
+# webauthn-rs (via webauthn-rs-core) links against system OpenSSL through openssl-sys.
+# The Windows MSVC CI runners have no discoverable system OpenSSL (openssl-sys fails its probe with "Could not find directory of OpenSSL installation").
+# Enable the vendored feature here so cargo feature-unification builds openssl-sys from source on Windows only; Unix keeps using the system library already present on those runners.
+# The vendored builder (openssl-src) auto-detects nasm and falls back to a no-asm build when it is absent, so the runners' bundled Perl is the only host prerequisite (both Windows images ship it).
+# Refs #6161.
+openssl = { version = "0.10", features = ["vendored"] }
 
 [build-dependencies]
 # `build.rs` uses `chrono::Utc::now()` to stamp `BUILD_DATE` instead of

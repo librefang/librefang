@@ -218,6 +218,12 @@ async fn test_cron_defaults_return_errors() {
         Err(KernelOpError::Unavailable(c)) if c == "Cron scheduler" => {}
         other => panic!("cron_cancel: expected Unavailable, got {other:?}"),
     }
+
+    let result = handle.cron_set_enabled("job1", false).await;
+    match result {
+        Err(KernelOpError::Unavailable(c)) if c == "Cron scheduler" => {}
+        other => panic!("cron_set_enabled: expected Unavailable, got {other:?}"),
+    }
 }
 
 #[test]

@@ -138,4 +138,27 @@ impl kernel_handle::CronControl for LibreFangKernel {
 
         Ok(())
     }
+
+    async fn cron_set_enabled(
+        &self,
+        job_id: &str,
+        enabled: bool,
+    ) -> Result<(), kernel_handle::KernelOpError> {
+        use kernel_handle::KernelOpError;
+        let id = librefang_types::scheduler::CronJobId(
+            uuid::Uuid::parse_str(job_id)
+                .map_err(|e| KernelOpError::InvalidInput(format!("job_id: {e}")))?,
+        );
+        self.workflows
+            .cron_scheduler
+            .set_enabled(id, enabled)
+            .map_err(|e| KernelOpError::Internal(e.to_string()))?;
+
+        // Persist after the toggle, mirroring `toggle_cron_job` in the HTTP route (#3515): an in-memory enable/disable that never reaches disk would silently revert on daemon restart.
+        if let Err(e) = self.workflows.cron_scheduler.persist() {
+            tracing::warn!("Failed to persist cron jobs: {e}");
+        }
+
+        Ok(())
+    }
 }
