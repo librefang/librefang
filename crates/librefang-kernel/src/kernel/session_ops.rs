@@ -1232,6 +1232,7 @@ async fn build_session_summary(
         session_id: Some(session_id.0.to_string()),
         step_id: None,
         reasoning_echo_policy: echo_policy,
+        ..Default::default()
     };
 
     invoke_summary_driver(
@@ -1696,6 +1697,8 @@ mod session_summary_tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: Default::default(),
+
+            ..Default::default()
         }
     }
 
@@ -1793,6 +1796,7 @@ mod session_summary_tests {
                     cache_read_input_tokens: 0,
                 },
                 actual_provider: None,
+                actual_model: None,
             })
         }
 

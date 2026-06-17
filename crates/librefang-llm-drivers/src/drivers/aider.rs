@@ -169,6 +169,7 @@ impl LlmDriver for AiderDriver {
                 ..Default::default()
             },
             actual_provider: None,
+            actual_model: None,
         })
     }
 }

@@ -23,13 +23,17 @@ uar-driver = ["dep:universal-agent-runtime"]
 #   conflict with librefang's own `rusqlite`/`libsqlite3-sys` versions.
 # * `surreal-backend` is enabled explicitly so UAR uses embedded SurrealDB
 #   (RocksDB) for persistence — fully self-contained, no external services.
-# * 2026-06-01 update: GQAdonis fork synced to Prometheus-AGS 745b4c1 with fixed
-#   .gitmodules (SCP SSH URLs -> HTTPS so libgit2 can parse them). Branch
-#   sync-gqadonis-745b4c1 == Prometheus-AGS 745b4c1 + one .gitmodules fix commit.
-#   surreal-memory pinned at 7072370 in both workspaces. kreuzberg now public HTTPS
-#   (kreuzberg-dev/kreuzberg tag v4.9.8), no SSH source redirect needed.
-#   See: https://github.com/GQAdonis/universal-agent-runtime/tree/sync-gqadonis-745b4c1
-universal-agent-runtime = { git = "https://github.com/GQAdonis/universal-agent-runtime.git", branch = "sync-gqadonis-745b4c1", optional = true, default-features = false, features = ["surreal-backend"] }
+# * 2026-06-17 update: bumped to GQAdonis/universal-agent-runtime `main`
+#   (rev 0f9385d4), which additionally ships a standalone `universal-agent-runtime`
+#   binary (Axum + gRPC/SSE server, `src/main.rs`) — the "sidecar" build option.
+#   This in-process `uar-driver` library link is retained for now; pinned to a
+#   `rev` (not a moving branch) for reproducible builds. See the sidecar
+#   migration assessment in docs/architecture/uar-sidecar-assessment.md — running
+#   UAR as a supervised sidecar (like channel sidecars) would decouple its heavy
+#   transitive tree (kreuzberg, surrealdb, liter-llm, the Leptos frontend) from
+#   librefang's build and remove a recurring upstream-merge break surface.
+#   See: https://github.com/GQAdonis/universal-agent-runtime/tree/main
+universal-agent-runtime = { git = "https://github.com/GQAdonis/universal-agent-runtime.git", rev = "0f9385d416ec957cf4ed66d1f9e7640fb15c269a", optional = true, default-features = false, features = ["surreal-backend"] }
 
 librefang-types = { path = "../librefang-types" }
 librefang-llm-driver = { path = "../librefang-llm-driver" }

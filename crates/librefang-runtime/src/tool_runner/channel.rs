@@ -123,11 +123,18 @@ fn trim_opt_string(val: Option<&str>) -> Option<&str> {
     val.map(str::trim).filter(|s| !s.is_empty())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn tool_channel_send(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
     workspace_root: Option<&Path>,
     sender_id: Option<&str>,
+    // #6117: the current turn's inbound channel and platform conversation id
+    // (chat_id / group jid). Used to scope the cross-chat dispatch guard. Both
+    // `None` for out-of-band callers (cron, triggers, external MCP) — the guard
+    // no-ops, preserving the existing unrestricted behaviour for those paths.
+    sender_channel: Option<&str>,
+    sender_chat_id: Option<&str>,
     caller_agent_id: Option<&str>,
     additional_roots: &[&Path],
 ) -> Result<String, String> {
@@ -140,16 +147,58 @@ pub(super) async fn tool_channel_send(
         .trim()
         .to_string();
 
-    let recipient = input["recipient"]
+    // An explicitly-supplied recipient is the only cross-chat-leak vector — an
+    // auto-filled one (reply to the inbound peer) targets the current chat by
+    // construction. Keep the two apart so the guard below only scrutinises an
+    // explicit `recipient`.
+    let explicit_recipient = input["recipient"]
         .as_str()
         .map(str::trim)
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty());
+
+    let recipient = explicit_recipient
         .or(sender_id)
         .ok_or("Missing 'recipient' parameter. When replying to the original sender, recipient is auto-filled — ensure channel_send is called in response to a message.")?
         .trim();
 
     if recipient.is_empty() {
         return Err("Recipient cannot be empty".to_string());
+    }
+
+    // #6117 cross-chat dispatch guard (audio cross-chat leak 2026-05-19). When
+    // the model explicitly targets a recipient on the SAME channel the turn
+    // arrived on, it must match the current conversation. The comparison key is
+    // the platform conversation id (`sender_chat_id` — a Telegram chat_id,
+    // group jid, …), not the individual `sender_id`: in a group the legitimate
+    // reply target is the group, not the speaker. DMs (where chat_id coincides
+    // with the sender, or no chat_id is stamped) fall back to `sender_id`.
+    //
+    // A different-channel dispatch (e.g. emailing while replying to a WhatsApp
+    // peer) stays allowed — only intra-channel re-targeting is the leak. To
+    // legitimately reach a different contact, the agent uses `notify_owner`
+    // (kernel-mediated) or waits for that contact's own inbound message.
+    if let (Some(explicit), Some(turn_channel)) = (explicit_recipient, sender_channel) {
+        // Filter an empty `sender_chat_id` before the DM fallback: the
+        // in-process path stamps the raw metadata value (unlike the `/mcp`
+        // bridge, which drops empty headers), so `Some("")` must not mask the
+        // `sender_id` fallback and silently disable the guard.
+        let expected_chat = sender_chat_id.filter(|s| !s.is_empty()).or(sender_id);
+        if let Some(expected) = expected_chat {
+            // Compare the recipient case-SENSITIVELY: `send_channel_*` lookups
+            // are case-sensitive (#6078), so a case-insensitive match here would
+            // let `recipient = "OWNER"` pass while the send routes to a distinct
+            // case-sensitive chat. The channel match stays case-insensitive so
+            // the guard still fires when the model varies the channel's casing.
+            if !expected.is_empty()
+                && !turn_channel.is_empty()
+                && turn_channel.eq_ignore_ascii_case(&channel)
+                && explicit != expected
+            {
+                return Err(format!(
+                    "channel_send recipient '{explicit}' does not match the current chat '{expected}' on channel '{channel}'. Cross-chat dispatch is forbidden — to reach a different contact use notify_owner, or wait for that contact's inbound message."
+                ));
+            }
+        }
     }
 
     let thread_id = trim_opt_string(input["thread_id"].as_str());

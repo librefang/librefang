@@ -5,6 +5,54 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.6.16] - 2026-06-16
+
+_18 PRs from 3 contributors since v2026.6.11-beta.18._
+
+### Highlights
+
+- **External Skill Registry** — agents can now discover and consume skills hosted on a Codeberg registry, with diff and propose-to-registry support for pending evolution drafts
+- **Persistent MCP Server Config** — MCP server configurations are stored in SQLite and survive restarts; runtime writes to `/api/mcp/servers` are also persisted
+- **Ukrainian Language Support** — backend and web UI are now fully localized in Ukrainian
+- **DeepSeek V4 Pro Reasoning** — DeepSeek v4-pro is now treated as a thinking-with-tools model so `reasoning_content` is correctly echoed through
+- **WhatsApp Voice Notes & Matrix Memory** — ElevenLabs voice notes send as Ogg/Opus with proper MIME sniffing; Matrix peers with colons in their IDs can now use the Memory tool
+
+### Added
+
+- Consume a Codeberg-hosted skill registry via registry.registry_host (#6095) (#6103) (@houko)
+- Diff + propose-to-registry for pending evolution drafts (#5819) (#6104) (@houko)
+- SidecarChannelConfig.agent + available_agents (#5671 PR-A) (#6105) (@houko)
+- SQLite-backed MCP server config storage + boot merge (#6021) (#6106) (@houko)
+- Add Ukrainian language support for backend and web UI (#6109) (@pavver)
+- Persist /api/mcp/servers writes to a DB store via mcp_runtime_store (#6113) (#6115) (@houko)
+
+### Fixed
+
+- Accept `version` field in ClawHubInstallRequest (#6038) (#6039) (@DaBlitzStein)
+- Stage Skills-tab edits behind a Save button (#6042) (@DaBlitzStein)
+- Refresh detect-secrets baseline for migrated Cloudflare account_id (#6093) (@houko)
+- Treat deepseek-v4-pro as thinking-with-tools so reasoning_content is echoed (#6098) (@DaBlitzStein)
+- Preserve caller-supplied channel name case in channel_send (#6078) (#6101) (@houko)
+- Percent-encode colons in peer_id so Matrix peers can use Memory (#6100) (#6102) (@houko)
+- Pin brace-expansion override to 2.0.2 to unbreak the Cloudflare docs build (#6110) (@houko)
+- Send ElevenLabs voice notes as Ogg/Opus and sniff audio mime (#6116) (#6118) (@houko)
+
+### Changed
+
+- Migrate web_search.rs to ToolError (#3576 slice) (#6107) (@houko)
+
+<details>
+<summary>Documentation, maintenance, and other internal changes</summary>
+
+### Maintenance
+
+- Migrate worker config to librefang Cloudflare account (#6092) (@houko)
+- Scope frontend pnpm audit to production deps (#6108) (@houko)
+- Free runner disk space before the integration shard build (fixes ENOSPC on main) (#6112) (@houko)
+
+</details>
+
+
 ## [2026.6.11] - 2026-06-11
 
 _8 PRs from 2 contributors since v2026.6.10-beta.17._
@@ -784,6 +832,20 @@ In-crate only; no cross-crate error-shape changes.
 
 ### Added
 
+- **auth/dashboard: passkey (WebAuthn/FIDO2) login** (#5981) (@houko) — sign in to the dashboard with Touch ID, Face ID, Windows Hello, Android biometrics, or a roaming security key instead of typing a password.
+  Opt-in per deployment via `passkey_enabled` + `passkey_rp_id` / `passkey_rp_origin` in `config.toml`; password login is untouched and remains the fallback.
+  Adds the `webauthn_credentials` table (SQLite migration v44) storing the serialized `webauthn-rs` `Passkey` so the sign-count persists across assertions, a `PasskeyEngine` owning the two WebAuthn ceremonies with short-TTL in-memory challenge state, and six routes under `/api/auth/passkey/*` (registration-options/verify gated Owner-only, authentication-options/verify public and rate-limited, plus list/revoke).
+  A successful passkey assertion mints a session identical to `dashboard_login` and bypasses the password-path TOTP challenge (a passkey is already a phishing-resistant second factor).
+  Dashboard gains a "Sign in with passkey" button on the login screen and a Passkeys panel under Settings → Security to register / list / revoke devices, via `@simplewebauthn/browser`.
+  See `docs/architecture/passkey-webauthn.md`.
+- **channels(routing): per-conversation agent routing for multi-agent groups** (#5323) (@houko) — the AITL routing layer on top of #5671 PR-A's `agent` / `available_agents` schema.
+  When more than one agent serves a channel, a group message that names a specific non-default agent now reaches that agent instead of the channel default.
+  Two addressing paths: an explicit `@`-mention the adapter surfaces in `metadata["mention_names"]` (resolved against agent names/handles), and a non-default agent's declared `channel_overrides.group_trigger_patterns` alias matching the text — scored by a new deterministic per-agent attention scorer (`librefang_channels::bridge::best_alias_match`, reusing the compiled-regex cache) that the channel dispatch path consults before the previously non-deterministic "first available" fallback (closes layer (c) of #5294).
+  `ThreadKey` (the conversation-ownership claim key) grows three optional slices — `account_id` (multi-tenant: two bot accounts on one channel-type no longer collide, the unlanded #3419/#3420 fix), `chat_id` (two chats reusing a forum-topic id), and `peer_id` (per-sender stickiness so two users in one thread can talk to two different agents without contaminating each other) — all defaulting to `None`, reproducing the historical `(channel, thread)` key byte-for-byte.
+  A topic-less group now claims by chat id instead of bypassing the registry, and a live claim makes a follow-up sticky to the same agent without a fresh mention; an explicit address re-claims for the new agent, preserving the #3334 TTL semantics.
+  New per-channel `[channel_overrides]` knobs: `conversation_ownership_ttl_seconds` (default `600`) and `conversation_ownership_include_dms` (default `false`).
+  The Telegram / Discord / Slack / Matrix sidecar adapters now surface `mention_names` and a per-group `sender_user_id` so the bridge can route and scope per peer.
+  Additive and backward-compatible: single-agent channels and existing configs are unchanged.
 - **hands/registry: consume a Codeberg-hosted skill registry via `registry.registry_host`** (#6095) (@houko) — the registry sync path hardcoded GitHub's tarball/clone URLs.
   A new optional `registry_host` (full base URL, e.g. `https://codeberg.org`) derives the archive URL, git-clone URL, and tarball top-level prefix from that host; unset (default `None`) reproduces the exact GitHub URLs, so existing setups stay byte-identical and need no migration.
   GitHub and Forgejo/Codeberg differ in more than the host (archive path `/archive/refs/heads/main.tar.gz` vs `/archive/main.tar.gz`; prefix `librefang-registry-main/` vs `librefang-registry/`), handled in a small `registry_urls()` helper without a forge trait/enum.
@@ -826,6 +888,10 @@ In-crate only; no cross-crate error-shape changes.
 
 ### Fixed
 
+- **channels: a conversation-ownership claim held by an agent that can no longer serve the channel is now taken over instead of silently dropping follow-ups** (#5323) (@houko).
+  Follow-up to #6127: if agent A claimed a thread and A's `manifest.channels` allowlist was then narrowed to exclude that channel, the still-live claim suppressed every non-addressed follow-up (routed to an eligible agent B) until the TTL expired — a silent message drop.
+  `conversation_ownership_allows` now checks the current holder's channel eligibility and, when the holder can no longer serve the channel, treats the dispatch as a takeover so the eligible candidate re-claims immediately.
+  A holder that is still eligible keeps its claim unchanged; a killed holder continues to degrade to a graceful `send_message` error as before.
 - **memory: Matrix peers can use Memory again — colon-bearing `peer_id`s are percent-encoded instead of rejected** (@houko). #5119/#5120 made the per-peer key framing `peer:{pid}:{key}` injective by rejecting any `peer_id` containing `:`, but Matrix user ids are natively `@user:matrix.org`, so every Matrix user was locked out of `memory_store` / `memory_recall` / `memory_list` with an `InvalidInput` error. The colon is now percent-encoded (`escape_peer_id`: `%`→`%25`, `:`→`%3A`) before it enters the key, so the framing stays injective without rejecting the id — peer `T1` (prefix `peer:T1:`) can no longer strip the escaped key `peer:T1%3AU2:…` of peer `T1:U2`, preserving the cross-peer isolation boundary. Colon-free peer_ids are encoded to themselves, so existing rows are byte-identical and need no migration; empty `peer_id`s and `peer:`-prefixed keys are still rejected. Closes #6100.
 - **channels: `channel_send` no longer lowercases the caller-supplied channel name, so capitalized sidecars are reachable again** (@houko). The `channel` tool argument was force-lowercased before the kernel's case-sensitive `send_channel_*` lookup, while channel adapters register under their config name with original case — so an agent calling `channel_send(channel="bot-A", …)` looked up `bot-a` and failed with a not-found error for any sidecar whose name carried uppercase (a latent regression since the case-preserving registration in #5996). The name is now passed through verbatim (still trimmed). Closes #6078.
 

@@ -9075,6 +9075,7 @@ mod try_summarize_trim_tests {
                     ..Default::default()
                 },
                 actual_provider: None,
+                actual_model: None,
             })
         }
     }

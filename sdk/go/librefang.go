@@ -612,6 +612,30 @@ func (r *AuthResource) DashboardLogout() (interface{}, error) {
 	return r.client.request("POST", "/api/auth/logout", nil, nil)
 }
 
+func (r *AuthResource) AuthenticationOptions(data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", "/api/auth/passkey/authentication-options", data, nil)
+}
+
+func (r *AuthResource) AuthenticationVerify(data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", "/api/auth/passkey/authentication-verify", data, nil)
+}
+
+func (r *AuthResource) ListCredentials() (interface{}, error) {
+	return r.client.request("GET", "/api/auth/passkey/credentials", nil, nil)
+}
+
+func (r *AuthResource) RevokeCredential(id string) (interface{}, error) {
+	return r.client.request("DELETE", fmt.Sprintf("/api/auth/passkey/credentials/%s", id), nil, nil)
+}
+
+func (r *AuthResource) RegistrationOptions(data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", "/api/auth/passkey/registration-options", data, nil)
+}
+
+func (r *AuthResource) RegistrationVerify(data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", "/api/auth/passkey/registration-verify", data, nil)
+}
+
 func (r *AuthResource) AuthProviders() (interface{}, error) {
 	return r.client.request("GET", "/api/auth/providers", nil, nil)
 }

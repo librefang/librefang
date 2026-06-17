@@ -897,6 +897,7 @@ impl ChatGptDriver {
             tool_calls,
             usage,
             actual_provider: None,
+            actual_model: None,
         })
     }
 
@@ -1300,6 +1301,8 @@ mod tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+
+            ..Default::default()
         };
         let api_req = ChatGptDriver::build_responses_request(&req);
         assert_eq!(api_req.model, "gpt-4o");
@@ -1342,6 +1345,8 @@ mod tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+
+            ..Default::default()
         };
         let api_req = ChatGptDriver::build_responses_request(&req);
         assert_eq!(api_req.instructions.as_deref(), Some("System prompt."));
@@ -1375,6 +1380,8 @@ mod tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+
+            ..Default::default()
         };
         let api_req = ChatGptDriver::build_responses_request(&req);
         let instructions = api_req.instructions.expect("instructions");
@@ -1417,6 +1424,8 @@ mod tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+
+            ..Default::default()
         };
         let api_req = ChatGptDriver::build_responses_request(&req);
         let instructions = api_req.instructions.expect("instructions");

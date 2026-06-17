@@ -475,6 +475,14 @@ use crate::types;
         crate::server::dashboard_logout,
         crate::server::change_password,
 
+        // ── Passkey (WebAuthn/FIDO2) login + credential management (#5981) ──
+        routes::passkey::registration_options,
+        routes::passkey::registration_verify,
+        routes::passkey::authentication_options,
+        routes::passkey::authentication_verify,
+        routes::passkey::list_credentials,
+        routes::passkey::revoke_credential,
+
         // ── OpenAI-Compatible API ──
         openai_compat::chat_completions,
         openai_compat::list_models,

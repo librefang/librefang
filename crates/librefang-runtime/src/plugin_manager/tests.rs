@@ -5,11 +5,28 @@ use super::registry::{
 };
 use super::*;
 
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn test_plugins_dir() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    std::env::remove_var("LIBREFANG_HOME");
     let dir = plugins_dir();
     assert!(dir.ends_with("plugins"));
     assert!(dir.to_string_lossy().contains(".librefang"));
+}
+
+#[test]
+fn test_plugins_dir_with_env() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    std::env::set_var("LIBREFANG_HOME", ".test");
+    let dir = plugins_dir();
+
+    std::env::remove_var("LIBREFANG_HOME");
+    assert!(dir.ends_with("plugins"));
+    assert!(dir.to_string_lossy().contains(".test"));
 }
 
 #[test]

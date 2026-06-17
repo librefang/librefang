@@ -678,6 +678,8 @@ async fn summarise_batch(
         session_id: None,
         step_id: None,
         reasoning_echo_policy,
+
+        ..Default::default()
     };
 
     let response = driver
@@ -863,6 +865,7 @@ mod tests {
                 stop_reason: librefang_types::message::StopReason::EndTurn,
                 usage: librefang_types::message::TokenUsage::default(),
                 actual_provider: None,
+                actual_model: None,
             })
         }
     }
@@ -883,6 +886,7 @@ mod tests {
                 stop_reason: librefang_types::message::StopReason::EndTurn,
                 usage: librefang_types::message::TokenUsage::default(),
                 actual_provider: None,
+                actual_model: None,
             })
         }
     }
@@ -918,6 +922,7 @@ mod tests {
                 stop_reason: librefang_types::message::StopReason::EndTurn,
                 usage: librefang_types::message::TokenUsage::default(),
                 actual_provider: None,
+                actual_model: None,
             })
         }
     }
@@ -977,6 +982,7 @@ mod tests {
                 stop_reason: librefang_types::message::StopReason::EndTurn,
                 usage: librefang_types::message::TokenUsage::default(),
                 actual_provider: None,
+                actual_model: None,
             })
         }
     }
@@ -2340,6 +2346,7 @@ mod tests {
                 stop_reason: librefang_types::message::StopReason::EndTurn,
                 usage: librefang_types::message::TokenUsage::default(),
                 actual_provider: None,
+                actual_model: None,
             })
         }
     }

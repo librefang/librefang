@@ -34,6 +34,8 @@ fn request_with_trace_ids(
         session_id: session_id.map(String::from),
         step_id: step_id.map(String::from),
         reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+
+        ..Default::default()
     }
 }
 

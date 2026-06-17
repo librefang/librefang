@@ -404,6 +404,24 @@ class _AuthResource(_Resource):
     def dashboard_logout(self):
         return self._c._request("POST", "/api/auth/logout")
 
+    def authentication_options(self, **data):
+        return self._c._request("POST", "/api/auth/passkey/authentication-options", data)
+
+    def authentication_verify(self, **data):
+        return self._c._request("POST", "/api/auth/passkey/authentication-verify", data)
+
+    def list_credentials(self):
+        return self._c._request("GET", "/api/auth/passkey/credentials")
+
+    def revoke_credential(self, id: str):
+        return self._c._request("DELETE", f"/api/auth/passkey/credentials/{id}")
+
+    def registration_options(self, **data):
+        return self._c._request("POST", "/api/auth/passkey/registration-options", data)
+
+    def registration_verify(self, **data):
+        return self._c._request("POST", "/api/auth/passkey/registration-verify", data)
+
     def auth_providers(self):
         return self._c._request("GET", "/api/auth/providers")
 

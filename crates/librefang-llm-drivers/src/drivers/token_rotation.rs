@@ -376,6 +376,8 @@ mod tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+
+            ..Default::default()
         }
     }
 
@@ -393,6 +395,7 @@ mod tests {
                 ..Default::default()
             },
             actual_provider: None,
+            actual_model: None,
         }
     }
 

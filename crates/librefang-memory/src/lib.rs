@@ -35,6 +35,7 @@
 //! - `ProactiveMemoryHooks`: Auto-memorize and auto-retrieve hooks
 //! - `ProactiveMemoryStore`: Implementation on top of MemorySubstrate
 
+pub mod channel_binding_store;
 pub mod chunker;
 pub mod consolidation;
 pub mod decay;
@@ -45,6 +46,7 @@ pub mod knowledge;
 pub mod mcp_config_store;
 pub mod migration;
 pub mod namespace_acl;
+pub mod passkey_store;
 pub mod proactive;
 pub mod prompt;
 pub mod provider;
@@ -85,8 +87,10 @@ pub use backends::SurrealSessionBackend;
 pub use backends::SurrealTaskBackend;
 #[cfg(feature = "surreal-backend")]
 pub use backends::SurrealUsageStore;
+pub use channel_binding_store::ChannelBindingStore;
 pub use goal_run_store::{GoalRunRow, GoalRunStore};
 pub use mcp_config_store::McpConfigStore;
+pub use passkey_store::{PasskeyRecord, PasskeyStore, PasskeyStoreError, SqlitePasskeyStore};
 pub use session_store::SessionStore;
 pub use substrate::MemorySubstrate;
 pub use workflow_store::{WorkflowRunRow, WorkflowStore};

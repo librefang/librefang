@@ -335,6 +335,14 @@ impl ClaudeCodeDriver {
     fn write_mcp_config(
         bridge: &McpBridgeConfig,
         agent_id: Option<&str>,
+        // #6117: inbound peer scope of the current turn. Forwarded on the
+        // bridge connection so `/mcp` can rehydrate `ToolExecContext`'s
+        // sender_id / channel / chat_id and `channel_send` can reject a
+        // cross-chat recipient mismatch on the same channel. `None` for
+        // out-of-band turns (cron, triggers) — those run the bridge unguarded.
+        peer_jid: Option<&str>,
+        peer_channel: Option<&str>,
+        peer_chat_id: Option<&str>,
     ) -> std::io::Result<PathBuf> {
         let path =
             std::env::temp_dir().join(format!("librefang-mcp-{}.json", uuid::Uuid::new_v4()));
@@ -362,6 +370,19 @@ impl ClaudeCodeDriver {
                 headers.insert("X-LibreFang-Agent-Id".to_string(), serde_json::json!(id));
             }
         }
+        // #6117: forward the turn's inbound peer scope. The bridge endpoint
+        // (`routes/network.rs::mcp_http`) reads these back into
+        // `ToolExecContext` so `channel_send` enforces the cross-chat guard.
+        let mut insert_nonempty = |key: &str, val: Option<&str>| {
+            if let Some(v) = val {
+                if !v.is_empty() {
+                    headers.insert(key.to_string(), serde_json::json!(v));
+                }
+            }
+        };
+        insert_nonempty("X-LibreFang-Current-Peer-Jid", peer_jid);
+        insert_nonempty("X-LibreFang-Current-Channel", peer_channel);
+        insert_nonempty("X-LibreFang-Current-Chat-Id", peer_chat_id);
 
         let mut server = serde_json::json!({
             "type": "http",
@@ -865,7 +886,13 @@ impl LlmDriver for ClaudeCodeDriver {
 
         if !request.tools.is_empty() {
             if let Some(ref bridge) = self.mcp_bridge {
-                match Self::write_mcp_config(bridge, request.agent_id.as_deref()) {
+                match Self::write_mcp_config(
+                    bridge,
+                    request.agent_id.as_deref(),
+                    request.sender_user_id.as_deref(),
+                    request.sender_channel.as_deref(),
+                    request.sender_chat_id.as_deref(),
+                ) {
                     Ok(path) => prepared.mcp_config_path = Some(path),
                     Err(e) => {
                         prepared.cleanup();
@@ -1105,6 +1132,7 @@ impl LlmDriver for ClaudeCodeDriver {
                     ..Default::default()
                 },
                 actual_provider: None,
+                actual_model: None,
             });
         }
 
@@ -1130,6 +1158,7 @@ impl LlmDriver for ClaudeCodeDriver {
                 ..Default::default()
             },
             actual_provider: None,
+            actual_model: None,
         })
     }
 
@@ -1148,7 +1177,13 @@ impl LlmDriver for ClaudeCodeDriver {
 
         if !request.tools.is_empty() {
             if let Some(ref bridge) = self.mcp_bridge {
-                match Self::write_mcp_config(bridge, request.agent_id.as_deref()) {
+                match Self::write_mcp_config(
+                    bridge,
+                    request.agent_id.as_deref(),
+                    request.sender_user_id.as_deref(),
+                    request.sender_channel.as_deref(),
+                    request.sender_chat_id.as_deref(),
+                ) {
                     Ok(path) => prepared.mcp_config_path = Some(path),
                     Err(e) => {
                         prepared.cleanup();
@@ -1570,6 +1605,7 @@ impl LlmDriver for ClaudeCodeDriver {
             tool_calls: Vec::new(),
             usage: final_usage,
             actual_provider: None,
+            actual_model: None,
         })
     }
 
@@ -1786,6 +1822,8 @@ mod tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+
+            ..Default::default()
         };
 
         let prompt = ClaudeCodeDriver::build_prompt(&request);
@@ -1835,6 +1873,8 @@ mod tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+
+            ..Default::default()
         };
 
         let prompt = ClaudeCodeDriver::build_prompt(&request);
@@ -1901,6 +1941,8 @@ mod tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+
+            ..Default::default()
         };
 
         let prompt = ClaudeCodeDriver::build_prompt(&request);
@@ -1983,6 +2025,8 @@ mod tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+
+            ..Default::default()
         };
 
         let prompt = ClaudeCodeDriver::build_prompt(&request);
@@ -2998,6 +3042,8 @@ mod tests {
             session_id: Some("sess-xyz".to_string()),
             step_id: Some("step-001".to_string()),
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+
+            ..Default::default()
         };
         ClaudeCodeDriver::apply_caller_trace_envs(&mut cmd, &request);
         let envs: std::collections::HashMap<_, _> = cmd
@@ -3056,6 +3102,8 @@ mod tests {
             session_id: Some(String::new()),
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+
+            ..Default::default()
         };
         ClaudeCodeDriver::apply_caller_trace_envs(&mut cmd, &request);
         let envs: std::collections::HashMap<_, _> = cmd
@@ -3099,7 +3147,9 @@ mod tests {
             base_url: "http://127.0.0.1:4545".to_string(),
             api_key: Some("secret-key".to_string()),
         };
-        let path = ClaudeCodeDriver::write_mcp_config(&bridge, Some("agent-1234")).unwrap();
+        let path =
+            ClaudeCodeDriver::write_mcp_config(&bridge, Some("agent-1234"), None, None, None)
+                .unwrap();
         let written = std::fs::read_to_string(&path).unwrap();
         let _ = std::fs::remove_file(&path);
         let cfg: serde_json::Value = serde_json::from_str(&written).unwrap();
@@ -3119,13 +3169,60 @@ mod tests {
             base_url: "http://127.0.0.1:4545".to_string(),
             api_key: Some("secret-key".to_string()),
         };
-        let path = ClaudeCodeDriver::write_mcp_config(&bridge, None).unwrap();
+        let path = ClaudeCodeDriver::write_mcp_config(&bridge, None, None, None, None).unwrap();
         let written = std::fs::read_to_string(&path).unwrap();
         let _ = std::fs::remove_file(&path);
         let cfg: serde_json::Value = serde_json::from_str(&written).unwrap();
         let headers = &cfg["mcpServers"]["librefang"]["headers"];
         assert_eq!(headers["X-API-Key"], "secret-key");
         assert!(headers.get("X-LibreFang-Agent-Id").is_none());
+    }
+
+    #[test]
+    fn test_mcp_config_carries_current_peer_scope_headers() {
+        // #6117: the inbound peer scope of the turn is forwarded on the bridge
+        // connection so `/mcp` can rehydrate ToolExecContext and `channel_send`
+        // can reject a cross-chat recipient mismatch on the same channel.
+        let bridge = McpBridgeConfig {
+            base_url: "http://127.0.0.1:4545".to_string(),
+            api_key: None,
+        };
+        let path = ClaudeCodeDriver::write_mcp_config(
+            &bridge,
+            Some("agent-1234"),
+            Some("owner-jid"),
+            Some("whatsapp"),
+            Some("group-123"),
+        )
+        .unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let cfg: serde_json::Value = serde_json::from_str(&written).unwrap();
+        let headers = &cfg["mcpServers"]["librefang"]["headers"];
+        assert_eq!(headers["X-LibreFang-Current-Peer-Jid"], "owner-jid");
+        assert_eq!(headers["X-LibreFang-Current-Channel"], "whatsapp");
+        assert_eq!(headers["X-LibreFang-Current-Chat-Id"], "group-123");
+    }
+
+    #[test]
+    fn test_mcp_config_omits_peer_scope_headers_when_absent() {
+        // Out-of-band turns (cron, triggers) carry no peer scope → no peer
+        // headers, so the `/mcp` bridge runs `channel_send` unguarded exactly
+        // as before #6117.
+        let bridge = McpBridgeConfig {
+            base_url: "http://127.0.0.1:4545".to_string(),
+            api_key: Some("k".to_string()),
+        };
+        let path =
+            ClaudeCodeDriver::write_mcp_config(&bridge, Some("agent-1234"), None, None, None)
+                .unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let cfg: serde_json::Value = serde_json::from_str(&written).unwrap();
+        let headers = &cfg["mcpServers"]["librefang"]["headers"];
+        assert!(headers.get("X-LibreFang-Current-Peer-Jid").is_none());
+        assert!(headers.get("X-LibreFang-Current-Channel").is_none());
+        assert!(headers.get("X-LibreFang-Current-Chat-Id").is_none());
     }
 
     #[test]
@@ -3138,7 +3235,7 @@ mod tests {
             base_url: "http://127.0.0.1:4545".to_string(),
             api_key: None,
         };
-        let path = ClaudeCodeDriver::write_mcp_config(&bridge, None).unwrap();
+        let path = ClaudeCodeDriver::write_mcp_config(&bridge, None, None, None, None).unwrap();
         let written = std::fs::read_to_string(&path).unwrap();
         let _ = std::fs::remove_file(&path);
         let cfg: serde_json::Value = serde_json::from_str(&written).unwrap();

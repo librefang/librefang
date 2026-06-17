@@ -1131,6 +1131,19 @@ class MatrixAdapter(SidecarAdapter):
                 metadata: dict[str, Any] = {}
                 if self.account_id is not None:
                     metadata["account_id"] = self.account_id
+                # Individual sender so the conversation-ownership registry can
+                # scope per-peer claims (the platform_id is the room, not the
+                # sender). #5323.
+                metadata["sender_user_id"] = sender
+                # Intentional mentions (MSC3952 `m.mentions`) so a multi-agent
+                # room can address a specific non-default agent (#5323).
+                mentioned = content.get("m.mentions")
+                if isinstance(mentioned, dict):
+                    user_ids = mentioned.get("user_ids")
+                    if isinstance(user_ids, list):
+                        names = [u for u in user_ids if isinstance(u, str) and u]
+                        if names:
+                            metadata["mention_names"] = names
                 ev = protocol.message(
                     user_id=room_id,
                     user_name=sender,

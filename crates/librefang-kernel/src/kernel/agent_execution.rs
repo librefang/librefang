@@ -150,6 +150,7 @@ impl LibreFangKernel {
             skill_evolution_suggested: false,
             owner_notice: None,
             actual_provider: None,
+            actual_model: None,
         })
     }
 
@@ -226,6 +227,7 @@ impl LibreFangKernel {
             skill_evolution_suggested: false,
             owner_notice: None,
             actual_provider: None,
+            actual_model: None,
         })
     }
 
@@ -826,6 +828,8 @@ impl LibreFangKernel {
                 session_id: None,
                 step_id: None,
                 reasoning_echo_policy: echo_policy,
+
+                ..Default::default()
             };
             let (complexity, routed_model) = router.select_model(&probe);
             // Check if the routed model's provider has a valid API key.
@@ -1301,7 +1305,10 @@ impl LibreFangKernel {
         let usage_record = librefang_memory::usage::UsageRecord {
             agent_id,
             provider: billed_provider,
-            model: model.clone(),
+            // #6134: honour `actual_model` so a driver that resolved its own
+            // model (e.g. codex-cli) records the model it actually ran. Mirrors
+            // the streaming path's UsageRecord construction.
+            model: result.actual_model.clone().unwrap_or_else(|| model.clone()),
             input_tokens: result.total_usage.input_tokens,
             output_tokens: result.total_usage.output_tokens,
             cost_usd: cost,

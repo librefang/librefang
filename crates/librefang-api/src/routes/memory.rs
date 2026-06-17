@@ -2433,6 +2433,10 @@ mod tests {
         > = Arc::new(librefang_memory::idempotency::SqliteIdempotencyStore::new(
             kernel.substrate_ref().pool(),
         ));
+        let passkey_store: Arc<dyn librefang_memory::passkey_store::PasskeyStore + Send + Sync> =
+            Arc::new(librefang_memory::passkey_store::SqlitePasskeyStore::new(
+                kernel.substrate_ref().pool(),
+            ));
         let state = Arc::new(AppState {
             kernel,
             started_at: std::time::Instant::now(),
@@ -2458,6 +2462,8 @@ mod tests {
             trusted_proxies: Arc::new(crate::client_ip::TrustedProxies::default()),
             trust_forwarded_for: false,
             idempotency_store,
+            passkey_store,
+            passkey_engine: None,
         });
         (state, tmp)
     }

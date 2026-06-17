@@ -134,6 +134,10 @@ export function useUpdateHandSettings() {
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: handKeys.lists() });
       qc.invalidateQueries({ queryKey: handKeys.detail(variables.handId) });
+      // The settings editor reads saved values back from this query's
+      // `current_values`; without invalidating it the freshly saved inputs
+      // never reappear once the local draft is cleared.
+      qc.invalidateQueries({ queryKey: handKeys.settings(variables.handId) });
     },
   });
 }
