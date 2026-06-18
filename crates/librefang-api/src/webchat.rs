@@ -766,8 +766,7 @@ mod tests {
 
     #[test]
     fn spa_route_matches_known_first_segments() {
-        // Exact top-level routes. `prompts` / `tasks` are the #6197 regression:
-        // both are real router.tsx routes that 404'd on hard refresh until added.
+        // Exact top-level routes.
         for p in ["agents", "config", "skills", "mcp-servers", "prompts", "tasks"] {
             assert!(is_spa_route(p), "expected {p:?} to be an SPA route");
         }
