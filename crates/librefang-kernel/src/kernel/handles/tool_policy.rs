@@ -55,14 +55,7 @@ impl kernel_handle::ToolPolicy for LibreFangKernel {
     }
 
     fn protected_write_paths(&self) -> Vec<std::path::PathBuf> {
-        // Resolve the audit anchor identically to boot (`boot.rs::Self::boot`
-        // around the `audit_anchor_path` binding): an absolute
-        // `[audit].anchor_path` wins, a relative one resolves against
-        // `data_dir`, and an unset one defaults to `data_dir/audit.anchor`.
-        // This is the file whose integrity the audit Merkle chain depends on,
-        // so a skill must never truncate it via a broad FileWrite grant. The
-        // resolution MUST stay in lockstep with boot or the deny-list would
-        // guard the wrong path.
+        // Mirror boot.rs `audit_anchor_path` resolution exactly; divergence would guard the wrong path.
         let cfg = self.config.load();
         let anchor = match cfg.audit.anchor_path.as_ref() {
             Some(path) if path.is_absolute() => path.clone(),

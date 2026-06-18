@@ -139,15 +139,7 @@ fn safe_resolve_parent(path: &str) -> Result<std::path::PathBuf, serde_json::Val
     Ok(canonical_parent.join(file_name))
 }
 
-/// Returns true if `write_path` targets one of the kernel's protected paths.
-///
-/// `write_path` has already been resolved through `safe_resolve_parent`
-/// (canonical parent + verbatim file name). Each protected path is resolved
-/// the SAME way before comparing, so symlink resolution and macOS `/private`
-/// firmlink aliasing land both sides in the same canonical namespace and an
-/// exact `PathBuf` equality is sound. A protected path whose parent cannot be
-/// canonicalized (e.g. its directory does not exist yet) simply does not match
-/// — it also cannot be written to, so nothing is under-protected.
+// Both sides go through `safe_resolve_parent` so symlinks and macOS firmlinks resolve identically.
 fn is_protected_write_target(write_path: &Path, protected: &[std::path::PathBuf]) -> bool {
     protected.iter().any(|p| {
         safe_resolve_parent(&p.to_string_lossy())
@@ -313,13 +305,7 @@ fn host_fs_write(state: &GuestState, params: &serde_json::Value) -> serde_json::
         Ok(p) => p,
         Err(e) => return e,
     };
-    // SECURITY (#6182): deny writes to kernel-protected paths (the audit
-    // anchor) ABOVE the capability check, as defense-in-depth. A skill granted
-    // a broad FileWrite subtree — or the universal FileWrite("*") — would
-    // otherwise pass check_capability and truncate the anchor, silently
-    // breaking the tamper-evident audit Merkle chain. The deny-list is scoped
-    // strictly to the protected files (not all of data_dir) to keep the blast
-    // radius small.
+    // SECURITY: deny protected paths above capability check so even FileWrite("*") cannot reach the anchor.
     if let Some(kernel) = &state.kernel {
         if is_protected_write_target(&write_path, &kernel.protected_write_paths()) {
             return json!({
@@ -1151,9 +1137,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_fs_write_denied_protected_audit_anchor_even_with_wildcard() {
-        // #6182: a skill granted the universal FileWrite("*") must NOT be able
-        // to truncate the audit anchor. The deny-list runs ABOVE the
-        // capability check, so the broad grant cannot rescue the write.
         let dir = std::env::temp_dir().join("librefang_anchor_test_6182_deny");
         std::fs::create_dir_all(&dir).unwrap();
         let anchor = dir.join("audit.anchor");
@@ -1183,9 +1166,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_fs_write_allows_non_protected_sibling_with_wildcard() {
-        // The deny-list is scoped strictly to the protected file; a sibling
-        // path in the same directory with FileWrite("*") still succeeds, so the
-        // hardening does not broaden into a data_dir-wide write ban.
         let dir = std::env::temp_dir().join("librefang_anchor_test_6182_allow");
         std::fs::create_dir_all(&dir).unwrap();
         let anchor = dir.join("audit.anchor");
@@ -1214,8 +1194,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_fs_write_no_kernel_skips_protected_check() {
-        // With no kernel handle (stub guest), there is no anchor to protect and
-        // the deny-list is simply not consulted — a granted write succeeds.
         let dir = std::env::temp_dir().join("librefang_anchor_test_6182_nokernel");
         std::fs::create_dir_all(&dir).unwrap();
         let target = dir.join("scratch.txt");
@@ -1436,8 +1414,6 @@ mod tests {
         preloaded: std::sync::Mutex<
             std::collections::HashMap<(Option<String>, String), serde_json::Value>,
         >,
-        /// Paths returned by `ToolPolicy::protected_write_paths` (the audit
-        /// anchor deny-list, #6182).
         protected_paths: std::sync::Mutex<Vec<std::path::PathBuf>>,
     }
 
