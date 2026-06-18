@@ -644,7 +644,13 @@ fn strip_matching_outer_quotes(s: &str) -> &str {
 /// `<PREFIX>__<KEY>` namespace for per-instance secrets in `secrets.env` (#6169).
 fn instance_secret_prefix(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -666,7 +672,11 @@ fn build_spawn_env(
                 instance_scoped.insert(bare.to_string(), v);
             }
         } else if k.contains("__") {
-            // Another instance's namespaced secret — never leak it into this child.
+            // `__` is the reserved instance-namespace delimiter. This function only
+            // knows its own instance name, so it cannot tell a foreign instance's
+            // namespaced secret from a global key that merely contains `__`. Both are
+            // intentionally withheld from the child: a bare global secret in
+            // secrets.env must not contain `__` (see librefang.toml.example).
             continue;
         } else if std::env::var(&k).is_err() {
             // Global secrets.env: parent process env wins (dotenv precedence).

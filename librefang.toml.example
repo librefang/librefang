@@ -254,7 +254,9 @@ debounce_ms = 500
 # "agent-a" reads `AGENT_A__MATRIX_ACCESS_TOKEN` as its own
 # `MATRIX_ACCESS_TOKEN`; it overrides the global one and never leaks
 # to another instance. Without a prefix, all instances share the
-# global secret.
+# global secret. `__` is reserved as this namespace delimiter: a bare
+# global secret key must NOT contain `__`, or it is treated as another
+# instance's namespaced secret and withheld from every child.
 # The full env-var inventory for an adapter lives in its SCHEMA:
 #   python3 -m librefang.sidecar.adapters.<name> --describe
 #
