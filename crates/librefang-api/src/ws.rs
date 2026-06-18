@@ -1986,8 +1986,12 @@ fn classify_streaming_error(err: &dyn std::fmt::Display) -> String {
     if inner.contains("Agent not found") {
         return "Agent not found. It may have been stopped or deleted.".to_string();
     }
-    if inner.contains("quota") || inner.contains("Quota") {
-        return "Token quota exceeded. Try /compact or /new to free up space.".to_string();
+    // Internal usage-budget cap (LibreFangError::QuotaExceeded), distinct from a
+    // provider 429/billing error that merely contains the word "quota". Match the
+    // exact thiserror Display prefix so provider strings fall through to the
+    // classifier below (RateLimit / Billing), not this branch.
+    if inner.contains("Resource quota exceeded:") {
+        return "Usage budget reached for this window. This is a spending/usage cap, not a full context window \u{2014} /compact will NOT help. Wait for the limit window (hourly/daily/monthly) to reset, or raise the [budget] limits in config.toml.".to_string();
     }
 
     // Use the LLM error classifier for everything else
@@ -2216,11 +2220,44 @@ mod tests {
         struct E;
         impl std::fmt::Display for E {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("quota exceeded")
+                f.write_str("Resource quota exceeded: example")
             }
         }
         let msg = classify_streaming_error(&E);
-        assert!(msg.to_lowercase().contains("quota"));
+        assert!(msg.to_lowercase().contains("usage budget"));
+    }
+
+    #[test]
+    fn test_classify_streaming_error_internal_budget_is_honest() {
+        // The internal LibreFangError::QuotaExceeded Display prefix maps to the
+        // honest usage-budget message that does NOT recommend /compact or /new,
+        // because those clear context / the in-memory token tracker, not the
+        // persisted cost/usage windows that raised this error.
+        let msg = classify_streaming_error(
+            &"Resource quota exceeded: Global hourly budget exceeded: $5 / $5",
+        );
+        assert!(msg.contains("Usage budget"));
+        assert!(!msg.contains("/compact"));
+        assert!(!msg.contains("/new"));
+    }
+
+    #[test]
+    fn test_classify_streaming_error_provider_quota_is_rate_limited() {
+        // A provider 429 that merely contains the word "quota" must NOT be
+        // hijacked by the internal-budget branch; it falls through to the LLM
+        // classifier and is reported as a rate limit.
+        let msg = classify_streaming_error(
+            &"API error (429): You exceeded your current quota",
+        );
+        assert!(msg.contains("Rate limited"));
+        assert!(!msg.contains("Usage budget"));
+    }
+
+    #[test]
+    fn test_classify_streaming_error_provider_billing() {
+        // A provider 402/billing error maps to the Billing branch.
+        let msg = classify_streaming_error(&"API error (402): billing");
+        assert!(msg.contains("Billing issue"));
     }
 
     #[test]
