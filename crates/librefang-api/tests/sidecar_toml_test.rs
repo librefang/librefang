@@ -1,4 +1,4 @@
-use librefang_api::routes::sidecar_toml::upsert_sidecar_block;
+use librefang_api::routes::sidecar_toml::{remove_sidecar_block, upsert_sidecar_block};
 use std::collections::BTreeMap;
 use std::fs;
 use tempfile::NamedTempFile;
@@ -344,5 +344,60 @@ fn removes_schema_managed_env_keys_when_form_clears_them() {
     assert!(
         !content.contains("ALLOWED_USERS"),
         "schema-managed key removed when form cleared it: {content}"
+    );
+}
+
+#[test]
+fn remove_drops_named_block_and_keeps_others() {
+    let tmp = NamedTempFile::new().unwrap();
+    fs::write(
+        tmp.path(),
+        "[[sidecar_channels]]\nname = \"ntfy\"\nchannel_type = \"ntfy\"\n\
+         [sidecar_channels.env]\nNTFY_TOPIC = \"alerts\"\n\
+         \n\
+         [[sidecar_channels]]\nname = \"telegram\"\nchannel_type = \"telegram\"\n\
+         [sidecar_channels.env]\nALLOWED_USERS = \"1\"\n",
+    )
+    .unwrap();
+
+    assert!(remove_sidecar_block(tmp.path(), "telegram").unwrap());
+
+    let content = fs::read_to_string(tmp.path()).unwrap();
+    assert!(!content.contains("name = \"telegram\""), "telegram removed");
+    assert!(content.contains("name = \"ntfy\""), "ntfy preserved");
+    assert!(content.contains("NTFY_TOPIC = \"alerts\""));
+}
+
+#[test]
+fn remove_absent_name_is_noop_returning_false() {
+    let tmp = NamedTempFile::new().unwrap();
+    let original = "[[sidecar_channels]]\nname = \"ntfy\"\nchannel_type = \"ntfy\"\n";
+    fs::write(tmp.path(), original).unwrap();
+
+    assert!(!remove_sidecar_block(tmp.path(), "telegram").unwrap());
+    assert_eq!(fs::read_to_string(tmp.path()).unwrap(), original);
+}
+
+#[test]
+fn remove_last_block_drops_the_array_key() {
+    let tmp = NamedTempFile::new().unwrap();
+    fs::write(
+        tmp.path(),
+        "[default_model]\nprovider = \"ollama\"\n\
+         \n\
+         [[sidecar_channels]]\nname = \"telegram\"\nchannel_type = \"telegram\"\n",
+    )
+    .unwrap();
+
+    assert!(remove_sidecar_block(tmp.path(), "telegram").unwrap());
+
+    let content = fs::read_to_string(tmp.path()).unwrap();
+    assert!(
+        !content.contains("sidecar_channels"),
+        "array key dropped: {content}"
+    );
+    assert!(
+        content.contains("[default_model]"),
+        "unrelated section preserved"
     );
 }

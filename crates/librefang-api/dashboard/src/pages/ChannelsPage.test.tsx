@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ChannelsPage } from "./ChannelsPage";
 import { useDrawerStore } from "../lib/drawerStore";
 import { useChannels, useChannelQr } from "../lib/queries/channels";
-import { useReloadChannels, useSaveSidecarConfig } from "../lib/mutations/channels";
+import { useReloadChannels, useSaveSidecarConfig, useRemoveSidecarConfig } from "../lib/mutations/channels";
 import type { ChannelItem, QrState } from "../api";
 
 // The post-migration ChannelsPage routes every write through the
@@ -33,6 +33,7 @@ vi.mock("qrcode", () => ({
 vi.mock("../lib/mutations/channels", () => ({
   useReloadChannels: vi.fn(),
   useSaveSidecarConfig: vi.fn(),
+  useRemoveSidecarConfig: vi.fn(),
 }));
 
 vi.mock("react-i18next", async () => {
@@ -61,6 +62,9 @@ const useReloadChannelsMock = useReloadChannels as unknown as ReturnType<
   typeof vi.fn
 >;
 const useSaveSidecarConfigMock = useSaveSidecarConfig as unknown as ReturnType<
+  typeof vi.fn
+>;
+const useRemoveSidecarConfigMock = useRemoveSidecarConfig as unknown as ReturnType<
   typeof vi.fn
 >;
 
@@ -113,12 +117,18 @@ function makeMutation(overrides: Partial<MutationStub> = {}): MutationStub {
   };
 }
 
-function setMutationDefaults(): { reload: MutationStub; save: MutationStub } {
+function setMutationDefaults(): {
+  reload: MutationStub;
+  save: MutationStub;
+  remove: MutationStub;
+} {
   const reload = makeMutation();
   const save = makeMutation();
+  const remove = makeMutation();
   useReloadChannelsMock.mockReturnValue(reload);
   useSaveSidecarConfigMock.mockReturnValue(save);
-  return { reload, save };
+  useRemoveSidecarConfigMock.mockReturnValue(remove);
+  return { reload, save, remove };
 }
 
 function renderPage(): void {
@@ -333,6 +343,19 @@ describe("ChannelsPage", () => {
     renderPage();
     fireEvent.click(screen.getByRole("button", { name: /channels\.reload/ }));
     expect(reload.mutate).toHaveBeenCalledTimes(1);
+  });
+
+  it("removes a configured channel after confirmation", () => {
+    const { remove } = setMutationDefaults();
+    useChannelsMock.mockReturnValue(
+      makeQuery<ChannelItem[]>([makeChannel({ name: "telegram", configured: true })]),
+    );
+    renderPage();
+    // The remove dialog only appears after the per-card Trash button is clicked.
+    fireEvent.click(screen.getByRole("button", { name: "channels.remove" }));
+    fireEvent.click(screen.getByRole("button", { name: "common.confirm" }));
+    expect(remove.mutate).toHaveBeenCalledTimes(1);
+    expect(remove.mutate.mock.calls[0][0]).toBe("telegram");
   });
 
   it("pre-populates non-secret field values from the sidecar schema", () => {

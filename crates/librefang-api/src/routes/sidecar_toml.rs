@@ -146,3 +146,45 @@ pub fn upsert_sidecar_block(
     fs::rename(&tmp, path).map_err(|e| format!("rename {tmp:?} -> {path:?}: {e}"))?;
     Ok(())
 }
+
+/// Remove the `[[sidecar_channels]]` block identified by `name`; returns whether one was removed.
+pub fn remove_sidecar_block(path: &Path, name: &str) -> Result<bool, String> {
+    let original = fs::read_to_string(path).unwrap_or_default();
+    let mut doc: DocumentMut = original
+        .parse()
+        .map_err(|e| format!("parse {path:?}: {e}"))?;
+
+    let now_empty;
+    {
+        let Some(aot_item) = doc.get_mut("sidecar_channels") else {
+            return Ok(false);
+        };
+        let aot = aot_item.as_array_of_tables_mut().ok_or_else(|| {
+            "config.toml: `sidecar_channels` is not an array-of-tables".to_string()
+        })?;
+        let idx = (0..aot.len()).find(|&i| {
+            aot.get(i)
+                .and_then(|t| t.get("name"))
+                .and_then(|v| v.as_str())
+                == Some(name)
+        });
+        let Some(idx) = idx else {
+            return Ok(false);
+        };
+        aot.remove(idx);
+        now_empty = aot.is_empty();
+    }
+    // Drop a now-empty array entirely rather than leaving a bare `sidecar_channels = []`.
+    if now_empty {
+        doc.remove("sidecar_channels");
+    }
+
+    // Atomic write to a sibling tempfile then rename (same scheme as upsert_sidecar_block).
+    let parent = path.parent().ok_or("config path has no parent")?;
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = parent.join(format!(".config.toml.tmp.{}.{seq}", std::process::id()));
+    fs::write(&tmp, doc.to_string()).map_err(|e| format!("write {tmp:?}: {e}"))?;
+    fs::rename(&tmp, path).map_err(|e| format!("rename {tmp:?} -> {path:?}: {e}"))?;
+    Ok(true)
+}

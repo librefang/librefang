@@ -866,7 +866,11 @@ In-crate only; no cross-crate error-shape changes.
 
 ### Added
 
-- **auth/dashboard: passkey (WebAuthn/FIDO2) login** (#5981) (@houko) — sign in to the dashboard with Touch ID, Face ID, Windows Hello, Android biometrics, or a roaming security key instead of typing a password.
+- **channels: remove a configured sidecar channel from the dashboard** (#6186) (@houko).
+  Channels could only be added — the only way to remove one was hand-editing `config.toml`.
+  A new `DELETE /api/channels/sidecar/{name}` rewrites `config.toml` under the same lock that gates configure, then hot-reloads so the removed sidecar child is stopped rather than left running until restart.
+  The dashboard configured-channel cards gain a confirm-guarded Trash button wired to a `useRemoveSidecarConfig` mutation; the channel's `secrets.env` keys are deliberately left untouched, since purging secrets is a separate destructive action.
+  Closes #6186.
   Opt-in per deployment via `passkey_enabled` + `passkey_rp_id` / `passkey_rp_origin` in `config.toml`; password login is untouched and remains the fallback.
   Adds the `webauthn_credentials` table (SQLite migration v44) storing the serialized `webauthn-rs` `Passkey` so the sign-count persists across assertions, a `PasskeyEngine` owning the two WebAuthn ceremonies with short-TTL in-memory challenge state, and six routes under `/api/auth/passkey/*` (registration-options/verify gated Owner-only, authentication-options/verify public and rate-limited, plus list/revoke).
   A successful passkey assertion mints a session identical to `dashboard_login` and bypasses the password-path TOTP challenge (a passkey is already a phishing-resistant second factor).
