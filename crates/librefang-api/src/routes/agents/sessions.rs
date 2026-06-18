@@ -457,7 +457,10 @@ pub async fn get_agent_session_context(
     // before there is any await, but keep the drop explicit per the repo gotcha.
     drop(t);
 
-    let report = match state.kernel.context_report_for_session(agent_id, session_override) {
+    let report = match state
+        .kernel
+        .context_report_for_session(agent_id, session_override)
+    {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!("Context report failed for agent {id}: {e}");

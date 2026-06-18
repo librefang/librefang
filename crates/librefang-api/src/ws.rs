@@ -2237,7 +2237,8 @@ mod tests {
             &"Resource quota exceeded: Global hourly budget exceeded: $5 / $5",
         );
         assert!(msg.contains("Usage budget"));
-        assert!(!msg.contains("/compact"));
+        // It mentions /compact only to steer the user away from it, never as a remedy.
+        assert!(msg.contains("/compact will NOT help"));
         assert!(!msg.contains("/new"));
     }
 
@@ -2246,9 +2247,7 @@ mod tests {
         // A provider 429 that merely contains the word "quota" must NOT be
         // hijacked by the internal-budget branch; it falls through to the LLM
         // classifier and is reported as a rate limit.
-        let msg = classify_streaming_error(
-            &"API error (429): You exceeded your current quota",
-        );
+        let msg = classify_streaming_error(&"API error (429): You exceeded your current quota");
         assert!(msg.contains("Rate limited"));
         assert!(!msg.contains("Usage budget"));
     }
