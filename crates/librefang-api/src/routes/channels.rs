@@ -1110,9 +1110,11 @@ pub async fn delete_sidecar_channel(
     {
         if let Err(e) = crate::channel_bridge::reload_channels_from_disk(&state).await {
             tracing::error!("sidecar delete: bridge restart failed: {e}");
-            return Err(ApiErrorResponse::internal(format!(
-                "removed from config.toml but bridge restart failed: {e}"
-            ))
+            // Surface the actionable partial-failure signal (config WAS removed) but
+            // not the raw error chain — the full `e` is already logged above.
+            return Err(ApiErrorResponse::internal(
+                "removed from config.toml but bridge restart failed",
+            )
             .into_json_tuple());
         }
     }
