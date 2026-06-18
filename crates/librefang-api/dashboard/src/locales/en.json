@@ -809,6 +809,8 @@
     "offline": "Offline",
     "require_config": "Requires Setup",
     "no_configured": "No configured providers",
+    "section_coding_agents": "Coding Agents",
+    "section_providers": "Providers",
     "no_unconfigured": "No unconfigured providers",
     "no_results": "No matching providers",
     "name": "Name",
