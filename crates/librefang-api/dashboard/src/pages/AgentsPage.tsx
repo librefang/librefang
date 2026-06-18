@@ -775,9 +775,7 @@ export function AgentsPage() {
       return a.name.localeCompare(b.name);
     }), [visibleAgents, search, stateFilter, sortBy]);
 
-  // Group the already-filtered/sorted list into Core Agents vs Hands so the
-  // two kinds read as distinct sections instead of one flat list. handAgents
-  // is naturally empty while the showHandAgents toggle is off.
+  // handAgents is naturally empty while the showHandAgents toggle is off.
   const coreAgents = useMemo(() => filteredAgents.filter(a => !a.is_hand), [filteredAgents]);
   const handAgents = useMemo(() => filteredAgents.filter(a => a.is_hand), [filteredAgents]);
   const conflictingToolNames = useMemo(

@@ -869,7 +869,8 @@ In-crate only; no cross-crate error-shape changes.
 - **dashboard(agents): group the Agents list into Core Agents and Hands sections** (#6189) (@houko).
   The Agents page rendered every agent in one flat list, with hand-role agents distinguished only by a small per-row badge.
   The already-filtered and -sorted list is now split on the `is_hand` flag into two titled sections (using the pre-seeded `agents.core_agents` / `agents.hands` i18n keys); each header only shows when its group is non-empty, so the `Show hands` toggle keeps its meaning and a single-group view shows no empty banner.
-  Presentational only — no data-layer, query, or backend change. Closes #6189.
+  Presentational only — no data-layer, query, or backend change.
+  Closes #6189.
 
 - **auth/dashboard: passkey (WebAuthn/FIDO2) login** (#5981) (@houko) — sign in to the dashboard with Touch ID, Face ID, Windows Hello, Android biometrics, or a roaming security key instead of typing a password.
   Opt-in per deployment via `passkey_enabled` + `passkey_rp_id` / `passkey_rp_origin` in `config.toml`; password login is untouched and remains the fallback.
