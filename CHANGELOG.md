@@ -5,6 +5,50 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.6.17] - 2026-06-17
+
+_22 PRs from 3 contributors since v2026.6.16-beta.19._
+
+### Added
+
+- Per-conversation agent routing for multi-agent groups (#5323) (#6127) (@houko)
+- Passkey (WebAuthn/FIDO2) dashboard login (#5981) (#6129) (@houko)
+- Deterministic inbound dispatch — channel-instance binding lookup (#5671 Model A) (#6131) (@houko)
+- GitHub/Codeberg registry source selector (#6142) (@houko)
+- Gate auto-routing on AutoRouteStrategy, not the "assistant" name (#6139) (#6148) (@houko)
+- Propagate W3C traceparent on outbound MCP tool calls (#6128) (#6153) (@houko)
+- Report the model codex actually used (#6134) (#6157) (@houko)
+- Dock the agent panel as a resizable sidebar with a larger prompt editor (#6154 #6155) (#6164) (@houko)
+- The cron-management tool disables jobs instead of deleting them (#6159) (#6165) (@houko)
+- Enlarge TOML view, edit agent system prompt and tools with reset-to-default (#6150 #6151 #6152) (#6166) (@houko)
+- Central prompt repository page with versions and agent binding (#6160) (#6167) (@houko)
+
+### Fixed
+
+- Enforce cross-chat dispatch guard through the /mcp bridge (#6117) (#6125) (@houko)
+- Take over a stale conversation-ownership claim from a channel-ineligible holder (#5323) (#6132) (@houko)
+- Respect `LIBREFANG_HOME` when resolving plugin directory (#6136) (@HuaGu-Dragon)
+- Close channel media RBAC bypass and audit findings (#6141) (@houko)
+- Keep Save actionable after a passing Test (#6144) (#6146) (@houko)
+- Refetch hand settings after save so inputs persist (#6145) (#6147) (@houko)
+- Show the correct Hand agent name in the sessions view (#6156) (#6162) (@houko)
+- Build vendored OpenSSL on Windows so webauthn-rs links (#6161) (#6163) (@houko)
+- Pin vendored OpenSSL to Strawberry Perl on the Windows test lane (#6171) (@houko)
+
+### Changed
+
+- Lift tool dispatch table to typed ToolError (#3576 slice 5) (#6124) (@houko)
+
+<details>
+<summary>Documentation, maintenance, and other internal changes</summary>
+
+### Maintenance
+
+- Bump the actions-minor-patch group with 2 updates (#6140) (@app/dependabot)
+
+</details>
+
+
 ## [2026.6.16] - 2026-06-16
 
 _18 PRs from 3 contributors since v2026.6.11-beta.18._
@@ -881,6 +925,12 @@ In-crate only; no cross-crate error-shape changes.
   `install.sh` / `install.ps1` install the bundled binary when present and stay silent on older tarballs that lack it.
 
 ### Fixed
+
+- **fix(whatsapp-gateway): resolve the `link-preview-js` peer conflict and commit a lockfile** (#6180) (@houko).
+  `npm install` in `packages/whatsapp-gateway` failed with `ERESOLVE` unless `--legacy-peer-deps` was passed: the gateway declared `link-preview-js@^4.0.1` as a direct dependency while `@whiskeysockets/baileys@6.7.22` lists it as `peerOptional ^3.0.0`, and the direct declaration defeated the optional flag.
+  `link-preview-js` is never imported by the gateway, so the direct dependency is dropped and pinned via an `overrides` block to `^4.0.1`, preserving the #5934 SSRF fix (GHSA-4gp8-rjrq-ch6q) if Baileys ever pulls it in transitively.
+  A `package-lock.json` is now committed so installs are reproducible and CI can run `npm audit` against a locked graph.
+  Closes #6180.
 
 - **ci: the Windows test lane is green again — `librefang-api` now builds vendored OpenSSL on Windows so `webauthn-rs` links** (#6161) (@houko).
   The passkey/WebAuthn work (#5981) added `webauthn-rs`, which pulls in `webauthn-rs-core` → native `openssl-sys`; the Windows MSVC runners have no discoverable system OpenSSL, so `cargo test --no-run --workspace` failed there with "Could not find directory of OpenSSL installation".
