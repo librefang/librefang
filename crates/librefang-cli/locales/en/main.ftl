@@ -62,6 +62,14 @@ label-id = ID
 label-active-agents = Active agents
 label-pairing-code = Pairing code
 label-expires = Expires
+label-yes = yes
+label-not-loaded = not loaded
+label-current = Current
+label-channel = Channel
+label-binary = Binary
+label-latest = Latest
+label-target = Target
+label-installed = Installed
 
 # --- Hints ---
 hint-open-dashboard = Open the dashboard in your browser, or run `librefang chat`
@@ -402,3 +410,489 @@ reset-fail = Failed to remove { $path }: { $error }
 # --- Logs ---
 log-following = --- Following { $path } (Ctrl+C to stop) ---
 log-path-hint = Log file: { $path }
+
+# --- Extracted from Rust sources ---
+init-upgrade-existing = Existing installation detected — running upgrade to preserve your settings.
+init-upgrade-fresh-hint = To start fresh, remove ~/.librefang/config.toml and run `librefang init` again.
+init-upgrade-no-config = Nothing to upgrade — no config.toml found. Run `librefang init` first.
+init-upgrade-registry-synced = Registry synced
+init-upgrade-registry-failed = Registry sync failed (network issue?) — continuing with cached content
+init-upgrade-config-up-to-date = Config is already up to date — no new fields added
+init-upgrade-sections-added = Added { $count } new config section(s):
+init-upgrade-legacy-openclaw = Legacy ~/.openclaw installation detected.
+init-upgrade-legacy-openclaw-hint = Run `librefang migrate --from openclaw` to migrate your data.
+init-upgrade-approval-warning = Your require_approval list only contains "shell_exec". File operations (file_write, file_delete) now require approval by default.
+init-upgrade-approval-hint = To enable: add "file_write" and "file_delete" to require_approval in config.toml
+init-upgrade-success-summary = Upgrade complete!
+init-upgrade-title = Upgrading LibreFang installation
+init-upgrade-progress-label = Upgrading
+init-upgrade-backing-up = Backing up config
+init-upgrade-backup-success = Backed up config to backups/{ $name }
+init-upgrade-syncing-registry = Syncing registry
+init-upgrade-initializing-vault-git = Initialising vault/git
+init-upgrade-merging-config = Merging config fields
+init-upgrade-failed-read = Upgrade aborted: failed to read config.toml: { $error }
+init-upgrade-failed-parse = Upgrade aborted: failed to parse config.toml: { $error }
+init-upgrade-backup-saved-hint = Your original config was saved to backups/{ $name }
+init-upgrade-failed-parse-template = Upgrade aborted: failed to parse default config template: { $error }
+init-upgrade-failed-write = Upgrade aborted: failed to write config: { $error }
+init-upgrade-steps-complete = Upgrade steps complete
+label-backup = Backup
+label-new-fields = New fields
+
+auth-chatgpt-device-requested = Device authentication requested.
+auth-chatgpt-device-open-url = Open this URL in any browser:\n  { $url }\n
+auth-chatgpt-device-one-time-code = Enter this one-time code:\n  { $code }\n
+auth-chatgpt-device-do-not-share = Do not share this code.
+auth-chatgpt-device-waiting = Waiting for authorization...
+auth-chatgpt-switching-browser = \nSwitching to the standard browser login flow...\n
+auth-chatgpt-opening-browser = Opening browser for OpenAI authentication...
+auth-chatgpt-open-manually-hint = If the browser does not open, visit:\n  { $url }\n
+auth-chatgpt-open-browser-failed = Could not open browser automatically: { $error }
+auth-chatgpt-open-manually = Please open manually: { $url }
+auth-chatgpt-tokens-saved = \nChatGPT tokens saved to { $path }
+auth-chatgpt-detecting-model = Detecting best available model...
+auth-chatgpt-selected-model = Selected model: { $model }
+auth-chatgpt-config-updated = config.toml updated: provider = "chatgpt", model = "{ $model }"
+auth-chatgpt-starting-flow = Starting ChatGPT authentication flow...\n
+auth-chatgpt-complete = ChatGPT authentication complete.
+auth-chatgpt-failed = ChatGPT authentication failed: { $error }
+
+auth-pool-config-not-array = config.toml `credential_pools` exists but is not an array of tables
+auth-pool-daemon-error-fallback = Daemon returned HTTP { $status } — falling back to config.toml view
+auth-pool-daemon-connect-fallback = Failed to query daemon at { $url }: { $error } — falling back to config.toml view
+auth-pool-no-config-offline = No config at { $path } and daemon is not running.
+auth-pool-config-load-failed = Failed to load config: { $error }
+auth-pool-none-configured = No credential pools configured.
+auth-pool-invalid-env-name = `{ $env_var }` is not a valid env var name. Expected uppercase letters, digits, and underscores (e.g. OPENAI_API_KEY_2).
+auth-pool-env-empty = env var `{ $env_var }` is set but empty.
+auth-pool-env-empty-fix = Set it to your API key before adding the pool entry, e.g.\n  export { $env_var }=sk-…\nThen retry.
+auth-pool-env-not-set = env var `{ $env_var }` is not set in the current shell.
+auth-pool-env-not-set-fix = Export it before adding the pool entry, e.g.\n  export { $env_var }=sk-…\nThen retry. (The daemon will read it from its own environment at boot time — make sure it's exported there too.)
+auth-pool-keys-not-array = Pool for `{ $provider }` has a `keys` field that is not an array of tables.
+auth-pool-key-duplicate = Key with env_var `{ $env_var }` already exists in pool for provider `{ $provider }`.
+auth-pool-key-added = Added key `{ $label }` (env={ $env_var }, priority={ $priority }) to pool for `{ $provider }`. Restart the daemon or hot-reload config to apply.
+auth-pool-not-configured = No credential pool configured for provider `{ $provider }`.
+auth-pool-no-keys-field = Pool for `{ $provider }` has no keys array.
+auth-pool-key-not-found = No key with env_var `{ $env_var }` found in pool for `{ $provider }`.
+auth-pool-key-removed-pool-empty = Removed key `{ $env_var }` from pool for `{ $provider }`. Pool is now empty and has been removed entirely. Restart the daemon or hot-reload config to apply.
+auth-pool-key-removed = Removed key `{ $env_var }` from pool for `{ $provider }`. Restart the daemon or hot-reload config to apply.
+auth-pool-unknown-strategy = Unknown strategy `{ $strategy }`. Valid: fill_first, round_robin, random, least_used.
+auth-pool-strategy-set = Set pool strategy for `{ $provider }` to `{ $strategy }`. Restart the daemon or hot-reload config to apply.
+vault-empty = Vault is empty.
+vault-stored-count = Stored credentials ({ $count }):
+
+# --- Scanned & Extracted keys ---
+# init.rs
+init-upgrade-failed-create-backups-dir = Failed to create backups dir: { $error }
+init-upgrade-failed-backup-config = Failed to backup config: { $error }
+init-error-write-config-example = Could not write config.example.toml: { $error }
+
+# auth.rs
+auth-write-failed = Failed to write { $path }: { $error }
+auth-password-empty = Password cannot be empty.
+auth-passwords-mismatch = Passwords do not match.
+auth-password-hash-failed = Failed to hash password: { $error }
+vault-enter-value-prompt = Enter value for { $key }: 
+auth-enter-password-prompt = Enter password: 
+auth-confirm-password-prompt = Confirm password: 
+
+# agent.rs
+agent-spawn-choose-target-or-template = Choose either a positional target or `--template`, not both.
+agent-spawn-choose-target-or-template-fix = Use `librefang spawn coder` or `librefang spawn --template agents/custom/my-agent.toml`.
+agent-spawn-name-requires-template = `--name` requires a template name or manifest path.
+agent-spawn-name-requires-template-fix = Use `librefang spawn coder --name backend-coder` or `librefang spawn --template path/to/agent.toml --name backend-coder`.
+agent-spawn-dry-run-requires-template = Dry run needs a template name or manifest path.
+agent-spawn-dry-run-requires-template-fix = Use `librefang spawn coder --dry-run` or `librefang spawn --template path/to/agent.toml --dry-run`.
+agent-spawn-template-or-path-not-found = Template or manifest path not found: { $target }
+agent-spawn-template-or-path-not-found-fix = Run `librefang agent new` to browse templates, or pass a valid manifest path.
+agent-manifest-parse-failed = Failed to parse agent manifest from { $source }: { $error }
+agent-manifest-parse-failed-fix = Check the manifest TOML syntax and required fields.
+agent-manifest-serialize-failed = Failed to serialize updated manifest: { $error }
+agent-dry-run-title = Agent Dry Run
+agent-dry-run-success = Manifest parsed successfully. No agent was spawned.
+agent-delete-warning-text = WARNING: Deleting agent "{ $name }" will permanently remove its canonical UUID
+    and all associated memories and sessions.
+    This action cannot be undone.
+label-confirm-prompt = Confirm?
+label-aborted = Aborted.
+agent-delete-no-uuid = No canonical UUID recorded for agent name '{ $name }' — nothing to delete.
+agent-deleted-success = Agent "{ $name }" deleted (canonical UUID purged).
+agent-delete-failed-with-reason = Failed to delete agent: { $error }
+agent-reset-uuid-warning-text = WARNING: Resetting the canonical UUID for "{ $name }" will orphan all sessions
+    and memories tied to its current UUID. The next spawn under this
+    name will start with a fresh UUID. This action cannot be undone.
+agent-reset-uuid-success = Canonical UUID for "{ $name }" reset (was { $previous }).
+agent-reset-uuid-failed-with-reason = Failed to reset canonical UUID: { $error }
+agent-reset-uuid-not-found = No canonical UUID recorded for agent name '{ $name }'.
+agent-merge-history-not-implemented = merge-history is not yet implemented (refs #4614 follow-up).
+    Reassignment of sessions / memories from { $from } to the canonical UUID
+    for agent "{ $name }" requires cross-table SQL surgery in the memory
+    substrate that is being tracked separately.
+agent-set-model-success = Agent { $id } model set to { $value }.
+agent-set-model-failed-with-reason = Failed to set model: { $error }
+agent-set-no-daemon = No running daemon found. Start one with: librefang start
+agent-set-unknown-field = Unknown field: { $field }. Supported fields: model
+agent-new-no-templates = No agent templates found
+agent-new-no-templates-fix = Run `librefang init` to set up the agents directory
+agent-new-template-not-found = Template '{ $name }' not found
+agent-new-template-not-found-fix = Run `librefang agent new` to see available templates
+agent-new-choose-template-prompt =   Choose template [1]: 
+agent-sessions-none-active = No active sessions.
+agent-sessions-none-found = No sessions found.
+
+label-source = Source
+label-name = Name
+label-module = Module
+label-tools = Tools
+label-tags = Tags
+label-description = Description
+
+# daemon.rs
+daemon-first-run-setup = First run detected — running quick setup...
+daemon-config-not-found = Config file not found: { $path }
+daemon-config-not-found-fix = Run `librefang init` to create a default config at ~/.librefang/config.toml, or check the --config path.
+daemon-log-file-not-found = Log file not found
+daemon-log-file-not-found-fix = Expected at: { $path }
+daemon-log-not-found-showing-tui = Daemon log not found; showing TUI log at { $path }
+
+# hand.rs
+hand-install-error-no-toml = Error: No HAND.toml found in { $path }
+hand-install-error-read-toml = Error reading { $path }: { $error }
+hand-error-prefix = Error: { $error }
+hand-installed-success = Installed hand: { $name } ({ $id })
+hand-activate-hint = Use `librefang hand activate { $id }` to start it.
+hand-none-available = No hands available.
+hand-list-activate-hint =
+    Use `librefang hand activate <id>` to activate a hand.
+hand-none-active = No active hands.
+label-hand = Hand
+label-instance = Instance
+label-agent = Agent
+hand-status-title = Hand Status
+label-status-inactive = inactive
+hand-not-found = No active hand or installed hand found for '{ $id }'.
+hand-activated-success = Hand '{ $id }' activated (instance: { $instance }, agent: { $agent })
+hand-activate-failed = Failed to activate hand '{ $id }': { $error }
+hand-deactivated-success = Hand '{ $id }' deactivated.
+label-failed-reason = Failed: { $error }
+hand-no-active-instance = No active hand instance found for '{ $id }'.
+hand-info-not-found = Hand not found: { $error }
+hand-no-settings = Hand '{ $id }' has no configurable settings.
+hand-settings-title = Settings for '{ $id }'
+hand-set-setting-success = Set { $key }={ $value } for hand '{ $id }'.
+hand-reloaded-summary = Reloaded hands: { $added } added, { $updated } updated, { $total } total.
+hand-chat-welcome = Chat with { $name } (type /quit to exit)
+
+# mcp_cmds.rs
+mcp-catalog-unknown-entry = Unknown MCP catalog entry: '{ $name }'
+mcp-catalog-available-header =
+    Available MCP servers (catalog):
+mcp-failed-read-config = Failed to read { $path }: { $error }
+mcp-invalid-toml = { $path } is not valid TOML: { $error }
+mcp-already-configured = MCP server '{ $name }' is already configured. Run `librefang mcp remove { $name }` first if you want to re-install.
+mcp-failed-write-config = Failed to write config.toml: { $error }
+mcp-add-credentials-hint =
+    To add credentials:
+mcp-get-it-here =   Get it here: { $url }
+mcp-not-configured = MCP server '{ $name }' is not configured
+mcp-failed-update-config = Failed to update config.toml: { $error }
+mcp-removed-success = { $name } removed.
+mcp-catalog-no-matches = No MCP catalog entries matching '{ $query }'.
+mcp-catalog-none-available = No MCP catalog entries available.
+mcp-catalog-summary =   { $total } catalog entries ({ $installed } installed)
+mcp-catalog-install-hint =   Use `librefang mcp add <id>` to install an MCP server.
+mcp-none-configured = No MCP servers configured.
+mcp-list-catalog-hint =   Use `librefang mcp catalog` to list installable entries.
+
+# monitoring.rs
+monitoring-audit-reset-destructive = audit reset is destructive — re-run with `--confirm` to proceed
+monitoring-db-not-found = database not found at { $path }
+monitoring-db-open-failed = failed to open { $path }: { $error }
+monitoring-db-truncate-failed = failed to truncate audit_entries: { $error }
+monitoring-audit-reset-anchor-deleted = , deleted anchor at { $path }
+monitoring-audit-reset-anchor-none =  (no anchor file to remove)
+monitoring-audit-reset-success = Audit trail reset: removed { $count } row(s) from audit_entries{ $anchor_detail }.
+monitoring-audit-reset-would-header =   Would:
+monitoring-audit-reset-would-delete =     1. DELETE all rows from `audit_entries` in { $path }
+monitoring-audit-reset-would-remove-anchor =     2. Remove anchor file { $path }
+monitoring-audit-reset-would-restart =   The Merkle chain will restart from the next audit event.
+monitoring-daemon-running-error = daemon is running at { $url }; refusing to touch the audit database
+monitoring-daemon-running-error-fix = stop the daemon first: `librefang stop`
+monitoring-anchor-remove-failed = failed to remove anchor { $path }: { $error }
+monitoring-audit-reset-seed-fresh = The next daemon boot will seed a fresh Merkle chain from the current tip.
+monitoring-memory-no-entries = No memory entries for agent '{ $agent }'.
+monitoring-devices-none-paired = No paired devices.
+monitoring-webhooks-none-configured = No webhooks configured.
+
+# skill.rs
+skill-install-progress = Installing { $source }
+
+# system.rs
+migrate-error-home-dir = Error: Could not determine home directory
+migrate-start-msg = Migrating from { $source } ({ $path })...
+migrate-dry-run-hint =   (dry run — no changes will be made)
+migrate-progress-label = Running migration
+migrate-complete-msg = Migration complete
+migrate-warn-report-save-failed = Warning: Could not save migration report: { $error }
+migrate-report-saved =
+      Report saved to: { $path }
+migrate-failed-msg = Migration failed: { $error }
+
+# maintenance.rs
+maintenance-service-install-root-error = Running as root — the service will be installed for the root account, not your user. Run without sudo instead.
+maintenance-service-unsupported = Auto-start service is not supported on this platform.
+maintenance-failed-create-dir = Failed to create { $path }: { $error }
+maintenance-failed-write-file = Failed to write { $path }: { $error }
+maintenance-wrote-file = Wrote { $path }
+maintenance-systemctl-reload-failed = systemctl --user daemon-reload failed
+maintenance-service-enabled = Service enabled (will start on next login)
+maintenance-service-start-hint = Start now with: systemctl --user start librefang.service
+maintenance-service-linger-hint = For headless servers, also run: loginctl enable-linger
+maintenance-systemctl-enable-failed = systemctl --user enable librefang.service failed
+maintenance-launchagent-loaded = LaunchAgent loaded (will start on login and now)
+maintenance-launchctl-load-failed = launchctl load failed: { $error }
+maintenance-launchctl-run-failed = Failed to run launchctl: { $error }
+maintenance-windows-startup-added = Added to Windows startup (HKCU\Software\Microsoft\Windows\CurrentVersion\Run)
+maintenance-windows-registry-write-failed = Failed to write registry: { $error }
+maintenance-windows-reg-run-failed = Failed to run reg.exe: { $error }
+maintenance-systemd-removed = Removed systemd user service
+maintenance-systemd-remove-failed = Failed to remove service file: { $error }
+maintenance-systemd-not-found = No systemd user service found — nothing to remove.
+maintenance-launchagent-removed = Removed LaunchAgent
+maintenance-launchagent-remove-failed = Failed to remove plist: { $error }
+maintenance-launchagent-not-found = No LaunchAgent found — nothing to remove.
+maintenance-windows-startup-removed = Removed from Windows startup
+maintenance-windows-startup-not-found = No startup entry found — nothing to remove.
+maintenance-systemd-status-registered = Systemd user service is registered
+maintenance-status-label-enabled =   Enabled
+maintenance-status-label-active =   Active
+maintenance-systemd-status-not-registered = No systemd user service registered.
+maintenance-service-install-hint = Run `librefang service install` to set it up.
+maintenance-launchagent-status-registered = LaunchAgent is registered
+maintenance-status-label-loaded =   Loaded
+maintenance-launchagent-status-not-registered = No LaunchAgent registered.
+maintenance-windows-status-registered = Windows startup entry is registered
+maintenance-windows-status-not-registered = No startup entry registered.
+reset-confirm-message =   This will delete all data in { $path }
+      Including: config, database, agent manifests, credentials.
+reset-confirm-prompt =   Are you sure? Type 'yes' to confirm: 
+reset-not-needed = Nothing to reset — { $path } does not exist.
+maintenance-update-section = Update
+maintenance-update-error-exe-path = Cannot determine current executable path: { $error }
+maintenance-update-error-check-release = Failed to check latest release: { $error }
+maintenance-update-warn-resolve-release = Could not resolve the latest published release: { $error }
+maintenance-update-warn-resolve-release-fix = Retry later, or pass `--version <tag>` to target a specific release.
+maintenance-update-available = A newer published release is available: { $tag }
+maintenance-update-run-hint = Run `librefang update` to install it.
+maintenance-update-same-core = The published release { $tag } uses the same CLI version core as the current binary ({ $current }).
+maintenance-update-same-core-hint = Run `librefang update` if you want the latest published build for this version line.
+maintenance-update-ahead = Current binary version { $current } is ahead of the published release { $tag }.
+maintenance-update-compare-unknown = Could not compare the current binary with release tag { $tag }.
+maintenance-update-compare-unknown-hint = If you want that exact release, run `librefang update --version <tag>`.
+maintenance-update-unable-to-determine = Unable to determine whether an update is available.
+maintenance-update-unable-to-determine-hint = Retry later when GitHub Releases is reachable.
+maintenance-update-cannot-compare-safely = Could not safely compare the current binary against release tag { $tag }.
+maintenance-update-cannot-compare-safely-hint = Re-run with `librefang update --version { $tag }` to install it explicitly.
+maintenance-update-windows-daemon-running-error = Stop the running daemon before updating on Windows.
+maintenance-update-windows-daemon-running-error-fix = Run `librefang stop`, then `librefang update`, then `librefang start`.
+maintenance-update-cli-success = LibreFang CLI updated.
+maintenance-update-merging-config-defaults = Merging new config defaults...
+maintenance-update-restart-daemon-hint = If the daemon is running, restart it with `librefang restart`.
+maintenance-update-background-launched = Update launched in the background.
+maintenance-update-background-hint-terminal = Open a new terminal after it finishes and run `librefang --version`.
+maintenance-update-background-hint-restart = If the daemon is running, restart it after the update completes.
+maintenance-update-failed-error = Update failed: { $error }
+maintenance-update-cargo-blocked = This binary was installed with cargo. Running `cargo install` from inside the active executable is intentionally blocked.
+maintenance-update-unofficial-path = Automatic update only supports the official install path ({ $path }). This binary is running from a different location.
+maintenance-update-package-manager-hint = If this binary came from another package manager, update it with that package manager instead.
+
+# doctor_cmd.rs
+doctor-check-librefang-dir-ok = LibreFang directory: { $path }
+doctor-check-librefang-dir-fail = LibreFang directory not found.
+doctor-check-librefang-dir-created = Created LibreFang directory
+doctor-check-librefang-dir-create-fail = Failed to create directory
+doctor-check-librefang-dir-not-found-init = LibreFang directory not found. Run `librefang init` first.
+doctor-check-env-ok = .env file (permissions OK)
+doctor-check-env-fixed = .env file (permissions fixed to 0600)
+doctor-check-env-ok-generic = .env file
+doctor-check-env-loose-warn = .env file has loose permissions ({ $mode }), should be 0600
+doctor-check-env-not-found-warn = .env file not found (create with: librefang config set-key <provider>)
+doctor-check-config-ok = Config file: { $path }
+doctor-check-config-syntax-fail = Config file has syntax errors: { $error }
+doctor-check-config-not-found = Config file not found.
+doctor-check-config-created = Created default config.toml
+doctor-check-config-create-fail = Failed to create config.toml
+doctor-check-cli-version = CLI version: { $version } (channel: { $channel })
+doctor-check-update-available-warn = Update available: { $current } -> { $latest } (see https://github.com/librefang/librefang/releases)
+doctor-check-cli-up-to-date = CLI is up to date
+doctor-check-update-fail-warn = Could not check for updates (network unavailable)
+doctor-check-daemon-running = Daemon running at { $url }
+doctor-check-daemon-not-running-warn = Daemon not running (start with `librefang start`)
+doctor-check-port-available = Port { $address } is available
+doctor-check-port-in-use-warn = Port { $address } is in use by another process
+doctor-check-stale-daemon-json-removed = Removed stale daemon.json
+doctor-check-stale-daemon-json-warn = Stale daemon.json found (daemon not running). Run with --repair to clean up.
+doctor-check-db-ok = Database file (valid SQLite)
+doctor-check-db-invalid-fail = Database file exists but is not valid SQLite
+doctor-check-db-not-found-warn = No database file (will be created on first run)
+doctor-check-disk-space-low-warn = Low disk space: { $count }MB available
+doctor-check-disk-space-ok = Disk space: { $count }MB available
+doctor-check-manifests-ok = Agent manifests are valid
+doctor-check-manifest-invalid-fail = Invalid manifest { $file }: { $error }
+doctor-check-home-dir-fail = Could not determine home directory
+doctor-check-provider-key-rejected-warn = { $name } ({ $env_var }) - key rejected (401/403)
+doctor-check-endpoint-reachable = { $name } endpoint reachable ({ $endpoint })
+doctor-check-endpoint-unreachable-warn = { $name } endpoint unreachable ({ $endpoint })
+doctor-check-channel-token-format-warn = { $name } ({ $env_var }) - unexpected token format
+doctor-check-config-env-missing-warn = Config references { $env_var } but it is not set in env or .env
+doctor-check-config-deser-ok = Config deserializes into KernelConfig
+doctor-check-exec-policy = Exec policy: mode={ $mode }, safe_bins={ $count }
+doctor-check-include-file-ok = Include file: { $path }
+doctor-check-include-file-missing-warn = Include file missing: { $path }
+doctor-check-include-file-not-found-fail = Include file not found: { $path }
+doctor-check-mcp-servers-count = MCP servers configured: { $count }
+doctor-check-mcp-empty-command-warn = MCP server '{ $name }' has empty command
+doctor-check-mcp-empty-url-warn = MCP server '{ $name }' has empty URL
+doctor-check-mcp-empty-base-url-warn = MCP server '{ $name }' has empty base_url
+doctor-check-mcp-no-compat-tools-warn = MCP server '{ $name }' has no http_compat tools configured
+doctor-check-mcp-compat-header-empty-name-warn = MCP server '{ $name }' has an http_compat header with empty name
+doctor-check-mcp-compat-header-no-value-warn = MCP server '{ $name }' has an http_compat header without value/value_env
+doctor-check-mcp-compat-tool-empty-name-warn = MCP server '{ $name }' has an http_compat tool with empty name
+doctor-check-mcp-compat-tool-empty-path-warn = MCP server '{ $name }' has an http_compat tool with empty path
+doctor-check-config-deser-fail = Config fails KernelConfig deserialization: { $error }
+doctor-check-skills-loaded = Skills loaded: { $count }
+doctor-check-skills-load-fail-warn = Failed to load skills: { $error }
+doctor-check-skills-injection-ok = All skills pass prompt injection scan
+doctor-check-mcp-catalog-templates = MCP catalog templates: { $templates }
+doctor-check-mcp-configured-servers = Configured MCP servers: { $configured }
+doctor-check-running-agents = Running agents: { $count }
+doctor-check-daemon-uptime = Daemon uptime: { $hours }h { $mins }m
+doctor-check-db-connectivity-ok = Database connectivity: OK
+doctor-check-db-status-fail = Database status: { $status }
+doctor-check-health-detail-status-warn = Health detail returned { $status }
+doctor-check-health-detail-fail-warn = Failed to query daemon health: { $error }
+doctor-check-skills-loaded-daemon = Skills loaded in daemon: { $count }
+doctor-check-rust-version = Rust: { $version }
+doctor-check-rust-not-found-fail = Rust toolchain not found
+doctor-check-python-version = Python: { $version }
+doctor-check-python-not-found-warn = Python not found (needed for Python skill runtime)
+doctor-check-node-version = Node.js: { $version }
+doctor-check-node-not-found-warn = Node.js not found (needed for Node skill runtime)
+doctor-prompt-create-dir =     Create it now? [Y/n] 
+doctor-prompt-create-config =     Create default config? [Y/n] 
+doctor-section-providers =   LLM Providers:
+doctor-section-connectivity = 
+
+  Network Connectivity:
+doctor-section-channels = 
+
+  Channel Integrations:
+doctor-section-config-val = 
+
+  Config Validation:
+doctor-section-skills = 
+
+  Skills:
+doctor-check-skills-injection-critical-warn = Skill '{ $name }' has { $count } critical warning(s):
+doctor-check-skills-injection-warn = Prompt injection warning in skill: { $name }
+doctor-section-mcp-servers =
+  MCP servers:
+doctor-section-daemon-health =
+  Daemon Health:
+doctor-check-daemon-mcp-status = MCP servers: { $configured } configured, { $connected } connected
+doctor-check-daemon-mcp-health = MCP server health: { $healthy }/{ $total } healthy
+
+doctor-suggest-groq = https://console.groq.com       (free, fast)
+doctor-suggest-gemini = https://aistudio.google.com    (free tier)
+doctor-suggest-deepseek = https://platform.deepseek.com  (low cost)
+
+desktop-install-launched = Desktop app launched.
+desktop-install-launch-fail = Failed to launch { $path }: { $error }
+desktop-install-launch-fail-generic = Failed to launch desktop app: { $error }
+desktop-install-not-installed = LibreFang Desktop is not installed.
+desktop-install-prompt =   Download and install it now? [Y/n] 
+desktop-install-skipped = Skipped. You can install it later:
+desktop-install-skipped-brew =   brew install --cask librefang   (macOS)
+desktop-install-skipped-manual =   Or download from https://github.com/librefang/librefang/releases
+desktop-install-fetching = Fetching latest release info...
+desktop-install-unsupported = Unsupported platform for automatic desktop install.
+desktop-install-download-manual = Download manually: https://github.com/librefang/librefang/releases
+desktop-install-github-fail = Failed to reach GitHub: { $error }
+desktop-install-parse-fail = Failed to parse release info: { $error }
+desktop-install-kv-asset = Asset
+desktop-install-downloading = Downloading...
+desktop-install-download-fail = Download failed: { $error }
+desktop-install-download-complete = Download complete.
+desktop-install-installing = Installing...
+desktop-install-success = LibreFang Desktop installed successfully.
+desktop-install-fail = Installation failed: { $error }
+desktop-install-running-installer = Running installer...
+
+doctor-audit-vault-key-unset = LIBREFANG_VAULT_KEY not set — vault encryption disabled.
+doctor-audit-vault-key-invalid-base64 = LIBREFANG_VAULT_KEY is not valid base64: { $error }
+doctor-audit-vault-key-invalid-base64-hint = Generate one with: openssl rand -base64 32
+doctor-audit-vault-key-wrong-length = LIBREFANG_VAULT_KEY decodes to { $count } bytes; must be exactly 32. Note that 32 ASCII characters is NOT 32 bytes after base64 decode.
+doctor-audit-vault-key-wrong-length-hint = Generate a fresh 32-byte key: openssl rand -base64 32 (44-char output)
+doctor-audit-vault-key-ok = LIBREFANG_VAULT_KEY decodes to 32 bytes.
+
+doctor-audit-api-listen-no-config = config.toml not found — skipping api_listen check.
+doctor-audit-api-listen-invalid-toml = config.toml is not valid TOML: { $error }
+doctor-audit-api-listen-invalid-toml-hint = Edit ~/.librefang/config.toml or run `librefang doctor --repair`.
+doctor-audit-api-listen-unset = api_listen not set in config — kernel will use the default.
+doctor-audit-api-listen-invalid-addr = api_listen `{ $address }` is not a valid socket address: { $error }
+doctor-audit-api-listen-invalid-addr-hint = Use `host:port` form, e.g. `127.0.0.1:4545` or `[::1]:4545`.
+doctor-audit-api-listen-port-zero = api_listen `{ $address }` uses port 0 (OS-assigned ephemeral); clients can't discover the daemon URL after bind.
+doctor-audit-api-listen-port-zero-hint = Pick an explicit port (default 4545), e.g. `127.0.0.1:4545`.
+doctor-audit-api-listen-privileged = api_listen port { $port } is privileged (<1024); daemon will fail to bind without root.
+doctor-audit-api-listen-privileged-hint = Use a port >= 1024 (default 4545) unless you intentionally need root.
+doctor-audit-api-listen-ok = api_listen `{ $address }` parses cleanly.
+
+doctor-audit-config-not-found = { $path } does not exist.
+doctor-audit-config-not-found-hint = Run `librefang init` to create a default config.
+doctor-audit-config-read-fail = Failed to read { $path }: { $error }
+doctor-audit-config-ok = { $path } parses as TOML.
+doctor-audit-config-syntax-error = { $path } has TOML syntax errors: { $error }
+doctor-audit-config-syntax-error-hint = Edit { $path } or restore from a backup.
+
+# launcher menu items
+launcher-menu-get-started = Get started
+launcher-menu-get-started-hint = Providers, API keys, models, migration
+launcher-menu-settings = Settings
+launcher-menu-settings-hint = Providers, API keys, models, routing
+launcher-menu-chat = Chat with an agent
+launcher-menu-chat-hint = Quick chat in the terminal
+launcher-menu-dashboard = Open dashboard
+launcher-menu-dashboard-hint = Launch the web UI in your browser
+launcher-menu-desktop = Open desktop app
+launcher-menu-desktop-hint = Launch the native desktop app
+launcher-menu-tui = Launch terminal UI
+launcher-menu-tui-hint = Full interactive TUI dashboard
+launcher-menu-help = Show all commands
+launcher-menu-help-hint = Print full --help output
+
+# launcher screen strings
+launcher-welcome = Welcome! Let's get you set up.
+launcher-checking-daemon = Checking for daemon…
+launcher-daemon-running = Daemon running at { $url }
+launcher-daemon-no-running = No daemon running
+launcher-provider = Provider: { $provider }
+launcher-no-keys = No API keys detected
+launcher-hint-re-run =   Run 'Re-run setup' to configure a provider
+launcher-hint-get-started =   Select 'Get started' to configure
+launcher-migration-question = Coming from { $source }? 
+launcher-migration-hint = 'Get started' includes automatic migration.
+launcher-menu-hints = ↑↓/jk navigate  1-9 quick select  enter confirm  q quit
+launcher-help-title = All commands
+launcher-help-subtitle =   — q/Esc to go back
+launcher-help-hints = ↑↓/jk scroll  PgUp/PgDn  g/G top/bottom  q back
+
+# CLI shared UI strings
+ui-brand-tagline = The open-source agent operating system
+ui-label-hint = hint:
+ui-label-next-steps = Next steps
+ui-label-fix = fix:
+ui-label-try = try:
+ui-provider-not-set = { $env_var } not set
+
+

@@ -125,7 +125,10 @@ pub(crate) fn cmd_skill_install(source: &str, hand: Option<&str>) {
         }
     } else {
         // Remote install from FangHub
-        let mut sp = progress::auto(&format!("Installing {source}"), None);
+        let mut sp = progress::auto(
+            &i18n::t_args("skill-install-progress", &[("source", source)]),
+            None,
+        );
         sp.tick(1);
         let rt = tokio::runtime::Runtime::new().unwrap();
         let client = librefang_skills::marketplace::MarketplaceClient::new(

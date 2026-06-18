@@ -258,15 +258,18 @@ pub(crate) fn ensure_initialized(config: &Option<PathBuf>) {
         None => {
             let home = cli_librefang_home();
             if !home.join("config.toml").exists() {
-                ui::hint("First run detected — running quick setup...");
+                ui::hint(&i18n::t("daemon-first-run-setup"));
                 cmd_init(true);
             }
         }
         Some(path) => {
             if !path.exists() {
                 ui::error_with_fix(
-                    &format!("Config file not found: {}", path.display()),
-                    "Run `librefang init` to create a default config at ~/.librefang/config.toml, or check the --config path.",
+                    &i18n::t_args(
+                        "daemon-config-not-found",
+                        &[("path", &path.display().to_string())],
+                    ),
+                    &i18n::t("daemon-config-not-found-fix"),
                 );
                 std::process::exit(1);
             }
@@ -610,8 +613,11 @@ pub(crate) fn force_kill_pid(pid: u32) {
 pub(crate) fn show_log_file(log_path: &std::path::Path, lines: usize, follow: bool) {
     if !log_path.exists() {
         ui::error_with_fix(
-            "Log file not found",
-            &format!("Expected at: {}", log_path.display()),
+            &i18n::t("daemon-log-file-not-found"),
+            &i18n::t_args(
+                "daemon-log-file-not-found-fix",
+                &[("path", &log_path.display().to_string())],
+            ),
         );
         std::process::exit(1);
     }
@@ -634,7 +640,13 @@ pub(crate) fn show_log_file(log_path: &std::path::Path, lines: usize, follow: bo
             for line in &all_lines[start..] {
                 println!("{line}");
             }
-            println!("--- Following {} (Ctrl+C to stop) ---", log_path.display());
+            println!(
+                "{}",
+                i18n::t_args(
+                    "log-following",
+                    &[("path", &log_path.display().to_string())]
+                )
+            );
             let mut last_len = content.len();
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(500));
@@ -669,9 +681,9 @@ pub(crate) fn cmd_logs(config: Option<PathBuf>, lines: usize, follow: bool) {
         None => daemon.home_dir.join("logs").join("tui.log"),
     };
     if tui_log.exists() {
-        ui::hint(&format!(
-            "Daemon log not found; showing TUI log at {}",
-            tui_log.display()
+        ui::hint(&i18n::t_args(
+            "daemon-log-not-found-showing-tui",
+            &[("path", &tui_log.display().to_string())],
         ));
         show_log_file(&tui_log, lines, follow);
         return;

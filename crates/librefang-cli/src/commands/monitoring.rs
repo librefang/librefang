@@ -146,36 +146,54 @@ pub(crate) fn cmd_audit_reset(config: Option<PathBuf>, confirm: bool) {
     };
 
     if !confirm {
-        ui::error("audit reset is destructive — re-run with `--confirm` to proceed");
+        ui::error(&i18n::t("monitoring-audit-reset-destructive"));
         ui::blank();
-        println!("  Would:");
+        println!("{}", i18n::t("monitoring-audit-reset-would-header"));
         println!(
-            "    1. DELETE all rows from `audit_entries` in {}",
-            db_path.display()
+            "{}",
+            i18n::t_args(
+                "monitoring-audit-reset-would-delete",
+                &[("path", &db_path.display().to_string())]
+            )
         );
-        println!("    2. Remove anchor file {}", anchor_path.display());
-        println!("  The Merkle chain will restart from the next audit event.");
+        println!(
+            "{}",
+            i18n::t_args(
+                "monitoring-audit-reset-would-remove-anchor",
+                &[("path", &anchor_path.display().to_string())]
+            )
+        );
+        println!("{}", i18n::t("monitoring-audit-reset-would-restart"));
         std::process::exit(1);
     }
 
     // Refuse if daemon is running — SQLite writer lock would block or corrupt.
     if let Some(base) = find_daemon_in_home(&daemon.home_dir) {
         ui::error_with_fix(
-            &format!("daemon is running at {base}; refusing to touch the audit database"),
-            "stop the daemon first: `librefang stop`",
+            &i18n::t_args("monitoring-daemon-running-error", &[("url", &base)]),
+            &i18n::t("monitoring-daemon-running-error-fix"),
         );
         std::process::exit(1);
     }
 
     if !db_path.exists() {
-        ui::error(&format!("database not found at {}", db_path.display()));
+        ui::error(&i18n::t_args(
+            "monitoring-db-not-found",
+            &[("path", &db_path.display().to_string())],
+        ));
         std::process::exit(1);
     }
 
     let conn = match rusqlite::Connection::open(&db_path) {
         Ok(c) => c,
         Err(e) => {
-            ui::error(&format!("failed to open {}: {e}", db_path.display()));
+            ui::error(&i18n::t_args(
+                "monitoring-db-open-failed",
+                &[
+                    ("path", &db_path.display().to_string()),
+                    ("error", &e.to_string()),
+                ],
+            ));
             std::process::exit(1);
         }
     };
@@ -194,9 +212,12 @@ pub(crate) fn cmd_audit_reset(config: Option<PathBuf>, confirm: bool) {
         match std::fs::remove_file(&anchor_path) {
             Ok(()) => true,
             Err(e) => {
-                ui::error(&format!(
-                    "failed to remove anchor {}: {e}",
-                    anchor_path.display()
+                ui::error(&i18n::t_args(
+                    "monitoring-anchor-remove-failed",
+                    &[
+                        ("path", &anchor_path.display().to_string()),
+                        ("error", &e.to_string()),
+                    ],
                 ));
                 std::process::exit(1);
             }
@@ -206,7 +227,10 @@ pub(crate) fn cmd_audit_reset(config: Option<PathBuf>, confirm: bool) {
     };
 
     if let Err(e) = conn.execute("DELETE FROM audit_entries", []) {
-        ui::error(&format!("failed to truncate audit_entries: {e}"));
+        ui::error(&i18n::t_args(
+            "monitoring-db-truncate-failed",
+            &[("error", &e.to_string())],
+        ));
         std::process::exit(1);
     }
     drop(conn);
@@ -214,15 +238,22 @@ pub(crate) fn cmd_audit_reset(config: Option<PathBuf>, confirm: bool) {
     // insert after an empty table naturally gets seq = 1. No sqlite_sequence
     // fiddling needed.
 
-    ui::success(&format!(
-        "Audit trail reset: removed {rows_before} row(s) from audit_entries{}.",
-        if anchor_removed {
-            format!(", deleted anchor at {}", anchor_path.display())
-        } else {
-            " (no anchor file to remove)".to_string()
-        }
+    let anchor_detail = if anchor_removed {
+        i18n::t_args(
+            "monitoring-audit-reset-anchor-deleted",
+            &[("path", &anchor_path.display().to_string())],
+        )
+    } else {
+        i18n::t("monitoring-audit-reset-anchor-none")
+    };
+    ui::success(&i18n::t_args(
+        "monitoring-audit-reset-success",
+        &[
+            ("count", &rows_before.to_string()),
+            ("anchor_detail", &anchor_detail),
+        ],
     ));
-    ui::hint("The next daemon boot will seed a fresh Merkle chain from the current tip.");
+    ui::hint(&i18n::t("monitoring-audit-reset-seed-fresh"));
 }
 
 pub(crate) fn cmd_memory_list(agent: &str, json: bool) {

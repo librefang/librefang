@@ -46,10 +46,7 @@ pub(crate) fn cmd_service_install() {
     {
         // SAFETY: geteuid() is always safe to call.
         if unsafe { libc::geteuid() } == 0 {
-            ui::error(
-                "Running as root — the service will be installed for the root account, \
-                 not your user. Run without sudo instead.",
-            );
+            ui::error(&i18n::t("maintenance-service-install-root-error"));
             std::process::exit(1);
         }
     }
@@ -74,7 +71,7 @@ pub(crate) fn cmd_service_install() {
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         let _ = &binary;
-        ui::error("Auto-start service is not supported on this platform.");
+        ui::error(&i18n::t("maintenance-service-unsupported"));
     }
 }
 
@@ -83,13 +80,19 @@ pub(crate) fn service_install_linux(binary: &std::path::Path, librefang_home: &s
     let home = match dirs::home_dir() {
         Some(h) => h,
         None => {
-            ui::error("Cannot determine home directory.");
+            ui::error(&i18n::t("migrate-error-home-dir"));
             return;
         }
     };
     let service_dir = home.join(".config/systemd/user");
     if let Err(e) = std::fs::create_dir_all(&service_dir) {
-        ui::error(&format!("Failed to create {}: {e}", service_dir.display()));
+        ui::error(&i18n::t_args(
+            "maintenance-failed-create-dir",
+            &[
+                ("path", &service_dir.display().to_string()),
+                ("error", &e.to_string()),
+            ],
+        ));
         return;
     }
 
@@ -117,10 +120,19 @@ pub(crate) fn service_install_linux(binary: &std::path::Path, librefang_home: &s
 
     let service_path = service_dir.join("librefang.service");
     if let Err(e) = std::fs::write(&service_path, &unit) {
-        ui::error(&format!("Failed to write {}: {e}", service_path.display()));
+        ui::error(&i18n::t_args(
+            "maintenance-failed-write-file",
+            &[
+                ("path", &service_path.display().to_string()),
+                ("error", &e.to_string()),
+            ],
+        ));
         return;
     }
-    ui::success(&format!("Wrote {}", service_path.display()));
+    ui::success(&i18n::t_args(
+        "maintenance-wrote-file",
+        &[("path", &service_path.display().to_string())],
+    ));
 
     // Reload and enable
     let reload = std::process::Command::new("systemctl")
@@ -128,7 +140,7 @@ pub(crate) fn service_install_linux(binary: &std::path::Path, librefang_home: &s
         .output();
     if let Ok(o) = &reload {
         if !o.status.success() {
-            ui::error("systemctl --user daemon-reload failed");
+            ui::error(&i18n::t("maintenance-systemctl-reload-failed"));
             return;
         }
     }
@@ -137,12 +149,12 @@ pub(crate) fn service_install_linux(binary: &std::path::Path, librefang_home: &s
         .output();
     match enable {
         Ok(o) if o.status.success() => {
-            ui::success("Service enabled (will start on next login)");
-            ui::hint("Start now with: systemctl --user start librefang.service");
+            ui::success(&i18n::t("maintenance-service-enabled"));
+            ui::hint(&i18n::t("maintenance-service-start-hint"));
             // Enable lingering so the user service runs without an active login session
-            ui::hint("For headless servers, also run: loginctl enable-linger");
+            ui::hint(&i18n::t("maintenance-service-linger-hint"));
         }
-        _ => ui::error("systemctl --user enable librefang.service failed"),
+        _ => ui::error(&i18n::t("maintenance-systemctl-enable-failed")),
     }
 }
 
@@ -151,13 +163,19 @@ pub(crate) fn service_install_macos(binary: &std::path::Path, librefang_home: &s
     let home = match dirs::home_dir() {
         Some(h) => h,
         None => {
-            ui::error("Cannot determine home directory.");
+            ui::error(&i18n::t("migrate-error-home-dir"));
             return;
         }
     };
     let agents_dir = home.join("Library/LaunchAgents");
     if let Err(e) = std::fs::create_dir_all(&agents_dir) {
-        ui::error(&format!("Failed to create {}: {e}", agents_dir.display()));
+        ui::error(&i18n::t_args(
+            "maintenance-failed-create-dir",
+            &[
+                ("path", &agents_dir.display().to_string()),
+                ("error", &e.to_string()),
+            ],
+        ));
         return;
     }
 
@@ -202,23 +220,38 @@ pub(crate) fn service_install_macos(binary: &std::path::Path, librefang_home: &s
     }
 
     if let Err(e) = std::fs::write(&plist_path, &plist) {
-        ui::error(&format!("Failed to write {}: {e}", plist_path.display()));
+        ui::error(&i18n::t_args(
+            "maintenance-failed-write-file",
+            &[
+                ("path", &plist_path.display().to_string()),
+                ("error", &e.to_string()),
+            ],
+        ));
         return;
     }
-    ui::success(&format!("Wrote {}", plist_path.display()));
+    ui::success(&i18n::t_args(
+        "maintenance-wrote-file",
+        &[("path", &plist_path.display().to_string())],
+    ));
 
     let load = std::process::Command::new("launchctl")
         .args(["load", &plist_path.to_string_lossy()])
         .output();
     match load {
         Ok(o) if o.status.success() => {
-            ui::success("LaunchAgent loaded (will start on login and now)");
+            ui::success(&i18n::t("maintenance-launchagent-loaded"));
         }
         Ok(o) => {
             let stderr = String::from_utf8_lossy(&o.stderr);
-            ui::error(&format!("launchctl load failed: {stderr}"));
+            ui::error(&i18n::t_args(
+                "maintenance-launchctl-load-failed",
+                &[("error", &stderr.to_string())],
+            ));
         }
-        Err(e) => ui::error(&format!("Failed to run launchctl: {e}")),
+        Err(e) => ui::error(&i18n::t_args(
+            "maintenance-launchctl-run-failed",
+            &[("error", &e.to_string())],
+        )),
     }
 }
 
@@ -240,13 +273,19 @@ pub(crate) fn service_install_windows(binary: &std::path::Path) {
         .output();
     match output {
         Ok(o) if o.status.success() => {
-            ui::success("Added to Windows startup (HKCU\\...\\Run)");
+            ui::success(&i18n::t("maintenance-windows-startup-added"));
         }
         Ok(o) => {
             let stderr = String::from_utf8_lossy(&o.stderr);
-            ui::error(&format!("Failed to write registry: {stderr}"));
+            ui::error(&i18n::t_args(
+                "maintenance-windows-registry-write-failed",
+                &[("error", &stderr.to_string())],
+            ));
         }
-        Err(e) => ui::error(&format!("Failed to run reg.exe: {e}")),
+        Err(e) => ui::error(&i18n::t_args(
+            "maintenance-windows-reg-run-failed",
+            &[("error", &e.to_string())],
+        )),
     }
 }
 
@@ -264,12 +303,15 @@ pub(crate) fn cmd_service_uninstall() {
                     let _ = std::process::Command::new("systemctl")
                         .args(["--user", "daemon-reload"])
                         .output();
-                    ui::success("Removed systemd user service");
+                    ui::success(&i18n::t("maintenance-systemd-removed"));
                 }
-                Err(e) => ui::error(&format!("Failed to remove service file: {e}")),
+                Err(e) => ui::error(&i18n::t_args(
+                    "maintenance-systemd-remove-failed",
+                    &[("error", &e.to_string())],
+                )),
             }
         } else {
-            ui::hint("No systemd user service found — nothing to remove.");
+            ui::hint(&i18n::t("maintenance-systemd-not-found"));
         }
     }
     #[cfg(target_os = "macos")]
@@ -281,11 +323,14 @@ pub(crate) fn cmd_service_uninstall() {
                 .args(["unload", &plist_path.to_string_lossy()])
                 .output();
             match std::fs::remove_file(&plist_path) {
-                Ok(()) => ui::success("Removed LaunchAgent"),
-                Err(e) => ui::error(&format!("Failed to remove plist: {e}")),
+                Ok(()) => ui::success(&i18n::t("maintenance-launchagent-removed")),
+                Err(e) => ui::error(&i18n::t_args(
+                    "maintenance-launchagent-remove-failed",
+                    &[("error", &e.to_string())],
+                )),
             }
         } else {
-            ui::hint("No LaunchAgent found — nothing to remove.");
+            ui::hint(&i18n::t("maintenance-launchagent-not-found"));
         }
     }
     #[cfg(windows)]
@@ -301,14 +346,14 @@ pub(crate) fn cmd_service_uninstall() {
             .output();
         match output {
             Ok(o) if o.status.success() => {
-                ui::success("Removed from Windows startup");
+                ui::success(&i18n::t("maintenance-windows-startup-removed"));
             }
-            _ => ui::hint("No startup entry found — nothing to remove."),
+            _ => ui::hint(&i18n::t("maintenance-windows-startup-not-found")),
         }
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
-        ui::error("Auto-start service is not supported on this platform.");
+        ui::error(&i18n::t("maintenance-service-unsupported"));
     }
 }
 
@@ -318,25 +363,25 @@ pub(crate) fn cmd_service_status() {
         let home = dirs::home_dir().unwrap_or_default();
         let service_path = home.join(".config/systemd/user/librefang.service");
         if service_path.exists() {
-            ui::success("Systemd user service is registered");
+            ui::success(&i18n::t("maintenance-systemd-status-registered"));
             // Show enabled/active status
             if let Ok(output) = std::process::Command::new("systemctl")
                 .args(["--user", "is-enabled", "librefang.service"])
                 .output()
             {
                 let status = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                ui::kv("  Enabled", &status);
+                ui::kv(&i18n::t("maintenance-status-label-enabled"), &status);
             }
             if let Ok(output) = std::process::Command::new("systemctl")
                 .args(["--user", "is-active", "librefang.service"])
                 .output()
             {
                 let status = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                ui::kv("  Active", &status);
+                ui::kv(&i18n::t("maintenance-status-label-active"), &status);
             }
         } else {
-            ui::hint("No systemd user service registered.");
-            ui::hint("Run `librefang service install` to set it up.");
+            ui::hint(&i18n::t("maintenance-systemd-status-not-registered"));
+            ui::hint(&i18n::t("maintenance-service-install-hint"));
         }
     }
     #[cfg(target_os = "macos")]
@@ -344,18 +389,25 @@ pub(crate) fn cmd_service_status() {
         let home = dirs::home_dir().unwrap_or_default();
         let plist_path = home.join("Library/LaunchAgents/ai.librefang.daemon.plist");
         if plist_path.exists() {
-            ui::success("LaunchAgent is registered");
+            ui::success(&i18n::t("maintenance-launchagent-status-registered"));
             if let Ok(output) = std::process::Command::new("launchctl")
                 .args(["list"])
                 .output()
             {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let running = stdout.lines().any(|l| l.contains("ai.librefang.daemon"));
-                ui::kv("  Loaded", if running { "yes" } else { "not loaded" });
+                ui::kv(
+                    &i18n::t("maintenance-status-label-loaded"),
+                    if running {
+                        &i18n::t("label-yes")
+                    } else {
+                        &i18n::t("label-not-loaded")
+                    },
+                );
             }
         } else {
-            ui::hint("No LaunchAgent registered.");
-            ui::hint("Run `librefang service install` to set it up.");
+            ui::hint(&i18n::t("maintenance-launchagent-status-not-registered"));
+            ui::hint(&i18n::t("maintenance-service-install-hint"));
         }
     }
     #[cfg(windows)]
@@ -370,17 +422,17 @@ pub(crate) fn cmd_service_status() {
             .output();
         match output {
             Ok(o) if o.status.success() => {
-                ui::success("Windows startup entry is registered");
+                ui::success(&i18n::t("maintenance-windows-status-registered"));
             }
             _ => {
-                ui::hint("No startup entry registered.");
-                ui::hint("Run `librefang service install` to set it up.");
+                ui::hint(&i18n::t("maintenance-windows-status-not-registered"));
+                ui::hint(&i18n::t("maintenance-service-install-hint"));
             }
         }
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
-        ui::error("Auto-start service is not supported on this platform.");
+        ui::error(&i18n::t("maintenance-service-unsupported"));
     }
 }
 
@@ -428,7 +480,10 @@ pub(crate) fn cmd_update(check: bool, version: Option<String>, channel_override:
     use librefang_types::config::UpdateChannel;
 
     let current_exe = std::env::current_exe().unwrap_or_else(|e| {
-        ui::error(&format!("Cannot determine current executable path: {e}"));
+        ui::error(&i18n::t_args(
+            "maintenance-update-error-exe-path",
+            &[("error", &e.to_string())],
+        ));
         std::process::exit(1);
     });
 
@@ -449,32 +504,38 @@ pub(crate) fn cmd_update(check: bool, version: Option<String>, channel_override:
         load_update_channel_from_config().unwrap_or_default()
     };
 
-    ui::section("Update");
-    ui::kv("Current", current_version);
-    ui::kv("Channel", &channel.to_string());
-    ui::kv("Binary", &current_exe_display);
+    ui::section(&i18n::t("maintenance-update-section"));
+    ui::kv(&i18n::t("label-current"), current_version);
+    ui::kv(&i18n::t("label-channel"), &channel.to_string());
+    ui::kv(&i18n::t("label-binary"), &current_exe_display);
 
     let latest_tag = if requested_version.is_none() {
         match fetch_latest_release_tag(channel) {
             Ok(tag) => {
-                ui::kv("Latest", &tag);
+                ui::kv(&i18n::t("label-latest"), &tag);
                 Some(tag)
             }
             Err(err) => {
                 if check {
-                    ui::error(&format!("Failed to check latest release: {err}"));
+                    ui::error(&i18n::t_args(
+                        "maintenance-update-error-check-release",
+                        &[("error", &err.to_string())],
+                    ));
                     std::process::exit(1);
                 }
                 ui::warn_with_fix(
-                    &format!("Could not resolve the latest published release: {err}"),
-                    "Retry later, or pass `--version <tag>` to target a specific release.",
+                    &i18n::t_args(
+                        "maintenance-update-warn-resolve-release",
+                        &[("error", &err.to_string())],
+                    ),
+                    &i18n::t("maintenance-update-warn-resolve-release-fix"),
                 );
                 None
             }
         }
     } else {
         if let Some(target) = requested_version {
-            ui::kv("Target", target);
+            ui::kv(&i18n::t("label-target"), target);
         }
         None
     };
@@ -552,8 +613,8 @@ pub(crate) fn cmd_update(check: bool, version: Option<String>, channel_override:
     #[cfg(windows)]
     if same_path(&current_exe, &default_install) && find_daemon().is_some() {
         ui::error_with_fix(
-            "Stop the running daemon before updating on Windows.",
-            "Run `librefang stop`, then `librefang update`, then `librefang start`.",
+            &i18n::t("maintenance-update-windows-daemon-running-error"),
+            &i18n::t("maintenance-update-windows-daemon-running-error-fix"),
         );
         std::process::exit(1);
     }
@@ -562,28 +623,31 @@ pub(crate) fn cmd_update(check: bool, version: Option<String>, channel_override:
         match run_official_update(target_version) {
             #[cfg(not(windows))]
             Ok(UpdateLaunch::Completed) => {
-                ui::success("LibreFang CLI updated.");
+                ui::success(&i18n::t("maintenance-update-cli-success"));
                 if let Some(installed) = installed_binary_version(&default_install) {
-                    ui::kv("Installed", &installed);
+                    ui::kv(&i18n::t("label-installed"), &installed);
                 }
                 // Merge any new config defaults added in the updated binary.
                 // Spawn the new binary rather than calling cmd_init_upgrade() here,
                 // because the current process still holds the old binary's template.
                 ui::blank();
-                ui::hint("Merging new config defaults...");
+                ui::hint(&i18n::t("maintenance-update-merging-config-defaults"));
                 let _ = std::process::Command::new(&default_install)
                     .args(["init", "--upgrade"])
                     .status();
-                ui::hint("If the daemon is running, restart it with `librefang restart`.");
+                ui::hint(&i18n::t("maintenance-update-restart-daemon-hint"));
             }
             #[cfg(windows)]
             Ok(UpdateLaunch::Detached) => {
-                ui::success("Update launched in the background.");
-                ui::hint("Open a new terminal after it finishes and run `librefang --version`.");
-                ui::hint("If the daemon is running, restart it after the update completes.");
+                ui::success(&i18n::t("maintenance-update-background-launched"));
+                ui::hint(&i18n::t("maintenance-update-background-hint-terminal"));
+                ui::hint(&i18n::t("maintenance-update-background-hint-restart"));
             }
             Err(err) => {
-                ui::error(&format!("Update failed: {err}"));
+                ui::error(&i18n::t_args(
+                    "maintenance-update-failed-error",
+                    &[("error", &err.to_string())],
+                ));
                 std::process::exit(1);
             }
         }
@@ -592,21 +656,19 @@ pub(crate) fn cmd_update(check: bool, version: Option<String>, channel_override:
 
     if same_path(&current_exe, &cargo_install) {
         let cargo_cmd = cargo_update_command(target_version);
-        ui::warn_with_fix(
-            "This binary was installed with cargo. Running `cargo install` from inside the active executable is intentionally blocked.",
-            &cargo_cmd,
-        );
+        ui::warn_with_fix(&i18n::t("maintenance-update-cargo-blocked"), &cargo_cmd);
         return;
     }
 
     let official_path = default_install.display().to_string();
     ui::warn_with_fix(
-        &format!(
-            "Automatic update only supports the official install path ({official_path}). This binary is running from a different location."
+        &i18n::t_args(
+            "maintenance-update-unofficial-path",
+            &[("path", &official_path)],
         ),
         &manual_installer_command(target_version),
     );
-    ui::hint("If this binary came from another package manager, update it with that package manager instead.");
+    ui::hint(&i18n::t("maintenance-update-package-manager-hint"));
 }
 
 pub(crate) fn fetch_latest_release_tag(

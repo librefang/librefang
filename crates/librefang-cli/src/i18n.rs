@@ -6,8 +6,9 @@ use unic_langid::LanguageIdentifier;
 
 const EN_FTL: &str = include_str!("../locales/en/main.ftl");
 const ZH_CN_FTL: &str = include_str!("../locales/zh-CN/main.ftl");
+const UK_FTL: &str = include_str!("../locales/uk/main.ftl");
 
-pub const SUPPORTED_LANGUAGES: &[&str] = &["en", "zh-CN"];
+pub const SUPPORTED_LANGUAGES: &[&str] = &["en", "zh-CN", "uk"];
 pub use librefang_types::i18n::DEFAULT_LANGUAGE;
 
 thread_local! {
@@ -32,6 +33,7 @@ impl I18n {
         bundle.set_use_isolating(false);
         let source = match selected {
             "zh-CN" => ZH_CN_FTL,
+            "uk" => UK_FTL,
             _ => EN_FTL,
         };
         let resource = FluentResource::try_new(source.to_string())
@@ -69,26 +71,97 @@ pub fn init(language: &str) {
     });
 }
 
+fn is_utf8_locale() -> bool {
+    let vars = ["LC_ALL", "LC_MESSAGES", "LANG"];
+    for var in vars {
+        if let Ok(val) = std::env::var(var) {
+            let val_lower = val.to_lowercase();
+            if val_lower.contains("utf8") || val_lower.contains("utf-8") {
+                return true;
+            }
+            if val_lower == "c" || val_lower == "posix" {
+                return false;
+            }
+            if let Some(dot_idx) = val.find('.') {
+                let encoding = &val_lower[dot_idx + 1..];
+                if encoding.contains("utf8") || encoding.contains("utf-8") {
+                    return true;
+                }
+                return false;
+            }
+        }
+    }
+    true
+}
+
+pub fn detect_system_language() -> String {
+    if !is_utf8_locale() {
+        return DEFAULT_LANGUAGE.to_string();
+    }
+    let vars = ["LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"];
+    for var in vars {
+        if let Ok(val) = std::env::var(var) {
+            let parts = val.split([':', ';']);
+            for part in parts {
+                let part = part.trim();
+                if part.is_empty() {
+                    continue;
+                }
+                let base = part.split(['.', '@']).next().unwrap_or(part);
+                let normalized = base.replace('_', "-");
+
+                // Try exact match
+                for lang in SUPPORTED_LANGUAGES {
+                    if lang.eq_ignore_ascii_case(&normalized) {
+                        return lang.to_string();
+                    }
+                }
+
+                // Try match by prefix before '-'
+                let prefix = normalized.split('-').next().unwrap_or(&normalized);
+                for lang in SUPPORTED_LANGUAGES {
+                    if lang.eq_ignore_ascii_case(prefix) {
+                        return lang.to_string();
+                    }
+                    let lang_prefix = lang.split('-').next().unwrap_or(lang);
+                    if lang_prefix.eq_ignore_ascii_case(prefix) {
+                        return lang.to_string();
+                    }
+                }
+            }
+        }
+    }
+    DEFAULT_LANGUAGE.to_string()
+}
+
 pub fn t(key: &str) -> String {
     I18N.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .map(|i18n| i18n.get(key, None))
-            .unwrap_or_else(|| format!("[{key}]"))
+        let mut borrow = cell.borrow_mut();
+        if borrow.is_none() {
+            let i18n = I18n::new(DEFAULT_LANGUAGE).unwrap_or_else(|error| {
+                panic!("failed to initialize default i18n fallback: {error}");
+            });
+            *borrow = Some(i18n);
+        }
+        borrow.as_ref().unwrap().get(key, None)
     })
 }
 
 pub fn t_args(key: &str, args: &[(&str, &str)]) -> String {
     I18N.with(|cell| {
-        if let Some(i18n) = cell.borrow().as_ref() {
-            let mut fluent_args = FluentArgs::new();
-            for (name, value) in args {
-                fluent_args.set(*name, FluentValue::from(*value));
-            }
-            i18n.get(key, Some(&fluent_args))
-        } else {
-            format!("[{key}]")
+        let mut borrow = cell.borrow_mut();
+        if borrow.is_none() {
+            let i18n = I18n::new(DEFAULT_LANGUAGE).unwrap_or_else(|error| {
+                panic!("failed to initialize default i18n fallback: {error}");
+            });
+            *borrow = Some(i18n);
         }
+        let i18n = borrow.as_ref().unwrap();
+        let mut fluent_args = FluentArgs::new();
+        for (name, value) in args {
+            fluent_args.set(*name, FluentValue::from(*value));
+        }
+        i18n.get(key, Some(&fluent_args))
     })
 }
 
@@ -109,11 +182,64 @@ mod tests {
     }
 
     #[test]
+    fn renders_ukrainian_translation() {
+        init("uk");
+        assert_eq!(t("label-dashboard"), "Панель приладів");
+    }
+
+    #[test]
     fn renders_with_args() {
         init("en");
         assert_eq!(
             t_args("models-available", &[("count", "12")]),
             "12 models available"
         );
+    }
+
+    #[test]
+    fn auto_initializes_when_not_initialized() {
+        I18N.with(|cell| {
+            *cell.borrow_mut() = None;
+        });
+        assert_eq!(t("daemon-starting"), "Starting daemon...");
+    }
+
+    #[test]
+    fn test_detect_system_language() {
+        let backup_language = std::env::var("LANGUAGE").ok();
+        let backup_lang = std::env::var("LANG").ok();
+
+        // Test matching "uk" from "uk:en_US"
+        std::env::set_var("LANGUAGE", "uk:en_US");
+        assert_eq!(detect_system_language(), "uk");
+
+        // Test non-UTF-8 fallback to English even if LANGUAGE=uk:en_US is set
+        std::env::set_var("LANG", "uk_UA.KOI8-U");
+        assert_eq!(detect_system_language(), "en");
+
+        // Test C locale fallback
+        std::env::set_var("LANG", "C");
+        assert_eq!(detect_system_language(), "en");
+
+        // Test matching "zh-CN" from "zh_CN.UTF-8"
+        std::env::remove_var("LANGUAGE");
+        std::env::set_var("LANG", "zh_CN.UTF-8");
+        assert_eq!(detect_system_language(), "zh-CN");
+
+        // Test fallback to default
+        std::env::set_var("LANG", "fr_FR.UTF-8");
+        assert_eq!(detect_system_language(), "en");
+
+        // Restore env vars
+        if let Some(val) = backup_language {
+            std::env::set_var("LANGUAGE", val);
+        } else {
+            std::env::remove_var("LANGUAGE");
+        }
+        if let Some(val) = backup_lang {
+            std::env::set_var("LANG", val);
+        } else {
+            std::env::remove_var("LANG");
+        }
     }
 }

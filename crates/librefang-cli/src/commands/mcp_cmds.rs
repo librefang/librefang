@@ -18,8 +18,11 @@ pub(crate) fn cmd_mcp_add(name: &str, key: Option<&str>) {
     let template = match catalog.get(name) {
         Some(t) => t.clone(),
         None => {
-            ui::error(&format!("Unknown MCP catalog entry: '{name}'"));
-            println!("\nAvailable MCP servers (catalog):");
+            ui::error(&i18n::t_args(
+                "mcp-catalog-unknown-entry",
+                &[("name", name)],
+            ));
+            println!("{}", i18n::t("mcp-catalog-available-header"));
             for t in catalog.list() {
                 println!("  {} {} — {}", t.icon, t.id, t.description);
             }
@@ -37,14 +40,26 @@ pub(crate) fn cmd_mcp_add(name: &str, key: Option<&str>) {
         let content = match std::fs::read_to_string(&config_path) {
             Ok(c) => c,
             Err(e) => {
-                ui::error(&format!("Failed to read {}: {e}", config_path.display()));
+                ui::error(&i18n::t_args(
+                    "mcp-failed-read-config",
+                    &[
+                        ("path", &config_path.display().to_string()),
+                        ("error", &e.to_string()),
+                    ],
+                ));
                 std::process::exit(1);
             }
         };
         let parsed: toml::value::Table = match toml::from_str(&content) {
             Ok(t) => t,
             Err(e) => {
-                ui::error(&format!("{} is not valid TOML: {e}", config_path.display()));
+                ui::error(&i18n::t_args(
+                    "mcp-invalid-toml",
+                    &[
+                        ("path", &config_path.display().to_string()),
+                        ("error", &e.to_string()),
+                    ],
+                ));
                 std::process::exit(1);
             }
         };
@@ -109,7 +124,10 @@ pub(crate) fn cmd_mcp_add(name: &str, key: Option<&str>) {
     // Persist the new [[mcp_servers]] entry directly into config.toml.
     let config_path = home.join("config.toml");
     if let Err(e) = upsert_mcp_server_local(&config_path, &result.server) {
-        ui::error(&format!("Failed to write config.toml: {e}"));
+        ui::error(&i18n::t_args(
+            "mcp-failed-write-config",
+            &[("error", &e.to_string())],
+        ));
         std::process::exit(1);
     }
 
@@ -117,12 +135,12 @@ pub(crate) fn cmd_mcp_add(name: &str, key: Option<&str>) {
         librefang_types::mcp::McpStatus::Ready => ui::success(&result.message),
         librefang_types::mcp::McpStatus::Setup => {
             println!("{}", result.message.yellow());
-            println!("\nTo add credentials:");
+            println!("{}", i18n::t("mcp-add-credentials-hint"));
             for env in &template.required_env {
                 if env.is_secret {
                     println!("  librefang vault set {}  # {}", env.name, env.help);
                     if let Some(ref url) = env.get_url {
-                        println!("  Get it here: {url}");
+                        println!("{}", i18n::t_args("mcp-get-it-here", &[("url", url)]));
                     }
                 }
             }
@@ -166,17 +184,23 @@ pub(crate) fn cmd_mcp_remove(name: &str) {
     let target_name = match target_name {
         Some(n) => n,
         None => {
-            ui::error(&format!("MCP server '{name}' is not configured"));
+            ui::error(&i18n::t_args("mcp-not-configured", &[("name", name)]));
             std::process::exit(1);
         }
     };
 
     if let Err(e) = remove_mcp_server_local(&config_path, &target_name) {
-        ui::error(&format!("Failed to update config.toml: {e}"));
+        ui::error(&i18n::t_args(
+            "mcp-failed-update-config",
+            &[("error", &e.to_string())],
+        ));
         std::process::exit(1);
     }
 
-    ui::success(&format!("{target_name} removed."));
+    ui::success(&i18n::t_args(
+        "mcp-removed-success",
+        &[("name", &target_name)],
+    ));
 
     // Hot-reload daemon
     if let Some(base_url) = find_daemon() {

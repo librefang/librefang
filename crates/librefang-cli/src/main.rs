@@ -331,7 +331,7 @@ fn main() {
     // Load ~/.librefang/.env into process environment (system env takes priority).
     dotenv::load_dotenv();
 
-    let language = load_language_from_config().unwrap_or_else(|| "en".to_string());
+    let language = load_language_from_config().unwrap_or_else(i18n::detect_system_language);
     i18n::init(&language);
 
     let cli = Cli::parse();
