@@ -1030,6 +1030,10 @@ impl LlmDriver for QwenCodeDriver {
     fn family(&self) -> crate::llm_driver::LlmFamily {
         crate::llm_driver::LlmFamily::OpenAi
     }
+
+    fn is_coding_agent(&self) -> bool {
+        true
+    }
 }
 
 /// Check if the Qwen Code CLI is available.
@@ -1074,6 +1078,11 @@ fn home_dir() -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_coding_agent_is_true() {
+        assert!(QwenCodeDriver::new(None, false).is_coding_agent());
+    }
 
     #[test]
     fn extract_text_single_object() {

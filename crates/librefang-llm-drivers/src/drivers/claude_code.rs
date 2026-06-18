@@ -1612,6 +1612,10 @@ impl LlmDriver for ClaudeCodeDriver {
     fn family(&self) -> crate::llm_driver::LlmFamily {
         crate::llm_driver::LlmFamily::Anthropic
     }
+
+    fn is_coding_agent(&self) -> bool {
+        true
+    }
 }
 
 /// Check if the Claude Code CLI is available.
@@ -1667,6 +1671,11 @@ fn home_dir() -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_coding_agent_is_true() {
+        assert!(ClaudeCodeDriver::new(None, false).is_coding_agent());
+    }
 
     /// Spawn a tiny cross-platform child process for the
     /// `diagnose_stdin_write_failure` tests. POSIX runners can rely on
