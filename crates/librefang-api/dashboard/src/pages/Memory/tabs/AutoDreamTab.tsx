@@ -1,17 +1,15 @@
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
-import { useQueryClient } from "@tanstack/react-query";
 import { Moon } from "lucide-react";
 import { Card } from "../../../components/ui/Card";
 import { EmptyState } from "../../../components/ui/EmptyState";
 import { useAutoDreamStatus } from "../../../lib/queries/autoDream";
-import { autoDreamKeys } from "../../../lib/queries/keys";
 import {
   useTriggerAutoDream,
   useAbortAutoDream,
   useSetAutoDreamEnabled,
+  useSetAutoDreamGlobalEnabled,
 } from "../../../lib/mutations/autoDream";
-import { useSetConfigValue } from "../../../lib/mutations/config";
 import type { AgentItem, AutoDreamAgentStatus } from "../../../api";
 import { useUIStore } from "../../../lib/store";
 import { AutoDreamAgentRow } from "../components/AutoDreamAgentRow";
@@ -23,37 +21,12 @@ interface Props {
 
 export function AutoDreamTab({ agents, scopedAgentId }: Props) {
   const { t } = useTranslation();
-  const qc = useQueryClient();
   const addToast = useUIStore((s) => s.addToast);
   const dreamStatusQuery = useAutoDreamStatus();
   const dreamTrigger = useTriggerAutoDream();
   const dreamAbort = useAbortAutoDream();
   const dreamSetEnabled = useSetAutoDreamEnabled();
-  // The GLOBAL master switch writes config.toml's `[auto_dream] enabled`
-  // through the generic config-set endpoint (the `auto_dream.` prefix is on
-  // the writable allowlist). useSetConfigValue only invalidates configKeys, so
-  // we additionally invalidate autoDreamKeys here — otherwise the status badge
-  // and the per-agent rows (whose "Dream now" buttons key off the global flag)
-  // would look stale until the 15s poll. The flag is read live by the kernel
-  // every consolidation tick, so the toggle takes effect immediately even
-  // though POST /api/config/set may report `restart_required` for the
-  // conservatively-classified [auto_dream] struct.
-  const setGlobalEnabled = useSetConfigValue({
-    onSuccess: (_data, variables) => {
-      qc.invalidateQueries({ queryKey: autoDreamKeys.all });
-      addToast(
-        variables.value
-          ? t("memory.auto_dream_global_on_ok", {
-              defaultValue: "Auto-Dream enabled globally",
-            })
-          : t("memory.auto_dream_global_off_ok", {
-              defaultValue: "Auto-Dream disabled globally",
-            }),
-        "success",
-      );
-    },
-    onError: (e) => addToast(e instanceof Error ? e.message : String(e), "error"),
-  });
+  const setGlobalEnabled = useSetAutoDreamGlobalEnabled();
 
   const dreamStatus = dreamStatusQuery.data;
   const dreamByAgentId = useMemo(() => {
@@ -146,12 +119,20 @@ export function AutoDreamTab({ agents, scopedAgentId }: Props) {
               type="checkbox"
               checked={dreamStatus.enabled}
               disabled={setGlobalEnabled.isPending}
-              onChange={(e) =>
-                setGlobalEnabled.mutate({
-                  path: "auto_dream.enabled",
-                  value: e.target.checked,
-                })
-              }
+              onChange={async (e) => {
+                const value = e.target.checked;
+                try {
+                  await setGlobalEnabled.mutateAsync({ path: "auto_dream.enabled", value });
+                  addToast(
+                    value
+                      ? t("memory.auto_dream_global_on_ok", { defaultValue: "Auto-Dream enabled globally" })
+                      : t("memory.auto_dream_global_off_ok", { defaultValue: "Auto-Dream disabled globally" }),
+                    "success",
+                  );
+                } catch (err) {
+                  addToast(err instanceof Error ? err.message : String(err), "error");
+                }
+              }}
               className="w-3.5 h-3.5 accent-purple-500"
             />
             <Moon className="w-3 h-3 inline" />
