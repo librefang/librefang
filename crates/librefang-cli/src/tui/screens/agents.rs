@@ -1466,8 +1466,6 @@ mod tests {
 
     #[test]
     fn custom_agent_template_has_unlimited_hourly_token_budget() {
-        // Regression for #6206: the wizard hard-coded a 200000 hourly token cap,
-        // silently rate-limiting TUI-created agents (the compiled default is unlimited).
         let toml = AgentSelectState::new().build_custom_toml();
         assert!(
             toml.contains("max_llm_tokens_per_hour = 0"),
