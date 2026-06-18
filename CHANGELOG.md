@@ -922,6 +922,12 @@ In-crate only; no cross-crate error-shape changes.
 
 ### Fixed
 
+- **fix(cli): stop the agent-creation wizard from stamping a hidden 200k hourly token cap** (#6206) (@houko).
+  The TUI "create custom agent" wizard hard-coded `[resources] max_llm_tokens_per_hour = 200000` into every generated `agent.toml`, so TUI-created agents silently hit `Resource quota exceeded: Token limit would be exceeded ... > 200000` after a few large-context turns — even though the compiled and global defaults are unlimited.
+  The template now emits `max_llm_tokens_per_hour = 0` (explicitly unlimited, matching every non-TUI agent); operators who want a cap set it via `agent.toml [resources]`, the global `[budget] default_max_llm_tokens_per_hour`, or `PATCH /api/agents/{id}/budget`.
+  Existing agents keep their stored cap — edit the agent's manifest or PATCH its budget to lift it.
+  Closes #6206.
+
 - **fix(whatsapp-gateway): resolve the `link-preview-js` peer conflict and commit a lockfile** (#6180) (@houko).
   `npm install` in `packages/whatsapp-gateway` failed with `ERESOLVE` unless `--legacy-peer-deps` was passed: the gateway declared `link-preview-js@^4.0.1` as a direct dependency while `@whiskeysockets/baileys@6.7.22` lists it as `peerOptional ^3.0.0`, and the direct declaration defeated the optional flag.
   `link-preview-js` is never imported by the gateway, so the direct dependency is dropped and pinned via an `overrides` block to `^4.0.1`, preserving the #5934 SSRF fix (GHSA-4gp8-rjrq-ch6q) if Baileys ever pulls it in transitively.
