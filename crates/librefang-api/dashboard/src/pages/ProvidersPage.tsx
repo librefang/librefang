@@ -1243,7 +1243,7 @@ export function ProvidersPage() {
     t,
   );
 
-  const providers = providersQuery.data ?? [];
+  const providers = useMemo(() => providersQuery.data ?? [], [providersQuery.data]);
   const currentDefaultProvider = statusQuery.data?.default_provider ?? "";
   const configuredCount = useMemo(() => providers.filter(p => isProviderAvailable(p.auth_status)).length, [providers]);
 
@@ -1280,6 +1280,22 @@ export function ProvidersPage() {
       }),
     [providers, search, filterStatus, sortField, sortOrder],
   );
+
+  // Split the configured list into coding-agent CLIs (claude-code, codex-cli,
+  // gemini-cli, qwen-code, codewhale) vs raw provider APIs, using the backend
+  // `is_coding_agent` flag, so the page shows them under separate headers.
+  // Order within each group is preserved from `filteredProviders`.
+  const codingAgentProviders = useMemo(
+    () => filteredProviders.filter(p => p.is_coding_agent),
+    [filteredProviders],
+  );
+  const apiProviders = useMemo(
+    () => filteredProviders.filter(p => !p.is_coding_agent),
+    [filteredProviders],
+  );
+  // Only show the group headers when both groups are non-empty — a single
+  // group renders flat, without a lone header.
+  const showGroupHeaders = codingAgentProviders.length > 0 && apiProviders.length > 0;
 
   // Catalog of unconfigured providers, surfaced in the Add picker.
   const pickerProviders = useMemo(
@@ -1551,23 +1567,54 @@ export function ProvidersPage() {
             )}
           </div>
 
-          <div className={viewMode === "grid" ? "grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 3xl:grid-cols-5 4xl:grid-cols-6" : "flex flex-col gap-2"}>
-            {filteredProviders.map((p) => (
-              <ProviderCard
-                key={p.id} provider={p}
-                isSelected={selectedIds.has(p.id)}
-                isDefault={p.id === currentDefaultProvider}
-                pendingId={testingIds.has(p.id) ? p.id : pendingId}
-                viewMode={viewMode}
-                onSelect={handleSelect}
-                onTest={handleTest}
-                onSetDefault={handleSetDefault}
-                onViewDetails={setDetailsProvider}
-                onConfigure={config.open}
-                onDelete={setDeleteConfirmProvider}
-              />
-            ))}
-          </div>
+          {codingAgentProviders.length > 0 && (
+            <>
+              {showGroupHeaders && (
+                <h3 className="text-xs font-black uppercase tracking-wider text-text-dim">{t("providers.section_coding_agents")}</h3>
+              )}
+              <div className={viewMode === "grid" ? "grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 3xl:grid-cols-5 4xl:grid-cols-6" : "flex flex-col gap-2"}>
+                {codingAgentProviders.map((p) => (
+                  <ProviderCard
+                    key={p.id} provider={p}
+                    isSelected={selectedIds.has(p.id)}
+                    isDefault={p.id === currentDefaultProvider}
+                    pendingId={testingIds.has(p.id) ? p.id : pendingId}
+                    viewMode={viewMode}
+                    onSelect={handleSelect}
+                    onTest={handleTest}
+                    onSetDefault={handleSetDefault}
+                    onViewDetails={setDetailsProvider}
+                    onConfigure={config.open}
+                    onDelete={setDeleteConfirmProvider}
+                  />
+                ))}
+              </div>
+            </>
+          )}
+          {apiProviders.length > 0 && (
+            <>
+              {showGroupHeaders && (
+                <h3 className="text-xs font-black uppercase tracking-wider text-text-dim">{t("providers.section_providers")}</h3>
+              )}
+              <div className={viewMode === "grid" ? "grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 3xl:grid-cols-5 4xl:grid-cols-6" : "flex flex-col gap-2"}>
+                {apiProviders.map((p) => (
+                  <ProviderCard
+                    key={p.id} provider={p}
+                    isSelected={selectedIds.has(p.id)}
+                    isDefault={p.id === currentDefaultProvider}
+                    pendingId={testingIds.has(p.id) ? p.id : pendingId}
+                    viewMode={viewMode}
+                    onSelect={handleSelect}
+                    onTest={handleTest}
+                    onSetDefault={handleSetDefault}
+                    onViewDetails={setDetailsProvider}
+                    onConfigure={config.open}
+                    onDelete={setDeleteConfirmProvider}
+                  />
+                ))}
+              </div>
+            </>
+          )}
         </>
       )}
       </div>

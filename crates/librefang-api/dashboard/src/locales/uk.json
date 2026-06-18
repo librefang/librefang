@@ -809,6 +809,8 @@
     "offline": "Офлайн",
     "require_config": "Потребує налаштування",
     "no_configured": "Немає налаштованих провайдерів",
+    "section_coding_agents": "Агенти кодування",
+    "section_providers": "Провайдери",
     "no_unconfigured": "Немає неналаштованих провайдерів",
     "no_results": "Немає відповідних провайдерів",
     "name": "Назва",
