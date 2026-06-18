@@ -163,7 +163,7 @@ async fn missing_extensioned_asset_returns_404() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
-/// #6197 regression: the prompts and tasks pages are real router routes that
+/// Regression: the prompts and tasks pages are real router routes that
 /// returned "asset not found" on a hard browser refresh until added to
 /// SPA_ROUTES.
 #[tokio::test(flavor = "multi_thread")]
@@ -176,7 +176,7 @@ async fn prompts_and_tasks_routes_serve_index_html() {
     }
 }
 
-/// Drift guard for the whole bug class (#6197): every top-level route declared
+/// Drift guard: every top-level route declared
 /// in the dashboard router must be in SPA_ROUTES, or a hard refresh of it 404s.
 /// Parses `dashboard/src/router.tsx` for `path: "/<segment>"` and asserts each
 /// segment falls back to the SPA shell, so adding a route without updating the
