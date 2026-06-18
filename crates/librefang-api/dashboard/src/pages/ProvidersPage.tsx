@@ -424,13 +424,6 @@ const ProviderCard = memo(function ProviderCard({ provider: p, isSelected, isDef
   // Grid view
   return (
     <Card hover padding="none" onClick={() => onViewDetails(p)} className={`relative flex flex-col overflow-hidden group transition-all ${isSelected ? "ring-2 ring-brand" : ""}`}>
-      {isCli && (
-        <div className="absolute top-1.5 left-0 z-10 overflow-hidden w-20 h-20 pointer-events-none">
-          <div className="absolute top-[12px] left-[-18px] w-[90px] text-center text-[9px] font-black uppercase tracking-wider text-text-dim bg-surface/80 border-y border-border-subtle rotate-[-45deg] py-px">
-            CLI
-          </div>
-        </div>
-      )}
       <div className={`relative z-20 h-1.5 bg-linear-to-r ${isConfigured ? "from-success via-success/60 to-success/30" : "from-brand via-brand/60 to-brand/30"}`} />
       <div className="p-5 flex-1 flex flex-col">
         {/* Header */}
@@ -446,7 +439,15 @@ const ProviderCard = memo(function ProviderCard({ provider: p, isSelected, isDef
               {getProviderIcon(p.id)}
             </div>
             <div className="min-w-0">
-              <h2 className={`text-base font-black truncate transition-colors ${isConfigured ? "group-hover:text-success" : "group-hover:text-brand"}`}>{p.display_name || p.id}</h2>
+              <div className="flex items-center gap-2">
+                <h2 className={`text-base font-black truncate transition-colors ${isConfigured ? "group-hover:text-success" : "group-hover:text-brand"}`}>{p.display_name || p.id}</h2>
+                {(() => {
+                  const cat = getCategoryBadge(p.category, isCli);
+                  return cat ? (
+                    <Badge variant={cat.variant} className="shrink-0">{t(cat.key)}</Badge>
+                  ) : null;
+                })()}
+              </div>
               <p className="text-[10px] font-black uppercase tracking-widest text-text-dim/60 truncate">{p.id}</p>
             </div>
           </div>
