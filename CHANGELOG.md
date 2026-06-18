@@ -866,6 +866,11 @@ In-crate only; no cross-crate error-shape changes.
 
 ### Added
 
+- **dashboard(agents): edit the system prompt and bind a prompt-library version from the agent detail drawer** (#6187) (@houko).
+  The Agents page previously showed the system prompt read-only and the "Prompts" modal's activate only flipped the store's active flag without changing the live prompt; the Hands page already had a full editor (#6151 / #6166), leaving the two pages inconsistent.
+  `SystemPromptSection` is now an inline editor: edit and save via `PATCH /api/agents/{id}`, or open the prompt library and bind a saved version via `useBindPromptVersionToAgent` (which hot-swaps the live `system_prompt` and flips `is_active` together).
+  Dashboard-only — the backend `update_system_prompt` path is unchanged; i18n added to en/zh/uk and the editor is covered by a new `AgentsPage.test.tsx`. Closes #6187.
+
 - **auth/dashboard: passkey (WebAuthn/FIDO2) login** (#5981) (@houko) — sign in to the dashboard with Touch ID, Face ID, Windows Hello, Android biometrics, or a roaming security key instead of typing a password.
   Opt-in per deployment via `passkey_enabled` + `passkey_rp_id` / `passkey_rp_origin` in `config.toml`; password login is untouched and remains the fallback.
   Adds the `webauthn_credentials` table (SQLite migration v44) storing the serialized `webauthn-rs` `Passkey` so the sign-count persists across assertions, a `PasskeyEngine` owning the two WebAuthn ceremonies with short-TTL in-memory challenge state, and six routes under `/api/auth/passkey/*` (registration-options/verify gated Owner-only, authentication-options/verify public and rate-limited, plus list/revoke).
