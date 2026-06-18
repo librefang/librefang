@@ -1161,7 +1161,6 @@ pub async fn execute_tool_raw(
                     let aid = caller_agent_id.unwrap_or("default");
                     crate::browser_tools::tool_browser_navigate(input, mgr, aid)
                         .await
-                        .map_err(ToolError::upstream_msg)
                 }
                 None => Err(ToolError::Unavailable("Browser tools")),
             }
@@ -1172,7 +1171,6 @@ pub async fn execute_tool_raw(
                 let aid = caller_agent_id.unwrap_or("default");
                 crate::browser_tools::tool_browser_click(input, mgr, aid)
                     .await
-                    .map_err(ToolError::upstream_msg)
             }
             None => Err(ToolError::Unavailable("Browser tools")),
         },
@@ -1182,7 +1180,6 @@ pub async fn execute_tool_raw(
                 let aid = caller_agent_id.unwrap_or("default");
                 crate::browser_tools::tool_browser_type(input, mgr, aid)
                     .await
-                    .map_err(ToolError::upstream_msg)
             }
             None => Err(ToolError::Unavailable("Browser tools")),
         },
@@ -1195,7 +1192,6 @@ pub async fn execute_tool_raw(
                     .unwrap_or_else(|| std::env::temp_dir().join("librefang_uploads"));
                 crate::browser_tools::tool_browser_screenshot(input, mgr, aid, &upload_dir)
                     .await
-                    .map_err(ToolError::upstream_msg)
             }
             None => Err(ToolError::Unavailable("Browser tools")),
         },
@@ -1205,7 +1201,6 @@ pub async fn execute_tool_raw(
                 let aid = caller_agent_id.unwrap_or("default");
                 crate::browser_tools::tool_browser_read_page(input, mgr, aid)
                     .await
-                    .map_err(ToolError::upstream_msg)
             }
             None => Err(ToolError::Unavailable("Browser tools")),
         },
@@ -1215,7 +1210,6 @@ pub async fn execute_tool_raw(
                 let aid = caller_agent_id.unwrap_or("default");
                 crate::browser_tools::tool_browser_close(input, mgr, aid)
                     .await
-                    .map_err(ToolError::upstream_msg)
             }
             None => Err(ToolError::Unavailable("Browser tools")),
         },
@@ -1225,7 +1219,6 @@ pub async fn execute_tool_raw(
                 let aid = caller_agent_id.unwrap_or("default");
                 crate::browser_tools::tool_browser_scroll(input, mgr, aid)
                     .await
-                    .map_err(ToolError::upstream_msg)
             }
             None => Err(ToolError::Unavailable("Browser tools")),
         },
@@ -1235,7 +1228,6 @@ pub async fn execute_tool_raw(
                 let aid = caller_agent_id.unwrap_or("default");
                 crate::browser_tools::tool_browser_wait(input, mgr, aid)
                     .await
-                    .map_err(ToolError::upstream_msg)
             }
             None => Err(ToolError::Unavailable("Browser tools")),
         },
@@ -1245,7 +1237,6 @@ pub async fn execute_tool_raw(
                 let aid = caller_agent_id.unwrap_or("default");
                 crate::browser_tools::tool_browser_run_js(input, mgr, aid)
                     .await
-                    .map_err(ToolError::upstream_msg)
             }
             None => Err(ToolError::Unavailable("Browser tools")),
         },
@@ -1255,7 +1246,6 @@ pub async fn execute_tool_raw(
                 let aid = caller_agent_id.unwrap_or("default");
                 crate::browser_tools::tool_browser_back(input, mgr, aid)
                     .await
-                    .map_err(ToolError::upstream_msg)
             }
             None => Err(ToolError::Unavailable("Browser tools")),
         },
