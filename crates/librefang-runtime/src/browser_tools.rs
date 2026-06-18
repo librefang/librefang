@@ -132,7 +132,8 @@ pub async fn tool_browser_screenshot(
         .map_err(ToolError::upstream_msg)?;
     if !resp.success {
         return Err(ToolError::upstream_msg(
-            resp.error.unwrap_or_else(|| "Screenshot failed".to_string()),
+            resp.error
+                .unwrap_or_else(|| "Screenshot failed".to_string()),
         ));
     }
 
@@ -271,7 +272,8 @@ pub async fn tool_browser_run_js(
         .map_err(ToolError::upstream_msg)?;
     if !resp.success {
         return Err(ToolError::upstream_msg(
-            resp.error.unwrap_or_else(|| "JS execution failed".to_string()),
+            resp.error
+                .unwrap_or_else(|| "JS execution failed".to_string()),
         ));
     }
     let data = resp.data.unwrap_or_default();
