@@ -216,9 +216,7 @@ export function PromptsExperimentsModal({
                                         defaultValue:
                                           "Active version — activate another version before deleting",
                                       })
-                                    : t("agents.prompts_experiments.delete", {
-                                        defaultValue: "Delete version",
-                                      })
+                                    : t("prompts.delete")
                                 }
                                 onClick={() =>
                                   deleteVersionMutation.mutate({
