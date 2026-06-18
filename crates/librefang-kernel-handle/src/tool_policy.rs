@@ -84,4 +84,23 @@ pub trait ToolPolicy: Send + Sync {
     fn effective_upload_dir(&self) -> std::path::PathBuf {
         std::env::temp_dir().join("librefang_uploads")
     }
+
+    /// Return absolute paths that the WASM sandbox must NEVER write to,
+    /// regardless of any `FileWrite` capability a skill manifest declares
+    /// (including the universal `FileWrite("*")` grant). Enforced as a
+    /// deny-list ABOVE the capability check in `host_fs_write` (#6182).
+    ///
+    /// The load-bearing entry is the resolved audit anchor
+    /// (`[audit].anchor_path`, default `data_dir/audit.anchor`): it stores the
+    /// Merkle tip of the tamper-evident audit log, and `SECURITY.md` documents
+    /// that its integrity rests on filesystem permissions. A skill granted a
+    /// broad `FileWrite` subtree could otherwise truncate it and silently break
+    /// the audit chain. Paths are returned as configured/resolved; the runtime
+    /// canonicalizes them the same way it resolves the write target before
+    /// comparing, so symlink and macOS `/private` aliasing are handled.
+    ///
+    /// Default: empty (stub kernels have no anchor to protect).
+    fn protected_write_paths(&self) -> Vec<std::path::PathBuf> {
+        vec![]
+    }
 }

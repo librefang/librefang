@@ -866,6 +866,11 @@ In-crate only; no cross-crate error-shape changes.
 
 ### Added
 
+- **sec(sandbox): protect the audit anchor from WASM skill `fs_write` via a capability deny-list** (#6182) (@houko).
+  The WASM sandbox previously gated `fs_write` solely on glob capability matching, so a skill granted a broad `FileWrite` subtree — or the universal `FileWrite("*")` — could truncate the audit anchor (`[audit].anchor_path`, default `data_dir/audit.anchor`) and silently break the tamper-evident Merkle chain.
+  `ToolPolicy` gains a `protected_write_paths()` method (default empty; the kernel returns the boot-resolved anchor), and `host_fs_write` now denies any write whose canonical target matches a protected path *above* the capability check, so even `FileWrite("*")` cannot reach the anchor.
+  The deny-list is scoped strictly to the anchor file, not all of `data_dir`, to keep the blast radius small; closes #6182 and supersedes the duplicate #6181.
+
 - **auth/dashboard: passkey (WebAuthn/FIDO2) login** (#5981) (@houko) — sign in to the dashboard with Touch ID, Face ID, Windows Hello, Android biometrics, or a roaming security key instead of typing a password.
   Opt-in per deployment via `passkey_enabled` + `passkey_rp_id` / `passkey_rp_origin` in `config.toml`; password login is untouched and remains the fallback.
   Adds the `webauthn_credentials` table (SQLite migration v44) storing the serialized `webauthn-rs` `Passkey` so the sign-count persists across assertions, a `PasskeyEngine` owning the two WebAuthn ceremonies with short-TTL in-memory challenge state, and six routes under `/api/auth/passkey/*` (registration-options/verify gated Owner-only, authentication-options/verify public and rate-limited, plus list/revoke).

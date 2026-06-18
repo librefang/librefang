@@ -139,6 +139,23 @@ fn safe_resolve_parent(path: &str) -> Result<std::path::PathBuf, serde_json::Val
     Ok(canonical_parent.join(file_name))
 }
 
+/// Returns true if `write_path` targets one of the kernel's protected paths.
+///
+/// `write_path` has already been resolved through `safe_resolve_parent`
+/// (canonical parent + verbatim file name). Each protected path is resolved
+/// the SAME way before comparing, so symlink resolution and macOS `/private`
+/// firmlink aliasing land both sides in the same canonical namespace and an
+/// exact `PathBuf` equality is sound. A protected path whose parent cannot be
+/// canonicalized (e.g. its directory does not exist yet) simply does not match
+/// — it also cannot be written to, so nothing is under-protected.
+fn is_protected_write_target(write_path: &Path, protected: &[std::path::PathBuf]) -> bool {
+    protected.iter().any(|p| {
+        safe_resolve_parent(&p.to_string_lossy())
+            .map(|canon| canon == *write_path)
+            .unwrap_or(false)
+    })
+}
+
 // ---------------------------------------------------------------------------
 // SSRF protection
 // ---------------------------------------------------------------------------
@@ -296,6 +313,20 @@ fn host_fs_write(state: &GuestState, params: &serde_json::Value) -> serde_json::
         Ok(p) => p,
         Err(e) => return e,
     };
+    // SECURITY (#6182): deny writes to kernel-protected paths (the audit
+    // anchor) ABOVE the capability check, as defense-in-depth. A skill granted
+    // a broad FileWrite subtree — or the universal FileWrite("*") — would
+    // otherwise pass check_capability and truncate the anchor, silently
+    // breaking the tamper-evident audit Merkle chain. The deny-list is scoped
+    // strictly to the protected files (not all of data_dir) to keep the blast
+    // radius small.
+    if let Some(kernel) = &state.kernel {
+        if is_protected_write_target(&write_path, &kernel.protected_write_paths()) {
+            return json!({
+                "error": "fs_write denied: target is a protected system path"
+            });
+        }
+    }
     // Capability check against the canonical path prevents traversal bypass.
     if let Err(e) = check_capability(
         &state.capabilities,
@@ -1119,6 +1150,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_fs_write_denied_protected_audit_anchor_even_with_wildcard() {
+        // #6182: a skill granted the universal FileWrite("*") must NOT be able
+        // to truncate the audit anchor. The deny-list runs ABOVE the
+        // capability check, so the broad grant cannot rescue the write.
+        let dir = std::env::temp_dir().join("librefang_anchor_test_6182_deny");
+        std::fs::create_dir_all(&dir).unwrap();
+        let anchor = dir.join("audit.anchor");
+        std::fs::write(&anchor, b"MERKLE-TIP").unwrap();
+
+        let kernel = RecordingKernel::new();
+        kernel.set_protected_paths(vec![anchor.clone()]);
+        let state = state_with_kernel(
+            "test-agent",
+            vec![Capability::FileWrite("*".to_string())],
+            std::sync::Arc::clone(&kernel),
+        );
+
+        let result = host_fs_write(
+            &state,
+            &json!({"path": anchor.to_string_lossy(), "content": "TAMPERED"}),
+        );
+        let err = result["error"].as_str().unwrap_or("");
+        assert!(
+            err.contains("protected"),
+            "expected protected-path deny, got: {result}"
+        );
+        // The anchor content must be untouched.
+        assert_eq!(std::fs::read(&anchor).unwrap(), b"MERKLE-TIP");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_fs_write_allows_non_protected_sibling_with_wildcard() {
+        // The deny-list is scoped strictly to the protected file; a sibling
+        // path in the same directory with FileWrite("*") still succeeds, so the
+        // hardening does not broaden into a data_dir-wide write ban.
+        let dir = std::env::temp_dir().join("librefang_anchor_test_6182_allow");
+        std::fs::create_dir_all(&dir).unwrap();
+        let anchor = dir.join("audit.anchor");
+        std::fs::write(&anchor, b"MERKLE-TIP").unwrap();
+        let target = dir.join("scratch.txt");
+
+        let kernel = RecordingKernel::new();
+        kernel.set_protected_paths(vec![anchor]);
+        let state = state_with_kernel(
+            "test-agent",
+            vec![Capability::FileWrite("*".to_string())],
+            std::sync::Arc::clone(&kernel),
+        );
+
+        let result = host_fs_write(
+            &state,
+            &json!({"path": target.to_string_lossy(), "content": "ok"}),
+        );
+        assert!(
+            result.get("ok").is_some(),
+            "non-protected write should succeed, got: {result}"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"ok");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_fs_write_no_kernel_skips_protected_check() {
+        // With no kernel handle (stub guest), there is no anchor to protect and
+        // the deny-list is simply not consulted — a granted write succeeds.
+        let dir = std::env::temp_dir().join("librefang_anchor_test_6182_nokernel");
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("scratch.txt");
+        let state = test_state(vec![Capability::FileWrite("*".to_string())]);
+        let result = host_fs_write(
+            &state,
+            &json!({"path": target.to_string_lossy(), "content": "ok"}),
+        );
+        assert!(
+            result.get("ok").is_some(),
+            "write should succeed without a kernel, got: {result}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
     async fn test_fs_read_granted_wildcard() {
         let state = test_state(vec![Capability::FileRead("*".to_string())]);
         let result = host_fs_read(&state, &json!({"path": "Cargo.toml"}));
@@ -1323,6 +1436,9 @@ mod tests {
         preloaded: std::sync::Mutex<
             std::collections::HashMap<(Option<String>, String), serde_json::Value>,
         >,
+        /// Paths returned by `ToolPolicy::protected_write_paths` (the audit
+        /// anchor deny-list, #6182).
+        protected_paths: std::sync::Mutex<Vec<std::path::PathBuf>>,
     }
 
     impl RecordingKernel {
@@ -1331,7 +1447,12 @@ mod tests {
                 stored: std::sync::Mutex::new(Vec::new()),
                 recalled: std::sync::Mutex::new(Vec::new()),
                 preloaded: std::sync::Mutex::new(std::collections::HashMap::new()),
+                protected_paths: std::sync::Mutex::new(Vec::new()),
             })
+        }
+
+        fn set_protected_paths(&self, paths: Vec<std::path::PathBuf>) {
+            *self.protected_paths.lock().unwrap() = paths;
         }
 
         fn preload(&self, agent_id: Option<&str>, key: &str, value: serde_json::Value) {
@@ -1513,7 +1634,11 @@ mod tests {
     impl librefang_kernel_handle::PromptStore for RecordingKernel {}
     impl librefang_kernel_handle::WorkflowRunner for RecordingKernel {}
     impl librefang_kernel_handle::GoalControl for RecordingKernel {}
-    impl librefang_kernel_handle::ToolPolicy for RecordingKernel {}
+    impl librefang_kernel_handle::ToolPolicy for RecordingKernel {
+        fn protected_write_paths(&self) -> Vec<std::path::PathBuf> {
+            self.protected_paths.lock().unwrap().clone()
+        }
+    }
     impl librefang_kernel_handle::CatalogQuery for RecordingKernel {}
     // ACP-specific role traits (#3313). Test stubs use the trait-default
     // no-op impls; ACP routing is exercised in `librefang-acp` /
