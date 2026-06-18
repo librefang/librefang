@@ -654,7 +654,8 @@ impl ModelCatalog {
                 // when the CLI is authenticated so the probe can discover the
                 // user's actual available models.
                 if p.id == "codex-cli" {
-                    return p.auth_status == librefang_types::model_catalog::AuthStatus::Configured;
+                    return p.auth_status
+                        == librefang_types::model_catalog::AuthStatus::Configured;
                 }
                 false
             })
