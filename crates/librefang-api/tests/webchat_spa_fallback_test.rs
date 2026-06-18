@@ -183,10 +183,10 @@ async fn prompts_and_tasks_routes_serve_index_html() {
 /// allowlist fails loudly instead of shipping a broken refresh.
 #[tokio::test(flavor = "multi_thread")]
 async fn every_router_top_level_route_serves_index_html() {
-    let router_tsx = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("dashboard/src/router.tsx");
-    let src = std::fs::read_to_string(&router_tsx)
-        .unwrap_or_else(|e| panic!("read {router_tsx:?}: {e}"));
+    let router_tsx =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("dashboard/src/router.tsx");
+    let src =
+        std::fs::read_to_string(&router_tsx).unwrap_or_else(|e| panic!("read {router_tsx:?}: {e}"));
 
     // Collect distinct first path segments from `path: "/<seg>..."` declarations,
     // skipping the root ("/"), dynamic params ($id), and splats (*).

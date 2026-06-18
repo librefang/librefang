@@ -767,7 +767,14 @@ mod tests {
     #[test]
     fn spa_route_matches_known_first_segments() {
         // Exact top-level routes.
-        for p in ["agents", "config", "skills", "mcp-servers", "prompts", "tasks"] {
+        for p in [
+            "agents",
+            "config",
+            "skills",
+            "mcp-servers",
+            "prompts",
+            "tasks",
+        ] {
             assert!(is_spa_route(p), "expected {p:?} to be an SPA route");
         }
         // Nested dynamic / child routes match on the first segment.
