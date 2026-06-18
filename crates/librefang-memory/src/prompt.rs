@@ -238,9 +238,7 @@ impl PromptStore {
 
     pub fn delete_version(&self, id: Uuid) -> LibreFangResult<()> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
-        // Guard: refuse to delete the active (bound) version — its agent still
-        // sends this prompt. The caller must activate another version first.
-        // Unknown id resolves to None and falls through to an idempotent no-op DELETE.
+        // Guard: reject active (bound) version; None (unknown id) falls through to idempotent no-op DELETE.
         let is_active: Option<bool> = conn
             .query_row(
                 "SELECT is_active FROM prompt_versions WHERE id = ?1",

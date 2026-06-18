@@ -334,8 +334,7 @@ describe("PromptsPage", () => {
     expect(
       screen.queryByRole("button", { name: /prompts\.bind/ }),
     ).not.toBeInTheDocument();
-    // Delete is rendered but disabled — the active (bound) version cannot be
-    // deleted until another version is activated (#6195).
+    // Delete is rendered but disabled — active version cannot be deleted until another is activated (#6195).
     expect(screen.getByRole("button", { name: "prompts.delete" })).toBeDisabled();
   });
 
