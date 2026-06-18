@@ -897,7 +897,9 @@ function HandSettingsEditor({
   };
 
   const handleSave = () => {
-    const payload: Record<string, unknown> = {};
+    // Seed from the currently-saved values so a partial draft (only the keys the
+    // user changed this session) doesn't drop the others; the draft overrides.
+    const payload: Record<string, unknown> = { ...(settings.current_values ?? {}) };
     for (const [k, v] of Object.entries(draft)) {
       payload[k] = v;
     }
