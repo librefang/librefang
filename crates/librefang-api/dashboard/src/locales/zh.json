@@ -2485,7 +2485,6 @@
     "clear_chat": "清空对话",
     "context_usage": "{{used}} / {{max}} tokens（约 {{pct}}%）",
     "context_usage_aria": "上下文窗口占用：约 {{pct}}%",
-    "context_usage_unknown": "上下文窗口未知",
     "session": "会话",
     "session_unpinned": "未固定",
     "sessions_title": "会话列表",

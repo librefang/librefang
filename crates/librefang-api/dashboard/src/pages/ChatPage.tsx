@@ -2163,7 +2163,11 @@ function ContextUsageIndicator({ agentId, sessionId }: { agentId: string; sessio
 
   if (query.isError) return null;
 
-  if (query.isLoading || !query.data) {
+  if (!query.data) {
+    // A disabled query (no sessionId) reports isLoading=false / data=undefined,
+    // so guarding on isLoading would pin a permanent skeleton. Show the skeleton
+    // only while a fetch is genuinely in flight; otherwise render nothing.
+    if (!query.isFetching) return null;
     return (
       <div
         className="hidden md:flex items-center gap-2 text-xs text-text-dim/60"

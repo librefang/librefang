@@ -2528,7 +2528,6 @@
     "clear_chat": "Очистити чат",
     "context_usage": "{{used}} / {{max}} токенів (~{{pct}}%)",
     "context_usage_aria": "Використання контекстного вікна: приблизно {{pct}} відсотків",
-    "context_usage_unknown": "Контекстне вікно невідоме",
     "session": "Сесія",
     "session_unpinned": "Відкріплена",
     "sessions_title": "Сесії",

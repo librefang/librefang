@@ -2528,7 +2528,6 @@
     "clear_chat": "Clear Chat",
     "context_usage": "{{used}} / {{max}} tokens (~{{pct}}%)",
     "context_usage_aria": "Context window usage: approximately {{pct}} percent",
-    "context_usage_unknown": "Context window unknown",
     "session": "Session",
     "session_unpinned": "Unpinned",
     "sessions_title": "Sessions",

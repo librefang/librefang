@@ -401,7 +401,7 @@ pub async fn get_agent_session_context(
     let Query(params) = match query {
         Ok(q) => q,
         Err(_) => {
-            return ApiErrorResponse::bad_request("invalid session_id")
+            return ApiErrorResponse::bad_request(t.t("api-error-session-invalid-id"))
                 .with_code("invalid_session_id")
                 .into_response();
         }
@@ -433,14 +433,14 @@ pub async fn get_agent_session_context(
     if let Some(target) = session_override {
         match state.kernel.memory_substrate().get_session(target) {
             Ok(Some(s)) if s.agent_id != agent_id => {
-                return ApiErrorResponse::not_found("session not found for this agent")
+                return ApiErrorResponse::not_found(t.t("api-error-session-not-found"))
                     .with_code("session_agent_mismatch")
                     .into_response();
             }
             Ok(Some(_)) => {}
             Ok(None) => {
                 if target.0 != entry.session_id.0 {
-                    return ApiErrorResponse::not_found("session not found for this agent")
+                    return ApiErrorResponse::not_found(t.t("api-error-session-not-found"))
                         .with_code("session_agent_mismatch")
                         .into_response();
                 }
@@ -455,6 +455,8 @@ pub async fn get_agent_session_context(
     }
     // ErrorTranslator is !Send; context_report below is sync so drop happens
     // before there is any await, but keep the drop explicit per the repo gotcha.
+    // Translate the context-report failure message before the drop.
+    let context_report_failed_msg = t.t("api-error-context-report-failed");
     drop(t);
 
     let report = match state
@@ -464,7 +466,7 @@ pub async fn get_agent_session_context(
         Ok(r) => r,
         Err(e) => {
             tracing::warn!("Context report failed for agent {id}: {e}");
-            return ApiErrorResponse::internal("context report failed")
+            return ApiErrorResponse::internal(context_report_failed_msg)
                 .with_code("context_report_failed")
                 .into_response();
         }

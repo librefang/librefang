@@ -5,6 +5,7 @@ api-error-agent-not-found = Agent nicht gefunden
 api-error-agent-spawn-failed = Agent konnte nicht erstellt werden
 api-error-agent-invalid-id = Ungueltige Agent-ID
 api-error-session-invalid-id = Ungueltige Session-ID
+api-error-context-report-failed = Kontextbericht fehlgeschlagen
 api-error-agent-already-exists = Agent existiert bereits
 
 # Message errors
