@@ -1,9 +1,4 @@
-// Focused tests for the agent-detail system-prompt editor (#6187).
-//
-// AgentsPage itself has no render harness (it wires ~20 hooks); the new
-// behavior lives in the exported SystemPromptSection, so we test that
-// component directly with its hook layer mocked, per the dashboard
-// data-layer rule (pages go through lib/queries + lib/mutations).
+// Tests SystemPromptSection directly — AgentsPage has no render harness (~20 hooks).
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";

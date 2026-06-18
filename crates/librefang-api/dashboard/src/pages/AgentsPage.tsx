@@ -136,14 +136,6 @@ function DetailRow({ label, children }: { label: React.ReactNode; children: Reac
   );
 }
 
-/** Editable system-prompt card for the agent detail drawer (#6187).
- *
- *  Reaches parity with the Hands page editor (#6151): the live system prompt
- *  is editable and savable via `PATCH /api/agents/{id}`, and a version from the
- *  prompt library can be bound (which both hot-swaps the live prompt and flips
- *  the store's active flag via `useBindPromptVersionToAgent`). The previous
- *  read-only collapsible display is replaced — the textarea naturally scrolls
- *  long prompts, so the expand/collapse affordance is no longer needed. */
 export function SystemPromptSection({
   agentId,
   prompt,
@@ -157,8 +149,7 @@ export function SystemPromptSection({
   const current = prompt ?? "";
   const [draft, setDraft] = useState(current);
   const [showLibrary, setShowLibrary] = useState(false);
-  // Re-seed the draft whenever the live prompt changes (e.g. after a bind or a
-  // switch to a different agent in the drawer).
+  // Re-seed draft when live prompt changes (e.g. after a bind or agent-switch).
   useEffect(() => {
     setDraft(current);
   }, [current]);
@@ -2561,8 +2552,7 @@ export function AgentsPage() {
                 </section>
               )}
 
-              {/* System Prompt — editable + bind-from-library (#6187). Always
-                  shown so an agent with no prompt yet can have one added. */}
+              {/* System Prompt — always shown so an agent with no prompt yet can add one */}
               <SystemPromptSection
                 agentId={detailAgent.id}
                 prompt={detailAgent.system_prompt ?? ""}
