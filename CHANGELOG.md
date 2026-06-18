@@ -844,6 +844,10 @@ _308 PRs from 7 contributors since v2026.5.17-beta.12._
 
 ### Changed
 
+- **dashboard(agents): drop the arbitrary 200000 cap on the model `max_tokens` input** (#6209) (@houko).
+  The agent model-config `max_tokens` field hard-capped its input at `max={200000}`, silently preventing operators from setting a higher output budget; the provider validates the real per-model ceiling anyway, so the UI no longer imposes its own arbitrary limit (`min={1}` is kept).
+  Closes #6209.
+
 - **refactor(error-contracts): migrate `web_search.rs` tool functions from `Result<String, String>` to `Result<String, ToolError>`** (#3576) (@houko) — one slice of the ongoing structured-error-contracts migration.
 The multi-provider search engine (`WebSearchEngine::search` and its `search_brave` / `search_tavily` / `search_perplexity` / `search_jina` / `search_duckduckgo` / `search_searxng` / `search_auto` / `list_searxng_categories` helpers) now returns the typed `ToolError` instead of an opaque `String`: missing API keys and unconfigured SearXNG URLs map to `Unavailable`, invalid `pageno` / `category` to `InvalidParameter`, `reqwest` send/JSON failures to `Upstream` via `ToolError::upstream` (preserving the `reqwest::Error` source chain per #3745), and "no results" / "all providers failed" to `Upstream` via `upstream_msg`.
 The dispatch boundary still narrows to a `String` via `Display`, so the LLM-visible error text now reflects the structured variant form (e.g. `"SearXNG URL unavailable"`, `"Invalid parameter 'pageno': must be >= 1 (pages are 1-indexed)"`) — the intended outcome of the migration.
