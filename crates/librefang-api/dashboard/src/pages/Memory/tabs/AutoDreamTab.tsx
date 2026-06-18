@@ -1,15 +1,17 @@
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
+import { useQueryClient } from "@tanstack/react-query";
 import { Moon } from "lucide-react";
 import { Card } from "../../../components/ui/Card";
 import { EmptyState } from "../../../components/ui/EmptyState";
-import { Badge } from "../../../components/ui/Badge";
 import { useAutoDreamStatus } from "../../../lib/queries/autoDream";
+import { autoDreamKeys } from "../../../lib/queries/keys";
 import {
   useTriggerAutoDream,
   useAbortAutoDream,
   useSetAutoDreamEnabled,
 } from "../../../lib/mutations/autoDream";
+import { useSetConfigValue } from "../../../lib/mutations/config";
 import type { AgentItem, AutoDreamAgentStatus } from "../../../api";
 import { useUIStore } from "../../../lib/store";
 import { AutoDreamAgentRow } from "../components/AutoDreamAgentRow";
@@ -21,11 +23,37 @@ interface Props {
 
 export function AutoDreamTab({ agents, scopedAgentId }: Props) {
   const { t } = useTranslation();
+  const qc = useQueryClient();
   const addToast = useUIStore((s) => s.addToast);
   const dreamStatusQuery = useAutoDreamStatus();
   const dreamTrigger = useTriggerAutoDream();
   const dreamAbort = useAbortAutoDream();
   const dreamSetEnabled = useSetAutoDreamEnabled();
+  // The GLOBAL master switch writes config.toml's `[auto_dream] enabled`
+  // through the generic config-set endpoint (the `auto_dream.` prefix is on
+  // the writable allowlist). useSetConfigValue only invalidates configKeys, so
+  // we additionally invalidate autoDreamKeys here — otherwise the status badge
+  // and the per-agent rows (whose "Dream now" buttons key off the global flag)
+  // would look stale until the 15s poll. The flag is read live by the kernel
+  // every consolidation tick, so the toggle takes effect immediately even
+  // though POST /api/config/set may report `restart_required` for the
+  // conservatively-classified [auto_dream] struct.
+  const setGlobalEnabled = useSetConfigValue({
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: autoDreamKeys.all });
+      addToast(
+        variables.value
+          ? t("memory.auto_dream_global_on_ok", {
+              defaultValue: "Auto-Dream enabled globally",
+            })
+          : t("memory.auto_dream_global_off_ok", {
+              defaultValue: "Auto-Dream disabled globally",
+            }),
+        "success",
+      );
+    },
+    onError: (e) => addToast(e instanceof Error ? e.message : String(e), "error"),
+  });
 
   const dreamStatus = dreamStatusQuery.data;
   const dreamByAgentId = useMemo(() => {
@@ -104,16 +132,35 @@ export function AutoDreamTab({ agents, scopedAgentId }: Props) {
         <p className="text-xs text-text-dim">
           {t("memory.auto_dream_desc_inline", {
             defaultValue:
-              "Periodic memory consolidation per agent. Manifest override > global default; configure global in config.toml under [auto_dream].",
+              "Periodic memory consolidation per agent. Manifest override > global default; toggle the global switch here.",
           })}
         </p>
         {dreamStatus && (
-          <Badge variant={dreamStatus.enabled ? "success" : "default"}>
-            <Moon className="w-3 h-3 mr-1 inline" />
-            {dreamStatus.enabled
-              ? t("memory.auto_dream_on_badge", { defaultValue: "Auto-Dream on" })
-              : t("memory.auto_dream_off_badge", { defaultValue: "Auto-Dream off" })}
-          </Badge>
+          <label
+            className="flex items-center gap-1.5 cursor-pointer select-none"
+            title={t("memory.auto_dream_global_toggle_title", {
+              defaultValue: "Enable or disable Auto-Dream globally",
+            })}
+          >
+            <input
+              type="checkbox"
+              checked={dreamStatus.enabled}
+              disabled={setGlobalEnabled.isPending}
+              onChange={(e) =>
+                setGlobalEnabled.mutate({
+                  path: "auto_dream.enabled",
+                  value: e.target.checked,
+                })
+              }
+              className="w-3.5 h-3.5 accent-purple-500"
+            />
+            <Moon className="w-3 h-3 inline" />
+            <span className="text-[11px] text-text-dim">
+              {dreamStatus.enabled
+                ? t("memory.auto_dream_on_badge", { defaultValue: "Auto-Dream on" })
+                : t("memory.auto_dream_off_badge", { defaultValue: "Auto-Dream off" })}
+            </span>
+          </label>
         )}
       </div>
 
