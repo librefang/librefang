@@ -1695,8 +1695,11 @@ async fn context_endpoint_returns_used_and_max_tokens() {
         "pct must be within [0, 100], got {pct}"
     );
 
-    // The model id echoes the agent's configured model.
-    assert_eq!(body["model"].as_str().unwrap(), "test-model");
+    // The model id echoes the agent's own manifest model. spawn_named uses
+    // AgentManifest::default(), whose model is "default" — not the global
+    // config default_model ("test-model"), which agents do not inherit into
+    // their manifest.
+    assert_eq!(body["model"].as_str().unwrap(), "default");
 }
 
 #[tokio::test(flavor = "multi_thread")]
