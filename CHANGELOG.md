@@ -866,6 +866,11 @@ In-crate only; no cross-crate error-shape changes.
 
 ### Added
 
+- **channels: per-instance sidecar secrets so each agent can own its own handle** (#6169) (@houko).
+  Two instances of the same sidecar adapter (e.g. one Matrix account per agent) previously had to share one global secret — a Matrix sidecar's identity is its `MATRIX_ACCESS_TOKEN`, so both logged in as the same account.
+  `build_spawn_env` now resolves a `<NAME>__KEY` entry in `secrets.env` to the bare `KEY` for the matching `[[sidecar_channels]]` instance (name uppercased, non-alphanumerics → `_`); the per-instance value overrides the global bare key and the parent env, and another instance's namespaced secret never leaks into this child.
+  Operators keep tokens in `secrets.env` (not plaintext `config.toml`); without a prefix all instances still share the global secret. Closes #6169.
+
 - **auth/dashboard: passkey (WebAuthn/FIDO2) login** (#5981) (@houko) — sign in to the dashboard with Touch ID, Face ID, Windows Hello, Android biometrics, or a roaming security key instead of typing a password.
   Opt-in per deployment via `passkey_enabled` + `passkey_rp_id` / `passkey_rp_origin` in `config.toml`; password login is untouched and remains the fallback.
   Adds the `webauthn_credentials` table (SQLite migration v44) storing the serialized `webauthn-rs` `Passkey` so the sign-count persists across assertions, a `PasskeyEngine` owning the two WebAuthn ceremonies with short-TTL in-memory challenge state, and six routes under `/api/auth/passkey/*` (registration-options/verify gated Owner-only, authentication-options/verify public and rate-limited, plus list/revoke).
