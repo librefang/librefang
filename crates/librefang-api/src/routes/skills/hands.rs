@@ -1116,7 +1116,6 @@ pub async fn update_hand_settings(
     Path(hand_id): Path<String>,
     Json(config): Json<std::collections::HashMap<String, serde_json::Value>>,
 ) -> impl IntoResponse {
-    // Find the active instance for this hand and its current config.
     let instance = state
         .kernel
         .hands()
@@ -1127,8 +1126,7 @@ pub async fn update_hand_settings(
     match instance {
         Some(inst) => {
             let id = inst.instance_id;
-            // Partial update: merge incoming keys over the existing config so settings
-            // the user didn't change in this save are not dropped back to their defaults.
+            // Merge over existing config so untouched keys keep their saved values.
             let mut merged = inst.config;
             merged.extend(config);
             match state.kernel.hands().update_config(id, merged.clone()) {
