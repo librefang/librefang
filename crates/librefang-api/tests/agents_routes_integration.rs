@@ -1650,3 +1650,151 @@ async fn test_patch_agent_auto_evolve_persists() {
         body["auto_evolve"]
     );
 }
+
+// ---------------------------------------------------------------------------
+// GET /api/agents/{id}/session/context — context-window usage indicator.
+//
+// The dashboard polls this to render a "how full is the window" bar. It
+// resolves the model context window (the Y denominator) that the full
+// /session endpoint does not expose, via the same precedence chain the agent
+// loop uses (manifest override > catalog > persisted session > 8192 fallback).
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn context_endpoint_returns_used_and_max_tokens() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "context-indicator");
+
+    let (status, body) = send(
+        h.app.clone(),
+        get(&format!("/api/agents/{}/session/context", id)),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body:?}");
+
+    // Shape: all five fields present.
+    assert!(body["used_tokens"].is_u64(), "used_tokens: {body:?}");
+    assert!(
+        body["max_context_tokens"].is_u64(),
+        "max_context_tokens: {body:?}"
+    );
+    assert!(body["pct"].is_number(), "pct: {body:?}");
+    assert!(body["model"].is_string(), "model: {body:?}");
+    assert!(body["pressure"].is_string(), "pressure: {body:?}");
+
+    // The unknown-model fallback (UNKNOWN_MODEL_CONTEXT_WINDOW = 8192) means the
+    // denominator is always resolved to a positive value, so the indicator can
+    // always render a bar.
+    let max = body["max_context_tokens"].as_u64().unwrap();
+    assert!(max > 0, "max_context_tokens must be > 0, got {max}");
+
+    let pct = body["pct"].as_f64().unwrap();
+    assert!(
+        (0.0..=100.0).contains(&pct),
+        "pct must be within [0, 100], got {pct}"
+    );
+
+    // The model id echoes the agent's configured model.
+    assert_eq!(body["model"].as_str().unwrap(), "test-model");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn context_endpoint_unknown_agent_404() {
+    let h = boot(TEST_TOKEN).await;
+    let unknown = AgentId::new();
+
+    let (status, body) = send(
+        h.app.clone(),
+        get(&format!("/api/agents/{}/session/context", unknown)),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND, "body: {body:?}");
+    assert_eq!(body["code"], "agent_not_found");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn context_endpoint_is_authed() {
+    // With an api_key configured, an unauthenticated (no Bearer) request from a
+    // non-loopback caller must be rejected — confirms the endpoint was NOT
+    // accidentally added to a PUBLIC_ROUTES_* allowlist slice.
+    let h = boot("test-secret").await;
+    let id = spawn_named(&h.state, "context-authed");
+
+    let (status, _) = send(
+        h.app.clone(),
+        get_with(&format!("/api/agents/{}/session/context", id), None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // Sanity: the same request with the correct Bearer token succeeds.
+    let (status, _) = send(
+        h.app.clone(),
+        get(&format!("/api/agents/{}/session/context", id)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn context_endpoint_honors_session_id_param() {
+    // The dashboard sends `?session_id=` for a pinned tab; the bar must track the
+    // viewed session, not always the canonical-active one. Pinning the agent's
+    // own session must succeed with the same shape, and a malformed id is
+    // rejected by the extractor (400) rather than silently ignored.
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "context-pinned");
+
+    // Discover the agent's canonical session id via the public endpoint.
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{}/session", id))).await;
+    assert_eq!(status, StatusCode::OK, "body: {body:?}");
+    let sid = body["session_id"].as_str().expect("session_id").to_string();
+
+    let (status, body) = send(
+        h.app.clone(),
+        get(&format!(
+            "/api/agents/{}/session/context?session_id={}",
+            id, sid
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body:?}");
+    assert!(body["max_context_tokens"].as_u64().unwrap() > 0);
+
+    let (status, body) = send(
+        h.app.clone(),
+        get(&format!(
+            "/api/agents/{}/session/context?session_id=not-a-uuid",
+            id
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body:?}");
+    assert_eq!(body["code"], "invalid_session_id");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn context_endpoint_rejects_cross_agent_session() {
+    // Agent B's session id under agent A's path must 404 — never leak B's usage
+    // counts through A's id (mirrors the get_agent_session ownership guard).
+    let h = boot(TEST_TOKEN).await;
+    let a = spawn_named(&h.state, "context-a");
+    let b = spawn_named(&h.state, "context-b");
+
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{}/session", b))).await;
+    assert_eq!(status, StatusCode::OK, "body: {body:?}");
+    let b_sid = body["session_id"].as_str().expect("session_id").to_string();
+
+    let (status, body) = send(
+        h.app.clone(),
+        get(&format!(
+            "/api/agents/{}/session/context?session_id={}",
+            a, b_sid
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "body: {body:?}");
+    assert_eq!(body["code"], "session_agent_mismatch");
+}
