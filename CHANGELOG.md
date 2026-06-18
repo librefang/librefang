@@ -922,6 +922,11 @@ In-crate only; no cross-crate error-shape changes.
 
 ### Fixed
 
+- **fix(cli): bind the macOS launchagent status string to a `let` so the macOS build compiles (E0716)** (#6198) (@houko).
+  The macOS-only launchagent-status block passed `&i18n::t(...)` from inside an `if`/`else` expression to `ui::kv`, but each arm returns an owned `String` whose temporary is freed at the end of the `if`-expression, before `ui::kv` borrows it.
+  The macOS test lane is main-push-only, so this surfaced as a red `main` after merge rather than failing the originating PR.
+  Closes #6198.
+
 - **fix(whatsapp-gateway): resolve the `link-preview-js` peer conflict and commit a lockfile** (#6180) (@houko).
   `npm install` in `packages/whatsapp-gateway` failed with `ERESOLVE` unless `--legacy-peer-deps` was passed: the gateway declared `link-preview-js@^4.0.1` as a direct dependency while `@whiskeysockets/baileys@6.7.22` lists it as `peerOptional ^3.0.0`, and the direct declaration defeated the optional flag.
   `link-preview-js` is never imported by the gateway, so the direct dependency is dropped and pinned via an `overrides` block to `^4.0.1`, preserving the #5934 SSRF fix (GHSA-4gp8-rjrq-ch6q) if Baileys ever pulls it in transitively.

@@ -396,14 +396,14 @@ pub(crate) fn cmd_service_status() {
             {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let running = stdout.lines().any(|l| l.contains("ai.librefang.daemon"));
-                ui::kv(
-                    &i18n::t("maintenance-status-label-loaded"),
-                    if running {
-                        &i18n::t("label-yes")
-                    } else {
-                        &i18n::t("label-not-loaded")
-                    },
-                );
+                // Bind to a `let` so the chosen i18n string outlives the ui::kv call; an
+                // `&i18n::t(...)` inside the if-arms is a temporary freed before the call (E0716).
+                let loaded_status = if running {
+                    i18n::t("label-yes")
+                } else {
+                    i18n::t("label-not-loaded")
+                };
+                ui::kv(&i18n::t("maintenance-status-label-loaded"), &loaded_status);
             }
         } else {
             ui::hint(&i18n::t("maintenance-launchagent-status-not-registered"));
