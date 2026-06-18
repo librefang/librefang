@@ -70,6 +70,11 @@ export interface ProviderItem {
    *  Lets the dashboard distinguish "user-hidden" from "never configured"
    *  for the otherwise indistinguishable `auth_status: "missing"`. */
   suppressed?: boolean;
+  /** Server-assigned provider class, derived from the driver kind (#6216).
+   *  `"developer_agent"` = an agent-CLI subprocess driver (claude-code,
+   *  codex-cli, gemini-cli, qwen-code); `"general"` = a standard LLM API
+   *  provider. Optional for back-compat with daemons predating the field. */
+  category?: "developer_agent" | "general";
 }
 
 export interface MediaProvider {

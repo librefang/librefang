@@ -95,6 +95,8 @@
     "online": "Онлайн",
     "offline": "Офлайн",
     "setup": "Налаштування",
+    "category_developer_agent": "Агент CLI",
+    "category_general": "API",
     "ok": "ОК",
     "config": "Конфігурація",
     "interact": "Взаємодія",

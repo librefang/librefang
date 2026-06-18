@@ -866,6 +866,11 @@ In-crate only; no cross-crate error-shape changes.
 
 ### Added
 
+- **providers: classify agent-CLI providers vs general API providers** (#6216) (@houko).
+  `GET /api/providers` (and the snapshot + single-provider responses) now carry a `category` of `"developer_agent"` (agent-CLI subprocess drivers: claude-code / codex-cli / gemini-cli / qwen-code) or `"general"` (API model providers), derived from the existing `is_cli_provider` predicate — no model-catalog schema change, so no golden-fixture or OpenAPI drift.
+  The dashboard Providers page badges each provider by category (preferring the server value, falling back to the client CLI heuristic for older daemons), with i18n in en/zh/uk.
+  The "actual underlying model" half of the request was already shipped (#6134 / #6157): driver responses carry `actual_model` and the kernel records the real model in metering. Closes #6216.
+
 - **auth/dashboard: passkey (WebAuthn/FIDO2) login** (#5981) (@houko) — sign in to the dashboard with Touch ID, Face ID, Windows Hello, Android biometrics, or a roaming security key instead of typing a password.
   Opt-in per deployment via `passkey_enabled` + `passkey_rp_id` / `passkey_rp_origin` in `config.toml`; password login is untouched and remains the fallback.
   Adds the `webauthn_credentials` table (SQLite migration v44) storing the serialized `webauthn-rs` `Passkey` so the sign-count persists across assertions, a `PasskeyEngine` owning the two WebAuthn ceremonies with short-TTL in-memory challenge state, and six routes under `/api/auth/passkey/*` (registration-options/verify gated Owner-only, authentication-options/verify public and rate-limited, plus list/revoke).

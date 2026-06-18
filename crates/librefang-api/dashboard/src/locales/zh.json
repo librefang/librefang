@@ -95,6 +95,8 @@
     "online": "在线",
     "offline": "离线",
     "setup": "需配置",
+    "category_developer_agent": "智能体 CLI",
+    "category_general": "API",
     "ok": "正常",
     "config": "配置",
     "interact": "交互",

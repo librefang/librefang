@@ -580,6 +580,23 @@ async fn list_providers_returns_well_formed_envelope() {
             p["display_name"].is_string(),
             "provider entry missing 'display_name': {p}"
         );
+        // #6216: every provider carries a coarse category.
+        let category = p["category"].as_str();
+        assert!(
+            matches!(category, Some("developer_agent") | Some("general")),
+            "provider entry has invalid 'category': {p}"
+        );
+        // Agent-CLI providers must be classified developer_agent.
+        if matches!(
+            p["id"].as_str(),
+            Some("claude-code" | "codex-cli" | "gemini-cli" | "qwen-code")
+        ) {
+            assert_eq!(
+                category,
+                Some("developer_agent"),
+                "agent-CLI provider must be developer_agent: {p}"
+            );
+        }
     }
 }
 

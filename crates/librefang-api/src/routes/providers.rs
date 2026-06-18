@@ -598,6 +598,9 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
             "media_capabilities": p.media_capabilities,
             "is_custom": p.is_custom,
             "suppressed": suppressed_ids.contains(&p.id),
+            // #6216: coarse UI category derived from the driver kind (agent-CLI
+            // subprocess vs API model provider), not a model_catalog field.
+            "category": if librefang_llm_drivers::drivers::is_cli_provider(&p.id) { "developer_agent" } else { "general" },
         });
 
         // Attach region map so the dashboard can show available regions
@@ -735,6 +738,9 @@ pub(crate) async fn providers_snapshot(state: &Arc<AppState>) -> Vec<serde_json:
             "media_capabilities": p.media_capabilities,
             "is_custom": p.is_custom,
             "suppressed": suppressed_ids.contains(&p.id),
+            // #6216: coarse UI category derived from the driver kind (agent-CLI
+            // subprocess vs API model provider), not a model_catalog field.
+            "category": if librefang_llm_drivers::drivers::is_cli_provider(&p.id) { "developer_agent" } else { "general" },
         });
         if let Some(probe) = probe_map.remove(&i) {
             attach_probe_result(&mut entry, &probe, &p.id, &*state.kernel);
@@ -817,6 +823,8 @@ pub async fn get_provider(
         "api_key_env": provider.api_key_env,
         "base_url": provider.base_url,
         "proxy_url": provider.proxy_url,
+        // #6216: keep the single-provider detail in sync with the list category.
+        "category": if librefang_llm_drivers::drivers::is_cli_provider(&provider.id) { "developer_agent" } else { "general" },
         "models": models,
     });
 

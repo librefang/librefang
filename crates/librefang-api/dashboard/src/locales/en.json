@@ -95,6 +95,8 @@
     "online": "Online",
     "offline": "Offline",
     "setup": "Setup",
+    "category_developer_agent": "Agent CLI",
+    "category_general": "API",
     "ok": "OK",
     "config": "Config",
     "interact": "Interact",

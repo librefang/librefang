@@ -97,6 +97,18 @@ function getAuthBadge(status?: string): { variant: BadgeVariant; label: string }
   }
 }
 
+// Coarse provider category badge (#6216): prefer the server-assigned category,
+// fall back to the client CLI heuristic for daemons predating the field.
+function getCategoryBadge(
+  category: ProviderItem["category"],
+  isCli: boolean,
+): { variant: BadgeVariant; key: string } | null {
+  const isDevAgent = category === "developer_agent" || (category == null && isCli);
+  if (isDevAgent) return { variant: "info", key: "providers.category_developer_agent" };
+  if (category === "general") return { variant: "default", key: "providers.category_general" };
+  return null;
+}
+
 type SortField = "name" | "models" | "latency";
 type SortOrder = "asc" | "desc";
 type ViewMode = "grid" | "list";
@@ -323,7 +335,12 @@ const ProviderCard = memo(function ProviderCard({ provider: p, isSelected, isDef
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
               <h3 className="font-black truncate">{p.display_name || p.id}</h3>
-              {isCli && <Badge variant="default" className="shrink-0">CLI</Badge>}
+              {(() => {
+                const cat = getCategoryBadge(p.category, isCli);
+                return cat ? (
+                  <Badge variant={cat.variant} className="shrink-0">{t(cat.key)}</Badge>
+                ) : null;
+              })()}
               {isConfigured ? (
                 <Badge variant={p.reachable === true ? "success" : p.reachable === false ? "error" : "default"} className="shrink-0">
                   {p.reachable === true ? t("providers.online") : p.reachable === false ? t("providers.offline") : t("providers.not_checked")}

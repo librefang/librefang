@@ -251,6 +251,46 @@ describe("ProvidersPage", () => {
     expect(screen.queryByText("Groq")).not.toBeInTheDocument();
   });
 
+  it("badges providers by category (#6216)", () => {
+    // Local fixture (not the shared PROVIDERS) so other tests' counts are
+    // unaffected. Both are configured so they render in the default view; the
+    // i18n mock echoes the key, so we assert on the key string.
+    useProvidersMock.mockReturnValue({
+      data: [
+        {
+          id: "claude-code",
+          display_name: "Claude Code",
+          auth_status: "configured_cli",
+          reachable: true,
+          model_count: 3,
+          key_required: false,
+          category: "developer_agent",
+        },
+        {
+          id: "openai",
+          display_name: "OpenAI",
+          auth_status: "validated_key",
+          reachable: true,
+          model_count: 12,
+          key_required: true,
+          category: "general",
+        },
+      ] as ProviderItem[],
+      isLoading: false,
+      isFetching: false,
+      refetch: vi.fn(),
+    });
+
+    renderPage();
+
+    expect(
+      screen.getAllByText("providers.category_developer_agent").length,
+    ).toBeGreaterThan(0);
+    expect(
+      screen.getAllByText("providers.category_general").length,
+    ).toBeGreaterThan(0);
+  });
+
   it("opens the Add picker drawer and lists only unconfigured providers", async () => {
     useProvidersMock.mockReturnValue({
       data: PROVIDERS,
