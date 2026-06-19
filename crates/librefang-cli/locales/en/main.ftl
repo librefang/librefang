@@ -1703,3 +1703,22 @@ tui-audit-chain-unverified = Chain: not verified
 tui-audit-chain-verified = Chain: Verified
 tui-audit-chain-failed = Chain: Verification failed
 tui-audit-hints =   [↑↓] Navigate  [f] Filter  [v] Verify Chain  [r] Refresh
+
+# dashboard.rs
+tui-dashboard-title = Dashboard
+tui-dashboard-hints =   [r] Refresh  [a] Agents  [↑↓] Scroll  [PgUp/PgDn] Fast scroll
+tui-dashboard-dreams-title = DREAMS
+tui-dashboard-auto-dream-enabled = auto-dream enabled
+tui-dashboard-auto-dream-disabled = auto-dream disabled
+tui-dashboard-dream-details = phase={ $phase }  tools={ $tools }  mems={ $mems }
+tui-dashboard-stat-agents = AGENTS
+tui-dashboard-stat-uptime = UPTIME
+tui-dashboard-stat-provider = PROVIDER
+tui-dashboard-stat-model = MODEL
+tui-dashboard-audit-time = Time
+tui-dashboard-audit-agent = Agent
+tui-dashboard-audit-action = Action
+tui-dashboard-audit-detail = Detail
+tui-dashboard-loading = Loading…
+tui-dashboard-no-audit = No audit entries yet.
+
