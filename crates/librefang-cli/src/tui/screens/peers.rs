@@ -83,7 +83,7 @@ impl PeersState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut PeersState) {
-    let inner = widgets::render_screen_block(f, area, "\u{25cc} Peers");
+    let inner = widgets::render_screen_block(f, area, &format!("{} {}", "\u{25cc}", crate::i18n::t("tui-peers-title")));
 
     let chunks = Layout::vertical([
         Constraint::Length(2), // header
@@ -97,29 +97,29 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut PeersState) {
         Paragraph::new(vec![
             Line::from(vec![
                 Span::styled(
-                    "  OFP Peer Network",
+                    format!("  {}", crate::i18n::t("tui-peers-network")),
                     Style::default()
                         .fg(theme::CYAN)
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    format!("  \u{2502} {} peers", state.peers.len()),
+                    format!("  {} {}", "\u{2502}", crate::i18n::t_args("tui-peers-count", &[("count", &state.peers.len().to_string())])),
                     Style::default().fg(theme::TEXT_SECONDARY),
                 ),
             ]),
             Line::from(vec![
                 Span::styled("  ", theme::table_header()),
-                Span::styled(format!("{:<14}", "Node ID"), theme::table_header()),
+                Span::styled(format!("{:<14}", crate::i18n::t("tui-peers-header-node-id")), theme::table_header()),
                 Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
-                Span::styled(format!("{:<16}", "Name"), theme::table_header()),
+                Span::styled(format!("{:<16}", crate::i18n::t("tui-peers-header-name")), theme::table_header()),
                 Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
-                Span::styled(format!("{:<20}", "Address"), theme::table_header()),
+                Span::styled(format!("{:<20}", crate::i18n::t("tui-peers-header-address")), theme::table_header()),
                 Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
-                Span::styled(format!("{:<10}", "Status"), theme::table_header()),
+                Span::styled(format!("{:<10}", crate::i18n::t("tui-peers-header-status")), theme::table_header()),
                 Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
-                Span::styled(format!("{:<6}", "Agents"), theme::table_header()),
+                Span::styled(format!("{:<6}", crate::i18n::t("tui-peers-header-agents")), theme::table_header()),
                 Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
-                Span::styled("Protocol", theme::table_header()),
+                Span::styled(crate::i18n::t("tui-peers-header-protocol"), theme::table_header()),
             ]),
         ]),
         chunks[0],
@@ -128,12 +128,12 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut PeersState) {
     // List
     if state.loading && state.peers.is_empty() {
         f.render_widget(
-            widgets::spinner(state.tick, "Discovering peers\u{2026}"),
+            widgets::spinner(state.tick, &crate::i18n::t("tui-peers-loading")),
             chunks[1],
         );
     } else if state.peers.is_empty() {
         f.render_widget(
-            widgets::empty_state("No peers connected. Enable OFP networking in config.toml."),
+            widgets::empty_state(&crate::i18n::t("tui-peers-empty")),
             chunks[1],
         );
     } else {
@@ -148,13 +148,15 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut PeersState) {
                 };
                 let (state_badge, state_style) = match p.state.to_lowercase().as_str() {
                     "connected" | "active" => {
-                        ("\u{25cf} Active", Style::default().fg(theme::GREEN))
+                        (format!("{} {}", "\u{25cf}", crate::i18n::t("tui-peers-status-active")), Style::default().fg(theme::GREEN))
                     }
-                    "disconnected" | "inactive" => ("\u{25cb} Offline", theme::dim_style()),
+                    "disconnected" | "inactive" => {
+                        (format!("{} {}", "\u{25cb}", crate::i18n::t("tui-peers-status-offline")), theme::dim_style())
+                    }
                     "connecting" | "pending" => {
-                        ("\u{25cb} Pending", Style::default().fg(theme::YELLOW))
+                        (format!("{} {}", "\u{25cb}", crate::i18n::t("tui-peers-status-pending")), Style::default().fg(theme::YELLOW))
                     }
-                    _ => (&*p.state, theme::dim_style()),
+                    _ => (p.state.clone(), theme::dim_style()),
                 };
                 ListItem::new(Line::from(vec![
                     Span::styled("  ", Style::default()),
@@ -194,7 +196,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut PeersState) {
 
     // Hints
     f.render_widget(
-        widgets::hint_bar("  \u{2191}\u{2193} Navigate  r Refresh  (auto-refreshes every 15s)"),
+        widgets::hint_bar(&format!("  {}", crate::i18n::t("tui-peers-hints"))),
         chunks[2],
     );
 }
