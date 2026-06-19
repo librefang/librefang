@@ -698,3 +698,25 @@ tui-peers-status-pending = 等待中
 tui-peers-loading = 正在寻找对等节点…
 tui-peers-empty = 无连接的对等节点。请在 config.toml 中启用 OFP 网络。
 tui-peers-hints = ↑↓ 导航  r 刷新 (每 15 秒自动刷新)
+
+# usage.rs
+tui-usage-title = 使用量
+tui-usage-hints = [1] 概览  [2] 按模型  [3] 按智能体  [r] 刷新
+tui-usage-tab-summary = 1 概览
+tui-usage-tab-model = 2 按模型
+tui-usage-tab-agent = 3 按智能体
+tui-usage-loading = 正在加载使用量数据…
+tui-usage-loading-simple = 正在加载…
+tui-usage-card-input = 输入 Token
+tui-usage-card-output = 输出 Token
+tui-usage-card-cost = 总花费
+tui-usage-card-calls = API 调用数
+tui-usage-header-model = 模型
+tui-usage-header-input = 输入 Token
+tui-usage-header-output = 输出 Token
+tui-usage-header-cost = 花费
+tui-usage-header-calls = 调用数
+tui-usage-header-agent = 智能体
+tui-usage-header-total-tokens = 总 Token
+tui-usage-header-tool-calls = 工具调用数
+tui-usage-empty = 暂无使用量数据。发送消息以查看 Token 统计信息。
