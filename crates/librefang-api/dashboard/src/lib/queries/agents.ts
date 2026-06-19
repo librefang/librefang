@@ -10,6 +10,7 @@ import {
   listExperiments,
   getExperimentMetrics,
   loadAgentSession,
+  getAgentSessionContext,
   listTools,
   getAgentTools,
   getAgentSkills,
@@ -96,6 +97,19 @@ export const agentQueries = {
       enabled: !!agentId,
       staleTime: 5 * 60_000,
       refetchOnWindowFocus: false,
+    }),
+  // Context-window usage snapshot — a cheap polled read that backs the chat
+  // header fill indicator. Refetched on a modest interval so it stays roughly
+  // live without spamming; paused in the background like the other agent
+  // polls (#3393). Disabled until both agent and session are known.
+  sessionContext: (agentId: string, sessionId?: string | null) =>
+    queryOptions({
+      queryKey: agentKeys.sessionContext(agentId, sessionId ?? null),
+      queryFn: () => getAgentSessionContext(agentId, sessionId ?? null),
+      enabled: !!agentId && !!sessionId,
+      staleTime: 10_000,
+      refetchInterval: 15_000,
+      refetchIntervalInBackground: false, // #3393
     }),
   agentTools: (agentId: string) =>
     queryOptions({
