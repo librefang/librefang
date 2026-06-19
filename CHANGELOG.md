@@ -872,6 +872,12 @@ In-crate only; no cross-crate error-shape changes.
 
 ### Added
 
+- **observability: `librefang_tool_call_total` now carries an `agent` label** (#6226) (@houko).
+  The counter added in #3495 was labeled only by `tool` and `outcome`, so tool failures could not be attributed per-agent.
+  It is now `librefang_tool_call_total{agent, tool, outcome}`, mirroring the existing per-agent `librefang_cron_fires_total{agent}` precedent.
+  The agent id is threaded from `session.agent_id` into `record_tool_call_metric` at every call site (serial and parallel dispatch paths) and sanitized + length-capped exactly like the `tool` label, so a hallucinated or hostile caller id cannot blow up metric cardinality.
+  Closes #6226.
+
 - **dashboard: a global Auto-Dream on/off switch on the Memory → Auto-Dream tab** (#6188) (@houko).
   The tab previously showed only a read-only status badge and told users to edit `config.toml` to flip the master switch; it is now an interactive toggle wired to the existing `POST /api/config/set` (`auto_dream.enabled` is on the writable allowlist).
   The handler invalidates `autoDreamKeys` in addition to `useSetConfigValue`'s `configKeys` so the badge and the per-agent "Dream now" buttons reflect the new global state immediately rather than after the 15s poll.
