@@ -17,23 +17,22 @@ pub(super) fn tool_use_blocks_from_calls(tool_calls: &[ToolCall]) -> Vec<Content
         .collect()
 }
 
-/// Sanitize a tool name into a bounded, low-cardinality metric label.
+/// Sanitize a free-form name into a bounded, low-cardinality metric label.
 ///
-/// Strips control chars and caps the length so an LLM that hallucinates
-/// a wild tool name can't blow up the metric registry. The set of real
-/// tool names is bounded (builtins + skill tools + MCP tools), so this
-/// label dimension stays tractable in steady state.
+/// Strips control chars and caps the length so an LLM that hallucinates a wild tool name (or a wildly long agent id) can't blow up the metric registry.
+/// The set of real tool names and agent ids is bounded (builtins + skill tools + MCP tools; registered agents), so these label dimensions stay tractable in steady state.
 pub(super) fn sanitize_tool_label(name: &str) -> String {
     name.chars().filter(|c| !c.is_control()).take(64).collect()
 }
 
-/// Record a tool-call outcome for observability (#3495). `outcome` is
-/// one of `"success"` / `"failure"`; we never push raw error text into
-/// metric labels.
-pub(super) fn record_tool_call_metric(tool_name: &str, is_error: bool) {
+/// Record a tool-call outcome for observability (#3495, #6226).
+/// `outcome` is one of `"success"` / `"failure"`; the `agent` dimension attributes the call to the agent that issued it so per-agent tool failure rates are queryable.
+/// We never push raw error text into metric labels, and both the `agent` and `tool` labels are sanitized + length-capped to keep cardinality bounded.
+pub(super) fn record_tool_call_metric(agent_id: &str, tool_name: &str, is_error: bool) {
     let outcome = if is_error { "failure" } else { "success" };
     metrics::counter!(
         "librefang_tool_call_total",
+        "agent" => sanitize_tool_label(agent_id),
         "tool" => sanitize_tool_label(tool_name),
         "outcome" => outcome,
     )
@@ -471,8 +470,10 @@ pub(super) async fn execute_single_tool_call(
 ) -> Result<ExecutedToolCall, LibreFangError> {
     let result = execute_single_tool_call_inner(ctx, tool_call).await;
     match &result {
-        Ok(executed) => record_tool_call_metric(&tool_call.name, executed.result.is_error),
-        Err(_) => record_tool_call_metric(&tool_call.name, true),
+        Ok(executed) => {
+            record_tool_call_metric(ctx.agent_id_str, &tool_call.name, executed.result.is_error)
+        }
+        Err(_) => record_tool_call_metric(ctx.agent_id_str, &tool_call.name, true),
     }
     result
 }
@@ -530,11 +531,15 @@ pub(super) async fn execute_tool_group(
                 members.push((idx, Member::Proceed(tool_call, verdict)));
             }
             LoopGuardPrecheck::Blocked(executed) => {
-                record_tool_call_metric(&tool_call.name, executed.result.is_error);
+                record_tool_call_metric(
+                    ctx.agent_id_str,
+                    &tool_call.name,
+                    executed.result.is_error,
+                );
                 members.push((idx, Member::Blocked(executed)));
             }
             LoopGuardPrecheck::CircuitBreak(err) => {
-                record_tool_call_metric(&tool_call.name, true);
+                record_tool_call_metric(ctx.agent_id_str, &tool_call.name, true);
                 return Err(err);
             }
         }
@@ -549,6 +554,8 @@ pub(super) async fn execute_tool_group(
         max_concurrent
     };
     let shared_ctx: &ToolExecutionContext = &*ctx;
+    // Capture the agent id from the shared borrow so the concurrent collector can attribute each metric without re-borrowing `ctx`.
+    let agent_id_str = shared_ctx.agent_id_str;
 
     let mut blocked: Vec<(usize, ExecutedToolCall)> = Vec::new();
     let mut pending: Vec<(usize, &ToolCall, LoopGuardVerdict)> = Vec::new();
@@ -572,14 +579,14 @@ pub(super) async fn execute_tool_group(
     while let Some((idx, name, outcome)) = in_flight.next().await {
         match outcome {
             Ok((executed, trace)) => {
-                record_tool_call_metric(&name, executed.result.is_error);
+                record_tool_call_metric(agent_id_str, &name, executed.result.is_error);
                 if let Some(trace) = trace {
                     traces.push((idx, trace));
                 }
                 results.push((idx, executed));
             }
             Err(e) => {
-                record_tool_call_metric(&name, true);
+                record_tool_call_metric(agent_id_str, &name, true);
                 // First hard error wins; keep draining in-flight futures so
                 // their side effects (decision traces, metrics) are not lost,
                 // then surface the error. The whole turn aborts on `?`.

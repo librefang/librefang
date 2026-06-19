@@ -693,6 +693,27 @@ impl MemorySubstrate {
             .canonical_context(agent_id, session_id, window_size)
     }
 
+    /// Return the agent's compacted summary **only if it is owned by
+    /// `session_id`** (#6225).
+    ///
+    /// The canonical compaction summary is agent-scoped and outlives any
+    /// single session, so it must not be surfaced on a session whose own
+    /// history was never compacted (e.g. a freshly created session that just
+    /// became the agent's active one). The summary is returned when its
+    /// recorded owning session matches `session_id`, and `None` otherwise —
+    /// including legacy rows with no recorded owner.
+    pub fn compacted_summary_for_session(
+        &self,
+        agent_id: AgentId,
+        session_id: SessionId,
+    ) -> LibreFangResult<Option<String>> {
+        let canonical = self.sessions.load_canonical(agent_id)?;
+        Ok(match canonical.compacted_summary_session_id {
+            Some(owner) if owner == session_id => canonical.compacted_summary,
+            _ => None,
+        })
+    }
+
     /// Store an LLM-generated summary, replacing older messages with the kept subset.
     ///
     /// Used by the compactor to replace text-truncation compaction with an
@@ -702,9 +723,10 @@ impl MemorySubstrate {
         agent_id: AgentId,
         summary: &str,
         kept_messages: Vec<librefang_types::message::Message>,
+        owning_session_id: Option<SessionId>,
     ) -> LibreFangResult<()> {
         self.sessions
-            .store_llm_summary(agent_id, summary, kept_messages)
+            .store_llm_summary(agent_id, summary, kept_messages, owning_session_id)
     }
 
     /// Write a human-readable JSONL mirror of a session to disk.
