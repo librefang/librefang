@@ -598,6 +598,7 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
             "media_capabilities": p.media_capabilities,
             "is_custom": p.is_custom,
             "suppressed": suppressed_ids.contains(&p.id),
+            "is_coding_agent": librefang_kernel::drivers::is_coding_agent_provider(&p.id),
         });
 
         // Attach region map so the dashboard can show available regions
@@ -735,6 +736,7 @@ pub(crate) async fn providers_snapshot(state: &Arc<AppState>) -> Vec<serde_json:
             "media_capabilities": p.media_capabilities,
             "is_custom": p.is_custom,
             "suppressed": suppressed_ids.contains(&p.id),
+            "is_coding_agent": librefang_kernel::drivers::is_coding_agent_provider(&p.id),
         });
         if let Some(probe) = probe_map.remove(&i) {
             attach_probe_result(&mut entry, &probe, &p.id, &*state.kernel);
