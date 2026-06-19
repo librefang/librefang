@@ -97,6 +97,7 @@ export {
   listSessions,
   getSessionDetails,
   loadAgentSession,
+  getAgentSessionContext,
   // skills (local + hubs)
   listSkills,
   getSkillDetail,

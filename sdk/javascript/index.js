@@ -304,6 +304,10 @@ class AgentsResource {
     return this._c._request("POST", `/api/agents/${id}/session/compact`);
   }
 
+  async getAgentSessionContext(id, query) {
+    return this._c._request("GET", `/api/agents/${id}/session/context`, undefined, query);
+  }
+
   async rebootSession(id) {
     return this._c._request("POST", `/api/agents/${id}/session/reboot`);
   }

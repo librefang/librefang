@@ -2090,6 +2090,53 @@
         }
       }
     },
+    "/api/agents/{id}/session/context": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/agents/{id}/session/context — context-window usage indicator.",
+        "operationId": "get_agent_session_context",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "query",
+            "description": "Optional session id to report on instead of the canonical active session",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Context window usage for the requested (or active) session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionContextResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid agent or session ID"
+          },
+          "404": {
+            "description": "Agent or session not found"
+          }
+        }
+      }
+    },
     "/api/agents/{id}/session/reboot": {
       "post": {
         "tags": [
@@ -14048,6 +14095,42 @@
           },
           "status": {
             "type": "string"
+          }
+        }
+      },
+      "SessionContextResponse": {
+        "type": "object",
+        "description": "Lightweight context-window usage indicator for an agent session.\n\nDistinct from `GET /api/agents/{id}/session`: that endpoint returns the full\nmessage history and exposes only the X numerator\n(`context_window_tokens`). This endpoint resolves the Y denominator (the\nmodel's context window, via the same precedence chain the agent loop uses)\nand the percentage, so the dashboard can render a cheap polled \"how full is\nthe window\" bar without pulling the heavy history payload.",
+        "required": [
+          "used_tokens",
+          "max_context_tokens",
+          "pct",
+          "model",
+          "pressure"
+        ],
+        "properties": {
+          "max_context_tokens": {
+            "type": "integer",
+            "description": "Resolved model context window. Falls back to\n`UNKNOWN_MODEL_CONTEXT_WINDOW` (8192) for an unknown model, so this is\nalways positive.",
+            "minimum": 0
+          },
+          "model": {
+            "type": "string",
+            "description": "The agent's model id."
+          },
+          "pct": {
+            "type": "number",
+            "format": "double",
+            "description": "Usage percentage, clamped to 100 with one decimal of precision."
+          },
+          "pressure": {
+            "type": "string",
+            "description": "Pressure level: `low` / `medium` / `high` / `critical`."
+          },
+          "used_tokens": {
+            "type": "integer",
+            "description": "Estimated tokens currently in the context window (chars/4 heuristic).",
+            "minimum": 0
           }
         }
       },
