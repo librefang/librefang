@@ -139,6 +139,37 @@ const MAX_CONSECUTIVE_ALL_FAILED: u32 = 3;
 /// Used by channel_bridge to detect this case without fragile string matching.
 pub const TIMEOUT_PARTIAL_OUTPUT_MARKER: &str = "[partial_output_delivered]";
 
+/// Strips control chars and caps length to bound metric cardinality.
+fn sanitize_agent_label(name: &str) -> String {
+    name.chars().filter(|c| !c.is_control()).take(64).collect()
+}
+
+/// Maps the loop result to a stable metric `reason` label; no `empty_response` branch (empty replies retry in-loop and land on `completed`).
+fn classify_exit_reason(result: &LibreFangResult<AgentLoopResult>) -> &'static str {
+    match result {
+        Ok(_) => "completed",
+        Err(LibreFangError::MaxIterationsExceeded(_)) => "max_iterations",
+        Err(LibreFangError::RepeatedToolFailures { .. }) => "repeated_tool_failures",
+        Err(LibreFangError::ContentFiltered { .. }) => "content_filtered",
+        Err(LibreFangError::Internal(msg))
+            if msg.starts_with(crate::loop_guard::CIRCUIT_BREAKER_MSG_PREFIX) =>
+        {
+            "circuit_break"
+        }
+        Err(_) => "error",
+    }
+}
+
+/// Increments the exit counter exactly once — called only by the instrumented wrappers, never from within the loop.
+fn record_agent_loop_exit(agent: &str, result: &LibreFangResult<AgentLoopResult>) {
+    metrics::counter!(
+        "librefang_agent_loop_exits_total",
+        "agent" => sanitize_agent_label(agent),
+        "reason" => classify_exit_reason(result),
+    )
+    .increment(1);
+}
+
 /// Notify the stream consumer that the LLM has finished producing text for
 /// this turn so the UI can unblock input before the agent loop's remaining
 /// post-processing (session persistence, proactive memory extraction) lands
@@ -341,6 +372,73 @@ pub(super) fn redact_images_for_text_only(mut messages: Vec<Message>, model: &st
 // The span itself does not emit a log line; the level only gates creation.
 #[instrument(level = "warn", skip_all, fields(agent.name = %manifest.name, agent.id = %session.agent_id, session.id = %session.id))]
 pub async fn run_agent_loop(
+    manifest: &AgentManifest,
+    user_message: &str,
+    session: &mut Session,
+    memory: &MemorySubstrate,
+    driver: Arc<dyn LlmDriver>,
+    available_tools: &[ToolDefinition],
+    kernel: Option<Arc<dyn KernelHandle>>,
+    skill_registry: Option<&SkillRegistry>,
+    mcp_connections: Option<&tokio::sync::Mutex<Vec<McpConnection>>>,
+    web_ctx: Option<&WebToolsContext>,
+    browser_ctx: Option<&crate::browser::BrowserManager>,
+    embedding_driver: Option<&(dyn EmbeddingDriver + Send + Sync)>,
+    workspace_root: Option<&Path>,
+    on_phase: Option<&PhaseCallback>,
+    media_engine: Option<&crate::media_understanding::MediaEngine>,
+    media_drivers: Option<&crate::media::MediaDriverCache>,
+    tts_engine: Option<&crate::tts::TtsEngine>,
+    docker_config: Option<&librefang_types::config::DockerSandboxConfig>,
+    hooks: Option<&crate::hooks::HookRegistry>,
+    context_window_tokens: Option<usize>,
+    process_manager: Option<&crate::process_manager::ProcessManager>,
+    checkpoint_manager: Option<Arc<CheckpointManager>>,
+    process_registry: Option<&crate::process_registry::ProcessRegistry>,
+    user_content_blocks: Option<Vec<ContentBlock>>,
+    proactive_memory: Option<Arc<librefang_memory::ProactiveMemoryStore>>,
+    context_engine: Option<&dyn ContextEngine>,
+    pending_messages: Option<&tokio::sync::Mutex<mpsc::Receiver<AgentLoopSignal>>>,
+    opts: &LoopOptions,
+) -> LibreFangResult<AgentLoopResult> {
+    let agent_label = manifest.name.clone();
+    let result = run_agent_loop_inner(
+        manifest,
+        user_message,
+        session,
+        memory,
+        driver,
+        available_tools,
+        kernel,
+        skill_registry,
+        mcp_connections,
+        web_ctx,
+        browser_ctx,
+        embedding_driver,
+        workspace_root,
+        on_phase,
+        media_engine,
+        media_drivers,
+        tts_engine,
+        docker_config,
+        hooks,
+        context_window_tokens,
+        process_manager,
+        checkpoint_manager,
+        process_registry,
+        user_content_blocks,
+        proactive_memory,
+        context_engine,
+        pending_messages,
+        opts,
+    )
+    .await;
+    record_agent_loop_exit(&agent_label, &result);
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_agent_loop_inner(
     manifest: &AgentManifest,
     user_message: &str,
     session: &mut Session,
