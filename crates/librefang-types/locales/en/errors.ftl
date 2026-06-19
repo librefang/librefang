@@ -49,6 +49,7 @@ api-error-auth-missing = API key not configured for this provider
 api-error-session-load-failed = Session load failed
 api-error-session-not-found = Session not found
 api-error-session-invalid-id = Invalid session ID
+api-error-context-report-failed = Context report failed
 api-error-session-no-label = No session found with that label
 api-error-session-cleanup-expired-failed = Failed to cleanup expired sessions: { $error }
 api-error-session-cleanup-excess-failed = Failed to cleanup excess sessions: { $error }
