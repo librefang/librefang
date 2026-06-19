@@ -196,6 +196,17 @@ fn is_potential_untranslated_literal(lit: &str) -> bool {
         "failed to initialize i18n, falling back to English",
         "default language pack must be valid",
         "failed to initialize default i18n fallback: {error}",
+        "HTTP error: {e}",
+        "Parse error: {e}",
+        "Invalid agent ID",
+        "Parse error",
+        "Content-Length: {}rnrn{}",
+        "Send a message to LibreFang agent '{name}'",
+        "Message to send to the agent",
+        "Missing 'message' argument",
+        "Unknown tool: {tool_name}",
+        "Error: {e}",
+        "Method not found: {method}",
         "target checked above",
         "instance_id missing",
         // Technical format strings
@@ -602,7 +613,6 @@ fn test_no_untranslated_strings() {
                 .replace('\\', "/");
 
             if rel_path == "cli.rs"
-                || rel_path == "mcp.rs"
                 || rel_path.starts_with("tui/")
             {
                 continue;
