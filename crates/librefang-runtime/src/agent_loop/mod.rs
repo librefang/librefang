@@ -139,45 +139,12 @@ const MAX_CONSECUTIVE_ALL_FAILED: u32 = 3;
 /// Used by channel_bridge to detect this case without fragile string matching.
 pub const TIMEOUT_PARTIAL_OUTPUT_MARKER: &str = "[partial_output_delivered]";
 
-/// Sanitize an agent name into a bounded, low-cardinality metric label.
-///
-/// Mirrors `sanitize_tool_label` in `tool_call.rs` and the bounded-cardinality
-/// contract documented on `record_cron_fire_metric` in the kernel's `cron.rs`:
-/// strip control chars and cap the length so a pathological agent name can't
-/// blow up the metric registry. The agent roster is bounded in steady state.
+/// Strips control chars and caps length to bound metric cardinality.
 fn sanitize_agent_label(name: &str) -> String {
     name.chars().filter(|c| !c.is_control()).take(64).collect()
 }
 
-/// Classify the final result of an agent-loop run into a stable metric
-/// `reason` label for `librefang_agent_loop_exits_total`.
-///
-/// One reason per real termination branch in `run_agent_loop` /
-/// `run_agent_loop_streaming`:
-/// - `completed` — any `Ok(_)` return: a finalized EndTurn reply, a silent
-///   completion (NO_REPLY / cascade-leak / progress-leak / mid-stream
-///   cascade-leak abort), a MaxTokens partial return, an interrupt-cancel
-///   early return, or the provider-not-configured early return. These all
-///   represent the loop handing control back without an error.
-/// - `max_iterations` — `Err(MaxIterationsExceeded)`: the `for` loop ran out.
-/// - `repeated_tool_failures` — `Err(RepeatedToolFailures)`:
-///   `consecutive_all_failed >= MAX_CONSECUTIVE_ALL_FAILED`.
-/// - `circuit_break` — the loop-guard global circuit breaker tripped. It
-///   surfaces as `Err(Internal(msg))` propagated up through the `?` on
-///   `execute_single_tool_call`; matched via the shared
-///   `loop_guard::CIRCUIT_BREAKER_MSG_PREFIX` constant.
-/// - `content_filtered` — `Err(ContentFiltered)`: provider safety / content
-///   filter blocked the response.
-/// - `error` — any other propagated `Err` (LLM call failure, memory error,
-///   etc.).
-///
-/// NOTE on the issue's suggested set: there is no distinct `empty_response`
-/// *termination* branch. An empty LLM response is a one-shot in-loop retry
-/// (`EndTurnRetry::EmptyResponse` → `continue`); the turn then either retries
-/// to a real reply or finalizes via `finalize_end_turn_text`, both of which
-/// land on `completed`. `content_filtered` is added because it is a real
-/// distinct terminal branch operators will want to separate from generic
-/// `error`.
+/// Maps the loop result to a stable metric `reason` label; no `empty_response` branch (empty replies retry in-loop and land on `completed`).
 fn classify_exit_reason(result: &LibreFangResult<AgentLoopResult>) -> &'static str {
     match result {
         Ok(_) => "completed",
@@ -193,16 +160,7 @@ fn classify_exit_reason(result: &LibreFangResult<AgentLoopResult>) -> &'static s
     }
 }
 
-/// Emit the agent-loop exit counter exactly once per loop termination.
-///
-/// Single-increment is guaranteed structurally: the public entry points
-/// (`run_agent_loop`, `run_agent_loop_streaming`) are thin wrappers that call
-/// their respective `*_inner` body once and feed the single returned `Result`
-/// here. No terminal site inside the loop touches this metric, so there is no
-/// path that can double-count even when one branch falls through to another.
-///
-/// Operators alert on
-/// `rate(librefang_agent_loop_exits_total{reason!="completed"}) > 0` per agent.
+/// Increments the exit counter exactly once — called only by the instrumented wrappers, never from within the loop.
 fn record_agent_loop_exit(agent: &str, result: &LibreFangResult<AgentLoopResult>) {
     metrics::counter!(
         "librefang_agent_loop_exits_total",
@@ -443,11 +401,6 @@ pub async fn run_agent_loop(
     pending_messages: Option<&tokio::sync::Mutex<mpsc::Receiver<AgentLoopSignal>>>,
     opts: &LoopOptions,
 ) -> LibreFangResult<AgentLoopResult> {
-    // Thin instrumented wrapper around `run_agent_loop_inner`. The single
-    // returned `Result` is classified into the `librefang_agent_loop_exits_total`
-    // metric exactly once here (see `record_agent_loop_exit`), so every
-    // termination branch — `Ok`, propagated `?` error, or explicit `Err` — is
-    // counted once and only once, with no per-site increments to double-count.
     let agent_label = manifest.name.clone();
     let result = run_agent_loop_inner(
         manifest,

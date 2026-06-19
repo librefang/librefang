@@ -1293,20 +1293,9 @@ fn test_record_tool_call_metric_success_outcome() {
     );
 }
 
-// ── Agent-loop exit metric (refs #6227) ────────────────────────────────
-//
-// `librefang_agent_loop_exits_total{agent,reason}` must increment exactly
-// once per loop termination, with the `reason` label matching the real
-// termination branch. The wrapper (`run_agent_loop` /
-// `run_agent_loop_streaming`) classifies the single returned `Result` via
-// `classify_exit_reason` and emits through `record_agent_loop_exit`. These
-// tests pin the classifier mapping for every branch and prove the single
-// `record_agent_loop_exit` call increments exactly once with the right
-// labels — the injection site of the metric.
+// ── Agent-loop exit metric ──────────────────────────────────────────────
 
-/// `classify_exit_reason` maps each real termination `Result` to its stable
-/// `reason` label. Pins the exact reason set so a future error-variant or
-/// branch change can't silently re-bucket a termination.
+/// Pins every `classify_exit_reason` mapping so future variant changes can't silently re-bucket an exit.
 #[test]
 fn test_classify_exit_reason_covers_every_branch() {
     // completed — any Ok return (finalized reply, silent completion,
@@ -1354,9 +1343,7 @@ fn test_classify_exit_reason_covers_every_branch() {
     );
 }
 
-/// `record_agent_loop_exit` increments the counter exactly once per call,
-/// labeled with the sanitized agent and the classified reason. Mirrors the
-/// `record_tool_call_metric` DebuggingRecorder pattern above.
+/// Counter increments exactly once per call with the right agent and reason labels.
 #[test]
 fn test_record_agent_loop_exit_increments_once_with_labels() {
     use metrics_util::debugging::{DebugValue, DebuggingRecorder};
@@ -1406,9 +1393,7 @@ fn test_record_agent_loop_exit_increments_once_with_labels() {
     }
 }
 
-/// The agent label is sanitized (control chars stripped, length capped)
-/// like the tool / cron agent labels, so a pathological agent name cannot
-/// blow up metric cardinality.
+/// A pathological agent name cannot blow up metric cardinality.
 #[test]
 fn test_sanitize_agent_label_strips_control_and_caps_length() {
     assert_eq!(sanitize_agent_label("agent\u{0007}\n-1"), "agent-1");

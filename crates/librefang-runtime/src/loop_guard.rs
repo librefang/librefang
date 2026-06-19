@@ -55,15 +55,7 @@ const POLL_KEYWORDS: &[&str] = &[
 /// Maximum recent call history size for ping-pong detection.
 const HISTORY_SIZE: usize = 30;
 
-/// Stable prefix of the [`LoopGuardVerdict::CircuitBreak`] message.
-///
-/// Single source of truth shared between the producer (the `check` global
-/// circuit-breaker branch below) and the agent-loop exit classifier
-/// (`agent_loop::classify_exit_reason`), which maps the propagated
-/// `LibreFangError::Internal(msg)` back to the `circuit_break` exit reason
-/// for the `librefang_agent_loop_exits_total` metric. Referencing the same
-/// `const` from both sides keeps the match compiler-anchored rather than a
-/// loose string literal duplicated across modules.
+/// Shared prefix anchoring the circuit-break classifier in `agent_loop` to the producer here.
 pub(crate) const CIRCUIT_BREAKER_MSG_PREFIX: &str = "Circuit breaker:";
 
 /// Backoff schedule in milliseconds for polling tools.

@@ -49,10 +49,6 @@ pub async fn run_agent_loop_streaming(
     pending_messages: Option<&tokio::sync::Mutex<mpsc::Receiver<AgentLoopSignal>>>,
     opts: &LoopOptions,
 ) -> LibreFangResult<AgentLoopResult> {
-    // Thin instrumented wrapper around `run_agent_loop_streaming_inner` — see
-    // `run_agent_loop` for the single-increment rationale. The streaming and
-    // non-streaming loops share the same `librefang_agent_loop_exits_total`
-    // metric and `record_agent_loop_exit` classifier.
     let agent_label = manifest.name.clone();
     let result = run_agent_loop_streaming_inner(
         manifest,
