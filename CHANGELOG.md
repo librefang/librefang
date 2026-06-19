@@ -875,6 +875,10 @@ In-crate only; no cross-crate error-shape changes.
 
 ### Added
 
+- **sec(sandbox): protect the audit anchor from WASM skill `fs_write` via a capability deny-list** (#6182) (@houko).
+  The WASM sandbox previously gated `fs_write` solely on glob capability matching, so a skill granted a broad `FileWrite` subtree — or the universal `FileWrite("*")` — could truncate the audit anchor (`[audit].anchor_path`, default `data_dir/audit.anchor`) and silently break the tamper-evident Merkle chain.
+  `ToolPolicy` gains a `protected_write_paths()` method (default empty; the kernel returns the boot-resolved anchor), and `host_fs_write` now denies any write whose canonical target matches a protected path *above* the capability check, so even `FileWrite("*")` cannot reach the anchor.
+  The deny-list is scoped strictly to the anchor file, not all of `data_dir`, to keep the blast radius small; closes #6182 and supersedes the duplicate #6181.
 - **channels: per-instance sidecar secrets so each agent can own its own handle** (#6169) (@houko).
   Two instances of the same sidecar adapter (e.g. one Matrix account per agent) previously had to share one global secret — a Matrix sidecar's identity is its `MATRIX_ACCESS_TOKEN`, so both logged in as the same account.
   `build_spawn_env` now resolves a `<NAME>__KEY` entry in `secrets.env` to the bare `KEY` for the matching `[[sidecar_channels]]` instance (name uppercased, non-alphanumerics → `_`); the per-instance value overrides the global bare key and the parent env, and another instance's namespaced secret never leaks into this child.
@@ -944,6 +948,10 @@ In-crate only; no cross-crate error-shape changes.
   The Hand settings editor PUTs only the keys changed this session, but `update_hand_settings` passed that partial map straight to `HandRegistry::update_config`, which replaces the whole instance config — so for a Hand with several settings, saving one reverted every other to its default.
   The route now reads the instance's current config and merges the incoming keys over it (a true partial update; the registry's replace contract is unchanged), and the editor also seeds its payload from the saved values as defense in depth.
   Closes #6204.
+- **fix(prompts): refuse to delete the active (bound) prompt version** (#6195) (@houko).
+  `PromptStore::delete_version` deleted unconditionally, so a direct API/SDK call could delete the version an agent is actively sending, orphaning its live prompt; the dashboard only hid the delete button client-side.
+  The store now rejects deleting an active version with `InvalidState` (surfaced as `400`, no longer flattened to `500` by the kernel handle), unknown ids stay an idempotent no-op, and the dashboard renders the active version's delete button disabled with an explanatory tooltip on both the Prompts page and the per-agent Prompts/Experiments modal.
+  Closes #6195.
 - **fix(cli): bind the macOS launchagent status string to a `let` so the macOS build compiles (E0716)** (#6198) (@houko).
   The macOS-only launchagent-status block passed `&i18n::t(...)` from inside an `if`/`else` expression to `ui::kv`, but each arm returns an owned `String` whose temporary is freed at the end of the `if`-expression, before `ui::kv` borrows it.
   The macOS test lane is main-push-only, so this surfaced as a red `main` after merge rather than failing the originating PR.

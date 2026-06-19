@@ -3883,6 +3883,7 @@
     "bind": "绑定",
     "bound": "已绑定",
     "delete": "删除版本",
+    "delete_blocked_active": "当前激活版本 — 请先激活其他版本再删除",
     "created_label": "创建于",
     "bind_success": "已将 v{{version}} 绑定到智能体",
     "bind_error": "绑定版本失败",
