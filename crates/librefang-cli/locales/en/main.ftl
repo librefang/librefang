@@ -1518,3 +1518,25 @@ tui-peers-status-pending = Pending
 tui-peers-loading = Discovering peers…
 tui-peers-empty = No peers connected. Enable OFP networking in config.toml.
 tui-peers-hints = ↑↓ Navigate  r Refresh  (auto-refreshes every 15s)
+
+# usage.rs
+tui-usage-title = Usage
+tui-usage-hints = [1] Summary  [2] By Model  [3] By Agent  [r] Refresh
+tui-usage-tab-summary = 1 Summary
+tui-usage-tab-model = 2 By Model
+tui-usage-tab-agent = 3 By Agent
+tui-usage-loading = Loading usage data…
+tui-usage-loading-simple = Loading…
+tui-usage-card-input = Input Tokens
+tui-usage-card-output = Output Tokens
+tui-usage-card-cost = Total Cost
+tui-usage-card-calls = API Calls
+tui-usage-header-model = Model
+tui-usage-header-input = Input Tokens
+tui-usage-header-output = Output Tokens
+tui-usage-header-cost = Cost
+tui-usage-header-calls = Calls
+tui-usage-header-agent = Agent
+tui-usage-header-total-tokens = Total Tokens
+tui-usage-header-tool-calls = Tool Calls
+tui-usage-empty = No usage data. Send messages to see token stats.
