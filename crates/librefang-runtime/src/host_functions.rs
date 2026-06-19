@@ -140,11 +140,33 @@ fn safe_resolve_parent(path: &str) -> Result<std::path::PathBuf, serde_json::Val
 }
 
 // Both sides go through `safe_resolve_parent` so symlinks and macOS firmlinks resolve identically.
+//
+// The parent directory of each side is canonicalized (so two paths reaching the
+// same real directory compare equal), but the leaf filename is appended verbatim.
+// That means an exact `PathBuf` comparison is case-sensitive on the leaf, while
+// the underlying filesystem may not be: on case-insensitive volumes (macOS APFS
+// default, NTFS) a guest could target `.../AUDIT.ANCHOR` and the OS would still
+// truncate the on-disk `.../audit.anchor`, slipping past an exact-string deny.
+// So once the canonical parents match, compare the leaf case-insensitively. This
+// errs toward denial on case-sensitive volumes (a genuinely distinct sibling that
+// differs from the anchor only by case is refused), which is the safe direction
+// for a security deny-list and harmless in practice — the anchor filename is fixed.
 fn is_protected_write_target(write_path: &Path, protected: &[std::path::PathBuf]) -> bool {
     protected.iter().any(|p| {
-        safe_resolve_parent(&p.to_string_lossy())
-            .map(|canon| canon == *write_path)
-            .unwrap_or(false)
+        let Ok(canon) = safe_resolve_parent(&p.to_string_lossy()) else {
+            return false;
+        };
+        if canon == *write_path {
+            return true;
+        }
+        // Same canonical parent but a leaf that differs only by ASCII case: on a
+        // case-insensitive volume both names resolve to the same on-disk file.
+        if canon.parent() != write_path.parent() {
+            return false;
+        }
+        let canon_leaf = canon.file_name().map(|n| n.to_string_lossy().to_lowercase());
+        let write_leaf = write_path.file_name().map(|n| n.to_string_lossy().to_lowercase());
+        canon_leaf.is_some() && canon_leaf == write_leaf
     })
 }
 
@@ -1160,6 +1182,40 @@ mod tests {
             "expected protected-path deny, got: {result}"
         );
         // The anchor content must be untouched.
+        assert_eq!(std::fs::read(&anchor).unwrap(), b"MERKLE-TIP");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_fs_write_denied_protected_audit_anchor_case_variant() {
+        // Regression for the case-insensitive-filesystem bypass: a guest that
+        // targets a differently-cased leaf (AUDIT.ANCHOR vs the on-disk
+        // audit.anchor) must still be denied, because on macOS APFS / NTFS the
+        // OS would resolve both to the same underlying file.
+        let dir = std::env::temp_dir().join("librefang_anchor_test_6182_case");
+        std::fs::create_dir_all(&dir).unwrap();
+        let anchor = dir.join("audit.anchor");
+        std::fs::write(&anchor, b"MERKLE-TIP").unwrap();
+        let variant = dir.join("AUDIT.ANCHOR");
+
+        let kernel = RecordingKernel::new();
+        kernel.set_protected_paths(vec![anchor.clone()]);
+        let state = state_with_kernel(
+            "test-agent",
+            vec![Capability::FileWrite("*".to_string())],
+            std::sync::Arc::clone(&kernel),
+        );
+
+        let result = host_fs_write(
+            &state,
+            &json!({"path": variant.to_string_lossy(), "content": "TAMPERED"}),
+        );
+        let err = result["error"].as_str().unwrap_or("");
+        assert!(
+            err.contains("protected"),
+            "case-variant of the anchor leaf must be denied, got: {result}"
+        );
+        // The anchor content must be untouched regardless of filesystem case-folding.
         assert_eq!(std::fs::read(&anchor).unwrap(), b"MERKLE-TIP");
         let _ = std::fs::remove_dir_all(&dir);
     }
