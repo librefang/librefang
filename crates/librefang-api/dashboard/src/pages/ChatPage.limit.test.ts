@@ -25,8 +25,17 @@ describe("isContextLimitError", () => {
     "You have exceeded your quota. Please try again later.",
     "Rate limit reached for requests",
     "HTTP 429 Too Many Requests",
+    // Canonical phrase the kernel emits for a provider context-overflow; the banner must fire.
+    "Context is full. Try /compact or /new.",
   ])("classifies provider limit error: %s", (msg) => {
     expect(isContextLimitError(msg)).toBe(true);
+  });
+
+  it("does NOT classify an internal usage/spending-budget cap as a context limit", () => {
+    // Budget-cap wording contains "context window" but a new session can't clear it, so the banner must stay hidden.
+    const budget =
+      "Usage budget reached for this window. This is a spending/usage cap, not a full context window — /compact will NOT help. Wait for the limit window (hourly/daily/monthly) to reset, or raise the [budget] limits in config.toml.";
+    expect(isContextLimitError(budget)).toBe(false);
   });
 
   it("is case-insensitive", () => {

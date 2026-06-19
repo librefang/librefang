@@ -1710,6 +1710,8 @@ const CONTEXT_LIMIT_PATTERNS = [
   "context_length_exceeded",
   "maximum context",
   "max context",
+  // Canonical phrase the kernel collapses provider context-overflow errors to.
+  "context is full",
   "too long",
   "too_long",
   "string too long",
@@ -1727,9 +1729,13 @@ const CONTEXT_LIMIT_PATTERNS = [
   "429",
 ];
 
+// A spending / usage-budget cap that a new session can't clear; its wording contains "context window", so suppress the banner for it rather than give wrong advice.
+const USAGE_BUDGET_PATTERNS = ["usage budget", "spending/usage cap", "/compact will not help"];
+
 export function isContextLimitError(text: string | undefined | null): boolean {
   if (!text) return false;
   const lowered = text.toLowerCase();
+  if (USAGE_BUDGET_PATTERNS.some((p) => lowered.includes(p))) return false;
   return CONTEXT_LIMIT_PATTERNS.some((p) => lowered.includes(p));
 }
 

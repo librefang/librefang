@@ -874,7 +874,8 @@ In-crate only; no cross-crate error-shape changes.
 
 - **dashboard: guide the user to start a new session when a conversation hits the token / context-window limit** (#6211) (@houko).
   When the latest turn in the agent chat fails with a token / context-window or length / quota limit, the chat view now shows an inline guidance banner with a one-click "Start a new session" action that reuses the existing `useCreateAgentSession` mutation, instead of leaving only a raw error bubble.
-  Detection is a frontend heuristic over the daemon / provider error string (`isContextLimitError`), because `main` carries no structured context-exhaustion signal on the chat surface; a structured signal can replace it later (related: the in-flight #6215 context-usage indicator + quota-error classification).
+  Detection is a frontend heuristic over the daemon / provider error string (`isContextLimitError`), because the chat surface carries no structured per-turn context-exhaustion signal; the heuristic matches the canonical phrases the kernel's `classify_streaming_error` emits and explicitly suppresses the banner for an internal usage / spending-budget cap (where a new session would not help).
+  This complements the #6215 context-usage indicator (which shows *how full* the window is but does not classify a failed turn).
   The banner is scoped to the agent session chat view — channels are config-only surfaces in the dashboard with no conversation UI.
   Dashboard-only change; covered by `ChatPage.limit.test.ts`.
   Closes #6211.
