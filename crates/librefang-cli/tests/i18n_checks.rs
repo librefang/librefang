@@ -189,6 +189,13 @@ fn is_potential_untranslated_literal(lit: &str) -> bool {
         "log filter not installed",
         "invalid log directive {directive:?}: {e}",
         "Skipping unparseable baseline log directive on reload",
+        "invalid language identifier: {e}",
+        "failed to parse Fluent resource: {errors:?}",
+        "failed to add Fluent resource: {errors:?}",
+        "Fluent formatting errors",
+        "failed to initialize i18n, falling back to English",
+        "default language pack must be valid",
+        "failed to initialize default i18n fallback: {error}",
         "target checked above",
         "instance_id missing",
         // Technical format strings
@@ -594,8 +601,7 @@ fn test_no_untranslated_strings() {
                 .unwrap()
                 .replace('\\', "/");
 
-            if rel_path == "i18n.rs"
-                || rel_path == "mod.rs"
+            if rel_path == "mod.rs"
                 || rel_path == "cli.rs"
                 || rel_path == "mcp.rs"
                 || rel_path.starts_with("tui/")
