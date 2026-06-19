@@ -952,6 +952,26 @@ tui-settings-models-empty = 没有可用模型。
 tui-settings-tools-header-name = 工具名称
 tui-settings-tools-header-desc = 描述
 tui-settings-tools-empty = 没有可用工具。
-
-
-
+# chat.rs
+tui-chat-input-staged =   (已暂存 { $count } 个)
+tui-chat-hints-modelpicker =     [↑↓] 导航  [Enter] 选择  [Esc] 关闭  [输入] 过滤
+tui-chat-hints-streaming =     [Enter] 暂存  [↑↓] 滚动  [Esc] 停止
+tui-chat-hints-history =     [Enter] 发送  [↑↓] 历史  [PgUp/PgDn] 滚动  [Esc] 返回
+tui-chat-hints-normal =     [Enter] 发送  [Ctrl+M] 模型  [↑↓] 历史  [PgUp/PgDn] 滚动  [Esc] 返回
+tui-chat-modelpicker-title =  切换模型 
+tui-chat-modelpicker-empty = 没有匹配的模型
+tui-chat-welcome-ready = 准备就绪
+tui-chat-welcome-suggest =   尝试提问:
+tui-chat-welcome-q1 = "解释这个代码库"
+tui-chat-welcome-q2 = "写一个单元测试..."
+tui-chat-welcome-q3 = "这个函数是做什么的？"
+tui-chat-welcome-footer =   输入 /help 查看命令  •  Ctrl+M 切换模型
+tui-chat-tokens-estimated =   约 { $count } 个 Token
+tui-chat-tokens-detail =   [Token: 输入 { $in } / 输出 { $out }{ $cost }]
+tui-chat-tool-input = 输入: 
+tui-chat-tool-error = 错误: 
+tui-chat-tool-result = 结果: 
+tui-chat-tool-running = 正在运行…
+tui-chat-thinking = 思考中…
+tui-chat-mode-daemon = 守护进程
+tui-chat-mode-inprocess = 进程内

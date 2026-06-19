@@ -1772,6 +1772,26 @@ tui-settings-models-empty = No models available.
 tui-settings-tools-header-name = Tool Name
 tui-settings-tools-header-desc = Description
 tui-settings-tools-empty = No tools available.
-
-
-
+# chat.rs
+tui-chat-input-staged =   ({ $count } staged)
+tui-chat-hints-modelpicker =     [↑↓] Navigate  [Enter] Select  [Esc] Close  [type] Filter
+tui-chat-hints-streaming =     [Enter] Stage  [↑↓] Scroll  [Esc] Stop
+tui-chat-hints-history =     [Enter] Send  [↑↓] History  [PgUp/PgDn] Scroll  [Esc] Back
+tui-chat-hints-normal =     [Enter] Send  [Ctrl+M] Models  [↑↓] History  [PgUp/PgDn] Scroll  [Esc] Back
+tui-chat-modelpicker-title =  Switch Model 
+tui-chat-modelpicker-empty = No models match
+tui-chat-welcome-ready = Ready to chat
+tui-chat-welcome-suggest =   Try asking:
+tui-chat-welcome-q1 = "Explain this codebase"
+tui-chat-welcome-q2 = "Write a unit test for..."
+tui-chat-welcome-q3 = "What does this function do?"
+tui-chat-welcome-footer =   Type /help for commands  •  Ctrl+M to switch models
+tui-chat-tokens-estimated =   ~{ $count } tokens
+tui-chat-tokens-detail =   [tokens: { $in } in / { $out } out{ $cost }]
+tui-chat-tool-input = input: 
+tui-chat-tool-error = error: 
+tui-chat-tool-result = result: 
+tui-chat-tool-running = running…
+tui-chat-thinking = thinking…
+tui-chat-mode-daemon = daemon
+tui-chat-mode-inprocess = in-process

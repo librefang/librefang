@@ -1788,6 +1788,26 @@ tui-settings-models-empty = Немає доступних моделей.
 tui-settings-tools-header-name = Назва інструменту
 tui-settings-tools-header-desc = Опис
 tui-settings-tools-empty = Немає доступних інструментів.
-
-
-
+# chat.rs
+tui-chat-input-staged =   ({ $count } відкладено)
+tui-chat-hints-modelpicker =     [↑↓] Навігація  [Enter] Вибрати  [Esc] Закрити  [type] Фільтр
+tui-chat-hints-streaming =     [Enter] Додати  [↑↓] Прокрутка  [Esc] Зупинити
+tui-chat-hints-history =     [Enter] Надіслати  [↑↓] Історія  [PgUp/PgDn] Прокрутка  [Esc] Назад
+tui-chat-hints-normal =     [Enter] Надіслати  [Ctrl+M] Моделі  [↑↓] Історія  [PgUp/PgDn] Прокрутка  [Esc] Назад
+tui-chat-modelpicker-title =  Зміна моделі 
+tui-chat-modelpicker-empty = Моделей не знайдено
+tui-chat-welcome-ready = Готовий до спілкування
+tui-chat-welcome-suggest =   Спробуйте запитати:
+tui-chat-welcome-q1 = "Поясни цю кодову базу"
+tui-chat-welcome-q2 = "Напиши юніт-тест для..."
+tui-chat-welcome-q3 = "Що робить ця функція?"
+tui-chat-welcome-footer =   Введіть /help для команд  •  Ctrl+M для зміни моделі
+tui-chat-tokens-estimated =   ~{ $count } токенів
+tui-chat-tokens-detail =   [токенів: { $in } вхідних / { $out } вихідних{ $cost }]
+tui-chat-tool-input = вхід: 
+tui-chat-tool-error = помилка: 
+tui-chat-tool-result = результат: 
+tui-chat-tool-running = виконується…
+tui-chat-thinking = думає…
+tui-chat-mode-daemon = демон
+tui-chat-mode-inprocess = вбудований
