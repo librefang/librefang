@@ -545,6 +545,9 @@ struct QwenJsonOutput {
     #[serde(default)]
     #[allow(dead_code)]
     cost_usd: Option<f64>,
+    /// The model the CLI reports running, when present.
+    #[serde(default)]
+    model: Option<String>,
 }
 
 /// Usage stats from Qwen CLI JSON output.
@@ -567,6 +570,9 @@ struct QwenStreamEvent {
     result: Option<String>,
     #[serde(default)]
     usage: Option<QwenUsage>,
+    /// Model the CLI reports, when present (e.g. on an init/system event).
+    #[serde(default)]
+    model: Option<String>,
 }
 
 /// Extract assistant text and token usage from Qwen CLI stdout when the
@@ -758,7 +764,7 @@ impl QwenCodeDriver {
                     ..Default::default()
                 },
                 actual_provider: None,
-                actual_model: None,
+                actual_model: parsed.model,
             });
         }
 
@@ -856,6 +862,9 @@ impl QwenCodeDriver {
             output_tokens: 0,
             ..Default::default()
         };
+        // Model the CLI resolved, recovered from whichever stream event carries
+        // it. Surfaced as actual_model (best-effort: None if the CLI omits it).
+        let mut actual_model: Option<String> = None;
         // Set when a `tx.send(...)` fails — kill the child and stop reading
         // stdout so the CLI doesn't keep producing tokens for nobody (#3769).
         let mut receiver_dropped = false;
@@ -889,6 +898,13 @@ impl QwenCodeDriver {
             };
 
             for event in events {
+                if actual_model.is_none() {
+                    if let Some(ref m) = event.model {
+                        if !m.is_empty() {
+                            actual_model = Some(m.clone());
+                        }
+                    }
+                }
                 match event.r#type.as_str() {
                     "content" | "text" | "assistant" | "content_block_delta" => {
                         if let Some(ref content) = event.content {
@@ -993,7 +1009,7 @@ impl QwenCodeDriver {
             tool_calls: Vec::new(),
             usage: final_usage,
             actual_provider: None,
-            actual_model: None,
+            actual_model,
         })
     }
 }
@@ -1029,6 +1045,10 @@ impl LlmDriver for QwenCodeDriver {
 
     fn family(&self) -> crate::llm_driver::LlmFamily {
         crate::llm_driver::LlmFamily::OpenAi
+    }
+
+    fn is_coding_agent(&self) -> bool {
+        true
     }
 }
 
@@ -1074,6 +1094,11 @@ fn home_dir() -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_coding_agent_is_true() {
+        assert!(QwenCodeDriver::new(None, false).is_coding_agent());
+    }
 
     #[test]
     fn extract_text_single_object() {
