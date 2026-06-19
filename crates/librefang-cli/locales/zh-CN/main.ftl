@@ -748,3 +748,23 @@ tui-hands-category-content = 内容
 tui-hands-category-security = 安全
 tui-hands-category-development = 开发
 tui-hands-category-productivity = 效率
+
+# logs.rs
+tui-logs-title = 日志
+tui-logs-badge-auto = 自动
+tui-logs-badge-paused = 暂停
+tui-logs-label-level = 级别
+tui-logs-filter-all = 全部
+tui-logs-filter-error = 错误
+tui-logs-filter-warn = 警告
+tui-logs-filter-info = 信息
+tui-logs-filter-active =   │ 过滤: "{ $query }"
+tui-logs-entries-count =   │ { $count } 条记录
+tui-logs-header-timestamp = 时间戳
+tui-logs-header-level = 级别
+tui-logs-header-action = 操作
+tui-logs-header-agent = 智能体
+tui-logs-header-detail = 详情
+tui-logs-loading = 正在加载日志…
+tui-logs-empty = 暂无日志记录。启动后台程序以查看日志。
+tui-logs-hints =   [↑↓] 导航  [f] 过滤级别  [/] 搜索  [a] 自动刷新  [r] 刷新
