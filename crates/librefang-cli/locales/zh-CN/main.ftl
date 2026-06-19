@@ -883,3 +883,22 @@ tui-audit-chain-unverified = 审计链: 未验证
 tui-audit-chain-verified = 审计链: 验证通过
 tui-audit-chain-failed = 审计链: 验证失败
 tui-audit-hints =   [↑↓] 导航  [f] 过滤  [v] 验证链  [r] 刷新
+
+# dashboard.rs
+tui-dashboard-title = 控制台
+tui-dashboard-hints =   [r] 刷新  [a] 智能体  [↑↓] 滚动  [PgUp/PgDn] 快速滚动
+tui-dashboard-dreams-title = DREAMS
+tui-dashboard-auto-dream-enabled = auto-dream 已启用
+tui-dashboard-auto-dream-disabled = auto-dream 已禁用
+tui-dashboard-dream-details = 阶段={ $phase }  工具={ $tools }  记忆={ $mems }
+tui-dashboard-stat-agents = 智能体
+tui-dashboard-stat-uptime = 在线时间
+tui-dashboard-stat-provider = 提供商
+tui-dashboard-stat-model = 模型
+tui-dashboard-audit-time = 时间
+tui-dashboard-audit-agent = 智能体
+tui-dashboard-audit-action = 操作
+tui-dashboard-audit-detail = 详情
+tui-dashboard-loading = 正在加载…
+tui-dashboard-no-audit = 暂无审计记录。
+
