@@ -837,7 +837,8 @@ temperature = 0.5
 system_prompt = """{prompt}"""
 
 [resources]
-max_llm_tokens_per_hour = 200000
+# 0 = unlimited hourly LLM-token budget; set a positive value to rate-limit.
+max_llm_tokens_per_hour = 0
 
 [capabilities]
 tools = [{tools_str}]
@@ -1457,4 +1458,22 @@ fn draw_checkbox_list(
     }
 
     f.render_widget(widgets::hint_bar(hints_text), chunks[2]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn custom_agent_template_has_unlimited_hourly_token_budget() {
+        let toml = AgentSelectState::new().build_custom_toml();
+        assert!(
+            toml.contains("max_llm_tokens_per_hour = 0"),
+            "template must emit an unlimited (0) hourly token budget:\n{toml}"
+        );
+        assert!(
+            !toml.contains("max_llm_tokens_per_hour = 200000"),
+            "template must not re-introduce the 200000 hourly cap"
+        );
+    }
 }

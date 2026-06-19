@@ -1700,6 +1700,73 @@ function CompactionSummaryBanner({ summary, isCompacting }: { summary: string | 
   );
 }
 
+// No structured context-exhaustion signal exists on the chat surface; match the daemon / provider error string instead.
+const CONTEXT_LIMIT_PATTERNS = [
+  "context window",
+  "context_window",
+  "context length",
+  "context_length",
+  "context length exceeded",
+  "context_length_exceeded",
+  "maximum context",
+  "max context",
+  // Canonical phrase the kernel collapses provider context-overflow errors to.
+  "context is full",
+  "too long",
+  "too_long",
+  "string too long",
+  "prompt is too long",
+  "input is too long",
+  "maximum tokens",
+  "max tokens",
+  "max_tokens",
+  "token limit",
+  "exceeds the maximum",
+  "reduce the length",
+  "quota",
+  "rate limit",
+  "rate_limit",
+  "429",
+];
+
+// A spending / usage-budget cap that a new session can't clear; its wording contains "context window", so suppress the banner for it rather than give wrong advice.
+const USAGE_BUDGET_PATTERNS = ["usage budget", "spending/usage cap", "/compact will not help"];
+
+export function isContextLimitError(text: string | undefined | null): boolean {
+  if (!text) return false;
+  const lowered = text.toLowerCase();
+  if (USAGE_BUDGET_PATTERNS.some((p) => lowered.includes(p))) return false;
+  return CONTEXT_LIMIT_PATTERNS.some((p) => lowered.includes(p));
+}
+
+function LimitReachedBanner({ onNewSession, creating }: { onNewSession: () => void; creating: boolean }) {
+  const { t } = useTranslation();
+  return (
+    <div className="rounded-xl border border-warning/30 bg-warning/10 px-4 py-3" role="status">
+      <div className="flex items-start gap-3">
+        <AlertCircle className="h-4 w-4 shrink-0 mt-0.5 text-warning" aria-hidden="true" />
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-semibold text-warning">{t("chat.limit_reached_title")}</p>
+          <p className="mt-1 text-xs text-text-dim leading-relaxed">{t("chat.limit_reached_desc")}</p>
+          <button
+            type="button"
+            onClick={onNewSession}
+            disabled={creating}
+            className="mt-2.5 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-warning/20 hover:bg-warning/30 text-warning text-xs font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {creating ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+            ) : (
+              <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+            )}
+            <span>{t("chat.limit_reached_action")}</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Input box - with shortcut hints
 function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabled, placeholder, authMissing, authStatus, providerName, supportsThinking, sttAvailable }: { agentId: string; onSend: (msg: string, attachments?: ChatAttachment[]) => void; onStop?: () => void; isStreaming?: boolean; disabled: boolean; inputDisabled?: boolean; placeholder: string; authMissing?: boolean; authStatus?: string; providerName?: string; supportsThinking?: boolean; sttAvailable?: boolean }) {
   const { t } = useTranslation();
@@ -3008,6 +3075,13 @@ export function ChatPage() {
   // can compose the next message immediately.
   const isStreaming = messages.some(m => m.role === "assistant" && m.isStreaming);
 
+  // Gate on the last message so the banner clears as soon as the user sends again.
+  const limitReached = useMemo(() => {
+    if (isStreaming) return false;
+    const last = messages[messages.length - 1];
+    return !!last && last.role === "assistant" && isContextLimitError(last.error);
+  }, [messages, isStreaming]);
+
   // Bug #3849: Track message count changes to announce new messages to screen
   // readers via the aria-live region.
   const [msgAriaAnnouncement, setMsgAriaAnnouncement] = useState("");
@@ -3528,6 +3602,12 @@ export function ChatPage() {
                 {pendingApprovals.map(approval => (
                   <ApprovalCard key={approval.id} approval={approval} onResolved={removeApproval} />
                 ))}
+                {limitReached && (
+                  <LimitReachedBanner
+                    onNewSession={handleNewSession}
+                    creating={createSessionMutation.isPending}
+                  />
+                )}
                 <div ref={messagesEndRef} />
               </div>
             )}
