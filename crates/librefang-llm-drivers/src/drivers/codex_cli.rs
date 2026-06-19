@@ -370,6 +370,10 @@ impl LlmDriver for CodexCliDriver {
     fn family(&self) -> crate::llm_driver::LlmFamily {
         crate::llm_driver::LlmFamily::OpenAi
     }
+
+    fn is_coding_agent(&self) -> bool {
+        true
+    }
 }
 
 /// Check if the Codex CLI is available.
@@ -407,6 +411,11 @@ fn home_dir() -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_coding_agent_is_true() {
+        assert!(CodexCliDriver::new(None, false).is_coding_agent());
+    }
 
     #[test]
     fn test_new_defaults() {
