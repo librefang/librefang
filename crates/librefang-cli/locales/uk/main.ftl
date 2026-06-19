@@ -1584,3 +1584,23 @@ tui-hands-category-content = Контент
 tui-hands-category-security = Безпека
 tui-hands-category-development = Розробка
 tui-hands-category-productivity = Продуктивність
+
+# logs.rs
+tui-logs-title = Логи
+tui-logs-badge-auto = авто
+tui-logs-badge-paused = пауза
+tui-logs-label-level = Рівень
+tui-logs-filter-all = Всі
+tui-logs-filter-error = Помилки
+tui-logs-filter-warn = Попередження
+tui-logs-filter-info = Інфо
+tui-logs-filter-active =   │ фільтр: "{ $query }"
+tui-logs-entries-count =   │ { $count } записів
+tui-logs-header-timestamp = Мітка часу
+tui-logs-header-level = Рівень
+tui-logs-header-action = Дія
+tui-logs-header-agent = Агент
+tui-logs-header-detail = Деталі
+tui-logs-loading = Завантаження логів…
+tui-logs-empty = Немає записів у логах. Запустіть демон, щоб побачити логи.
+tui-logs-hints =   [↑↓] Навігація  [f] Рівень фільтра  [/] Пошук  [a] Автооновлення  [r] Оновити
