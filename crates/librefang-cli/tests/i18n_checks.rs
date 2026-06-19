@@ -274,6 +274,9 @@ fn is_potential_untranslated_literal(lit: &str) -> bool {
         "u{25cb} END",
         "u{25cf} ERR",
         "u{25cb} ---",
+        "L I B R E F A N G",
+        "Brave Search",
+        "librefang init",
     ];
     if exclusions.contains(&trimmed) {
         return false;
@@ -648,7 +651,7 @@ fn test_no_untranslated_strings() {
                 .unwrap()
                 .replace('\\', "/");
 
-            if rel_path.starts_with("tui/screens/")
+            if rel_path.starts_with("tui/screens/") && rel_path != "tui/screens/welcome.rs"
             {
                 continue;
             }
