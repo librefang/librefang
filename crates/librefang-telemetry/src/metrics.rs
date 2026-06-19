@@ -153,8 +153,8 @@ pub fn describe_observability_metrics() {
     );
     metrics::describe_counter!(
         "librefang_tool_call_total",
-        "Tool invocations executed by the agent loop, labeled by tool name \
-         and outcome (success|failure) (#3495)."
+        "Tool invocations executed by the agent loop, labeled by agent, tool \
+         name, and outcome (success|failure) (#3495, #6226)."
     );
     metrics::describe_counter!(
         "librefang_cron_fires_total",
