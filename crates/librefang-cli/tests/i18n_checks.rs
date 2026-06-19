@@ -265,6 +265,13 @@ fn is_potential_untranslated_literal(lit: &str) -> bool {
         "rx1b[2K{:<14} [{}] {:>3}% ({}/{})",
         "rx1b[2K{ch} {}",
         "x1b[31m✗x1b[0m {msg}",
+        // TUI theme agent state badges
+        "u{25cf} RUN",
+        "u{25cb} NEW",
+        "u{25d4} SUS",
+        "u{25cb} END",
+        "u{25cf} ERR",
+        "u{25cb} ---",
     ];
     if exclusions.contains(&trimmed) {
         return false;
@@ -630,7 +637,11 @@ fn test_no_untranslated_strings() {
                 .unwrap()
                 .replace('\\', "/");
 
-            if rel_path.starts_with("tui/")
+            if rel_path == "tui/chat_runner.rs"
+                || rel_path == "tui/event.rs"
+                || rel_path == "tui/mod.rs"
+                || rel_path == "tui/widgets.rs"
+                || rel_path.starts_with("tui/screens/")
             {
                 continue;
             }
