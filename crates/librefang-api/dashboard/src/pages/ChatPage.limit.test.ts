@@ -1,11 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { isContextLimitError } from "./ChatPage";
 
-// Issue #6211: the dashboard guidance banner keys off this heuristic because
-// `main` carries no structured context-exhaustion signal — only the daemon /
-// provider error string. These cases pin the phrases we classify as a
-// token / context-window or length / quota limit so a refactor can't silently
-// stop matching real-world provider errors.
+// Pins real-world provider error phrases so a refactor can't silently break context-limit detection.
 describe("isContextLimitError", () => {
   it("returns false for empty / nullish input", () => {
     expect(isContextLimitError(undefined)).toBe(false);

@@ -1700,17 +1700,7 @@ function CompactionSummaryBanner({ summary, isCompacting }: { summary: string | 
   );
 }
 
-// Heuristic classifier for "the conversation hit a token / context-window or
-// length / quota limit" (issue #6211). The dashboard in `main` has no
-// dedicated backend signal for context exhaustion — the chat surface only
-// carries the error string the daemon returned (an `ApiError.message` / `code`
-// over HTTP, or the WS `error` event's `content`). So we match that text
-// against the phrases providers and the kernel use for this class of failure.
-// This is deliberately a string heuristic, not a fabricated backend field; a
-// structured signal can replace it later (see #6215, which adds a
-// context-usage indicator + quota-error classification). Matching here is
-// case-insensitive and intentionally broad — a false positive only surfaces a
-// "start a new session" suggestion, never blocks the user.
+// No structured context-exhaustion signal exists on the chat surface; match the daemon / provider error string instead.
 const CONTEXT_LIMIT_PATTERNS = [
   "context window",
   "context_window",
@@ -1743,9 +1733,6 @@ export function isContextLimitError(text: string | undefined | null): boolean {
   return CONTEXT_LIMIT_PATTERNS.some((p) => lowered.includes(p));
 }
 
-// Guidance banner shown when the latest turn failed with a token / context /
-// quota limit error, pointing the user at a one-click "start a new session"
-// action that reuses the existing create-session mutation (issue #6211).
 function LimitReachedBanner({ onNewSession, creating }: { onNewSession: () => void; creating: boolean }) {
   const { t } = useTranslation();
   return (
@@ -3008,12 +2995,7 @@ export function ChatPage() {
   // can compose the next message immediately.
   const isStreaming = messages.some(m => m.role === "assistant" && m.isStreaming);
 
-  // Issue #6211: when the most recent turn failed with a token / context-window
-  // or length / quota limit, surface a guidance banner offering a one-click new
-  // session. Gate on the LAST message so the banner clears as soon as the user
-  // sends again (a fresh turn replaces the errored tail). `isContextLimitError`
-  // is a frontend heuristic over the error string — see its definition for why
-  // there is no structured backend signal to key off in `main`.
+  // Gate on the last message so the banner clears as soon as the user sends again.
   const limitReached = useMemo(() => {
     if (isStreaming) return false;
     const last = messages[messages.length - 1];
@@ -3540,7 +3522,6 @@ export function ChatPage() {
                 {pendingApprovals.map(approval => (
                   <ApprovalCard key={approval.id} approval={approval} onResolved={removeApproval} />
                 ))}
-                {/* Token / context-window limit guidance (#6211) */}
                 {limitReached && (
                   <LimitReachedBanner
                     onNewSession={handleNewSession}

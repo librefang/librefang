@@ -876,7 +876,8 @@ In-crate only; no cross-crate error-shape changes.
   When the latest turn in the agent chat fails with a token / context-window or length / quota limit, the chat view now shows an inline guidance banner with a one-click "Start a new session" action that reuses the existing `useCreateAgentSession` mutation, instead of leaving only a raw error bubble.
   Detection is a frontend heuristic over the daemon / provider error string (`isContextLimitError`), because `main` carries no structured context-exhaustion signal on the chat surface; a structured signal can replace it later (related: the in-flight #6215 context-usage indicator + quota-error classification).
   The banner is scoped to the agent session chat view — channels are config-only surfaces in the dashboard with no conversation UI.
-  Dashboard-only change; covered by `ChatPage.limit.test.ts`. Closes #6211.
+  Dashboard-only change; covered by `ChatPage.limit.test.ts`.
+  Closes #6211.
 
 - **dashboard: a global Auto-Dream on/off switch on the Memory → Auto-Dream tab** (#6188) (@houko).
   The tab previously showed only a read-only status badge and told users to edit `config.toml` to flip the master switch; it is now an interactive toggle wired to the existing `POST /api/config/set` (`auto_dream.enabled` is on the writable allowlist).
