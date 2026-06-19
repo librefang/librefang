@@ -583,6 +583,28 @@ pub trait LlmDriver: Send + Sync {
     fn family(&self) -> LlmFamily {
         LlmFamily::Other
     }
+
+    /// Whether this driver delegates to an external *coding-agent* CLI that
+    /// resolves and runs its own model — Claude Code, Codex, Gemini CLI, Qwen
+    /// Code, CodeWhale, … — rather than calling a raw provider API with a
+    /// caller-nominated model.
+    ///
+    /// This axis is orthogonal to [`LlmFamily`] (which groups by wire format):
+    /// the `claude-code` CLI and the Anthropic HTTP API are both
+    /// [`LlmFamily::Anthropic`], yet only the former is a coding agent.
+    /// Likewise `codex-cli` and the OpenAI API are both [`LlmFamily::OpenAi`].
+    ///
+    /// Coding agents own model selection — the spawned CLI may resolve a model
+    /// that differs from the requested id (codex picks from its own config,
+    /// CodeWhale's `/model auto` re-picks per turn) — so they are the drivers
+    /// that can meaningfully populate [`CompletionResponse::actual_model`]. Raw
+    /// providers honour the requested model verbatim and leave it `None`.
+    ///
+    /// Defaults to `false` so every existing HTTP provider and out-of-tree
+    /// driver keeps compiling unchanged; the in-tree CLI drivers override it.
+    fn is_coding_agent(&self) -> bool {
+        false
+    }
 }
 
 /// Configuration for creating an LLM driver.
@@ -996,6 +1018,24 @@ mod tests {
         }
 
         assert_eq!(BareDriver.family(), LlmFamily::Other);
+    }
+
+    #[test]
+    fn test_llm_driver_is_coding_agent_default_is_false() {
+        struct BareDriver;
+
+        #[async_trait]
+        impl LlmDriver for BareDriver {
+            async fn complete(
+                &self,
+                _request: CompletionRequest,
+            ) -> Result<CompletionResponse, LlmError> {
+                unreachable!("test does not call complete")
+            }
+        }
+
+        // Raw providers / out-of-tree drivers are not coding agents by default.
+        assert!(!BareDriver.is_coding_agent());
     }
 
     #[tokio::test]
