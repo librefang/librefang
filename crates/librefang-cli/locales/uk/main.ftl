@@ -612,6 +612,17 @@ init-upgrade-failed-create-backups-dir = Не вдалося створити д
 init-upgrade-failed-backup-config = Не вдалося створити бекап конфігурації: { $error }
 init-error-write-config-example = Не вдалося записати config.example.toml: { $error }
 
+# acp.rs
+acp-attached-uds = librefang acp: приєднано до демона (UDS { $path })
+acp-attached-pipe = librefang acp: приєднано до демона (іменований канал)
+acp-in-process = librefang acp: запуск вбудованого ядра (демона не виявлено)
+acp-error-boot-kernel = Не вдалося запустити ядро: { $error }
+acp-error-resolve-agent = Не вдалося розпізнати агента '{ $name }': { $error }
+acp-error-server = Помилка сервера ACP: { $error }
+acp-error-uds-connect = Помилка підключення ACP UDS за шляхом { $path }: { $error }
+acp-error-pipe-connect = Помилка підключення до іменованого каналу ACP { $name }: { $error }
+
+
 # auth.rs
 auth-write-failed = Не вдалося записати { $path }: { $error }
 auth-password-empty = Пароль не може бути порожнім.

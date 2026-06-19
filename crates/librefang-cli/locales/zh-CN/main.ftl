@@ -480,4 +480,14 @@ common-error-daemon-timeout = 守护进程未在 10 秒内就绪
 ui-brand-title = LibreFang Agent OS
 progress-fail = [失败]
 
+# acp.rs
+acp-attached-uds = librefang acp: 已连接到守护进程 (UDS { $path })
+acp-attached-pipe = librefang acp: 已连接到守护进程 (命名管道)
+acp-in-process = librefang acp: 进程内内核 (未检测到守护进程)
+acp-error-boot-kernel = 启动内核失败: { $error }
+acp-error-resolve-agent = 解析智能体 '{ $name }' 失败: { $error }
+acp-error-server = ACP 服务器错误: { $error }
+acp-error-uds-connect = ACP UDS 连接失败 { $path }: { $error }
+acp-error-pipe-connect = ACP 命名管道连接失败 { $name }: { $error }
+
 

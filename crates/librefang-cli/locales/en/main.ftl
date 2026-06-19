@@ -602,6 +602,17 @@ init-upgrade-failed-create-backups-dir = Failed to create backups dir: { $error 
 init-upgrade-failed-backup-config = Failed to backup config: { $error }
 init-error-write-config-example = Could not write config.example.toml: { $error }
 
+# acp.rs
+acp-attached-uds = librefang acp: attached to daemon (UDS { $path })
+acp-attached-pipe = librefang acp: attached to daemon (named pipe)
+acp-in-process = librefang acp: in-process kernel (no daemon detected)
+acp-error-boot-kernel = Failed to boot kernel: { $error }
+acp-error-resolve-agent = Failed to resolve agent '{ $name }': { $error }
+acp-error-server = ACP server error: { $error }
+acp-error-uds-connect = ACP UDS connect failed at { $path }: { $error }
+acp-error-pipe-connect = ACP named-pipe connect failed at { $name }: { $error }
+
+
 # auth.rs
 auth-write-failed = Failed to write { $path }: { $error }
 auth-password-empty = Password cannot be empty.

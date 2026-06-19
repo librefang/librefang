@@ -184,6 +184,7 @@ fn is_potential_untranslated_literal(lit: &str) -> bool {
         // Developer-facing expect/panic strings
         "idx within bounds",
         "Failed to create tokio runtime",
+        "Failed to create Tokio runtime",
         "target checked above",
         "instance_id missing",
         // Technical format strings
@@ -591,7 +592,6 @@ fn test_no_untranslated_strings() {
 
             if rel_path == "i18n.rs"
                 || rel_path == "mod.rs"
-                || rel_path == "acp.rs"
                 || rel_path == "cli.rs"
                 || rel_path == "mcp.rs"
                 || rel_path == "log_filter.rs"
