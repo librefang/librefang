@@ -1738,3 +1738,23 @@ tui-dashboard-audit-detail = Деталі
 tui-dashboard-loading = Завантаження…
 tui-dashboard-no-audit = Немає записів аудиту.
 
+# comms.rs
+tui-comms-title = Зв'язок
+tui-comms-tab-topology = Топологія ({ $agents } агентів, { $edges } зв'язків)
+tui-comms-tab-events = Події ({ $count })
+tui-comms-hints =   [s] надіслати  [t] таска  [r] оновити  [Tab] фокус  [↑↓] прокрутка
+tui-comms-loading = Завантаження топології…
+tui-comms-empty = Немає запущених агентів. Запустіть агентів, щоб побачити зв'язки.
+tui-comms-events-empty = Немає подій між агентами. Активність з'явиться тут.
+tui-comms-modal-send-title =  Надіслати повідомлення 
+tui-comms-modal-send-from = Від кого (ID агента):
+tui-comms-modal-send-to = Кому (ID агента):
+tui-comms-modal-send-msg = Повідомлення:
+tui-comms-modal-send-hints = [Tab] поле  [Enter] надіслати  [Esc] скасувати
+tui-comms-modal-task-title =  Створити таску 
+tui-comms-modal-task-title-field = Назва:
+tui-comms-modal-task-desc = Опис:
+tui-comms-modal-task-assign = Призначити (ID агента, опціонально):
+tui-comms-modal-task-hints = [Tab] поле  [Enter] створити  [Esc] скасувати
+
+
