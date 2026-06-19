@@ -279,6 +279,15 @@ fn is_potential_untranslated_literal(lit: &str) -> bool {
         return false;
     }
 
+    if trimmed.contains("[capabilities]")
+        || trimmed.starts_with("{} ")
+        || trimmed.contains("Missing API key")
+        || trimmed.starts_with("{} {} — ")
+        || trimmed.starts_with("{} — {} ")
+    {
+        return false;
+    }
+
     if trimmed.contains("[Unit]") || trimmed.contains("[Service]") || trimmed.contains("[Install]") {
         return false;
     }
@@ -639,8 +648,7 @@ fn test_no_untranslated_strings() {
                 .unwrap()
                 .replace('\\', "/");
 
-            if rel_path == "tui/mod.rs"
-                || rel_path.starts_with("tui/screens/")
+            if rel_path.starts_with("tui/screens/")
             {
                 continue;
             }
