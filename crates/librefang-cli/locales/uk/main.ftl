@@ -1492,3 +1492,22 @@ tui-welcome-provider = Провайдер: { $provider }
 tui-welcome-no-api-keys = Немає API-ключів
 tui-welcome-run-hint-prefix =  — запустіть 
 tui-welcome-setup-complete = Налаштування завершено!
+
+# sessions.rs
+tui-sessions-title = Сесії
+tui-sessions-filter = (фільтр: "{ $query }")
+tui-sessions-count =
+    { $count ->
+        [one] { $count } сесія
+        [few] { $count } сесії
+        [many] { $count } сесій
+       *[other] { $count } сесій
+    }
+tui-sessions-header-agent = Агент
+tui-sessions-header-id = ID сесії
+tui-sessions-header-msgs = Повід.
+tui-sessions-header-created = Створено
+tui-sessions-loading = Завантаження сесій…
+tui-sessions-empty = Сесій ще немає. Почніть чат, щоб створити її.
+tui-sessions-delete-confirm = Видалити цю сесію? [y] Так  [будь-яка клавіша] Скасувати
+tui-sessions-hints = ↑↓ Навігація  Enter Відкрити  d Видалити  / Пошук  r Оновити
