@@ -79,28 +79,43 @@ pub enum LauncherChoice {
     Quit,
 }
 
+#[allow(dead_code)]
 struct MenuItem {
+    label: &'static str,
+    hint: &'static str,
     choice: LauncherChoice,
 }
 
 // Menu for first-time users: "Get started" is first and prominent
 const MENU_FIRST_RUN: &[MenuItem] = &[
     MenuItem {
+        label: "Get started",
+        hint: "Providers, API keys, models, migration",
         choice: LauncherChoice::GetStarted,
     },
     MenuItem {
+        label: "Chat with an agent",
+        hint: "Quick chat in the terminal",
         choice: LauncherChoice::Chat,
     },
     MenuItem {
+        label: "Open dashboard",
+        hint: "Launch the web UI in your browser",
         choice: LauncherChoice::Dashboard,
     },
     MenuItem {
+        label: "Open desktop app",
+        hint: "Launch the native desktop app",
         choice: LauncherChoice::DesktopApp,
     },
     MenuItem {
+        label: "Launch terminal UI",
+        hint: "Full interactive TUI dashboard",
         choice: LauncherChoice::TerminalUI,
     },
     MenuItem {
+        label: "Show all commands",
+        hint: "Print full --help output",
         choice: LauncherChoice::ShowHelp,
     },
 ];
@@ -108,21 +123,33 @@ const MENU_FIRST_RUN: &[MenuItem] = &[
 // Menu for returning users: action-first, setup at the bottom
 const MENU_RETURNING: &[MenuItem] = &[
     MenuItem {
+        label: "Chat with an agent",
+        hint: "Quick chat in the terminal",
         choice: LauncherChoice::Chat,
     },
     MenuItem {
+        label: "Open dashboard",
+        hint: "Launch the web UI in your browser",
         choice: LauncherChoice::Dashboard,
     },
     MenuItem {
+        label: "Launch terminal UI",
+        hint: "Full interactive TUI dashboard",
         choice: LauncherChoice::TerminalUI,
     },
     MenuItem {
+        label: "Open desktop app",
+        hint: "Launch the native desktop app",
         choice: LauncherChoice::DesktopApp,
     },
     MenuItem {
+        label: "Settings",
+        hint: "Providers, API keys, models, routing",
         choice: LauncherChoice::GetStarted,
     },
     MenuItem {
+        label: "Show all commands",
+        hint: "Print full --help output",
         choice: LauncherChoice::ShowHelp,
     },
 ];

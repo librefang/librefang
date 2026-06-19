@@ -162,6 +162,21 @@ fn is_potential_untranslated_literal(lit: &str) -> bool {
         "Connection refused",
         "Set-Clipboard '{}'",
         "not found",
+        // Menu item labels and hints (comments only, dynamic translation done elsewhere)
+        "Get started",
+        "Providers, API keys, models, migration",
+        "Chat with an agent",
+        "Quick chat in the terminal",
+        "Open dashboard",
+        "Launch the web UI in your browser",
+        "Open desktop app",
+        "Launch the native desktop app",
+        "Launch terminal UI",
+        "Full interactive TUI dashboard",
+        "Show all commands",
+        "Print full --help output",
+        "Settings",
+        "Providers, API keys, models, routing",
         // Brand/technical display names
         // Technical init strings
         "chore: initial librefang config",

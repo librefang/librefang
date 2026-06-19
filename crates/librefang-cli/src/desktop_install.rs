@@ -511,7 +511,10 @@ mod tests {
     //! routed through `tempfile::TempDir` so nothing escapes the tempdir.
 
     use super::*;
+    use std::sync::Mutex;
     use tempfile::TempDir;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn desktop_binary_name_matches_platform() {
@@ -551,6 +554,7 @@ mod tests {
 
     #[test]
     fn which_lookup_finds_existing_binary_in_path() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let tmp = TempDir::new().expect("tempdir");
         let bin_dir = tmp.path().join("bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
@@ -578,6 +582,7 @@ mod tests {
 
     #[test]
     fn which_lookup_returns_none_when_missing() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let tmp = TempDir::new().expect("tempdir");
         let prev = std::env::var_os("PATH");
         unsafe {
