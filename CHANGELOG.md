@@ -844,6 +844,12 @@ _308 PRs from 7 contributors since v2026.5.17-beta.12._
 
 ### Changed
 
+- **chore(deps): drop five orphaned email `[workspace.dependencies]` left after the channel sidecar migration** (#6176) (@houko).
+  `lettre` / `imap` / `rustls-connector` / `mailparse` / `rustls-pemfile` were declared in the root `Cargo.toml` but had no member consumer (no `.workspace = true`, no `use`) and were already absent from `Cargo.lock`, so they were never compiled or audited — the issue's "adds compile time / binary size / supply-chain surface" framing was inaccurate; the real defect was dead declaration cruft.
+  The now-unmatchable `deny.toml` ignore for `RUSTSEC-2025-0134` (`rustls-pemfile`) is dropped in the same change, since that crate no longer appears in the resolved graph.
+  Declaration-only removal; `Cargo.lock` is unchanged.
+  Closes #6176.
+
 - **refactor(error-contracts): migrate `web_search.rs` tool functions from `Result<String, String>` to `Result<String, ToolError>`** (#3576) (@houko) — one slice of the ongoing structured-error-contracts migration.
 The multi-provider search engine (`WebSearchEngine::search` and its `search_brave` / `search_tavily` / `search_perplexity` / `search_jina` / `search_duckduckgo` / `search_searxng` / `search_auto` / `list_searxng_categories` helpers) now returns the typed `ToolError` instead of an opaque `String`: missing API keys and unconfigured SearXNG URLs map to `Unavailable`, invalid `pageno` / `category` to `InvalidParameter`, `reqwest` send/JSON failures to `Upstream` via `ToolError::upstream` (preserving the `reqwest::Error` source chain per #3745), and "no results" / "all providers failed" to `Upstream` via `upstream_msg`.
 The dispatch boundary still narrows to a `String` via `Display`, so the LLM-visible error text now reflects the structured variant form (e.g. `"SearXNG URL unavailable"`, `"Invalid parameter 'pageno': must be >= 1 (pages are 1-indexed)"`) — the intended outcome of the migration.
