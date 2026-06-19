@@ -1240,7 +1240,7 @@ fn test_record_tool_call_metric_failure_outcome() {
     metrics::with_local_recorder(&recorder, || {
         // Simulate what the wrapper does when execute_single_tool_call_inner
         // returns Err (circuit-break or any hard error).
-        record_tool_call_metric("my_tool", true);
+        record_tool_call_metric("agent_a", "my_tool", true);
     });
 
     let snap = snapshotter.snapshot().into_vec();
@@ -1275,7 +1275,7 @@ fn test_record_tool_call_metric_success_outcome() {
     let snapshotter = recorder.snapshotter();
 
     metrics::with_local_recorder(&recorder, || {
-        record_tool_call_metric("other_tool", false);
+        record_tool_call_metric("agent_b", "other_tool", false);
     });
 
     let snap = snapshotter.snapshot().into_vec();
@@ -1291,6 +1291,61 @@ fn test_record_tool_call_metric_success_outcome() {
         success_counter.is_some(),
         "outcome=success counter must be recorded for successful tool calls"
     );
+}
+
+/// Regression for #6226 — `librefang_tool_call_total` must carry an `agent` label so tool failures can be attributed per-agent.
+/// Asserts the counter is emitted with `agent`, `tool`, and `outcome` labels and that the agent id is sanitized + length-capped like the tool label.
+#[test]
+fn test_record_tool_call_metric_carries_agent_label() {
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+
+    // A control char and an over-long id exercise the sanitize/cap path — a hallucinated or hostile caller id must not blow up cardinality.
+    let raw_agent = format!("agent\u{0007}-{}", "x".repeat(200));
+
+    metrics::with_local_recorder(&recorder, || {
+        record_tool_call_metric(&raw_agent, "shell_exec", true);
+    });
+
+    let snap = snapshotter.snapshot().into_vec();
+    let entry = snap.iter().find(|(ckey, _, _, val)| {
+        ckey.key().name() == "librefang_tool_call_total"
+            && ckey
+                .key()
+                .labels()
+                .any(|l| l.key() == "tool" && l.value() == "shell_exec")
+            && ckey
+                .key()
+                .labels()
+                .any(|l| l.key() == "outcome" && l.value() == "failure")
+            && ckey.key().labels().any(|l| l.key() == "agent")
+            && matches!(val, DebugValue::Counter(_))
+    });
+    let (ckey, _, _, val) = entry.expect(
+        "librefang_tool_call_total must carry an agent label alongside tool/outcome (#6226)",
+    );
+
+    let agent_value = ckey
+        .key()
+        .labels()
+        .find(|l| l.key() == "agent")
+        .map(|l| l.value().to_string())
+        .expect("agent label must be present");
+    // Control char stripped, length capped at 64 (same as sanitize_tool_label).
+    assert!(
+        !agent_value.contains('\u{0007}'),
+        "agent label must strip control chars"
+    );
+    assert!(
+        agent_value.chars().count() <= 64,
+        "agent label must be length-capped to keep cardinality bounded, got {} chars",
+        agent_value.chars().count()
+    );
+    if let DebugValue::Counter(count) = val {
+        assert_eq!(*count, 1, "counter must be incremented exactly once");
+    }
 }
 
 // ── Agent-loop exit metric ──────────────────────────────────────────────
