@@ -80,14 +80,6 @@ pub enum LevelFilter {
 }
 
 impl LevelFilter {
-    fn label(self) -> &'static str {
-        match self {
-            Self::All => "All",
-            Self::Error => "Error",
-            Self::Warn => "Warn",
-            Self::Info => "Info",
-        }
-    }
     fn next(self) -> Self {
         match self {
             Self::All => Self::Error,
@@ -249,7 +241,11 @@ impl LogsState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut LogsState) {
-    let inner = widgets::render_screen_block(f, area, "\u{25b9} Logs");
+    let inner = widgets::render_screen_block(
+        f,
+        area,
+        &format!("{} {}", "\u{25b9}", crate::i18n::t("tui-logs-title")),
+    );
 
     let chunks = Layout::vertical([
         Constraint::Length(3), // header: filter + separator + column headers
@@ -276,24 +272,46 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut LogsState) {
         );
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled(format!("  {:<20}", "Timestamp"), theme::table_header()),
-                Span::styled(format!(" {:<6}", "Level"), theme::table_header()),
-                Span::styled(format!(" {:<16}", "Action"), theme::table_header()),
-                Span::styled(format!(" {:<14}", "Agent"), theme::table_header()),
-                Span::styled(" Detail", theme::table_header()),
+                Span::styled(
+                    format!("  {:<20}", crate::i18n::t("tui-logs-header-timestamp")),
+                    theme::table_header(),
+                ),
+                Span::styled(
+                    format!(" {:<6}", crate::i18n::t("tui-logs-header-level")),
+                    theme::table_header(),
+                ),
+                Span::styled(
+                    format!(" {:<16}", crate::i18n::t("tui-logs-header-action")),
+                    theme::table_header(),
+                ),
+                Span::styled(
+                    format!(" {:<14}", crate::i18n::t("tui-logs-header-agent")),
+                    theme::table_header(),
+                ),
+                Span::styled(
+                    format!(" {}", crate::i18n::t("tui-logs-header-detail")),
+                    theme::table_header(),
+                ),
             ])),
             header_rows[2],
         );
     } else {
         let auto_badge = if state.auto_refresh {
             Span::styled(
-                " \u{25cf} auto",
+                format!(" {} {}", "\u{25cf}", crate::i18n::t("tui-logs-badge-auto")),
                 Style::default()
                     .fg(theme::GREEN)
                     .add_modifier(Modifier::BOLD),
             )
         } else {
-            Span::styled(" \u{25cb} paused", theme::dim_style())
+            Span::styled(
+                format!(
+                    " {} {}",
+                    "\u{25cb}",
+                    crate::i18n::t("tui-logs-badge-paused")
+                ),
+                theme::dim_style(),
+            )
         };
         let filter_style = match state.level_filter {
             LevelFilter::All => Style::default()
@@ -311,17 +329,29 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut LogsState) {
             Span::raw("")
         } else {
             Span::styled(
-                format!("  \u{2502} filter: \"{}\"", state.search_buf),
+                crate::i18n::t_args("tui-logs-filter-active", &[("query", &state.search_buf)]),
                 Style::default().fg(theme::YELLOW),
             )
+        };
+        let filter_label = match state.level_filter {
+            LevelFilter::All => crate::i18n::t("tui-logs-filter-all"),
+            LevelFilter::Error => crate::i18n::t("tui-logs-filter-error"),
+            LevelFilter::Warn => crate::i18n::t("tui-logs-filter-warn"),
+            LevelFilter::Info => crate::i18n::t("tui-logs-filter-info"),
         };
         f.render_widget(
             Paragraph::new(vec![
                 Line::from(vec![
-                    Span::styled("  Level: ", theme::dim_style()),
-                    Span::styled(format!("[{}]", state.level_filter.label()), filter_style),
                     Span::styled(
-                        format!("  \u{2502} {} entries", state.filtered.len()),
+                        format!("  {}: ", crate::i18n::t("tui-logs-label-level")),
+                        theme::dim_style(),
+                    ),
+                    Span::styled(format!("[{}]", filter_label), filter_style),
+                    Span::styled(
+                        crate::i18n::t_args(
+                            "tui-logs-entries-count",
+                            &[("count", &state.filtered.len().to_string())],
+                        ),
                         theme::dim_style(),
                     ),
                     auto_badge,
@@ -332,11 +362,26 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut LogsState) {
                     Style::default().fg(theme::BORDER),
                 )]),
                 Line::from(vec![
-                    Span::styled(format!("  {:<20}", "Timestamp"), theme::table_header()),
-                    Span::styled(format!(" {:<6}", "Level"), theme::table_header()),
-                    Span::styled(format!(" {:<16}", "Action"), theme::table_header()),
-                    Span::styled(format!(" {:<14}", "Agent"), theme::table_header()),
-                    Span::styled(" Detail", theme::table_header()),
+                    Span::styled(
+                        format!("  {:<20}", crate::i18n::t("tui-logs-header-timestamp")),
+                        theme::table_header(),
+                    ),
+                    Span::styled(
+                        format!(" {:<6}", crate::i18n::t("tui-logs-header-level")),
+                        theme::table_header(),
+                    ),
+                    Span::styled(
+                        format!(" {:<16}", crate::i18n::t("tui-logs-header-action")),
+                        theme::table_header(),
+                    ),
+                    Span::styled(
+                        format!(" {:<14}", crate::i18n::t("tui-logs-header-agent")),
+                        theme::table_header(),
+                    ),
+                    Span::styled(
+                        format!(" {}", crate::i18n::t("tui-logs-header-detail")),
+                        theme::table_header(),
+                    ),
                 ]),
             ]),
             chunks[0],
@@ -346,12 +391,12 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut LogsState) {
     // ── Log list ──
     if state.loading && state.entries.is_empty() {
         f.render_widget(
-            widgets::spinner(state.tick, "Loading logs\u{2026}"),
+            widgets::spinner(state.tick, &crate::i18n::t("tui-logs-loading")),
             chunks[1],
         );
     } else if state.filtered.is_empty() {
         f.render_widget(
-            widgets::empty_state("No log entries. Start the daemon to see logs."),
+            widgets::empty_state(&crate::i18n::t("tui-logs-empty")),
             chunks[1],
         );
     } else {
@@ -393,7 +438,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut LogsState) {
 
     // ── Hints ──
     f.render_widget(
-        widgets::hint_bar("  [\u{2191}\u{2193}] Navigate  [f] Filter Level  [/] Search  [a] Auto-refresh  [r] Refresh"),
+        widgets::hint_bar(&crate::i18n::t("tui-logs-hints")),
         chunks[2],
     );
 }
