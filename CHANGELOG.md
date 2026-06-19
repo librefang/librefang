@@ -836,11 +836,22 @@ _308 PRs from 7 contributors since v2026.5.17-beta.12._
 
 ### Added
 
+- **feat(dashboard): provider max-token limit on the Providers page** (#6209) (@houko).
+  Each provider card now shows the representative model's max-output-token limit (the `max_tokens` override when set, else the catalog `max_output_tokens`), and the config drawer lets you edit it; clearing the field reverts to the catalog default.
+  Persisted through the existing per-model override endpoint, so no new persistence path is introduced.
 - **feat(runtime): emit `librefang_agent_loop_exits_total{agent,reason}`** so operators can alert on non-success agent-loop terminations (#6227) (@houko).
   The agent loop previously recorded no metric when it aborted on repeated tool failures, max iterations, a loop-guard circuit break, or a provider content-filter — the only signal was reading transcripts, and a cron/trigger fire that aborted still recorded `librefang_cron_fires_total{outcome="ok"}` because the loop returned.
   Reasons: `completed`, `max_iterations`, `repeated_tool_failures`, `circuit_break`, `content_filtered`, `error`.
   The counter increments exactly once per termination from a thin wrapper around the streaming and non-streaming loops, so no branch fall-through can double-count.
   Alert with `rate(librefang_agent_loop_exits_total{reason!="completed"}) > 0` per agent.
+- **feat(runtime): CoT-pruning for stale reasoning traces during compaction** (#6173) (@houko).
+  Strips `<think>...</think>` spans and `Thinking` content blocks from assistant turns older than `[compaction] strip_reasoning_after_turns` (default 0, disabled), reclaiming context that stale reasoning would otherwise occupy.
+  Runs only at the compaction boundary, never on the per-turn hot path, so it does not invalidate the provider prompt cache more often than compaction already does.
+  Skipped entirely for models whose `ReasoningEchoPolicy` is `Echo` (DeepSeek V4 Flash), which require the reasoning echoed back on tool_calls turns.
+  Implements part of the proposal in #6173 by @pavver.
+- **feat(runtime): developer-loop aggregation during compaction** (#6173) (@houko).
+  Collapses long runs of consecutive developer-tool steps — classified by the existing `ToolClass` taxonomy (`Mutating` / `ExecCapable`), not a hardcoded name list — into the first step, a deterministic placeholder, and the last step, opt-in via `[compaction] aggregate_developer_loops` (default off) with `max_loop_steps_before_aggregate` (default 5).
+  Whole tool-use/result pairs are removed together so no `tool_use_id` is orphaned.
 
 ### Breaking Changes
 
@@ -858,6 +869,9 @@ _308 PRs from 7 contributors since v2026.5.17-beta.12._
 - **refactor(error-contracts): migrate `browser_tools.rs` to `Result<String, ToolError>`** (#3576) (@houko) — another slice of the structured-error-contracts migration.
   The ten `tool_browser_*` dispatchers (navigate / click / type / screenshot / read_page / close / scroll / wait / run_js / back) now return the typed `ToolError` instead of an opaque `String`: missing params map to `MissingParameter`, an SSRF-blocked URL to `InvalidParameter`, and CDP transport / command failures to `Upstream` via `upstream_msg`.
   The dispatch boundary drops its per-arm `.map_err(ToolError::upstream_msg)` so the typed variants flow through `tool_result_from_typed`; the `None` (browser-not-wired) arm still yields `Unavailable`.
+- **refactor(api): replace `anyhow` with a typed `TmuxError` in `terminal_tmux`** (#3576) (@houko) — another slice of the structured-error-contracts migration.
+  The `TmuxController` methods and `parse_window_list` now return `Result<T, TmuxError>` instead of `anyhow::Result<T>`: spawn failures carry the underlying `io::Error` on the `source()` chain, plus typed variants for subprocess timeout, post-spawn I/O error, non-zero exit (rendered status + trimmed stderr), pre-spawn argument validation, empty `new-window` output, and the `parse_window_list` missing-field / bad-index cases.
+  Every `Display` string is preserved byte-for-byte from the old `anyhow!(…)` text because it reaches daemon logs via `warn!(error = %e, …)` in `routes/terminal.rs`, so callers compile unchanged with equivalent behavior.
 - **chore(deps): drop five orphaned email `[workspace.dependencies]` left after the channel sidecar migration** (#6176) (@houko).
   `lettre` / `imap` / `rustls-connector` / `mailparse` / `rustls-pemfile` were declared in the root `Cargo.toml` but had no member consumer (no `.workspace = true`, no `use`) and were already absent from `Cargo.lock`, so they were never compiled or audited — the issue's "adds compile time / binary size / supply-chain surface" framing was inaccurate; the real defect was dead declaration cruft.
   The now-unmatchable `deny.toml` ignore for `RUSTSEC-2025-0134` (`rustls-pemfile`) is dropped in the same change, since that crate no longer appears in the resolved graph.
@@ -886,6 +900,20 @@ In-crate only; no cross-crate error-shape changes.
 
 ### Added
 
+- **dashboard(agents): group the Agents list into Core Agents and Hands sections** (#6189) (@houko).
+  The Agents page rendered every agent in one flat list, with hand-role agents distinguished only by a small per-row badge.
+  The already-filtered and -sorted list is now split on the `is_hand` flag into two titled sections (using the pre-seeded `agents.core_agents` / `agents.hands` i18n keys); each header only shows when its group is non-empty, so the `Show hands` toggle keeps its meaning and a single-group view shows no empty banner.
+  Presentational only — no data-layer, query, or backend change.
+  Closes #6189.
+- **observability: tool-call telemetry fidelity — failure-type breakdown, per-tool latency histogram, and span error status** (#6228) (@houko).
+  `librefang_tool_call_total` gains a bounded `failure_type` label that no longer collapses every failure to one `outcome=failure` bucket: a loop-guard / allowlist block (`blocked`), an approval denial or modify-and-retry (`approval_denied`), a tool timeout (`timeout`), a genuine crash (`hard_error`), and a circuit break (`circuit_break`) are now distinguishable on a dashboard.
+  The label is derived from the existing `ToolExecutionStatus` (`Skipped → blocked`, `Denied`/`ModifyAndRetry → approval_denied`, `Expired → timeout`, `Error → hard_error`, no-status circuit break → `circuit_break`); the success path carries `failure_type=none`.
+  A new `librefang_tool_execution_seconds{tool}` histogram exports the per-tool dispatch latency that was already measured for the decision trace (`execution_ms / 1000.0`), so latency distributions are now visible per tool.
+  The `execute_single_tool_call` span now records `tool.outcome` and sets the OpenTelemetry span status to error (`otel.status_code=error`) on a genuine service failure (hard error, circuit break, or timeout) — but not on a model-fat-fingered blocked / denied call — so a `hasError=true` trace filter and service-level errorRate finally match a failed tool. Closes #6228.
+- **dashboard(agents): edit the system prompt and bind a prompt-library version from the agent detail drawer** (#6187) (@houko).
+  The Agents page previously showed the system prompt read-only and the "Prompts" modal's activate only flipped the store's active flag without changing the live prompt; the Hands page already had a full editor (#6151 / #6166), leaving the two pages inconsistent.
+  `SystemPromptSection` is now an inline editor: edit and save via `PATCH /api/agents/{id}`, or open the prompt library and bind a saved version via `useBindPromptVersionToAgent` (which hot-swaps the live `system_prompt` and flips `is_active` together).
+  Dashboard-only — the backend `update_system_prompt` path is unchanged; i18n added to en/zh/uk and the editor is covered by a new `AgentsPage.test.tsx`. Closes #6187.
 - **observability: `librefang_tool_call_total` now carries an `agent` label** (#6226) (@houko).
   The counter added in #3495 was labeled only by `tool` and `outcome`, so tool failures could not be attributed per-agent.
   It is now `librefang_tool_call_total{agent, tool, outcome}`, mirroring the existing per-agent `librefang_cron_fires_total{agent}` precedent.
@@ -972,6 +1000,14 @@ In-crate only; no cross-crate error-shape changes.
 
 ### Fixed
 
+- **fix(hands): saving one Hand setting no longer drops the others** (#6204) (@houko).
+  The Hand settings editor PUTs only the keys changed this session, but `update_hand_settings` passed that partial map straight to `HandRegistry::update_config`, which replaces the whole instance config — so for a Hand with several settings, saving one reverted every other to its default.
+  The route now reads the instance's current config and merges the incoming keys over it (a true partial update; the registry's replace contract is unchanged), and the editor also seeds its payload from the saved values as defense in depth.
+  Closes #6204.
+- **fix(dashboard): serve the SPA shell on a hard refresh of the Prompts and Tasks pages** (#6197) (@houko).
+  `/dashboard/prompts` and `/dashboard/tasks` are real router routes, but they were never added to the server-side `SPA_ROUTES` allowlist, so a direct navigation or browser refresh returned `asset not found` (404) instead of `index.html`.
+  Both slugs are added to the allowlist, and a drift-guard test now parses `router.tsx` and asserts every top-level dashboard route falls back to the shell, so a future route added without updating the allowlist fails loudly.
+  Closes #6197.
 - **fix(api): scope the compaction-summary banner to the session that was actually compacted** (#6225) (@houko).
   The dashboard "Session summary (older messages compacted)" banner appeared on a freshly created session that was never compacted, showing a previous unrelated conversation's summary.
   `compacted_summary` lives in the agent-scoped `canonical_sessions` row (one per `agent_id`) and outlives any individual session, but `get_agent_session` exposed it whenever the requested session was the agent's *active* one — so creating a new session, which makes it active without compacting it, leaked the prior summary onto message #1.

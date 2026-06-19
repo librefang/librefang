@@ -591,6 +591,85 @@ async fn get_provider_unknown_returns_404() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+/// Issue #6209 — the provider list and detail endpoints surface the
+/// representative model's max-output-token limit so the dashboard can show
+/// (and edit) it. Without an override, the value is the catalog
+/// `max_output_tokens` of the provider's default/first model; setting a
+/// `max_tokens` override changes the headline value the dashboard renders.
+#[tokio::test(flavor = "multi_thread")]
+async fn provider_max_output_tokens_reflects_catalog_then_override() {
+    let h = boot();
+
+    // The baseline seeds openai → gpt-4o-mini with max_output_tokens 16_384
+    // and no override, so the headline value is the catalog default.
+    let find_openai = |body: &serde_json::Value| -> serde_json::Value {
+        body["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"].as_str() == Some("openai"))
+            .cloned()
+            .expect("openai provider present in baseline catalog")
+    };
+
+    let (status, body) = json_request(&h, Method::GET, "/api/providers", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let openai = find_openai(&body);
+    assert_eq!(
+        openai["max_output_tokens"].as_u64(),
+        Some(16_384),
+        "list should expose the catalog max_output_tokens before any override: {openai}"
+    );
+
+    // The single-provider detail endpoint exposes the same value.
+    let (status, detail) = json_request(&h, Method::GET, "/api/providers/openai", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(detail["max_output_tokens"].as_u64(), Some(16_384));
+
+    // Set a max_tokens override on the representative model.
+    let (status, _body) = json_request(
+        &h,
+        Method::PUT,
+        "/api/models/overrides/openai:gpt-4o-mini",
+        Some(serde_json::json!({ "max_tokens": 8_000 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The headline value now reflects the override on both endpoints.
+    let (status, body) = json_request(&h, Method::GET, "/api/providers", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let openai = find_openai(&body);
+    assert_eq!(
+        openai["max_output_tokens"].as_u64(),
+        Some(8_000),
+        "list should reflect the max_tokens override after PUT: {openai}"
+    );
+
+    let (status, detail) = json_request(&h, Method::GET, "/api/providers/openai", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(detail["max_output_tokens"].as_u64(), Some(8_000));
+
+    // Clearing the override reverts the headline to the catalog default.
+    let (status, _body) = json_request(
+        &h,
+        Method::DELETE,
+        "/api/models/overrides/openai:gpt-4o-mini",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, body) = json_request(&h, Method::GET, "/api/providers", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let openai = find_openai(&body);
+    assert_eq!(
+        openai["max_output_tokens"].as_u64(),
+        Some(16_384),
+        "list should revert to catalog default after the override is deleted: {openai}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // POST /api/providers/{name}/test — only verify unknown-provider 404
 // (the success branch performs outbound HTTP/CLI probes — see file header).
