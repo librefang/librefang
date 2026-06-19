@@ -595,10 +595,11 @@ pub(super) fn record_tool_span_outcome(
     let ft = failure_type_label(is_error, status);
     let span = tracing::Span::current();
     span.record("tool.outcome", ft);
-    // `hard_error` and `circuit_break` are the only genuine service errors;
-    // `blocked` / `approval_denied` / `timeout`(soft) are model- or
-    // policy-driven and must not flip the span to errored. Timeout is a
-    // genuine execution failure, so it counts as hard for span status.
+    // `blocked` and `approval_denied` are model- or policy-driven outcomes;
+    // they must not flip the span to errored or the service errorRate will
+    // count the model's policy violations as service failures.
+    // `hard_error`, `circuit_break`, and `timeout` are genuine execution
+    // failures and do set the OTel span status to error.
     if matches!(ft, "hard_error" | "circuit_break" | "timeout") {
         span.record("otel.status_code", "error");
     }
