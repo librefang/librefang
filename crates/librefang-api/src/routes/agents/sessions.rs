@@ -261,20 +261,20 @@ pub async fn get_agent_session(
 
             let messages = built_messages;
 
-            // Expose the LLM-generated compaction summary only for the
-            // canonical session. A pinned ?sessionId= that is not canonical
-            // has no associated summary — return null rather than an error
-            // so the dashboard banner simply stays hidden.
-            let compacted_summary: Option<String> = if target_session_id == entry.session_id {
-                state
-                    .kernel
-                    .memory_substrate()
-                    .canonical_context(agent_id, None, Some(0))
-                    .ok()
-                    .and_then(|(summary, _)| summary)
-            } else {
-                None
-            };
+            // Expose the LLM-generated compaction summary only on the session
+            // whose own history was actually compacted (#6225). The summary
+            // lives in the agent-scoped `canonical_sessions` row and outlives
+            // any individual session, so gating on "is this the active
+            // session?" leaked a prior conversation's summary onto a freshly
+            // created session that merely became active. Gate on recorded
+            // ownership instead: a session — pinned or active — that never
+            // produced this summary gets null and the banner stays hidden.
+            let compacted_summary: Option<String> = state
+                .kernel
+                .memory_substrate()
+                .compacted_summary_for_session(agent_id, target_session_id)
+                .ok()
+                .flatten();
 
             // #3511: tag session_id (and agent_id) so the access-log
             // middleware can emit them as structured fields.
@@ -313,16 +313,18 @@ pub async fn get_agent_session(
                         .into_response();
                 }
             }
-            // For the canonical session (no pinned session_id override), expose
-            // any LLM-generated compaction summary even when the session row
-            // itself is not yet materialised (e.g. agent just spawned but
-            // store_llm_summary was called directly, as in tests).
+            // Expose the LLM-generated compaction summary even when the
+            // session row itself is not yet materialised (e.g. agent just
+            // spawned but store_llm_summary was called directly, as in
+            // tests), but only when this active session is the one that
+            // actually owns the summary (#6225) — never a freshly created
+            // session that inherited the agent-scoped row.
             let compacted_summary: Option<String> = state
                 .kernel
                 .memory_substrate()
-                .canonical_context(agent_id, None, Some(0))
+                .compacted_summary_for_session(agent_id, entry.session_id)
                 .ok()
-                .and_then(|(summary, _)| summary);
+                .flatten();
 
             // #3511: tag both identifiers even for the empty-session case.
             crate::extensions::with_session_id(

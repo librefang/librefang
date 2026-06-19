@@ -1240,7 +1240,7 @@ fn test_record_tool_call_metric_failure_outcome() {
     metrics::with_local_recorder(&recorder, || {
         // Simulate what the wrapper does when execute_single_tool_call_inner
         // returns Err (circuit-break or any hard error).
-        record_tool_call_metric("my_tool", true, None, None);
+        record_tool_call_metric("agent_a", "my_tool", true, None, None);
     });
 
     let snap = snapshotter.snapshot().into_vec();
@@ -1276,6 +1276,7 @@ fn test_record_tool_call_metric_success_outcome() {
 
     metrics::with_local_recorder(&recorder, || {
         record_tool_call_metric(
+            "agent_b",
             "other_tool",
             false,
             Some(librefang_types::tool::ToolExecutionStatus::Completed),
@@ -1349,7 +1350,7 @@ fn test_record_tool_call_metric_emits_failure_type() {
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
         metrics::with_local_recorder(&recorder, || {
-            record_tool_call_metric("ftool", true, status, Some(10));
+            record_tool_call_metric("agent", "ftool", true, status, Some(10));
         });
         let snap = snapshotter.snapshot().into_vec();
         let found = snap.iter().any(|(ckey, _, _, val)| {
@@ -1381,7 +1382,7 @@ fn test_record_tool_call_metric_success_failure_type_is_none() {
     let recorder = DebuggingRecorder::new();
     let snapshotter = recorder.snapshotter();
     metrics::with_local_recorder(&recorder, || {
-        record_tool_call_metric("oktool", false, Some(S::Completed), Some(5));
+        record_tool_call_metric("agent", "oktool", false, Some(S::Completed), Some(5));
     });
     let snap = snapshotter.snapshot().into_vec();
     let found = snap.iter().any(|(ckey, _, _, val)| {
@@ -1406,7 +1407,7 @@ fn test_record_tool_call_metric_emits_latency_histogram() {
     let snapshotter = recorder.snapshotter();
     metrics::with_local_recorder(&recorder, || {
         // 1500 ms ⇒ 1.5 s.
-        record_tool_call_metric("histtool", false, Some(S::Completed), Some(1500));
+        record_tool_call_metric("agent", "histtool", false, Some(S::Completed), Some(1500));
     });
     let snap = snapshotter.snapshot().into_vec();
     let hist = snap.iter().find(|(ckey, _, _, val)| {
@@ -1439,7 +1440,7 @@ fn test_record_tool_call_metric_skips_histogram_without_duration() {
     let snapshotter = recorder.snapshotter();
     metrics::with_local_recorder(&recorder, || {
         // Circuit-break shape: error, no status, no duration.
-        record_tool_call_metric("nodur", true, None, None);
+        record_tool_call_metric("agent", "nodur", true, None, None);
     });
     let snap = snapshotter.snapshot().into_vec();
     let hist_present = snap.iter().any(|(ckey, _, _, val)| {
@@ -1587,6 +1588,61 @@ fn test_span_outcome_success_is_not_errored() {
     assert!(!fields.contains_key("otel.status_code"));
 }
 
+
+/// Regression for #6226 — `librefang_tool_call_total` must carry an `agent` label so tool failures can be attributed per-agent.
+/// Asserts the counter is emitted with `agent`, `tool`, and `outcome` labels and that the agent id is sanitized + length-capped like the tool label.
+#[test]
+fn test_record_tool_call_metric_carries_agent_label() {
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+
+    // A control char and an over-long id exercise the sanitize/cap path — a hallucinated or hostile caller id must not blow up cardinality.
+    let raw_agent = format!("agent\u{0007}-{}", "x".repeat(200));
+
+    metrics::with_local_recorder(&recorder, || {
+        record_tool_call_metric(&raw_agent, "shell_exec", true, None, None);
+    });
+
+    let snap = snapshotter.snapshot().into_vec();
+    let entry = snap.iter().find(|(ckey, _, _, val)| {
+        ckey.key().name() == "librefang_tool_call_total"
+            && ckey
+                .key()
+                .labels()
+                .any(|l| l.key() == "tool" && l.value() == "shell_exec")
+            && ckey
+                .key()
+                .labels()
+                .any(|l| l.key() == "outcome" && l.value() == "failure")
+            && ckey.key().labels().any(|l| l.key() == "agent")
+            && matches!(val, DebugValue::Counter(_))
+    });
+    let (ckey, _, _, val) = entry.expect(
+        "librefang_tool_call_total must carry an agent label alongside tool/outcome (#6226)",
+    );
+
+    let agent_value = ckey
+        .key()
+        .labels()
+        .find(|l| l.key() == "agent")
+        .map(|l| l.value().to_string())
+        .expect("agent label must be present");
+    // Control char stripped, length capped at 64 (same as sanitize_tool_label).
+    assert!(
+        !agent_value.contains('\u{0007}'),
+        "agent label must strip control chars"
+    );
+    assert!(
+        agent_value.chars().count() <= 64,
+        "agent label must be length-capped to keep cardinality bounded, got {} chars",
+        agent_value.chars().count()
+    );
+    if let DebugValue::Counter(count) = val {
+        assert_eq!(*count, 1, "counter must be incremented exactly once");
+    }
+}
 // ── Agent-loop exit metric ──────────────────────────────────────────────
 
 /// Pins every `classify_exit_reason` mapping so future variant changes can't silently re-bucket an exit.

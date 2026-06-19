@@ -26,6 +26,7 @@ librefang-import = { path = "../librefang-import" }
 librefang-telemetry = { path = "../librefang-telemetry" }
 librefang-http = { path = "../librefang-http" }
 anyhow = { workspace = true }
+thiserror = { workspace = true }
 arc-swap = { workspace = true }
 dashmap = { workspace = true }
 portable-pty = { workspace = true }
