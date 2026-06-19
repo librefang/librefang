@@ -185,6 +185,7 @@ fn is_potential_untranslated_literal(lit: &str) -> bool {
         "idx within bounds",
         "Failed to create tokio runtime",
         "Failed to create Tokio runtime",
+        "HTTP blocking client with bundled CA roots should always build",
         "target checked above",
         "instance_id missing",
         // Technical format strings
@@ -595,7 +596,6 @@ fn test_no_untranslated_strings() {
                 || rel_path == "cli.rs"
                 || rel_path == "mcp.rs"
                 || rel_path == "log_filter.rs"
-                || rel_path == "http_client.rs"
                 || rel_path.starts_with("tui/")
             {
                 continue;
