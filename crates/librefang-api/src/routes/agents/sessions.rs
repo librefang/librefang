@@ -261,20 +261,20 @@ pub async fn get_agent_session(
 
             let messages = built_messages;
 
-            // Expose the LLM-generated compaction summary only for the
-            // canonical session. A pinned ?sessionId= that is not canonical
-            // has no associated summary — return null rather than an error
-            // so the dashboard banner simply stays hidden.
-            let compacted_summary: Option<String> = if target_session_id == entry.session_id {
-                state
-                    .kernel
-                    .memory_substrate()
-                    .canonical_context(agent_id, None, Some(0))
-                    .ok()
-                    .and_then(|(summary, _)| summary)
-            } else {
-                None
-            };
+            // Expose the LLM-generated compaction summary only on the session
+            // whose own history was actually compacted (#6225). The summary
+            // lives in the agent-scoped `canonical_sessions` row and outlives
+            // any individual session, so gating on "is this the active
+            // session?" leaked a prior conversation's summary onto a freshly
+            // created session that merely became active. Gate on recorded
+            // ownership instead: a session — pinned or active — that never
+            // produced this summary gets null and the banner stays hidden.
+            let compacted_summary: Option<String> = state
+                .kernel
+                .memory_substrate()
+                .compacted_summary_for_session(agent_id, target_session_id)
+                .ok()
+                .flatten();
 
             // #3511: tag session_id (and agent_id) so the access-log
             // middleware can emit them as structured fields.
@@ -313,16 +313,18 @@ pub async fn get_agent_session(
                         .into_response();
                 }
             }
-            // For the canonical session (no pinned session_id override), expose
-            // any LLM-generated compaction summary even when the session row
-            // itself is not yet materialised (e.g. agent just spawned but
-            // store_llm_summary was called directly, as in tests).
+            // Expose the LLM-generated compaction summary even when the
+            // session row itself is not yet materialised (e.g. agent just
+            // spawned but store_llm_summary was called directly, as in
+            // tests), but only when this active session is the one that
+            // actually owns the summary (#6225) — never a freshly created
+            // session that inherited the agent-scoped row.
             let compacted_summary: Option<String> = state
                 .kernel
                 .memory_substrate()
-                .canonical_context(agent_id, None, Some(0))
+                .compacted_summary_for_session(agent_id, entry.session_id)
                 .ok()
-                .and_then(|(summary, _)| summary);
+                .flatten();
 
             // #3511: tag both identifiers even for the empty-session case.
             crate::extensions::with_session_id(
@@ -350,6 +352,141 @@ pub async fn get_agent_session(
                 .into_response()
         }
     }
+}
+
+/// Lightweight context-window usage indicator for an agent session.
+///
+/// Distinct from `GET /api/agents/{id}/session`: that endpoint returns the full
+/// message history and exposes only the X numerator
+/// (`context_window_tokens`). This endpoint resolves the Y denominator (the
+/// model's context window, via the same precedence chain the agent loop uses)
+/// and the percentage, so the dashboard can render a cheap polled "how full is
+/// the window" bar without pulling the heavy history payload.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct SessionContextResponse {
+    /// Estimated tokens currently in the context window (chars/4 heuristic).
+    pub used_tokens: usize,
+    /// Resolved model context window. Falls back to
+    /// `UNKNOWN_MODEL_CONTEXT_WINDOW` (8192) for an unknown model, so this is
+    /// always positive.
+    pub max_context_tokens: usize,
+    /// Usage percentage, clamped to 100 with one decimal of precision.
+    pub pct: f64,
+    /// The agent's model id.
+    pub model: String,
+    /// Pressure level: `low` / `medium` / `high` / `critical`.
+    pub pressure: String,
+}
+
+/// GET /api/agents/{id}/session/context — context-window usage indicator.
+#[utoipa::path(
+    get,
+    path = "/api/agents/{id}/session/context",
+    tag = "agents",
+    params(
+        ("id" = String, Path, description = "Agent ID"),
+        ("session_id" = Option<String>, Query, description = "Optional session id to report on instead of the canonical active session"),
+    ),
+    responses(
+        (status = 200, description = "Context window usage for the requested (or active) session", body = SessionContextResponse),
+        (status = 400, description = "Invalid agent or session ID"),
+        (status = 404, description = "Agent or session not found")
+    )
+)]
+pub async fn get_agent_session_context(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    query: Result<Query<GetAgentSessionQuery>, axum::extract::rejection::QueryRejection>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let Query(params) = match query {
+        Ok(q) => q,
+        Err(_) => {
+            return ApiErrorResponse::bad_request(t.t("api-error-session-invalid-id"))
+                .with_code("invalid_session_id")
+                .into_response();
+        }
+    };
+    let agent_id: AgentId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
+                .with_code("invalid_agent_id")
+                .into_response();
+        }
+    };
+
+    let entry = match state.kernel.agent_registry().get(agent_id) {
+        Some(e) => e,
+        None => {
+            return ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
+                .with_code("agent_not_found")
+                .into_response();
+        }
+    };
+    let model = entry.manifest.model.model.clone();
+
+    // A dashboard tab can pin a non-active session via `?session_id=`. Validate
+    // ownership exactly as `get_agent_session` does so one agent's usage cannot
+    // be read through another agent's id. An unmaterialized session row (no
+    // messages yet) is only accepted when it is this agent's own canonical id.
+    let session_override = params.session_id.map(librefang_types::agent::SessionId);
+    if let Some(target) = session_override {
+        match state.kernel.memory_substrate().get_session(target) {
+            Ok(Some(s)) if s.agent_id != agent_id => {
+                return ApiErrorResponse::not_found(t.t("api-error-session-not-found"))
+                    .with_code("session_agent_mismatch")
+                    .into_response();
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                if target.0 != entry.session_id.0 {
+                    return ApiErrorResponse::not_found(t.t("api-error-session-not-found"))
+                        .with_code("session_agent_mismatch")
+                        .into_response();
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Session load failed for agent {id}: {e}");
+                return ApiErrorResponse::internal(t.t("api-error-session-load-failed"))
+                    .with_code("session_load_failed")
+                    .into_response();
+            }
+        }
+    }
+    // ErrorTranslator is !Send; context_report below is sync so drop happens
+    // before there is any await, but keep the drop explicit per the repo gotcha.
+    // Translate the context-report failure message before the drop.
+    let context_report_failed_msg = t.t("api-error-context-report-failed");
+    drop(t);
+
+    let report = match state
+        .kernel
+        .context_report_for_session(agent_id, session_override)
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("Context report failed for agent {id}: {e}");
+            return ApiErrorResponse::internal(context_report_failed_msg)
+                .with_code("context_report_failed")
+                .into_response();
+        }
+    };
+
+    crate::extensions::with_agent_id(
+        agent_id,
+        (
+            StatusCode::OK,
+            Json(SessionContextResponse {
+                used_tokens: report.estimated_tokens,
+                max_context_tokens: report.context_window,
+                pct: report.usage_percent,
+                model,
+                pressure: format!("{:?}", report.pressure).to_lowercase(),
+            }),
+        ),
+    )
 }
 
 /// GET /api/agents/{id}/sessions/{session_id}/stream — attach to a session's

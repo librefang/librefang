@@ -1575,6 +1575,32 @@ export async function loadAgentSession(
   return get<AgentSessionResponse>(`/api/agents/${encodeURIComponent(agentId)}/session${qs}`);
 }
 
+/**
+ * Context-window usage snapshot for a session.
+ *
+ * `pct` is `used_tokens / max_context_tokens` clamped to 0..=100 with one
+ * decimal; it is an approximate (chars/4 heuristic) estimate, not the
+ * provider's exact tokenizer count. `max_context_tokens` is 0 when the model
+ * window could not be resolved.
+ */
+export interface SessionContextResponse {
+  used_tokens: number;
+  max_context_tokens: number;
+  pct: number;
+  model: string;
+  pressure: string;
+}
+
+export async function getAgentSessionContext(
+  agentId: string,
+  sessionId?: string | null,
+): Promise<SessionContextResponse> {
+  const qs = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : "";
+  return get<SessionContextResponse>(
+    `/api/agents/${encodeURIComponent(agentId)}/session/context${qs}`,
+  );
+}
+
 export async function sendAgentMessage(
   agentId: string,
   message: string,

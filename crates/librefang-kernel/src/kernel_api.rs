@@ -517,6 +517,11 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         &self,
         agent_id: AgentId,
     ) -> KernelResult<librefang_runtime::compactor::ContextReport>;
+    fn context_report_for_session(
+        &self,
+        agent_id: AgentId,
+        session_id: Option<SessionId>,
+    ) -> KernelResult<librefang_runtime::compactor::ContextReport>;
     fn effective_mcp_servers_ref(
         &self,
     ) -> &std::sync::RwLock<Vec<librefang_types::config::McpServerConfigEntry>>;
@@ -1311,6 +1316,13 @@ impl KernelApi for LibreFangKernel {
         agent_id: AgentId,
     ) -> KernelResult<librefang_runtime::compactor::ContextReport> {
         Self::context_report(self, agent_id)
+    }
+    fn context_report_for_session(
+        &self,
+        agent_id: AgentId,
+        session_id: Option<SessionId>,
+    ) -> KernelResult<librefang_runtime::compactor::ContextReport> {
+        Self::context_report_for_session(self, agent_id, session_id)
     }
     fn effective_mcp_servers_ref(
         &self,

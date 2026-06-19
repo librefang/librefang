@@ -62,6 +62,9 @@ ignore = [
     { id = "RUSTSEC-2025-0098", reason = "unic-* unmaintained (kuchikiki/selectors chain). https://rustsec.org/advisories/RUSTSEC-2025-0098" },
     { id = "RUSTSEC-2025-0100", reason = "unic-* unmaintained (kuchikiki/selectors chain). https://rustsec.org/advisories/RUSTSEC-2025-0100" },
     { id = "RUSTSEC-2025-0141", reason = "bincode 2.0.x unmaintained; transitive via the 2026-06-17 upstream dep bumps. https://rustsec.org/advisories/RUSTSEC-2025-0141" },
+    { id = "RUSTSEC-2024-0384", reason = "instant unmaintained; transitive via notify → universal-agent-runtime (UAR provider). https://rustsec.org/advisories/RUSTSEC-2024-0384" },
+    { id = "RUSTSEC-2024-0436", reason = "paste unmaintained; transitive via biblatex/kreuzberg → universal-agent-runtime (UAR provider). https://rustsec.org/advisories/RUSTSEC-2024-0436" },
+    { id = "RUSTSEC-2025-0119", reason = "number_prefix unmaintained; transitive via indicatif → tokenizers → liter-llm → universal-agent-runtime (UAR provider). https://rustsec.org/advisories/RUSTSEC-2025-0119" },
 ]
 # Note: RUSTSEC-2025-0134 (rustls-pemfile unmaintained) was removed — the
 # crate was dropped from the dependency tree by an upstream dep bump and the

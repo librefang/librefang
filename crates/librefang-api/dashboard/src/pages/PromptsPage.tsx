@@ -362,17 +362,23 @@ function AgentPromptRepoModal({
                         <Check className="h-3 w-3 mr-1" /> {t("prompts.bound")}
                       </span>
                     )}
-                    {!v.is_active && (
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        disabled={deleteMutation.isPending}
-                        onClick={() => handleDelete(v)}
-                        aria-label={t("prompts.delete")}
-                      >
-                        <Trash2 className="h-3 w-3" />
-                      </Button>
-                    )}
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      disabled={v.is_active || deleteMutation.isPending}
+                      onClick={() => handleDelete(v)}
+                      aria-label={t("prompts.delete")}
+                      title={
+                        v.is_active
+                          ? t("prompts.delete_blocked_active", {
+                              defaultValue:
+                                "Active version — activate another version before deleting",
+                            })
+                          : t("prompts.delete")
+                      }
+                    >
+                      <Trash2 className="h-3 w-3" />
+                    </Button>
                   </div>
                 </div>
                 <pre className="text-xs text-text-dim whitespace-pre-wrap max-h-32 overflow-y-auto font-mono">

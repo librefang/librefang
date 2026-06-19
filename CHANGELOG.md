@@ -834,6 +834,14 @@ _308 PRs from 7 contributors since v2026.5.17-beta.12._
 
 ## [Unreleased]
 
+### Added
+
+- **feat(runtime): emit `librefang_agent_loop_exits_total{agent,reason}`** so operators can alert on non-success agent-loop terminations (#6227) (@houko).
+  The agent loop previously recorded no metric when it aborted on repeated tool failures, max iterations, a loop-guard circuit break, or a provider content-filter — the only signal was reading transcripts, and a cron/trigger fire that aborted still recorded `librefang_cron_fires_total{outcome="ok"}` because the loop returned.
+  Reasons: `completed`, `max_iterations`, `repeated_tool_failures`, `circuit_break`, `content_filtered`, `error`.
+  The counter increments exactly once per termination from a thin wrapper around the streaming and non-streaming loops, so no branch fall-through can double-count.
+  Alert with `rate(librefang_agent_loop_exits_total{reason!="completed"}) > 0` per agent.
+
 ### Breaking Changes
 
 - **Subprocess plugin sandbox is now secure-by-default** (#2) (@houko).
@@ -853,6 +861,18 @@ _308 PRs from 7 contributors since v2026.5.17-beta.12._
 - **runtime(plugin-host): Component Model execute path for WASM plugins (@GQAdonis)** — Phase-5 lands a typed-WIT Component Model execute path on `WasmSandbox`, side-by-side with the existing core-module `execute()`. New `WasmSandbox::execute_component()` loads a `.wasm` Component via `wasmtime::component::Component::from_binary`, binds the host interfaces declared in `SkillManifest.host_capabilities` via per-interface `add_to_linker`, and invokes the exported `run` function. WIT package `librefang:plugin@0.1.0` (`crates/librefang-skills/wit/`) declares six host interfaces (`fs`, `net`, `kv`, `agent`, `env`, `time`) modeling the existing `host_functions::dispatch` surface — typed bindings shim through to the same dispatcher so capability checks stay in one place. New `HostCapability` enum on `SkillManifest` gates which interfaces are bound at link time; importing an undeclared interface fails at instantiation. AOT `.cwasm` cache (`aot_cache.rs`) speeds re-runs: `Auto` (default) compiles JIT on first run and writes the cache opportunistically, subsequent runs deserialize the pre-compiled artefact in milliseconds. Cache key embeds wasmtime version + sha256 of source so both kinds of drift cleanly miss the cache. Existing core-module Wasm skills are unaffected. Per-language plugin authoring recipes (Rust via cargo-component, Python via componentize-py, JS via jco, Go via TinyGo wasip2, C via wit-bindgen) at `docs/development/plugin-host.md`. Smoke harness `cargo run --example load_and_run -- <wasm>` for validating Components produced by external authors. 30 new unit tests (wit_host 17, sandbox_component 6, aot_cache 7) — all green.
 
 ### Changed
+
+- **dashboard(agents): drop the arbitrary 200000 cap on the model `max_tokens` input** (#6209) (@houko).
+  The agent model-config `max_tokens` field hard-capped its input at `max={200000}`, silently preventing operators from setting a higher output budget; the provider validates the real per-model ceiling anyway, so the UI no longer imposes its own arbitrary limit (`min={1}` is kept).
+  Closes #6209.
+- **refactor(error-contracts): migrate `browser_tools.rs` to `Result<String, ToolError>`** (#3576) (@houko) — another slice of the structured-error-contracts migration.
+  The ten `tool_browser_*` dispatchers (navigate / click / type / screenshot / read_page / close / scroll / wait / run_js / back) now return the typed `ToolError` instead of an opaque `String`: missing params map to `MissingParameter`, an SSRF-blocked URL to `InvalidParameter`, and CDP transport / command failures to `Upstream` via `upstream_msg`.
+  The dispatch boundary drops its per-arm `.map_err(ToolError::upstream_msg)` so the typed variants flow through `tool_result_from_typed`; the `None` (browser-not-wired) arm still yields `Unavailable`.
+- **chore(deps): drop five orphaned email `[workspace.dependencies]` left after the channel sidecar migration** (#6176) (@houko).
+  `lettre` / `imap` / `rustls-connector` / `mailparse` / `rustls-pemfile` were declared in the root `Cargo.toml` but had no member consumer (no `.workspace = true`, no `use`) and were already absent from `Cargo.lock`, so they were never compiled or audited — the issue's "adds compile time / binary size / supply-chain surface" framing was inaccurate; the real defect was dead declaration cruft.
+  The now-unmatchable `deny.toml` ignore for `RUSTSEC-2025-0134` (`rustls-pemfile`) is dropped in the same change, since that crate no longer appears in the resolved graph.
+  Declaration-only removal; `Cargo.lock` is unchanged.
+  Closes #6176.
 
 - **refactor(error-contracts): migrate `web_search.rs` tool functions from `Result<String, String>` to `Result<String, ToolError>`** (#3576) (@houko) — one slice of the ongoing structured-error-contracts migration.
 The multi-provider search engine (`WebSearchEngine::search` and its `search_brave` / `search_tavily` / `search_perplexity` / `search_jina` / `search_duckduckgo` / `search_searxng` / `search_auto` / `list_searxng_categories` helpers) now returns the typed `ToolError` instead of an opaque `String`: missing API keys and unconfigured SearXNG URLs map to `Unavailable`, invalid `pageno` / `category` to `InvalidParameter`, `reqwest` send/JSON failures to `Upstream` via `ToolError::upstream` (preserving the `reqwest::Error` source chain per #3745), and "no results" / "all providers failed" to `Upstream` via `upstream_msg`.
@@ -875,6 +895,32 @@ In-crate only; no cross-crate error-shape changes.
   Additive and non-breaking: `resolve_or_fallback`, dispatch, and the conversation-bindings table are untouched and arrive in later PRs.
 
 ### Added
+
+- **observability: `librefang_tool_call_total` now carries an `agent` label** (#6226) (@houko).
+  The counter added in #3495 was labeled only by `tool` and `outcome`, so tool failures could not be attributed per-agent.
+  It is now `librefang_tool_call_total{agent, tool, outcome}`, mirroring the existing per-agent `librefang_cron_fires_total{agent}` precedent.
+  The agent id is threaded from `session.agent_id` into `record_tool_call_metric` at every call site (serial and parallel dispatch paths) and sanitized + length-capped exactly like the `tool` label, so a hallucinated or hostile caller id cannot blow up metric cardinality.
+  Closes #6226.
+- **dashboard: guide the user to start a new session when a conversation hits the token / context-window limit** (#6211) (@houko).
+  When the latest turn in the agent chat fails with a token / context-window or length / quota limit, the chat view now shows an inline guidance banner with a one-click "Start a new session" action that reuses the existing `useCreateAgentSession` mutation, instead of leaving only a raw error bubble.
+  Detection is a frontend heuristic over the daemon / provider error string (`isContextLimitError`), because the chat surface carries no structured per-turn context-exhaustion signal; the heuristic matches the canonical phrases the kernel's `classify_streaming_error` emits and explicitly suppresses the banner for an internal usage / spending-budget cap (where a new session would not help).
+  This complements the #6215 context-usage indicator (which shows *how full* the window is but does not classify a failed turn).
+  The banner is scoped to the agent session chat view — channels are config-only surfaces in the dashboard with no conversation UI.
+  Dashboard-only change; covered by `ChatPage.limit.test.ts`.
+  Closes #6211.
+
+- **sec(sandbox): protect the audit anchor from WASM skill `fs_write` via a capability deny-list** (#6182) (@houko).
+  The WASM sandbox previously gated `fs_write` solely on glob capability matching, so a skill granted a broad `FileWrite` subtree — or the universal `FileWrite("*")` — could truncate the audit anchor (`[audit].anchor_path`, default `data_dir/audit.anchor`) and silently break the tamper-evident Merkle chain.
+  `ToolPolicy` gains a `protected_write_paths()` method (default empty; the kernel returns the boot-resolved anchor), and `host_fs_write` now denies any write whose canonical target matches a protected path *above* the capability check, so even `FileWrite("*")` cannot reach the anchor.
+  The deny-list is scoped strictly to the anchor file, not all of `data_dir`, to keep the blast radius small; closes #6182 and supersedes the duplicate #6181.
+- **channels: per-instance sidecar secrets so each agent can own its own handle** (#6169) (@houko).
+  Two instances of the same sidecar adapter (e.g. one Matrix account per agent) previously had to share one global secret — a Matrix sidecar's identity is its `MATRIX_ACCESS_TOKEN`, so both logged in as the same account.
+  `build_spawn_env` now resolves a `<NAME>__KEY` entry in `secrets.env` to the bare `KEY` for the matching `[[sidecar_channels]]` instance (name uppercased, non-alphanumerics → `_`); the per-instance value overrides the global bare key and the parent env, and another instance's namespaced secret never leaks into this child.
+  Operators keep tokens in `secrets.env` (not plaintext `config.toml`); without a prefix all instances still share the global secret. Closes #6169.
+- **dashboard: a global Auto-Dream on/off switch on the Memory → Auto-Dream tab** (#6188) (@houko).
+  The tab previously showed only a read-only status badge and told users to edit `config.toml` to flip the master switch; it is now an interactive toggle wired to the existing `POST /api/config/set` (`auto_dream.enabled` is on the writable allowlist).
+  The handler invalidates `autoDreamKeys` in addition to `useSetConfigValue`'s `configKeys` so the badge and the per-agent "Dream now" buttons reflect the new global state immediately rather than after the 15s poll.
+  Dashboard-only change — the flag is read live by the kernel each tick, so the toggle takes effect without a restart. Closes #6188.
 
 - **auth/dashboard: passkey (WebAuthn/FIDO2) login** (#5981) (@houko) — sign in to the dashboard with Touch ID, Face ID, Windows Hello, Android biometrics, or a roaming security key instead of typing a password.
   Opt-in per deployment via `passkey_enabled` + `passkey_rp_id` / `passkey_rp_origin` in `config.toml`; password login is untouched and remains the fallback.
@@ -931,6 +977,26 @@ In-crate only; no cross-crate error-shape changes.
   `install.sh` / `install.ps1` install the bundled binary when present and stay silent on older tarballs that lack it.
 
 ### Fixed
+
+- **fix(api): scope the compaction-summary banner to the session that was actually compacted** (#6225) (@houko).
+  The dashboard "Session summary (older messages compacted)" banner appeared on a freshly created session that was never compacted, showing a previous unrelated conversation's summary.
+  `compacted_summary` lives in the agent-scoped `canonical_sessions` row (one per `agent_id`) and outlives any individual session, but `get_agent_session` exposed it whenever the requested session was the agent's *active* one — so creating a new session, which makes it active without compacting it, leaked the prior summary onto message #1.
+  A nullable `compacted_summary_session_id` column (schema v46, backward-compatible) now records which session owns the current summary; `store_llm_summary` stamps it with the compacted session, and the GET handler surfaces the banner only when the requested session matches the owner via the new `MemorySubstrate::compacted_summary_for_session`.
+  The summary is scoped, not lost — the session that legitimately produced it still shows it.
+  Closes #6225.
+- **fix(cli): stop the agent-creation wizard from stamping a hidden 200k hourly token cap** (#6206) (@houko).
+  The TUI "create custom agent" wizard hard-coded `[resources] max_llm_tokens_per_hour = 200000` into every generated `agent.toml`, so TUI-created agents silently hit `Resource quota exceeded: Token limit would be exceeded ... > 200000` after a few large-context turns — even though the compiled and global defaults are unlimited.
+  The template now emits `max_llm_tokens_per_hour = 0` (explicitly unlimited, matching every non-TUI agent); operators who want a cap set it via `agent.toml [resources]`, the global `[budget] default_max_llm_tokens_per_hour`, or `PATCH /api/agents/{id}/budget`.
+  Existing agents keep their stored cap — edit the agent's manifest or PATCH its budget to lift it.
+  Closes #6206.
+- **fix(prompts): refuse to delete the active (bound) prompt version** (#6195) (@houko).
+  `PromptStore::delete_version` deleted unconditionally, so a direct API/SDK call could delete the version an agent is actively sending, orphaning its live prompt; the dashboard only hid the delete button client-side.
+  The store now rejects deleting an active version with `InvalidState` (surfaced as `400`, no longer flattened to `500` by the kernel handle), unknown ids stay an idempotent no-op, and the dashboard renders the active version's delete button disabled with an explanatory tooltip on both the Prompts page and the per-agent Prompts/Experiments modal.
+  Closes #6195.
+- **fix(cli): bind the macOS launchagent status string to a `let` so the macOS build compiles (E0716)** (#6198) (@houko).
+  The macOS-only launchagent-status block passed `&i18n::t(...)` from inside an `if`/`else` expression to `ui::kv`, but each arm returns an owned `String` whose temporary is freed at the end of the `if`-expression, before `ui::kv` borrows it.
+  The macOS test lane is main-push-only, so this surfaced as a red `main` after merge rather than failing the originating PR.
+  Closes #6198.
 
 - **fix(whatsapp-gateway): resolve the `link-preview-js` peer conflict and commit a lockfile** (#6180) (@houko).
   `npm install` in `packages/whatsapp-gateway` failed with `ERESOLVE` unless `--legacy-peer-deps` was passed: the gateway declared `link-preview-js@^4.0.1` as a direct dependency while `@whiskeysockets/baileys@6.7.22` lists it as `peerOptional ^3.0.0`, and the direct declaration defeated the optional flag.
