@@ -639,8 +639,7 @@ fn test_no_untranslated_strings() {
                 .unwrap()
                 .replace('\\', "/");
 
-            if rel_path == "tui/event.rs"
-                || rel_path == "tui/mod.rs"
+            if rel_path == "tui/mod.rs"
                 || rel_path.starts_with("tui/screens/")
             {
                 continue;
