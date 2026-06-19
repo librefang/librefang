@@ -601,8 +601,7 @@ fn test_no_untranslated_strings() {
                 .unwrap()
                 .replace('\\', "/");
 
-            if rel_path == "mod.rs"
-                || rel_path == "cli.rs"
+            if rel_path == "cli.rs"
                 || rel_path == "mcp.rs"
                 || rel_path.starts_with("tui/")
             {
