@@ -67,8 +67,8 @@ pub struct WelcomeState {
 }
 
 pub struct MenuItem {
-    pub label: &'static str,
-    pub hint: &'static str,
+    pub label: String,
+    pub hint: String,
     pub icon: &'static str,
     pub action: WelcomeAction,
 }
@@ -109,27 +109,27 @@ impl WelcomeState {
         self.menu_items.clear();
         if self.daemon_url.is_some() {
             self.menu_items.push(MenuItem {
-                label: "Connect to daemon",
-                hint: "talk to running agents via API",
+                label: crate::i18n::t("tui-welcome-menu-connect"),
+                hint: crate::i18n::t("tui-welcome-menu-connect-hint"),
                 icon: "\u{25cf}",
                 action: WelcomeAction::ConnectDaemon,
             });
         }
         self.menu_items.push(MenuItem {
-            label: "Quick chat",
-            hint: "boot kernel locally, no daemon needed",
+            label: crate::i18n::t("tui-welcome-menu-chat"),
+            hint: crate::i18n::t("tui-welcome-menu-chat-hint"),
             icon: "\u{25b8}",
             action: WelcomeAction::InProcess,
         });
         self.menu_items.push(MenuItem {
-            label: "Setup wizard",
-            hint: "configure providers & channels",
+            label: crate::i18n::t("tui-welcome-menu-setup"),
+            hint: crate::i18n::t("tui-welcome-menu-setup-hint"),
             icon: "\u{2699}",
             action: WelcomeAction::Wizard,
         });
         self.menu_items.push(MenuItem {
-            label: "Exit",
-            hint: "quit LibreFang",
+            label: crate::i18n::t("tui-welcome-menu-exit"),
+            hint: crate::i18n::t("tui-welcome-menu-exit-hint"),
             icon: "\u{2190}",
             action: WelcomeAction::Exit,
         });
@@ -235,7 +235,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut WelcomeState) {
     // ── Tagline ──
     let tagline = Line::from(vec![
         Span::styled(
-            "Agent Operating System",
+            crate::i18n::t("tui-welcome-tagline"),
             Style::default()
                 .fg(theme::TEXT_PRIMARY)
                 .add_modifier(Modifier::BOLD),
@@ -256,14 +256,14 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut WelcomeState) {
     if state.ctrl_c_pending {
         f.render_widget(
             Paragraph::new(Span::styled(
-                "Press Ctrl+C again to exit",
+                crate::i18n::t("tui-welcome-ctrl-c-quit"),
                 Style::default().fg(theme::YELLOW),
             )),
             chunks[7],
         );
     } else {
         f.render_widget(
-            widgets::hint_bar("\u{2191}\u{2193} navigate  enter select  q quit"),
+            widgets::hint_bar(&crate::i18n::t("tui-welcome-hint-bar")),
             chunks[7],
         );
     }
@@ -315,7 +315,7 @@ fn draw_status_card(f: &mut Frame, area: Rect, state: &WelcomeState) {
 
     if state.detecting {
         f.render_widget(
-            widgets::spinner(state.tick, "Checking for daemon\u{2026}"),
+            widgets::spinner(state.tick, &crate::i18n::t("tui-welcome-checking-daemon")),
             inner,
         );
         return;
@@ -326,18 +326,14 @@ fn draw_status_card(f: &mut Frame, area: Rect, state: &WelcomeState) {
     // Daemon
     if let Some(ref url) = state.daemon_url {
         let suffix = if state.daemon_agents > 0 {
-            format!(
-                " \u{2022} {} agent{}",
-                state.daemon_agents,
-                if state.daemon_agents == 1 { "" } else { "s" }
-            )
+            crate::i18n::t_args("tui-welcome-agent-count", &[("count", &state.daemon_agents.to_string())])
         } else {
             String::new()
         };
         lines.push(Line::from(vec![
             Span::styled(" \u{25cf} ", Style::default().fg(theme::GREEN)),
             Span::styled(
-                format!("Daemon {url}"),
+                crate::i18n::t_args("tui-welcome-daemon-status", &[("url", url)]),
                 Style::default().fg(theme::TEXT_PRIMARY),
             ),
             Span::styled(suffix, Style::default().fg(theme::GREEN)),
@@ -345,7 +341,7 @@ fn draw_status_card(f: &mut Frame, area: Rect, state: &WelcomeState) {
     } else {
         lines.push(Line::from(vec![
             Span::styled(" \u{25cb} ", theme::dim_style()),
-            Span::styled("No daemon running", theme::dim_style()),
+            Span::styled(crate::i18n::t("tui-welcome-no-daemon"), theme::dim_style()),
         ]));
     }
 
@@ -354,15 +350,15 @@ fn draw_status_card(f: &mut Frame, area: Rect, state: &WelcomeState) {
         lines.push(Line::from(vec![
             Span::styled(" \u{25cf} ", Style::default().fg(theme::GREEN)),
             Span::styled(
-                format!("Provider: {provider}"),
+                crate::i18n::t_args("tui-welcome-provider", &[("provider", provider)]),
                 Style::default().fg(theme::TEXT_PRIMARY),
             ),
         ]));
     } else {
         lines.push(Line::from(vec![
             Span::styled(" \u{25cb} ", Style::default().fg(theme::YELLOW)),
-            Span::styled("No API keys", Style::default().fg(theme::YELLOW)),
-            Span::styled(" \u{2014} run ", theme::dim_style()),
+            Span::styled(crate::i18n::t("tui-welcome-no-api-keys"), Style::default().fg(theme::YELLOW)),
+            Span::styled(crate::i18n::t("tui-welcome-run-hint-prefix"), theme::dim_style()),
             Span::styled("librefang init", Style::default().fg(theme::ACCENT)),
         ]));
     }
@@ -371,7 +367,7 @@ fn draw_status_card(f: &mut Frame, area: Rect, state: &WelcomeState) {
     if state.setup_just_completed {
         lines.push(Line::from(vec![
             Span::styled(" \u{2714} ", Style::default().fg(theme::GREEN)),
-            Span::styled("Setup complete!", Style::default().fg(theme::GREEN)),
+            Span::styled(crate::i18n::t("tui-welcome-setup-complete"), Style::default().fg(theme::GREEN)),
         ]));
     }
 
@@ -394,7 +390,7 @@ fn draw_menu(f: &mut Frame, area: Rect, state: &mut WelcomeState) {
                         .fg(theme::TEXT_PRIMARY)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(item.hint, theme::dim_style()),
+                Span::styled(&item.hint, theme::dim_style()),
             ]))
         })
         .collect();
