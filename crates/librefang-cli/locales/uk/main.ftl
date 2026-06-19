@@ -1534,3 +1534,25 @@ tui-peers-status-pending = Очікування
 tui-peers-loading = Пошук пірів…
 tui-peers-empty = Немає підключених пірів. Увімкніть OFP-мережу в config.toml.
 tui-peers-hints = ↑↓ Навігація  r Оновити  (автооновлення кожні 15 с)
+
+# usage.rs
+tui-usage-title = Використання
+tui-usage-hints = [1] Зведення  [2] За моделями  [3] За агентами  [r] Оновити
+tui-usage-tab-summary = 1 Зведення
+tui-usage-tab-model = 2 За моделями
+tui-usage-tab-agent = 3 За агентами
+tui-usage-loading = Завантаження даних використання…
+tui-usage-loading-simple = Завантаження…
+tui-usage-card-input = Вхідні токени
+tui-usage-card-output = Вихідні токени
+tui-usage-card-cost = Загальна вартість
+tui-usage-card-calls = API-запити
+tui-usage-header-model = Модель
+tui-usage-header-input = Вхідні токени
+tui-usage-header-output = Вихідні токени
+tui-usage-header-cost = Вартість
+tui-usage-header-calls = Запити
+tui-usage-header-agent = Агент
+tui-usage-header-total-tokens = Всього токенів
+tui-usage-header-tool-calls = Виклики інструментів
+tui-usage-empty = Немає даних про використання. Надішліть повідомлення, щоб побачити статистику.
