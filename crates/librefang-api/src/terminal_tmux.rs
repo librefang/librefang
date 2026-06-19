@@ -20,23 +20,17 @@ use tokio::process::Command;
 
 // ── error type ─────────────────────────────────────────────────────────────────
 
-/// Structured error returned by [`TmuxController`] methods and
-/// [`parse_window_list`].
+/// Structured error returned by [`TmuxController`] methods and [`parse_window_list`].
 ///
-/// Replaces the historical `anyhow::Error` shape so callers can branch on the
-/// *kind* of failure (spawn vs. timeout vs. non-zero exit vs. malformed output)
-/// rather than substring-matching the rendered string. The `Display` text is
-/// preserved byte-for-byte from the previous `anyhow!(…)` call sites because it
-/// reaches daemon logs (`warn!(error = %e, …)`) — see `routes/terminal.rs`.
+/// Replaces the historical `anyhow::Error` shape so callers can branch on the *kind* of failure (spawn vs. timeout vs. non-zero exit vs. malformed output) rather than substring-matching the rendered string.
+/// The `Display` text is preserved byte-for-byte from the previous `anyhow!(…)` call sites because it reaches daemon logs (`warn!(error = %e, …)`) — see `routes/terminal.rs`.
 ///
 /// Refs: #3576.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum TmuxError {
-    /// `Command::spawn()` failed before the process started. `cmd` names which
-    /// tmux invocation could not be launched (e.g. `"tmux"`,
-    /// `"tmux has-session"`, `"tmux new-session"`); the `source` is the
-    /// underlying spawn `io::Error`.
+    /// `Command::spawn()` failed before the process started.
+    /// `cmd` names which tmux invocation could not be launched (e.g. `"tmux"`, `"tmux has-session"`, `"tmux new-session"`); the `source` is the underlying spawn `io::Error`.
     #[error("failed to spawn {cmd}: {source}")]
     Spawn {
         cmd: &'static str,
@@ -44,28 +38,25 @@ pub enum TmuxError {
         source: std::io::Error,
     },
 
-    /// The subprocess did not finish within the hard timeout. `what` names the
-    /// operation that stalled (e.g. `"tmux command"`, `"tmux has-session"`,
-    /// `"tmux new-session"`).
+    /// The subprocess did not finish within the hard timeout.
+    /// `what` names the operation that stalled (e.g. `"tmux command"`, `"tmux has-session"`, `"tmux new-session"`).
     #[error("{what} timed out")]
     Timeout { what: &'static str },
 
-    /// Waiting on the subprocess (collecting its output) failed with an I/O
-    /// error after it was spawned.
+    /// Waiting on the subprocess (collecting its output) failed with an I/O error after it was spawned.
     #[error("tmux I/O error: {source}")]
     Io {
         #[source]
         source: std::io::Error,
     },
 
-    /// tmux ran but exited non-zero. `status` is the rendered exit status and
-    /// `stderr` is the trimmed standard-error output.
+    /// tmux ran but exited non-zero.
+    /// `status` is the rendered exit status and `stderr` is the trimmed standard-error output.
     #[error("tmux exited with {status}: {stderr}")]
     NonZeroExit { status: String, stderr: String },
 
     /// A window id or name failed validation before any subprocess was spawned.
-    /// The message preserves the regex-pattern detail the previous `anyhow!`
-    /// call sites surfaced.
+    /// The message preserves the regex-pattern detail the previous `anyhow!` call sites surfaced.
     #[error("{0}")]
     InvalidArgument(String),
 
@@ -73,14 +64,13 @@ pub enum TmuxError {
     #[error("tmux new-window returned no output")]
     NoOutput,
 
-    /// A line of `list-windows -F` output was missing an expected field. `field`
-    /// is the absent column (`"window_id"`, `"window_index"`, `"window_name"`,
-    /// `"window_active"`); `line` is the offending raw line.
+    /// A line of `list-windows -F` output was missing an expected field.
+    /// `field` is the absent column (`"window_id"`, `"window_index"`, `"window_name"`, `"window_active"`); `line` is the offending raw line.
     #[error("missing {field} in tmux output: {line:?}")]
     MissingField { field: &'static str, line: String },
 
-    /// The `window_index` column could not be parsed as a `u32`. `value` is the
-    /// raw token that failed to parse.
+    /// The `window_index` column could not be parsed as a `u32`.
+    /// `value` is the raw token that failed to parse.
     #[error("invalid window index {value:?}")]
     InvalidIndex { value: String },
 }
