@@ -223,8 +223,15 @@ fn download_file(url: &str, dest: &Path) -> Result<(), String> {
         .send()
         .map_err(|e| i18n::t_args("desktop-install-error-http", &[("error", &e.to_string())]))?;
 
-    let mut file = std::fs::File::create(dest)
-        .map_err(|e| i18n::t_args("desktop-install-error-create", &[("path", &dest.display().to_string()), ("error", &e.to_string())]))?;
+    let mut file = std::fs::File::create(dest).map_err(|e| {
+        i18n::t_args(
+            "desktop-install-error-create",
+            &[
+                ("path", &dest.display().to_string()),
+                ("error", &e.to_string()),
+            ],
+        )
+    })?;
 
     resp.copy_to(&mut file)
         .map_err(|e| i18n::t_args("desktop-install-error-write", &[("error", &e.to_string())]))?;
@@ -347,7 +354,12 @@ fn install_macos_dmg(dmg_path: &Path) -> Result<PathBuf, String> {
         .arg("/tmp/librefang-dmg-mount")
         .arg(dmg_path)
         .output()
-        .map_err(|e| i18n::t_args("desktop-install-error-hdiutil-attach", &[("error", &e.to_string())]))?;
+        .map_err(|e| {
+            i18n::t_args(
+                "desktop-install-error-hdiutil-attach",
+                &[("error", &e.to_string())],
+            )
+        })?;
 
     if !output.status.success() {
         return Err(i18n::t_args(
@@ -369,8 +381,12 @@ fn install_macos_dmg(dmg_path: &Path) -> Result<PathBuf, String> {
     // Remove old installation if present
     let dest = Path::new("/Applications/LibreFang.app");
     if dest.exists() {
-        std::fs::remove_dir_all(dest)
-            .map_err(|e| i18n::t_args("desktop-install-error-remove-old", &[("error", &e.to_string())]))?;
+        std::fs::remove_dir_all(dest).map_err(|e| {
+            i18n::t_args(
+                "desktop-install-error-remove-old",
+                &[("error", &e.to_string())],
+            )
+        })?;
     }
 
     // Copy .app bundle to /Applications
@@ -413,10 +429,18 @@ fn install_windows(installer_path: &Path) -> Result<PathBuf, String> {
     let status = Command::new(installer_path)
         .arg("/S")
         .status()
-        .map_err(|e| i18n::t_args("desktop-install-error-run-installer", &[("error", &e.to_string())]))?;
+        .map_err(|e| {
+            i18n::t_args(
+                "desktop-install-error-run-installer",
+                &[("error", &e.to_string())],
+            )
+        })?;
 
     if !status.success() {
-        return Err(i18n::t_args("desktop-install-error-installer-status", &[("status", &status.to_string())]));
+        return Err(i18n::t_args(
+            "desktop-install-error-installer-status",
+            &[("status", &status.to_string())],
+        ));
     }
 
     // NSIS installs to %LOCALAPPDATA%\LibreFang\
@@ -446,16 +470,15 @@ fn install_linux_appimage(appimage_path: &Path) -> Result<PathBuf, String> {
 #[cfg_attr(not(test), cfg(target_os = "linux"))]
 #[allow(dead_code)]
 fn install_linux_appimage_to(appimage_path: &Path, dest_dir: &Path) -> Result<PathBuf, String> {
-    std::fs::create_dir_all(dest_dir)
-        .map_err(|e| {
-            i18n::t_args(
-                "desktop-install-error-create-dir",
-                &[
-                    ("path", &dest_dir.display().to_string()),
-                    ("error", &e.to_string()),
-                ],
-            )
-        })?;
+    std::fs::create_dir_all(dest_dir).map_err(|e| {
+        i18n::t_args(
+            "desktop-install-error-create-dir",
+            &[
+                ("path", &dest_dir.display().to_string()),
+                ("error", &e.to_string()),
+            ],
+        )
+    })?;
 
     let dest = dest_dir.join("librefang-desktop");
     std::fs::copy(appimage_path, &dest).map_err(|e| {

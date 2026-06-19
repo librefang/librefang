@@ -168,7 +168,11 @@ impl SessionsState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut SessionsState) {
-    let inner = widgets::render_screen_block(f, area, &format!("{} {}", "\u{25c7}", crate::i18n::t("tui-sessions-title")));
+    let inner = widgets::render_screen_block(
+        f,
+        area,
+        &format!("{} {}", "\u{25c7}", crate::i18n::t("tui-sessions-title")),
+    );
 
     let (header, content, hints) = widgets::layout_hch(inner, 2);
 
@@ -179,26 +183,50 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SessionsState) {
         let search_hint = if state.search_buf.is_empty() {
             String::new()
         } else {
-            format!("  {}", crate::i18n::t_args("tui-sessions-filter", &[("query", state.search_buf.as_str())]))
+            format!(
+                "  {}",
+                crate::i18n::t_args(
+                    "tui-sessions-filter",
+                    &[("query", state.search_buf.as_str())]
+                )
+            )
         };
         f.render_widget(
             Paragraph::new(vec![
                 Line::from(vec![
                     Span::styled(
-                        format!("  {}", crate::i18n::t_args("tui-sessions-count", &[("count", &state.filtered.len().to_string())])),
+                        format!(
+                            "  {}",
+                            crate::i18n::t_args(
+                                "tui-sessions-count",
+                                &[("count", &state.filtered.len().to_string())]
+                            )
+                        ),
                         Style::default().fg(theme::TEXT_SECONDARY),
                     ),
                     Span::styled(search_hint, theme::dim_style()),
                 ]),
                 Line::from(vec![
                     Span::styled("  ", theme::table_header()),
-                    Span::styled(format!("{:<20}", crate::i18n::t("tui-sessions-header-agent")), theme::table_header()),
+                    Span::styled(
+                        format!("{:<20}", crate::i18n::t("tui-sessions-header-agent")),
+                        theme::table_header(),
+                    ),
                     Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
-                    Span::styled(format!("{:<14}", crate::i18n::t("tui-sessions-header-id")), theme::table_header()),
+                    Span::styled(
+                        format!("{:<14}", crate::i18n::t("tui-sessions-header-id")),
+                        theme::table_header(),
+                    ),
                     Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
-                    Span::styled(format!("{:<6}", crate::i18n::t("tui-sessions-header-msgs")), theme::table_header()),
+                    Span::styled(
+                        format!("{:<6}", crate::i18n::t("tui-sessions-header-msgs")),
+                        theme::table_header(),
+                    ),
                     Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
-                    Span::styled(crate::i18n::t("tui-sessions-header-created"), theme::table_header()),
+                    Span::styled(
+                        crate::i18n::t("tui-sessions-header-created"),
+                        theme::table_header(),
+                    ),
                 ]),
             ]),
             header,

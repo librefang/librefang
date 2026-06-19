@@ -564,7 +564,7 @@ pub(crate) fn cmd_update(check: bool, version: Option<String>, channel_override:
                 ui::warn_with_fix(
                     &i18n::t_args(
                         "maintenance-update-same-core",
-                        &[("tag", tag), ("current", current_version)]
+                        &[("tag", tag), ("current", current_version)],
                     ),
                     &i18n::t("maintenance-update-same-core-hint"),
                 );
@@ -572,7 +572,7 @@ pub(crate) fn cmd_update(check: bool, version: Option<String>, channel_override:
             (Some(tag), Some(ReleaseComparison::Older)) => {
                 ui::success(&i18n::t_args(
                     "maintenance-update-ahead",
-                    &[("current", current_version), ("tag", tag)]
+                    &[("current", current_version), ("tag", tag)],
                 ));
             }
             (Some(tag), Some(ReleaseComparison::Unknown)) => {
@@ -596,19 +596,16 @@ pub(crate) fn cmd_update(check: bool, version: Option<String>, channel_override:
             (Some(tag), Some(ReleaseComparison::Older)) => {
                 ui::success(&i18n::t_args(
                     "maintenance-update-ahead",
-                    &[("current", current_version), ("tag", tag)]
+                    &[("current", current_version), ("tag", tag)],
                 ));
                 return;
             }
             (Some(tag), Some(ReleaseComparison::Unknown)) => {
                 ui::warn_with_fix(
-                    &i18n::t_args(
-                        "maintenance-update-cannot-compare-safely",
-                        &[("tag", tag)]
-                    ),
+                    &i18n::t_args("maintenance-update-cannot-compare-safely", &[("tag", tag)]),
                     &i18n::t_args(
                         "maintenance-update-cannot-compare-safely-hint",
-                        &[("tag", tag)]
+                        &[("tag", tag)],
                     ),
                 );
                 return;
@@ -692,17 +689,25 @@ pub(crate) fn fetch_latest_release_tag(
     match channel {
         UpdateChannel::Stable => {
             // /releases/latest returns the latest non-draft, non-prerelease
-            let response = client
-                .get(RELEASES_LATEST_API)
-                .send()
-                .map_err(|e| i18n::t_args("maintenance-error-github-request", &[("error", &e.to_string())]))?;
+            let response = client.get(RELEASES_LATEST_API).send().map_err(|e| {
+                i18n::t_args(
+                    "maintenance-error-github-request",
+                    &[("error", &e.to_string())],
+                )
+            })?;
             let status = response.status();
             if !status.is_success() {
-                return Err(i18n::t_args("maintenance-error-github-status", &[("status", &status.to_string())]));
+                return Err(i18n::t_args(
+                    "maintenance-error-github-status",
+                    &[("status", &status.to_string())],
+                ));
             }
-            let body = response
-                .json::<serde_json::Value>()
-                .map_err(|e| i18n::t_args("maintenance-error-decode-release", &[("error", &e.to_string())]))?;
+            let body = response.json::<serde_json::Value>().map_err(|e| {
+                i18n::t_args(
+                    "maintenance-error-decode-release",
+                    &[("error", &e.to_string())],
+                )
+            })?;
             body["tag_name"]
                 .as_str()
                 .filter(|tag| !tag.is_empty())
@@ -711,17 +716,25 @@ pub(crate) fn fetch_latest_release_tag(
         }
         UpdateChannel::Beta | UpdateChannel::Rc => {
             // /releases lists all releases, newest first — filter by channel
-            let response = client
-                .get(RELEASES_API)
-                .send()
-                .map_err(|e| i18n::t_args("maintenance-error-github-request", &[("error", &e.to_string())]))?;
+            let response = client.get(RELEASES_API).send().map_err(|e| {
+                i18n::t_args(
+                    "maintenance-error-github-request",
+                    &[("error", &e.to_string())],
+                )
+            })?;
             let status = response.status();
             if !status.is_success() {
-                return Err(i18n::t_args("maintenance-error-github-status", &[("status", &status.to_string())]));
+                return Err(i18n::t_args(
+                    "maintenance-error-github-status",
+                    &[("status", &status.to_string())],
+                ));
             }
-            let releases = response
-                .json::<Vec<serde_json::Value>>()
-                .map_err(|e| i18n::t_args("maintenance-error-decode-list", &[("error", &e.to_string())]))?;
+            let releases = response.json::<Vec<serde_json::Value>>().map_err(|e| {
+                i18n::t_args(
+                    "maintenance-error-decode-list",
+                    &[("error", &e.to_string())],
+                )
+            })?;
 
             for release in &releases {
                 let draft = release["draft"].as_bool().unwrap_or(false);
@@ -754,7 +767,12 @@ pub(crate) fn update_http_client() -> Result<reqwest::blocking::Client, String> 
         .user_agent(format!("librefang-cli/{}", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(60))
         .build()
-        .map_err(|e| i18n::t_args("maintenance-error-http-client", &[("error", &e.to_string())]))
+        .map_err(|e| {
+            i18n::t_args(
+                "maintenance-error-http-client",
+                &[("error", &e.to_string())],
+            )
+        })
 }
 
 pub(crate) fn compare_release_tag(tag: &str, current_version: &str) -> ReleaseComparison {
@@ -820,9 +838,12 @@ pub(crate) fn run_official_update(version: Option<&str>) -> Result<UpdateLaunch,
             command.env("LIBREFANG_VERSION", tag);
         }
 
-        command
-            .spawn()
-            .map_err(|e| i18n::t_args("maintenance-error-powershell-updater", &[("error", &e.to_string())]))?;
+        command.spawn().map_err(|e| {
+            i18n::t_args(
+                "maintenance-error-powershell-updater",
+                &[("error", &e.to_string())],
+            )
+        })?;
         Ok(UpdateLaunch::Detached)
     }
 
@@ -835,12 +856,18 @@ pub(crate) fn run_official_update(version: Option<&str>) -> Result<UpdateLaunch,
             command.env("LIBREFANG_VERSION", tag);
         }
 
-        let status = command
-            .status()
-            .map_err(|e| i18n::t_args("maintenance-error-run-installer", &[("error", &e.to_string())]))?;
+        let status = command.status().map_err(|e| {
+            i18n::t_args(
+                "maintenance-error-run-installer",
+                &[("error", &e.to_string())],
+            )
+        })?;
         let _ = std::fs::remove_file(&script_path);
         if !status.success() {
-            return Err(i18n::t_args("maintenance-error-installer-status", &[("status", &status.to_string())]));
+            return Err(i18n::t_args(
+                "maintenance-error-installer-status",
+                &[("status", &status.to_string())],
+            ));
         }
         Ok(UpdateLaunch::Completed)
     }
@@ -848,17 +875,25 @@ pub(crate) fn run_official_update(version: Option<&str>) -> Result<UpdateLaunch,
 
 pub(crate) fn download_text(url: &str) -> Result<String, String> {
     let client = update_http_client()?;
-    let response = client
-        .get(url)
-        .send()
-        .map_err(|e| i18n::t_args("maintenance-error-download-fail", &[("error", &e.to_string())]))?;
+    let response = client.get(url).send().map_err(|e| {
+        i18n::t_args(
+            "maintenance-error-download-fail",
+            &[("error", &e.to_string())],
+        )
+    })?;
     let status = response.status();
     if !status.is_success() {
-        return Err(i18n::t_args("maintenance-error-download-status", &[("status", &status.to_string())]));
+        return Err(i18n::t_args(
+            "maintenance-error-download-status",
+            &[("status", &status.to_string())],
+        ));
     }
-    response
-        .text()
-        .map_err(|e| i18n::t_args("maintenance-error-read-response", &[("error", &e.to_string())]))
+    response.text().map_err(|e| {
+        i18n::t_args(
+            "maintenance-error-read-response",
+            &[("error", &e.to_string())],
+        )
+    })
 }
 
 #[cfg(not(windows))]
@@ -893,7 +928,8 @@ pub(crate) fn write_update_script(contents: &str, extension: &str) -> Result<Pat
     // race to swap the contents before they ran. `create_new` refuses an
     // existing path / dangling symlink and never follows one.
     let dir = cli_librefang_home().join("updates");
-    std::fs::create_dir_all(&dir).map_err(|e| i18n::t_args("maintenance-error-create-dir", &[("error", &e.to_string())]))?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| i18n::t_args("maintenance-error-create-dir", &[("error", &e.to_string())]))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -910,12 +946,19 @@ pub(crate) fn write_update_script(contents: &str, extension: &str) -> Result<Pat
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
     }
-    let mut f = opts
-        .open(&path)
-        .map_err(|e| i18n::t_args("maintenance-error-create-script", &[("error", &e.to_string())]))?;
+    let mut f = opts.open(&path).map_err(|e| {
+        i18n::t_args(
+            "maintenance-error-create-script",
+            &[("error", &e.to_string())],
+        )
+    })?;
     use std::io::Write as _;
-    f.write_all(contents.as_bytes())
-        .map_err(|e| i18n::t_args("maintenance-error-write-script", &[("error", &e.to_string())]))?;
+    f.write_all(contents.as_bytes()).map_err(|e| {
+        i18n::t_args(
+            "maintenance-error-write-script",
+            &[("error", &e.to_string())],
+        )
+    })?;
     Ok(path)
 }
 
@@ -990,12 +1033,7 @@ pub(crate) fn cmd_uninstall(confirm: bool, keep_config: bool) {
 
     // Step 1: Show what will be removed
     println!();
-    println!(
-        "  {}",
-        i18n::t("uninstall-warning")
-            .bold()
-            .red()
-    );
+    println!("  {}", i18n::t("uninstall-warning").bold().red());
     println!();
     if librefang_dir.exists() {
         if keep_config {

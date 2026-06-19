@@ -36,7 +36,13 @@ pub(crate) fn resolve_skills_dir(hand: Option<&str>) -> PathBuf {
             let hand_dir = home.join("workspaces").join("hands").join(hand_id);
             if !hand_dir.exists() {
                 let path_str = hand_dir.display().to_string();
-                eprintln!("{}", i18n::t_args("skill-hand-not-found", &[("hand", hand_id), ("path", &path_str)]));
+                eprintln!(
+                    "{}",
+                    i18n::t_args(
+                        "skill-hand-not-found",
+                        &[("hand", hand_id), ("path", &path_str)]
+                    )
+                );
                 std::process::exit(1);
             }
             hand_dir.join("skills")
@@ -48,7 +54,10 @@ pub(crate) fn cmd_skill_install(source: &str, hand: Option<&str>) {
     let skills_dir = resolve_skills_dir(hand);
     std::fs::create_dir_all(&skills_dir).unwrap_or_else(|e| {
         let err_msg = e.to_string();
-        eprintln!("{}", i18n::t_args("skill-create-skills-dir-failed", &[("error", &err_msg)]));
+        eprintln!(
+            "{}",
+            i18n::t_args("skill-create-skills-dir-failed", &[("error", &err_msg)])
+        );
         std::process::exit(1);
     });
 
@@ -63,7 +72,10 @@ pub(crate) fn cmd_skill_install(source: &str, hand: Option<&str>) {
                 match librefang_skills::openclaw_compat::convert_openclaw_skill(&source_path) {
                     Ok(manifest) => {
                         if let Err(e) = validate_skill_name(&manifest.skill.name) {
-                            eprintln!("{}", i18n::t_args("skill-install-refused", &[("error", &e)]));
+                            eprintln!(
+                                "{}",
+                                i18n::t_args("skill-install-refused", &[("error", &e)])
+                            );
                             std::process::exit(1);
                         }
                         let dest = skills_dir.join(&manifest.skill.name);
@@ -73,7 +85,10 @@ pub(crate) fn cmd_skill_install(source: &str, hand: Option<&str>) {
                             &dest, &manifest,
                         ) {
                             let err_msg = e.to_string();
-                            eprintln!("{}", i18n::t_args("skill-write-manifest-failed", &[("error", &err_msg)]));
+                            eprintln!(
+                                "{}",
+                                i18n::t_args("skill-write-manifest-failed", &[("error", &err_msg)])
+                            );
                             std::process::exit(1);
                         }
                         if let Some(h) = hand {
@@ -96,7 +111,10 @@ pub(crate) fn cmd_skill_install(source: &str, hand: Option<&str>) {
                     }
                     Err(e) => {
                         let err_msg = e.to_string();
-                        eprintln!("{}", i18n::t_args("skill-openclaw-convert-failed", &[("error", &err_msg)]));
+                        eprintln!(
+                            "{}",
+                            i18n::t_args("skill-openclaw-convert-failed", &[("error", &err_msg)])
+                        );
                         std::process::exit(1);
                     }
                 }
@@ -109,18 +127,27 @@ pub(crate) fn cmd_skill_install(source: &str, hand: Option<&str>) {
         // Read manifest to get skill name
         let toml_str = std::fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
             let err_msg = e.to_string();
-            eprintln!("{}", i18n::t_args("skill-read-toml-failed", &[("error", &err_msg)]));
+            eprintln!(
+                "{}",
+                i18n::t_args("skill-read-toml-failed", &[("error", &err_msg)])
+            );
             std::process::exit(1);
         });
         let manifest: librefang_skills::SkillManifest =
             toml::from_str(&toml_str).unwrap_or_else(|e| {
                 let err_msg = e.to_string();
-                eprintln!("{}", i18n::t_args("skill-parse-toml-failed", &[("error", &err_msg)]));
+                eprintln!(
+                    "{}",
+                    i18n::t_args("skill-parse-toml-failed", &[("error", &err_msg)])
+                );
                 std::process::exit(1);
             });
 
         if let Err(e) = validate_skill_name(&manifest.skill.name) {
-            eprintln!("{}", i18n::t_args("skill-install-refused", &[("error", &e)]));
+            eprintln!(
+                "{}",
+                i18n::t_args("skill-install-refused", &[("error", &e)])
+            );
             std::process::exit(1);
         }
         let dest = skills_dir.join(&manifest.skill.name);
@@ -176,7 +203,10 @@ pub(crate) fn cmd_skill_install(source: &str, hand: Option<&str>) {
             }
             Err(e) => {
                 let err_msg = e.to_string();
-                sp.finish_with_failure(&i18n::t_args("skill-install-failed", &[("error", &err_msg)]));
+                sp.finish_with_failure(&i18n::t_args(
+                    "skill-install-failed",
+                    &[("error", &err_msg)],
+                ));
                 std::process::exit(1);
             }
         }
@@ -198,10 +228,19 @@ pub(crate) fn cmd_skill_list(hand: Option<&str>) {
         Ok(count) => {
             if let Some(h) = hand {
                 let count_str = count.to_string();
-                println!("{}", i18n::t_args("skill-list-count-hand", &[("count", &count_str), ("hand", h)]));
+                println!(
+                    "{}",
+                    i18n::t_args(
+                        "skill-list-count-hand",
+                        &[("count", &count_str), ("hand", h)]
+                    )
+                );
             } else {
                 let count_str = count.to_string();
-                println!("{}", i18n::t_args("skill-list-count", &[("count", &count_str)]));
+                println!(
+                    "{}",
+                    i18n::t_args("skill-list-count", &[("count", &count_str)])
+                );
             }
             println!();
             let mut t = crate::table::Table::new(&["NAME", "VERSION", "TOOLS", "DESCRIPTION"]);
@@ -217,7 +256,10 @@ pub(crate) fn cmd_skill_list(hand: Option<&str>) {
         }
         Err(e) => {
             let err_msg = e.to_string();
-            eprintln!("{}", i18n::t_args("skill-list-load-failed", &[("error", &err_msg)]));
+            eprintln!(
+                "{}",
+                i18n::t_args("skill-list-load-failed", &[("error", &err_msg)])
+            );
             std::process::exit(1);
         }
     }
@@ -231,14 +273,20 @@ pub(crate) fn cmd_skill_remove(name: &str, hand: Option<&str>) {
     match librefang_skills::evolution::uninstall_skill(&skills_dir, name) {
         Ok(_) => {
             if let Some(h) = hand {
-                println!("{}", i18n::t_args("skill-removed-from-hand", &[("name", name), ("hand", h)]));
+                println!(
+                    "{}",
+                    i18n::t_args("skill-removed-from-hand", &[("name", name), ("hand", h)])
+                );
             } else {
                 println!("{}", i18n::t_args("skill-removed", &[("name", name)]));
             }
         }
         Err(e) => {
             let err_msg = e.to_string();
-            eprintln!("{}", i18n::t_args("skill-remove-failed", &[("error", &err_msg)]));
+            eprintln!(
+                "{}",
+                i18n::t_args("skill-remove-failed", &[("error", &err_msg)])
+            );
             std::process::exit(1);
         }
     }
@@ -254,7 +302,10 @@ pub(crate) fn cmd_skill_search(query: &str) {
             println!("{}", i18n::t_args("skill-search-none", &[("query", query)]));
         }
         Ok(results) => {
-            println!("{}", i18n::t_args("skill-search-results-header", &[("query", query)]));
+            println!(
+                "{}",
+                i18n::t_args("skill-search-results-header", &[("query", query)])
+            );
             println!();
             for r in results {
                 println!("  {} ({})", r.name, r.stars);
@@ -267,7 +318,10 @@ pub(crate) fn cmd_skill_search(query: &str) {
         }
         Err(e) => {
             let err_msg = e.to_string();
-            eprintln!("{}", i18n::t_args("skill-search-failed", &[("error", &err_msg)]));
+            eprintln!(
+                "{}",
+                i18n::t_args("skill-search-failed", &[("error", &err_msg)])
+            );
             std::process::exit(1);
         }
     }
@@ -278,7 +332,10 @@ pub(crate) fn cmd_skill_test(path: Option<PathBuf>, tool: Option<String>, input:
     let prepared =
         librefang_skills::publish::prepare_local_skill(&skill_path).unwrap_or_else(|e| {
             let err_msg = e.to_string();
-            eprintln!("{}", i18n::t_args("skill-validation-failed", &[("error", &err_msg)]));
+            eprintln!(
+                "{}",
+                i18n::t_args("skill-validation-failed", &[("error", &err_msg)])
+            );
             std::process::exit(1);
         });
 
@@ -295,18 +352,12 @@ pub(crate) fn cmd_skill_test(path: Option<PathBuf>, tool: Option<String>, input:
     let runtime_type_str = format!("{:?}", prepared.manifest.runtime.runtime_type);
     println!(
         "{}",
-        i18n::t_args(
-            "skill-validated-runtime",
-            &[("runtime", &runtime_type_str)]
-        )
+        i18n::t_args("skill-validated-runtime", &[("runtime", &runtime_type_str)])
     );
     let source_dir_str = prepared.source_dir.display().to_string();
     println!(
         "{}",
-        i18n::t_args(
-            "skill-validated-source",
-            &[("path", &source_dir_str)]
-        )
+        i18n::t_args("skill-validated-source", &[("path", &source_dir_str)])
     );
     if !prepared.manifest.skill.description.is_empty() {
         println!(
@@ -328,10 +379,7 @@ pub(crate) fn cmd_skill_test(path: Option<PathBuf>, tool: Option<String>, input:
             .join(", ");
         println!(
             "{}",
-            i18n::t_args(
-                "skill-validated-tools",
-                &[("tools", &tools_list)]
-            )
+            i18n::t_args("skill-validated-tools", &[("tools", &tools_list)])
         );
     }
     print_skill_warnings(&prepared.warnings);
@@ -356,7 +404,10 @@ pub(crate) fn cmd_skill_test(path: Option<PathBuf>, tool: Option<String>, input:
     let input_json = match input {
         Some(input) => serde_json::from_str::<serde_json::Value>(&input).unwrap_or_else(|err| {
             let err_msg = err.to_string();
-            eprintln!("{}", i18n::t_args("skill-invalid-input-json", &[("error", &err_msg)]));
+            eprintln!(
+                "{}",
+                i18n::t_args("skill-invalid-input-json", &[("error", &err_msg)])
+            );
             std::process::exit(1);
         }),
         None => serde_json::json!({}),
@@ -389,7 +440,10 @@ pub(crate) fn cmd_skill_test(path: Option<PathBuf>, tool: Option<String>, input:
     match result {
         Ok(result) => {
             println!();
-            println!("{}", i18n::t_args("skill-tool-result-header", &[("name", &tool_name)]));
+            println!(
+                "{}",
+                i18n::t_args("skill-tool-result-header", &[("name", &tool_name)])
+            );
             println!(
                 "{}",
                 serde_json::to_string_pretty(&result.output).unwrap_or_default()
@@ -401,11 +455,17 @@ pub(crate) fn cmd_skill_test(path: Option<PathBuf>, tool: Option<String>, input:
         Err(librefang_skills::SkillError::RuntimeNotAvailable(message)) => {
             println!();
             println!("{}", i18n::t("skill-validation-complete"));
-            println!("{}", i18n::t_args("skill-execution-skipped", &[("message", &message)]));
+            println!(
+                "{}",
+                i18n::t_args("skill-execution-skipped", &[("message", &message)])
+            );
         }
         Err(err) => {
             let err_msg = err.to_string();
-            eprintln!("{}", i18n::t_args("skill-execution-failed", &[("error", &err_msg)]));
+            eprintln!(
+                "{}",
+                i18n::t_args("skill-execution-failed", &[("error", &err_msg)])
+            );
             std::process::exit(1);
         }
     }
@@ -422,7 +482,10 @@ pub(crate) fn cmd_skill_publish(
     let prepared =
         librefang_skills::publish::prepare_local_skill(&skill_path).unwrap_or_else(|e| {
             let err_msg = e.to_string();
-            eprintln!("{}", i18n::t_args("skill-validation-failed", &[("error", &err_msg)]));
+            eprintln!(
+                "{}",
+                i18n::t_args("skill-validation-failed", &[("error", &err_msg)])
+            );
             std::process::exit(1);
         });
 
@@ -446,7 +509,10 @@ pub(crate) fn cmd_skill_publish(
     let packaged = librefang_skills::publish::package_prepared_skill(&prepared, &output_dir)
         .unwrap_or_else(|e| {
             let err_msg = e.to_string();
-            eprintln!("{}", i18n::t_args("skill-package-failed", &[("error", &err_msg)]));
+            eprintln!(
+                "{}",
+                i18n::t_args("skill-package-failed", &[("error", &err_msg)])
+            );
             std::process::exit(1);
         });
 
@@ -459,10 +525,7 @@ pub(crate) fn cmd_skill_publish(
     );
     println!(
         "{}",
-        i18n::t_args(
-            "skill-bundle-sha",
-            &[("sha", &packaged.sha256)]
-        )
+        i18n::t_args("skill-bundle-sha", &[("sha", &packaged.sha256)])
     );
     println!(
         "{}",
@@ -500,7 +563,10 @@ pub(crate) fn cmd_skill_publish(
 
     let sp_title = i18n::t_args(
         "skill-publishing-progress",
-        &[("name", packaged.manifest.skill.name.as_str()), ("tag", &tag)],
+        &[
+            ("name", packaged.manifest.skill.name.as_str()),
+            ("tag", &tag),
+        ],
     );
     let mut sp = progress::auto(&sp_title, None);
     sp.tick(1);
@@ -536,7 +602,10 @@ pub(crate) fn cmd_skill_publish(
     );
     sp.finish(&success_msg);
     if !published.html_url.is_empty() {
-        println!("{}", i18n::t_args("skill-publish-release-url", &[("url", &published.html_url)]));
+        println!(
+            "{}",
+            i18n::t_args("skill-publish-release-url", &[("url", &published.html_url)])
+        );
     }
 }
 
@@ -544,7 +613,10 @@ pub(crate) fn resolve_skill_path(path: Option<PathBuf>) -> PathBuf {
     path.unwrap_or_else(|| {
         std::env::current_dir().unwrap_or_else(|e| {
             let err_msg = e.to_string();
-            eprintln!("{}", i18n::t_args("skill-determine-dir-failed", &[("error", &err_msg)]));
+            eprintln!(
+                "{}",
+                i18n::t_args("skill-determine-dir-failed", &[("error", &err_msg)])
+            );
             std::process::exit(1);
         })
     })
@@ -588,7 +660,10 @@ pub(crate) fn cmd_skill_create() {
     let skill_dir = home.join("skills").join(&name);
     std::fs::create_dir_all(skill_dir.join("src")).unwrap_or_else(|e| {
         let err_msg = e.to_string();
-        eprintln!("{}", i18n::t_args("skill-create-dir-failed", &[("error", &err_msg)]));
+        eprintln!(
+            "{}",
+            i18n::t_args("skill-create-dir-failed", &[("error", &err_msg)])
+        );
         std::process::exit(1);
     });
 
@@ -736,7 +811,10 @@ skill!(handle);
         },
         other => {
             let runtime_str = other.to_string();
-            eprintln!("{}", i18n::t_args("skill-unsupported-runtime", &[("runtime", &runtime_str)]));
+            eprintln!(
+                "{}",
+                i18n::t_args("skill-unsupported-runtime", &[("runtime", &runtime_str)])
+            );
             std::process::exit(1);
         }
     };
@@ -777,7 +855,13 @@ capabilities = []
     }
 
     println!();
-    println!("{}", i18n::t_args("skill-created", &[("path", &skill_dir.display().to_string())]));
+    println!(
+        "{}",
+        i18n::t_args(
+            "skill-created",
+            &[("path", &skill_dir.display().to_string())]
+        )
+    );
     println!();
     println!("{}", i18n::t("skill-created-files-header"));
     println!("  skill.toml");
@@ -788,7 +872,10 @@ capabilities = []
     println!("{}", i18n::t("skill-created-next-steps-header"));
     let mut step = 1;
     let step_str = step.to_string();
-    println!("{}", i18n::t_args("skill-created-step-edit", &[("step", &step_str)]));
+    println!(
+        "{}",
+        i18n::t_args("skill-created-step-edit", &[("step", &step_str)])
+    );
     for build_step in &scaffold.build_steps {
         step += 1;
         println!("  {}. {}", step, build_step);
@@ -838,14 +925,20 @@ pub(crate) fn load_installed_skill(
     let mut registry = librefang_skills::registry::SkillRegistry::new(skills_dir.clone());
     if let Err(e) = registry.load_all() {
         let err_msg = e.to_string();
-        eprintln!("{}", i18n::t_args("skill-registry-load-failed", &[("error", &err_msg)]));
+        eprintln!(
+            "{}",
+            i18n::t_args("skill-registry-load-failed", &[("error", &err_msg)])
+        );
         std::process::exit(1);
     }
     match registry.get(name) {
         Some(skill) => (skills_dir, skill.clone()),
         None => {
             let path_str = skills_dir.display().to_string();
-            eprintln!("{}", i18n::t_args("skill-not-found", &[("name", name), ("path", &path_str)]));
+            eprintln!(
+                "{}",
+                i18n::t_args("skill-not-found", &[("name", name), ("path", &path_str)])
+            );
             std::process::exit(1);
         }
     }
@@ -865,7 +958,13 @@ pub(crate) fn cmd_skill_evolve(sub: EvolveCommands) {
                 Err(e) => {
                     let path_str = context_file.display().to_string();
                     let err_msg = e.to_string();
-                    eprintln!("{}", i18n::t_args("skill-read-file-failed", &[("path", &path_str), ("error", &err_msg)]));
+                    eprintln!(
+                        "{}",
+                        i18n::t_args(
+                            "skill-read-file-failed",
+                            &[("path", &path_str), ("error", &err_msg)]
+                        )
+                    );
                     std::process::exit(1);
                 }
             };
@@ -878,7 +977,10 @@ pub(crate) fn cmd_skill_evolve(sub: EvolveCommands) {
             let skills_dir = resolve_skills_dir(hand.as_deref());
             if let Err(e) = std::fs::create_dir_all(&skills_dir) {
                 let err_msg = e.to_string();
-                eprintln!("{}", i18n::t_args("skill-create-skills-dir-failed", &[("error", &err_msg)]));
+                eprintln!(
+                    "{}",
+                    i18n::t_args("skill-create-skills-dir-failed", &[("error", &err_msg)])
+                );
                 std::process::exit(1);
             }
             match librefang_skills::evolution::create_skill(
@@ -892,7 +994,10 @@ pub(crate) fn cmd_skill_evolve(sub: EvolveCommands) {
                 Ok(r) => print_evolution_result(&r),
                 Err(e) => {
                     let err_msg = e.to_string();
-                    eprintln!("{}", i18n::t_args("skill-create-failed", &[("error", &err_msg)]));
+                    eprintln!(
+                        "{}",
+                        i18n::t_args("skill-create-failed", &[("error", &err_msg)])
+                    );
                     std::process::exit(1);
                 }
             }
@@ -908,7 +1013,13 @@ pub(crate) fn cmd_skill_evolve(sub: EvolveCommands) {
                 Err(e) => {
                     let path_str = context_file.display().to_string();
                     let err_msg = e.to_string();
-                    eprintln!("{}", i18n::t_args("skill-read-file-failed", &[("path", &path_str), ("error", &err_msg)]));
+                    eprintln!(
+                        "{}",
+                        i18n::t_args(
+                            "skill-read-file-failed",
+                            &[("path", &path_str), ("error", &err_msg)]
+                        )
+                    );
                     std::process::exit(1);
                 }
             };
@@ -922,7 +1033,10 @@ pub(crate) fn cmd_skill_evolve(sub: EvolveCommands) {
                 Ok(r) => print_evolution_result(&r),
                 Err(e) => {
                     let err_msg = e.to_string();
-                    eprintln!("{}", i18n::t_args("skill-update-failed", &[("error", &err_msg)]));
+                    eprintln!(
+                        "{}",
+                        i18n::t_args("skill-update-failed", &[("error", &err_msg)])
+                    );
                     std::process::exit(1);
                 }
             }
@@ -940,7 +1054,13 @@ pub(crate) fn cmd_skill_evolve(sub: EvolveCommands) {
                 Err(e) => {
                     let path_str = old_file.display().to_string();
                     let err_msg = e.to_string();
-                    eprintln!("{}", i18n::t_args("skill-read-file-failed", &[("path", &path_str), ("error", &err_msg)]));
+                    eprintln!(
+                        "{}",
+                        i18n::t_args(
+                            "skill-read-file-failed",
+                            &[("path", &path_str), ("error", &err_msg)]
+                        )
+                    );
                     std::process::exit(1);
                 }
             };
@@ -949,7 +1069,13 @@ pub(crate) fn cmd_skill_evolve(sub: EvolveCommands) {
                 Err(e) => {
                     let path_str = new_file.display().to_string();
                     let err_msg = e.to_string();
-                    eprintln!("{}", i18n::t_args("skill-read-file-failed", &[("path", &path_str), ("error", &err_msg)]));
+                    eprintln!(
+                        "{}",
+                        i18n::t_args(
+                            "skill-read-file-failed",
+                            &[("path", &path_str), ("error", &err_msg)]
+                        )
+                    );
                     std::process::exit(1);
                 }
             };
@@ -965,7 +1091,10 @@ pub(crate) fn cmd_skill_evolve(sub: EvolveCommands) {
                 Ok(r) => print_evolution_result(&r),
                 Err(e) => {
                     let err_msg = e.to_string();
-                    eprintln!("{}", i18n::t_args("skill-patch-failed", &[("error", &err_msg)]));
+                    eprintln!(
+                        "{}",
+                        i18n::t_args("skill-patch-failed", &[("error", &err_msg)])
+                    );
                     std::process::exit(1);
                 }
             }
@@ -976,7 +1105,10 @@ pub(crate) fn cmd_skill_evolve(sub: EvolveCommands) {
                 Ok(r) => print_evolution_result(&r),
                 Err(e) => {
                     let err_msg = e.to_string();
-                    eprintln!("{}", i18n::t_args("skill-delete-failed", &[("error", &err_msg)]));
+                    eprintln!(
+                        "{}",
+                        i18n::t_args("skill-delete-failed", &[("error", &err_msg)])
+                    );
                     std::process::exit(1);
                 }
             }
@@ -987,7 +1119,10 @@ pub(crate) fn cmd_skill_evolve(sub: EvolveCommands) {
                 Ok(r) => print_evolution_result(&r),
                 Err(e) => {
                     let err_msg = e.to_string();
-                    eprintln!("{}", i18n::t_args("skill-rollback-failed", &[("error", &err_msg)]));
+                    eprintln!(
+                        "{}",
+                        i18n::t_args("skill-rollback-failed", &[("error", &err_msg)])
+                    );
                     std::process::exit(1);
                 }
             }
@@ -1003,7 +1138,13 @@ pub(crate) fn cmd_skill_evolve(sub: EvolveCommands) {
                 Err(e) => {
                     let path_str = source.display().to_string();
                     let err_msg = e.to_string();
-                    eprintln!("{}", i18n::t_args("skill-read-file-failed", &[("path", &path_str), ("error", &err_msg)]));
+                    eprintln!(
+                        "{}",
+                        i18n::t_args(
+                            "skill-read-file-failed",
+                            &[("path", &path_str), ("error", &err_msg)]
+                        )
+                    );
                     std::process::exit(1);
                 }
             };
@@ -1012,7 +1153,10 @@ pub(crate) fn cmd_skill_evolve(sub: EvolveCommands) {
                 Ok(r) => print_evolution_result(&r),
                 Err(e) => {
                     let err_msg = e.to_string();
-                    eprintln!("{}", i18n::t_args("skill-write-file-failed", &[("error", &err_msg)]));
+                    eprintln!(
+                        "{}",
+                        i18n::t_args("skill-write-file-failed", &[("error", &err_msg)])
+                    );
                     std::process::exit(1);
                 }
             }
@@ -1023,7 +1167,10 @@ pub(crate) fn cmd_skill_evolve(sub: EvolveCommands) {
                 Ok(r) => print_evolution_result(&r),
                 Err(e) => {
                     let err_msg = e.to_string();
-                    eprintln!("{}", i18n::t_args("skill-remove-file-failed", &[("error", &err_msg)]));
+                    eprintln!(
+                        "{}",
+                        i18n::t_args("skill-remove-file-failed", &[("error", &err_msg)])
+                    );
                     std::process::exit(1);
                 }
             }
@@ -1036,18 +1183,42 @@ pub(crate) fn cmd_skill_evolve(sub: EvolveCommands) {
                     Ok(s) => println!("{s}"),
                     Err(e) => {
                         let err_msg = e.to_string();
-                        eprintln!("{}", i18n::t_args("skill-serialize-history-failed", &[("error", &err_msg)]));
+                        eprintln!(
+                            "{}",
+                            i18n::t_args("skill-serialize-history-failed", &[("error", &err_msg)])
+                        );
                         std::process::exit(1);
                     }
                 }
                 return;
             }
-            println!("{}", i18n::t_args("skill-evolution-label", &[("name", &skill.manifest.skill.name)]));
-            println!("{}", i18n::t_args("skill-version-label", &[("version", &skill.manifest.skill.version)]));
+            println!(
+                "{}",
+                i18n::t_args(
+                    "skill-evolution-label",
+                    &[("name", &skill.manifest.skill.name)]
+                )
+            );
+            println!(
+                "{}",
+                i18n::t_args(
+                    "skill-version-label",
+                    &[("version", &skill.manifest.skill.version)]
+                )
+            );
             let use_count_str = meta.use_count.to_string();
-            println!("{}", i18n::t_args("skill-use-count-label", &[("count", &use_count_str)]));
+            println!(
+                "{}",
+                i18n::t_args("skill-use-count-label", &[("count", &use_count_str)])
+            );
             let evolution_count_str = meta.evolution_count.to_string();
-            println!("{}", i18n::t_args("skill-evolution-count-label", &[("count", &evolution_count_str)]));
+            println!(
+                "{}",
+                i18n::t_args(
+                    "skill-evolution-count-label",
+                    &[("count", &evolution_count_str)]
+                )
+            );
             if meta.versions.is_empty() {
                 println!();
                 println!("{}", i18n::t("skill-no-history"));
@@ -1079,7 +1250,10 @@ pub(crate) fn cmd_skill_pending(sub: PendingCommands) {
                 Ok(v) => v,
                 Err(e) => {
                     let err_msg = e.to_string();
-                    eprintln!("{}", i18n::t_args("skill-read-pending-failed", &[("error", &err_msg)]));
+                    eprintln!(
+                        "{}",
+                        i18n::t_args("skill-read-pending-failed", &[("error", &err_msg)])
+                    );
                     std::process::exit(1);
                 }
             };
@@ -1088,7 +1262,10 @@ pub(crate) fn cmd_skill_pending(sub: PendingCommands) {
                     Some(a) => i18n::t_args("skill-pending-filter", &[("agent", a)]),
                     None => String::new(),
                 };
-                println!("{}", i18n::t_args("skill-no-pending", &[("filter", &filter_str)]));
+                println!(
+                    "{}",
+                    i18n::t_args("skill-no-pending", &[("filter", &filter_str)])
+                );
                 return;
             }
             println!(
@@ -1127,7 +1304,10 @@ pub(crate) fn cmd_skill_pending(sub: PendingCommands) {
                 Ok(c) => c,
                 Err(e) => {
                     let err_msg = e.to_string();
-                    eprintln!("{}", i18n::t_args("skill-load-candidate-failed", &[("error", &err_msg)]));
+                    eprintln!(
+                        "{}",
+                        i18n::t_args("skill-load-candidate-failed", &[("error", &err_msg)])
+                    );
                     std::process::exit(1);
                 }
             };
@@ -1135,7 +1315,10 @@ pub(crate) fn cmd_skill_pending(sub: PendingCommands) {
                 Ok(s) => s,
                 Err(e) => {
                     let err_msg = e.to_string();
-                    eprintln!("{}", i18n::t_args("skill-render-candidate-failed", &[("error", &err_msg)]));
+                    eprintln!(
+                        "{}",
+                        i18n::t_args("skill-render-candidate-failed", &[("error", &err_msg)])
+                    );
                     std::process::exit(1);
                 }
             };
@@ -1163,7 +1346,10 @@ pub(crate) fn cmd_skill_pending(sub: PendingCommands) {
                 }
                 Err(e) => {
                     let err_msg = e.to_string();
-                    eprintln!("{}", i18n::t_args("skill-approve-candidate-failed", &[("error", &err_msg)]));
+                    eprintln!(
+                        "{}",
+                        i18n::t_args("skill-approve-candidate-failed", &[("error", &err_msg)])
+                    );
                     std::process::exit(1);
                 }
             }
@@ -1171,11 +1357,17 @@ pub(crate) fn cmd_skill_pending(sub: PendingCommands) {
         PendingCommands::Reject { id } => {
             match librefang_kernel::skill_workshop::storage::reject_candidate(&skills_root, &id) {
                 Ok(()) => {
-                    println!("{}", i18n::t_args("skill-rejected-candidate", &[("id", &id)]));
+                    println!(
+                        "{}",
+                        i18n::t_args("skill-rejected-candidate", &[("id", &id)])
+                    );
                 }
                 Err(e) => {
                     let err_msg = e.to_string();
-                    eprintln!("{}", i18n::t_args("skill-reject-candidate-failed", &[("error", &err_msg)]));
+                    eprintln!(
+                        "{}",
+                        i18n::t_args("skill-reject-candidate-failed", &[("error", &err_msg)])
+                    );
                     std::process::exit(1);
                 }
             }

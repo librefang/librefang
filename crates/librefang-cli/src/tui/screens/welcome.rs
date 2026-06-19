@@ -326,7 +326,10 @@ fn draw_status_card(f: &mut Frame, area: Rect, state: &WelcomeState) {
     // Daemon
     if let Some(ref url) = state.daemon_url {
         let suffix = if state.daemon_agents > 0 {
-            crate::i18n::t_args("tui-welcome-agent-count", &[("count", &state.daemon_agents.to_string())])
+            crate::i18n::t_args(
+                "tui-welcome-agent-count",
+                &[("count", &state.daemon_agents.to_string())],
+            )
         } else {
             String::new()
         };
@@ -357,8 +360,14 @@ fn draw_status_card(f: &mut Frame, area: Rect, state: &WelcomeState) {
     } else {
         lines.push(Line::from(vec![
             Span::styled(" \u{25cb} ", Style::default().fg(theme::YELLOW)),
-            Span::styled(crate::i18n::t("tui-welcome-no-api-keys"), Style::default().fg(theme::YELLOW)),
-            Span::styled(crate::i18n::t("tui-welcome-run-hint-prefix"), theme::dim_style()),
+            Span::styled(
+                crate::i18n::t("tui-welcome-no-api-keys"),
+                Style::default().fg(theme::YELLOW),
+            ),
+            Span::styled(
+                crate::i18n::t("tui-welcome-run-hint-prefix"),
+                theme::dim_style(),
+            ),
             Span::styled("librefang init", Style::default().fg(theme::ACCENT)),
         ]));
     }
@@ -367,7 +376,10 @@ fn draw_status_card(f: &mut Frame, area: Rect, state: &WelcomeState) {
     if state.setup_just_completed {
         lines.push(Line::from(vec![
             Span::styled(" \u{2714} ", Style::default().fg(theme::GREEN)),
-            Span::styled(crate::i18n::t("tui-welcome-setup-complete"), Style::default().fg(theme::GREEN)),
+            Span::styled(
+                crate::i18n::t("tui-welcome-setup-complete"),
+                Style::default().fg(theme::GREEN),
+            ),
         ]));
     }
 

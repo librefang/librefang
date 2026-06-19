@@ -57,14 +57,16 @@ pub(crate) fn spawn_detached_daemon(
     config: Option<&std::path::Path>,
     log_path: &std::path::Path,
 ) -> Result<std::process::Child, String> {
-    let exe = std::env::current_exe().map_err(|e| {
-        i18n::t_args("daemon-error-resolve-exe", &[("error", &e.to_string())])
-    })?;
+    let exe = std::env::current_exe()
+        .map_err(|e| i18n::t_args("daemon-error-resolve-exe", &[("error", &e.to_string())]))?;
     if let Some(log_dir) = log_path.parent() {
         std::fs::create_dir_all(log_dir).map_err(|e| {
             i18n::t_args(
                 "daemon-error-create-log-dir",
-                &[("path", &log_dir.display().to_string()), ("error", &e.to_string())],
+                &[
+                    ("path", &log_dir.display().to_string()),
+                    ("error", &e.to_string()),
+                ],
             )
         })?;
         restrict_dir_permissions(log_dir);
@@ -77,13 +79,19 @@ pub(crate) fn spawn_detached_daemon(
         .map_err(|e| {
             i18n::t_args(
                 "daemon-error-open-log",
-                &[("path", &log_path.display().to_string()), ("error", &e.to_string())],
+                &[
+                    ("path", &log_path.display().to_string()),
+                    ("error", &e.to_string()),
+                ],
             )
         })?;
     let stderr = stdout.try_clone().map_err(|e| {
         i18n::t_args(
             "daemon-error-clone-log-handle",
-            &[("path", &log_path.display().to_string()), ("error", &e.to_string())],
+            &[
+                ("path", &log_path.display().to_string()),
+                ("error", &e.to_string()),
+            ],
         )
     })?;
 
@@ -192,7 +200,10 @@ pub(crate) fn setup_foreground_tee(log_path: &std::path::Path) -> ForegroundTeeG
                 "{}",
                 i18n::t_args(
                     "daemon-error-failed-create-log-dir",
-                    &[("path", &parent.display().to_string()), ("error", &e.to_string())]
+                    &[
+                        ("path", &parent.display().to_string()),
+                        ("error", &e.to_string())
+                    ]
                 )
             );
             std::process::exit(1);
@@ -215,7 +226,10 @@ pub(crate) fn setup_foreground_tee(log_path: &std::path::Path) -> ForegroundTeeG
                     "{}",
                     i18n::t_args(
                         "daemon-error-failed-open-log",
-                        &[("path", &log_path.display().to_string()), ("error", &e.to_string())]
+                        &[
+                            ("path", &log_path.display().to_string()),
+                            ("error", &e.to_string())
+                        ]
                     )
                 );
                 std::process::exit(1);

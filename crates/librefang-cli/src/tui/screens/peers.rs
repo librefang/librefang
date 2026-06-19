@@ -83,7 +83,11 @@ impl PeersState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut PeersState) {
-    let inner = widgets::render_screen_block(f, area, &format!("{} {}", "\u{25cc}", crate::i18n::t("tui-peers-title")));
+    let inner = widgets::render_screen_block(
+        f,
+        area,
+        &format!("{} {}", "\u{25cc}", crate::i18n::t("tui-peers-title")),
+    );
 
     let chunks = Layout::vertical([
         Constraint::Length(2), // header
@@ -103,23 +107,48 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut PeersState) {
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    format!("  {} {}", "\u{2502}", crate::i18n::t_args("tui-peers-count", &[("count", &state.peers.len().to_string())])),
+                    format!(
+                        "  {} {}",
+                        "\u{2502}",
+                        crate::i18n::t_args(
+                            "tui-peers-count",
+                            &[("count", &state.peers.len().to_string())]
+                        )
+                    ),
                     Style::default().fg(theme::TEXT_SECONDARY),
                 ),
             ]),
             Line::from(vec![
                 Span::styled("  ", theme::table_header()),
-                Span::styled(format!("{:<14}", crate::i18n::t("tui-peers-header-node-id")), theme::table_header()),
+                Span::styled(
+                    format!("{:<14}", crate::i18n::t("tui-peers-header-node-id")),
+                    theme::table_header(),
+                ),
                 Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
-                Span::styled(format!("{:<16}", crate::i18n::t("tui-peers-header-name")), theme::table_header()),
+                Span::styled(
+                    format!("{:<16}", crate::i18n::t("tui-peers-header-name")),
+                    theme::table_header(),
+                ),
                 Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
-                Span::styled(format!("{:<20}", crate::i18n::t("tui-peers-header-address")), theme::table_header()),
+                Span::styled(
+                    format!("{:<20}", crate::i18n::t("tui-peers-header-address")),
+                    theme::table_header(),
+                ),
                 Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
-                Span::styled(format!("{:<10}", crate::i18n::t("tui-peers-header-status")), theme::table_header()),
+                Span::styled(
+                    format!("{:<10}", crate::i18n::t("tui-peers-header-status")),
+                    theme::table_header(),
+                ),
                 Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
-                Span::styled(format!("{:<6}", crate::i18n::t("tui-peers-header-agents")), theme::table_header()),
+                Span::styled(
+                    format!("{:<6}", crate::i18n::t("tui-peers-header-agents")),
+                    theme::table_header(),
+                ),
                 Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
-                Span::styled(crate::i18n::t("tui-peers-header-protocol"), theme::table_header()),
+                Span::styled(
+                    crate::i18n::t("tui-peers-header-protocol"),
+                    theme::table_header(),
+                ),
             ]),
         ]),
         chunks[0],
@@ -147,15 +176,30 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut PeersState) {
                     p.node_id.clone()
                 };
                 let (state_badge, state_style) = match p.state.to_lowercase().as_str() {
-                    "connected" | "active" => {
-                        (format!("{} {}", "\u{25cf}", crate::i18n::t("tui-peers-status-active")), Style::default().fg(theme::GREEN))
-                    }
-                    "disconnected" | "inactive" => {
-                        (format!("{} {}", "\u{25cb}", crate::i18n::t("tui-peers-status-offline")), theme::dim_style())
-                    }
-                    "connecting" | "pending" => {
-                        (format!("{} {}", "\u{25cb}", crate::i18n::t("tui-peers-status-pending")), Style::default().fg(theme::YELLOW))
-                    }
+                    "connected" | "active" => (
+                        format!(
+                            "{} {}",
+                            "\u{25cf}",
+                            crate::i18n::t("tui-peers-status-active")
+                        ),
+                        Style::default().fg(theme::GREEN),
+                    ),
+                    "disconnected" | "inactive" => (
+                        format!(
+                            "{} {}",
+                            "\u{25cb}",
+                            crate::i18n::t("tui-peers-status-offline")
+                        ),
+                        theme::dim_style(),
+                    ),
+                    "connecting" | "pending" => (
+                        format!(
+                            "{} {}",
+                            "\u{25cb}",
+                            crate::i18n::t("tui-peers-status-pending")
+                        ),
+                        Style::default().fg(theme::YELLOW),
+                    ),
                     _ => (p.state.clone(), theme::dim_style()),
                 };
                 ListItem::new(Line::from(vec![

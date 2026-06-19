@@ -58,14 +58,20 @@ pub(crate) fn cmd_workflow_create(file: PathBuf) {
     let contents = std::fs::read_to_string(&file).unwrap_or_else(|e| {
         eprintln!(
             "{}",
-            i18n::t_args("automation-workflow-read-error", &[("error", &e.to_string())])
+            i18n::t_args(
+                "automation-workflow-read-error",
+                &[("error", &e.to_string())]
+            )
         );
         std::process::exit(1);
     });
     let json_body: serde_json::Value = serde_json::from_str(&contents).unwrap_or_else(|e| {
         eprintln!(
             "{}",
-            i18n::t_args("automation-workflow-invalid-json", &[("error", &e.to_string())])
+            i18n::t_args(
+                "automation-workflow-invalid-json",
+                &[("error", &e.to_string())]
+            )
         );
         std::process::exit(1);
     });
@@ -80,7 +86,10 @@ pub(crate) fn cmd_workflow_create(file: PathBuf) {
 
     if let Some(id) = body["workflow_id"].as_str() {
         println!("{}", i18n::t("automation-workflow-created"));
-        println!("{}", i18n::t_args("automation-workflow-created-id", &[("id", id)]));
+        println!(
+            "{}",
+            i18n::t_args("automation-workflow-created-id", &[("id", id)])
+        );
     } else {
         let err_msg = body["error"].as_str().unwrap_or("Unknown error");
         let err_localized = if err_msg == "Unknown error" {
@@ -90,7 +99,10 @@ pub(crate) fn cmd_workflow_create(file: PathBuf) {
         };
         eprintln!(
             "{}",
-            i18n::t_args("automation-workflow-create-failed", &[("error", &err_localized)])
+            i18n::t_args(
+                "automation-workflow-create-failed",
+                &[("error", &err_localized)]
+            )
         );
         std::process::exit(1);
     }
@@ -199,7 +211,10 @@ pub(crate) fn cmd_trigger_create(
     let pattern: serde_json::Value = serde_json::from_str(pattern_json).unwrap_or_else(|e| {
         eprintln!(
             "{}",
-            i18n::t_args("automation-trigger-invalid-pattern", &[("error", &e.to_string())])
+            i18n::t_args(
+                "automation-trigger-invalid-pattern",
+                &[("error", &e.to_string())]
+            )
         );
         eprintln!("Examples:");
         eprintln!("  '\"lifecycle\"'");
@@ -235,10 +250,22 @@ pub(crate) fn cmd_trigger_create(
 
     if let Some(id) = body["trigger_id"].as_str() {
         println!("{}", i18n::t("automation-trigger-created"));
-        println!("{}", i18n::t_args("automation-trigger-created-id", &[("id", id)]));
-        println!("{}", i18n::t_args("automation-trigger-created-agent", &[("agent_id", &agent_id)]));
+        println!(
+            "{}",
+            i18n::t_args("automation-trigger-created-id", &[("id", id)])
+        );
+        println!(
+            "{}",
+            i18n::t_args(
+                "automation-trigger-created-agent",
+                &[("agent_id", &agent_id)]
+            )
+        );
         if let Some(t) = target_agent {
-            println!("{}", i18n::t_args("automation-trigger-created-target", &[("target", t)]));
+            println!(
+                "{}",
+                i18n::t_args("automation-trigger-created-target", &[("target", t)])
+            );
         }
     } else {
         let err_msg = body["error"].as_str().unwrap_or("Unknown error");
@@ -249,7 +276,10 @@ pub(crate) fn cmd_trigger_create(
         };
         eprintln!(
             "{}",
-            i18n::t_args("automation-trigger-create-failed", &[("error", &err_localized)])
+            i18n::t_args(
+                "automation-trigger-create-failed",
+                &[("error", &err_localized)]
+            )
         );
         std::process::exit(1);
     }
@@ -265,7 +295,10 @@ pub(crate) fn cmd_trigger_delete(trigger_id: &str) {
     );
 
     if body.get("status").is_some() {
-        println!("{}", i18n::t_args("automation-trigger-deleted", &[("id", trigger_id)]));
+        println!(
+            "{}",
+            i18n::t_args("automation-trigger-deleted", &[("id", trigger_id)])
+        );
     } else {
         let err_msg = body["error"].as_str().unwrap_or("Unknown error");
         let err_localized = if err_msg == "Unknown error" {
@@ -275,7 +308,10 @@ pub(crate) fn cmd_trigger_delete(trigger_id: &str) {
         };
         eprintln!(
             "{}",
-            i18n::t_args("automation-trigger-delete-failed", &[("error", &err_localized)])
+            i18n::t_args(
+                "automation-trigger-delete-failed",
+                &[("error", &err_localized)]
+            )
         );
         std::process::exit(1);
     }
@@ -299,28 +335,43 @@ pub(crate) fn cmd_trigger_get(trigger_id: &str) {
         };
         eprintln!(
             "{}",
-            i18n::t_args("automation-trigger-get-failed", &[("error", &err_localized)])
+            i18n::t_args(
+                "automation-trigger-get-failed",
+                &[("error", &err_localized)]
+            )
         );
         std::process::exit(1);
     }
 
     println!(
         "{}",
-        i18n::t_args("automation-trigger-info-id", &[("id", body["id"].as_str().unwrap_or("-"))])
+        i18n::t_args(
+            "automation-trigger-info-id",
+            &[("id", body["id"].as_str().unwrap_or("-"))]
+        )
     );
     println!(
         "{}",
-        i18n::t_args("automation-trigger-info-agent", &[("id", body["agent_id"].as_str().unwrap_or("-"))])
+        i18n::t_args(
+            "automation-trigger-info-agent",
+            &[("id", body["agent_id"].as_str().unwrap_or("-"))]
+        )
     );
     println!(
         "{}",
-        i18n::t_args("automation-trigger-info-pattern", &[("pattern", &body["pattern"].to_string())])
+        i18n::t_args(
+            "automation-trigger-info-pattern",
+            &[("pattern", &body["pattern"].to_string())]
+        )
     );
     println!(
         "{}",
-        i18n::t_args("automation-trigger-info-prompt", &[("prompt", body["prompt_template"].as_str().unwrap_or("-"))])
+        i18n::t_args(
+            "automation-trigger-info-prompt",
+            &[("prompt", body["prompt_template"].as_str().unwrap_or("-"))]
+        )
     );
-    
+
     let yes_str = i18n::t("label-yes");
     let no_str = i18n::t("label-no");
     let enabled_str = if body["enabled"].as_bool().unwrap_or(false) {
@@ -330,30 +381,54 @@ pub(crate) fn cmd_trigger_get(trigger_id: &str) {
     };
     println!(
         "{}",
-        i18n::t_args("automation-trigger-info-enabled", &[("enabled", enabled_str)])
+        i18n::t_args(
+            "automation-trigger-info-enabled",
+            &[("enabled", enabled_str)]
+        )
     );
     println!(
         "{}",
-        i18n::t_args("automation-trigger-info-fires", &[("count", &body["fire_count"].as_u64().unwrap_or(0).to_string())])
+        i18n::t_args(
+            "automation-trigger-info-fires",
+            &[(
+                "count",
+                &body["fire_count"].as_u64().unwrap_or(0).to_string()
+            )]
+        )
     );
-    
+
     let max_fires_str = body["max_fires"]
         .as_u64()
         .map(|n| n.to_string())
         .unwrap_or_else(|| i18n::t("automation-unlimited"));
     println!(
         "{}",
-        i18n::t_args("automation-trigger-info-max-fires", &[("count", &max_fires_str)])
+        i18n::t_args(
+            "automation-trigger-info-max-fires",
+            &[("count", &max_fires_str)]
+        )
     );
 
     if let Some(t) = body["target_agent_id"].as_str() {
-        println!("{}", i18n::t_args("automation-trigger-info-target", &[("agent", t)]));
+        println!(
+            "{}",
+            i18n::t_args("automation-trigger-info-target", &[("agent", t)])
+        );
     }
     if let Some(c) = body["cooldown_secs"].as_u64() {
-        println!("{}", i18n::t_args("automation-trigger-info-cooldown", &[("secs", &c.to_string())]));
+        println!(
+            "{}",
+            i18n::t_args(
+                "automation-trigger-info-cooldown",
+                &[("secs", &c.to_string())]
+            )
+        );
     }
     if let Some(m) = body["session_mode"].as_str() {
-        println!("{}", i18n::t_args("automation-trigger-info-session", &[("mode", m)]));
+        println!(
+            "{}",
+            i18n::t_args("automation-trigger-info-session", &[("mode", m)])
+        );
     }
 }
 
@@ -379,7 +454,10 @@ pub(crate) fn cmd_trigger_update(
         let parsed: serde_json::Value = serde_json::from_str(p).unwrap_or_else(|e| {
             eprintln!(
                 "{}",
-                i18n::t_args("automation-trigger-invalid-pattern", &[("error", &e.to_string())])
+                i18n::t_args(
+                    "automation-trigger-invalid-pattern",
+                    &[("error", &e.to_string())]
+                )
             );
             std::process::exit(1);
         });
@@ -426,11 +504,17 @@ pub(crate) fn cmd_trigger_update(
         };
         eprintln!(
             "{}",
-            i18n::t_args("automation-trigger-update-failed", &[("error", &err_localized)])
+            i18n::t_args(
+                "automation-trigger-update-failed",
+                &[("error", &err_localized)]
+            )
         );
         std::process::exit(1);
     }
-    println!("{}", i18n::t_args("automation-trigger-updated", &[("id", trigger_id)]));
+    println!(
+        "{}",
+        i18n::t_args("automation-trigger-updated", &[("id", trigger_id)])
+    );
 }
 
 pub(crate) fn cmd_trigger_set_enabled(trigger_id: &str, enabled: bool) {

@@ -493,12 +493,8 @@ pub(crate) fn cmd_webhooks_list(json: bool) {
         let header_url = i18n::t("label-header-url");
         let yes_str = i18n::t("label-yes");
         let no_str = i18n::t("label-no");
-        let mut t = crate::table::Table::new(&[
-            &header_id,
-            &header_name,
-            &header_enabled,
-            &header_url,
-        ]);
+        let mut t =
+            crate::table::Table::new(&[&header_id, &header_name, &header_enabled, &header_url]);
         for w in arr {
             t.add_row(&[
                 w["id"].as_str().unwrap_or("?"),

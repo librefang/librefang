@@ -28,7 +28,10 @@ pub(crate) fn daemon_config_context(config: Option<&std::path::Path>) -> DaemonC
     let config = load_config(config).unwrap_or_else(|e| {
         eprintln!(
             "{}",
-            i18n::t_args("common-warning-config-default", &[("error", &e.to_string())])
+            i18n::t_args(
+                "common-warning-config-default",
+                &[("error", &e.to_string())]
+            )
         );
         librefang_types::config::KernelConfig::default()
     });
@@ -752,9 +755,8 @@ pub(crate) fn test_api_key(provider: &str, key: &str) -> bool {
 ///
 /// Polls for daemon health for up to 10 seconds. Returns the daemon URL on success.
 pub(crate) fn start_daemon_background() -> Result<String, String> {
-    let exe = std::env::current_exe().map_err(|e| {
-        i18n::t_args("common-error-find-exe", &[("error", &e.to_string())])
-    })?;
+    let exe = std::env::current_exe()
+        .map_err(|e| i18n::t_args("common-error-find-exe", &[("error", &e.to_string())]))?;
 
     #[cfg(windows)]
     {
@@ -768,9 +770,7 @@ pub(crate) fn start_daemon_background() -> Result<String, String> {
             .stderr(std::process::Stdio::null())
             .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
             .spawn()
-            .map_err(|e| {
-                i18n::t_args("common-error-spawn-daemon", &[("error", &e.to_string())])
-            })?;
+            .map_err(|e| i18n::t_args("common-error-spawn-daemon", &[("error", &e.to_string())]))?;
     }
 
     #[cfg(not(windows))]
@@ -781,9 +781,7 @@ pub(crate) fn start_daemon_background() -> Result<String, String> {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
-            .map_err(|e| {
-                i18n::t_args("common-error-spawn-daemon", &[("error", &e.to_string())])
-            })?;
+            .map_err(|e| i18n::t_args("common-error-spawn-daemon", &[("error", &e.to_string())]))?;
     }
 
     // Poll for daemon readiness

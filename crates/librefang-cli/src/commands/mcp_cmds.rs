@@ -246,7 +246,10 @@ pub(crate) fn cmd_mcp_catalog(query: Option<&str>) {
 
     if entries.is_empty() {
         if let Some(q) = query {
-            println!("{}", i18n::t_args("mcp-catalog-no-matches", &[("query", q)]));
+            println!(
+                "{}",
+                i18n::t_args("mcp-catalog-no-matches", &[("query", q)])
+            );
         } else {
             println!("{}", i18n::t("mcp-catalog-none-available"));
         }
@@ -370,7 +373,12 @@ pub(crate) fn upsert_mcp_server_local(
         // malformed config.toml would otherwise be overwritten as a new
         // near-empty file, wiping unrelated sections the user may want
         // to fix by hand.
-        toml::from_str(&content).map_err(|e| i18n::t_args("mcp-invalid-toml", &[("path", "config.toml"), ("error", &e.to_string())]))?
+        toml::from_str(&content).map_err(|e| {
+            i18n::t_args(
+                "mcp-invalid-toml",
+                &[("path", "config.toml"), ("error", &e.to_string())],
+            )
+        })?
     } else {
         toml::value::Table::new()
     };
@@ -407,7 +415,12 @@ pub(crate) fn remove_mcp_server_local(
 ) -> Result<(), String> {
     let mut table: toml::value::Table = if config_path.exists() {
         let content = std::fs::read_to_string(config_path).map_err(|e| e.to_string())?;
-        toml::from_str(&content).map_err(|e| i18n::t_args("mcp-invalid-toml", &[("path", "config.toml"), ("error", &e.to_string())]))?
+        toml::from_str(&content).map_err(|e| {
+            i18n::t_args(
+                "mcp-invalid-toml",
+                &[("path", "config.toml"), ("error", &e.to_string())],
+            )
+        })?
     } else {
         return Ok(());
     };

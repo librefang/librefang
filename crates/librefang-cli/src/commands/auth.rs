@@ -476,10 +476,8 @@ pub(crate) fn print_pool_summary_human(body: &serde_json::Value) {
                         format!(
                             "{} {}",
                             i18n::t("auth-pool-status-cooldown").yellow(),
-                            i18n::t_args(
-                                "auth-pool-cooldown-left",
-                                &[("secs", &n.to_string())]
-                            ).dimmed()
+                            i18n::t_args("auth-pool-cooldown-left", &[("secs", &n.to_string())])
+                                .dimmed()
                         )
                     } else {
                         i18n::t("auth-pool-status-exhausted").yellow().to_string()

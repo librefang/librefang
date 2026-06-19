@@ -84,7 +84,10 @@ pub(crate) fn cmd_hand_install(path: &str) {
     );
     println!(
         "{}",
-        i18n::t_args("hand-activate-hint", &[("id", body["id"].as_str().unwrap_or("?"))])
+        i18n::t_args(
+            "hand-activate-hint",
+            &[("id", body["id"].as_str().unwrap_or("?"))]
+        )
     );
 }
 
@@ -278,7 +281,10 @@ pub(crate) fn cmd_hand_deactivate(id: &str) {
                     .send(),
             );
             if body.get("status").is_some() {
-                println!("{}", i18n::t_args("hand-deactivated-success", &[("id", id)]));
+                println!(
+                    "{}",
+                    i18n::t_args("hand-deactivated-success", &[("id", id)])
+                );
             } else {
                 let err_fallback = i18n::t("error-unknown");
                 eprintln!(
@@ -390,10 +396,7 @@ pub(crate) fn cmd_hand_pause(id: &str) {
     } else {
         ui::success(&i18n::t_args(
             "hand-paused",
-            &[
-                ("label", hand_label),
-                ("instance_id", instance_id),
-            ],
+            &[("label", hand_label), ("instance_id", instance_id)],
         ));
     }
 }
@@ -425,10 +428,7 @@ pub(crate) fn cmd_hand_resume(id: &str) {
     } else {
         ui::success(&i18n::t_args(
             "hand-resumed",
-            &[
-                ("label", hand_label),
-                ("instance_id", instance_id),
-            ],
+            &[("label", hand_label), ("instance_id", instance_id)],
         ));
     }
 }

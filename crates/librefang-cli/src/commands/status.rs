@@ -575,12 +575,7 @@ pub(crate) fn render_agents_table(agents: &[serde_json::Value]) {
     let header_id = i18n::t("label-header-id");
     let header_state = i18n::t("label-header-state");
     let header_model = i18n::t("model-header-model");
-    let mut t = crate::table::Table::new(&[
-        &header_name,
-        &header_id,
-        &header_state,
-        &header_model,
-    ]);
+    let mut t = crate::table::Table::new(&[&header_name, &header_id, &header_state, &header_model]);
     for a in agents {
         let id = id_trim(a["id"].as_str().unwrap_or("?"));
         let model = format!(
@@ -755,10 +750,7 @@ pub(crate) fn cmd_health(json: bool) {
                     &i18n::t("label-uptime"),
                     &i18n::t_args(
                         "status-uptime-format",
-                        &[
-                            ("hours", &hours.to_string()),
-                            ("mins", &mins.to_string()),
-                        ],
+                        &[("hours", &hours.to_string()), ("mins", &mins.to_string())],
                     ),
                 );
             }

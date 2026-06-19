@@ -622,7 +622,9 @@ pub fn spawn_daemon_agent(
                         body["error"]
                             .as_str()
                             .map(|s| s.to_string())
-                            .unwrap_or_else(|| crate::i18n::t("tui-event-agent-spawn-failed-fallback")),
+                            .unwrap_or_else(|| {
+                                crate::i18n::t("tui-event-agent-spawn-failed-fallback")
+                            }),
                     ));
                 }
             }
@@ -884,9 +886,9 @@ pub fn spawn_run_workflow(
             }
         }
         BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::WorkflowRunResult(
-                crate::i18n::t("tui-event-workflow-exec-not-available-in-process"),
-            ));
+            let _ = tx.send(AppEvent::WorkflowRunResult(crate::i18n::t(
+                "tui-event-workflow-exec-not-available-in-process",
+            )));
         }
     });
 }
@@ -924,9 +926,9 @@ pub fn spawn_create_workflow(
             }
         }
         BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::FetchError(
-                crate::i18n::t("tui-event-workflow-create-not-available-in-process"),
-            ));
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-workflow-create-not-available-in-process",
+            )));
         }
     });
 }
@@ -1000,9 +1002,9 @@ pub fn spawn_create_trigger(
             }
         }
         BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::FetchError(
-                crate::i18n::t("tui-event-trigger-create-not-available-in-process"),
-            ));
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-trigger-create-not-available-in-process",
+            )));
         }
     });
 }
@@ -1029,9 +1031,9 @@ pub fn spawn_delete_trigger(backend: BackendRef, trigger_id: String, tx: mpsc::S
             }
         }
         BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::FetchError(
-                crate::i18n::t("tui-event-trigger-delete-not-available-in-process"),
-            ));
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-trigger-delete-not-available-in-process",
+            )));
         }
     });
 }
@@ -1112,7 +1114,9 @@ pub fn spawn_fetch_agent_skills(backend: BackendRef, agent_id: String, tx: mpsc:
                     return;
                 }
             }
-            let _ = tx.send(AppEvent::FetchError(crate::i18n::t("tui-event-skills-fetch-failed")));
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-skills-fetch-failed",
+            )));
         }
         BackendRef::InProcess(kernel) => {
             if let Ok(uuid) = uuid::Uuid::parse_str(&agent_id) {
@@ -1173,9 +1177,9 @@ pub fn spawn_fetch_agent_mcp_servers(
                     return;
                 }
             }
-            let _ = tx.send(AppEvent::FetchError(
-                crate::i18n::t("tui-event-mcp-fetch-failed"),
-            ));
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-mcp-fetch-failed",
+            )));
         }
         BackendRef::InProcess(kernel) => {
             if let Ok(uuid) = uuid::Uuid::parse_str(&agent_id) {
@@ -1232,7 +1236,9 @@ pub fn spawn_update_agent_skills(
                     let _ = tx.send(AppEvent::AgentSkillsUpdated(agent_id));
                 }
                 _ => {
-                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t("tui-event-skills-update-failed")));
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                        "tui-event-skills-update-failed",
+                    )));
                 }
             }
         }
@@ -1274,9 +1280,9 @@ pub fn spawn_update_agent_mcp_servers(
                     let _ = tx.send(AppEvent::AgentMcpServersUpdated(agent_id));
                 }
                 _ => {
-                    let _ = tx.send(AppEvent::FetchError(
-                        crate::i18n::t("tui-event-mcp-update-failed"),
-                    ));
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                        "tui-event-mcp-update-failed",
+                    )));
                 }
             }
         }
@@ -1382,9 +1388,9 @@ pub fn spawn_delete_session(backend: BackendRef, session_id: String, tx: mpsc::S
             }
         }
         BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::FetchError(
-                crate::i18n::t("tui-event-session-management-not-available-in-process"),
-            ));
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-session-management-not-available-in-process",
+            )));
         }
     });
 }
@@ -1476,14 +1482,16 @@ pub fn spawn_save_memory_kv(
                     let _ = tx.send(AppEvent::MemoryKvSaved { key });
                 }
                 _ => {
-                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t("tui-event-kv-save-failed")));
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                        "tui-event-kv-save-failed",
+                    )));
                 }
             }
         }
         BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::FetchError(
-                crate::i18n::t("tui-event-kv-not-available-in-process"),
-            ));
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-kv-not-available-in-process",
+            )));
         }
     });
 }
@@ -1506,14 +1514,16 @@ pub fn spawn_delete_memory_kv(
                     let _ = tx.send(AppEvent::MemoryKvDeleted(key));
                 }
                 _ => {
-                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t("tui-event-kv-delete-failed")));
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                        "tui-event-kv-delete-failed",
+                    )));
                 }
             }
         }
         BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::FetchError(
-                crate::i18n::t("tui-event-kv-not-available-in-process"),
-            ));
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-kv-not-available-in-process",
+            )));
         }
     });
 }
@@ -1643,9 +1653,9 @@ pub fn spawn_install_skill(backend: BackendRef, slug: String, tx: mpsc::Sender<A
             }
         }
         BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::FetchError(
-                crate::i18n::t("tui-event-skill-install-not-available-in-process"),
-            ));
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-skill-install-not-available-in-process",
+            )));
         }
     });
 }
@@ -1672,9 +1682,9 @@ pub fn spawn_uninstall_skill(backend: BackendRef, name: String, tx: mpsc::Sender
             }
         }
         BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::FetchError(
-                crate::i18n::t("tui-event-skill-uninstall-not-available-in-process"),
-            ));
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-skill-uninstall-not-available-in-process",
+            )));
         }
     });
 }
@@ -1795,7 +1805,9 @@ pub fn spawn_verify_chain(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
                     let message = body["message"]
                         .as_str()
                         .map(|s| s.to_string())
-                        .unwrap_or_else(|| crate::i18n::t("tui-event-security-verification-complete"));
+                        .unwrap_or_else(|| {
+                            crate::i18n::t("tui-event-security-verification-complete")
+                        });
                     let _ = tx.send(AppEvent::SecurityChainVerified { valid, message });
                     let _ = tx.send(AppEvent::AuditChainVerified(valid));
                 }
@@ -2059,9 +2071,9 @@ pub fn spawn_save_provider_key(
             }
         }
         BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::FetchError(
-                crate::i18n::t("tui-event-provider-key-management-not-available-in-process"),
-            ));
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-provider-key-management-not-available-in-process",
+            )));
         }
     });
 }
@@ -2087,9 +2099,9 @@ pub fn spawn_delete_provider_key(backend: BackendRef, name: String, tx: mpsc::Se
             }
         }
         BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::FetchError(
-                crate::i18n::t("tui-event-provider-key-management-not-available-in-process"),
-            ));
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-provider-key-management-not-available-in-process",
+            )));
         }
     });
 }
@@ -2667,7 +2679,12 @@ pub fn spawn_install_extension(backend: BackendRef, id: String, tx: mpsc::Sender
                     let body = resp.json::<serde_json::Value>().ok();
                     let err = body
                         .and_then(|b| b["error"].as_str().map(String::from))
-                        .unwrap_or_else(|| crate::i18n::t_args("tui-event-extension-install-failed", &[("id", &id)]));
+                        .unwrap_or_else(|| {
+                            crate::i18n::t_args(
+                                "tui-event-extension-install-failed",
+                                &[("id", &id)],
+                            )
+                        });
                     let _ = tx.send(AppEvent::FetchError(err));
                 }
                 Err(e) => {
@@ -2679,9 +2696,9 @@ pub fn spawn_install_extension(backend: BackendRef, id: String, tx: mpsc::Sender
             }
         }
         BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::FetchError(
-                crate::i18n::t("tui-event-extension-install-not-supported"),
-            ));
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-extension-install-not-supported",
+            )));
         }
     });
 }
@@ -2715,9 +2732,9 @@ pub fn spawn_remove_extension(backend: BackendRef, id: String, tx: mpsc::Sender<
             }
         }
         BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::FetchError(
-                crate::i18n::t("tui-event-extension-remove-not-supported"),
-            ));
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-extension-remove-not-supported",
+            )));
         }
     });
 }
@@ -2748,9 +2765,9 @@ pub fn spawn_reconnect_extension(backend: BackendRef, id: String, tx: mpsc::Send
             }
         }
         BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::FetchError(
-                crate::i18n::t("tui-event-extension-reconnect-not-supported"),
-            ));
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-extension-reconnect-not-supported",
+            )));
         }
     });
 }
@@ -2857,7 +2874,9 @@ pub fn spawn_comms_send(
             {
                 Ok(resp) => {
                     if resp.status().is_success() {
-                        let _ = tx.send(AppEvent::CommsSendResult(crate::i18n::t("tui-event-comms-message-sent")));
+                        let _ = tx.send(AppEvent::CommsSendResult(crate::i18n::t(
+                            "tui-event-comms-message-sent",
+                        )));
                     } else {
                         let err = resp
                             .json::<serde_json::Value>()
@@ -2873,9 +2892,9 @@ pub fn spawn_comms_send(
             }
         }
         BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::CommsSendResult(
-                crate::i18n::t("tui-event-comms-send-not-supported-in-process"),
-            ));
+            let _ = tx.send(AppEvent::CommsSendResult(crate::i18n::t(
+                "tui-event-comms-send-not-supported-in-process",
+            )));
         }
     });
 }
@@ -2905,7 +2924,9 @@ pub fn spawn_comms_task(
             {
                 Ok(resp) => {
                     if resp.status().is_success() {
-                        let _ = tx.send(AppEvent::CommsTaskResult(crate::i18n::t("tui-event-comms-task-posted")));
+                        let _ = tx.send(AppEvent::CommsTaskResult(crate::i18n::t(
+                            "tui-event-comms-task-posted",
+                        )));
                     } else {
                         let err = resp
                             .json::<serde_json::Value>()
@@ -2921,9 +2942,9 @@ pub fn spawn_comms_task(
             }
         }
         BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::CommsTaskResult(
-                crate::i18n::t("tui-event-comms-post-not-supported-in-process"),
-            ));
+            let _ = tx.send(AppEvent::CommsTaskResult(crate::i18n::t(
+                "tui-event-comms-post-not-supported-in-process",
+            )));
         }
     });
 }

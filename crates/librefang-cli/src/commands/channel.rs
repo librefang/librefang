@@ -35,7 +35,13 @@ pub(crate) fn cmd_channel_list() {
     let conf_header = i18n::t("label-header-configured");
     let token_header = i18n::t("label-header-token");
     let msgs_header = i18n::t("channel-header-msgs-24h");
-    let mut t = crate::table::Table::new(&[&name_header, &kind_header, &conf_header, &token_header, &msgs_header]);
+    let mut t = crate::table::Table::new(&[
+        &name_header,
+        &kind_header,
+        &conf_header,
+        &token_header,
+        &msgs_header,
+    ]);
     for ch in &items {
         let name = ch.get("name").and_then(|v| v.as_str()).unwrap_or("?");
         let kind = ch.get("category").and_then(|v| v.as_str()).unwrap_or("?");
@@ -208,15 +214,9 @@ pub(crate) fn cmd_channel_setup(name: Option<&str>) {
                 &[("label", label), ("key", key), ("current", current)],
             )
         } else if required {
-            i18n::t_args(
-                "channel-prompt-required",
-                &[("label", label), ("key", key)],
-            )
+            i18n::t_args("channel-prompt-required", &[("label", label), ("key", key)])
         } else {
-            i18n::t_args(
-                "channel-prompt-optional",
-                &[("label", label), ("key", key)],
-            )
+            i18n::t_args("channel-prompt-optional", &[("label", label), ("key", key)])
         };
         let entered = prompt_input(&prompt);
         let val = entered.trim();
@@ -300,7 +300,10 @@ pub(crate) fn cmd_channel_rm(name: &str) {
             ui::error_with_fix(
                 &i18n::t_args(
                     "channel-config-read-fail",
-                    &[("path", &path.display().to_string()), ("error", &e.to_string())],
+                    &[
+                        ("path", &path.display().to_string()),
+                        ("error", &e.to_string()),
+                    ],
                 ),
                 &i18n::t("channel-config-read-fail-fix"),
             );
@@ -313,7 +316,10 @@ pub(crate) fn cmd_channel_rm(name: &str) {
             ui::error_with_fix(
                 &i18n::t_args(
                     "channel-config-parse-fail",
-                    &[("path", &path.display().to_string()), ("error", &e.to_string())],
+                    &[
+                        ("path", &path.display().to_string()),
+                        ("error", &e.to_string()),
+                    ],
                 ),
                 &i18n::t("channel-config-parse-fail-fix"),
             );
@@ -355,7 +361,10 @@ pub(crate) fn cmd_channel_rm(name: &str) {
         ui::error_with_fix(
             &i18n::t_args(
                 "channel-config-write-fail",
-                &[("path", &path.display().to_string()), ("error", &e.to_string())],
+                &[
+                    ("path", &path.display().to_string()),
+                    ("error", &e.to_string()),
+                ],
             ),
             &i18n::t("channel-config-write-fail-fix"),
         );

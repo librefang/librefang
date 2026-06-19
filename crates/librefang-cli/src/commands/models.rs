@@ -37,7 +37,12 @@ pub(crate) fn cmd_models_list(provider_filter: Option<&str>, json: bool) {
             let header_provider = i18n::t("label-header-provider");
             let header_tier = i18n::t("model-header-tier");
             let header_context = i18n::t("model-header-context");
-            let mut t = crate::table::Table::new(&[&header_model, &header_provider, &header_tier, &header_context]);
+            let mut t = crate::table::Table::new(&[
+                &header_model,
+                &header_provider,
+                &header_tier,
+                &header_context,
+            ]);
             for m in arr {
                 t.add_row(&[
                     m["id"].as_str().unwrap_or("?"),
@@ -81,7 +86,12 @@ pub(crate) fn cmd_models_list(provider_filter: Option<&str>, json: bool) {
         let header_provider = i18n::t("label-header-provider");
         let header_tier = i18n::t("model-header-tier");
         let header_context = i18n::t("model-header-context");
-        let mut t = crate::table::Table::new(&[&header_model, &header_provider, &header_tier, &header_context]);
+        let mut t = crate::table::Table::new(&[
+            &header_model,
+            &header_provider,
+            &header_tier,
+            &header_context,
+        ]);
         for m in models {
             if let Some(p) = provider_filter {
                 if m.provider != p {
@@ -177,7 +187,12 @@ pub(crate) fn cmd_models_providers(json: bool) {
             let header_auth = i18n::t("model-header-auth");
             let header_models = i18n::t("model-header-models");
             let header_base_url = i18n::t("model-header-base-url");
-            let mut t = crate::table::Table::new(&[&header_provider, &header_auth, &header_models, &header_base_url]);
+            let mut t = crate::table::Table::new(&[
+                &header_provider,
+                &header_auth,
+                &header_models,
+                &header_base_url,
+            ]);
             for p in arr {
                 t.add_row(&[
                     p["id"].as_str().unwrap_or("?"),
@@ -215,7 +230,12 @@ pub(crate) fn cmd_models_providers(json: bool) {
         let header_auth = i18n::t("model-header-auth");
         let header_models = i18n::t("model-header-models");
         let header_base_url = i18n::t("model-header-base-url");
-        let mut t = crate::table::Table::new(&[&header_provider, &header_auth, &header_models, &header_base_url]);
+        let mut t = crate::table::Table::new(&[
+            &header_provider,
+            &header_auth,
+            &header_models,
+            &header_base_url,
+        ]);
         for p in providers {
             t.add_row(&[
                 &p.id,
@@ -351,7 +371,8 @@ pub(crate) fn cmd_approvals_list(json: bool) {
         let header_agent = i18n::t("label-header-agent");
         let header_type = i18n::t("label-header-type");
         let header_request = i18n::t("approval-header-request");
-        let mut t = crate::table::Table::new(&[&header_id, &header_agent, &header_type, &header_request]);
+        let mut t =
+            crate::table::Table::new(&[&header_id, &header_agent, &header_type, &header_request]);
         for a in arr {
             t.add_row(&[
                 a["id"].as_str().unwrap_or("?"),
