@@ -186,6 +186,9 @@ fn is_potential_untranslated_literal(lit: &str) -> bool {
         "Failed to create tokio runtime",
         "Failed to create Tokio runtime",
         "HTTP blocking client with bundled CA roots should always build",
+        "log filter not installed",
+        "invalid log directive {directive:?}: {e}",
+        "Skipping unparseable baseline log directive on reload",
         "target checked above",
         "instance_id missing",
         // Technical format strings
@@ -595,7 +598,6 @@ fn test_no_untranslated_strings() {
                 || rel_path == "mod.rs"
                 || rel_path == "cli.rs"
                 || rel_path == "mcp.rs"
-                || rel_path == "log_filter.rs"
                 || rel_path.starts_with("tui/")
             {
                 continue;
