@@ -1722,3 +1722,23 @@ tui-dashboard-audit-detail = Detail
 tui-dashboard-loading = Loading…
 tui-dashboard-no-audit = No audit entries yet.
 
+# comms.rs
+tui-comms-title = Comms
+tui-comms-tab-topology = Topology ({ $agents } agents, { $edges } edges)
+tui-comms-tab-events = Events ({ $count })
+tui-comms-hints =   [s]end  [t]ask  [r]efresh  [Tab] focus  [↑↓] scroll
+tui-comms-loading = Loading topology…
+tui-comms-empty = No agents running. Start agents to see communication.
+tui-comms-events-empty = No inter-agent events yet. Activity will appear here.
+tui-comms-modal-send-title =  Send Message 
+tui-comms-modal-send-from = From (agent ID):
+tui-comms-modal-send-to = To (agent ID):
+tui-comms-modal-send-msg = Message:
+tui-comms-modal-send-hints = [Tab] field  [Enter] send  [Esc] cancel
+tui-comms-modal-task-title =  Post Task 
+tui-comms-modal-task-title-field = Title:
+tui-comms-modal-task-desc = Description:
+tui-comms-modal-task-assign = Assign to (agent ID, optional):
+tui-comms-modal-task-hints = [Tab] field  [Enter] post  [Esc] cancel
+
+
