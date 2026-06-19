@@ -969,10 +969,6 @@ pub async fn compact_messages(
     );
 
     let mut kept_messages = kept.to_vec();
-    // Context-engineering passes (#6173) run here, at the compaction
-    // boundary, so they piggyback on an event that already invalidates the
-    // provider prompt cache rather than mutating history every turn. Both
-    // passes are no-ops unless explicitly enabled in `[compaction]`.
     apply_context_engineering(&mut kept_messages, config, reasoning_echo_policy);
     let compacted_count = to_compact.len();
 
@@ -1062,21 +1058,9 @@ pub async fn compact_messages(
     })
 }
 
-// ---------------------------------------------------------------------------
 // Context engineering (#6173): CoT-pruning + developer-loop aggregation.
-//
-// Both passes reshape only the *kept* (verbatim) messages produced by
-// compaction. The append-only message journal retains the originals; only
-// the compacted working session is rewritten — and only at the compaction
-// boundary, never on the per-turn hot path, so the provider prompt cache is
-// not invalidated more often than compaction already does.
-// ---------------------------------------------------------------------------
 
-/// Apply the optional context-engineering passes to the kept messages.
-///
-/// Order matters: developer-loop aggregation runs first (it removes whole
-/// tool-use/result pairs), then CoT-pruning strips reasoning from whatever
-/// assistant turns remain. Both are gated and default-off.
+/// Aggregation runs before pruning so reasoning is stripped from whatever assistant turns remain after pairs are removed.
 fn apply_context_engineering(
     messages: &mut Vec<Message>,
     config: &CompactionConfig,
@@ -1094,19 +1078,7 @@ fn apply_context_engineering(
     }
 }
 
-/// Strip stale reasoning from assistant messages in place.
-///
-/// Keeps reasoning on the most recent `after_turns` assistant turns; for
-/// older assistant turns it drops `ContentBlock::Thinking` blocks and strips
-/// inline `<think>...</think>` spans from text blocks. Non-assistant turns
-/// are left untouched.
-///
-/// No-op when `after_turns == 0`, or when the model's [`ReasoningEchoPolicy`]
-/// is `Echo` — DeepSeek V4 Flash (thinking-on, librefang/librefang#4842)
-/// *requires* the original thinking echoed back on `tool_calls` turns or the
-/// API returns 400, so for that policy we never strip.
-///
-/// [`ReasoningEchoPolicy`]: librefang_types::model_catalog::ReasoningEchoPolicy
+/// No-op for `ReasoningEchoPolicy::Echo` (DeepSeek V4 Flash #4842) — those providers require reasoning echoed back or the API returns 400.
 fn prune_stale_reasoning(
     messages: &mut [Message],
     after_turns: u32,
@@ -1154,10 +1126,7 @@ fn strip_reasoning_from_message(msg: &mut Message) {
     }
 }
 
-/// Remove every `<think>...</think>` span from `s`. The opening tag is
-/// matched case-insensitively and matching is non-greedy (stops at the first
-/// `</think>`). An unclosed `<think>` strips to end of string. Surrounding
-/// text is preserved verbatim.
+/// Strip `<think>...</think>` spans from `s` case-insensitively; unclosed tag strips to end of string.
 fn strip_think_spans(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
@@ -1185,9 +1154,7 @@ fn strip_think_spans(s: &str) -> String {
     out
 }
 
-/// Case-insensitive (ASCII) substring search returning the byte offset of the
-/// first match of the ASCII `needle` in `haystack`. Because the needle is
-/// ASCII, the returned offset is always a UTF-8 char boundary.
+/// ASCII case-insensitive substring search; returns byte offset of first match (always a UTF-8 char boundary).
 fn find_ascii_ci(haystack: &str, needle: &str) -> Option<usize> {
     let hb = haystack.as_bytes();
     let nb = needle.as_bytes();
@@ -1198,11 +1165,7 @@ fn find_ascii_ci(haystack: &str, needle: &str) -> Option<usize> {
         .find(|&i| nb.iter().enumerate().all(|(j, c)| hb[i + j].eq_ignore_ascii_case(c)))
 }
 
-/// Collapse consecutive runs of developer-tool steps (each an assistant
-/// tool-use turn whose tool calls are all `Mutating`/`ExecCapable`, paired
-/// with its matching tool-result turn) into the first step, a deterministic
-/// placeholder, and the last step. Whole tool-use/result pairs are removed so
-/// no `tool_use_id` is ever orphaned. No-op when `max_steps == 0`.
+/// Whole tool-use/result pairs are removed together so no `tool_use_id` is orphaned; runs shorter than `max_steps` are left verbatim.
 fn aggregate_developer_loops(messages: &mut Vec<Message>, max_steps: u32) {
     if max_steps == 0 || messages.len() < 4 {
         return;
@@ -1219,7 +1182,7 @@ fn aggregate_developer_loops(messages: &mut Vec<Message>, max_steps: u32) {
             steps.push((j, j + 1));
             j += 2;
         }
-        if steps.len() > max_steps && steps.len() > 2 {
+        if steps.len() >= max_steps && steps.len() > 2 {
             let first = steps[0];
             let last = steps[steps.len() - 1];
             result.push(messages[first.0].clone());
@@ -1239,10 +1202,7 @@ fn aggregate_developer_loops(messages: &mut Vec<Message>, max_steps: u32) {
     *messages = result;
 }
 
-/// True when `a` is an assistant turn whose tool calls are all developer
-/// tools (`Mutating`/`ExecCapable`) and `b` carries exactly the matching
-/// tool results. Role of `b` is not constrained beyond "contains only tool
-/// results", so the check is robust to how results are threaded.
+/// True when `a` is an assistant turn with all-developer tool calls and `b` carries exactly the matching tool results.
 fn is_dev_tool_step(a: &Message, b: &Message) -> bool {
     if a.role != Role::Assistant {
         return false;
@@ -1279,8 +1239,7 @@ fn is_dev_tool_step(a: &Message, b: &Message) -> bool {
         && result_ids.iter().all(|id| tool_use_ids.contains(id))
 }
 
-/// Whether a tool name classifies as a developer tool (`Mutating` or
-/// `ExecCapable`) by the shared tool classifier — no hardcoded name list.
+/// Whether a tool name classifies as a developer tool via the shared classifier (`Mutating`/`ExecCapable`) — no hardcoded list.
 fn is_developer_tool(name: &str) -> bool {
     matches!(
         crate::classify_tool(name, None),
@@ -1288,8 +1247,7 @@ fn is_developer_tool(name: &str) -> bool {
     )
 }
 
-/// Sorted, de-duplicated developer-tool names across the given steps
-/// (deterministic output — refs #3298).
+/// Sorted, de-duplicated tool names from the given steps (deterministic per #3298).
 fn collect_dev_tool_names(messages: &[Message], steps: &[(usize, usize)]) -> Vec<String> {
     let mut names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for &(a_idx, _) in steps {
@@ -1304,9 +1262,7 @@ fn collect_dev_tool_names(messages: &[Message], steps: &[(usize, usize)]) -> Vec
     names.into_iter().collect()
 }
 
-/// Build the deterministic placeholder that replaces the elided middle steps
-/// of a developer loop. Constructed manually with `timestamp: None` so the
-/// output is byte-stable across runs.
+/// `timestamp: None` keeps output byte-stable across runs.
 fn developer_loop_placeholder(elided: usize, tools: &[String]) -> Message {
     let tool_list = if tools.is_empty() {
         String::new()
@@ -1556,6 +1512,21 @@ mod tests {
         aggregate_developer_loops(&mut msgs, 5);
         assert_eq!(msgs.len(), 4, "short run is not aggregated");
         assert!(!has_loop_placeholder(&msgs));
+    }
+
+    #[test]
+    fn aggregate_developer_loops_triggers_at_exact_threshold() {
+        // max_steps=3, 3 steps: must aggregate (the documented "minimum N triggers" boundary).
+        let mut msgs = Vec::new();
+        for k in 0..3 {
+            msgs.push(dev_tool_use(&format!("t{k}"), "file_write"));
+            msgs.push(tool_result(&format!("t{k}"), "file_write"));
+        }
+        aggregate_developer_loops(&mut msgs, 3);
+        // first + placeholder + last = 5
+        assert_eq!(msgs.len(), 5);
+        assert!(has_loop_placeholder(&msgs));
+        assert!(tool_pairing_intact(&msgs));
     }
 
     #[test]
