@@ -268,14 +268,85 @@ async fn activate_prompt_version_with_agent_id_in_body_succeeds() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body={body:?}");
-    // The mock kernel has no real PromptStore, so activate writes succeed but
+    // VERSION_ID is a synthetic constant that was never created in the
+    // (real, SQLite-backed) store, so set_active_version updates zero rows and
     // the subsequent read-back returns Ok(None). The handler falls back to the
     // legacy ack envelope. Assert the ack shape explicitly — the entity-return
-    // path from #4365 requires a real PromptStore-backed fixture to verify.
+    // path from #4365 needs a version that was actually created first (see
+    // delete_active_prompt_version_returns_400).
     assert_eq!(
         body["success"],
         serde_json::json!(true),
         "expected ack envelope {{success:true}}, got body={body:?}"
+    );
+}
+
+/// #6195: deleting the active (bound) prompt version must be refused at the
+/// HTTP layer with 400, and the version must survive. Drives the full
+/// create → activate → delete path through the real SQLite-backed store so
+/// the guard (`PromptStore::delete_version` → `InvalidState`) is exercised
+/// end to end, not just at the store layer.
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_active_prompt_version_returns_400() {
+    let h = boot().await;
+    let create_path = format!("/api/agents/{AGENT_UUID}/prompts/versions");
+
+    // Create two versions so one can be made active while another remains.
+    let (status, first) = json_request(
+        &h,
+        Method::POST,
+        &create_path,
+        Some(serde_json::json!({"system_prompt": "First.", "description": "v1"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create v1: {first:?}");
+    let first_id = first["id"].as_str().expect("v1 id").to_string();
+
+    let (status, second) = json_request(
+        &h,
+        Method::POST,
+        &create_path,
+        Some(serde_json::json!({"system_prompt": "Second.", "description": "v2"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create v2: {second:?}");
+
+    // Activate the first version.
+    let (status, _) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/prompts/versions/{first_id}/activate"),
+        Some(serde_json::json!({"agent_id": AGENT_UUID})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Deleting the active version must be refused with 400.
+    let (status, body) = json_request(
+        &h,
+        Method::DELETE,
+        &format!("/api/prompts/versions/{first_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "deleting the active version must be refused: {body:?}"
+    );
+
+    // The version still exists — the refused delete was a no-op.
+    let (status, _) = json_request(
+        &h,
+        Method::GET,
+        &format!("/api/prompts/versions/{first_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the active version must survive the refused delete"
     );
 }
 

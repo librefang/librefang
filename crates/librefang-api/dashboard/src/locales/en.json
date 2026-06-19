@@ -3883,6 +3883,7 @@
     "bind": "Bind",
     "bound": "Bound",
     "delete": "Delete version",
+    "delete_blocked_active": "Active version — activate another version before deleting",
     "created_label": "Created",
     "bind_success": "Bound v{{version}} to the agent",
     "bind_error": "Failed to bind version",
