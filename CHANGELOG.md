@@ -844,6 +844,12 @@ _308 PRs from 7 contributors since v2026.5.17-beta.12._
 
 ### Changed
 
+- **chore(deps): drop five orphaned email `[workspace.dependencies]` left after the channel sidecar migration** (#6176) (@houko).
+  `lettre` / `imap` / `rustls-connector` / `mailparse` / `rustls-pemfile` were declared in the root `Cargo.toml` but had no member consumer (no `.workspace = true`, no `use`) and were already absent from `Cargo.lock`, so they were never compiled or audited — the issue's "adds compile time / binary size / supply-chain surface" framing was inaccurate; the real defect was dead declaration cruft.
+  The now-unmatchable `deny.toml` ignore for `RUSTSEC-2025-0134` (`rustls-pemfile`) is dropped in the same change, since that crate no longer appears in the resolved graph.
+  Declaration-only removal; `Cargo.lock` is unchanged.
+  Closes #6176.
+
 - **refactor(error-contracts): migrate `web_search.rs` tool functions from `Result<String, String>` to `Result<String, ToolError>`** (#3576) (@houko) — one slice of the ongoing structured-error-contracts migration.
 The multi-provider search engine (`WebSearchEngine::search` and its `search_brave` / `search_tavily` / `search_perplexity` / `search_jina` / `search_duckduckgo` / `search_searxng` / `search_auto` / `list_searxng_categories` helpers) now returns the typed `ToolError` instead of an opaque `String`: missing API keys and unconfigured SearXNG URLs map to `Unavailable`, invalid `pageno` / `category` to `InvalidParameter`, `reqwest` send/JSON failures to `Upstream` via `ToolError::upstream` (preserving the `reqwest::Error` source chain per #3745), and "no results" / "all providers failed" to `Upstream` via `upstream_msg`.
 The dispatch boundary still narrows to a `String` via `Display`, so the LLM-visible error text now reflects the structured variant form (e.g. `"SearXNG URL unavailable"`, `"Invalid parameter 'pageno': must be >= 1 (pages are 1-indexed)"`) — the intended outcome of the migration.
@@ -870,6 +876,10 @@ In-crate only; no cross-crate error-shape changes.
   Two instances of the same sidecar adapter (e.g. one Matrix account per agent) previously had to share one global secret — a Matrix sidecar's identity is its `MATRIX_ACCESS_TOKEN`, so both logged in as the same account.
   `build_spawn_env` now resolves a `<NAME>__KEY` entry in `secrets.env` to the bare `KEY` for the matching `[[sidecar_channels]]` instance (name uppercased, non-alphanumerics → `_`); the per-instance value overrides the global bare key and the parent env, and another instance's namespaced secret never leaks into this child.
   Operators keep tokens in `secrets.env` (not plaintext `config.toml`); without a prefix all instances still share the global secret. Closes #6169.
+- **dashboard: a global Auto-Dream on/off switch on the Memory → Auto-Dream tab** (#6188) (@houko).
+  The tab previously showed only a read-only status badge and told users to edit `config.toml` to flip the master switch; it is now an interactive toggle wired to the existing `POST /api/config/set` (`auto_dream.enabled` is on the writable allowlist).
+  The handler invalidates `autoDreamKeys` in addition to `useSetConfigValue`'s `configKeys` so the badge and the per-agent "Dream now" buttons reflect the new global state immediately rather than after the 15s poll.
+  Dashboard-only change — the flag is read live by the kernel each tick, so the toggle takes effect without a restart. Closes #6188.
 
 - **auth/dashboard: passkey (WebAuthn/FIDO2) login** (#5981) (@houko) — sign in to the dashboard with Touch ID, Face ID, Windows Hello, Android biometrics, or a roaming security key instead of typing a password.
   Opt-in per deployment via `passkey_enabled` + `passkey_rp_id` / `passkey_rp_origin` in `config.toml`; password login is untouched and remains the fallback.

@@ -5,6 +5,7 @@ import {
   triggerAutoDream,
 } from "../http/client";
 import { autoDreamKeys } from "../queries/keys";
+import { useSetConfigValue } from "./config";
 
 /**
  * Manually trigger a consolidation for a specific agent. The outcome
@@ -44,6 +45,13 @@ export function useSetAutoDreamEnabled() {
   return useMutation({
     mutationFn: ({ agentId, enabled }: { agentId: string; enabled: boolean }) =>
       setAutoDreamEnabled(agentId, enabled),
+    onSuccess: () => qc.invalidateQueries({ queryKey: autoDreamKeys.all }),
+  });
+}
+
+export function useSetAutoDreamGlobalEnabled() {
+  const qc = useQueryClient();
+  return useSetConfigValue({
     onSuccess: () => qc.invalidateQueries({ queryKey: autoDreamKeys.all }),
   });
 }
