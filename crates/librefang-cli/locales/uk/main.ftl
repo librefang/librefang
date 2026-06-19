@@ -1811,3 +1811,10 @@ tui-chat-tool-running = виконується…
 tui-chat-thinking = думає…
 tui-chat-mode-daemon = демон
 tui-chat-mode-inprocess = вбудований
+
+# free_provider_guide.rs
+tui-guide-hint-groq = безкоштовний рівень, надшвидка генерація
+tui-guide-hint-gemini = безкоштовний рівень, щедра квота (Google акаунт)
+tui-guide-hint-deepseek = 5 млн безкоштовних токенів для нових акаунтів
+tui-guide-label-apikey =  API ключ 
+tui-guide-warn-env = .env: { $error }

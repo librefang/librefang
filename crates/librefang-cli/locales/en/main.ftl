@@ -1795,3 +1795,10 @@ tui-chat-tool-running = running…
 tui-chat-thinking = thinking…
 tui-chat-mode-daemon = daemon
 tui-chat-mode-inprocess = in-process
+
+# free_provider_guide.rs
+tui-guide-hint-groq = free tier, blazing fast inference
+tui-guide-hint-gemini = free tier, generous quota (Google account)
+tui-guide-hint-deepseek = 5M free tokens for new accounts
+tui-guide-label-apikey =  API Key 
+tui-guide-warn-env = .env: { $error }

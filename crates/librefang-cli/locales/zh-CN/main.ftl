@@ -975,3 +975,10 @@ tui-chat-tool-running = 正在运行…
 tui-chat-thinking = 思考中…
 tui-chat-mode-daemon = 守护进程
 tui-chat-mode-inprocess = 进程内
+
+# free_provider_guide.rs
+tui-guide-hint-groq = 免费层，极速推理
+tui-guide-hint-gemini = 免费层，额度慷慨 (需 Google 账号)
+tui-guide-hint-deepseek = 新用户免费 500 万 Token
+tui-guide-label-apikey =  API 密钥 
+tui-guide-warn-env = .env: { $error }
