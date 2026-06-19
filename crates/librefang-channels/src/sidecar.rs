@@ -640,16 +640,54 @@ fn strip_matching_outer_quotes(s: &str) -> &str {
 /// `Command::env`, with both layers merged. The parent env is NOT
 /// returned here — the spawned child already inherits it via
 /// `Command::env_clear` not being called.
-fn build_spawn_env(home_dir: &Path, ctx_env: &HashMap<String, String>) -> Vec<(String, String)> {
+/// Uppercase + non-alphanumeric→`_` form of a sidecar instance `name`, used as the
+/// `<PREFIX>__<KEY>` namespace for per-instance secrets in `secrets.env` (#6169).
+fn instance_secret_prefix(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn build_spawn_env(
+    home_dir: &Path,
+    instance_name: &str,
+    ctx_env: &HashMap<String, String>,
+) -> Vec<(String, String)> {
     let mut merged: HashMap<String, String> = HashMap::new();
     let secrets_path = home_dir.join("secrets.env");
+    let prefix = format!("{}__", instance_secret_prefix(instance_name));
+    let mut instance_scoped: HashMap<String, String> = HashMap::new();
     for (k, v) in parse_secrets_env(&secrets_path) {
-        // Parent process env wins (dotenv precedence).
-        if std::env::var(&k).is_err() {
+        if let Some(bare) = k.strip_prefix(prefix.as_str()) {
+            // Per-instance secret (`<NAME>__KEY`): scoped to this instance; wins over
+            // the global bare key and the parent env so two sidecars can hold their
+            // own tokens while keeping them in secrets.env, not plaintext config.toml.
+            if !bare.is_empty() {
+                instance_scoped.insert(bare.to_string(), v);
+            }
+        } else if k.contains("__") {
+            // `__` is the reserved instance-namespace delimiter. This function only
+            // knows its own instance name, so it cannot tell a foreign instance's
+            // namespaced secret from a global key that merely contains `__`. Both are
+            // intentionally withheld from the child: a bare global secret in
+            // secrets.env must not contain `__` (see librefang.toml.example).
+            continue;
+        } else if std::env::var(&k).is_err() {
+            // Global secrets.env: parent process env wins (dotenv precedence).
             merged.insert(k, v);
         }
     }
-    // Explicit config.toml [sidecar_channels.env] wins over secrets.env.
+    // Per-instance secrets beat the global secrets.env and the parent env.
+    for (k, v) in instance_scoped {
+        merged.insert(k, v);
+    }
+    // Explicit config.toml [sidecar_channels.env] wins over everything.
     for (k, v) in ctx_env {
         merged.insert(k.clone(), v.clone());
     }
@@ -750,7 +788,7 @@ async fn spawn_once(
     // loader — still reach the child without a daemon restart. The
     // parent process env is the highest precedence and the child
     // already inherits it via the default `Command` setup.
-    let mut env_map: HashMap<String, String> = build_spawn_env(&ctx.home_dir, &ctx.env)
+    let mut env_map: HashMap<String, String> = build_spawn_env(&ctx.home_dir, &ctx.name, &ctx.env)
         .into_iter()
         .collect();
     // Embedded-SDK fallback: when the spawn command is a Python
@@ -3551,7 +3589,7 @@ mod tests {
         }
 
         let ctx_env: HashMap<String, String> = HashMap::new();
-        let merged = build_spawn_env(tmp.path(), &ctx_env);
+        let merged = build_spawn_env(tmp.path(), "test", &ctx_env);
         let got: HashMap<_, _> = merged.into_iter().collect();
         assert_eq!(
             got.get("LIBREFANG_TEST_BSE_SECRETS_ONLY")
@@ -3575,7 +3613,7 @@ mod tests {
         }
 
         let ctx_env: HashMap<String, String> = HashMap::new();
-        let merged = build_spawn_env(tmp.path(), &ctx_env);
+        let merged = build_spawn_env(tmp.path(), "test", &ctx_env);
         let got: HashMap<_, _> = merged.into_iter().collect();
         // The merge skipped the secrets.env entry because the parent
         // env already had the key; the child still inherits the parent
@@ -3612,7 +3650,7 @@ mod tests {
             "LIBREFANG_TEST_BSE_CTX_WINS".to_string(),
             "from_config".to_string(),
         );
-        let merged = build_spawn_env(tmp.path(), &ctx_env);
+        let merged = build_spawn_env(tmp.path(), "test", &ctx_env);
         let got: HashMap<_, _> = merged.into_iter().collect();
         assert_eq!(
             got.get("LIBREFANG_TEST_BSE_CTX_WINS").map(|s| s.as_str()),
@@ -3627,9 +3665,62 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let mut ctx_env: HashMap<String, String> = HashMap::new();
         ctx_env.insert("FOO".to_string(), "bar".to_string());
-        let merged = build_spawn_env(tmp.path(), &ctx_env);
+        let merged = build_spawn_env(tmp.path(), "test", &ctx_env);
         let got: HashMap<_, _> = merged.into_iter().collect();
         assert_eq!(got.get("FOO").map(|s| s.as_str()), Some("bar"));
+    }
+
+    #[test]
+    fn build_spawn_env_per_instance_secret_overrides_global_and_parent() {
+        // #6169: a `<NAME>__KEY` secret resolves to bare KEY for this instance and
+        // beats both the global bare key and a shell-exported parent value, so two
+        // sidecars can each hold their own token from secrets.env.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("secrets.env"),
+            "LIBREFANG_TEST_BSE_PI=global\nAGENT_A__LIBREFANG_TEST_BSE_PI=for_a\n",
+        )
+        .unwrap();
+        // SAFETY: test-local key; exported to prove the per-instance secret still wins.
+        unsafe {
+            std::env::set_var("LIBREFANG_TEST_BSE_PI", "from_parent");
+        }
+        let ctx_env: HashMap<String, String> = HashMap::new();
+        let merged = build_spawn_env(tmp.path(), "agent-a", &ctx_env);
+        let got: HashMap<_, _> = merged.into_iter().collect();
+        assert_eq!(
+            got.get("LIBREFANG_TEST_BSE_PI").map(|s| s.as_str()),
+            Some("for_a"),
+            "per-instance secret must override global secrets.env and parent env"
+        );
+        // SAFETY: cleanup.
+        unsafe {
+            std::env::remove_var("LIBREFANG_TEST_BSE_PI");
+        }
+    }
+
+    #[test]
+    fn build_spawn_env_other_instance_namespaced_secret_does_not_leak() {
+        // A different instance's `<NAME>__KEY` secret must not reach this child,
+        // neither under the bare name nor under the namespaced name.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("secrets.env"),
+            "AGENT_B__LIBREFANG_TEST_BSE_LEAK=for_b\n",
+        )
+        .unwrap();
+        // SAFETY: ensure no parent value masks the assertion.
+        unsafe {
+            std::env::remove_var("LIBREFANG_TEST_BSE_LEAK");
+        }
+        let ctx_env: HashMap<String, String> = HashMap::new();
+        let merged = build_spawn_env(tmp.path(), "agent-a", &ctx_env);
+        let got: HashMap<_, _> = merged.into_iter().collect();
+        assert!(
+            !got.contains_key("LIBREFANG_TEST_BSE_LEAK")
+                && !got.contains_key("AGENT_B__LIBREFANG_TEST_BSE_LEAK"),
+            "agent-b's namespaced secret must not leak into agent-a's child env"
+        );
     }
 
     /// Find python3 or python on PATH.
