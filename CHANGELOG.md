@@ -852,6 +852,9 @@ _308 PRs from 7 contributors since v2026.5.17-beta.12._
 
 ### Changed
 
+- **dashboard(agents): drop the arbitrary 200000 cap on the model `max_tokens` input** (#6209) (@houko).
+  The agent model-config `max_tokens` field hard-capped its input at `max={200000}`, silently preventing operators from setting a higher output budget; the provider validates the real per-model ceiling anyway, so the UI no longer imposes its own arbitrary limit (`min={1}` is kept).
+  Closes #6209.
 - **refactor(error-contracts): migrate `browser_tools.rs` to `Result<String, ToolError>`** (#3576) (@houko) — another slice of the structured-error-contracts migration.
   The ten `tool_browser_*` dispatchers (navigate / click / type / screenshot / read_page / close / scroll / wait / run_js / back) now return the typed `ToolError` instead of an opaque `String`: missing params map to `MissingParameter`, an SSRF-blocked URL to `InvalidParameter`, and CDP transport / command failures to `Upstream` via `upstream_msg`.
   The dispatch boundary drops its per-arm `.map_err(ToolError::upstream_msg)` so the typed variants flow through `tool_result_from_typed`; the `None` (browser-not-wired) arm still yields `Unavailable`.
@@ -882,6 +885,14 @@ In-crate only; no cross-crate error-shape changes.
   Additive and non-breaking: `resolve_or_fallback`, dispatch, and the conversation-bindings table are untouched and arrive in later PRs.
 
 ### Added
+
+- **dashboard: guide the user to start a new session when a conversation hits the token / context-window limit** (#6211) (@houko).
+  When the latest turn in the agent chat fails with a token / context-window or length / quota limit, the chat view now shows an inline guidance banner with a one-click "Start a new session" action that reuses the existing `useCreateAgentSession` mutation, instead of leaving only a raw error bubble.
+  Detection is a frontend heuristic over the daemon / provider error string (`isContextLimitError`), because the chat surface carries no structured per-turn context-exhaustion signal; the heuristic matches the canonical phrases the kernel's `classify_streaming_error` emits and explicitly suppresses the banner for an internal usage / spending-budget cap (where a new session would not help).
+  This complements the #6215 context-usage indicator (which shows *how full* the window is but does not classify a failed turn).
+  The banner is scoped to the agent session chat view — channels are config-only surfaces in the dashboard with no conversation UI.
+  Dashboard-only change; covered by `ChatPage.limit.test.ts`.
+  Closes #6211.
 
 - **sec(sandbox): protect the audit anchor from WASM skill `fs_write` via a capability deny-list** (#6182) (@houko).
   The WASM sandbox previously gated `fs_write` solely on glob capability matching, so a skill granted a broad `FileWrite` subtree — or the universal `FileWrite("*")` — could truncate the audit anchor (`[audit].anchor_path`, default `data_dir/audit.anchor`) and silently break the tamper-evident Merkle chain.
@@ -958,6 +969,11 @@ In-crate only; no cross-crate error-shape changes.
   A nullable `compacted_summary_session_id` column (schema v46, backward-compatible) now records which session owns the current summary; `store_llm_summary` stamps it with the compacted session, and the GET handler surfaces the banner only when the requested session matches the owner via the new `MemorySubstrate::compacted_summary_for_session`.
   The summary is scoped, not lost — the session that legitimately produced it still shows it.
   Closes #6225.
+- **fix(cli): stop the agent-creation wizard from stamping a hidden 200k hourly token cap** (#6206) (@houko).
+  The TUI "create custom agent" wizard hard-coded `[resources] max_llm_tokens_per_hour = 200000` into every generated `agent.toml`, so TUI-created agents silently hit `Resource quota exceeded: Token limit would be exceeded ... > 200000` after a few large-context turns — even though the compiled and global defaults are unlimited.
+  The template now emits `max_llm_tokens_per_hour = 0` (explicitly unlimited, matching every non-TUI agent); operators who want a cap set it via `agent.toml [resources]`, the global `[budget] default_max_llm_tokens_per_hour`, or `PATCH /api/agents/{id}/budget`.
+  Existing agents keep their stored cap — edit the agent's manifest or PATCH its budget to lift it.
+  Closes #6206.
 - **fix(prompts): refuse to delete the active (bound) prompt version** (#6195) (@houko).
   `PromptStore::delete_version` deleted unconditionally, so a direct API/SDK call could delete the version an agent is actively sending, orphaning its live prompt; the dashboard only hid the delete button client-side.
   The store now rejects deleting an active version with `InvalidState` (surfaced as `400`, no longer flattened to `500` by the kernel handle), unknown ids stay an idempotent no-op, and the dashboard renders the active version's delete button disabled with an explanatory tooltip on both the Prompts page and the per-agent Prompts/Experiments modal.
