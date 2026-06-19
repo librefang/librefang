@@ -892,6 +892,10 @@ In-crate only; no cross-crate error-shape changes.
 
 ### Added
 
+- **dashboard(agents): edit the system prompt and bind a prompt-library version from the agent detail drawer** (#6187) (@houko).
+  The Agents page previously showed the system prompt read-only and the "Prompts" modal's activate only flipped the store's active flag without changing the live prompt; the Hands page already had a full editor (#6151 / #6166), leaving the two pages inconsistent.
+  `SystemPromptSection` is now an inline editor: edit and save via `PATCH /api/agents/{id}`, or open the prompt library and bind a saved version via `useBindPromptVersionToAgent` (which hot-swaps the live `system_prompt` and flips `is_active` together).
+  Dashboard-only — the backend `update_system_prompt` path is unchanged; i18n added to en/zh/uk and the editor is covered by a new `AgentsPage.test.tsx`. Closes #6187.
 - **observability: `librefang_tool_call_total` now carries an `agent` label** (#6226) (@houko).
   The counter added in #3495 was labeled only by `tool` and `outcome`, so tool failures could not be attributed per-agent.
   It is now `librefang_tool_call_total{agent, tool, outcome}`, mirroring the existing per-agent `librefang_cron_fires_total{agent}` precedent.
@@ -978,6 +982,10 @@ In-crate only; no cross-crate error-shape changes.
   The Hand settings editor PUTs only the keys changed this session, but `update_hand_settings` passed that partial map straight to `HandRegistry::update_config`, which replaces the whole instance config — so for a Hand with several settings, saving one reverted every other to its default.
   The route now reads the instance's current config and merges the incoming keys over it (a true partial update; the registry's replace contract is unchanged), and the editor also seeds its payload from the saved values as defense in depth.
   Closes #6204.
+- **fix(dashboard): serve the SPA shell on a hard refresh of the Prompts and Tasks pages** (#6197) (@houko).
+  `/dashboard/prompts` and `/dashboard/tasks` are real router routes, but they were never added to the server-side `SPA_ROUTES` allowlist, so a direct navigation or browser refresh returned `asset not found` (404) instead of `index.html`.
+  Both slugs are added to the allowlist, and a drift-guard test now parses `router.tsx` and asserts every top-level dashboard route falls back to the shell, so a future route added without updating the allowlist fails loudly.
+  Closes #6197.
 - **fix(api): scope the compaction-summary banner to the session that was actually compacted** (#6225) (@houko).
   The dashboard "Session summary (older messages compacted)" banner appeared on a freshly created session that was never compacted, showing a previous unrelated conversation's summary.
   `compacted_summary` lives in the agent-scoped `canonical_sessions` row (one per `agent_id`) and outlives any individual session, but `get_agent_session` exposed it whenever the requested session was the agent's *active* one — so creating a new session, which makes it active without compacting it, leaked the prior summary onto message #1.

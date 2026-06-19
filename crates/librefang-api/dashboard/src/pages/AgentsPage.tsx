@@ -5,6 +5,7 @@ import { useNavigate } from "@tanstack/react-router";
 import {
   type AgentDetail,
   type AgentItem,
+  type PromptVersion,
   type ToolDefinition,
 } from "../api";
 import { useQueryClient } from "@tanstack/react-query";
@@ -26,7 +27,7 @@ import { PromptsExperimentsModal } from "../components/PromptsExperimentsModal";
 import { useUIStore } from "../lib/store";
 import { toastErr } from "../lib/errors";
 import { filterVisible } from "../lib/hiddenModels";
-import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, Check } from "lucide-react";
+import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, Check, Save, Library } from "lucide-react";
 import { buildModelConfigPatch, MODEL_MAX_TOKENS_DEFAULT, MODEL_TEMPERATURE_DEFAULT } from "../lib/agentModelPatch";
 import { truncateId } from "../lib/string";
 import { pickLatestSessionId } from "../lib/sessionSelector";
@@ -62,6 +63,7 @@ import {
   useAgentTemplates,
   useAgentTools,
   useAgentSkills,
+  usePromptVersions,
   useTools,
 } from "../lib/queries/agents";
 import {
@@ -78,6 +80,7 @@ import {
   useUpdateAgentTools,
   useSetAgentSkills,
 } from "../lib/mutations/agents";
+import { useBindPromptVersionToAgent } from "../lib/mutations/prompts";
 
 /**
  * Local view type that pairs the strict `AgentDetail` shape from `api.ts`
@@ -133,42 +136,155 @@ function DetailRow({ label, children }: { label: React.ReactNode; children: Reac
   );
 }
 
-/** Collapsible system-prompt card. Long prompts (>6 lines or >400 chars)
- *  start collapsed with an expand toggle; short prompts render as-is. */
-function SystemPromptSection({ prompt }: { prompt: string }) {
+export function SystemPromptSection({
+  agentId,
+  prompt,
+}: {
+  agentId: string;
+  prompt: string;
+}) {
   const { t } = useTranslation();
-  const [expanded, setExpanded] = useState(false);
-  const isLong = prompt.split("\n").length > 6 || prompt.length > 400;
+  const addToast = useUIStore((s) => s.addToast);
+
+  const current = prompt ?? "";
+  const [draft, setDraft] = useState(current);
+  const [showLibrary, setShowLibrary] = useState(false);
+  // Re-seed draft when live prompt changes (e.g. after a bind or agent-switch).
+  useEffect(() => {
+    setDraft(current);
+  }, [current]);
+
+  const patchAgent = usePatchAgent();
+  const bindVersion = useBindPromptVersionToAgent();
+  // Only fetch versions once the operator opens the library picker.
+  const versionsQuery = usePromptVersions(agentId, { enabled: showLibrary });
+
+  const dirty = draft !== current;
+
+  const save = () => {
+    if (!dirty || patchAgent.isPending) return;
+    patchAgent.mutate(
+      { agentId, body: { system_prompt: draft } },
+      {
+        onSuccess: () =>
+          addToast(
+            t("agents.system_prompt_saved", { defaultValue: "System prompt saved" }),
+            "success",
+          ),
+        onError: (e: Error) =>
+          addToast(e.message || t("common.error", { defaultValue: "Error" }), "error"),
+      },
+    );
+  };
+
+  const bind = (version: PromptVersion) => {
+    if (bindVersion.isPending) return;
+    bindVersion.mutate(
+      { agentId, version },
+      {
+        onSuccess: () => {
+          addToast(
+            t("agents.prompt_bound", { defaultValue: "Prompt bound from library" }),
+            "success",
+          );
+          setShowLibrary(false);
+        },
+        onError: (e: Error) =>
+          addToast(e.message || t("common.error", { defaultValue: "Error" }), "error"),
+      },
+    );
+  };
+
   return (
     <section>
       <div className="flex items-center justify-between mb-2">
         <h4 className="text-sm font-semibold">{t("agents.system_prompt")}</h4>
-        {isLong && (
-          <button
-            onClick={() => setExpanded(v => !v)}
-            className="text-xs text-brand hover:underline font-medium"
-          >
-            {expanded
-              ? t("common.collapse", { defaultValue: "Collapse" })
-              : t("common.expand", { defaultValue: "Expand" })}
-          </button>
-        )}
-      </div>
-      <div className="relative">
-        <div
-          className={`rounded-lg bg-main border border-border-subtle p-4 text-sm text-text leading-relaxed whitespace-pre-wrap ${
-            isLong && !expanded ? "max-h-40 overflow-hidden" : ""
-          }`}
+        <button
+          type="button"
+          onClick={() => setShowLibrary((v) => !v)}
+          className="inline-flex items-center gap-1 text-xs text-brand hover:underline font-medium"
         >
-          {prompt}
-        </div>
-        {isLong && !expanded && (
-          // Fade-out at the bottom so the cut feels intentional rather than
-          // a clip, without introducing an inner scroll. The modal's outer
-          // scroll is the single source of truth — no nested scrolling.
-          <div className="pointer-events-none absolute inset-x-0 bottom-0 h-12 rounded-b-lg bg-linear-to-t from-main to-transparent" />
-        )}
+          <Library className="w-3.5 h-3.5" />
+          {t("agents.bind_from_library", { defaultValue: "Bind from library" })}
+        </button>
       </div>
+
+      <textarea
+        value={draft}
+        disabled={patchAgent.isPending}
+        onChange={(e) => setDraft(e.target.value)}
+        placeholder={t("agents.system_prompt_placeholder", {
+          defaultValue: "This agent has no system prompt yet.",
+        })}
+        rows={8}
+        className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm font-mono leading-relaxed resize-y disabled:opacity-50 focus:outline-none focus:border-brand"
+      />
+      <div className="flex justify-end mt-2">
+        <button
+          type="button"
+          disabled={!dirty || patchAgent.isPending}
+          onClick={save}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-brand text-white text-xs font-bold disabled:opacity-40 disabled:cursor-not-allowed hover:bg-brand/90 transition-colors"
+        >
+          {patchAgent.isPending ? (
+            <Loader2 className="w-3 h-3 animate-spin" />
+          ) : (
+            <Save className="w-3 h-3" />
+          )}
+          {t("common.save")}
+        </button>
+      </div>
+
+      {showLibrary && (
+        <div className="mt-2 rounded-lg border border-border-subtle bg-main/40 p-2 space-y-1">
+          {versionsQuery.isLoading ? (
+            <p className="text-xs text-text-dim px-1 py-2">
+              {t("common.loading", { defaultValue: "Loading…" })}
+            </p>
+          ) : versionsQuery.isError ? (
+            <p className="text-xs text-red-500 px-1 py-2">
+              {t("agents.prompt_versions_load_err", {
+                defaultValue: "Failed to load prompt versions",
+              })}
+            </p>
+          ) : !versionsQuery.data || versionsQuery.data.length === 0 ? (
+            <p className="text-xs text-text-dim px-1 py-2">
+              {t("agents.no_prompt_versions", {
+                defaultValue: "No saved prompt versions for this agent yet.",
+              })}
+            </p>
+          ) : (
+            versionsQuery.data.map((v) => (
+              <div
+                key={v.id}
+                className="flex items-center justify-between gap-2 rounded-md px-2 py-1.5 hover:bg-main/60"
+              >
+                <div className="min-w-0">
+                  <span className="text-xs font-semibold">v{v.version}</span>
+                  {v.is_active && (
+                    <Badge variant="brand" className="ml-1.5 text-[10px]">
+                      {t("agents.prompt_active", { defaultValue: "active" })}
+                    </Badge>
+                  )}
+                  {v.description && (
+                    <span className="ml-1.5 text-[11px] text-text-dim truncate">
+                      {v.description}
+                    </span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  disabled={bindVersion.isPending}
+                  onClick={() => bind(v)}
+                  className="shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded-md border border-border-subtle text-[11px] font-bold text-text-dim hover:text-brand hover:border-brand disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                >
+                  {t("agents.bind", { defaultValue: "Bind" })}
+                </button>
+              </div>
+            ))
+          )}
+        </div>
+      )}
     </section>
   );
 }
@@ -2435,10 +2551,11 @@ export function AgentsPage() {
                 </section>
               )}
 
-              {/* System Prompt — collapsible */}
-              {detailAgent.system_prompt && (
-                <SystemPromptSection prompt={detailAgent.system_prompt} />
-              )}
+              {/* System Prompt — always shown so an agent with no prompt yet can add one */}
+              <SystemPromptSection
+                agentId={detailAgent.id}
+                prompt={detailAgent.system_prompt ?? ""}
+              />
 
               {/* Skills */}
               {detailAgent.skills && detailAgent.skills.length > 0 && (
