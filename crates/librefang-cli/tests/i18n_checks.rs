@@ -640,7 +640,6 @@ fn test_no_untranslated_strings() {
             if rel_path == "tui/chat_runner.rs"
                 || rel_path == "tui/event.rs"
                 || rel_path == "tui/mod.rs"
-                || rel_path == "tui/widgets.rs"
                 || rel_path.starts_with("tui/screens/")
             {
                 continue;
