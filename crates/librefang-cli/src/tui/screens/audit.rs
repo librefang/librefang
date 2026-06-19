@@ -31,14 +31,14 @@ pub enum AuditFilter {
 }
 
 impl AuditFilter {
-    fn label(self) -> &'static str {
+    fn label(self) -> String {
         match self {
-            Self::All => "All",
-            Self::AgentSpawn => "Agent Created",
-            Self::AgentKill => "Agent Killed",
-            Self::ToolInvoke => "Tool Used",
-            Self::NetworkAccess => "Network",
-            Self::ShellExec => "Shell Exec",
+            Self::All => crate::i18n::t("tui-audit-filter-all"),
+            Self::AgentSpawn => crate::i18n::t("tui-audit-filter-spawn"),
+            Self::AgentKill => crate::i18n::t("tui-audit-filter-kill"),
+            Self::ToolInvoke => crate::i18n::t("tui-audit-filter-tool"),
+            Self::NetworkAccess => crate::i18n::t("tui-audit-filter-network"),
+            Self::ShellExec => crate::i18n::t("tui-audit-filter-shell"),
         }
     }
     fn next(self) -> Self {
@@ -93,16 +93,16 @@ impl AuditFilter {
 }
 
 /// Map raw action names to friendly display names.
-fn friendly_action(action: &str) -> &str {
+fn friendly_action(action: &str) -> String {
     match action {
-        "AgentSpawn" | "AgentSpawned" => "Agent Created",
-        "AgentKill" | "AgentKilled" => "Agent Killed",
-        "ToolInvoke" | "ToolInvocation" => "Tool Used",
-        "NetworkAccess" | "NetFetch" => "Network Access",
-        "ShellExec" | "ShellCommand" => "Shell Exec",
-        "CapabilityDenied" => "Access Denied",
-        "ConfigChange" => "Config Changed",
-        other => other,
+        "AgentSpawn" | "AgentSpawned" => crate::i18n::t("tui-audit-action-spawn"),
+        "AgentKill" | "AgentKilled" => crate::i18n::t("tui-audit-action-kill"),
+        "ToolInvoke" | "ToolInvocation" => crate::i18n::t("tui-audit-action-tool"),
+        "NetworkAccess" | "NetFetch" => crate::i18n::t("tui-audit-action-network"),
+        "ShellExec" | "ShellCommand" => crate::i18n::t("tui-audit-action-shell"),
+        "CapabilityDenied" => crate::i18n::t("tui-audit-action-denied"),
+        "ConfigChange" => crate::i18n::t("tui-audit-action-config"),
+        other => other.to_string(),
     }
 }
 
@@ -190,7 +190,11 @@ impl AuditState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut AuditState) {
-    let inner = widgets::render_screen_block(f, area, "\u{25c8} Audit Trail");
+    let inner = widgets::render_screen_block(
+        f,
+        area,
+        &format!("{} {}", "\u{25c8}", crate::i18n::t("tui-audit-title")),
+    );
 
     let chunks = Layout::vertical([
         Constraint::Length(3), // filter + header separator + column headers
@@ -222,10 +226,19 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AuditState) {
     f.render_widget(
         Paragraph::new(vec![
             Line::from(vec![
-                Span::styled("  Filter: ", theme::dim_style()),
+                Span::styled(
+                    format!("  {} ", crate::i18n::t("tui-audit-label-filter")),
+                    theme::dim_style(),
+                ),
                 Span::styled(format!("[{}]", state.action_filter.label()), filter_style),
                 Span::styled(
-                    format!("  \u{2502} {} entries", state.filtered.len()),
+                    format!(
+                        "  │ {}",
+                        crate::i18n::t_args(
+                            "tui-audit-entries-count",
+                            &[("count", &state.filtered.len().to_string())]
+                        )
+                    ),
                     theme::dim_style(),
                 ),
             ]),
@@ -235,22 +248,25 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AuditState) {
             )]),
             Line::from(vec![
                 Span::styled(
-                    format!("  {:<20}", "Timestamp"),
+                    format!("  {:<20}", crate::i18n::t("tui-audit-header-timestamp")),
                     theme::table_header(),
                 ),
                 Span::styled(
-                    format!(" {:<16}", "Action"),
+                    format!(" {:<16}", crate::i18n::t("tui-audit-header-action")),
                     theme::table_header(),
                 ),
                 Span::styled(
-                    format!(" {:<14}", "Agent"),
+                    format!(" {:<14}", crate::i18n::t("tui-audit-header-agent")),
                     theme::table_header(),
                 ),
                 Span::styled(
-                    format!(" {:<10}", "Hash"),
+                    format!(" {:<10}", crate::i18n::t("tui-audit-header-hash")),
                     theme::table_header(),
                 ),
-                Span::styled(" Detail", theme::table_header()),
+                Span::styled(
+                    format!(" {}", crate::i18n::t("tui-audit-header-detail")),
+                    theme::table_header(),
+                ),
             ]),
         ]),
         chunks[0],
@@ -259,12 +275,12 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AuditState) {
     // ── List ──
     if state.loading {
         f.render_widget(
-            widgets::spinner(state.tick, "Loading audit trail\u{2026}"),
+            widgets::spinner(state.tick, &crate::i18n::t("tui-audit-loading")),
             chunks[1],
         );
     } else if state.filtered.is_empty() {
         f.render_widget(
-            widgets::empty_state("No audit entries yet. Agent actions will appear here."),
+            widgets::empty_state(&crate::i18n::t("tui-audit-empty")),
             chunks[1],
         );
     } else {
@@ -306,7 +322,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AuditState) {
                         theme::dim_style(),
                     ),
                     Span::styled(
-                        format!(" {:<16}", widgets::truncate(action_display, 15)),
+                        format!(" {:<16}", widgets::truncate(&action_display, 15)),
                         action_style,
                     ),
                     Span::styled(
@@ -332,17 +348,17 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AuditState) {
     // ── Chain status + hints ──
     let chain_line = match state.chain_verified {
         None => Line::from(vec![Span::styled(
-            "  \u{25cb} Chain: not verified",
+            format!("  ○ {}", crate::i18n::t("tui-audit-chain-unverified")),
             theme::dim_style(),
         )]),
         Some(true) => Line::from(vec![Span::styled(
-            "  \u{2714} Chain: Verified",
+            format!("  ✔ {}", crate::i18n::t("tui-audit-chain-verified")),
             Style::default()
                 .fg(theme::GREEN)
                 .add_modifier(Modifier::BOLD),
         )]),
         Some(false) => Line::from(vec![Span::styled(
-            "  \u{2718} Chain: Verification failed",
+            format!("  ✘ {}", crate::i18n::t("tui-audit-chain-failed")),
             Style::default().fg(theme::RED).add_modifier(Modifier::BOLD),
         )]),
     };
@@ -354,7 +370,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AuditState) {
         )])
     } else {
         Line::from(vec![Span::styled(
-            "  [\u{2191}\u{2193}] Navigate  [f] Filter  [v] Verify Chain  [r] Refresh",
+            crate::i18n::t("tui-audit-hints"),
             theme::hint_style(),
         )])
     };
