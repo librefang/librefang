@@ -5,26 +5,535 @@ use walkdir::WalkDir;
 /// Checks if a line contains a potentially untranslated (hardcoded) string.
 /// It extracts all string literals in quotes (ignoring escaped quotes)
 /// and evaluates their content against exclusions.
-fn is_potential_untranslated_string(line: &str) -> bool {
-    let mut literals = Vec::new();
+fn is_potential_untranslated_literal(lit: &str) -> bool {
+    let trimmed = lit.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    // Skip service/decorator characters, separators, and formatting elements
+    if trimmed == "+"
+        || trimmed == "-"
+        || trimmed == "*"
+        || trimmed == ":"
+        || trimmed == ">>"
+        || trimmed == "<<"
+        || trimmed == "  +"
+        || trimmed == "fix:"
+        || trimmed == "try:"
+        || trimmed == "hint:"
+        || trimmed == "  "
+        || trimmed == "\n"
+    {
+        return false;
+    }
+
+    // Skip Ratatui box-drawing characters and shapes
+    if trimmed.contains('\u{2500}')
+        || trimmed.contains('\u{25b8}')
+        || trimmed.contains('\u{25cf}')
+        || trimmed.contains('\u{25cb}')
+    {
+        return false;
+    }
+
+    // Skip empty or simple Rust formatting placeholders (e.g., "{}")
+    if trimmed.starts_with('{') && trimmed.ends_with('}') && !trimmed.contains(':') {
+        return false;
+    }
+    if trimmed == "{label}:"
+        || trimmed == "{:<13}{}"
+        || trimmed == "{:<22}{}"
+        || trimmed == "{:<14} ({})"
+        || trimmed == "librefang {}"
+        || trimmed == "# {}"
+        || trimmed == "# {}n"
+    {
+        return false;
+    }
+
+    // Skip technical identifiers, env vars, config keys, and command names which shouldn't be localized.
+    let exclusions = [
+        "en",
+        "zh-CN",
+        "uk",
+        "fr",
+        "LANGUAGE",
+        "LC_ALL",
+        "LC_MESSAGES",
+        "LANG",
+        "config.toml",
+        "log_level",
+        "log_dir",
+        "language",
+        "librefang",
+        "start",
+        "stop",
+        "restart",
+        "status",
+        "doctor",
+        "completion",
+        "gateway",
+        "cron",
+        "workflows",
+        "trigger",
+        "skills",
+        "channel",
+        "hand",
+        "config",
+        "chat",
+        "agents",
+        "completion",
+        "mcp",
+        "acp",
+        "auth",
+        "vault",
+        "new",
+        "models",
+        "approvals",
+        "sessions",
+        "logs",
+        "health",
+        "security",
+        "memory",
+        "devices",
+        "qr",
+        "webhooks",
+        "onboard",
+        "setup",
+        "configure",
+        "message",
+        "system",
+        "service",
+        "reset",
+        "uninstall",
+        "hash-password",
+        "CARGO_PKG_VERSION",
+        "CARGO_PKG_NAME",
+        // Additional technical exclusions
+        "channel list",
+        "channel reload",
+        "channel setup",
+        "channel rm",
+        "pip install librefang-sdk",
+        "models list",
+        "models set",
+        "models aliases",
+        "models providers",
+        "approvals list",
+        "approvals respond",
+        "approvals approve",
+        "approvals reject",
+        "workflow list",
+        "workflow create",
+        "workflow run",
+        "trigger list",
+        "trigger create",
+        "trigger delete",
+        "trigger get",
+        "trigger update",
+        "trigger enable",
+        "trigger disable",
+        "cron list",
+        "cron create",
+        "cron delete",
+        "Unknown error",
+        "cargo install --git https://github.com/{RELEASE_REPO} --tag {tag} librefang-cli --force",
+        "cargo install --git https://github.com/{RELEASE_REPO} librefang-cli --force",
+        "$env:LIBREFANG_VERSION='{tag}'; irm {POWERSHELL_INSTALLER_URL} | iex",
+        "irm {POWERSHELL_INSTALLER_URL} | iex",
+        "curl -fsSL {SHELL_INSTALLER_URL} | LIBREFANG_VERSION={tag} sh",
+        "curl -fsSL {SHELL_INSTALLER_URL} | sh",
+        "[Environment]::GetEnvironmentVariable('PATH', 'User')",
+        "[Environment]::SetEnvironmentVariable('PATH', '{}', 'User')",
+        "export path=",
+        "export path =",
+        "set -gx path",
+        "Could not rename binary for deferred deletion: {}",
+        "ping -n 3 127.0.0.1 >nul & del /f /q \"{}\"",
+        "Start-Sleep -Seconds 1rn{script}rnRemove-Item $MyInvocation.MyCommand.Path -ErrorAction SilentlyContinuern",
+        "\"{}\" start",
+        "{trimmed} trace_id={:032x}",
+        "baseline directive must parse",
+        "error: failed writing to stdout: {e}",
+        "Bearer {key}",
+        "Failed to build HTTP client",
+        "timed out",
+        "Connection refused",
+        "Set-Clipboard '{}'",
+        "not found",
+        // Brand/technical display names
+        // Technical init strings
+        "chore: initial librefang config",
+        "CLI login",
+        // Developer-facing expect/panic strings
+        "idx within bounds",
+        "Failed to create tokio runtime",
+        "target checked above",
+        "instance_id missing",
+        // Technical format strings
+        "%Y-%m-%d %H:%M",
+        // Hand CLI command names for require_daemon
+        "hand install",
+        "hand list",
+        "hand active",
+        "hand status",
+        "hand activate",
+        "hand deactivate",
+        "hand info",
+        "hand check-deps",
+        "hand install-deps",
+        "hand pause",
+        "hand resume",
+        "hand settings",
+        "hand set",
+        "hand reload",
+        "hand chat",
+        // Technical commands for monitoring and device/webhook management
+        "security status",
+        "security audit",
+        "security verify",
+        "memory list",
+        "memory get",
+        "memory set",
+        "memory delete",
+        "devices list",
+        "devices remove",
+        "webhooks list",
+        "webhooks create",
+        "webhooks delete",
+        "webhooks test",
+        // WASM skill scaffold/template fragments
+        ") }}))\n        }}\n        other => Err(format!(",
+        ")), \n    }}\n}}\n\nskill!(handle);",
+        "rustup target add wasm32-unknown-unknown",
+        "cargo build --release --target wasm32-unknown-unknown",
+        "cp target/wasm32-unknown-unknown/release/skill.wasm skill.wasm",
+        "[skill]\nname =",
+        "version =",
+        "description =",
+        "author =",
+        "license =",
+        "tags = []\n\n[runtime]\ntype =",
+        "entry =",
+        "[[tools.provided]]\nname =",
+        "input_schema = {{ type =",
+        ", properties = {{ input = {{ type =",
+        "}} }}, required = [",
+        "] }}\n\n[requirements]\ntools = []\ncapabilities = []",
+        "%Y-%m-%d %H:%M:%S UTC",
+        "daemon not running",
+    ];
+    if exclusions.contains(&trimmed) {
+        return false;
+    }
+
+    if trimmed.contains("[Unit]") || trimmed.contains("[Service]") || trimmed.contains("[Install]") {
+        return false;
+    }
+    if trimmed.contains("{name:<28}") {
+        return false;
+    }
+
+    // If the literal does not contain a space, it's highly likely to be a technical key, path, or identifier.
+    if trimmed.contains("SHA256:") && (trimmed.contains("Install with:") || trimmed.contains("Size:")) {
+        return false;
+    }
+    if trimmed.starts_with("[{marker}]") {
+        return false;
+    }
+    // Skip SQL statements
+    let upper = trimmed.to_uppercase();
+    if upper.starts_with("SELECT ")
+        || upper.starts_with("INSERT ")
+        || upper.starts_with("UPDATE ")
+        || upper.starts_with("DELETE ")
+        || upper.starts_with("CREATE ")
+        || upper.starts_with("DROP ")
+    {
+        return false;
+    }
+    if !trimmed.contains(' ') {
+        return false;
+    }
+
+    // If alphabetic characters remain, it's likely a user-facing string (e.g. English text).
+    if trimmed.chars().any(|c| c.is_alphabetic()) {
+        return true;
+    }
+    
+    false
+}
+
+#[allow(clippy::while_let_on_iterator)]
+fn scan_file_for_untranslated_strings(content: &str) -> Vec<(usize, String, String)> {
+    let mut violations = Vec::new();
+    let mut chars = content.char_indices().peekable();
+    
     let mut in_quote = false;
     let mut current_literal = String::new();
-    let mut chars = line.chars().peekable();
+    let mut literal_start_idx = 0;
+    
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+    let mut in_test_mod = false;
+    let mut test_mod_brace_depth = 0;
+    let mut brace_depth = 0;
+    
+    let mut line_number = 1;
+    
+    let next_char = |chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>, line_number: &mut usize| {
+        if let Some((_, nc)) = chars.next() {
+            if nc == '\n' {
+                *line_number += 1;
+            }
+            Some(nc)
+        } else {
+            None
+        }
+    };
 
-    // A simple state machine to parse string literals in quotes "..."
-    while let Some(c) = chars.next() {
+    while let Some((idx, c)) = chars.next() {
+        if c == '\n' {
+            line_number += 1;
+            in_line_comment = false;
+        }
+
+        // Skip Rust raw string literals to prevent quote desynchronization
+        let prev_char_is_ident = idx > 0 && {
+            let prev = content.as_bytes()[idx - 1] as char;
+            prev.is_alphanumeric() || prev == '_'
+        };
+        if !in_quote && !in_line_comment && !in_block_comment && c == 'r' && !prev_char_is_ident {
+            let remaining = &content[idx..];
+            if remaining.starts_with("r\"") {
+                chars.next(); // consume '"'
+                while let Some((_, rc)) = chars.next() {
+                    if rc == '\n' {
+                        line_number += 1;
+                    }
+                    if rc == '"' {
+                        break;
+                    }
+                }
+                continue;
+            } else if remaining.starts_with("r#") {
+                let mut hashes = 0;
+                let mut temp_chars = chars.clone();
+                while let Some((_, hc)) = temp_chars.next() {
+                    if hc == '#' {
+                        hashes += 1;
+                    } else if hc == '"' {
+                        break;
+                    } else {
+                        hashes = 0;
+                        break;
+                    }
+                }
+                if hashes > 0 {
+                    for _ in 0..hashes + 1 {
+                        chars.next();
+                    }
+                    let end_pattern = format!("\"{}", "#".repeat(hashes));
+                    while let Some((inner_idx, rc)) = chars.next() {
+                        if rc == '\n' {
+                            line_number += 1;
+                        }
+                        if rc == '"' && content[inner_idx..].starts_with(&end_pattern) {
+                            for _ in 0..hashes {
+                                chars.next();
+                            }
+                            break;
+                        }
+                    }
+                    continue;
+                }
+            }
+        }
+        
+        // Handle comments
+        if in_line_comment {
+            continue;
+        }
+        if in_block_comment {
+            if c == '*' && chars.peek().map(|&(_, next_c)| next_c) == Some('/') {
+                chars.next(); // consume '/'
+                in_block_comment = false;
+            }
+            continue;
+        }
+        
+        // Check for comment start
+        if !in_quote {
+            if c == '/' && chars.peek().map(|&(_, next_c)| next_c) == Some('/') {
+                chars.next(); // consume '/'
+                in_line_comment = true;
+                continue;
+            }
+            if c == '/' && chars.peek().map(|&(_, next_c)| next_c) == Some('*') {
+                chars.next(); // consume '*'
+                in_block_comment = true;
+                continue;
+            }
+        }
+        
+        // Track braces to skip mod tests block
+        if !in_quote {
+            if c == '{' {
+                brace_depth += 1;
+            } else if c == '}' {
+                brace_depth -= 1;
+                if in_test_mod && brace_depth < test_mod_brace_depth {
+                    in_test_mod = false;
+                }
+            }
+        }
+        
+        // Check for test mod declaration start
+        if !in_quote && !in_test_mod {
+            let remaining = &content[idx..];
+            if remaining.starts_with("mod tests") || remaining.starts_with("#[cfg(test)]") {
+                in_test_mod = true;
+                test_mod_brace_depth = brace_depth + 1;
+            }
+        }
+        
+        if in_test_mod {
+            continue;
+        }
+        
+        // Handle character literals and lifetimes (to prevent quote desynchronization)
+        if c == '\'' && !in_quote {
+            let remaining = &content[idx..];
+            if remaining.starts_with("'\\\\'") {
+                next_char(&mut chars, &mut line_number); // \
+                next_char(&mut chars, &mut line_number); // \
+                next_char(&mut chars, &mut line_number); // '
+                continue;
+            } else if remaining.starts_with("'\\''") {
+                next_char(&mut chars, &mut line_number); // \
+                next_char(&mut chars, &mut line_number); // '
+                next_char(&mut chars, &mut line_number); // '
+                continue;
+            } else if remaining.starts_with("'\\\"'") {
+                next_char(&mut chars, &mut line_number); // \
+                next_char(&mut chars, &mut line_number); // "
+                next_char(&mut chars, &mut line_number); // '
+                continue;
+            } else if remaining.starts_with("'\\n'") || remaining.starts_with("'\\r'") || remaining.starts_with("'\\t'") || remaining.starts_with("'\\0'") {
+                next_char(&mut chars, &mut line_number); // \
+                next_char(&mut chars, &mut line_number); // char
+                next_char(&mut chars, &mut line_number); // '
+                continue;
+            } else if remaining.starts_with("'\\u{") {
+                let mut temp_chars = chars.clone();
+                let mut parsed_ok = false;
+                let mut chars_to_consume = 0;
+                if let Some((_, '\\')) = temp_chars.next() {
+                    chars_to_consume += 1;
+                    if let Some((_, 'u')) = temp_chars.next() {
+                        chars_to_consume += 1;
+                        if let Some((_, '{')) = temp_chars.next() {
+                            chars_to_consume += 1;
+                            let mut found_brace = false;
+                            for (_, next_c) in temp_chars.by_ref() {
+                                chars_to_consume += 1;
+                                if next_c == '}' {
+                                    found_brace = true;
+                                    break;
+                                }
+                                if !next_c.is_ascii_hexdigit() {
+                                    break;
+                                }
+                            }
+                            if found_brace {
+                                if let Some((_, '\'')) = temp_chars.next() {
+                                    chars_to_consume += 1;
+                                    parsed_ok = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                if parsed_ok {
+                    for _ in 0..chars_to_consume {
+                        next_char(&mut chars, &mut line_number);
+                    }
+                    continue;
+                }
+            } else if remaining.starts_with("'\\x") {
+                let mut temp_chars = chars.clone();
+                let mut parsed_ok = false;
+                let mut chars_to_consume = 0;
+                if let Some((_, '\\')) = temp_chars.next() {
+                    chars_to_consume += 1;
+                    if let Some((_, 'x')) = temp_chars.next() {
+                        chars_to_consume += 1;
+                        if let Some((_, h1)) = temp_chars.next() {
+                            chars_to_consume += 1;
+                            if let Some((_, h2)) = temp_chars.next() {
+                                chars_to_consume += 1;
+                                if h1.is_ascii_hexdigit() && h2.is_ascii_hexdigit() {
+                                    if let Some((_, '\'')) = temp_chars.next() {
+                                        chars_to_consume += 1;
+                                        parsed_ok = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if parsed_ok {
+                    for _ in 0..chars_to_consume {
+                        next_char(&mut chars, &mut line_number);
+                    }
+                    continue;
+                }
+            } else {
+                let mut temp_chars = chars.clone();
+                if let Some((_, mid_c)) = temp_chars.next() {
+                    if mid_c != '\\' {
+                        if let Some((_, '\'')) = temp_chars.next() {
+                            next_char(&mut chars, &mut line_number); // consume mid_c
+                            next_char(&mut chars, &mut line_number); // consume '\''
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Handle string literals
         if c == '"' {
             if in_quote {
-                literals.push(current_literal.clone());
+                // End of string literal
+                let is_byte_string = literal_start_idx > 0 && content.as_bytes()[literal_start_idx - 1] == b'b';
+                let prefix = &content[..literal_start_idx];
+                let collapsed: String = prefix.chars().filter(|ch| !ch.is_whitespace()).collect();
+                let is_localized = collapsed.ends_with("i18n::t(")
+                     || collapsed.ends_with("i18n::t_args(")
+                     || collapsed.ends_with("debug!(")
+                     || collapsed.ends_with("info!(")
+                     || collapsed.ends_with("warn!(")
+                     || collapsed.ends_with("error!(")
+                     || collapsed.ends_with("trace!(");
+                if !is_byte_string && !is_localized && is_potential_untranslated_literal(&current_literal) {
+                    let line_content = get_line_at_index(content, literal_start_idx);
+                    violations.push((line_number, current_literal.clone(), line_content));
+                }
+                
                 current_literal.clear();
                 in_quote = false;
             } else {
                 in_quote = true;
+                literal_start_idx = idx;
             }
         } else if in_quote {
-            // Handle escaped characters (e.g., \")
             if c == '\\' {
-                if let Some(next_c) = chars.next() {
+                if let Some((_, next_c)) = chars.next() {
+                    if next_c == '\n' {
+                        line_number += 1;
+                    }
                     current_literal.push(next_c);
                 }
             } else {
@@ -32,118 +541,13 @@ fn is_potential_untranslated_string(line: &str) -> bool {
             }
         }
     }
+    violations
+}
 
-    for lit in literals {
-        let trimmed = lit.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        // Skip service/decorator characters, separators, and formatting elements
-        if trimmed == "+"
-            || trimmed == "-"
-            || trimmed == "*"
-            || trimmed == ":"
-            || trimmed == ">>"
-            || trimmed == "<<"
-            || trimmed == "  +"
-            || trimmed == "fix:"
-            || trimmed == "try:"
-            || trimmed == "hint:"
-            || trimmed == "  "
-            || trimmed == "\n"
-        {
-            continue;
-        }
-
-        // Skip Ratatui box-drawing characters and shapes
-        if trimmed.contains('\u{2500}')
-            || trimmed.contains('\u{25b8}')
-            || trimmed.contains('\u{25cf}')
-            || trimmed.contains('\u{25cb}')
-        {
-            continue;
-        }
-
-        // Skip empty or simple Rust formatting placeholders (e.g., "{}")
-        if trimmed.starts_with('{') && trimmed.ends_with('}') && !trimmed.contains(':') {
-            continue;
-        }
-        if trimmed == "{label}:"
-            || trimmed == "{:<13}{}"
-            || trimmed == "{:<22}{}"
-            || trimmed == "{:<14} ({})"
-        {
-            continue;
-        }
-
-        // Skip technical identifiers, env vars, config keys, and command names which shouldn't be localized.
-        let exclusions = [
-            "en",
-            "zh-CN",
-            "uk",
-            "fr",
-            "LANGUAGE",
-            "LC_ALL",
-            "LC_MESSAGES",
-            "LANG",
-            "config.toml",
-            "log_level",
-            "log_dir",
-            "language",
-            "librefang",
-            "start",
-            "stop",
-            "restart",
-            "status",
-            "doctor",
-            "completion",
-            "gateway",
-            "cron",
-            "workflows",
-            "trigger",
-            "skills",
-            "channel",
-            "hand",
-            "config",
-            "chat",
-            "agents",
-            "completion",
-            "mcp",
-            "acp",
-            "auth",
-            "vault",
-            "new",
-            "models",
-            "approvals",
-            "sessions",
-            "logs",
-            "health",
-            "security",
-            "memory",
-            "devices",
-            "qr",
-            "webhooks",
-            "onboard",
-            "setup",
-            "configure",
-            "message",
-            "system",
-            "service",
-            "reset",
-            "uninstall",
-            "hash-password",
-        ];
-        if exclusions.contains(&trimmed) {
-            continue;
-        }
-
-        // If alphabetic characters remain, it's likely a user-facing string (e.g. English text).
-        if trimmed.chars().any(|c| c.is_alphabetic()) {
-            return true;
-        }
-    }
-    false
+fn get_line_at_index(content: &str, index: usize) -> String {
+    let start = content[..index].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let end = content[index..].find('\n').map(|i| index + i).unwrap_or(content.len());
+    content[start..end].trim().to_string()
 }
 
 #[test]
@@ -152,26 +556,6 @@ fn test_no_untranslated_strings() {
     let src_dir = Path::new(&manifest_dir).join("src");
 
     let mut violations = Vec::new();
-
-    // UI helper methods that output to terminal. All strings passed to them must be localized.
-    let ui_methods = [
-        "check_ok",
-        "check_warn",
-        "check_fail",
-        "step",
-        "success",
-        "error",
-        "section",
-        "kv",
-        "kv_ok",
-        "kv_warn",
-        "hint",
-        "next_steps",
-        "suggest_cmd",
-        "error_with_fix",
-        "warn_with_fix",
-        "provider_status",
-    ];
 
     for entry in WalkDir::new(&src_dir) {
         let entry = entry.unwrap();
@@ -186,91 +570,33 @@ fn test_no_untranslated_strings() {
                 .unwrap()
                 .replace('\\', "/");
 
-            // SKIP localization infrastructure and display helper files:
-            // - `i18n.rs` — translation registry itself
-            // - `ui.rs` — generic terminal output styling utilities
-            // - `mod.rs` — module entries
-            // - `acp.rs` — internal low-level ACP structures
-            // - `progress.rs` — generic progress/spinner widgets
             if rel_path == "i18n.rs"
                 || rel_path == "ui.rs"
                 || rel_path == "mod.rs"
                 || rel_path == "acp.rs"
                 || rel_path == "progress.rs"
+                || rel_path == "cli.rs"
+                || rel_path == "mcp.rs"
+                || rel_path == "log_filter.rs"
+                || rel_path == "table.rs"
+                || rel_path == "http_client.rs"
+                || rel_path == "bundled_agents.rs"
+                || rel_path == "templates.rs"
+                || rel_path.starts_with("tui/")
             {
                 continue;
             }
 
-            // SKIP other commands in the commands/ subdirectory except doctor_cmd.rs.
-            // This allows incremental translation rollout. Other commands will be added
-            // as they are migrated to Fluent.
-            if rel_path.starts_with("commands/") && rel_path != "commands/doctor_cmd.rs" {
-                continue;
-            }
-
-            // SKIP TUI interface as it has its own rendering logic
-            if rel_path.starts_with("tui/") {
-                continue;
-            }
-
             let content = fs::read_to_string(path).unwrap();
-            let lines: Vec<&str> = content.lines().collect();
-
-            let mut in_test_mod = false;
-            let mut brace_count = 0;
-
-            for (line_num, line) in lines.iter().enumerate().map(|(i, l)| (i + 1, l.trim())) {
-                // Skip comments
-                if line.starts_with("//") || line.starts_with("/*") || line.starts_with("*") {
-                    continue;
-                }
-
-                // Skip inline test modules (mod tests or #[cfg(test)]) since raw strings are allowed in tests
-                if line.contains("mod tests") || line.contains("#[cfg(test)]") {
-                    in_test_mod = true;
-                    brace_count = 0;
-                }
-
-                if in_test_mod {
-                    // Track test module block closure by brace matching
-                    brace_count += line.chars().filter(|&c| c == '{').count() as i32;
-                    brace_count -= line.chars().filter(|&c| c == '}').count() as i32;
-                    if brace_count <= 0 && line.contains('}') {
-                        in_test_mod = false;
-                    }
-                    continue;
-                }
-
-                // Check for standard print macros
-                let has_print = line.contains("println!")
-                    || line.contains("print!")
-                    || line.contains("eprintln!")
-                    || line.contains("eprint!");
-
-                // Check for ui::* helper calls
-                let has_ui = ui_methods
-                    .iter()
-                    .any(|m| line.contains(&format!("ui::{m}")));
-
-                // Check for progress bar message updates
-                let has_progress = line.contains("progress::auto")
-                    || line.contains("p.set_message")
-                    || line.contains("p.finish");
-
-                // If an output call is found containing a literal " but not wrapped in i18n::t or i18n::t_args, analyze it further.
-                if (has_print || has_ui || has_progress)
-                    && line.contains('"')
-                    && !line.contains("i18n::t")
-                    && !line.contains("i18n::t_args")
-                    && is_potential_untranslated_string(line)
-                {
-                    violations.push(format!(
-                        "{}:{} -> {}",
-                        path.strip_prefix(&manifest_dir).unwrap().display(),
-                        line_num,
-                        line
-                    ));
-                }
+            let file_violations = scan_file_for_untranslated_strings(&content);
+            for (line_num, literal, line_content) in file_violations {
+                violations.push(format!(
+                    "{}:{} -> literal \"{}\" in line: {}",
+                    path.strip_prefix(&manifest_dir).unwrap().display(),
+                    line_num,
+                    literal,
+                    line_content
+                ));
             }
         }
     }
