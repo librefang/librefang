@@ -844,6 +844,14 @@ _308 PRs from 7 contributors since v2026.5.17-beta.12._
   Reasons: `completed`, `max_iterations`, `repeated_tool_failures`, `circuit_break`, `content_filtered`, `error`.
   The counter increments exactly once per termination from a thin wrapper around the streaming and non-streaming loops, so no branch fall-through can double-count.
   Alert with `rate(librefang_agent_loop_exits_total{reason!="completed"}) > 0` per agent.
+- **feat(runtime): CoT-pruning for stale reasoning traces during compaction** (#6173) (@houko).
+  Strips `<think>...</think>` spans and `Thinking` content blocks from assistant turns older than `[compaction] strip_reasoning_after_turns` (default 0, disabled), reclaiming context that stale reasoning would otherwise occupy.
+  Runs only at the compaction boundary, never on the per-turn hot path, so it does not invalidate the provider prompt cache more often than compaction already does.
+  Skipped entirely for models whose `ReasoningEchoPolicy` is `Echo` (DeepSeek V4 Flash), which require the reasoning echoed back on tool_calls turns.
+  Implements part of the proposal in #6173 by @pavver.
+- **feat(runtime): developer-loop aggregation during compaction** (#6173) (@houko).
+  Collapses long runs of consecutive developer-tool steps — classified by the existing `ToolClass` taxonomy (`Mutating` / `ExecCapable`), not a hardcoded name list — into the first step, a deterministic placeholder, and the last step, opt-in via `[compaction] aggregate_developer_loops` (default off) with `max_loop_steps_before_aggregate` (default 5).
+  Whole tool-use/result pairs are removed together so no `tool_use_id` is orphaned.
 
 ### Breaking Changes
 
@@ -897,6 +905,11 @@ In-crate only; no cross-crate error-shape changes.
   The already-filtered and -sorted list is now split on the `is_hand` flag into two titled sections (using the pre-seeded `agents.core_agents` / `agents.hands` i18n keys); each header only shows when its group is non-empty, so the `Show hands` toggle keeps its meaning and a single-group view shows no empty banner.
   Presentational only — no data-layer, query, or backend change.
   Closes #6189.
+- **observability: tool-call telemetry fidelity — failure-type breakdown, per-tool latency histogram, and span error status** (#6228) (@houko).
+  `librefang_tool_call_total` gains a bounded `failure_type` label that no longer collapses every failure to one `outcome=failure` bucket: a loop-guard / allowlist block (`blocked`), an approval denial or modify-and-retry (`approval_denied`), a tool timeout (`timeout`), a genuine crash (`hard_error`), and a circuit break (`circuit_break`) are now distinguishable on a dashboard.
+  The label is derived from the existing `ToolExecutionStatus` (`Skipped → blocked`, `Denied`/`ModifyAndRetry → approval_denied`, `Expired → timeout`, `Error → hard_error`, no-status circuit break → `circuit_break`); the success path carries `failure_type=none`.
+  A new `librefang_tool_execution_seconds{tool}` histogram exports the per-tool dispatch latency that was already measured for the decision trace (`execution_ms / 1000.0`), so latency distributions are now visible per tool.
+  The `execute_single_tool_call` span now records `tool.outcome` and sets the OpenTelemetry span status to error (`otel.status_code=error`) on a genuine service failure (hard error, circuit break, or timeout) — but not on a model-fat-fingered blocked / denied call — so a `hasError=true` trace filter and service-level errorRate finally match a failed tool. Closes #6228.
 - **dashboard(agents): edit the system prompt and bind a prompt-library version from the agent detail drawer** (#6187) (@houko).
   The Agents page previously showed the system prompt read-only and the "Prompts" modal's activate only flipped the store's active flag without changing the live prompt; the Hands page already had a full editor (#6151 / #6166), leaving the two pages inconsistent.
   `SystemPromptSection` is now an inline editor: edit and save via `PATCH /api/agents/{id}`, or open the prompt library and bind a saved version via `useBindPromptVersionToAgent` (which hot-swaps the live `system_prompt` and flips `is_active` together).
@@ -983,6 +996,10 @@ In-crate only; no cross-crate error-shape changes.
 
 ### Fixed
 
+- **fix(hands): saving one Hand setting no longer drops the others** (#6204) (@houko).
+  The Hand settings editor PUTs only the keys changed this session, but `update_hand_settings` passed that partial map straight to `HandRegistry::update_config`, which replaces the whole instance config — so for a Hand with several settings, saving one reverted every other to its default.
+  The route now reads the instance's current config and merges the incoming keys over it (a true partial update; the registry's replace contract is unchanged), and the editor also seeds its payload from the saved values as defense in depth.
+  Closes #6204.
 - **fix(dashboard): serve the SPA shell on a hard refresh of the Prompts and Tasks pages** (#6197) (@houko).
   `/dashboard/prompts` and `/dashboard/tasks` are real router routes, but they were never added to the server-side `SPA_ROUTES` allowlist, so a direct navigation or browser refresh returned `asset not found` (404) instead of `index.html`.
   Both slugs are added to the allowlist, and a drift-guard test now parses `router.tsx` and asserts every top-level dashboard route falls back to the shell, so a future route added without updating the allowlist fails loudly.

@@ -1240,7 +1240,7 @@ fn test_record_tool_call_metric_failure_outcome() {
     metrics::with_local_recorder(&recorder, || {
         // Simulate what the wrapper does when execute_single_tool_call_inner
         // returns Err (circuit-break or any hard error).
-        record_tool_call_metric("agent_a", "my_tool", true);
+        record_tool_call_metric("agent_a", "my_tool", true, None, None);
     });
 
     let snap = snapshotter.snapshot().into_vec();
@@ -1275,7 +1275,13 @@ fn test_record_tool_call_metric_success_outcome() {
     let snapshotter = recorder.snapshotter();
 
     metrics::with_local_recorder(&recorder, || {
-        record_tool_call_metric("agent_b", "other_tool", false);
+        record_tool_call_metric(
+            "agent_b",
+            "other_tool",
+            false,
+            Some(librefang_types::tool::ToolExecutionStatus::Completed),
+            Some(0),
+        );
     });
 
     let snap = snapshotter.snapshot().into_vec();
@@ -1293,6 +1299,295 @@ fn test_record_tool_call_metric_success_outcome() {
     );
 }
 
+// ── failure_type breakdown + per-tool latency histogram (#6228) ─────────
+
+/// `failure_type_label` maps the real `ToolExecutionStatus` variants — and
+/// the no-status circuit-break case — onto the bounded enum the
+/// `librefang_tool_call_total{failure_type}` label exposes. This is the
+/// load-bearing classification; the counter test below relies on it.
+#[test]
+fn test_failure_type_label_mapping() {
+    use librefang_types::tool::ToolExecutionStatus as S;
+
+    // Success path is always "none", regardless of status shape.
+    assert_eq!(failure_type_label(false, Some(S::Completed)), "none");
+    assert_eq!(failure_type_label(false, None), "none");
+
+    // Failure mappings.
+    assert_eq!(failure_type_label(true, Some(S::Skipped)), "blocked");
+    assert_eq!(failure_type_label(true, Some(S::Denied)), "approval_denied");
+    assert_eq!(
+        failure_type_label(true, Some(S::ModifyAndRetry)),
+        "approval_denied"
+    );
+    assert_eq!(failure_type_label(true, Some(S::Expired)), "timeout");
+    assert_eq!(failure_type_label(true, Some(S::Error)), "hard_error");
+    // No status on the error path ⇒ circuit break.
+    assert_eq!(failure_type_label(true, None), "circuit_break");
+    // Defensive: an error flagged with a success-shaped status still lands
+    // in the genuine-error bucket rather than being dropped.
+    assert_eq!(failure_type_label(true, Some(S::Completed)), "hard_error");
+}
+
+/// Every failure status emits the counter with a distinct `failure_type`
+/// label, so a dashboard can break failures down instead of seeing one
+/// opaque `outcome=failure` bucket (#6228).
+#[test]
+fn test_record_tool_call_metric_emits_failure_type() {
+    use librefang_types::tool::ToolExecutionStatus as S;
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+    let cases = [
+        (Some(S::Skipped), "blocked"),
+        (Some(S::Denied), "approval_denied"),
+        (Some(S::ModifyAndRetry), "approval_denied"),
+        (Some(S::Expired), "timeout"),
+        (Some(S::Error), "hard_error"),
+        (None, "circuit_break"),
+    ];
+
+    for (status, expected_ft) in cases {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        metrics::with_local_recorder(&recorder, || {
+            record_tool_call_metric("agent", "ftool", true, status, Some(10));
+        });
+        let snap = snapshotter.snapshot().into_vec();
+        let found = snap.iter().any(|(ckey, _, _, val)| {
+            ckey.key().name() == "librefang_tool_call_total"
+                && ckey
+                    .key()
+                    .labels()
+                    .any(|l| l.key() == "outcome" && l.value() == "failure")
+                && ckey
+                    .key()
+                    .labels()
+                    .any(|l| l.key() == "failure_type" && l.value() == expected_ft)
+                && matches!(val, DebugValue::Counter(_))
+        });
+        assert!(
+            found,
+            "failure_type={expected_ft} must be emitted for status {status:?}"
+        );
+    }
+}
+
+/// The success path carries `failure_type="none"` so the label is always
+/// present (a missing label would fragment the time series).
+#[test]
+fn test_record_tool_call_metric_success_failure_type_is_none() {
+    use librefang_types::tool::ToolExecutionStatus as S;
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    metrics::with_local_recorder(&recorder, || {
+        record_tool_call_metric("agent", "oktool", false, Some(S::Completed), Some(5));
+    });
+    let snap = snapshotter.snapshot().into_vec();
+    let found = snap.iter().any(|(ckey, _, _, val)| {
+        ckey.key().name() == "librefang_tool_call_total"
+            && ckey
+                .key()
+                .labels()
+                .any(|l| l.key() == "failure_type" && l.value() == "none")
+            && matches!(val, DebugValue::Counter(_))
+    });
+    assert!(found, "success path must carry failure_type=none");
+}
+
+/// The per-tool latency histogram is emitted with the `tool` label and a
+/// sample equal to `execution_ms / 1000.0` seconds (#6228).
+#[test]
+fn test_record_tool_call_metric_emits_latency_histogram() {
+    use librefang_types::tool::ToolExecutionStatus as S;
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    metrics::with_local_recorder(&recorder, || {
+        // 1500 ms ⇒ 1.5 s.
+        record_tool_call_metric("agent", "histtool", false, Some(S::Completed), Some(1500));
+    });
+    let snap = snapshotter.snapshot().into_vec();
+    let hist = snap.iter().find(|(ckey, _, _, val)| {
+        ckey.key().name() == "librefang_tool_execution_seconds"
+            && ckey
+                .key()
+                .labels()
+                .any(|l| l.key() == "tool" && l.value() == "histtool")
+            && matches!(val, DebugValue::Histogram(_))
+    });
+    let hist = hist.expect("librefang_tool_execution_seconds{tool=histtool} must be recorded");
+    if let DebugValue::Histogram(samples) = &hist.3 {
+        assert_eq!(samples.len(), 1, "exactly one latency sample");
+        assert!(
+            (samples[0].into_inner() - 1.5).abs() < 1e-9,
+            "1500ms must record as 1.5s, got {:?}",
+            samples[0]
+        );
+    }
+}
+
+/// When no duration is available (circuit-break / short-circuit paths),
+/// the histogram is NOT emitted — we never record a bogus 0s sample that
+/// would skew the latency distribution downward.
+#[test]
+fn test_record_tool_call_metric_skips_histogram_without_duration() {
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    metrics::with_local_recorder(&recorder, || {
+        // Circuit-break shape: error, no status, no duration.
+        record_tool_call_metric("agent", "nodur", true, None, None);
+    });
+    let snap = snapshotter.snapshot().into_vec();
+    let hist_present = snap.iter().any(|(ckey, _, _, val)| {
+        ckey.key().name() == "librefang_tool_execution_seconds"
+            && matches!(val, DebugValue::Histogram(_))
+    });
+    assert!(
+        !hist_present,
+        "histogram must be skipped when no execution duration is available"
+    );
+}
+
+// ── span outcome / error status on execute_single_tool_call (#6228) ─────
+
+/// Minimal `tracing` layer that records the string values of any span
+/// field set via `Span::record` into a shared map keyed by field name.
+/// Lets us assert what `record_tool_span_outcome` stamps onto the span
+/// without standing up a full OTLP exporter.
+#[derive(Clone, Default)]
+struct FieldCaptureLayer {
+    fields: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
+}
+
+impl<S> tracing_subscriber::Layer<S> for FieldCaptureLayer
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    fn on_record(
+        &self,
+        _id: &tracing::span::Id,
+        values: &tracing::span::Record<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        struct V<'a>(&'a mut std::collections::HashMap<String, String>);
+        impl tracing::field::Visit for V<'_> {
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                self.0.insert(field.name().to_string(), value.to_string());
+            }
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.0
+                    .insert(field.name().to_string(), format!("{value:?}"));
+            }
+        }
+        let mut guard = self.fields.lock().unwrap();
+        values.record(&mut V(&mut guard));
+    }
+}
+
+fn capture_span_fields<F: FnOnce()>(body: F) -> std::collections::HashMap<String, String> {
+    use tracing_subscriber::layer::SubscriberExt;
+
+    let layer = FieldCaptureLayer::default();
+    let fields = layer.fields.clone();
+    let subscriber = tracing_subscriber::registry().with(layer);
+    tracing::subscriber::with_default(subscriber, || {
+        // Mirror the `execute_single_tool_call` span shape: the two outcome
+        // fields are declared Empty up front, then recorded by the helper.
+        let span = tracing::info_span!(
+            "execute_single_tool_call",
+            tool.outcome = tracing::field::Empty,
+            otel.status_code = tracing::field::Empty,
+        );
+        let _g = span.enter();
+        body();
+    });
+    let guard = fields.lock().unwrap();
+    guard.clone()
+}
+
+/// A hard failure stamps `tool.outcome = hard_error` AND flips the OTel
+/// span status (`otel.status_code = error`) so a `hasError=true` trace
+/// filter matches.
+#[test]
+fn test_span_outcome_hard_error_sets_error_status() {
+    use librefang_types::tool::ToolExecutionStatus as S;
+    let fields = capture_span_fields(|| record_tool_span_outcome(true, Some(S::Error)));
+    assert_eq!(
+        fields.get("tool.outcome").map(String::as_str),
+        Some("hard_error")
+    );
+    assert_eq!(
+        fields.get("otel.status_code").map(String::as_str),
+        Some("error"),
+        "hard failure must set the OTel span status to error"
+    );
+}
+
+/// The circuit-break path (no status) is also a genuine service error.
+#[test]
+fn test_span_outcome_circuit_break_sets_error_status() {
+    let fields = capture_span_fields(|| record_tool_span_outcome(true, None));
+    assert_eq!(
+        fields.get("tool.outcome").map(String::as_str),
+        Some("circuit_break")
+    );
+    assert_eq!(
+        fields.get("otel.status_code").map(String::as_str),
+        Some("error")
+    );
+}
+
+/// A model-fat-fingered blocked / denied call records the outcome but must
+/// NOT flip the span status — otherwise the service errorRate counts the
+/// model's mistakes as service errors.
+#[test]
+fn test_span_outcome_blocked_does_not_set_error_status() {
+    use librefang_types::tool::ToolExecutionStatus as S;
+    for (status, ft) in [(S::Skipped, "blocked"), (S::Denied, "approval_denied")] {
+        let fields = capture_span_fields(|| record_tool_span_outcome(true, Some(status)));
+        assert_eq!(fields.get("tool.outcome").map(String::as_str), Some(ft));
+        assert!(
+            !fields.contains_key("otel.status_code"),
+            "soft outcome {ft} must not set the span status to error"
+        );
+    }
+}
+
+/// A tool timeout (`Expired` → `timeout`) is a genuine execution failure —
+/// the body overran its deadline — so it flips the span status to error,
+/// matching `hard_error` / `circuit_break`. Guards the load-bearing
+/// `timeout` arm in `record_tool_span_outcome`'s error-status set (the
+/// inline comment there once claimed timeout was soft).
+#[test]
+fn test_span_outcome_timeout_sets_error_status() {
+    use librefang_types::tool::ToolExecutionStatus as S;
+    let fields = capture_span_fields(|| record_tool_span_outcome(true, Some(S::Expired)));
+    assert_eq!(
+        fields.get("tool.outcome").map(String::as_str),
+        Some("timeout")
+    );
+    assert_eq!(
+        fields.get("otel.status_code").map(String::as_str),
+        Some("error"),
+        "a tool timeout is a genuine execution failure and must set the span status to error"
+    );
+}
+
+/// The success path records `tool.outcome = success`-equivalent (`none`)
+/// and never touches the span status.
+#[test]
+fn test_span_outcome_success_is_not_errored() {
+    use librefang_types::tool::ToolExecutionStatus as S;
+    let fields = capture_span_fields(|| record_tool_span_outcome(false, Some(S::Completed)));
+    assert_eq!(fields.get("tool.outcome").map(String::as_str), Some("none"));
+    assert!(!fields.contains_key("otel.status_code"));
+}
+
 /// Regression for #6226 — `librefang_tool_call_total` must carry an `agent` label so tool failures can be attributed per-agent.
 /// Asserts the counter is emitted with `agent`, `tool`, and `outcome` labels and that the agent id is sanitized + length-capped like the tool label.
 #[test]
@@ -1306,7 +1601,7 @@ fn test_record_tool_call_metric_carries_agent_label() {
     let raw_agent = format!("agent\u{0007}-{}", "x".repeat(200));
 
     metrics::with_local_recorder(&recorder, || {
-        record_tool_call_metric(&raw_agent, "shell_exec", true);
+        record_tool_call_metric(&raw_agent, "shell_exec", true, None, None);
     });
 
     let snap = snapshotter.snapshot().into_vec();

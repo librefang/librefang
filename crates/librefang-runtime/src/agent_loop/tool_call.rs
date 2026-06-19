@@ -25,18 +25,92 @@ pub(super) fn sanitize_tool_label(name: &str) -> String {
     name.chars().filter(|c| !c.is_control()).take(64).collect()
 }
 
-/// Record a tool-call outcome for observability (#3495, #6226).
-/// `outcome` is one of `"success"` / `"failure"`; the `agent` dimension attributes the call to the agent that issued it so per-agent tool failure rates are queryable.
-/// We never push raw error text into metric labels, and both the `agent` and `tool` labels are sanitized + length-capped to keep cardinality bounded.
-pub(super) fn record_tool_call_metric(agent_id: &str, tool_name: &str, is_error: bool) {
+/// Classify a tool-call outcome into a bounded, low-cardinality
+/// `failure_type` label for the `librefang_tool_call_total` counter
+/// (#6228). The label distinguishes the failure *modes* a single
+/// `is_error` bool previously collapsed, so a denied call, a loop-guard
+/// block, a timeout, a circuit break, and a genuine crash are no longer
+/// indistinguishable on a dashboard.
+///
+/// On the success path the label is `"none"`. The variant set is a fixed
+/// enum — never raw error text — so cardinality stays bounded.
+///
+/// `ToolExecutionStatus` → `failure_type` mapping:
+/// - `Completed` / `WaitingApproval` (success / pending, `is_error=false`) → `none`
+/// - `Skipped` → `blocked` (loop-guard block, exec allowlist / metacharacter gate, skipped batch member)
+/// - `Denied` / `ModifyAndRetry` → `approval_denied` (approval policy rejected or asked to modify)
+/// - `Expired` → `timeout` (tool body exceeded its timeout)
+/// - `Error` → `hard_error` (genuine tool crash / IO / network failure)
+///
+/// The circuit-break path has no `ToolExecutionStatus` (the call never
+/// produced a `ToolResult`); the caller passes `None`, which maps to
+/// `circuit_break`.
+pub(super) fn failure_type_label(
+    is_error: bool,
+    status: Option<librefang_types::tool::ToolExecutionStatus>,
+) -> &'static str {
+    use librefang_types::tool::ToolExecutionStatus as S;
+    if !is_error {
+        return "none";
+    }
+    match status {
+        // No status at all ⇒ the call aborted before producing a result
+        // (circuit breaker tripped in the loop-guard pre-check).
+        None => "circuit_break",
+        Some(S::Skipped) => "blocked",
+        Some(S::Denied) | Some(S::ModifyAndRetry) => "approval_denied",
+        Some(S::Expired) => "timeout",
+        // `Error`, plus the should-not-happen `is_error=true` with a
+        // success-shaped status, fall to the genuine-error bucket.
+        Some(S::Error) | Some(S::Completed) | Some(S::WaitingApproval) => "hard_error",
+    }
+}
+
+/// Record a tool-call outcome for observability (#3495, #6228). Emits two
+/// metrics off the same dispatch event:
+///
+/// - `librefang_tool_call_total{tool,outcome,failure_type}` counter —
+///   `outcome` is `"success"` / `"failure"`; `failure_type` breaks the
+///   failure down into a fixed low-cardinality enum (see
+///   [`failure_type_label`]). We never push raw error text into labels.
+/// - `librefang_tool_execution_seconds{tool}` histogram — per-tool wall
+///   time of the dispatch, recorded only when a duration is available
+///   (`execution_ms` from the decision trace). Emitted in seconds.
+///
+/// `status` is the `ToolExecutionStatus` of the produced `ToolResult`, or
+/// `None` on the circuit-break path where no result exists.
+/// `execution_ms` is the measured tool duration in milliseconds, or
+/// `None` when the call never reached the timed body (circuit break, etc.).
+pub(super) fn record_tool_call_metric(
+    agent_id: &str,
+    tool_name: &str,
+    is_error: bool,
+    status: Option<librefang_types::tool::ToolExecutionStatus>,
+    execution_ms: Option<u64>,
+) {
+    let tool = sanitize_tool_label(tool_name);
     let outcome = if is_error { "failure" } else { "success" };
     metrics::counter!(
         "librefang_tool_call_total",
         "agent" => sanitize_tool_label(agent_id),
-        "tool" => sanitize_tool_label(tool_name),
+        "tool" => tool.clone(),
         "outcome" => outcome,
+        "failure_type" => failure_type_label(is_error, status),
     )
     .increment(1);
+
+    // Per-tool latency histogram (#6228). The duration was already
+    // captured for the decision trace; export it here so dashboards get a
+    // `librefang_tool_execution_seconds{tool}` distribution. `tool` is the
+    // only label, and it is already sanitized + capped, so cardinality
+    // stays bounded.
+    if let Some(ms) = execution_ms {
+        metrics::histogram!(
+            "librefang_tool_execution_seconds",
+            "tool" => tool,
+        )
+        .record(ms as f64 / 1000.0);
+    }
 }
 
 pub(super) fn append_tool_result_guidance_blocks(tool_result_blocks: &mut Vec<ContentBlock>) {
@@ -396,6 +470,13 @@ pub(super) fn stage_tool_use_turn(
 pub(super) struct ExecutedToolCall {
     pub(super) result: librefang_types::tool::ToolResult,
     pub(super) final_content: String,
+    /// Wall-clock duration of the timed tool body, in milliseconds —
+    /// the same value recorded in the `DecisionTrace`. Surfaced here so
+    /// every metric-recording call site can export the per-tool latency
+    /// histogram (#6228) without re-borrowing the trace. `None` for
+    /// short-circuit outcomes that never ran the timed body (fork
+    /// allowlist rejection, incognito drop, hook block, loop-guard block).
+    pub(super) execution_ms: Option<u64>,
 }
 
 pub(super) struct ToolExecutionContext<'a> {
@@ -459,11 +540,22 @@ pub(super) struct ToolExecutionContext<'a> {
     fields(
         tool.name = %tool_call.name,
         tool.id = %tool_call.id,
+        // Recorded after execution (see `record_tool_span_outcome`). `tool.outcome`
+        // carries the bounded failure-type label so a trace backend can break
+        // failures down without parsing free text; `otel.status_code` is the
+        // canonical field `tracing-opentelemetry` maps to the OTel span status —
+        // set to `error` only on a genuine service failure (hard_error /
+        // circuit_break / timeout), never on a model-driven blocked / denied call,
+        // so a `hasError=true` filter and service-level errorRate actually match a
+        // failed tool (#6228).
+        tool.outcome = tracing::field::Empty,
+        otel.status_code = tracing::field::Empty,
     ),
 )]
 /// Thin wrapper around `execute_single_tool_call_inner` that guarantees
 /// `record_tool_call_metric` is called on **every** return path — both `Ok`
-/// (success or is_error tool result) and `Err` (e.g. circuit-break).
+/// (success or is_error tool result) and `Err` (e.g. circuit-break) — and
+/// stamps the span with the outcome + error status (#6228).
 pub(super) async fn execute_single_tool_call(
     ctx: &mut ToolExecutionContext<'_>,
     tool_call: &ToolCall,
@@ -471,11 +563,49 @@ pub(super) async fn execute_single_tool_call(
     let result = execute_single_tool_call_inner(ctx, tool_call).await;
     match &result {
         Ok(executed) => {
-            record_tool_call_metric(ctx.agent_id_str, &tool_call.name, executed.result.is_error)
+            record_tool_call_metric(
+                ctx.agent_id_str,
+                &tool_call.name,
+                executed.result.is_error,
+                Some(executed.result.status),
+                executed.execution_ms,
+            );
+            record_tool_span_outcome(executed.result.is_error, Some(executed.result.status));
         }
-        Err(_) => record_tool_call_metric(ctx.agent_id_str, &tool_call.name, true),
+        Err(_) => {
+            // Circuit break: no `ToolResult`, no measured duration.
+            record_tool_call_metric(ctx.agent_id_str, &tool_call.name, true, None, None);
+            record_tool_span_outcome(true, None);
+        }
     }
     result
+}
+
+/// Stamp the current `execute_single_tool_call` span with the tool
+/// outcome (#6228). Records `tool.outcome` (the bounded failure-type
+/// label, or `"success"`) on every call, and sets `otel.status_code =
+/// "error"` — the field `tracing-opentelemetry` maps to the OTel span
+/// status — **only** on a genuine service failure (`hard_error`,
+/// `circuit_break`, or `timeout`). A model-fat-fingered blocked / denied /
+/// approval-modify call is the model's mistake, not a service error:
+/// marking those errored would inflate the service errorRate with
+/// non-failures, so the span status stays unset (OK) for them while
+/// `tool.outcome` still records what happened.
+pub(super) fn record_tool_span_outcome(
+    is_error: bool,
+    status: Option<librefang_types::tool::ToolExecutionStatus>,
+) {
+    let ft = failure_type_label(is_error, status);
+    let span = tracing::Span::current();
+    span.record("tool.outcome", ft);
+    // `blocked` and `approval_denied` are model- or policy-driven outcomes;
+    // they must not flip the span to errored or the service errorRate will
+    // count the model's policy violations as service failures.
+    // `hard_error`, `circuit_break`, and `timeout` are genuine execution
+    // failures and do set the OTel span status to error.
+    if matches!(ft, "hard_error" | "circuit_break" | "timeout") {
+        span.record("otel.status_code", "error");
+    }
 }
 
 /// Execute one [`crate::parallel_dispatch::ParallelPlan`] group concurrently.
@@ -507,8 +637,11 @@ pub(super) async fn execute_tool_group(
     // Phase 1 — serial loop-guard pre-checks (`&mut LoopGuard` / session).
     // Each member is either short-circuited (blocked) or proceeds with a
     // verdict that feeds the concurrent core. A circuit break aborts here.
+    // `ExecutedToolCall` is the larger variant by far; box it so the enum
+    // stays small (clippy::large_enum_variant) now that the struct grew an
+    // `execution_ms` field (#6228).
     enum Member<'c> {
-        Blocked(ExecutedToolCall),
+        Blocked(Box<ExecutedToolCall>),
         Proceed(&'c ToolCall, LoopGuardVerdict),
     }
     let mut members: Vec<(usize, Member)> = Vec::with_capacity(group.len());
@@ -535,11 +668,13 @@ pub(super) async fn execute_tool_group(
                     ctx.agent_id_str,
                     &tool_call.name,
                     executed.result.is_error,
+                    Some(executed.result.status),
+                    executed.execution_ms,
                 );
-                members.push((idx, Member::Blocked(executed)));
+                members.push((idx, Member::Blocked(Box::new(executed))));
             }
             LoopGuardPrecheck::CircuitBreak(err) => {
-                record_tool_call_metric(ctx.agent_id_str, &tool_call.name, true);
+                record_tool_call_metric(ctx.agent_id_str, &tool_call.name, true, None, None);
                 return Err(err);
             }
         }
@@ -561,7 +696,7 @@ pub(super) async fn execute_tool_group(
     let mut pending: Vec<(usize, &ToolCall, LoopGuardVerdict)> = Vec::new();
     for (idx, member) in members {
         match member {
-            Member::Blocked(executed) => blocked.push((idx, executed)),
+            Member::Blocked(executed) => blocked.push((idx, *executed)),
             Member::Proceed(tool_call, verdict) => pending.push((idx, tool_call, verdict)),
         }
     }
@@ -579,14 +714,20 @@ pub(super) async fn execute_tool_group(
     while let Some((idx, name, outcome)) = in_flight.next().await {
         match outcome {
             Ok((executed, trace)) => {
-                record_tool_call_metric(agent_id_str, &name, executed.result.is_error);
+                record_tool_call_metric(
+                    agent_id_str,
+                    &name,
+                    executed.result.is_error,
+                    Some(executed.result.status),
+                    executed.execution_ms,
+                );
                 if let Some(trace) = trace {
                     traces.push((idx, trace));
                 }
                 results.push((idx, executed));
             }
             Err(e) => {
-                record_tool_call_metric(agent_id_str, &name, true);
+                record_tool_call_metric(agent_id_str, &name, true, None, None);
                 // First hard error wins; keep draining in-flight futures so
                 // their side effects (decision traces, metrics) are not lost,
                 // then surface the error. The whole turn aborts on `?`.
@@ -719,6 +860,8 @@ pub(super) async fn precheck_loop_guard(
                     ..Default::default()
                 },
                 final_content: msg.clone(),
+                // Loop-guard block never ran the timed tool body.
+                execution_ms: None,
             })
         }
         _ => LoopGuardPrecheck::Proceed(verdict),
@@ -798,6 +941,8 @@ pub(super) async fn execute_single_tool_call_core(
                         ..Default::default()
                     },
                     final_content: msg,
+                    // Rejected before the timed tool body ran.
+                    execution_ms: None,
                 },
                 None,
             ));
@@ -820,6 +965,8 @@ pub(super) async fn execute_single_tool_call_core(
                     ..Default::default()
                 },
                 final_content: "ok".to_string(),
+                // Dropped before the timed tool body ran.
+                execution_ms: None,
             },
             None,
         ));
@@ -865,6 +1012,8 @@ pub(super) async fn execute_single_tool_call_core(
                         ..Default::default()
                     },
                     final_content: content,
+                    // Hook blocked the call before the timed tool body ran.
+                    execution_ms: None,
                 },
                 None,
             ));
@@ -1053,6 +1202,7 @@ pub(super) async fn execute_single_tool_call_core(
         ExecutedToolCall {
             result,
             final_content,
+            execution_ms: Some(execution_ms),
         },
         Some(decision_trace),
     ))
