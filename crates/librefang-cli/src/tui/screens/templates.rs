@@ -27,6 +27,8 @@ pub struct ProviderAuth {
 
 // ── Built-in templates ──────────────────────────────────────────────────────
 
+// NOTE: These static template names are used to dynamically derive i18n keys (e.g. tui-templates-name-*).
+// Do not rename or edit these strings without updating the corresponding Fluent translation keys.
 const BUILTIN_TEMPLATES: &[(&str, &str, &str, &str, &str)] = &[
     (
         "General Assistant",
