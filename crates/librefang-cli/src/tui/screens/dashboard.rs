@@ -356,12 +356,30 @@ fn items_to_lines(rows: &[AuditRow]) -> Vec<Line<'_>> {
 
 fn format_uptime(secs: u64) -> String {
     if secs < 60 {
-        format!("{secs}s")
+        crate::i18n::t_args("format-uptime-s", &[("secs", &secs.to_string())])
     } else if secs < 3600 {
-        format!("{}m {}s", secs / 60, secs % 60)
+        crate::i18n::t_args(
+            "format-uptime-ms",
+            &[
+                ("mins", &(secs / 60).to_string()),
+                ("secs", &(secs % 60).to_string()),
+            ],
+        )
     } else if secs < 86400 {
-        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+        crate::i18n::t_args(
+            "format-uptime-hm",
+            &[
+                ("hours", &(secs / 3600).to_string()),
+                ("mins", &((secs % 3600) / 60).to_string()),
+            ],
+        )
     } else {
-        format!("{}d {}h", secs / 86400, (secs % 86400) / 3600)
+        crate::i18n::t_args(
+            "format-uptime-dh",
+            &[
+                ("days", &(secs / 86400).to_string()),
+                ("hours", &((secs % 86400) / 3600).to_string()),
+            ],
+        )
     }
 }

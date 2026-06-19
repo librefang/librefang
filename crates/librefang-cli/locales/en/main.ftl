@@ -63,6 +63,7 @@ label-active-agents = Active agents
 label-pairing-code = Pairing code
 label-expires = Expires
 label-yes = yes
+label-no = no
 label-not-loaded = not loaded
 label-current = Current
 label-channel = Channel
@@ -212,6 +213,7 @@ label-platform = Platform
 label-sessions = Sessions
 label-memory = Memory
 label-started = Started
+label-running = running
 label-response = Response
 label-checks = Checks
 section-status-locked = Restricted (requires API key)
@@ -276,6 +278,44 @@ channel-unknown = Unknown channel: { $name }
 channel-unknown-fix = Available: discord, slack, whatsapp, email, signal, matrix
 channel-test-ok = Channel test passed
 channel-test-fail = Channel test failed
+channel-none-configured = No channels configured.
+channel-use-setup-hint = Use `librefang channel setup` to add one.
+channel-reloaded = Channels reloaded ({ $started } sidecar(s) started).
+channel-registry-empty = Daemon's channel registry is empty.
+channel-install-sdk-hint = Install the sidecar SDK so adapters appear in the catalog:
+channel-install-sdk-cmd =   pip install librefang-sdk
+channel-rerun-setup-hint = Then re-run `librefang channel setup`.
+channel-all-configured = Every available channel is already configured.
+channel-see-list-hint = Use `librefang channel list` to see them, or
+channel-remove-entry-hint = `librefang channel rm <name>` to remove an entry first.
+channel-pick-setup = Pick a channel to set up:
+channel-choice-prompt = Choice [1]: 
+channel-unknown-error = Unknown channel: { $name }
+channel-unknown-error-fix = Run `librefang channel list` to see the available adapters.
+channel-no-configurable-fields = `{ $name }` exposes no configurable fields — nothing to prompt for.
+channel-hot-reload-manual-hint = (Hot-reload anyway with `librefang channel reload` if you've already edited config.toml by hand.)
+channel-prompt-secret-keep =   { $label } ({ $key }) [set — leave blank to keep]: 
+channel-prompt-default =   { $label } ({ $key }) [{ $current }]: 
+channel-prompt-required =   { $label } ({ $key }) *: 
+channel-prompt-optional =   { $label } ({ $key }): 
+channel-save-rejected = Save for `{ $name }` rejected: { $error }
+channel-save-rejected-fix = Re-run with corrected values, or check the daemon log for details.
+channel-saved-restart-required = ✓ Saved `{ $name }` — restart the daemon for changes to apply.
+channel-saved-hot-reload = ✓ Saved `{ $name }` — hot-reload applied.
+channel-env-shadowing-warn = Warning: shell environment variables shadow these tokens — unset them and restart for the new value to take effect: { $keys }
+channel-config-read-fail = Cannot read { $path }: { $error }
+channel-config-read-fail-fix = Run `librefang init` to create the config file.
+channel-config-parse-fail = Cannot parse { $path }: { $error }
+channel-config-parse-fail-fix = Fix the TOML syntax and retry.
+channel-no-entries-to-remove = No [[sidecar_channels]] entries in config.toml — nothing to remove.
+channel-no-entry-with-name = No [[sidecar_channels]] entry with name="{ $name }".
+channel-config-write-fail = Failed to write { $path }: { $error }
+channel-config-write-fail-fix = Check filesystem permissions.
+channel-removed-entries = ✓ Removed { $count } [[sidecar_channels]] entry/entries named `{ $name }`.
+channel-hot-reloaded-daemon =   Hot-reloaded daemon.
+channel-reload-status-warn =   Reload returned { $status }: change will apply on next daemon restart.
+channel-reload-contact-fail-warn =   Could not contact daemon for reload ({ $error }); change will apply on next start.
+channel-reload-daemon-offline =   Daemon not running; change will apply on next start.
 section-setup-discord = Setting up Discord
 section-setup-slack = Setting up Slack
 section-setup-whatsapp = Setting up WhatsApp
@@ -316,9 +356,56 @@ cron-delete-failed = Failed to delete cron job: { $error }
 cron-toggled = Cron job { $id } { $action }d.
 cron-toggle-failed = Failed to { $action } cron job: { $error }
 
+# --- Automation ---
+automation-workflow-none = No workflows registered.
+automation-workflow-file-not-found = Workflow file not found: { $path }
+automation-workflow-read-error = Error reading workflow file: { $error }
+automation-workflow-invalid-json = Invalid JSON: { $error }
+automation-workflow-created = Workflow created successfully!
+automation-workflow-created-id =   ID: { $id }
+automation-workflow-create-failed = Failed to create workflow: { $error }
+automation-workflow-completed = Workflow completed!
+automation-workflow-run-id =   Run ID: { $id }
+automation-workflow-failed = Workflow failed: { $error }
+automation-trigger-none = No triggers registered.
+automation-trigger-invalid-pattern = Invalid pattern JSON: { $error }
+automation-trigger-created = Trigger created successfully!
+automation-trigger-created-id =   Trigger ID: { $id }
+automation-trigger-created-agent =   Agent ID:   { $agent_id }
+automation-trigger-created-target =   Target:     { $target }
+automation-trigger-create-failed = Failed to create trigger: { $error }
+automation-trigger-deleted = Trigger { $id } deleted.
+automation-trigger-delete-failed = Failed to delete trigger: { $error }
+automation-trigger-get-failed = Failed to get trigger: { $error }
+automation-trigger-update-failed = Failed to update trigger: { $error }
+automation-trigger-updated = Trigger { $id } updated.
+automation-trigger-toggle-failed = Failed to { $action } trigger: { $error }
+automation-trigger-toggled = Trigger { $id } { $action }d.
+automation-trigger-info-id = Trigger ID:    { $id }
+automation-trigger-info-agent = Agent ID:      { $id }
+automation-trigger-info-pattern = Pattern:       { $pattern }
+automation-trigger-info-prompt = Prompt:        { $prompt }
+automation-trigger-info-enabled = Enabled:       { $enabled }
+automation-trigger-info-fires = Fire count:    { $count }
+automation-trigger-info-max-fires = Max fires:     { $count }
+automation-trigger-info-target = Target agent:  { $agent }
+automation-trigger-info-cooldown = Cooldown:      { $secs }s
+automation-trigger-info-session = Session mode:  { $mode }
+automation-unlimited = unlimited
+automation-cron-none = No scheduled jobs.
+
+label-header-steps = STEPS
+label-header-trigger-id = TRIGGER ID
+label-header-agent-id = AGENT ID
+label-header-fires = FIRES
+label-header-pattern = PATTERN
+label-header-schedule = SCHEDULE
+label-header-prompt = PROMPT
+
 # --- Approvals ---
 approval-responded = Approval { $id } { $action }d.
 approval-failed = Failed to { $action } approval: { $error }
+approval-no-pending = No pending approvals.
 
 # --- Memory ---
 memory-set = Set { $key } for agent '{ $agent }'.
@@ -346,6 +433,9 @@ model-set-failed = Failed to set model: { $error }
 model-no-catalog = No models in catalog.
 section-select-model = Select a model
 model-out-of-range = Number out of range (1-{ $max })
+model-none-found = No models found.
+model-prompt-selection =   Enter number or model ID: 
+
 
 # --- Config ---
 config-set-success = Config value set.
@@ -374,11 +464,26 @@ config-remove-key-failed = Failed to remove key: { $error }
 config-env-not-set = { $env_var } not set
 config-set-key-hint = Set it: librefang config set-key { $provider }
 config-update-key-hint = Update key: librefang config set-key { $provider }
+config-no-file-found = No configuration found at: { $path }
+config-run-init-hint = Run `librefang init` to create one.
+config-read-error = Error reading config: { $error }
+config-editor-exit = Editor exited with: { $status }
+config-editor-open-fail = Failed to open editor '{ $editor }': { $error }
+config-editor-env-hint = Set $EDITOR to your preferred editor.
+config-val-exceeds-i64 = value { $value } exceeds i64::MAX ({ $max }); TOML cannot store unsigned integers above this bound
+config-invalid-integer = '{ $raw }' is not a valid integer
+config-paste-api-key-prompt =   Paste your { $provider } API key: 
+config-testing-key =   Testing key... 
+config-testing-provider-key =   Testing { $provider } ({ $env_var })... 
+config-test-ok = OK
+config-test-failed = FAILED (401/403)
+config-test-unverified = could not verify (may still work)
+
 
 # --- Hand commands ---
 hand-install-deps-success = Dependencies installed for hand '{ $id }'.
-hand-paused = Hand instance '{ $id }' paused.
-hand-resumed = Hand instance '{ $id }' resumed.
+hand-paused = Hand instance '{ $label } (instance: { $instance_id })' paused.
+hand-resumed = Hand instance '{ $label } (instance: { $instance_id })' resumed.
 
 # --- Daemon notify ---
 daemon-restart-notify = Restart the daemon to apply: librefang restart
@@ -387,6 +492,14 @@ daemon-restart-notify = Restart the daemon to apply: librefang restart
 section-system-info = LibreFang System Info
 
 # --- Uninstall ---
+uninstall-warning = This will completely uninstall LibreFang from your system.
+uninstall-remove-data-kept =   • Remove data in { $path } (keeping config files)
+uninstall-remove-all =   • Remove { $path }
+uninstall-remove-binary =   • Remove binary: { $path }
+uninstall-remove-cargo-binary =   • Remove cargo binary: { $path }
+uninstall-remove-autostart =   • Remove auto-start entries (if any)
+uninstall-clean-path =   • Clean PATH from shell configs (if any)
+uninstall-confirm-prompt =   Type 'uninstall' to confirm: 
 uninstall-goodbye = LibreFang has been uninstalled. Goodbye!
 uninstall-cancelled = Cancelled.
 uninstall-stopping-daemon = Stopping running daemon...
@@ -412,6 +525,7 @@ log-following = --- Following { $path } (Ctrl+C to stop) ---
 log-path-hint = Log file: { $path }
 
 # --- Extracted from Rust sources ---
+init-error-create-data-dir = Error creating data dir: { $error }
 init-upgrade-existing = Existing installation detected — running upgrade to preserve your settings.
 init-upgrade-fresh-hint = To start fresh, remove ~/.librefang/config.toml and run `librefang init` again.
 init-upgrade-no-config = Nothing to upgrade — no config.toml found. Run `librefang init` first.
@@ -543,6 +657,7 @@ agent-sessions-none-found = No sessions found.
 
 label-source = Source
 label-name = Name
+label-captured = Captured
 label-module = Module
 label-tools = Tools
 label-tags = Tags
@@ -604,6 +719,11 @@ mcp-catalog-summary =   { $total } catalog entries ({ $installed } installed)
 mcp-catalog-install-hint =   Use `librefang mcp add <id>` to install an MCP server.
 mcp-none-configured = No MCP servers configured.
 mcp-list-catalog-hint =   Use `librefang mcp catalog` to list installable entries.
+mcp-vault-set-hint =   librefang vault set { $name }  # { $help }
+mcp-header-name = name
+mcp-header-template-id = template_id
+mcp-header-transport = transport
+mcp-header-details = details
 
 # monitoring.rs
 monitoring-audit-reset-destructive = audit reset is destructive — re-run with `--confirm` to proceed
@@ -875,6 +995,10 @@ launcher-menu-help-hint = Print full --help output
 launcher-welcome = Welcome! Let's get you set up.
 launcher-checking-daemon = Checking for daemon…
 launcher-daemon-running = Daemon running at { $url }
+launcher-daemon-agents = { $count ->
+    [one]  ({ $count } agent)
+   *[other]  ({ $count } agents)
+}
 launcher-daemon-no-running = No daemon running
 launcher-provider = Provider: { $provider }
 launcher-no-keys = No API keys detected
@@ -888,6 +1012,7 @@ launcher-help-subtitle =   — q/Esc to go back
 launcher-help-hints = ↑↓/jk scroll  PgUp/PgDn  g/G top/bottom  q back
 
 # CLI shared UI strings
+common-warning-config-default = warning: { $error }; using default config values for this command
 ui-brand-tagline = The open-source agent operating system
 ui-label-hint = hint:
 ui-label-next-steps = Next steps
@@ -895,4 +1020,269 @@ ui-label-fix = fix:
 ui-label-try = try:
 ui-provider-not-set = { $env_var } not set
 
+# Table headers / Shared labels
+label-header-name = NAME
+label-header-kind = KIND
+label-header-configured = CONFIGURED
+label-header-token = TOKEN
+label-header-alias = ALIAS
+label-header-provider = PROVIDER
+label-header-id = ID
+label-header-agent = AGENT
+label-header-type = TYPE
+label-header-timestamp = TIMESTAMP
+label-header-event = EVENT
+label-header-key = KEY
+label-header-value = VALUE
+label-header-enabled = ENABLED
+label-header-url = URL
+
+# Channel command specific keys
+channel-header-msgs-24h = 24H MSGS
+channel-error-save-failed-no-body = save failed (no error body)
+
+# Models command specific keys
+model-none-in-catalog = No models in catalog.
+model-header-model = MODEL
+model-header-tier = TIER
+model-header-context = CONTEXT
+model-header-resolves-to = RESOLVES TO
+model-header-auth = AUTH
+model-header-models = MODELS
+model-header-base-url = BASE URL
+model-picker-item =     { $idx }. { $id } { $tier }
+
+# Approvals command specific keys
+approval-none-pending = No pending approvals.
+approval-header-request = REQUEST
+
+# Auth command specific keys
+auth-error-create-home-dir = Failed to create LibreFang home directory: { $error }
+auth-error-write-secrets = Failed to write secrets.env: { $error }
+auth-error-parse-config = Failed to parse config.toml: { $error }
+auth-error-default-model-not-table = default_model is not a table
+auth-error-write-config = Failed to write config.toml: { $error }
+auth-pool-add-hint = Add one with:
+auth-pool-add-example =   librefang auth pool add openai OPENAI_API_KEY_1 --label Primary --priority 10
+auth-pool-header = { $provider }  ({ $strategy })
+auth-pool-keys-available =   keys: { $available }/{ $total } available
+auth-pool-cooldown-left = ({ $secs }s left)
+auth-pool-status-invalid = invalid
+auth-pool-status-exhausted = exhausted
+auth-pool-status-cooldown = cooldown
+auth-pool-status-env-missing = env-missing
+auth-pool-status-healthy = healthy
+auth-pool-key-requests = requests={ $count }
+auth-pool-key-item =     - [{ $label }] { $key_display }  priority={ $pri }{ $reqs_str }  status={ $status }
+auth-hash-add-config-hint = Add to config.toml:
+auth-hash-config-entry =   dashboard_pass_hash = "{ $hash }"
+
+# Agent command specific keys
+agent-spawn-id-label =   ID:   { $id }
+agent-spawn-name-label =   Name: { $name }
+error-unknown = Unknown error
+label-unknown = <unknown>
+label-header-state = STATE
+label-header-created = CREATED
+label-header-msgs = MSGS
+label-header-last-active = LAST ACTIVE
+label-session-state-running = running
+label-session-state-idle = idle
+
+# Daemon command specific keys
+daemon-error-resolve-exe = resolve current executable: { $error }
+daemon-error-create-log-dir = create log directory { $path }: { $error }
+daemon-error-open-log = open daemon log { $path }: { $error }
+daemon-error-clone-log-handle = clone daemon log handle { $path }: { $error }
+daemon-error-spawn-detached = spawn detached daemon: { $error }
+daemon-error-failed-create-log-dir = Failed to create log directory { $path }: { $error }
+daemon-error-failed-open-log = Failed to open daemon log file { $path }: { $error }
+
+# --- Skill commands ---
+skill-name-empty = skill name is empty
+skill-name-unsafe = unsafe skill name '{ $name }': must be a single path component (no '/', '\', '..' or absolute path)
+skill-hand-not-found = Hand '{ $hand }' not found at { $path }
+skill-openclaw-detected = Detected OpenClaw skill format. Converting...
+skill-install-refused = Refusing to install skill: { $error }
+skill-write-manifest-failed = Failed to write manifest: { $error }
+skill-openclaw-installed-to-hand = Installed OpenClaw skill '{ $name }' to hand '{ $hand }'
+skill-openclaw-installed = Installed OpenClaw skill: { $name }
+skill-openclaw-convert-failed = Failed to convert OpenClaw skill: { $error }
+skill-no-toml = No skill.toml found in { $path }
+skill-read-toml-failed = Error reading skill.toml: { $error }
+skill-parse-toml-failed = Error parsing skill.toml: { $error }
+skill-installed-to-hand = Installed skill '{ $name }' v{ $version } to hand '{ $hand }'
+skill-installed = Installed skill: { $name } v{ $version }
+skill-installed-hub-to-hand = Installed { $source } { $version } to hand '{ $hand }'
+skill-installed-hub = Installed { $source } { $version }
+skill-install-failed = Failed to install skill: { $error }
+skill-list-none-hand = No skills installed for hand '{ $hand }'.
+skill-list-none = No skills installed.
+skill-list-count-hand = { $count } skill(s) installed for hand '{ $hand }':
+skill-list-count = { $count } skill(s) installed:
+skill-list-load-failed = Error loading skills: { $error }
+skill-removed-from-hand = Removed skill '{ $name }' from hand '{ $hand }'
+skill-removed = Removed skill: { $name }
+skill-remove-failed = Failed to remove skill: { $error }
+skill-search-none = No skills found for "{ $query }".
+skill-search-results-header = Skills matching "{ $query }":
+skill-search-failed = Search failed: { $error }
+skill-validation-failed = Skill validation failed: { $error }
+skill-execution-failed = Skill execution failed: { $error }
+skill-package-failed = Failed to package skill: { $error }
+skill-determine-dir-failed = Could not determine current directory: { $error }
+skill-unsupported-runtime = Unsupported runtime '{ $runtime }'. Choose one of: python, node, wasm.
+skill-create-dir-failed = Error creating skill directory: { $error }
+skill-registry-load-failed = Error loading skill registry: { $error }
+skill-not-found = Skill '{ $name }' not found in { $path }
+skill-read-file-failed = Failed to read { $path }: { $error }
+skill-create-skills-dir-failed = Failed to create skills dir: { $error }
+skill-create-failed = Create failed: { $error }
+skill-update-failed = Update failed: { $error }
+skill-patch-failed = Patch failed: { $error }
+skill-delete-failed = Delete failed: { $error }
+skill-rollback-failed = Rollback failed: { $error }
+skill-write-file-failed = Write-file failed: { $error }
+skill-remove-file-failed = Remove-file failed: { $error }
+skill-serialize-history-failed = Failed to serialize history: { $error }
+skill-read-pending-failed = Failed to read pending directory: { $error }
+skill-load-candidate-failed = Failed to load candidate: { $error }
+skill-render-candidate-failed = Failed to render candidate as TOML: { $error }
+skill-approve-candidate-failed = Approve failed: { $error }
+skill-reject-candidate-failed = Reject failed: { $error }
+skill-publish-failed = Publish failed: { $error }
+skill-evolution-label = Skill: { $name }
+skill-version-label = Current version: { $version }
+skill-use-count-label = Use count: { $count }
+skill-evolution-count-label = Evolution count: { $count }
+skill-no-history = No version history recorded.
+skill-no-pending = No pending skill candidates.{ $filter }
+skill-pending-filter =  (filter: agent { $agent })
+skill-approved-candidate = Approved candidate { $id } → installed skill '{ $name }' (v{ $version }).
+skill-rejected-candidate = Rejected and removed candidate { $id }.
+skill-validated = Validated skill: { $name } v{ $version }
+skill-validated-runtime =   Runtime: { $runtime }
+skill-validated-source =   Source: { $path }
+skill-validated-description =   Description: { $description }
+skill-validated-tools =   Tools: { $tools }
+skill-refusing-warnings = Refusing to execute a skill with critical validation warnings.
+skill-validated-only = Validation only: no tool declared to execute.
+skill-invalid-input-json = Invalid --input JSON: { $error }
+skill-tool-result-header = Tool result ({ $name }):
+skill-validation-complete = Validation complete.
+skill-execution-skipped = Execution skipped: { $message }
+skill-preparing = Preparing skill: { $name } v{ $version }
+skill-refusing-publish = Refusing to publish a skill with critical validation warnings.
+skill-bundle-created = Bundle created: { $path }
+skill-bundle-sha =   SHA256: { $sha }
+skill-bundle-size =   Size: { $size } bytes
+skill-dry-run = Dry run only.
+skill-dry-run-repo =   Repo: { $repo }
+skill-dry-run-tag =   Tag: { $tag }
+skill-github-token-required = Set GITHUB_TOKEN or GH_TOKEN to publish, or re-run with --dry-run.
+skill-publishing-progress = Publishing { $name }@{ $tag }
+skill-publish-success = Published { $name } to { $repo }@{ $tag }
+skill-publish-release-url = Release: { $url }
+skill-warnings-none =   Warnings: none
+skill-warnings-header =   Warnings:
+skill-prompt-name = Skill name: 
+skill-prompt-description = Description: 
+skill-prompt-runtime = Runtime (python/node/wasm) [python]: 
+skill-created = Skill created: { $path }
+skill-created-files-header = Files:
+skill-created-next-steps-header = Next steps:
+skill-created-step-edit =   { $step }. Edit the entry point to implement your skill logic
+skill-created-step-test =   { $step }. Test locally: librefang skill test { $path }
+skill-created-step-install =   { $step }. Install: librefang skill install { $path }
+
+# --- Monitoring & Status ---
+monitoring-no-audit = No audit entries.
+monitoring-no-memory = No memory entries for agent '{ $agent }'.
+monitoring-no-devices = No paired devices.
+monitoring-no-webhooks = No webhooks configured.
+label-last-seen = LAST SEEN
+status-watch-header =   { $status } (refreshing every { $interval }s, Ctrl+C to exit)
+status-warning-config = warning: { $error }; using default config values for status display
+status-summary-up = librefang { $version } { $state } uptime={ $uptime } { $auth } ({ $base })
+status-peers-connected = { $connected } connected / { $total } known
+status-agents-active = { $active } running / { $total } total
+status-mb = { $mb } MB
+status-summary-down = librefang down home={ $home } default={ $provider }/{ $model }
+status-uptime-format = { $hours }h { $mins }m
+# --- Brand/proper names ---
+brand-openai = OpenAI
+brand-openrouter = OpenRouter
+brand-deepseek = DeepSeek
+brand-deepinfra = DeepInfra
+brand-byteplus = BytePlus
+brand-azure-openai = Azure OpenAI
+brand-github-copilot = GitHub Copilot
+brand-huggingface = Hugging Face
+brand-openai-codex = OpenAI Codex
+brand-claude-code = Claude Code
+brand-vertex-ai = Vertex AI
+brand-nvidia-nim = NVIDIA NIM
+brand-zai = Z.ai
+brand-kimi-coding = Kimi Coding
+brand-alibaba-coding-plan = Alibaba Coding Plan
+brand-slack-app = Slack App
+brand-slack-bot = Slack Bot
+brand-telegram = Telegram
+brand-discord = Discord
+brand-openclaw-openfang = OpenClaw / OpenFang
+brand-openclaw = OpenClaw
+brand-openfang = OpenFang
+
+# --- Number/unit formatting templates ---
+format-bytes-gib = { $value } GiB
+format-bytes-mib = { $value } MiB
+format-bytes-kib = { $value } KiB
+format-bytes-b = { $value } B
+format-size-mb = ({ $value } MB)
+
+format-uptime-s = { $secs }s
+format-uptime-ms = { $mins }m { $secs }s
+format-uptime-hm = { $hours }h { $mins }m
+format-uptime-hms = { $hours }h { $mins }m { $secs }s
+format-uptime-dh = { $days }d { $hours }h
+format-uptime-dhm = { $days }d { $hours }h { $mins }m
+
+# --- Desktop install & Update errors ---
+desktop-install-unsupported-platform = Unsupported platform
+desktop-install-error-hdiutil-attach = hdiutil attach failed: { $error }
+desktop-install-error-app-not-found = LibreFang.app not found in DMG
+desktop-install-error-remove-old = Failed to remove old installation: { $error }
+desktop-install-error-cp = cp failed: { $error }
+desktop-install-error-copy-applications = Copy to /Applications failed: { $error }
+desktop-install-error-run-installer = Failed to run installer: { $error }
+desktop-install-error-installer-status = Installer exited with: { $status }
+desktop-install-error-localappdata = Cannot determine %LOCALAPPDATA%
+desktop-install-error-binary-not-found = Installer completed but binary not found at expected location
+desktop-install-error-home-dir = Cannot determine home directory
+desktop-install-error-create-dir = Failed to create { $path }: { $error }
+desktop-install-error-copy-appimage = Failed to copy AppImage: { $error }
+desktop-install-error-http = HTTP request failed: { $error }
+desktop-install-error-create = Cannot create { $path }: { $error }
+desktop-install-error-write = Write error: { $error }
+
+maintenance-error-github-request = GitHub request failed: { $error }
+maintenance-error-github-status = GitHub API returned { $status }
+maintenance-error-decode-release = Failed to decode release metadata: { $error }
+maintenance-error-missing-tag = Release metadata is missing `tag_name`
+maintenance-error-decode-list = Failed to decode releases list: { $error }
+maintenance-error-no-release = No matching release found for the '{ $channel }' channel
+maintenance-error-http-client = Failed to build HTTP client: { $error }
+maintenance-error-powershell-updater = Failed to launch PowerShell updater: { $error }
+maintenance-error-run-installer = Failed to run installer: { $error }
+maintenance-error-installer-status = Installer exited with status { $status }
+maintenance-error-download-fail = Download failed: { $error }
+maintenance-error-download-status = Download returned { $status }
+maintenance-error-read-response = Failed to read response body: { $error }
+maintenance-error-create-dir = Failed to create updater dir: { $error }
+maintenance-error-create-script = Failed to create updater script: { $error }
+maintenance-error-write-script = Failed to write updater script: { $error }
+
+common-error-find-exe = Cannot find executable: { $error }
+common-error-spawn-daemon = Failed to spawn daemon: { $error }
+common-error-daemon-timeout = Daemon did not become ready within 10 seconds
 

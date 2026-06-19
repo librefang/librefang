@@ -399,3 +399,81 @@ reset-fail = 移除 { $path } 失败：{ $error }
 # --- Logs ---
 log-following = --- 正在跟踪 { $path }（Ctrl+C 停止）---
 log-path-hint = 日志文件：{ $path }
+
+# --- Brand/proper names ---
+brand-openai = OpenAI
+brand-openrouter = OpenRouter
+brand-deepseek = DeepSeek
+brand-deepinfra = DeepInfra
+brand-byteplus = BytePlus
+brand-azure-openai = Azure OpenAI
+brand-github-copilot = GitHub Copilot
+brand-huggingface = Hugging Face
+brand-openai-codex = OpenAI Codex
+brand-claude-code = Claude Code
+brand-vertex-ai = Vertex AI
+brand-nvidia-nim = NVIDIA NIM
+brand-zai = Z.ai
+brand-kimi-coding = Kimi Coding
+brand-alibaba-coding-plan = Alibaba Coding Plan
+brand-slack-app = Slack App
+brand-slack-bot = Slack Bot
+brand-telegram = Telegram
+brand-discord = Discord
+brand-openclaw-openfang = OpenClaw / OpenFang
+brand-openclaw = OpenClaw
+brand-openfang = OpenFang
+
+# --- Number/unit formatting templates ---
+format-bytes-gib = { $value } GiB
+format-bytes-mib = { $value } MiB
+format-bytes-kib = { $value } KiB
+format-bytes-b = { $value } B
+format-size-mb = ({ $value } MB)
+
+format-uptime-s = { $secs }s
+format-uptime-ms = { $mins }m { $secs }s
+format-uptime-hm = { $hours }h { $mins }m
+format-uptime-hms = { $hours }h { $mins }m { $secs }s
+format-uptime-dh = { $days }d { $hours }h
+format-uptime-dhm = { $days }d { $hours }h { $mins }m
+
+# --- Desktop install & Update errors ---
+desktop-install-unsupported-platform = 不支持的平台
+desktop-install-error-hdiutil-attach = hdiutil 挂载失败：{ $error }
+desktop-install-error-app-not-found = 在 DMG 中未找到 LibreFang.app
+desktop-install-error-remove-old = 无法移除旧安装：{ $error }
+desktop-install-error-cp = cp 失败：{ $error }
+desktop-install-error-copy-applications = 复制到 /Applications 失败：{ $error }
+desktop-install-error-run-installer = 启动安装程序失败：{ $error }
+desktop-install-error-installer-status = 安装程序已退出：{ $status }
+desktop-install-error-localappdata = 无法确定 %LOCALAPPDATA%
+desktop-install-error-binary-not-found = 安装程序已完成，但在预期位置未找到二进制文件
+desktop-install-error-home-dir = 无法确定用户主目录
+desktop-install-error-create-dir = 创建 { $path } 失败：{ $error }
+desktop-install-error-copy-appimage = 复制 AppImage 失败：{ $error }
+desktop-install-error-http = HTTP 请求失败：{ $error }
+desktop-install-error-create = 无法创建 { $path }：{ $error }
+desktop-install-error-write = 写入错误：{ $error }
+
+maintenance-error-github-request = GitHub 请求失败：{ $error }
+maintenance-error-github-status = GitHub API 返回了 { $status }
+maintenance-error-decode-release = 解码发布版元数据失败：{ $error }
+maintenance-error-missing-tag = 发布版元数据中缺少 `tag_name`
+maintenance-error-decode-list = 解码发布版列表失败：{ $error }
+maintenance-error-no-release = 未找到适用于 '{ $channel }' 频道的发布版本
+maintenance-error-http-client = 构建 HTTP 客户端失败：{ $error }
+maintenance-error-powershell-updater = 无法启动 PowerShell 更新程序：{ $error }
+maintenance-error-run-installer = 启动安装程序失败：{ $error }
+maintenance-error-installer-status = 安装程序以状态 { $status } 退出
+maintenance-error-download-fail = 下载失败：{ $error }
+maintenance-error-download-status = 下载返回了 { $status }
+maintenance-error-read-response = 读取响应主体失败：{ $error }
+maintenance-error-create-dir = 创建更新程序目录失败：{ $error }
+maintenance-error-create-script = 创建更新程序脚本失败：{ $error }
+maintenance-error-write-script = 写入更新程序脚本失败：{ $error }
+
+common-error-find-exe = 找不到可执行文件：{ $error }
+common-error-spawn-daemon = 无法启动后台守护进程：{ $error }
+common-error-daemon-timeout = 守护进程未在 10 秒内就绪
+
