@@ -1588,7 +1588,6 @@ fn test_span_outcome_success_is_not_errored() {
     assert!(!fields.contains_key("otel.status_code"));
 }
 
-
 /// Regression for #6226 — `librefang_tool_call_total` must carry an `agent` label so tool failures can be attributed per-agent.
 /// Asserts the counter is emitted with `agent`, `tool`, and `outcome` labels and that the agent id is sanitized + length-capped like the tool label.
 #[test]
@@ -1643,6 +1642,7 @@ fn test_record_tool_call_metric_carries_agent_label() {
         assert_eq!(*count, 1, "counter must be incremented exactly once");
     }
 }
+
 // ── Agent-loop exit metric ──────────────────────────────────────────────
 
 /// Pins every `classify_exit_reason` mapping so future variant changes can't silently re-bucket an exit.
