@@ -1719,3 +1719,22 @@ tui-audit-chain-unverified = Ланцюжок: не верифіковано
 tui-audit-chain-verified = Ланцюжок: верифіковано
 tui-audit-chain-failed = Ланцюжок: помилка верифікації
 tui-audit-hints =   [↑↓] Навігація  [f] Фільтр  [v] Верифікація ланцюжка  [r] Оновити
+
+# dashboard.rs
+tui-dashboard-title = Панель приладів
+tui-dashboard-hints =   [r] Оновити  [a] Агенти  [↑↓] Прокрутка  [PgUp/PgDn] Швидка прокрутка
+tui-dashboard-dreams-title = DREAMS
+tui-dashboard-auto-dream-enabled = auto-dream увімкнено
+tui-dashboard-auto-dream-disabled = auto-dream вимкнено
+tui-dashboard-dream-details = фаза={ $phase }  інструменти={ $tools }  пам'ять={ $mems }
+tui-dashboard-stat-agents = АГЕНТИ
+tui-dashboard-stat-uptime = ЧАС РОБОТИ
+tui-dashboard-stat-provider = ПРОВАЙДЕР
+tui-dashboard-stat-model = МОДЕЛЬ
+tui-dashboard-audit-time = Час
+tui-dashboard-audit-agent = Агент
+tui-dashboard-audit-action = Дія
+tui-dashboard-audit-detail = Деталі
+tui-dashboard-loading = Завантаження…
+tui-dashboard-no-audit = Немає записів аудиту.
+
