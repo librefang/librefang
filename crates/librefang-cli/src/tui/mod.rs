@@ -86,26 +86,26 @@ const TABS: &[Tab] = &[
 ];
 
 impl Tab {
-    fn label(self) -> &'static str {
+    fn label(self) -> String {
         match self {
-            Tab::Dashboard => "\u{25a3} Dash",
-            Tab::Agents => "\u{2726} Agents",
-            Tab::Chat => "\u{25e6} Chat",
-            Tab::Sessions => "\u{25c7} Sessions",
-            Tab::Workflows => "\u{25b7} Flows",
-            Tab::Triggers => "\u{25c9} Triggers",
-            Tab::Memory => "\u{25a1} Memory",
-            Tab::Skills => "\u{2605} Skills",
-            Tab::Hands => "\u{270b} Hands",
-            Tab::Extensions => "\u{29c9} Ext",
-            Tab::Templates => "\u{25a2} Tpl",
-            Tab::Peers => "\u{25cc} Peers",
-            Tab::Comms => "\u{25ef} Comms",
-            Tab::Security => "\u{25c6} Sec",
-            Tab::Audit => "\u{25c8} Audit",
-            Tab::Usage => "\u{25b4} Usage",
-            Tab::Settings => "\u{2699} Config",
-            Tab::Logs => "\u{25b9} Logs",
+            Tab::Dashboard => format!("{} {}", "\u{25a3}", crate::i18n::t("tui-tab-dashboard")),
+            Tab::Agents => format!("{} {}", "\u{2726}", crate::i18n::t("tui-tab-agents")),
+            Tab::Chat => format!("{} {}", "\u{25e6}", crate::i18n::t("tui-tab-chat")),
+            Tab::Sessions => format!("{} {}", "\u{25c7}", crate::i18n::t("tui-tab-sessions")),
+            Tab::Workflows => format!("{} {}", "\u{25b7}", crate::i18n::t("tui-tab-workflows")),
+            Tab::Triggers => format!("{} {}", "\u{25c9}", crate::i18n::t("tui-tab-triggers")),
+            Tab::Memory => format!("{} {}", "\u{25a1}", crate::i18n::t("tui-tab-memory")),
+            Tab::Skills => format!("{} {}", "\u{2605}", crate::i18n::t("tui-tab-skills")),
+            Tab::Hands => format!("{} {}", "\u{270b}", crate::i18n::t("tui-tab-hands")),
+            Tab::Extensions => format!("{} {}", "\u{29c9}", crate::i18n::t("tui-tab-extensions")),
+            Tab::Templates => format!("{} {}", "\u{25a2}", crate::i18n::t("tui-tab-templates")),
+            Tab::Peers => format!("{} {}", "\u{25cc}", crate::i18n::t("tui-tab-peers")),
+            Tab::Comms => format!("{} {}", "\u{25ef}", crate::i18n::t("tui-tab-comms")),
+            Tab::Security => format!("{} {}", "\u{25c6}", crate::i18n::t("tui-tab-security")),
+            Tab::Audit => format!("{} {}", "\u{25c8}", crate::i18n::t("tui-tab-audit")),
+            Tab::Usage => format!("{} {}", "\u{25b4}", crate::i18n::t("tui-tab-usage")),
+            Tab::Settings => format!("{} {}", "\u{2699}", crate::i18n::t("tui-tab-settings")),
+            Tab::Logs => format!("{} {}", "\u{25b9}", crate::i18n::t("tui-tab-logs")),
         }
     }
 
@@ -296,7 +296,7 @@ impl App {
                 self.workflows.loading = false;
             }
             AppEvent::WorkflowCreated(_id) => {
-                self.workflows.status_msg = "Workflow created!".to_string();
+                self.workflows.status_msg = crate::i18n::t("tui-mod-workflow-created");
                 self.refresh_workflows();
             }
             AppEvent::TriggerListLoaded(list) => {
@@ -307,20 +307,20 @@ impl App {
                 self.triggers.loading = false;
             }
             AppEvent::TriggerCreated(_id) => {
-                self.triggers.status_msg = "Trigger created!".to_string();
+                self.triggers.status_msg = crate::i18n::t("tui-mod-trigger-created");
                 self.refresh_triggers();
             }
             AppEvent::TriggerDeleted(id) => {
                 self.triggers.triggers.retain(|t| t.id != id);
-                self.triggers.status_msg = format!("Trigger {id} deleted.");
+                self.triggers.status_msg = crate::i18n::t_args("tui-mod-trigger-deleted", &[("id", &id)]);
             }
             AppEvent::AgentKilled { id } => {
-                self.agents.status_msg = format!("Agent {id} killed.");
+                self.agents.status_msg = crate::i18n::t_args("tui-mod-agent-killed-status", &[("id", &id)]);
                 self.agents.sub = agents::AgentSubScreen::AgentList;
                 self.refresh_agents();
             }
             AppEvent::AgentKillError(err) => {
-                self.agents.status_msg = format!("Kill failed: {err}");
+                self.agents.status_msg = crate::i18n::t_args("tui-mod-agent-kill-failed", &[("error", &err)]);
             }
             AppEvent::AgentSkillsLoaded {
                 assigned,
@@ -351,11 +351,11 @@ impl App {
                 self.agents.mcp_cursor = 0;
             }
             AppEvent::AgentSkillsUpdated(id) => {
-                self.agents.status_msg = format!("Skills updated for agent {id}.");
+                self.agents.status_msg = crate::i18n::t_args("tui-mod-agent-skills-updated", &[("id", &id)]);
                 self.agents.sub = agents::AgentSubScreen::AgentDetail;
             }
             AppEvent::AgentMcpServersUpdated(id) => {
-                self.agents.status_msg = format!("MCP servers updated for agent {id}.");
+                self.agents.status_msg = crate::i18n::t_args("tui-mod-agent-mcp-updated", &[("id", &id)]);
                 self.agents.sub = agents::AgentSubScreen::AgentDetail;
             }
             AppEvent::FetchError(err) => {
@@ -383,7 +383,7 @@ impl App {
             AppEvent::SessionDeleted(id) => {
                 self.sessions.sessions.retain(|s| s.id != id);
                 self.sessions.refilter();
-                self.sessions.status_msg = format!("Session {id} deleted.");
+                self.sessions.status_msg = crate::i18n::t_args("tui-mod-session-deleted", &[("id", &id)]);
             }
             AppEvent::MemoryAgentsLoaded(agents) => {
                 self.memory.agents = agents;
@@ -400,7 +400,7 @@ impl App {
                 self.memory.loading = false;
             }
             AppEvent::MemoryKvSaved { key } => {
-                self.memory.status_msg = format!("Saved key: {key}");
+                self.memory.status_msg = crate::i18n::t_args("tui-mod-saved-key", &[("key", &key)]);
                 // Refresh KV pairs
                 if let Some(agent) = &self.memory.selected_agent {
                     if let Some(backend) = self.backend.to_ref() {
@@ -414,7 +414,7 @@ impl App {
             }
             AppEvent::MemoryKvDeleted(key) => {
                 self.memory.kv_pairs.retain(|kv| kv.key != key);
-                self.memory.status_msg = format!("Deleted key: {key}");
+                self.memory.status_msg = crate::i18n::t_args("tui-mod-deleted-key", &[("key", &key)]);
             }
             AppEvent::SkillsLoaded(list) => {
                 self.skills.installed = list;
@@ -431,12 +431,12 @@ impl App {
                 self.skills.loading = false;
             }
             AppEvent::SkillInstalled(name) => {
-                self.skills.status_msg = format!("Installed: {name}");
+                self.skills.status_msg = crate::i18n::t_args("tui-mod-skill-installed", &[("name", &name)]);
                 self.refresh_skills();
             }
             AppEvent::SkillUninstalled(name) => {
                 self.skills.installed.retain(|s| s.name != name);
-                self.skills.status_msg = format!("Uninstalled: {name}");
+                self.skills.status_msg = crate::i18n::t_args("tui-mod-skill-uninstalled", &[("name", &name)]);
             }
             AppEvent::McpServersLoaded(servers) => {
                 self.skills.mcp_servers = servers;
@@ -503,11 +503,11 @@ impl App {
                 self.settings.loading = false;
             }
             AppEvent::ProviderKeySaved(name) => {
-                self.settings.status_msg = format!("Key saved for {name}");
+                self.settings.status_msg = crate::i18n::t_args("tui-mod-key-saved-for", &[("name", &name)]);
                 self.refresh_settings_providers();
             }
             AppEvent::ProviderKeyDeleted(name) => {
-                self.settings.status_msg = format!("Key deleted for {name}");
+                self.settings.status_msg = crate::i18n::t_args("tui-mod-key-deleted-for", &[("name", &name)]);
                 self.refresh_settings_providers();
             }
             AppEvent::ProviderTestResult(result) => {
@@ -559,12 +559,12 @@ impl App {
                 self.hands.loading = false;
             }
             AppEvent::HandActivated(name) => {
-                self.hands.status_msg = format!("Activated: {name}");
+                self.hands.status_msg = crate::i18n::t_args("tui-mod-hand-activated", &[("name", &name)]);
                 self.refresh_hands();
             }
             AppEvent::HandDeactivated(id) => {
                 self.hands.instances.retain(|i| i.instance_id != id);
-                self.hands.status_msg = format!("Deactivated: {id}");
+                self.hands.status_msg = crate::i18n::t_args("tui-mod-hand-deactivated", &[("id", &id)]);
             }
             AppEvent::HandPaused(id) => {
                 if let Some(inst) = self
@@ -575,7 +575,7 @@ impl App {
                 {
                     inst.status = "Paused".to_string();
                 }
-                self.hands.status_msg = "Hand paused".to_string();
+                self.hands.status_msg = crate::i18n::t("tui-mod-hand-paused");
             }
             AppEvent::HandResumed(id) => {
                 if let Some(inst) = self
@@ -586,7 +586,7 @@ impl App {
                 {
                     inst.status = "Active".to_string();
                 }
-                self.hands.status_msg = "Hand resumed".to_string();
+                self.hands.status_msg = crate::i18n::t("tui-mod-hand-resumed");
             }
             AppEvent::ExtensionsLoaded(list) => {
                 self.extensions.all_extensions = list;
@@ -606,15 +606,18 @@ impl App {
                 }
             }
             AppEvent::ExtensionInstalled(id) => {
-                self.extensions.status_msg = format!("Installed: {id}");
+                self.extensions.status_msg = crate::i18n::t_args("tui-mod-extension-installed", &[("id", &id)]);
                 self.refresh_extensions();
             }
             AppEvent::ExtensionRemoved(id) => {
-                self.extensions.status_msg = format!("Removed: {id}");
+                self.extensions.status_msg = crate::i18n::t_args("tui-mod-extension-removed", &[("id", &id)]);
                 self.refresh_extensions();
             }
             AppEvent::ExtensionReconnected(id, tools) => {
-                self.extensions.status_msg = format!("Reconnected {id}: {tools} tools");
+                self.extensions.status_msg = crate::i18n::t_args(
+                    "tui-mod-extension-reconnected",
+                    &[("id", &id), ("tools", &tools.to_string())],
+                );
                 self.refresh_extension_health();
             }
 
@@ -637,7 +640,7 @@ impl App {
             AppEvent::ChatModelsForPicker(models) => {
                 if models.is_empty() {
                     self.chat
-                        .push_message(chat::Role::System, "No models available.".to_string());
+                        .push_message(chat::Role::System, crate::i18n::t("chat-runner-no-models-available"));
                 } else {
                     self.chat.model_picker_models = models;
                     self.chat.model_picker_filter.clear();
@@ -647,7 +650,7 @@ impl App {
             }
             AppEvent::ChatAgentListLoaded(lines) => {
                 let msg = if lines.is_empty() {
-                    "No agents running.".to_string()
+                    crate::i18n::t("tui-mod-no-agents-running")
                 } else {
                     lines.join("\n")
                 };
@@ -1226,7 +1229,7 @@ impl App {
             // §A — owner notices are surfaced as a transient status line.
             StreamEvent::OwnerNotice { text } => {
                 let preview: String = text.chars().take(80).collect();
-                self.chat.status_msg = Some(format!("[owner_notice] {preview}"));
+                self.chat.status_msg = Some(crate::i18n::t_args("chat-runner-owner-notice", &[("preview", &preview)]));
             }
             _ => {}
         }
@@ -1251,7 +1254,7 @@ impl App {
                 }
             }
             Err(e) => {
-                self.chat.status_msg = Some(format!("Error: {e}"));
+                self.chat.status_msg = Some(crate::i18n::t_args("chat-runner-error-prefix", &[("error", &e)]));
             }
         }
         // Auto-send the next staged message if any
@@ -1765,7 +1768,7 @@ impl App {
         });
         self.chat.push_message(
             chat::Role::System,
-            "/help for commands \u{2022} /exit to quit".to_string(),
+            crate::i18n::t("chat-runner-welcome-help-hint"),
         );
         self.active_tab = Tab::Chat;
     }
@@ -1791,7 +1794,7 @@ impl App {
         });
         self.chat.push_message(
             chat::Role::System,
-            "/help for commands \u{2022} /exit to quit".to_string(),
+            crate::i18n::t("chat-runner-welcome-help-hint"),
         );
         self.active_tab = Tab::Chat;
     }
@@ -1833,7 +1836,7 @@ impl App {
             }
             _ => {
                 self.chat.is_streaming = false;
-                self.chat.status_msg = Some("No active connection".to_string());
+                self.chat.status_msg = Some(crate::i18n::t("chat-runner-no-active-connection"));
                 None
             }
         };
@@ -1856,7 +1859,7 @@ impl App {
                     match toml::from_str(&toml_content) {
                         Ok(m) => m,
                         Err(e) => {
-                            self.agents.status_msg = format!("Invalid manifest: {e}");
+                            self.agents.status_msg = crate::i18n::t_args("tui-mod-invalid-manifest", &[("error", &e.to_string())]);
                             self.agents.sub = agents::AgentSubScreen::AgentList;
                             return;
                         }
@@ -1865,13 +1868,13 @@ impl App {
                 match kernel.spawn_agent(manifest) {
                     Ok(id) => self.enter_chat_inprocess(id, name),
                     Err(e) => {
-                        self.agents.status_msg = format!("Spawn failed: {e}");
+                        self.agents.status_msg = crate::i18n::t_args("tui-mod-spawn-failed", &[("error", &e.to_string())]);
                         self.agents.sub = agents::AgentSubScreen::AgentList;
                     }
                 }
             }
             Backend::None => {
-                self.agents.status_msg = "No backend connected".to_string();
+                self.agents.status_msg = crate::i18n::t("chat-runner-no-backend-connected");
                 self.agents.sub = agents::AgentSubScreen::AgentList;
             }
         }
@@ -1906,7 +1909,7 @@ impl App {
                 };
                 if models.is_empty() {
                     self.chat
-                        .push_message(chat::Role::System, "No models available.".to_string());
+                        .push_message(chat::Role::System, crate::i18n::t("chat-runner-no-models-available"));
                     return;
                 }
                 self.chat.model_picker_models = models;
@@ -1916,7 +1919,7 @@ impl App {
             }
             Backend::None => {
                 self.chat
-                    .push_message(chat::Role::System, "No models available.".to_string());
+                    .push_message(chat::Role::System, crate::i18n::t("chat-runner-no-models-available"));
             }
         }
     }
@@ -1949,13 +1952,13 @@ impl App {
                             }
                             self.chat.push_message(
                                 chat::Role::System,
-                                format!("Switched to {model_id}"),
+                                crate::i18n::t_args("chat-runner-switched-model", &[("model", model_id)]),
                             );
                         }
                         _ => {
                             self.chat.push_message(
                                 chat::Role::System,
-                                format!("Failed to switch to {model_id}"),
+                                crate::i18n::t_args("chat-runner-failed-switch-model", &[("model", model_id)]),
                             );
                         }
                     }
@@ -1991,19 +1994,19 @@ impl App {
                             self.chat.model_label = format!("{prov_label}/{model_id}");
                             self.chat.push_message(
                                 chat::Role::System,
-                                format!("Switched to {model_id}"),
+                                crate::i18n::t_args("chat-runner-switched-model", &[("model", model_id)]),
                             );
                         }
                         Err(e) => {
                             self.chat
-                                .push_message(chat::Role::System, format!("Switch failed: {e}"));
+                                .push_message(chat::Role::System, crate::i18n::t_args("chat-runner-switch-failed", &[("error", &e.to_string())]));
                         }
                     }
                 }
             }
             _ => {
                 self.chat
-                    .push_message(chat::Role::System, "No backend connected.".to_string());
+                    .push_message(chat::Role::System, crate::i18n::t("chat-runner-no-backend-connected"));
             }
         }
     }
@@ -2018,14 +2021,14 @@ impl App {
                 self.chat.push_message(
                     chat::Role::System,
                     [
-                        "/help         \u{2014} show this help",
-                        "/model        \u{2014} open model picker (Ctrl+M)",
-                        "/model <name> \u{2014} switch to model directly",
-                        "/status       \u{2014} connection & agent info",
-                        "/agents       \u{2014} list running agents",
-                        "/clear        \u{2014} clear chat history",
-                        "/kill         \u{2014} kill the current agent",
-                        "/exit         \u{2014} end chat session",
+                        crate::i18n::t("tui-mod-help-help"),
+                        crate::i18n::t("tui-mod-help-model"),
+                        crate::i18n::t("tui-mod-help-model-arg"),
+                        crate::i18n::t("tui-mod-help-status"),
+                        crate::i18n::t("tui-mod-help-agents"),
+                        crate::i18n::t("tui-mod-help-clear"),
+                        crate::i18n::t("tui-mod-help-kill"),
+                        crate::i18n::t("tui-mod-help-exit"),
                     ]
                     .join("\n"),
                 );
@@ -2034,19 +2037,19 @@ impl App {
                 let mut s = Vec::new();
                 match &self.backend {
                     Backend::Daemon { base_url, .. } => {
-                        s.push(format!("Mode: daemon ({base_url})"));
+                        s.push(crate::i18n::t_args("tui-mod-status-mode-daemon", &[("url", base_url)]));
                         if let Some(ref t) = self.chat_target {
-                            s.push(format!("Agent: {}", t.agent_name));
+                            s.push(crate::i18n::t_args("tui-mod-status-agent", &[("name", &t.agent_name)]));
                         }
                     }
                     Backend::InProcess { kernel } => {
-                        s.push("Mode: in-process".to_string());
-                        s.push(format!("Agents: {}", kernel.agent_registry_ref().count()));
+                        s.push(crate::i18n::t("tui-mod-status-mode-inprocess"));
+                        s.push(crate::i18n::t_args("tui-mod-status-agents-count", &[("count", &kernel.agent_registry_ref().count().to_string())]));
                         if let Some(ref t) = self.chat_target {
-                            s.push(format!("Agent: {}", t.agent_name));
+                            s.push(crate::i18n::t_args("tui-mod-status-agent", &[("name", &t.agent_name)]));
                         }
                     }
-                    Backend::None => s.push("Mode: disconnected".to_string()),
+                    Backend::None => s.push(crate::i18n::t("tui-mod-status-mode-disconnected")),
                 }
                 self.chat.push_message(chat::Role::System, s.join("\n"));
             }
@@ -2077,7 +2080,7 @@ impl App {
                             })
                             .collect();
                         let msg = if lines.is_empty() {
-                            "No agents running.".to_string()
+                            crate::i18n::t("tui-mod-no-agents-running")
                         } else {
                             lines.join("\n")
                         };
@@ -2085,7 +2088,7 @@ impl App {
                     }
                     Backend::None => {
                         self.chat
-                            .push_message(chat::Role::System, "No agents running.".to_string());
+                            .push_message(chat::Role::System, crate::i18n::t("tui-mod-no-agents-running"));
                     }
                 }
             }
@@ -2098,7 +2101,7 @@ impl App {
                 self.chat.model_label = model;
                 self.chat.mode_label = mode;
                 self.chat
-                    .push_message(chat::Role::System, "Chat history cleared.".to_string());
+                    .push_message(chat::Role::System, crate::i18n::t("tui-mod-chat-history-cleared"));
             }
             "/kill" => {
                 if let Some(ref target) = self.chat_target {
@@ -2112,13 +2115,13 @@ impl App {
                                     Ok(r) if r.status().is_success() => {
                                         self.chat.push_message(
                                             chat::Role::System,
-                                            format!("Agent \"{name}\" killed."),
+                                            crate::i18n::t_args("tui-mod-agent-killed", &[("name", &name)]),
                                         );
                                     }
                                     _ => {
                                         self.chat.push_message(
                                             chat::Role::System,
-                                            format!("Failed to kill agent \"{name}\"."),
+                                            crate::i18n::t_args("tui-mod-failed-kill-agent", &[("name", &name)]),
                                         );
                                     }
                                 }
@@ -2130,13 +2133,13 @@ impl App {
                                     Ok(()) => {
                                         self.chat.push_message(
                                             chat::Role::System,
-                                            format!("Agent \"{name}\" killed."),
+                                            crate::i18n::t_args("tui-mod-agent-killed", &[("name", &name)]),
                                         );
                                     }
                                     Err(e) => {
                                         self.chat.push_message(
                                             chat::Role::System,
-                                            format!("Kill failed: {e}"),
+                                            crate::i18n::t_args("tui-mod-agent-kill-failed", &[("error", &e.to_string())]),
                                         );
                                     }
                                 }
@@ -2145,7 +2148,7 @@ impl App {
                         Backend::None => {
                             self.chat.push_message(
                                 chat::Role::System,
-                                "No backend connected.".to_string(),
+                                crate::i18n::t("chat-runner-no-backend-connected"),
                             );
                         }
                     }
@@ -2163,21 +2166,21 @@ impl App {
                 Backend::InProcess { kernel } => {
                     let defs = kernel.hand_registry_ref().list_definitions();
                     let instances = kernel.hand_registry_ref().list_instances();
-                    let mut msg = format!("Available hands ({}):\n", defs.len());
+                    let mut msg = format!("{}\n", crate::i18n::t_args("tui-mod-available-hands", &[("count", &defs.len().to_string())]));
                     for d in &defs {
                         let reqs_met = kernel
                             .hand_registry_ref()
                             .check_requirements(&d.id)
                             .map(|r| r.iter().all(|(_, ok)| *ok))
                             .unwrap_or(false);
-                        let badge = if reqs_met { "Ready" } else { "Setup" };
+                        let badge = if reqs_met { crate::i18n::t("tui-mod-ready") } else { crate::i18n::t("tui-mod-setup") };
                         msg.push_str(&format!(
                             "  {} {} — {} [{}]\n",
                             d.icon, d.name, d.description, badge
                         ));
                     }
                     if !instances.is_empty() {
-                        msg.push_str(&format!("\nActive hands ({}):\n", instances.len()));
+                        msg.push_str(&format!("\n{}\n", crate::i18n::t_args("tui-mod-active-hands", &[("count", &instances.len().to_string())])));
                         for i in &instances {
                             msg.push_str(&format!(
                                 "  {} — {} ({})\n",
@@ -2192,15 +2195,14 @@ impl App {
                 _ => {
                     self.chat.push_message(
                         chat::Role::System,
-                        "Hands info requires in-process mode. Use the Hands tab instead."
-                            .to_string(),
+                        crate::i18n::t("tui-mod-hands-info-requires-inprocess"),
                     );
                 }
             },
             _ => {
                 self.chat.push_message(
                     chat::Role::System,
-                    format!("Unknown command: {}. Type /help", parts[0]),
+                    crate::i18n::t_args("tui-mod-unknown-command", &[("command", parts[0])]),
                 );
             }
         }
@@ -2223,7 +2225,7 @@ impl App {
                     widgets::render_toast(frame, area, &msg, theme::YELLOW);
                 }
                 if let Some(ref err) = self.kernel_boot_error {
-                    let msg = format!(" \u{2718} {err}");
+                    let msg = crate::i18n::t_args("tui-mod-error-symbol", &[("error", err)]);
                     widgets::render_toast(frame, area, &msg, theme::RED);
                 }
             }
@@ -2277,10 +2279,13 @@ impl App {
 
         // Reserve space for overflow indicators (2 chars each) and hint
         let indicator_width = 2; // "< " or " >"
+        let hint_str;
         let hint = if self.ctrl_c_pending {
-            "Press Ctrl+C again to quit"
+            hint_str = crate::i18n::t("tui-mod-press-ctrl-c-again-to-quit");
+            &hint_str
         } else {
-            "Ctrl+C×2 quit  Tab/Ctrl+\u{2190}\u{2192} switch"
+            hint_str = crate::i18n::t("tui-mod-ctrl-c-status-bar");
+            &hint_str
         };
         let hint_width = hint.len() + 2;
         let available = width.saturating_sub(hint_width + 2);
