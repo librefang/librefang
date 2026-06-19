@@ -933,6 +933,13 @@ In-crate only; no cross-crate error-shape changes.
 
 ### Fixed
 
+- **fix(api): scope the compaction-summary banner to the session that was actually compacted** (#6225) (@houko).
+  The dashboard "Session summary (older messages compacted)" banner appeared on a freshly created session that was never compacted, showing a previous unrelated conversation's summary.
+  `compacted_summary` lives in the agent-scoped `canonical_sessions` row (one per `agent_id`) and outlives any individual session, but `get_agent_session` exposed it whenever the requested session was the agent's *active* one — so creating a new session, which makes it active without compacting it, leaked the prior summary onto message #1.
+  A nullable `compacted_summary_session_id` column (schema v46, backward-compatible) now records which session owns the current summary; `store_llm_summary` stamps it with the compacted session, and the GET handler surfaces the banner only when the requested session matches the owner via the new `MemorySubstrate::compacted_summary_for_session`.
+  The summary is scoped, not lost — the session that legitimately produced it still shows it.
+  Closes #6225.
+
 - **fix(whatsapp-gateway): resolve the `link-preview-js` peer conflict and commit a lockfile** (#6180) (@houko).
   `npm install` in `packages/whatsapp-gateway` failed with `ERESOLVE` unless `--legacy-peer-deps` was passed: the gateway declared `link-preview-js@^4.0.1` as a direct dependency while `@whiskeysockets/baileys@6.7.22` lists it as `peerOptional ^3.0.0`, and the direct declaration defeated the optional flag.
   `link-preview-js` is never imported by the gateway, so the direct dependency is dropped and pinned via an `overrides` block to `^4.0.1`, preserving the #5934 SSRF fix (GHSA-4gp8-rjrq-ch6q) if Baileys ever pulls it in transitively.

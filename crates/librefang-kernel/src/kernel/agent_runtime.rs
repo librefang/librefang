@@ -425,10 +425,18 @@ impl LibreFangKernel {
                 .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e)))?
         };
 
-        // Store the LLM summary in the canonical session
+        // Store the LLM summary in the canonical session, tagged with the
+        // session whose history was actually compacted (#6225) so the
+        // dashboard banner is shown only on that session — never leaked onto
+        // a freshly created session that merely became the agent's active one.
         self.memory
             .substrate
-            .store_llm_summary(agent_id, &result.summary, result.kept_messages.clone())
+            .store_llm_summary(
+                agent_id,
+                &result.summary,
+                result.kept_messages.clone(),
+                Some(target_session_id),
+            )
             .map_err(KernelError::LibreFang)?;
 
         // Post-compaction audit: validate and repair the kept messages
