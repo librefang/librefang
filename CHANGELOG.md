@@ -872,6 +872,12 @@ In-crate only; no cross-crate error-shape changes.
 
 ### Added
 
+- **observability: tool-call telemetry fidelity — failure-type breakdown, per-tool latency histogram, and span error status** (#6228) (@houko).
+  `librefang_tool_call_total` gains a bounded `failure_type` label that no longer collapses every failure to one `outcome=failure` bucket: a loop-guard / allowlist block (`blocked`), an approval denial or modify-and-retry (`approval_denied`), a tool timeout (`timeout`), a genuine crash (`hard_error`), and a circuit break (`circuit_break`) are now distinguishable on a dashboard.
+  The label is derived from the existing `ToolExecutionStatus` (`Skipped → blocked`, `Denied`/`ModifyAndRetry → approval_denied`, `Expired → timeout`, `Error → hard_error`, no-status circuit break → `circuit_break`); the success path carries `failure_type=none`.
+  A new `librefang_tool_execution_seconds{tool}` histogram exports the per-tool dispatch latency that was already measured for the decision trace (`execution_ms / 1000.0`), so latency distributions are now visible per tool.
+  The `execute_single_tool_call` span now records `tool.outcome` and sets the OpenTelemetry span status to error (`otel.status_code=error`) on a genuine hard failure or circuit break — but not on a model-fat-fingered blocked / denied call — so a `hasError=true` trace filter and service-level errorRate finally match a failed tool. Closes #6228.
+
 - **dashboard: a global Auto-Dream on/off switch on the Memory → Auto-Dream tab** (#6188) (@houko).
   The tab previously showed only a read-only status badge and told users to edit `config.toml` to flip the master switch; it is now an interactive toggle wired to the existing `POST /api/config/set` (`auto_dream.enabled` is on the writable allowlist).
   The handler invalidates `autoDreamKeys` in addition to `useSetConfigValue`'s `configKeys` so the badge and the per-agent "Dream now" buttons reflect the new global state immediately rather than after the 15s poll.
