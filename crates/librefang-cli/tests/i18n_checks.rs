@@ -553,12 +553,30 @@ fn scan_file_for_untranslated_strings(content: &str) -> Vec<(usize, String, Stri
                 let prefix = &content[..literal_start_idx];
                 let collapsed: String = prefix.chars().filter(|ch| !ch.is_whitespace()).collect();
                 let is_localized = collapsed.ends_with("i18n::t(")
-                     || collapsed.ends_with("i18n::t_args(")
-                     || collapsed.ends_with("debug!(")
-                     || collapsed.ends_with("info!(")
-                     || collapsed.ends_with("warn!(")
-                     || collapsed.ends_with("error!(")
-                     || collapsed.ends_with("trace!(");
+                      || collapsed.ends_with("i18n::t_args(")
+                      || collapsed.ends_with("debug!(")
+                      || collapsed.ends_with("info!(")
+                      || collapsed.ends_with("warn!(")
+                      || collapsed.ends_with("error!(")
+                      || collapsed.ends_with("trace!(")
+                      || collapsed.ends_with("about=")
+                      || collapsed.ends_with("long_about=")
+                      || collapsed.ends_with("help=")
+                      || collapsed.ends_with("after_help=")
+                      || collapsed.ends_with("value_name=")
+                      || collapsed.ends_with("rename_all=")
+                      || collapsed.ends_with("name=")
+                      || collapsed.ends_with("conflicts_with=")
+                      || collapsed.ends_with("conflicts_with_all=")
+                      || collapsed.ends_with("required_unless_present=")
+                      || collapsed.ends_with("requires=")
+                      || collapsed.ends_with("default_value=")
+                      || collapsed.ends_with("env=")
+                      || collapsed.ends_with("aliases=")
+                      || collapsed.ends_with("alias=")
+                      || collapsed.ends_with("short=")
+                      || collapsed.ends_with("long=")
+                      || collapsed.ends_with("constAFTER_HELP:&str=");
                 if !is_byte_string && !is_localized && is_potential_untranslated_literal(&current_literal) {
                     let line_content = get_line_at_index(content, literal_start_idx);
                     violations.push((line_number, current_literal.clone(), line_content));
@@ -612,8 +630,7 @@ fn test_no_untranslated_strings() {
                 .unwrap()
                 .replace('\\', "/");
 
-            if rel_path == "cli.rs"
-                || rel_path.starts_with("tui/")
+            if rel_path.starts_with("tui/")
             {
                 continue;
             }
