@@ -209,9 +209,9 @@ impl TemplatesState {
                     if let Some(&idx) = self.filtered.get(sel) {
                         let t = &self.templates[idx];
                         if !self.provider_configured(&t.provider) && !self.providers.is_empty() {
-                            self.status_msg = format!(
-                                "Provider '{}' not configured. Set API key in Settings first.",
-                                t.provider
+                            self.status_msg = crate::i18n::t_args(
+                                "tui-templates-provider-not-configured",
+                                &[("provider", &t.provider)],
                             );
                             return TemplatesAction::Continue;
                         }
@@ -233,7 +233,11 @@ impl TemplatesState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
-    let inner = widgets::render_screen_block(f, area, "\u{25a2} Templates");
+    let inner = widgets::render_screen_block(
+        f,
+        area,
+        &format!("{} {}", "\u{25a2}", crate::i18n::t("tui-templates-title")),
+    );
 
     let chunks = Layout::vertical([
         Constraint::Length(2), // header + category filter
@@ -253,15 +257,27 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
                 Style::default().fg(theme::BORDER),
             ));
         }
+        let localized_cat = match c {
+            "All" => crate::i18n::t("tui-templates-cat-all"),
+            "General" => crate::i18n::t("tui-templates-cat-general"),
+            "Development" => crate::i18n::t("tui-templates-cat-development"),
+            "Research" => crate::i18n::t("tui-templates-cat-research"),
+            "Writing" => crate::i18n::t("tui-templates-cat-writing"),
+            "Business" => crate::i18n::t("tui-templates-cat-business"),
+            other => other.to_string(),
+        };
         if c == active_cat {
             cat_spans.push(Span::styled(
-                format!(" \u{25cf} {c} "),
+                format!(" {} {} ", "\u{25cf}", localized_cat),
                 Style::default()
                     .fg(theme::ACCENT)
                     .add_modifier(Modifier::BOLD),
             ));
         } else {
-            cat_spans.push(Span::styled(format!(" \u{25cb} {c} "), theme::dim_style()));
+            cat_spans.push(Span::styled(
+                format!(" {} {} ", "\u{25cb}", localized_cat),
+                theme::dim_style(),
+            ));
         }
     }
     f.render_widget(
@@ -270,7 +286,10 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
             Line::from(vec![Span::styled(
                 format!(
                     "  {:<22} {:<14} {:<16} {}",
-                    "Template", "Category", "Provider/Model", "Description"
+                    crate::i18n::t("tui-templates-header-template"),
+                    crate::i18n::t("tui-templates-header-category"),
+                    crate::i18n::t("tui-templates-header-provider-model"),
+                    crate::i18n::t("tui-templates-header-description")
                 ),
                 theme::table_header(),
             )]),
@@ -281,11 +300,14 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
     // ── List ──
     if state.loading {
         f.render_widget(
-            widgets::spinner(state.tick, "Loading templates\u{2026}"),
+            widgets::spinner(state.tick, &crate::i18n::t("tui-templates-loading")),
             chunks[1],
         );
     } else if state.filtered.is_empty() {
-        f.render_widget(widgets::empty_state("No templates available."), chunks[1]);
+        f.render_widget(
+            widgets::empty_state(&crate::i18n::t("tui-templates-empty")),
+            chunks[1],
+        );
     } else {
         let items: Vec<ListItem> = state
             .filtered
@@ -301,13 +323,23 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
                     Span::styled(" \u{25cb}", Style::default().fg(theme::RED))
                 };
                 let prov_model = format!("{}/{}", t.provider, widgets::truncate(&t.model, 12));
+                let localized_name = localize_template_name(&t.name);
+                let localized_desc = localize_template_desc(&t.name, &t.description);
+                let localized_cat = match t.category.as_str() {
+                    "General" => crate::i18n::t("tui-templates-cat-general"),
+                    "Development" => crate::i18n::t("tui-templates-cat-development"),
+                    "Research" => crate::i18n::t("tui-templates-cat-research"),
+                    "Writing" => crate::i18n::t("tui-templates-cat-writing"),
+                    "Business" => crate::i18n::t("tui-templates-cat-business"),
+                    other => other.to_string(),
+                };
                 ListItem::new(Line::from(vec![
                     Span::styled(
-                        format!("  {:<22}", widgets::truncate(&t.name, 21)),
+                        format!("  {:<22}", widgets::truncate(&localized_name, 21)),
                         Style::default().fg(theme::CYAN),
                     ),
                     Span::styled(
-                        format!(" {:<14}", &t.category),
+                        format!(" {:<14}", &localized_cat),
                         Style::default().fg(theme::YELLOW),
                     ),
                     Span::styled(
@@ -316,7 +348,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
                     ),
                     auth_badge,
                     Span::styled(
-                        format!("  {}", widgets::truncate(&t.description, 28)),
+                        format!("  {}", widgets::truncate(&localized_desc, 28)),
                         theme::dim_style(),
                     ),
                 ]))
@@ -331,20 +363,25 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
     if let Some(sel) = state.list_state.selected() {
         if let Some(&idx) = state.filtered.get(sel) {
             let t = &state.templates[idx];
+            let localized_name = localize_template_name(&t.name);
+            let localized_desc = localize_template_desc(&t.name, &t.description);
             f.render_widget(
                 Paragraph::new(vec![
                     Line::from(vec![Span::styled(
-                        format!("  {} ", t.name),
+                        format!("  {} ", localized_name),
                         Style::default()
                             .fg(theme::CYAN)
                             .add_modifier(Modifier::BOLD),
                     )]),
                     Line::from(vec![
                         Span::styled("  ", Style::default()),
-                        Span::styled(&t.description, theme::dim_style()),
+                        Span::styled(&localized_desc, theme::dim_style()),
                     ]),
                     Line::from(vec![Span::styled(
-                        format!("  Provider: {}/{}  ", t.provider, t.model),
+                        crate::i18n::t_args(
+                            "tui-templates-detail-provider",
+                            &[("provider", &t.provider), ("model", &t.model)],
+                        ),
                         Style::default().fg(theme::BLUE),
                     )]),
                 ]),
@@ -364,8 +401,29 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
         );
     } else {
         f.render_widget(
-            widgets::hint_bar("  [\u{2191}\u{2193}] Navigate  [Enter] Spawn Agent  [f] Filter Category  [r] Refresh"),
+            widgets::hint_bar(&crate::i18n::t("tui-templates-hints")),
             chunks[3],
         );
+    }
+}
+
+fn localize_template_name(name: &str) -> String {
+    let key = format!(
+        "tui-templates-name-{}",
+        name.to_lowercase().replace(' ', "-")
+    );
+    crate::i18n::t(&key)
+}
+
+fn localize_template_desc(name: &str, default_desc: &str) -> String {
+    let key = format!(
+        "tui-templates-desc-{}",
+        name.to_lowercase().replace(' ', "-")
+    );
+    let localized = crate::i18n::t(&key);
+    if localized == key {
+        default_desc.to_string()
+    } else {
+        localized
     }
 }
