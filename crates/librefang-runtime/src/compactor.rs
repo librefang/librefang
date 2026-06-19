@@ -1161,8 +1161,11 @@ fn find_ascii_ci(haystack: &str, needle: &str) -> Option<usize> {
     if nb.is_empty() || hb.len() < nb.len() {
         return None;
     }
-    (0..=hb.len() - nb.len())
-        .find(|&i| nb.iter().enumerate().all(|(j, c)| hb[i + j].eq_ignore_ascii_case(c)))
+    (0..=hb.len() - nb.len()).find(|&i| {
+        nb.iter()
+            .enumerate()
+            .all(|(j, c)| hb[i + j].eq_ignore_ascii_case(c))
+    })
 }
 
 /// Whole tool-use/result pairs are removed together so no `tool_use_id` is orphaned; runs shorter than `max_steps` are left verbatim.
@@ -2327,6 +2330,7 @@ mod tests {
             token_threshold_ratio: 0.6,
             max_chunk_chars: 90_000,
             max_retries: 4,
+            ..Default::default()
         };
         let merged = CompactionConfig::from_toml_with_overrides(&global, None);
         let baseline = CompactionConfig::from_toml(&global);
