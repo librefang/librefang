@@ -1299,3 +1299,32 @@ common-error-find-exe = Cannot find executable: { $error }
 common-error-spawn-daemon = Failed to spawn daemon: { $error }
 common-error-daemon-timeout = Daemon did not become ready within 10 seconds
 
+# tui/chat_runner.rs
+chat-runner-owner-notice = [owner_notice] { $preview }
+chat-runner-error-prefix = Error: { $error }
+chat-runner-no-active-connection = No active connection
+chat-runner-unknown-command = Unknown command: { $command }. Type /help
+chat-runner-status-mode-daemon = Mode: daemon ({ $url })
+chat-runner-status-agent = Agent: { $name }
+chat-runner-status-mode-inprocess = Mode: in-process
+chat-runner-status-agents-count = Agents: { $count }
+chat-runner-status-mode-disconnected = Mode: disconnected
+chat-runner-chat-history-cleared = Chat history cleared.
+chat-runner-agent-killed = Agent "{ $name }" killed.
+chat-runner-failed-kill-agent = Failed to kill agent "{ $name }".
+chat-runner-kill-failed = Kill failed: { $error }
+chat-runner-no-backend-connected = No backend connected.
+chat-runner-no-models-available = No models available.
+chat-runner-switched-model = Switched to { $model }
+chat-runner-failed-switch-model = Failed to switch to { $model }
+chat-runner-switch-failed = Switch failed: { $error }
+chat-runner-welcome-help-hint = /help for commands • /exit to quit
+chat-runner-spawning-agent = Spawning '{ $name }' agent…
+chat-runner-no-agent-templates = No agent templates found. Run `librefang init`.
+chat-runner-invalid-template = Invalid template '{ $name }': { $error }
+chat-runner-spawn-failed = Spawn failed: { $error }
+chat-runner-booting-kernel = Booting kernel…
+chat-runner-booting-kernel-hint =   This may take a moment while the kernel initializes.
+chat-runner-failed-start = Failed to start
+chat-runner-press-esc-to-exit =   Press Esc to exit.
+

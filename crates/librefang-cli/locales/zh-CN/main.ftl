@@ -490,4 +490,33 @@ acp-error-server = ACP 服务器错误: { $error }
 acp-error-uds-connect = ACP UDS 连接失败 { $path }: { $error }
 acp-error-pipe-connect = ACP 命名管道连接失败 { $name }: { $error }
 
+# tui/chat_runner.rs
+chat-runner-owner-notice = [owner_notice] { $preview }
+chat-runner-error-prefix = 错误: { $error }
+chat-runner-no-active-connection = 无活动连接
+chat-runner-unknown-command = 未知命令: { $command }。输入 /help
+chat-runner-status-mode-daemon = 模式: 守护进程 ({ $url })
+chat-runner-status-agent = 智能体: { $name }
+chat-runner-status-mode-inprocess = 模式: 进程内
+chat-runner-status-agents-count = 智能体数量: { $count }
+chat-runner-status-mode-disconnected = 模式: 已断开连接
+chat-runner-chat-history-cleared = 聊天历史记录已清除。
+chat-runner-agent-killed = 智能体 "{ $name }" 已终止。
+chat-runner-failed-kill-agent = 终止智能体 "{ $name }" 失败。
+chat-runner-kill-failed = 终止失败: { $error }
+chat-runner-no-backend-connected = 未连接后端。
+chat-runner-no-models-available = 无可用模型。
+chat-runner-switched-model = 已切换到 { $model }
+chat-runner-failed-switch-model = 切换到 { $model } 失败
+chat-runner-switch-failed = 切换失败: { $error }
+chat-runner-welcome-help-hint = /help 获取命令列表 • /exit 退出
+chat-runner-spawning-agent = 正在生成智能体 '{ $name }'…
+chat-runner-no-agent-templates = 未找到智能体模板。请运行 `librefang init`。
+chat-runner-invalid-template = 智能体模板 '{ $name }' 无效: { $error }
+chat-runner-spawn-failed = 生成失败: { $error }
+chat-runner-booting-kernel = 正在启动内核…
+chat-runner-booting-kernel-hint =   内核初始化可能需要一些时间。
+chat-runner-failed-start = 启动失败
+chat-runner-press-esc-to-exit =   按 Esc 键退出。
+
 

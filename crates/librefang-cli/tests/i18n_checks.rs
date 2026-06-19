@@ -209,6 +209,8 @@ fn is_potential_untranslated_literal(lit: &str) -> bool {
         "Method not found: {method}",
         "target checked above",
         "instance_id missing",
+        "unhandled CLI command `{other}`",
+        "Failed to draw",
         // Technical format strings
         "%Y-%m-%d %H:%M",
         // Hand CLI command names for require_daemon
@@ -637,8 +639,7 @@ fn test_no_untranslated_strings() {
                 .unwrap()
                 .replace('\\', "/");
 
-            if rel_path == "tui/chat_runner.rs"
-                || rel_path == "tui/event.rs"
+            if rel_path == "tui/event.rs"
                 || rel_path == "tui/mod.rs"
                 || rel_path.starts_with("tui/screens/")
             {

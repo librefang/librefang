@@ -1310,3 +1310,32 @@ common-error-find-exe = Не вдалося знайти виконуваний 
 common-error-spawn-daemon = Не вдалося запустити демон: { $error }
 common-error-daemon-timeout = Демон не став готовим протягом 10 секунд
 
+# tui/chat_runner.rs
+chat-runner-owner-notice = [owner_notice] { $preview }
+chat-runner-error-prefix = Помилка: { $error }
+chat-runner-no-active-connection = Немає активного з'єднання
+chat-runner-unknown-command = Невідома команда: { $command }. Введіть /help
+chat-runner-status-mode-daemon = Режим: демон ({ $url })
+chat-runner-status-agent = Агент: { $name }
+chat-runner-status-mode-inprocess = Режим: вбудоване ядро
+chat-runner-status-agents-count = Агенти: { $count }
+chat-runner-status-mode-disconnected = Режим: відключено
+chat-runner-chat-history-cleared = Історію чату очищено.
+chat-runner-agent-killed = Агента "{ $name }" примусово зупинено.
+chat-runner-failed-kill-agent = Не вдалося примусово зупинити агента "{ $name }".
+chat-runner-kill-failed = Не вдалося примусово зупинити: { $error }
+chat-runner-no-backend-connected = Не підключено до бекенду.
+chat-runner-no-models-available = Немає доступних моделей.
+chat-runner-switched-model = Переключено на { $model }
+chat-runner-failed-switch-model = Не вдалося переключитися на { $model }
+chat-runner-switch-failed = Помилка перемикання: { $error }
+chat-runner-welcome-help-hint = /help для довідки • /exit для виходу
+chat-runner-spawning-agent = Запуск агента '{ $name }'…
+chat-runner-no-agent-templates = Шаблонів агентів не знайдено. Запустіть `librefang init`.
+chat-runner-invalid-template = Некоректний шаблон '{ $name }': { $error }
+chat-runner-spawn-failed = Не вдалося запустити: { $error }
+chat-runner-booting-kernel = Завантаження ядра…
+chat-runner-booting-kernel-hint =   Це може зайняти деякий час, поки ядро ініціалізується.
+chat-runner-failed-start = Не вдалося запустити
+chat-runner-press-esc-to-exit =   Натисніть Esc для виходу.
+
