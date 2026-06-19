@@ -1480,3 +1480,20 @@ tui-welcome-provider = Provider: { $provider }
 tui-welcome-no-api-keys = No API keys
 tui-welcome-run-hint-prefix =  — run 
 tui-welcome-setup-complete = Setup complete!
+
+# sessions.rs
+tui-sessions-title = Sessions
+tui-sessions-filter = (filter: "{ $query }")
+tui-sessions-count =
+    { $count ->
+        [one] 1 session
+       *[other] { $count } sessions
+    }
+tui-sessions-header-agent = Agent
+tui-sessions-header-id = Session ID
+tui-sessions-header-msgs = Msgs
+tui-sessions-header-created = Created
+tui-sessions-loading = Loading sessions…
+tui-sessions-empty = No sessions yet. Start a chat to create one.
+tui-sessions-delete-confirm = Delete this session? [y] Yes  [any] Cancel
+tui-sessions-hints = ↑↓ Navigate  Enter Open  d Delete  / Search  r Refresh
