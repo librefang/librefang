@@ -40,6 +40,9 @@ vi.mock("../lib/queries/providers", () => ({
 
 vi.mock("../lib/queries/models", () => ({
   useModels: vi.fn(),
+  // ProviderMaxTokensSection (#6209) calls this; default to no override so the
+  // existing tests don't have to care about the max-tokens section.
+  useModelOverrides: vi.fn(() => ({ data: undefined, isLoading: false })),
 }));
 
 vi.mock("../lib/mutations/providers", () => ({

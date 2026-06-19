@@ -167,17 +167,7 @@ function SetDefaultModelSection({ providerId, currentDefault, onSetDefault }: {
   );
 }
 
-// ── ProviderMaxTokensSection — edit the representative model's max-token
-//    limit from the config drawer (#6209) ──────────────────────────────────
-//
-// "最大token" is the per-request max-output-token cap. It is persisted as a
-// `max_tokens` model override (PUT /api/models/overrides/{provider}:{model}),
-// which composes over the catalog `max_output_tokens` — the same value the
-// provider card displays via `provider.max_output_tokens`. Editing is scoped
-// to a single model (the provider's first/representative model by default,
-// switchable), because the limit is a per-model property. Clearing the input
-// deletes the override and reverts to the catalog default.
-
+// Uses max_tokens override (not context_window): context_window has no persistence path in ModelOverrides and is overwritten on registry sync.
 function ProviderMaxTokensSection({ providerId, addToast }: {
   providerId: string;
   addToast: (msg: string, type?: "success" | "error" | "info") => void;
