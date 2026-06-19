@@ -921,4 +921,37 @@ tui-comms-modal-task-desc = 描述:
 tui-comms-modal-task-assign = 指派给 (智能体 ID, 可选):
 tui-comms-modal-task-hints = [Tab] 切换输入框  [Enter] 发布  [Esc] 取消
 
+# settings.rs
+tui-settings-title = 设置
+tui-settings-hints-input =   [Enter] 保存  [Esc] 取消
+tui-settings-hints-providers =   [↑↓] 导航  [e] 设置密钥  [d] 删除密钥  [t] 测试  [r] 刷新
+tui-settings-hints-models =   [↑↓] 导航  [r] 刷新
+tui-settings-hints-tools =   [↑↓] 导航  [r] 刷新
+tui-settings-tab-providers = 1 提供商
+tui-settings-tab-models = 2 模型
+tui-settings-tab-tools = 3 工具
+tui-settings-providers-header-provider = 提供商
+tui-settings-providers-header-status = 状态
+tui-settings-providers-header-env = 环境变量
+tui-settings-providers-loading = 正在加载提供商…
+tui-settings-providers-empty = 未配置提供商。运行 `librefang init` 进行设置。
+tui-settings-providers-status-online = 在线 ({ $ms }ms)
+tui-settings-providers-status-offline = 离线
+tui-settings-providers-status-local = 本地
+tui-settings-providers-status-configured = 已配置
+tui-settings-providers-status-notset = 未设置
+tui-settings-providers-input-prompt = 输入 { $provider } 的 API 密钥: 
+tui-settings-providers-latency = 延迟: { $ms }ms
+tui-settings-models-header-id = 模型 ID
+tui-settings-models-header-provider = 提供商
+tui-settings-models-header-tier = 层级
+tui-settings-models-header-context = 上下文
+tui-settings-models-header-cost = 成本 (输入/输出 每百万)
+tui-settings-models-loading = 正在加载模型…
+tui-settings-models-empty = 没有可用模型。
+tui-settings-tools-header-name = 工具名称
+tui-settings-tools-header-desc = 描述
+tui-settings-tools-empty = 没有可用工具。
+
+
 

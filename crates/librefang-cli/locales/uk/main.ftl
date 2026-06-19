@@ -1757,4 +1757,37 @@ tui-comms-modal-task-desc = Опис:
 tui-comms-modal-task-assign = Призначити (ID агента, опціонально):
 tui-comms-modal-task-hints = [Tab] поле  [Enter] створити  [Esc] скасувати
 
+# settings.rs
+tui-settings-title = Налаштування
+tui-settings-hints-input =   [Enter] Зберегти  [Esc] Скасувати
+tui-settings-hints-providers =   [↑↓] Навігація  [e] Встановити ключ  [d] Видалити ключ  [t] Тест  [r] Оновити
+tui-settings-hints-models =   [↑↓] Навігація  [r] Оновити
+tui-settings-hints-tools =   [↑↓] Навігація  [r] Оновити
+tui-settings-tab-providers = 1 Провайдери
+tui-settings-tab-models = 2 Моделі
+tui-settings-tab-tools = 3 Інструменти
+tui-settings-providers-header-provider = Провайдер
+tui-settings-providers-header-status = Статус
+tui-settings-providers-header-env = Змінна оточення
+tui-settings-providers-loading = Завантаження провайдерів…
+tui-settings-providers-empty = Немає налаштованих провайдерів. Виконайте `librefang init` для налаштування.
+tui-settings-providers-status-online = В мережі ({ $ms }мс)
+tui-settings-providers-status-offline = Поза мережею
+tui-settings-providers-status-local = Локально
+tui-settings-providers-status-configured = Налаштовано
+tui-settings-providers-status-notset = Не встановлено
+tui-settings-providers-input-prompt = Введіть API ключ для { $provider }: 
+tui-settings-providers-latency = Затримка: { $ms }мс
+tui-settings-models-header-id = ID моделі
+tui-settings-models-header-provider = Провайдер
+tui-settings-models-header-tier = Рівень
+tui-settings-models-header-context = Контекст
+tui-settings-models-header-cost = Вартість (вхід/вихід за 1M)
+tui-settings-models-loading = Завантаження моделей…
+tui-settings-models-empty = Немає доступних моделей.
+tui-settings-tools-header-name = Назва інструменту
+tui-settings-tools-header-desc = Опис
+tui-settings-tools-empty = Немає доступних інструментів.
+
+
 

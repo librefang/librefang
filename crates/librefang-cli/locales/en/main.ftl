@@ -1741,4 +1741,37 @@ tui-comms-modal-task-desc = Description:
 tui-comms-modal-task-assign = Assign to (agent ID, optional):
 tui-comms-modal-task-hints = [Tab] field  [Enter] post  [Esc] cancel
 
+# settings.rs
+tui-settings-title = Settings
+tui-settings-hints-input =   [Enter] Save  [Esc] Cancel
+tui-settings-hints-providers =   [↑↓] Navigate  [e] Set Key  [d] Delete Key  [t] Test  [r] Refresh
+tui-settings-hints-models =   [↑↓] Navigate  [r] Refresh
+tui-settings-hints-tools =   [↑↓] Navigate  [r] Refresh
+tui-settings-tab-providers = 1 Providers
+tui-settings-tab-models = 2 Models
+tui-settings-tab-tools = 3 Tools
+tui-settings-providers-header-provider = Provider
+tui-settings-providers-header-status = Status
+tui-settings-providers-header-env = Env Variable
+tui-settings-providers-loading = Loading providers…
+tui-settings-providers-empty = No providers configured. Run `librefang init` to set up.
+tui-settings-providers-status-online = Online ({ $ms }ms)
+tui-settings-providers-status-offline = Offline
+tui-settings-providers-status-local = Local
+tui-settings-providers-status-configured = Configured
+tui-settings-providers-status-notset = Not set
+tui-settings-providers-input-prompt = Enter API key for { $provider }: 
+tui-settings-providers-latency = Latency: { $ms }ms
+tui-settings-models-header-id = Model ID
+tui-settings-models-header-provider = Provider
+tui-settings-models-header-tier = Tier
+tui-settings-models-header-context = Context
+tui-settings-models-header-cost = Cost (in/out per 1M)
+tui-settings-models-loading = Loading models…
+tui-settings-models-empty = No models available.
+tui-settings-tools-header-name = Tool Name
+tui-settings-tools-header-desc = Description
+tui-settings-tools-empty = No tools available.
+
+
 
