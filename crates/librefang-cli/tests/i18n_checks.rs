@@ -586,17 +586,13 @@ fn test_no_untranslated_strings() {
                 .replace('\\', "/");
 
             if rel_path == "i18n.rs"
-                || rel_path == "ui.rs"
                 || rel_path == "mod.rs"
                 || rel_path == "acp.rs"
                 || rel_path == "progress.rs"
                 || rel_path == "cli.rs"
                 || rel_path == "mcp.rs"
                 || rel_path == "log_filter.rs"
-                || rel_path == "table.rs"
                 || rel_path == "http_client.rs"
-                || rel_path == "bundled_agents.rs"
-                || rel_path == "templates.rs"
                 || rel_path.starts_with("tui/")
             {
                 continue;

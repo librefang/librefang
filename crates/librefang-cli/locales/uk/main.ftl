@@ -1025,6 +1025,7 @@ launcher-help-hints = ↑↓/jk прокрутка  PgUp/PgDn  g/G вгору/в
 # CLI shared UI strings
 common-warning-config-default = попередження: { $error }; використовуються стандартні значення конфігурації для цієї команди
 ui-brand-tagline = Відкрита операційна система для агентів
+ui-brand-title = LibreFang Agent OS
 ui-label-hint = підказка:
 ui-label-next-steps = Наступні кроки
 ui-label-fix = виправити:

@@ -1014,6 +1014,7 @@ launcher-help-hints = ↑↓/jk scroll  PgUp/PgDn  g/G top/bottom  q back
 # CLI shared UI strings
 common-warning-config-default = warning: { $error }; using default config values for this command
 ui-brand-tagline = The open-source agent operating system
+ui-brand-title = LibreFang Agent OS
 ui-label-hint = hint:
 ui-label-next-steps = Next steps
 ui-label-fix = fix:
