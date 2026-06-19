@@ -1511,3 +1511,26 @@ tui-sessions-loading = Завантаження сесій…
 tui-sessions-empty = Сесій ще немає. Почніть чат, щоб створити її.
 tui-sessions-delete-confirm = Видалити цю сесію? [y] Так  [будь-яка клавіша] Скасувати
 tui-sessions-hints = ↑↓ Навігація  Enter Відкрити  d Видалити  / Пошук  r Оновити
+
+# peers.rs
+tui-peers-title = Піри
+tui-peers-network = Мережа пірів OFP
+tui-peers-count =
+    { $count ->
+        [one] { $count } пір
+        [few] { $count } піри
+        [many] { $count } пірів
+       *[other] { $count } пірів
+    }
+tui-peers-header-node-id = ID вузла
+tui-peers-header-name = Назва
+tui-peers-header-address = Адреса
+tui-peers-header-status = Статус
+tui-peers-header-agents = Агенти
+tui-peers-header-protocol = Протокол
+tui-peers-status-active = Активний
+tui-peers-status-offline = Офлайн
+tui-peers-status-pending = Очікування
+tui-peers-loading = Пошук пірів…
+tui-peers-empty = Немає підключених пірів. Увімкніть OFP-мережу в config.toml.
+tui-peers-hints = ↑↓ Навігація  r Оновити  (автооновлення кожні 15 с)
