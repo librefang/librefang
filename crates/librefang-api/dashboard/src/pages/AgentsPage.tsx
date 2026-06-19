@@ -891,7 +891,9 @@ export function AgentsPage() {
       return a.name.localeCompare(b.name);
     }), [visibleAgents, search, stateFilter, sortBy]);
 
-  const coreAgents = filteredAgents;
+  // handAgents is naturally empty while the showHandAgents toggle is off.
+  const coreAgents = useMemo(() => filteredAgents.filter(a => !a.is_hand), [filteredAgents]);
+  const handAgents = useMemo(() => filteredAgents.filter(a => a.is_hand), [filteredAgents]);
   const conflictingToolNames = useMemo(
     () => toolAllowlistDraft.filter((name) => toolBlocklistDraft.includes(name)),
     [toolAllowlistDraft, toolBlocklistDraft],
@@ -2232,7 +2234,22 @@ export function AgentsPage() {
               )
             ) : (
               <div className="flex flex-col">
-                {coreAgents.map((agent) => renderAgentRow(agent))}
+                {coreAgents.length > 0 && (
+                  <>
+                    <div className="px-3.5 py-1.5 text-[10px] uppercase font-semibold tracking-[0.08em] text-text-dim bg-main/40 border-b border-border-subtle/40">
+                      {t("agents.core_agents")} ({coreAgents.length})
+                    </div>
+                    {coreAgents.map((agent) => renderAgentRow(agent))}
+                  </>
+                )}
+                {handAgents.length > 0 && (
+                  <>
+                    <div className="px-3.5 py-1.5 text-[10px] uppercase font-semibold tracking-[0.08em] text-text-dim bg-main/40 border-b border-border-subtle/40">
+                      {t("agents.hands")} ({handAgents.length})
+                    </div>
+                    {handAgents.map((agent) => renderAgentRow(agent))}
+                  </>
+                )}
               </div>
             )}
           </div>
