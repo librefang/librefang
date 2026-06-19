@@ -1467,3 +1467,28 @@ tui-tab-audit = Аудит
 tui-tab-usage = Використання
 tui-tab-settings = Конфіг
 tui-tab-logs = Логи
+# welcome.rs
+tui-welcome-menu-connect = Підключитися до демона
+tui-welcome-menu-connect-hint = взаємодія з активними агентами через API
+tui-welcome-menu-chat = Швидкий чат
+tui-welcome-menu-chat-hint = локальний запуск ядра без демона
+tui-welcome-menu-setup = Майстер налаштування
+tui-welcome-menu-setup-hint = налаштування провайдерів та каналів
+tui-welcome-menu-exit = Вихід
+tui-welcome-menu-exit-hint = вийти з LibreFang
+tui-welcome-tagline = Операційна система агентів
+tui-welcome-ctrl-c-quit = Натисніть Ctrl+C ще раз для виходу
+tui-welcome-hint-bar = ↑↓ навігація  enter вибір  q вихід
+tui-welcome-checking-daemon = Перевірка демона…
+tui-welcome-agent-count =
+    { $count ->
+        [one]  • { $count } агент
+        [few]  • { $count } агенти
+       *[other]  • { $count } агентів
+    }
+tui-welcome-daemon-status = Демон { $url }
+tui-welcome-no-daemon = Демон не запущений
+tui-welcome-provider = Провайдер: { $provider }
+tui-welcome-no-api-keys = Немає API-ключів
+tui-welcome-run-hint-prefix =  — запустіть 
+tui-welcome-setup-complete = Налаштування завершено!
