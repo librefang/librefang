@@ -1497,3 +1497,24 @@ tui-sessions-loading = Loading sessions…
 tui-sessions-empty = No sessions yet. Start a chat to create one.
 tui-sessions-delete-confirm = Delete this session? [y] Yes  [any] Cancel
 tui-sessions-hints = ↑↓ Navigate  Enter Open  d Delete  / Search  r Refresh
+
+# peers.rs
+tui-peers-title = Peers
+tui-peers-network = OFP Peer Network
+tui-peers-count =
+    { $count ->
+        [one] 1 peer
+       *[other] { $count } peers
+    }
+tui-peers-header-node-id = Node ID
+tui-peers-header-name = Name
+tui-peers-header-address = Address
+tui-peers-header-status = Status
+tui-peers-header-agents = Agents
+tui-peers-header-protocol = Protocol
+tui-peers-status-active = Active
+tui-peers-status-offline = Offline
+tui-peers-status-pending = Pending
+tui-peers-loading = Discovering peers…
+tui-peers-empty = No peers connected. Enable OFP networking in config.toml.
+tui-peers-hints = ↑↓ Navigate  r Refresh  (auto-refreshes every 15s)
