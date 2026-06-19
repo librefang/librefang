@@ -54,6 +54,17 @@ impl kernel_handle::ToolPolicy for LibreFangKernel {
         self.config_ref().channels.effective_file_download_dir()
     }
 
+    fn protected_write_paths(&self) -> Vec<std::path::PathBuf> {
+        // Mirror boot.rs `audit_anchor_path` resolution exactly; divergence would guard the wrong path.
+        let cfg = self.config.load();
+        let anchor = match cfg.audit.anchor_path.as_ref() {
+            Some(path) if path.is_absolute() => path.clone(),
+            Some(path) => cfg.data_dir.join(path),
+            None => cfg.data_dir.join("audit.anchor"),
+        };
+        vec![anchor]
+    }
+
     fn readonly_workspace_prefixes(&self, agent_id: &str) -> Vec<std::path::PathBuf> {
         self.named_workspace_prefixes(agent_id)
             .into_iter()

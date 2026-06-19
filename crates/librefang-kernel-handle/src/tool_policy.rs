@@ -84,4 +84,9 @@ pub trait ToolPolicy: Send + Sync {
     fn effective_upload_dir(&self) -> std::path::PathBuf {
         std::env::temp_dir().join("librefang_uploads")
     }
+
+    /// Absolute paths the WASM sandbox must never write to regardless of capability grants; default empty.
+    fn protected_write_paths(&self) -> Vec<std::path::PathBuf> {
+        vec![]
+    }
 }

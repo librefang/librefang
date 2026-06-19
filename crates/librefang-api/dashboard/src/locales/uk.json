@@ -2531,6 +2531,8 @@
     "input_placeholder_with_agent": "Надіслати команду для {{name}}...",
     "generating": "Генерація...",
     "clear_chat": "Очистити чат",
+    "context_usage": "{{used}} / {{max}} токенів (~{{pct}}%)",
+    "context_usage_aria": "Використання контекстного вікна: приблизно {{pct}} відсотків",
     "session": "Сесія",
     "session_unpinned": "Відкріплена",
     "sessions_title": "Сесії",

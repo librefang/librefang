@@ -6,7 +6,7 @@ import { motion } from "motion/react";
 import { messageIn, fadeInUp } from "../lib/motion";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { buildAuthenticatedWebSocket } from "../api";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ApprovalItem, SessionListItem, ModelItem, AgentTool, AgentItem } from "../api";
 import { clearAgentHistory } from "../lib/http/client";
 import { useFullConfig } from "../lib/queries/config";
@@ -2214,6 +2214,77 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
   );
 }
 
+// Context-window usage indicator — a small progress bar plus an
+// "X / Y tokens (Z%)" label showing how full the live session context is.
+// `Y` (the model window) and `pct` come from the dedicated
+// /agents/{id}/session/context endpoint; the estimate is approximate
+// (chars/4 heuristic), so the copy reads "roughly how full", not exact.
+//
+// Two-state UI: a skeleton bar while loading and nothing on error (the
+// indicator is non-critical and must not surface a chat error). The server
+// always resolves the window to a positive value (8192 fallback for an
+// unknown model), so there is no zero-denominator case to hide.
+function ContextUsageIndicator({ agentId, sessionId }: { agentId: string; sessionId?: string }) {
+  const { t } = useTranslation();
+  const query = useQuery(agentQueries.sessionContext(agentId, sessionId ?? null));
+
+  if (query.isError) return null;
+
+  if (!query.data) {
+    // A disabled query (no sessionId) reports isLoading=false / data=undefined,
+    // so guarding on isLoading would pin a permanent skeleton. Show the skeleton
+    // only while a fetch is genuinely in flight; otherwise render nothing.
+    if (!query.isFetching) return null;
+    return (
+      <div
+        className="hidden md:flex items-center gap-2 text-xs text-text-dim/60"
+        aria-hidden="true"
+      >
+        <div className="h-1.5 w-20 rounded-full bg-border-subtle/60 animate-pulse" />
+      </div>
+    );
+  }
+
+  const { used_tokens: used, max_context_tokens: max, pct, pressure } = query.data;
+
+  // Theme-token fill color stepped by pressure. Neutral (brand) until the
+  // context is genuinely tight, then amber, then red. Dark-mode aware via
+  // the CSS-variable-backed Tailwind tokens (no literal hex).
+  const fillClass =
+    pressure === "critical"
+      ? "bg-error"
+      : pressure === "high"
+        ? "bg-warning"
+        : "bg-brand";
+
+  const clampedPct = Math.max(0, Math.min(100, pct));
+  const label = t("chat.context_usage", {
+    used: used.toLocaleString(),
+    max: max.toLocaleString(),
+    pct: clampedPct.toFixed(1),
+  });
+  const ariaLabel = t("chat.context_usage_aria", { pct: clampedPct.toFixed(1) });
+
+  return (
+    <div className="hidden md:flex items-center gap-2 text-xs text-text-dim/70" title={label}>
+      <div
+        role="progressbar"
+        aria-label={ariaLabel}
+        aria-valuenow={Math.round(clampedPct)}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        className="h-1.5 w-20 rounded-full bg-border-subtle/60 overflow-hidden"
+      >
+        <div
+          className={`h-full rounded-full transition-[width] duration-500 ${fillClass}`}
+          style={{ width: `${clampedPct}%` }}
+        />
+      </div>
+      <span className="hidden lg:inline tabular-nums whitespace-nowrap">{label}</span>
+    </div>
+  );
+}
+
 // Connection status bar with session dropdown
 function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, wsConnected, modelName, modelProvider, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession, agentId, isHand, onModelChange, webSearchAugmentation, onWebSearchChange, webSearchAvailable, onOpenConfig, attached, attachedEventCount, onOpenMobileSheet }: {
   agentName: string; isLoading: boolean; messageCount: number; onClear: () => void; onExport: () => void; wsConnected?: boolean; modelName?: string; modelProvider?: string;
@@ -2661,6 +2732,9 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
               </div>
             )}
           </div>
+        )}
+        {agentId && messageCount > 0 && (
+          <ContextUsageIndicator agentId={agentId} sessionId={activeSessionId} />
         )}
         {messageCount > 0 && (
           <>
