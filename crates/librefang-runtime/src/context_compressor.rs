@@ -759,6 +759,7 @@ mod tests {
             token_threshold_ratio: 0.5,
             max_chunk_chars: 90_000,
             max_retries: 4,
+            ..Default::default()
         };
         let cfg = CompressionConfig::from_compaction_toml(&toml);
         // Shared fields come from the toml:
