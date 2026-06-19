@@ -183,4 +183,9 @@ pub const OPERATIONAL_MIGRATIONS: &[Migration] = &[
         name: "config_store_v1",
         sql: include_str!("sql/031_config_store.surql"),
     },
+    Migration {
+        version: 32,
+        name: "canonical_sessions_compacted_summary_session_id_v1",
+        sql: include_str!("sql/032_canonical_sessions_compacted_summary_session_id.surql"),
+    },
 ];

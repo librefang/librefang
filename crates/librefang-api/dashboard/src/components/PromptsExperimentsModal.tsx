@@ -206,20 +206,27 @@ export function PromptsExperimentsModal({
                                   <Check className="w-3 h-3 mr-1" /> {t("agents.prompts_experiments.activate")}
                                 </Button>
                               )}
-                              {!v.is_active && (
-                                <Button
-                                  variant="secondary"
-                                  size="sm"
-                                  onClick={() =>
-                                    deleteVersionMutation.mutate({
-                                      versionId: v.id,
-                                      agentId,
-                                    })
-                                  }
-                                >
-                                  <Trash2 className="w-3 h-3" />
-                                </Button>
-                              )}
+                              <Button
+                                variant="secondary"
+                                size="sm"
+                                disabled={v.is_active || deleteVersionMutation.isPending}
+                                title={
+                                  v.is_active
+                                    ? t("prompts.delete_blocked_active", {
+                                        defaultValue:
+                                          "Active version — activate another version before deleting",
+                                      })
+                                    : t("prompts.delete")
+                                }
+                                onClick={() =>
+                                  deleteVersionMutation.mutate({
+                                    versionId: v.id,
+                                    agentId,
+                                  })
+                                }
+                              >
+                                <Trash2 className="w-3 h-3" />
+                              </Button>
                             </div>
                           </div>
                           <pre className="text-xs text-text-dim whitespace-pre-wrap max-h-24 overflow-y-auto">

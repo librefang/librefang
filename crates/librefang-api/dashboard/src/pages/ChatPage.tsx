@@ -6,7 +6,7 @@ import { motion } from "motion/react";
 import { messageIn, fadeInUp } from "../lib/motion";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { buildAuthenticatedWebSocket } from "../api";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ApprovalItem, SessionListItem, ModelItem, AgentTool, AgentItem } from "../api";
 import { clearAgentHistory } from "../lib/http/client";
 import { useFullConfig } from "../lib/queries/config";
@@ -1700,6 +1700,73 @@ function CompactionSummaryBanner({ summary, isCompacting }: { summary: string | 
   );
 }
 
+// No structured context-exhaustion signal exists on the chat surface; match the daemon / provider error string instead.
+const CONTEXT_LIMIT_PATTERNS = [
+  "context window",
+  "context_window",
+  "context length",
+  "context_length",
+  "context length exceeded",
+  "context_length_exceeded",
+  "maximum context",
+  "max context",
+  // Canonical phrase the kernel collapses provider context-overflow errors to.
+  "context is full",
+  "too long",
+  "too_long",
+  "string too long",
+  "prompt is too long",
+  "input is too long",
+  "maximum tokens",
+  "max tokens",
+  "max_tokens",
+  "token limit",
+  "exceeds the maximum",
+  "reduce the length",
+  "quota",
+  "rate limit",
+  "rate_limit",
+  "429",
+];
+
+// A spending / usage-budget cap that a new session can't clear; its wording contains "context window", so suppress the banner for it rather than give wrong advice.
+const USAGE_BUDGET_PATTERNS = ["usage budget", "spending/usage cap", "/compact will not help"];
+
+export function isContextLimitError(text: string | undefined | null): boolean {
+  if (!text) return false;
+  const lowered = text.toLowerCase();
+  if (USAGE_BUDGET_PATTERNS.some((p) => lowered.includes(p))) return false;
+  return CONTEXT_LIMIT_PATTERNS.some((p) => lowered.includes(p));
+}
+
+function LimitReachedBanner({ onNewSession, creating }: { onNewSession: () => void; creating: boolean }) {
+  const { t } = useTranslation();
+  return (
+    <div className="rounded-xl border border-warning/30 bg-warning/10 px-4 py-3" role="status">
+      <div className="flex items-start gap-3">
+        <AlertCircle className="h-4 w-4 shrink-0 mt-0.5 text-warning" aria-hidden="true" />
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-semibold text-warning">{t("chat.limit_reached_title")}</p>
+          <p className="mt-1 text-xs text-text-dim leading-relaxed">{t("chat.limit_reached_desc")}</p>
+          <button
+            type="button"
+            onClick={onNewSession}
+            disabled={creating}
+            className="mt-2.5 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-warning/20 hover:bg-warning/30 text-warning text-xs font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {creating ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+            ) : (
+              <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+            )}
+            <span>{t("chat.limit_reached_action")}</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Input box - with shortcut hints
 function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabled, placeholder, authMissing, authStatus, providerName, supportsThinking, sttAvailable }: { agentId: string; onSend: (msg: string, attachments?: ChatAttachment[]) => void; onStop?: () => void; isStreaming?: boolean; disabled: boolean; inputDisabled?: boolean; placeholder: string; authMissing?: boolean; authStatus?: string; providerName?: string; supportsThinking?: boolean; sttAvailable?: boolean }) {
   const { t } = useTranslation();
@@ -2144,6 +2211,77 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
         )}
       </div>
     </form>
+  );
+}
+
+// Context-window usage indicator — a small progress bar plus an
+// "X / Y tokens (Z%)" label showing how full the live session context is.
+// `Y` (the model window) and `pct` come from the dedicated
+// /agents/{id}/session/context endpoint; the estimate is approximate
+// (chars/4 heuristic), so the copy reads "roughly how full", not exact.
+//
+// Two-state UI: a skeleton bar while loading and nothing on error (the
+// indicator is non-critical and must not surface a chat error). The server
+// always resolves the window to a positive value (8192 fallback for an
+// unknown model), so there is no zero-denominator case to hide.
+function ContextUsageIndicator({ agentId, sessionId }: { agentId: string; sessionId?: string }) {
+  const { t } = useTranslation();
+  const query = useQuery(agentQueries.sessionContext(agentId, sessionId ?? null));
+
+  if (query.isError) return null;
+
+  if (!query.data) {
+    // A disabled query (no sessionId) reports isLoading=false / data=undefined,
+    // so guarding on isLoading would pin a permanent skeleton. Show the skeleton
+    // only while a fetch is genuinely in flight; otherwise render nothing.
+    if (!query.isFetching) return null;
+    return (
+      <div
+        className="hidden md:flex items-center gap-2 text-xs text-text-dim/60"
+        aria-hidden="true"
+      >
+        <div className="h-1.5 w-20 rounded-full bg-border-subtle/60 animate-pulse" />
+      </div>
+    );
+  }
+
+  const { used_tokens: used, max_context_tokens: max, pct, pressure } = query.data;
+
+  // Theme-token fill color stepped by pressure. Neutral (brand) until the
+  // context is genuinely tight, then amber, then red. Dark-mode aware via
+  // the CSS-variable-backed Tailwind tokens (no literal hex).
+  const fillClass =
+    pressure === "critical"
+      ? "bg-error"
+      : pressure === "high"
+        ? "bg-warning"
+        : "bg-brand";
+
+  const clampedPct = Math.max(0, Math.min(100, pct));
+  const label = t("chat.context_usage", {
+    used: used.toLocaleString(),
+    max: max.toLocaleString(),
+    pct: clampedPct.toFixed(1),
+  });
+  const ariaLabel = t("chat.context_usage_aria", { pct: clampedPct.toFixed(1) });
+
+  return (
+    <div className="hidden md:flex items-center gap-2 text-xs text-text-dim/70" title={label}>
+      <div
+        role="progressbar"
+        aria-label={ariaLabel}
+        aria-valuenow={Math.round(clampedPct)}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        className="h-1.5 w-20 rounded-full bg-border-subtle/60 overflow-hidden"
+      >
+        <div
+          className={`h-full rounded-full transition-[width] duration-500 ${fillClass}`}
+          style={{ width: `${clampedPct}%` }}
+        />
+      </div>
+      <span className="hidden lg:inline tabular-nums whitespace-nowrap">{label}</span>
+    </div>
   );
 }
 
@@ -2595,6 +2733,9 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
             )}
           </div>
         )}
+        {agentId && messageCount > 0 && (
+          <ContextUsageIndicator agentId={agentId} sessionId={activeSessionId} />
+        )}
         {messageCount > 0 && (
           <>
             <button
@@ -2933,6 +3074,13 @@ export function ChatPage() {
   // `response` event. Textarea unblocks as soon as streaming ends so the user
   // can compose the next message immediately.
   const isStreaming = messages.some(m => m.role === "assistant" && m.isStreaming);
+
+  // Gate on the last message so the banner clears as soon as the user sends again.
+  const limitReached = useMemo(() => {
+    if (isStreaming) return false;
+    const last = messages[messages.length - 1];
+    return !!last && last.role === "assistant" && isContextLimitError(last.error);
+  }, [messages, isStreaming]);
 
   // Bug #3849: Track message count changes to announce new messages to screen
   // readers via the aria-live region.
@@ -3454,6 +3602,12 @@ export function ChatPage() {
                 {pendingApprovals.map(approval => (
                   <ApprovalCard key={approval.id} approval={approval} onResolved={removeApproval} />
                 ))}
+                {limitReached && (
+                  <LimitReachedBanner
+                    onNewSession={handleNewSession}
+                    creating={createSessionMutation.isPending}
+                  />
+                )}
                 <div ref={messagesEndRef} />
               </div>
             )}

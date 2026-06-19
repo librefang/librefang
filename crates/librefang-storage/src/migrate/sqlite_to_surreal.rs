@@ -530,7 +530,8 @@ fn copy_canonical_sessions(
     }
     let mut stmt = conn
         .prepare(
-            "SELECT agent_id, messages, compaction_cursor, compacted_summary, updated_at \
+            "SELECT agent_id, messages, compaction_cursor, compacted_summary, \
+             compacted_summary_session_id, updated_at \
              FROM canonical_sessions",
         )
         .map_err(map_sql)?;
@@ -544,21 +545,29 @@ fn copy_canonical_sessions(
                 messages_json,
                 row.get::<_, i64>(2)?,
                 row.get::<_, Option<String>>(3)?,
-                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, String>(5)?,
             ))
         })
         .map_err(map_sql)?;
 
     let mut count = 0u64;
     for row in rows {
-        let (agent_id, messages, compaction_cursor, compacted_summary, updated_at) =
-            row.map_err(map_sql)?;
+        let (
+            agent_id,
+            messages,
+            compaction_cursor,
+            compacted_summary,
+            compacted_summary_session_id,
+            updated_at,
+        ) = row.map_err(map_sql)?;
         if !dry_run {
             let body = serde_json::json!({
                 "agent_id": agent_id,
                 "messages": messages,
                 "compaction_cursor": compaction_cursor,
                 "compacted_summary": compacted_summary,
+                "compacted_summary_session_id": compacted_summary_session_id,
                 "updated_at": updated_at,
             });
             let rec_id = sanitise_id(&agent_id);

@@ -31,6 +31,12 @@ export const agentKeys = {
     [...agentKeys.all, "session", agentId] as const,
   session: (agentId: string, sessionId?: string | null) =>
     [...agentKeys.sessionSnapshots(agentId), sessionId ?? null] as const,
+  // Context-window usage snapshot for a session — backs the chat header
+  // indicator. Anchored under `sessionSnapshots` so it shares the same
+  // (agent, session) invalidation subtree, but kept on its own leaf so
+  // polling the indicator does not churn the heavy history snapshot cache.
+  sessionContext: (agentId: string, sessionId?: string | null) =>
+    [...agentKeys.sessionSnapshots(agentId), sessionId ?? null, "context"] as const,
   stats: (agentId: string) =>
     [...agentKeys.all, "stats", agentId] as const,
   events: (agentId: string, limit: number) =>

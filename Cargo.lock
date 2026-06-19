@@ -8685,7 +8685,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-storage"
-version = "2026.6.16-beta.19"
+version = "2026.6.17-beta.20"
 dependencies = [
  "async-trait",
  "chrono",
@@ -8782,7 +8782,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-uar-spec"
-version = "2026.6.16-beta.19"
+version = "2026.6.17-beta.20"
 dependencies = [
  "chrono",
  "librefang-types",

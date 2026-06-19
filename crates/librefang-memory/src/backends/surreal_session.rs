@@ -215,6 +215,13 @@ impl SessionBackend for SurrealSessionBackend {
                 .as_ref()
                 .and_then(|v| v["compacted_summary"].as_str())
                 .map(str::to_string);
+            // Preserve the owning-session pointer (#6225) across appends — the
+            // upsert below replaces the whole record, so an omitted field would
+            // wipe it and resurface the compaction banner on every session.
+            let compacted_summary_session_id = existing
+                .as_ref()
+                .and_then(|v| v["compacted_summary_session_id"].as_str())
+                .map(str::to_string);
 
             all_msgs.extend(new_msgs);
 
@@ -226,6 +233,7 @@ impl SessionBackend for SurrealSessionBackend {
                 "messages": msgs_value,
                 "compaction_cursor": compaction_cursor,
                 "compacted_summary": compacted_summary,
+                "compacted_summary_session_id": compacted_summary_session_id,
                 "updated_at": chrono::Utc::now().to_rfc3339(),
             });
 
