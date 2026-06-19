@@ -1557,6 +1557,26 @@ fn test_span_outcome_blocked_does_not_set_error_status() {
     }
 }
 
+/// A tool timeout (`Expired` → `timeout`) is a genuine execution failure —
+/// the body overran its deadline — so it flips the span status to error,
+/// matching `hard_error` / `circuit_break`. Guards the load-bearing
+/// `timeout` arm in `record_tool_span_outcome`'s error-status set (the
+/// inline comment there once claimed timeout was soft).
+#[test]
+fn test_span_outcome_timeout_sets_error_status() {
+    use librefang_types::tool::ToolExecutionStatus as S;
+    let fields = capture_span_fields(|| record_tool_span_outcome(true, Some(S::Expired)));
+    assert_eq!(
+        fields.get("tool.outcome").map(String::as_str),
+        Some("timeout")
+    );
+    assert_eq!(
+        fields.get("otel.status_code").map(String::as_str),
+        Some("error"),
+        "a tool timeout is a genuine execution failure and must set the span status to error"
+    );
+}
+
 /// The success path records `tool.outcome = success`-equivalent (`none`)
 /// and never touches the span status.
 #[test]

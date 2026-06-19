@@ -544,8 +544,10 @@ pub(super) struct ToolExecutionContext<'a> {
         // carries the bounded failure-type label so a trace backend can break
         // failures down without parsing free text; `otel.status_code` is the
         // canonical field `tracing-opentelemetry` maps to the OTel span status —
-        // set to `error` only on a HARD failure so a `hasError=true` filter and
-        // service-level errorRate actually match a failed tool (#6228).
+        // set to `error` only on a genuine service failure (hard_error /
+        // circuit_break / timeout), never on a model-driven blocked / denied call,
+        // so a `hasError=true` filter and service-level errorRate actually match a
+        // failed tool (#6228).
         tool.outcome = tracing::field::Empty,
         otel.status_code = tracing::field::Empty,
     ),
@@ -582,12 +584,12 @@ pub(super) async fn execute_single_tool_call(
 /// outcome (#6228). Records `tool.outcome` (the bounded failure-type
 /// label, or `"success"`) on every call, and sets `otel.status_code =
 /// "error"` — the field `tracing-opentelemetry` maps to the OTel span
-/// status — **only** when the failure is a genuine hard error. A
-/// model-fat-fingered blocked / denied / approval-modify call is the
-/// model's mistake, not a service error: marking those errored would
-/// inflate the service errorRate with non-failures, so the span status
-/// stays unset (OK) for them while `tool.outcome` still records what
-/// happened.
+/// status — **only** on a genuine service failure (`hard_error`,
+/// `circuit_break`, or `timeout`). A model-fat-fingered blocked / denied /
+/// approval-modify call is the model's mistake, not a service error:
+/// marking those errored would inflate the service errorRate with
+/// non-failures, so the span status stays unset (OK) for them while
+/// `tool.outcome` still records what happened.
 pub(super) fn record_tool_span_outcome(
     is_error: bool,
     status: Option<librefang_types::tool::ToolExecutionStatus>,
