@@ -95,7 +95,7 @@ pub(crate) async fn persist_chatgpt_auth(
 
     let home = librefang_home();
     std::fs::create_dir_all(&home)
-        .map_err(|e| format!("Failed to create LibreFang home directory: {e}"))?;
+        .map_err(|e| i18n::t_args("auth-error-create-home-dir", &[("error", &e.to_string())]))?;
 
     let access_token = auth_result.access_token;
     let refresh_token = auth_result.refresh_token;
@@ -162,7 +162,7 @@ pub(crate) fn write_chatgpt_secrets(
     }
 
     std::fs::write(&secrets_path, updated)
-        .map_err(|e| format!("Failed to write secrets.env: {e}"))?;
+        .map_err(|e| i18n::t_args("auth-error-write-secrets", &[("error", &e.to_string())]))?;
 
     Ok(secrets_path)
 }
@@ -178,14 +178,14 @@ pub(crate) fn update_chatgpt_config(
     } else {
         config_str
             .parse::<toml_edit::DocumentMut>()
-            .map_err(|e| format!("Failed to parse config.toml: {e}"))?
+            .map_err(|e| i18n::t_args("auth-error-parse-config", &[("error", &e.to_string())]))?
     };
 
     let dm = doc
         .entry("default_model")
         .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
         .as_table_mut()
-        .ok_or("default_model is not a table")?;
+        .ok_or_else(|| i18n::t("auth-error-default-model-not-table"))?;
     dm.insert("provider", toml_edit::value("chatgpt"));
     dm.insert("api_key_env", toml_edit::value("CHATGPT_SESSION_TOKEN"));
     dm.insert("model", toml_edit::value(best_model));
@@ -195,7 +195,7 @@ pub(crate) fn update_chatgpt_config(
     );
 
     std::fs::write(&config_path, doc.to_string())
-        .map_err(|e| format!("Failed to write config.toml: {e}"))?;
+        .map_err(|e| i18n::t_args("auth-error-write-config", &[("error", &e.to_string())]))?;
 
     Ok(())
 }
@@ -428,10 +428,8 @@ pub(crate) fn print_pool_summary_human(body: &serde_json::Value) {
         _ => {
             println!("{}", i18n::t("auth-pool-none-configured").dimmed());
             println!();
-            println!("Add one with:");
-            println!(
-                "  librefang auth pool add openai OPENAI_API_KEY_1 --label Primary --priority 10"
-            );
+            println!("{}", i18n::t("auth-pool-add-hint"));
+            println!("{}", i18n::t("auth-pool-add-example"));
             return;
         }
     };
@@ -440,12 +438,20 @@ pub(crate) fn print_pool_summary_human(body: &serde_json::Value) {
         let strategy = pool["strategy"].as_str().unwrap_or("");
         let total = pool["total_count"].as_u64().unwrap_or(0);
         let available = pool["available_count"].as_u64().unwrap_or(total);
-        let header = format!("{provider}  ({strategy})");
+        let header = i18n::t_args(
+            "auth-pool-header",
+            &[("provider", provider), ("strategy", strategy)],
+        );
         println!("{}", header.bold());
         println!(
-            "  keys: {}/{} available",
-            available.to_string().bold(),
-            total
+            "{}",
+            i18n::t_args(
+                "auth-pool-keys-available",
+                &[
+                    ("available", &available.to_string().bold().to_string()),
+                    ("total", &total.to_string())
+                ]
+            )
         );
         if let Some(creds) = pool["credentials"].as_array() {
             for c in creds {
@@ -462,28 +468,48 @@ pub(crate) fn print_pool_summary_human(body: &serde_json::Value) {
                 let status: String = if exhausted {
                     if let Some(serde_json::Value::String(s)) = cooldown {
                         if s == "permanent" {
-                            "invalid".red().to_string()
+                            i18n::t("auth-pool-status-invalid").red().to_string()
                         } else {
-                            "exhausted".yellow().to_string()
+                            i18n::t("auth-pool-status-exhausted").yellow().to_string()
                         }
                     } else if let Some(serde_json::Value::Number(n)) = cooldown {
                         format!(
                             "{} {}",
-                            "cooldown".yellow(),
-                            format!("({}s left)", n).dimmed()
+                            i18n::t("auth-pool-status-cooldown").yellow(),
+                            i18n::t_args(
+                                "auth-pool-cooldown-left",
+                                &[("secs", &n.to_string())]
+                            ).dimmed()
                         )
                     } else {
-                        "exhausted".yellow().to_string()
+                        i18n::t("auth-pool-status-exhausted").yellow().to_string()
                     }
                 } else if env_resolved == Some(false) {
-                    "env-missing".red().to_string()
+                    i18n::t("auth-pool-status-env-missing").red().to_string()
                 } else {
-                    "healthy".green().to_string()
+                    i18n::t("auth-pool-status-healthy").green().to_string()
                 };
 
-                let reqs_str = reqs.map(|r| format!(" requests={r}")).unwrap_or_default();
+                let reqs_str = reqs
+                    .map(|r| {
+                        format!(
+                            " {}",
+                            i18n::t_args("auth-pool-key-requests", &[("count", &r.to_string())])
+                        )
+                    })
+                    .unwrap_or_default();
                 println!(
-                    "    - [{label}] {key_display}  priority={pri}{reqs_str}  status={status}"
+                    "{}",
+                    i18n::t_args(
+                        "auth-pool-key-item",
+                        &[
+                            ("label", label),
+                            ("key_display", key_display),
+                            ("pri", &pri.to_string()),
+                            ("reqs_str", &reqs_str),
+                            ("status", &status)
+                        ]
+                    )
                 );
             }
         }
@@ -759,7 +785,7 @@ pub(crate) fn cmd_vault_set(key: &str) {
         std::process::exit(1);
     }
 
-    let value = prompt_input(&format!("Enter value for {key}: "));
+    let value = prompt_input(&i18n::t_args("vault-enter-value-prompt", &[("key", key)]));
     if value.is_empty() {
         ui::error(&i18n::t("vault-empty-value"));
         std::process::exit(1);
@@ -1008,8 +1034,11 @@ pub(crate) fn cmd_hash_password(password: Option<String>) {
     match librefang_api::password_hash::hash_password(&pass) {
         Ok(hash) => {
             println!("\n{hash}\n");
-            println!("Add to config.toml:");
-            println!("  dashboard_pass_hash = \"{hash}\"");
+            println!("{}", i18n::t("auth-hash-add-config-hint"));
+            println!(
+                "{}",
+                i18n::t_args("auth-hash-config-entry", &[("hash", &hash)])
+            );
         }
         Err(e) => {
             ui::error(&i18n::t_args(

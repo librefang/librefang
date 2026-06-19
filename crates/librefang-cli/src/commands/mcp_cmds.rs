@@ -73,10 +73,7 @@ pub(crate) fn cmd_mcp_add(name: &str, key: Option<&str>) {
                 matches_field("name") || matches_field("template_id")
             });
             if conflict {
-                ui::error(&format!(
-                    "MCP server '{name}' is already configured. Run \
-                     `librefang mcp remove {name}` first if you want to re-install."
-                ));
+                ui::error(&i18n::t_args("mcp-already-configured", &[("name", name)]));
                 std::process::exit(1);
             }
         }
@@ -138,7 +135,13 @@ pub(crate) fn cmd_mcp_add(name: &str, key: Option<&str>) {
             println!("{}", i18n::t("mcp-add-credentials-hint"));
             for env in &template.required_env {
                 if env.is_secret {
-                    println!("  librefang vault set {}  # {}", env.name, env.help);
+                    println!(
+                        "{}",
+                        i18n::t_args(
+                            "mcp-vault-set-hint",
+                            &[("name", &env.name), ("help", &env.help)]
+                        )
+                    );
                     if let Some(ref url) = env.get_url {
                         println!("{}", i18n::t_args("mcp-get-it-here", &[("url", url)]));
                     }
@@ -243,9 +246,9 @@ pub(crate) fn cmd_mcp_catalog(query: Option<&str>) {
 
     if entries.is_empty() {
         if let Some(q) = query {
-            println!("No MCP catalog entries matching '{q}'.");
+            println!("{}", i18n::t_args("mcp-catalog-no-matches", &[("query", q)]));
         } else {
-            println!("No MCP catalog entries available.");
+            println!("{}", i18n::t("mcp-catalog-none-available"));
         }
         return;
     }
@@ -278,14 +281,23 @@ pub(crate) fn cmd_mcp_catalog(query: Option<&str>) {
     }
     println!();
     println!(
-        "  {} catalog entries ({} installed)",
-        entries.len(),
-        entries
-            .iter()
-            .filter(|e| installed_template_ids.contains(&e.id))
-            .count()
+        "{}",
+        i18n::t_args(
+            "mcp-catalog-summary",
+            &[
+                ("total", &entries.len().to_string()),
+                (
+                    "installed",
+                    &entries
+                        .iter()
+                        .filter(|e| installed_template_ids.contains(&e.id))
+                        .count()
+                        .to_string()
+                )
+            ]
+        )
     );
-    println!("  Use `librefang mcp add <id>` to install an MCP server.");
+    println!("{}", i18n::t("mcp-catalog-install-hint"));
 }
 
 pub(crate) fn cmd_mcp_list() {
@@ -297,17 +309,20 @@ pub(crate) fn cmd_mcp_list() {
         .and_then(|t| t.get("mcp_servers"))
         .and_then(|v| v.as_array());
     let Some(servers) = servers else {
-        println!("No MCP servers configured.");
+        println!("{}", i18n::t("mcp-none-configured"));
         return;
     };
     if servers.is_empty() {
-        println!("No MCP servers configured.");
+        println!("{}", i18n::t("mcp-none-configured"));
         return;
     }
     println!();
     println!(
-        "  {:<28} {:<14} {:<18} details",
-        "name", "template_id", "transport"
+        "  {:<28} {:<14} {:<18} {}",
+        i18n::t("mcp-header-name"),
+        i18n::t("mcp-header-template-id"),
+        i18n::t("mcp-header-transport"),
+        i18n::t("mcp-header-details")
     );
     for entry in servers {
         let Some(tbl) = entry.as_table() else {
@@ -341,7 +356,7 @@ pub(crate) fn cmd_mcp_list() {
         println!("  {name:<28} {tid:<14} {transport:<18} {detail}");
     }
     println!();
-    println!("  Use `librefang mcp catalog` to list installable entries.");
+    println!("{}", i18n::t("mcp-list-catalog-hint"));
 }
 
 /// Local upsert helper — mirrors the API's `upsert_mcp_server_config`.
@@ -355,7 +370,7 @@ pub(crate) fn upsert_mcp_server_local(
         // malformed config.toml would otherwise be overwritten as a new
         // near-empty file, wiping unrelated sections the user may want
         // to fix by hand.
-        toml::from_str(&content).map_err(|e| format!("config.toml is not valid TOML: {e}"))?
+        toml::from_str(&content).map_err(|e| i18n::t_args("mcp-invalid-toml", &[("path", "config.toml"), ("error", &e.to_string())]))?
     } else {
         toml::value::Table::new()
     };
@@ -392,7 +407,7 @@ pub(crate) fn remove_mcp_server_local(
 ) -> Result<(), String> {
     let mut table: toml::value::Table = if config_path.exists() {
         let content = std::fs::read_to_string(config_path).map_err(|e| e.to_string())?;
-        toml::from_str(&content).map_err(|e| format!("config.toml is not valid TOML: {e}"))?
+        toml::from_str(&content).map_err(|e| i18n::t_args("mcp-invalid-toml", &[("path", "config.toml"), ("error", &e.to_string())]))?
     } else {
         return Ok(());
     };
