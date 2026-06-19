@@ -1,5 +1,6 @@
 import { useMutation } from "@tanstack/react-query";
 import { formatTime, formatDateTime } from "../lib/datetime";
+import { formatCompact } from "../lib/format";
 import { memo, useId, useMemo, useState, useCallback, useEffect, useReducer } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
@@ -7,7 +8,8 @@ import type { ApiActionResponse, ProviderItem } from "../api";
 import { isProviderAvailable } from "../lib/status";
 import { useCredentialPools, useProviders, useProviderStatus } from "../lib/queries/providers";
 import type { CredentialPoolStatus, CredentialPoolKeySnapshot } from "../api";
-import { useModels } from "../lib/queries/models";
+import { useModels, useModelOverrides } from "../lib/queries/models";
+import { useUpdateModelOverrides } from "../lib/mutations/models";
 import { useTestProvider, useSetProviderKey, useDeleteProviderKey, useEnableProvider, useSetProviderUrl, useSetDefaultProvider, useCreateRegistryContent } from "../lib/mutations/providers";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
@@ -25,7 +27,7 @@ import {
   Server, Zap, Clock, Key, Globe, CheckCircle2, XCircle, Loader2, AlertCircle, Search,
   SortAsc, SortDesc, CheckSquare, Square, ChevronRight, X, Grid3X3, List, Filter,
   Activity, Cpu, Cloud, Bot, Globe2, Sparkles, Plus, Star, Pencil, Trash2,
-  Check, ChevronLeft, RotateCcw
+  Check, ChevronLeft, RotateCcw, Gauge
 } from "lucide-react";
 
 function getErrorMessage(e: unknown): string | null {
@@ -161,6 +163,145 @@ function SetDefaultModelSection({ providerId, currentDefault, onSetDefault }: {
         {setting ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Star className="w-4 h-4 mr-1" />}
         {isDefault ? t("providers.is_default") : t("providers.set_as_default")}
       </Button>
+    </div>
+  );
+}
+
+// ── ProviderMaxTokensSection — edit the representative model's max-token
+//    limit from the config drawer (#6209) ──────────────────────────────────
+//
+// "最大token" is the per-request max-output-token cap. It is persisted as a
+// `max_tokens` model override (PUT /api/models/overrides/{provider}:{model}),
+// which composes over the catalog `max_output_tokens` — the same value the
+// provider card displays via `provider.max_output_tokens`. Editing is scoped
+// to a single model (the provider's first/representative model by default,
+// switchable), because the limit is a per-model property. Clearing the input
+// deletes the override and reverts to the catalog default.
+
+function ProviderMaxTokensSection({ providerId, addToast }: {
+  providerId: string;
+  addToast: (msg: string, type?: "success" | "error" | "info") => void;
+}) {
+  const { t } = useTranslation();
+  const modelsQuery = useModels({ provider: providerId });
+  const models = useMemo(() => modelsQuery.data?.models ?? [], [modelsQuery.data]);
+
+  const [selectedModelId, setSelectedModelId] = useState("");
+  // Default the editor to the provider's representative (first) model so the
+  // field aligns with the card's headline value without an extra click.
+  useEffect(() => {
+    if (!selectedModelId && models.length > 0) {
+      setSelectedModelId(models[0].id);
+    }
+  }, [models, selectedModelId]);
+
+  const selectedModel = models.find(m => m.id === selectedModelId);
+  const overrideKey = selectedModelId ? `${providerId}:${selectedModelId}` : "";
+  const overridesQuery = useModelOverrides(overrideKey);
+  const updateOverrides = useUpdateModelOverrides();
+
+  // The effective value: an explicit `max_tokens` override wins, else the
+  // model's catalog `max_output_tokens`. Mirrors the backend resolution.
+  const overrideMax = overridesQuery.data?.max_tokens;
+  const catalogMax = selectedModel?.max_output_tokens;
+  const effectiveMax = overrideMax ?? catalogMax;
+
+  // Local input state, seeded from the effective value once it resolves and
+  // re-seeded when the user switches models.
+  const [input, setInput] = useState("");
+  const [seededFor, setSeededFor] = useState("");
+  useEffect(() => {
+    if (overrideKey && overrideKey !== seededFor && !overridesQuery.isLoading) {
+      setInput(effectiveMax != null ? String(effectiveMax) : "");
+      setSeededFor(overrideKey);
+    }
+  }, [overrideKey, seededFor, overridesQuery.isLoading, effectiveMax]);
+
+  const [saving, setSaving] = useState(false);
+
+  const parsed = input.trim() === "" ? null : Number(input);
+  const invalid = parsed != null && (!Number.isInteger(parsed) || parsed <= 0);
+  // The override the value would resolve to once saved: an explicit number
+  // that already equals the catalog default needs no override row, so treat
+  // it as "clear". A blank input also clears.
+  const targetOverride = parsed != null && parsed !== catalogMax ? parsed : null;
+  const dirty = targetOverride !== (overrideMax ?? null);
+
+  const handleSave = async () => {
+    if (!overrideKey || invalid) return;
+    setSaving(true);
+    try {
+      if (targetOverride == null) {
+        // Reverts to the catalog default → drop any existing override.
+        if (overrideMax != null) {
+          const next = { ...overridesQuery.data };
+          delete next.max_tokens;
+          await updateOverrides.mutateAsync({ modelKey: overrideKey, overrides: next });
+        }
+      } else {
+        await updateOverrides.mutateAsync({
+          modelKey: overrideKey,
+          overrides: { ...overridesQuery.data, max_tokens: targetOverride },
+        });
+      }
+      addToast(t("providers.max_tokens_saved"), "success");
+    } catch (e: unknown) {
+      addToast(getErrorMessage(e) || t("common.error"), "error");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="border-t border-border-subtle pt-3 mt-1 space-y-2">
+      <label className="text-[10px] font-bold text-text-dim uppercase">{t("providers.max_tokens")}</label>
+      {modelsQuery.isLoading ? (
+        <div className="w-full h-10 rounded-xl bg-bg-subtle animate-pulse" />
+      ) : models.length === 0 ? (
+        <p className="text-[10px] text-text-dim/60">{t("providers.no_models_for_provider")}</p>
+      ) : (
+        <>
+          {models.length > 1 && (
+            <select
+              value={selectedModelId}
+              onChange={e => { setSelectedModelId(e.target.value); setSeededFor(""); }}
+              className="w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand focus:ring-1 focus:ring-brand/20"
+              aria-label={t("providers.max_tokens_model_label")}
+            >
+              {models.map(m => (
+                <option key={m.id} value={m.id}>{m.display_name || m.id}</option>
+              ))}
+            </select>
+          )}
+          <div className="flex gap-2">
+            <input
+              type="number"
+              min={1}
+              step={1}
+              value={input}
+              onChange={e => setInput(e.target.value)}
+              placeholder={catalogMax != null ? String(catalogMax) : t("providers.max_tokens_placeholder")}
+              className={`flex-1 rounded-xl border bg-main px-3 py-2 text-sm font-mono outline-none focus:ring-1 ${invalid ? "border-error focus:border-error focus:ring-error/20" : "border-border-subtle focus:border-brand focus:ring-brand/20"}`}
+              aria-invalid={invalid || undefined}
+            />
+            <Button
+              variant="secondary"
+              onClick={handleSave}
+              disabled={saving || invalid || !dirty || !overrideKey}
+            >
+              {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : t("common.save")}
+            </Button>
+          </div>
+          {invalid && (
+            <p className="text-[10px] text-error">{t("providers.max_tokens_invalid")}</p>
+          )}
+          <p className="text-[10px] text-text-dim/60 leading-snug">
+            {overrideMax != null
+              ? t("providers.max_tokens_hint_override", { value: catalogMax != null ? catalogMax.toLocaleString() : "-" })
+              : t("providers.max_tokens_hint_default")}
+          </p>
+        </>
+      )}
     </div>
   );
 }
@@ -345,6 +486,10 @@ const ProviderCard = memo(function ProviderCard({ provider: p, isSelected, isDef
             <p className={`text-xs font-black ${getLatencyColor(p.latency_ms)}`}>{p.latency_ms != null ? `${p.latency_ms}ms` : "-"}</p>
             <p className="text-[8px] uppercase text-text-dim">{t("providers.latency")}</p>
           </div>
+          <div className="text-center" title={p.max_output_tokens != null ? p.max_output_tokens.toLocaleString() : undefined}>
+            <p className="text-xs font-black">{p.max_output_tokens != null ? formatCompact(p.max_output_tokens) : "-"}</p>
+            <p className="text-[8px] uppercase text-text-dim">{t("providers.max_tokens")}</p>
+          </div>
           {p.last_tested && (
             <div className="text-center w-20">
               <p className="text-[10px] font-mono text-text-dim">{formatTime(p.last_tested)}</p>
@@ -443,7 +588,7 @@ const ProviderCard = memo(function ProviderCard({ provider: p, isSelected, isDef
         </div>
 
         {/* Stats */}
-        <div className="grid grid-cols-2 gap-3 mb-4">
+        <div className="grid grid-cols-3 gap-3 mb-4">
           <div className="p-3 rounded-xl bg-linear-to-br from-main/60 to-main/30 border border-border-subtle/50">
             <div className="flex items-center gap-1.5 mb-1">
               <Zap className={`w-3 h-3 ${isConfigured ? "text-success" : "text-brand"}`} />
@@ -458,6 +603,18 @@ const ProviderCard = memo(function ProviderCard({ provider: p, isSelected, isDef
             </div>
             <p className={`text-xl font-black ${getLatencyColor(p.latency_ms)}`}>
               {p.latency_ms != null ? `${p.latency_ms}ms` : "-"}
+            </p>
+          </div>
+          <div
+            className="p-3 rounded-xl bg-linear-to-br from-main/60 to-main/30 border border-border-subtle/50"
+            title={p.max_output_tokens != null ? p.max_output_tokens.toLocaleString() : undefined}
+          >
+            <div className="flex items-center gap-1.5 mb-1">
+              <Gauge className="w-3 h-3 text-brand" />
+              <p className="text-[9px] font-black uppercase tracking-wider text-text-dim/70">{t("providers.max_tokens")}</p>
+            </div>
+            <p className="text-xl font-black text-text-main">
+              {p.max_output_tokens != null ? formatCompact(p.max_output_tokens) : "-"}
             </p>
           </div>
         </div>
@@ -1714,6 +1871,11 @@ export function ProvidersPage() {
                 onSetDefault={handleSetDefault}
               />
             )}
+
+            <ProviderMaxTokensSection
+              providerId={config.provider.id}
+              addToast={addToast}
+            />
           </div>
         )}
       </DrawerPanel>

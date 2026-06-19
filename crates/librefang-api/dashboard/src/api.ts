@@ -75,6 +75,11 @@ export interface ProviderItem {
    *  Sourced from the backend (`is_coding_agent_provider`) so the dashboard
    *  can group coding agents apart from providers. */
   is_coding_agent?: boolean;
+  /** Headline max-output-token limit for the provider's representative
+   *  (default, else first) model: the user's `max_tokens` override when set,
+   *  otherwise the model's catalog `max_output_tokens`. Absent when the
+   *  provider has no usable model or declares no output limit (#6209). */
+  max_output_tokens?: number;
 }
 
 export interface MediaProvider {

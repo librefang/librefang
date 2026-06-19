@@ -836,6 +836,9 @@ _308 PRs from 7 contributors since v2026.5.17-beta.12._
 
 ### Added
 
+- **feat(dashboard): provider max-token limit on the Providers page** (#6209) (@houko).
+  Each provider card now shows the representative model's max-output-token limit (the `max_tokens` override when set, else the catalog `max_output_tokens`), and the config drawer lets you edit it; clearing the field reverts to the catalog default.
+  Persisted through the existing per-model override endpoint, so no new persistence path is introduced.
 - **feat(runtime): emit `librefang_agent_loop_exits_total{agent,reason}`** so operators can alert on non-success agent-loop terminations (#6227) (@houko).
   The agent loop previously recorded no metric when it aborted on repeated tool failures, max iterations, a loop-guard circuit break, or a provider content-filter — the only signal was reading transcripts, and a cron/trigger fire that aborted still recorded `librefang_cron_fires_total{outcome="ok"}` because the loop returned.
   Reasons: `completed`, `max_iterations`, `repeated_tool_failures`, `circuit_break`, `content_filtered`, `error`.
