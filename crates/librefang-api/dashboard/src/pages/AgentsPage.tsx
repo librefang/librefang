@@ -2327,7 +2327,6 @@ export function AgentsPage() {
                           <input
                             type="number"
                             min={1}
-                            max={200000}
                             value={modelDraft.max_tokens}
                             onChange={e => setModelDraft(d => ({ ...d, max_tokens: e.target.value }))}
                             className="w-44 px-2 py-1 rounded-md border border-border-subtle bg-surface text-sm font-mono outline-none focus:border-brand text-right"
