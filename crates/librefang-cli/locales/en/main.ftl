@@ -1456,3 +1456,27 @@ tui-tab-audit = Audit
 tui-tab-usage = Usage
 tui-tab-settings = Config
 tui-tab-logs = Logs
+# welcome.rs
+tui-welcome-menu-connect = Connect to daemon
+tui-welcome-menu-connect-hint = talk to running agents via API
+tui-welcome-menu-chat = Quick chat
+tui-welcome-menu-chat-hint = boot kernel locally, no daemon needed
+tui-welcome-menu-setup = Setup wizard
+tui-welcome-menu-setup-hint = configure providers & channels
+tui-welcome-menu-exit = Exit
+tui-welcome-menu-exit-hint = quit LibreFang
+tui-welcome-tagline = Agent Operating System
+tui-welcome-ctrl-c-quit = Press Ctrl+C again to exit
+tui-welcome-hint-bar = ↑↓ navigate  enter select  q quit
+tui-welcome-checking-daemon = Checking for daemon…
+tui-welcome-agent-count =
+    { $count ->
+        [one]  • { $count } agent
+       *[other]  • { $count } agents
+    }
+tui-welcome-daemon-status = Daemon { $url }
+tui-welcome-no-daemon = No daemon running
+tui-welcome-provider = Provider: { $provider }
+tui-welcome-no-api-keys = No API keys
+tui-welcome-run-hint-prefix =  — run 
+tui-welcome-setup-complete = Setup complete!
