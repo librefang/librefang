@@ -164,8 +164,12 @@ fn is_protected_write_target(write_path: &Path, protected: &[std::path::PathBuf]
         if canon.parent() != write_path.parent() {
             return false;
         }
-        let canon_leaf = canon.file_name().map(|n| n.to_string_lossy().to_lowercase());
-        let write_leaf = write_path.file_name().map(|n| n.to_string_lossy().to_lowercase());
+        let canon_leaf = canon
+            .file_name()
+            .map(|n| n.to_string_lossy().to_lowercase());
+        let write_leaf = write_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_lowercase());
         canon_leaf.is_some() && canon_leaf == write_leaf
     })
 }
