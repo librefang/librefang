@@ -836,6 +836,9 @@ _308 PRs from 7 contributors since v2026.5.17-beta.12._
 
 ### Added
 
+- **feat(dashboard): provider max-token limit on the Providers page** (#6209) (@houko).
+  Each provider card now shows the representative model's max-output-token limit (the `max_tokens` override when set, else the catalog `max_output_tokens`), and the config drawer lets you edit it; clearing the field reverts to the catalog default.
+  Persisted through the existing per-model override endpoint, so no new persistence path is introduced.
 - **feat(runtime): emit `librefang_agent_loop_exits_total{agent,reason}`** so operators can alert on non-success agent-loop terminations (#6227) (@houko).
   The agent loop previously recorded no metric when it aborted on repeated tool failures, max iterations, a loop-guard circuit break, or a provider content-filter — the only signal was reading transcripts, and a cron/trigger fire that aborted still recorded `librefang_cron_fires_total{outcome="ok"}` because the loop returned.
   Reasons: `completed`, `max_iterations`, `repeated_tool_failures`, `circuit_break`, `content_filtered`, `error`.
@@ -858,6 +861,9 @@ _308 PRs from 7 contributors since v2026.5.17-beta.12._
 - **refactor(error-contracts): migrate `browser_tools.rs` to `Result<String, ToolError>`** (#3576) (@houko) — another slice of the structured-error-contracts migration.
   The ten `tool_browser_*` dispatchers (navigate / click / type / screenshot / read_page / close / scroll / wait / run_js / back) now return the typed `ToolError` instead of an opaque `String`: missing params map to `MissingParameter`, an SSRF-blocked URL to `InvalidParameter`, and CDP transport / command failures to `Upstream` via `upstream_msg`.
   The dispatch boundary drops its per-arm `.map_err(ToolError::upstream_msg)` so the typed variants flow through `tool_result_from_typed`; the `None` (browser-not-wired) arm still yields `Unavailable`.
+- **refactor(api): replace `anyhow` with a typed `TmuxError` in `terminal_tmux`** (#3576) (@houko) — another slice of the structured-error-contracts migration.
+  The `TmuxController` methods and `parse_window_list` now return `Result<T, TmuxError>` instead of `anyhow::Result<T>`: spawn failures carry the underlying `io::Error` on the `source()` chain, plus typed variants for subprocess timeout, post-spawn I/O error, non-zero exit (rendered status + trimmed stderr), pre-spawn argument validation, empty `new-window` output, and the `parse_window_list` missing-field / bad-index cases.
+  Every `Display` string is preserved byte-for-byte from the old `anyhow!(…)` text because it reaches daemon logs via `warn!(error = %e, …)` in `routes/terminal.rs`, so callers compile unchanged with equivalent behavior.
 - **chore(deps): drop five orphaned email `[workspace.dependencies]` left after the channel sidecar migration** (#6176) (@houko).
   `lettre` / `imap` / `rustls-connector` / `mailparse` / `rustls-pemfile` were declared in the root `Cargo.toml` but had no member consumer (no `.workspace = true`, no `use`) and were already absent from `Cargo.lock`, so they were never compiled or audited — the issue's "adds compile time / binary size / supply-chain surface" framing was inaccurate; the real defect was dead declaration cruft.
   The now-unmatchable `deny.toml` ignore for `RUSTSEC-2025-0134` (`rustls-pemfile`) is dropped in the same change, since that crate no longer appears in the resolved graph.
@@ -886,6 +892,11 @@ In-crate only; no cross-crate error-shape changes.
 
 ### Added
 
+- **observability: `librefang_tool_call_total` now carries an `agent` label** (#6226) (@houko).
+  The counter added in #3495 was labeled only by `tool` and `outcome`, so tool failures could not be attributed per-agent.
+  It is now `librefang_tool_call_total{agent, tool, outcome}`, mirroring the existing per-agent `librefang_cron_fires_total{agent}` precedent.
+  The agent id is threaded from `session.agent_id` into `record_tool_call_metric` at every call site (serial and parallel dispatch paths) and sanitized + length-capped exactly like the `tool` label, so a hallucinated or hostile caller id cannot blow up metric cardinality.
+  Closes #6226.
 - **dashboard: guide the user to start a new session when a conversation hits the token / context-window limit** (#6211) (@houko).
   When the latest turn in the agent chat fails with a token / context-window or length / quota limit, the chat view now shows an inline guidance banner with a one-click "Start a new session" action that reuses the existing `useCreateAgentSession` mutation, instead of leaving only a raw error bubble.
   Detection is a frontend heuristic over the daemon / provider error string (`isContextLimitError`), because the chat surface carries no structured per-turn context-exhaustion signal; the heuristic matches the canonical phrases the kernel's `classify_streaming_error` emits and explicitly suppresses the banner for an internal usage / spending-budget cap (where a new session would not help).
@@ -967,6 +978,12 @@ In-crate only; no cross-crate error-shape changes.
   `/dashboard/prompts` and `/dashboard/tasks` are real router routes, but they were never added to the server-side `SPA_ROUTES` allowlist, so a direct navigation or browser refresh returned `asset not found` (404) instead of `index.html`.
   Both slugs are added to the allowlist, and a drift-guard test now parses `router.tsx` and asserts every top-level dashboard route falls back to the shell, so a future route added without updating the allowlist fails loudly.
   Closes #6197.
+- **fix(api): scope the compaction-summary banner to the session that was actually compacted** (#6225) (@houko).
+  The dashboard "Session summary (older messages compacted)" banner appeared on a freshly created session that was never compacted, showing a previous unrelated conversation's summary.
+  `compacted_summary` lives in the agent-scoped `canonical_sessions` row (one per `agent_id`) and outlives any individual session, but `get_agent_session` exposed it whenever the requested session was the agent's *active* one — so creating a new session, which makes it active without compacting it, leaked the prior summary onto message #1.
+  A nullable `compacted_summary_session_id` column (schema v46, backward-compatible) now records which session owns the current summary; `store_llm_summary` stamps it with the compacted session, and the GET handler surfaces the banner only when the requested session matches the owner via the new `MemorySubstrate::compacted_summary_for_session`.
+  The summary is scoped, not lost — the session that legitimately produced it still shows it.
+  Closes #6225.
 - **fix(cli): stop the agent-creation wizard from stamping a hidden 200k hourly token cap** (#6206) (@houko).
   The TUI "create custom agent" wizard hard-coded `[resources] max_llm_tokens_per_hour = 200000` into every generated `agent.toml`, so TUI-created agents silently hit `Resource quota exceeded: Token limit would be exceeded ... > 200000` after a few large-context turns — even though the compiled and global defaults are unlimited.
   The template now emits `max_llm_tokens_per_hour = 0` (explicitly unlimited, matching every non-TUI agent); operators who want a cap set it via `agent.toml [resources]`, the global `[budget] default_max_llm_tokens_per_hour`, or `PATCH /api/agents/{id}/budget`.
