@@ -1020,6 +1020,7 @@ ui-label-next-steps = Next steps
 ui-label-fix = fix:
 ui-label-try = try:
 ui-provider-not-set = { $env_var } not set
+progress-fail = [FAIL]
 
 # Table headers / Shared labels
 label-header-name = NAME

@@ -238,6 +238,10 @@ fn is_potential_untranslated_literal(lit: &str) -> bool {
         "] }}\n\n[requirements]\ntools = []\ncapabilities = []",
         "%Y-%m-%d %H:%M:%S UTC",
         "daemon not running",
+        // progress.rs TUI formatting and spinners
+        "rx1b[2K{:<14} [{}] {:>3}% ({}/{})",
+        "rx1b[2K{ch} {}",
+        "x1b[31m✗x1b[0m {msg}",
     ];
     if exclusions.contains(&trimmed) {
         return false;
@@ -588,7 +592,6 @@ fn test_no_untranslated_strings() {
             if rel_path == "i18n.rs"
                 || rel_path == "mod.rs"
                 || rel_path == "acp.rs"
-                || rel_path == "progress.rs"
                 || rel_path == "cli.rs"
                 || rel_path == "mcp.rs"
                 || rel_path == "log_filter.rs"

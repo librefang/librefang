@@ -1031,6 +1031,7 @@ ui-label-next-steps = Наступні кроки
 ui-label-fix = виправити:
 ui-label-try = спробувати:
 ui-provider-not-set = { $env_var } не налаштовано
+progress-fail = [ПОМИЛКА]
 
 # Table headers / Shared labels
 label-header-name = НАЗВА

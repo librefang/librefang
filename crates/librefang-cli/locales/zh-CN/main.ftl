@@ -478,5 +478,6 @@ common-error-spawn-daemon = 无法启动后台守护进程：{ $error }
 common-error-daemon-timeout = 守护进程未在 10 秒内就绪
 
 ui-brand-title = LibreFang Agent OS
+progress-fail = [失败]
 
 
