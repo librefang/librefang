@@ -1273,11 +1273,21 @@ async fn test_agent_session_returns_compacted_summary_after_force_compact() {
         },
     ];
 
+    // The summary must be tagged with the session it belongs to (#6225);
+    // the active session is the one compaction would have run against.
+    let active_sid = h
+        .state
+        .kernel
+        .agent_registry()
+        .get(id)
+        .expect("agent registry entry")
+        .session_id;
+
     // Store a summary directly, as compact_agent_session_with_id would.
     h.state
         .kernel
         .memory_substrate()
-        .store_llm_summary(id, "A test compaction summary.", kept)
+        .store_llm_summary(id, "A test compaction summary.", kept, Some(active_sid))
         .expect("store_llm_summary");
 
     // The canonical session endpoint must surface the summary.
@@ -1319,10 +1329,19 @@ async fn test_agent_session_returns_null_summary_for_non_canonical_session() {
             timestamp: None,
         },
     ];
+    // Own the summary with the agent's active session so the pinned
+    // side-session query below is rejected on ownership, not absence (#6225).
+    let active_sid = h
+        .state
+        .kernel
+        .agent_registry()
+        .get(id)
+        .expect("agent registry entry")
+        .session_id;
     h.state
         .kernel
         .memory_substrate()
-        .store_llm_summary(id, "A test summary.", messages.clone())
+        .store_llm_summary(id, "A test summary.", messages.clone(), Some(active_sid))
         .expect("store_llm_summary");
 
     // Create a side session (non-canonical) and save it.
@@ -1357,6 +1376,102 @@ async fn test_agent_session_returns_null_summary_for_non_canonical_session() {
     assert!(
         body["compacted_summary"].is_null(),
         "non-canonical pinned session must have null compacted_summary: {body:?}"
+    );
+}
+
+/// Regression for #6225: the agent-scoped compaction summary must NOT leak
+/// onto a freshly created session that was never compacted.
+///
+/// `compacted_summary` lives in the agent-scoped `canonical_sessions` row and
+/// outlives any individual session. Before the fix the GET handler exposed it
+/// whenever the requested session was the agent's *active* session — so
+/// creating a brand-new session (which makes it active without compacting it)
+/// rendered the previous conversation's summary on message #1. This test
+/// drives the full leak path through HTTP: compact session A, confirm A shows
+/// the banner, create a NEW active session B, then assert B shows nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_compacted_summary_does_not_leak_to_new_session() {
+    use librefang_types::message::{Message, MessageContent, Role};
+
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "summary-leak-agent");
+
+    // Session A: the agent's initial active session, which we "compact".
+    let session_a = h
+        .state
+        .kernel
+        .agent_registry()
+        .get(id)
+        .expect("agent registry entry")
+        .session_id;
+
+    let kept: Vec<Message> = vec![Message {
+        role: Role::Assistant,
+        content: MessageContent::Text("kept".into()),
+        pinned: false,
+        timestamp: None,
+    }];
+    h.state
+        .kernel
+        .memory_substrate()
+        .store_llm_summary(id, "Summary of session A.", kept, Some(session_a))
+        .expect("store_llm_summary");
+
+    // Legitimate case: GET session A surfaces the summary it owns.
+    let (status_a, body_a) = send(h.app.clone(), get(&format!("/api/agents/{id}/session"))).await;
+    assert_eq!(status_a, StatusCode::OK, "body={body_a:?}");
+    assert_eq!(
+        body_a["compacted_summary"].as_str(),
+        Some("Summary of session A."),
+        "session A owns the summary and must show it: {body_a:?}"
+    );
+
+    // Create session B via the public route; this makes B the active session
+    // WITHOUT clearing the agent-scoped summary row.
+    let (status_new, body_new) = send(
+        h.app.clone(),
+        post_json(&format!("/api/agents/{id}/sessions"), serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(status_new, StatusCode::OK, "body={body_new:?}");
+    let session_b = body_new["session_id"]
+        .as_str()
+        .expect("new session_id")
+        .to_string();
+    assert_ne!(
+        session_b,
+        session_a.0.to_string(),
+        "new session must differ from the compacted one"
+    );
+
+    // The leak: GET the new active session B. It was never compacted, so the
+    // summary owned by session A must NOT appear.
+    let (status_b, body_b) = send(h.app.clone(), get(&format!("/api/agents/{id}/session"))).await;
+    assert_eq!(status_b, StatusCode::OK, "body={body_b:?}");
+    assert_eq!(
+        body_b["session_id"].as_str(),
+        Some(session_b.as_str()),
+        "GET /session must now resolve to the new active session: {body_b:?}"
+    );
+    assert!(
+        body_b["compacted_summary"].is_null(),
+        "freshly created session must NOT inherit the prior session's summary: {body_b:?}"
+    );
+
+    // The summary is scoped, not lost: the agent-scoped row still records
+    // session A as the owner, so a read for A's id resolves it while B does
+    // not. (Querying A via the active route is no longer possible once B is
+    // active; the substrate-level ownership check is asserted directly.)
+    let owned = h
+        .state
+        .kernel
+        .memory_substrate()
+        .compacted_summary_for_session(id, session_a)
+        .expect("compacted_summary_for_session");
+    assert_eq!(
+        owned.as_deref(),
+        Some("Summary of session A."),
+        "session A must still own its summary after B became active"
     );
 }
 
@@ -1649,4 +1764,155 @@ async fn test_patch_agent_auto_evolve_persists() {
         "expected auto_evolve=true after re-enable PATCH, got {:?}",
         body["auto_evolve"]
     );
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/agents/{id}/session/context — context-window usage indicator.
+//
+// The dashboard polls this to render a "how full is the window" bar. It
+// resolves the model context window (the Y denominator) that the full
+// /session endpoint does not expose, via the same precedence chain the agent
+// loop uses (manifest override > catalog > persisted session > 8192 fallback).
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn context_endpoint_returns_used_and_max_tokens() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "context-indicator");
+
+    let (status, body) = send(
+        h.app.clone(),
+        get(&format!("/api/agents/{}/session/context", id)),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body:?}");
+
+    // Shape: all five fields present.
+    assert!(body["used_tokens"].is_u64(), "used_tokens: {body:?}");
+    assert!(
+        body["max_context_tokens"].is_u64(),
+        "max_context_tokens: {body:?}"
+    );
+    assert!(body["pct"].is_number(), "pct: {body:?}");
+    assert!(body["model"].is_string(), "model: {body:?}");
+    assert!(body["pressure"].is_string(), "pressure: {body:?}");
+
+    // The unknown-model fallback (UNKNOWN_MODEL_CONTEXT_WINDOW = 8192) means the
+    // denominator is always resolved to a positive value, so the indicator can
+    // always render a bar.
+    let max = body["max_context_tokens"].as_u64().unwrap();
+    assert!(max > 0, "max_context_tokens must be > 0, got {max}");
+
+    let pct = body["pct"].as_f64().unwrap();
+    assert!(
+        (0.0..=100.0).contains(&pct),
+        "pct must be within [0, 100], got {pct}"
+    );
+
+    // The model id echoes the agent's own manifest model. spawn_named uses
+    // AgentManifest::default(), whose model is "default" — not the global
+    // config default_model ("test-model"), which agents do not inherit into
+    // their manifest.
+    assert_eq!(body["model"].as_str().unwrap(), "default");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn context_endpoint_unknown_agent_404() {
+    let h = boot(TEST_TOKEN).await;
+    let unknown = AgentId::new();
+
+    let (status, body) = send(
+        h.app.clone(),
+        get(&format!("/api/agents/{}/session/context", unknown)),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND, "body: {body:?}");
+    assert_eq!(body["code"], "agent_not_found");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn context_endpoint_is_authed() {
+    // With an api_key configured, an unauthenticated (no Bearer) request from a
+    // non-loopback caller must be rejected — confirms the endpoint was NOT
+    // accidentally added to a PUBLIC_ROUTES_* allowlist slice.
+    let h = boot("test-secret").await;
+    let id = spawn_named(&h.state, "context-authed");
+
+    let (status, _) = send(
+        h.app.clone(),
+        get_with(&format!("/api/agents/{}/session/context", id), None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // Sanity: the same request with the correct Bearer token succeeds.
+    let (status, _) = send(
+        h.app.clone(),
+        get(&format!("/api/agents/{}/session/context", id)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn context_endpoint_honors_session_id_param() {
+    // The dashboard sends `?session_id=` for a pinned tab; the bar must track the
+    // viewed session, not always the canonical-active one. Pinning the agent's
+    // own session must succeed with the same shape, and a malformed id is
+    // rejected by the extractor (400) rather than silently ignored.
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "context-pinned");
+
+    // Discover the agent's canonical session id via the public endpoint.
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{}/session", id))).await;
+    assert_eq!(status, StatusCode::OK, "body: {body:?}");
+    let sid = body["session_id"].as_str().expect("session_id").to_string();
+
+    let (status, body) = send(
+        h.app.clone(),
+        get(&format!(
+            "/api/agents/{}/session/context?session_id={}",
+            id, sid
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body:?}");
+    assert!(body["max_context_tokens"].as_u64().unwrap() > 0);
+
+    let (status, body) = send(
+        h.app.clone(),
+        get(&format!(
+            "/api/agents/{}/session/context?session_id=not-a-uuid",
+            id
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body:?}");
+    assert_eq!(body["code"], "invalid_session_id");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn context_endpoint_rejects_cross_agent_session() {
+    // Agent B's session id under agent A's path must 404 — never leak B's usage
+    // counts through A's id (mirrors the get_agent_session ownership guard).
+    let h = boot(TEST_TOKEN).await;
+    let a = spawn_named(&h.state, "context-a");
+    let b = spawn_named(&h.state, "context-b");
+
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{}/session", b))).await;
+    assert_eq!(status, StatusCode::OK, "body: {body:?}");
+    let b_sid = body["session_id"].as_str().expect("session_id").to_string();
+
+    let (status, body) = send(
+        h.app.clone(),
+        get(&format!(
+            "/api/agents/{}/session/context?session_id={}",
+            a, b_sid
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "body: {body:?}");
+    assert_eq!(body["code"], "session_agent_mismatch");
 }

@@ -425,10 +425,18 @@ impl LibreFangKernel {
                 .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e)))?
         };
 
-        // Store the LLM summary in the canonical session
+        // Store the LLM summary in the canonical session, tagged with the
+        // session whose history was actually compacted (#6225) so the
+        // dashboard banner is shown only on that session — never leaked onto
+        // a freshly created session that merely became the agent's active one.
         self.memory
             .substrate
-            .store_llm_summary(agent_id, &result.summary, result.kept_messages.clone())
+            .store_llm_summary(
+                agent_id,
+                &result.summary,
+                result.kept_messages.clone(),
+                Some(target_session_id),
+            )
             .map_err(KernelError::LibreFang)?;
 
         // Post-compaction audit: validate and repair the kept messages
@@ -477,19 +485,35 @@ impl LibreFangKernel {
         &self,
         agent_id: AgentId,
     ) -> KernelResult<librefang_runtime::compactor::ContextReport> {
+        self.context_report_for_session(agent_id, None)
+    }
+
+    /// Like [`Self::context_report`] but reports on a specific session rather
+    /// than the agent's canonical-active one. `None` resolves to the active
+    /// session; an explicit override lets a dashboard tab pinned to a
+    /// non-active session render the matching window usage. Cross-agent
+    /// ownership of an explicit `session_id_override` is the caller's
+    /// responsibility (the API handler enforces it) — this method trusts the
+    /// session id it is handed.
+    pub fn context_report_for_session(
+        &self,
+        agent_id: AgentId,
+        session_id_override: Option<SessionId>,
+    ) -> KernelResult<librefang_runtime::compactor::ContextReport> {
         use librefang_runtime::compactor::generate_context_report;
 
         let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
 
+        let target_session_id = session_id_override.unwrap_or(entry.session_id);
         let session = self
             .memory
             .substrate
-            .get_session(entry.session_id)
+            .get_session(target_session_id)
             .map_err(KernelError::LibreFang)?
             .unwrap_or_else(|| librefang_memory::session::Session {
-                id: entry.session_id,
+                id: target_session_id,
                 agent_id,
                 messages: Vec::new(),
                 context_window_tokens: 0,

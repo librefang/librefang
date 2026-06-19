@@ -55,6 +55,9 @@ const POLL_KEYWORDS: &[&str] = &[
 /// Maximum recent call history size for ping-pong detection.
 const HISTORY_SIZE: usize = 30;
 
+/// Shared prefix anchoring the circuit-break classifier in `agent_loop` to the producer here.
+pub(crate) const CIRCUIT_BREAKER_MSG_PREFIX: &str = "Circuit breaker:";
+
 /// Backoff schedule in milliseconds for polling tools.
 const BACKOFF_SCHEDULE_MS: &[u64] = &[5000, 10000, 30000, 60000];
 
@@ -176,7 +179,7 @@ impl LoopGuard {
         if self.total_calls > self.config.global_circuit_breaker {
             self.blocked_calls += 1;
             return LoopGuardVerdict::CircuitBreak(format!(
-                "Circuit breaker: exceeded {} total tool calls in this loop. \
+                "{CIRCUIT_BREAKER_MSG_PREFIX} exceeded {} total tool calls in this loop. \
                  The agent appears to be stuck.",
                 self.config.global_circuit_breaker
             ));
