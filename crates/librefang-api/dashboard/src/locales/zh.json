@@ -2496,6 +2496,8 @@
     "input_placeholder_with_agent": "向 {{name}} 发送消息...",
     "generating": "生成中...",
     "clear_chat": "清空对话",
+    "context_usage": "{{used}} / {{max}} tokens（约 {{pct}}%）",
+    "context_usage_aria": "上下文窗口占用：约 {{pct}}%",
     "session": "会话",
     "session_unpinned": "未固定",
     "sessions_title": "会话列表",
