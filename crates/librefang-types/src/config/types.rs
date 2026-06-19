@@ -2664,6 +2664,15 @@ pub struct CompactionTomlConfig {
     /// Maximum retries for LLM summarization (default: 3).
     #[serde(default = "default_compaction_max_retries")]
     pub max_retries: u32,
+    /// Aggregate consecutive developer-tool loops (edit/run/test) during compaction (default: false).
+    #[serde(default = "default_compaction_aggregate_developer_loops")]
+    pub aggregate_developer_loops: bool,
+    /// Minimum consecutive developer-tool steps before loop aggregation triggers (default: 5).
+    #[serde(default = "default_compaction_max_loop_steps_before_aggregate")]
+    pub max_loop_steps_before_aggregate: u32,
+    /// Strip reasoning from assistant messages older than this many turns during compaction; 0 disables (default: 0).
+    #[serde(default = "default_compaction_strip_reasoning_after_turns")]
+    pub strip_reasoning_after_turns: u32,
 }
 
 fn default_compaction_threshold() -> usize {
@@ -2684,6 +2693,15 @@ fn default_compaction_max_chunk_chars() -> usize {
 fn default_compaction_max_retries() -> u32 {
     3
 }
+fn default_compaction_aggregate_developer_loops() -> bool {
+    false
+}
+fn default_compaction_max_loop_steps_before_aggregate() -> u32 {
+    5
+}
+fn default_compaction_strip_reasoning_after_turns() -> u32 {
+    0
+}
 
 impl Default for CompactionTomlConfig {
     fn default() -> Self {
@@ -2694,6 +2712,9 @@ impl Default for CompactionTomlConfig {
             token_threshold_ratio: default_compaction_token_threshold_ratio(),
             max_chunk_chars: default_compaction_max_chunk_chars(),
             max_retries: default_compaction_max_retries(),
+            aggregate_developer_loops: default_compaction_aggregate_developer_loops(),
+            max_loop_steps_before_aggregate: default_compaction_max_loop_steps_before_aggregate(),
+            strip_reasoning_after_turns: default_compaction_strip_reasoning_after_turns(),
         }
     }
 }

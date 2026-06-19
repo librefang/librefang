@@ -841,6 +841,14 @@ _308 PRs from 7 contributors since v2026.5.17-beta.12._
   Reasons: `completed`, `max_iterations`, `repeated_tool_failures`, `circuit_break`, `content_filtered`, `error`.
   The counter increments exactly once per termination from a thin wrapper around the streaming and non-streaming loops, so no branch fall-through can double-count.
   Alert with `rate(librefang_agent_loop_exits_total{reason!="completed"}) > 0` per agent.
+- **feat(runtime): CoT-pruning for stale reasoning traces during compaction** (#6173) (@houko).
+  Strips `<think>...</think>` spans and `Thinking` content blocks from assistant turns older than `[compaction] strip_reasoning_after_turns` (default 0, disabled), reclaiming context that stale reasoning would otherwise occupy.
+  Runs only at the compaction boundary, never on the per-turn hot path, so it does not invalidate the provider prompt cache more often than compaction already does.
+  Skipped entirely for models whose `ReasoningEchoPolicy` is `Echo` (DeepSeek V4 Flash), which require the reasoning echoed back on tool_calls turns.
+  Implements part of the proposal in #6173 by @pavver.
+- **feat(runtime): developer-loop aggregation during compaction** (#6173) (@houko).
+  Collapses long runs of consecutive developer-tool steps — classified by the existing `ToolClass` taxonomy (`Mutating` / `ExecCapable`), not a hardcoded name list — into the first step, a deterministic placeholder, and the last step, opt-in via `[compaction] aggregate_developer_loops` (default off) with `max_loop_steps_before_aggregate` (default 5).
+  Whole tool-use/result pairs are removed together so no `tool_use_id` is orphaned.
 
 ### Breaking Changes
 

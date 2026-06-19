@@ -16,6 +16,7 @@ use crate::str_utils::safe_truncate_str;
 use librefang_memory::session::Session;
 use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
 use librefang_types::tool::ToolDefinition;
+use librefang_types::tool_class::ToolApprovalClass;
 use serde::Serialize;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -45,6 +46,12 @@ pub struct CompactionConfig {
     pub token_threshold_ratio: f64,
     /// Model context window size in tokens.
     pub context_window_tokens: usize,
+    /// Aggregate consecutive developer-tool loops during compaction. Off by default.
+    pub aggregate_developer_loops: bool,
+    /// Minimum consecutive developer-tool steps before loop aggregation triggers.
+    pub max_loop_steps_before_aggregate: u32,
+    /// Strip reasoning from assistant messages older than this many turns. `0` disables.
+    pub strip_reasoning_after_turns: u32,
 }
 
 impl Default for CompactionConfig {
@@ -61,6 +68,9 @@ impl Default for CompactionConfig {
             max_retries: 3,
             token_threshold_ratio: 0.7,
             context_window_tokens: 200_000,
+            aggregate_developer_loops: false,
+            max_loop_steps_before_aggregate: 5,
+            strip_reasoning_after_turns: 0,
         }
     }
 }
@@ -76,6 +86,9 @@ impl CompactionConfig {
             max_chunk_chars: toml.max_chunk_chars,
             max_retries: toml.max_retries,
             token_threshold_ratio: toml.token_threshold_ratio,
+            aggregate_developer_loops: toml.aggregate_developer_loops,
+            max_loop_steps_before_aggregate: toml.max_loop_steps_before_aggregate,
+            strip_reasoning_after_turns: toml.strip_reasoning_after_turns,
             ..Self::default()
         }
     }
@@ -955,7 +968,12 @@ pub async fn compact_messages(
         "Compacting session messages"
     );
 
-    let kept_messages = kept.to_vec();
+    let mut kept_messages = kept.to_vec();
+    // Context-engineering passes (#6173) run here, at the compaction
+    // boundary, so they piggyback on an event that already invalidates the
+    // provider prompt cache rather than mutating history every turn. Both
+    // passes are no-ops unless explicitly enabled in `[compaction]`.
+    apply_context_engineering(&mut kept_messages, config, reasoning_echo_policy);
     let compacted_count = to_compact.len();
 
     // Stage 1: Try full single-pass summarization
@@ -1044,6 +1062,268 @@ pub async fn compact_messages(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Context engineering (#6173): CoT-pruning + developer-loop aggregation.
+//
+// Both passes reshape only the *kept* (verbatim) messages produced by
+// compaction. The append-only message journal retains the originals; only
+// the compacted working session is rewritten — and only at the compaction
+// boundary, never on the per-turn hot path, so the provider prompt cache is
+// not invalidated more often than compaction already does.
+// ---------------------------------------------------------------------------
+
+/// Apply the optional context-engineering passes to the kept messages.
+///
+/// Order matters: developer-loop aggregation runs first (it removes whole
+/// tool-use/result pairs), then CoT-pruning strips reasoning from whatever
+/// assistant turns remain. Both are gated and default-off.
+fn apply_context_engineering(
+    messages: &mut Vec<Message>,
+    config: &CompactionConfig,
+    reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
+) {
+    if config.aggregate_developer_loops && config.max_loop_steps_before_aggregate > 0 {
+        aggregate_developer_loops(messages, config.max_loop_steps_before_aggregate);
+    }
+    if config.strip_reasoning_after_turns > 0 {
+        prune_stale_reasoning(
+            messages,
+            config.strip_reasoning_after_turns,
+            reasoning_echo_policy,
+        );
+    }
+}
+
+/// Strip stale reasoning from assistant messages in place.
+///
+/// Keeps reasoning on the most recent `after_turns` assistant turns; for
+/// older assistant turns it drops `ContentBlock::Thinking` blocks and strips
+/// inline `<think>...</think>` spans from text blocks. Non-assistant turns
+/// are left untouched.
+///
+/// No-op when `after_turns == 0`, or when the model's [`ReasoningEchoPolicy`]
+/// is `Echo` — DeepSeek V4 Flash (thinking-on, librefang/librefang#4842)
+/// *requires* the original thinking echoed back on `tool_calls` turns or the
+/// API returns 400, so for that policy we never strip.
+///
+/// [`ReasoningEchoPolicy`]: librefang_types::model_catalog::ReasoningEchoPolicy
+fn prune_stale_reasoning(
+    messages: &mut [Message],
+    after_turns: u32,
+    reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
+) {
+    use librefang_types::model_catalog::ReasoningEchoPolicy;
+    if after_turns == 0 || reasoning_echo_policy == ReasoningEchoPolicy::Echo {
+        return;
+    }
+    // Walk newest → oldest, counting assistant turns. Once we have passed
+    // `after_turns` assistant turns, strip reasoning from the rest.
+    let mut assistant_turns_seen: u32 = 0;
+    for msg in messages.iter_mut().rev() {
+        if msg.role != Role::Assistant {
+            continue;
+        }
+        assistant_turns_seen += 1;
+        if assistant_turns_seen <= after_turns {
+            continue;
+        }
+        strip_reasoning_from_message(msg);
+    }
+}
+
+/// Remove reasoning from a single message: strip `<think>...</think>` from
+/// text and drop `Thinking` blocks (and any text block emptied by the strip).
+fn strip_reasoning_from_message(msg: &mut Message) {
+    match &mut msg.content {
+        MessageContent::Text(text) => {
+            let stripped = strip_think_spans(text.as_str());
+            *text = stripped;
+        }
+        MessageContent::Blocks(blocks) => {
+            for block in blocks.iter_mut() {
+                if let ContentBlock::Text { text, .. } = block {
+                    let stripped = strip_think_spans(text.as_str());
+                    *text = stripped;
+                }
+            }
+            blocks.retain(|b| {
+                !matches!(b, ContentBlock::Thinking { .. })
+                    && !matches!(b, ContentBlock::Text { text, .. } if text.is_empty())
+            });
+        }
+    }
+}
+
+/// Remove every `<think>...</think>` span from `s`. The opening tag is
+/// matched case-insensitively and matching is non-greedy (stops at the first
+/// `</think>`). An unclosed `<think>` strips to end of string. Surrounding
+/// text is preserved verbatim.
+fn strip_think_spans(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    loop {
+        match find_ascii_ci(rest, "<think>") {
+            Some(start) => {
+                out.push_str(&rest[..start]);
+                let after_open = &rest[start + "<think>".len()..];
+                match find_ascii_ci(after_open, "</think>") {
+                    Some(end) => {
+                        rest = &after_open[end + "</think>".len()..];
+                    }
+                    None => {
+                        // Unclosed tag: drop the remainder.
+                        break;
+                    }
+                }
+            }
+            None => {
+                out.push_str(rest);
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Case-insensitive (ASCII) substring search returning the byte offset of the
+/// first match of the ASCII `needle` in `haystack`. Because the needle is
+/// ASCII, the returned offset is always a UTF-8 char boundary.
+fn find_ascii_ci(haystack: &str, needle: &str) -> Option<usize> {
+    let hb = haystack.as_bytes();
+    let nb = needle.as_bytes();
+    if nb.is_empty() || hb.len() < nb.len() {
+        return None;
+    }
+    (0..=hb.len() - nb.len())
+        .find(|&i| nb.iter().enumerate().all(|(j, c)| hb[i + j].eq_ignore_ascii_case(c)))
+}
+
+/// Collapse consecutive runs of developer-tool steps (each an assistant
+/// tool-use turn whose tool calls are all `Mutating`/`ExecCapable`, paired
+/// with its matching tool-result turn) into the first step, a deterministic
+/// placeholder, and the last step. Whole tool-use/result pairs are removed so
+/// no `tool_use_id` is ever orphaned. No-op when `max_steps == 0`.
+fn aggregate_developer_loops(messages: &mut Vec<Message>, max_steps: u32) {
+    if max_steps == 0 || messages.len() < 4 {
+        return;
+    }
+    let max_steps = max_steps as usize;
+    let n = messages.len();
+    let mut result: Vec<Message> = Vec::with_capacity(n);
+    let mut i = 0usize;
+    while i < n {
+        // Extend a run of back-to-back developer-tool steps starting at `i`.
+        let mut steps: Vec<(usize, usize)> = Vec::new();
+        let mut j = i;
+        while j + 1 < n && is_dev_tool_step(&messages[j], &messages[j + 1]) {
+            steps.push((j, j + 1));
+            j += 2;
+        }
+        if steps.len() > max_steps && steps.len() > 2 {
+            let first = steps[0];
+            let last = steps[steps.len() - 1];
+            result.push(messages[first.0].clone());
+            result.push(messages[first.1].clone());
+            let elided = steps.len() - 2;
+            let tools = collect_dev_tool_names(messages, &steps[1..steps.len() - 1]);
+            result.push(developer_loop_placeholder(elided, &tools));
+            result.push(messages[last.0].clone());
+            result.push(messages[last.1].clone());
+            i = j;
+        } else {
+            // Short run or non-loop message: keep verbatim and step forward.
+            result.push(messages[i].clone());
+            i += 1;
+        }
+    }
+    *messages = result;
+}
+
+/// True when `a` is an assistant turn whose tool calls are all developer
+/// tools (`Mutating`/`ExecCapable`) and `b` carries exactly the matching
+/// tool results. Role of `b` is not constrained beyond "contains only tool
+/// results", so the check is robust to how results are threaded.
+fn is_dev_tool_step(a: &Message, b: &Message) -> bool {
+    if a.role != Role::Assistant {
+        return false;
+    }
+    let a_blocks = match &a.content {
+        MessageContent::Blocks(blocks) => blocks,
+        MessageContent::Text(_) => return false,
+    };
+    let mut tool_use_ids: Vec<&str> = Vec::new();
+    for block in a_blocks {
+        if let ContentBlock::ToolUse { id, name, .. } = block {
+            if !is_developer_tool(name) {
+                return false;
+            }
+            tool_use_ids.push(id.as_str());
+        }
+    }
+    if tool_use_ids.is_empty() {
+        return false;
+    }
+    let b_blocks = match &b.content {
+        MessageContent::Blocks(blocks) => blocks,
+        MessageContent::Text(_) => return false,
+    };
+    let mut result_ids: Vec<&str> = Vec::new();
+    for block in b_blocks {
+        match block {
+            ContentBlock::ToolResult { tool_use_id, .. } => result_ids.push(tool_use_id.as_str()),
+            _ => return false,
+        }
+    }
+    // Every tool use is answered, and every result answers a tool use.
+    tool_use_ids.iter().all(|id| result_ids.contains(id))
+        && result_ids.iter().all(|id| tool_use_ids.contains(id))
+}
+
+/// Whether a tool name classifies as a developer tool (`Mutating` or
+/// `ExecCapable`) by the shared tool classifier — no hardcoded name list.
+fn is_developer_tool(name: &str) -> bool {
+    matches!(
+        crate::classify_tool(name, None),
+        ToolApprovalClass::Mutating | ToolApprovalClass::ExecCapable
+    )
+}
+
+/// Sorted, de-duplicated developer-tool names across the given steps
+/// (deterministic output — refs #3298).
+fn collect_dev_tool_names(messages: &[Message], steps: &[(usize, usize)]) -> Vec<String> {
+    let mut names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for &(a_idx, _) in steps {
+        if let MessageContent::Blocks(blocks) = &messages[a_idx].content {
+            for block in blocks {
+                if let ContentBlock::ToolUse { name, .. } = block {
+                    names.insert(name.clone());
+                }
+            }
+        }
+    }
+    names.into_iter().collect()
+}
+
+/// Build the deterministic placeholder that replaces the elided middle steps
+/// of a developer loop. Constructed manually with `timestamp: None` so the
+/// output is byte-stable across runs.
+fn developer_loop_placeholder(elided: usize, tools: &[String]) -> Message {
+    let tool_list = if tools.is_empty() {
+        String::new()
+    } else {
+        format!(" (tools: {})", tools.join(", "))
+    };
+    let text = format!(
+        "[DEVELOPER LOOP AGGREGATED] {elided} intermediate developer-tool step(s) elided during compaction{tool_list}. The first and last steps are retained for context."
+    );
+    Message {
+        role: Role::User,
+        content: MessageContent::Text(text),
+        pinned: false,
+        timestamp: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1096,6 +1376,215 @@ mod tests {
         assert_eq!(config.max_summary_tokens, 1024);
         assert!((config.token_threshold_ratio - 0.7).abs() < f64::EPSILON);
         assert_eq!(config.context_window_tokens, 200_000);
+        assert!(!config.aggregate_developer_loops);
+        assert_eq!(config.max_loop_steps_before_aggregate, 5);
+        assert_eq!(config.strip_reasoning_after_turns, 0);
+    }
+
+    // --- Context engineering (#6173) -------------------------------------
+
+    fn assistant_with_thinking(thinking: &str, text: &str) -> Message {
+        Message {
+            role: Role::Assistant,
+            content: MessageContent::Blocks(vec![
+                ContentBlock::Thinking {
+                    thinking: thinking.to_string(),
+                    provider_metadata: None,
+                },
+                ContentBlock::Text {
+                    text: text.to_string(),
+                    provider_metadata: None,
+                },
+            ]),
+            pinned: false,
+            timestamp: None,
+        }
+    }
+
+    fn dev_tool_use(id: &str, name: &str) -> Message {
+        Message {
+            role: Role::Assistant,
+            content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                id: id.to_string(),
+                name: name.to_string(),
+                input: serde_json::json!({}),
+                provider_metadata: None,
+            }]),
+            pinned: false,
+            timestamp: None,
+        }
+    }
+
+    fn tool_result(id: &str, name: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                tool_use_id: id.to_string(),
+                tool_name: name.to_string(),
+                content: "ok".to_string(),
+                is_error: false,
+                status: Default::default(),
+                approval_request_id: None,
+            }]),
+            pinned: false,
+            timestamp: None,
+        }
+    }
+
+    fn message_has_thinking(msg: &Message) -> bool {
+        match &msg.content {
+            MessageContent::Blocks(blocks) => blocks
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Thinking { .. })),
+            MessageContent::Text(_) => false,
+        }
+    }
+
+    fn has_loop_placeholder(msgs: &[Message]) -> bool {
+        msgs.iter().any(|m| {
+            matches!(&m.content, MessageContent::Text(t) if t.contains("DEVELOPER LOOP AGGREGATED"))
+        })
+    }
+
+    /// Every `ToolUse` id has a matching `ToolResult` and vice versa.
+    fn tool_pairing_intact(msgs: &[Message]) -> bool {
+        use std::collections::BTreeSet;
+        let mut uses: BTreeSet<String> = BTreeSet::new();
+        let mut results: BTreeSet<String> = BTreeSet::new();
+        for m in msgs {
+            if let MessageContent::Blocks(blocks) = &m.content {
+                for b in blocks {
+                    match b {
+                        ContentBlock::ToolUse { id, .. } => {
+                            uses.insert(id.clone());
+                        }
+                        ContentBlock::ToolResult { tool_use_id, .. } => {
+                            results.insert(tool_use_id.clone());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        uses == results
+    }
+
+    #[test]
+    fn strip_think_spans_handles_case_insensitive_multiple_and_unclosed() {
+        assert_eq!(strip_think_spans("a<think>x</think>b"), "ab");
+        assert_eq!(strip_think_spans("a<THINK>x</think>b"), "ab");
+        assert_eq!(
+            strip_think_spans("a<think>x</think>b<think>y</think>c"),
+            "abc"
+        );
+        assert_eq!(strip_think_spans("keep<think>drop to end"), "keep");
+        assert_eq!(strip_think_spans("no tags here"), "no tags here");
+    }
+
+    #[test]
+    fn prune_stale_reasoning_strips_old_keeps_recent() {
+        let mut msgs = vec![
+            assistant_with_thinking("old reasoning", "answer 1"),
+            assistant_with_thinking("mid reasoning", "answer 2"),
+            assistant_with_thinking("recent reasoning", "answer 3"),
+        ];
+        prune_stale_reasoning(
+            &mut msgs,
+            1,
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        );
+        assert!(!message_has_thinking(&msgs[0]), "oldest stripped");
+        assert!(!message_has_thinking(&msgs[1]), "middle stripped");
+        assert!(message_has_thinking(&msgs[2]), "most recent kept");
+        // The visible answer text survives the strip.
+        assert_eq!(msgs[0].content.text_content(), "answer 1");
+    }
+
+    #[test]
+    fn prune_stale_reasoning_noop_for_echo_policy() {
+        let mut msgs = vec![
+            assistant_with_thinking("a", "1"),
+            assistant_with_thinking("b", "2"),
+        ];
+        prune_stale_reasoning(
+            &mut msgs,
+            1,
+            librefang_types::model_catalog::ReasoningEchoPolicy::Echo,
+        );
+        assert!(
+            message_has_thinking(&msgs[0]) && message_has_thinking(&msgs[1]),
+            "Echo policy must keep reasoning intact"
+        );
+    }
+
+    #[test]
+    fn prune_stale_reasoning_noop_when_zero() {
+        let mut msgs = vec![assistant_with_thinking("a", "1")];
+        prune_stale_reasoning(
+            &mut msgs,
+            0,
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        );
+        assert!(message_has_thinking(&msgs[0]));
+    }
+
+    #[test]
+    fn aggregate_developer_loops_collapses_long_run() {
+        // 4 developer-tool steps = 8 messages; max_steps = 2 → aggregate.
+        let mut msgs = Vec::new();
+        for k in 0..4 {
+            msgs.push(dev_tool_use(&format!("t{k}"), "file_write"));
+            msgs.push(tool_result(&format!("t{k}"), "file_write"));
+        }
+        aggregate_developer_loops(&mut msgs, 2);
+        // first step (2) + placeholder (1) + last step (2) = 5
+        assert_eq!(msgs.len(), 5);
+        assert!(has_loop_placeholder(&msgs));
+        assert!(
+            tool_pairing_intact(&msgs),
+            "no tool_use_id may be orphaned by aggregation"
+        );
+    }
+
+    #[test]
+    fn aggregate_developer_loops_leaves_short_run_untouched() {
+        let mut msgs = Vec::new();
+        for k in 0..2 {
+            msgs.push(dev_tool_use(&format!("t{k}"), "file_write"));
+            msgs.push(tool_result(&format!("t{k}"), "file_write"));
+        }
+        aggregate_developer_loops(&mut msgs, 5);
+        assert_eq!(msgs.len(), 4, "short run is not aggregated");
+        assert!(!has_loop_placeholder(&msgs));
+    }
+
+    #[test]
+    fn aggregate_developer_loops_noop_when_disabled() {
+        let mut msgs = Vec::new();
+        for k in 0..10 {
+            msgs.push(dev_tool_use(&format!("t{k}"), "file_write"));
+            msgs.push(tool_result(&format!("t{k}"), "file_write"));
+        }
+        aggregate_developer_loops(&mut msgs, 0);
+        assert_eq!(msgs.len(), 20);
+        assert!(!has_loop_placeholder(&msgs));
+    }
+
+    #[test]
+    fn aggregate_developer_loops_ignores_non_developer_tools() {
+        // Read-only tool steps must never be treated as a developer loop.
+        let mut msgs = Vec::new();
+        for k in 0..6 {
+            msgs.push(dev_tool_use(&format!("t{k}"), "file_read"));
+            msgs.push(tool_result(&format!("t{k}"), "file_read"));
+        }
+        aggregate_developer_loops(&mut msgs, 2);
+        assert_eq!(
+            msgs.len(),
+            12,
+            "read-only tools are not developer-loop steps"
+        );
+        assert!(!has_loop_placeholder(&msgs));
     }
 
     #[tokio::test]
