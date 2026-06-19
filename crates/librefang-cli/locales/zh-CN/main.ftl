@@ -681,3 +681,20 @@ tui-sessions-loading = 正在加载会话…
 tui-sessions-empty = 暂无会话。开启聊天以创建。
 tui-sessions-delete-confirm = 删除此会话？[y] 是  [任意键] 取消
 tui-sessions-hints = ↑↓ 导航  Enter 打开  d 删除  / 搜索  r 刷新
+
+# peers.rs
+tui-peers-title = 对等节点
+tui-peers-network = OFP 对等网络
+tui-peers-count = { $count } 个对等节点
+tui-peers-header-node-id = 节点 ID
+tui-peers-header-name = 名称
+tui-peers-header-address = 地址
+tui-peers-header-status = 状态
+tui-peers-header-agents = 智能体
+tui-peers-header-protocol = 协议
+tui-peers-status-active = 活跃
+tui-peers-status-offline = 离线
+tui-peers-status-pending = 等待中
+tui-peers-loading = 正在寻找对等节点…
+tui-peers-empty = 无连接的对等节点。请在 config.toml 中启用 OFP 网络。
+tui-peers-hints = ↑↓ 导航  r 刷新 (每 15 秒自动刷新)
