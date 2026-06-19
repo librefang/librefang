@@ -1700,6 +1700,80 @@ function CompactionSummaryBanner({ summary, isCompacting }: { summary: string | 
   );
 }
 
+// Heuristic classifier for "the conversation hit a token / context-window or
+// length / quota limit" (issue #6211). The dashboard in `main` has no
+// dedicated backend signal for context exhaustion — the chat surface only
+// carries the error string the daemon returned (an `ApiError.message` / `code`
+// over HTTP, or the WS `error` event's `content`). So we match that text
+// against the phrases providers and the kernel use for this class of failure.
+// This is deliberately a string heuristic, not a fabricated backend field; a
+// structured signal can replace it later (see #6215, which adds a
+// context-usage indicator + quota-error classification). Matching here is
+// case-insensitive and intentionally broad — a false positive only surfaces a
+// "start a new session" suggestion, never blocks the user.
+const CONTEXT_LIMIT_PATTERNS = [
+  "context window",
+  "context_window",
+  "context length",
+  "context_length",
+  "context length exceeded",
+  "context_length_exceeded",
+  "maximum context",
+  "max context",
+  "too long",
+  "too_long",
+  "string too long",
+  "prompt is too long",
+  "input is too long",
+  "maximum tokens",
+  "max tokens",
+  "max_tokens",
+  "token limit",
+  "exceeds the maximum",
+  "reduce the length",
+  "quota",
+  "rate limit",
+  "rate_limit",
+  "429",
+];
+
+export function isContextLimitError(text: string | undefined | null): boolean {
+  if (!text) return false;
+  const lowered = text.toLowerCase();
+  return CONTEXT_LIMIT_PATTERNS.some((p) => lowered.includes(p));
+}
+
+// Guidance banner shown when the latest turn failed with a token / context /
+// quota limit error, pointing the user at a one-click "start a new session"
+// action that reuses the existing create-session mutation (issue #6211).
+function LimitReachedBanner({ onNewSession, creating }: { onNewSession: () => void; creating: boolean }) {
+  const { t } = useTranslation();
+  return (
+    <div className="rounded-xl border border-warning/30 bg-warning/10 px-4 py-3" role="status">
+      <div className="flex items-start gap-3">
+        <AlertCircle className="h-4 w-4 shrink-0 mt-0.5 text-warning" aria-hidden="true" />
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-semibold text-warning">{t("chat.limit_reached_title")}</p>
+          <p className="mt-1 text-xs text-text-dim leading-relaxed">{t("chat.limit_reached_desc")}</p>
+          <button
+            type="button"
+            onClick={onNewSession}
+            disabled={creating}
+            className="mt-2.5 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-warning/20 hover:bg-warning/30 text-warning text-xs font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {creating ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+            ) : (
+              <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+            )}
+            <span>{t("chat.limit_reached_action")}</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Input box - with shortcut hints
 function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabled, placeholder, authMissing, authStatus, providerName, supportsThinking, sttAvailable }: { agentId: string; onSend: (msg: string, attachments?: ChatAttachment[]) => void; onStop?: () => void; isStreaming?: boolean; disabled: boolean; inputDisabled?: boolean; placeholder: string; authMissing?: boolean; authStatus?: string; providerName?: string; supportsThinking?: boolean; sttAvailable?: boolean }) {
   const { t } = useTranslation();
@@ -2934,6 +3008,18 @@ export function ChatPage() {
   // can compose the next message immediately.
   const isStreaming = messages.some(m => m.role === "assistant" && m.isStreaming);
 
+  // Issue #6211: when the most recent turn failed with a token / context-window
+  // or length / quota limit, surface a guidance banner offering a one-click new
+  // session. Gate on the LAST message so the banner clears as soon as the user
+  // sends again (a fresh turn replaces the errored tail). `isContextLimitError`
+  // is a frontend heuristic over the error string — see its definition for why
+  // there is no structured backend signal to key off in `main`.
+  const limitReached = useMemo(() => {
+    if (isStreaming) return false;
+    const last = messages[messages.length - 1];
+    return !!last && last.role === "assistant" && isContextLimitError(last.error);
+  }, [messages, isStreaming]);
+
   // Bug #3849: Track message count changes to announce new messages to screen
   // readers via the aria-live region.
   const [msgAriaAnnouncement, setMsgAriaAnnouncement] = useState("");
@@ -3454,6 +3540,13 @@ export function ChatPage() {
                 {pendingApprovals.map(approval => (
                   <ApprovalCard key={approval.id} approval={approval} onResolved={removeApproval} />
                 ))}
+                {/* Token / context-window limit guidance (#6211) */}
+                {limitReached && (
+                  <LimitReachedBanner
+                    onNewSession={handleNewSession}
+                    creating={createSessionMutation.isPending}
+                  />
+                )}
                 <div ref={messagesEndRef} />
               </div>
             )}
