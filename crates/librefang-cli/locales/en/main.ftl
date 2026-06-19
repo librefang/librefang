@@ -1568,3 +1568,23 @@ tui-hands-category-content = Content
 tui-hands-category-security = Security
 tui-hands-category-development = Development
 tui-hands-category-productivity = Productivity
+
+# logs.rs
+tui-logs-title = Logs
+tui-logs-badge-auto = auto
+tui-logs-badge-paused = paused
+tui-logs-label-level = Level
+tui-logs-filter-all = All
+tui-logs-filter-error = Error
+tui-logs-filter-warn = Warn
+tui-logs-filter-info = Info
+tui-logs-filter-active =   │ filter: "{ $query }"
+tui-logs-entries-count =   │ { $count } entries
+tui-logs-header-timestamp = Timestamp
+tui-logs-header-level = Level
+tui-logs-header-action = Action
+tui-logs-header-agent = Agent
+tui-logs-header-detail = Detail
+tui-logs-loading = Loading logs…
+tui-logs-empty = No log entries. Start the daemon to see logs.
+tui-logs-hints =   [↑↓] Navigate  [f] Filter Level  [/] Search  [a] Auto-refresh  [r] Refresh
