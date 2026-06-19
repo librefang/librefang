@@ -922,16 +922,15 @@ In-crate only; no cross-crate error-shape changes.
 
 ### Fixed
 
-<<<<<<< HEAD
 - **fix(whatsapp-gateway): resolve the `link-preview-js` peer conflict and commit a lockfile** (#6180) (@houko).
   `npm install` in `packages/whatsapp-gateway` failed with `ERESOLVE` unless `--legacy-peer-deps` was passed: the gateway declared `link-preview-js@^4.0.1` as a direct dependency while `@whiskeysockets/baileys@6.7.22` lists it as `peerOptional ^3.0.0`, and the direct declaration defeated the optional flag.
   `link-preview-js` is never imported by the gateway, so the direct dependency is dropped and pinned via an `overrides` block to `^4.0.1`, preserving the #5934 SSRF fix (GHSA-4gp8-rjrq-ch6q) if Baileys ever pulls it in transitively.
   A `package-lock.json` is now committed so installs are reproducible and CI can run `npm audit` against a locked graph.
   Closes #6180.
 
-=======
-- **sec: make SHA256 verification a hard failure in `install.sh`, remove silent skip paths** (@mrchn).
->>>>>>> 35f2f824 (fix(sec): enforce SHA256 verification in install.sh, remove silent skip paths)
+- **sec(install): enforce SHA256 verification in install.sh, remove silent skip paths** (#6179) (@mrchn).
+  `install.sh` previously skipped SHA256 verification silently in two cases: when no hash tool (`sha256sum`/`shasum`) was present on the system, and when the expected `.sha256` file was missing from the GitHub release — in both cases the install proceeded as if verification had passed.
+  Verification now fails loudly (non-zero exit, clear error message) instead of silently succeeding, closing the integrity-check bypass.
 - **ci: the Windows test lane is green again — `librefang-api` now builds vendored OpenSSL on Windows so `webauthn-rs` links** (#6161) (@houko).
   The passkey/WebAuthn work (#5981) added `webauthn-rs`, which pulls in `webauthn-rs-core` → native `openssl-sys`; the Windows MSVC runners have no discoverable system OpenSSL, so `cargo test --no-run --workspace` failed there with "Could not find directory of OpenSSL installation".
   A Windows-gated `openssl = { features = ["vendored"] }` dependency in `crates/librefang-api/Cargo.toml` makes cargo feature-unification build `openssl-sys` from source on Windows only; Unix keeps using the system library and is unaffected.
