@@ -70,6 +70,11 @@ export interface ProviderItem {
    *  Lets the dashboard distinguish "user-hidden" from "never configured"
    *  for the otherwise indistinguishable `auth_status: "missing"`. */
   suppressed?: boolean;
+  /** True when this provider is a coding-agent CLI (claude-code, codex-cli,
+   *  gemini-cli, qwen-code, codewhale) rather than a raw provider API.
+   *  Sourced from the backend (`is_coding_agent_provider`) so the dashboard
+   *  can group coding agents apart from providers. */
+  is_coding_agent?: boolean;
 }
 
 export interface MediaProvider {

@@ -804,6 +804,11 @@ struct ClaudeJsonOutput {
     /// The CLI sets this when the result is an error (auth failure, etc.).
     #[serde(default)]
     is_error: bool,
+    /// The model the CLI reports running. `claude -p --output-format json` does
+    /// not currently emit it (so this stays `None`); captured for forward-compat
+    /// if a future CLI version adds it.
+    #[serde(default)]
+    model: Option<String>,
 }
 
 /// Usage stats from Claude CLI JSON output.
@@ -829,6 +834,10 @@ struct ClaudeStreamEvent {
     /// The CLI sets this when the result is an error (auth failure, etc.).
     #[serde(default)]
     is_error: bool,
+    /// Present on the `system`/`init` event in stream-json mode: the model the
+    /// CLI resolved for this run.
+    #[serde(default)]
+    model: Option<String>,
 }
 
 /// Check if CLI response text looks like an auth or rate-limit error that
@@ -1132,7 +1141,7 @@ impl LlmDriver for ClaudeCodeDriver {
                     ..Default::default()
                 },
                 actual_provider: None,
-                actual_model: None,
+                actual_model: parsed.model,
             });
         }
 
@@ -1289,6 +1298,9 @@ impl LlmDriver for ClaudeCodeDriver {
             output_tokens: 0,
             ..Default::default()
         };
+        // The model the CLI resolved, recovered from the stream-json `init`
+        // event (stream-json mode emits it up front). Surfaced as actual_model.
+        let mut actual_model: Option<String> = None;
 
         // Track last known activity for timeout diagnostics
         let mut last_activity = "starting".to_string();
@@ -1379,6 +1391,16 @@ impl LlmDriver for ClaudeCodeDriver {
 
                     match serde_json::from_str::<ClaudeStreamEvent>(&line) {
                         Ok(event) => {
+                            // Recover the resolved model from whichever event
+                            // carries it (the `system`/`init` event in
+                            // stream-json mode emits it up front).
+                            if actual_model.is_none() {
+                                if let Some(ref m) = event.model {
+                                    if !m.is_empty() {
+                                        actual_model = Some(m.clone());
+                                    }
+                                }
+                            }
                             // Track last activity for timeout diagnostics
                             let etype = event.r#type.as_str();
                             if etype.contains("tool") {
@@ -1605,12 +1627,16 @@ impl LlmDriver for ClaudeCodeDriver {
             tool_calls: Vec::new(),
             usage: final_usage,
             actual_provider: None,
-            actual_model: None,
+            actual_model,
         })
     }
 
     fn family(&self) -> crate::llm_driver::LlmFamily {
         crate::llm_driver::LlmFamily::Anthropic
+    }
+
+    fn is_coding_agent(&self) -> bool {
+        true
     }
 }
 
@@ -1667,6 +1693,11 @@ fn home_dir() -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_coding_agent_is_true() {
+        assert!(ClaudeCodeDriver::new(None, false).is_coding_agent());
+    }
 
     /// Spawn a tiny cross-platform child process for the
     /// `diagnose_stdin_write_failure` tests. POSIX runners can rely on

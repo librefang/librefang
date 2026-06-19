@@ -273,6 +273,10 @@ impl LlmDriver for GeminiCliDriver {
     fn family(&self) -> crate::llm_driver::LlmFamily {
         crate::llm_driver::LlmFamily::Google
     }
+
+    fn is_coding_agent(&self) -> bool {
+        true
+    }
 }
 
 /// Check if the Gemini CLI is available.
@@ -330,6 +334,11 @@ fn home_dir() -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_coding_agent_is_true() {
+        assert!(GeminiCliDriver::new(None, false).is_coding_agent());
+    }
 
     #[test]
     fn test_new_defaults() {
