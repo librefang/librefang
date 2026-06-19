@@ -872,6 +872,11 @@ In-crate only; no cross-crate error-shape changes.
 
 ### Added
 
+- **dashboard: a global Auto-Dream on/off switch on the Memory → Auto-Dream tab** (#6188) (@houko).
+  The tab previously showed only a read-only status badge and told users to edit `config.toml` to flip the master switch; it is now an interactive toggle wired to the existing `POST /api/config/set` (`auto_dream.enabled` is on the writable allowlist).
+  The handler invalidates `autoDreamKeys` in addition to `useSetConfigValue`'s `configKeys` so the badge and the per-agent "Dream now" buttons reflect the new global state immediately rather than after the 15s poll.
+  Dashboard-only change — the flag is read live by the kernel each tick, so the toggle takes effect without a restart. Closes #6188.
+
 - **auth/dashboard: passkey (WebAuthn/FIDO2) login** (#5981) (@houko) — sign in to the dashboard with Touch ID, Face ID, Windows Hello, Android biometrics, or a roaming security key instead of typing a password.
   Opt-in per deployment via `passkey_enabled` + `passkey_rp_id` / `passkey_rp_origin` in `config.toml`; password login is untouched and remains the fallback.
   Adds the `webauthn_credentials` table (SQLite migration v44) storing the serialized `webauthn-rs` `Passkey` so the sign-count persists across assertions, a `PasskeyEngine` owning the two WebAuthn ceremonies with short-TTL in-memory challenge state, and six routes under `/api/auth/passkey/*` (registration-options/verify gated Owner-only, authentication-options/verify public and rate-limited, plus list/revoke).
