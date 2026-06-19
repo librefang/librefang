@@ -1293,10 +1293,8 @@ fn test_record_tool_call_metric_success_outcome() {
     );
 }
 
-/// Regression for #6226 — `librefang_tool_call_total` must carry an
-/// `agent` label so tool failures can be attributed per-agent. Asserts
-/// the counter is emitted with `agent`, `tool`, and `outcome` labels and
-/// that the agent id is sanitized + length-capped like the tool label.
+/// Regression for #6226 — `librefang_tool_call_total` must carry an `agent` label so tool failures can be attributed per-agent.
+/// Asserts the counter is emitted with `agent`, `tool`, and `outcome` labels and that the agent id is sanitized + length-capped like the tool label.
 #[test]
 fn test_record_tool_call_metric_carries_agent_label() {
     use metrics_util::debugging::{DebugValue, DebuggingRecorder};
@@ -1304,8 +1302,7 @@ fn test_record_tool_call_metric_carries_agent_label() {
     let recorder = DebuggingRecorder::new();
     let snapshotter = recorder.snapshotter();
 
-    // A control char and an over-long id exercise the sanitize/cap path —
-    // a hallucinated or hostile caller id must not blow up cardinality.
+    // A control char and an over-long id exercise the sanitize/cap path — a hallucinated or hostile caller id must not blow up cardinality.
     let raw_agent = format!("agent\u{0007}-{}", "x".repeat(200));
 
     metrics::with_local_recorder(&recorder, || {
