@@ -668,3 +668,16 @@ tui-welcome-provider = 提供商: { $provider }
 tui-welcome-no-api-keys = 缺少 API 密钥
 tui-welcome-run-hint-prefix =  — 运行 
 tui-welcome-setup-complete = 设置完成！
+
+# sessions.rs
+tui-sessions-title = 会话
+tui-sessions-filter = (过滤: "{ $query }")
+tui-sessions-count = { $count } 个会话
+tui-sessions-header-agent = 智能体
+tui-sessions-header-id = 会话 ID
+tui-sessions-header-msgs = 消息数
+tui-sessions-header-created = 创建时间
+tui-sessions-loading = 正在加载会话…
+tui-sessions-empty = 暂无会话。开启聊天以创建。
+tui-sessions-delete-confirm = 删除此会话？[y] 是  [任意键] 取消
+tui-sessions-hints = ↑↓ 导航  Enter 打开  d 删除  / 搜索  r 刷新
