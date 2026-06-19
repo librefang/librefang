@@ -162,3 +162,66 @@ async fn missing_extensioned_asset_returns_404() {
     let (status, _body) = get(h.app.clone(), "/dashboard/nope.css").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+/// Regression: the prompts and tasks pages are real router routes that
+/// returned "asset not found" on a hard browser refresh until added to
+/// SPA_ROUTES.
+#[tokio::test(flavor = "multi_thread")]
+async fn prompts_and_tasks_routes_serve_index_html() {
+    let h = boot_open_with_dashboard().await;
+    for route in ["/dashboard/prompts", "/dashboard/tasks"] {
+        let (status, body) = get(h.app.clone(), route).await;
+        assert_eq!(status, StatusCode::OK, "{route} must serve the shell");
+        assert!(body.contains("SPA-SHELL"), "{route} got: {body}");
+    }
+}
+
+/// Drift guard: every top-level route declared
+/// in the dashboard router must be in SPA_ROUTES, or a hard refresh of it 404s.
+/// Parses `dashboard/src/router.tsx` for `path: "/<segment>"` and asserts each
+/// segment falls back to the SPA shell, so adding a route without updating the
+/// allowlist fails loudly instead of shipping a broken refresh.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_router_top_level_route_serves_index_html() {
+    let router_tsx =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("dashboard/src/router.tsx");
+    let src =
+        std::fs::read_to_string(&router_tsx).unwrap_or_else(|e| panic!("read {router_tsx:?}: {e}"));
+
+    // Collect distinct first path segments from `path: "/<seg>..."` declarations,
+    // skipping the root ("/"), dynamic params ($id), and splats (*).
+    let mut segments: Vec<String> = Vec::new();
+    for marker in ["path: \"/", "path:\"/"] {
+        let mut rest = src.as_str();
+        while let Some(idx) = rest.find(marker) {
+            rest = &rest[idx + marker.len()..];
+            let raw = rest.split('"').next().unwrap_or("");
+            let seg = raw.split('/').next().unwrap_or("").trim();
+            // Skip the root, dynamic params ($id), splats, and the `/dashboard`
+            // index route (its segment equals the basepath, not a sub-page).
+            if !seg.is_empty()
+                && !seg.starts_with('$')
+                && seg != "*"
+                && seg != "dashboard"
+                && !segments.contains(&seg.to_string())
+            {
+                segments.push(seg.to_string());
+            }
+        }
+    }
+    assert!(
+        segments.iter().any(|s| s == "prompts") && segments.iter().any(|s| s == "tasks"),
+        "parser sanity: expected to find prompts + tasks routes, got {segments:?}"
+    );
+
+    let h = boot_open_with_dashboard().await;
+    for seg in &segments {
+        let (status, body) = get(h.app.clone(), &format!("/dashboard/{seg}")).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "router route /dashboard/{seg} is missing from SPA_ROUTES (webchat.rs) — a hard refresh would 404"
+        );
+        assert!(body.contains("SPA-SHELL"), "/dashboard/{seg} got: {body}");
+    }
+}
