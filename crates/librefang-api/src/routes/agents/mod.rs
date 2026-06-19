@@ -117,6 +117,10 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             axum::routing::get(get_agent_session),
         )
         .route(
+            "/agents/{id}/session/context",
+            axum::routing::get(get_agent_session_context),
+        )
+        .route(
             "/agents/{id}/sessions",
             axum::routing::get(list_agent_sessions).post(create_agent_session),
         )
