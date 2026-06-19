@@ -55,6 +55,17 @@ const POLL_KEYWORDS: &[&str] = &[
 /// Maximum recent call history size for ping-pong detection.
 const HISTORY_SIZE: usize = 30;
 
+/// Stable prefix of the [`LoopGuardVerdict::CircuitBreak`] message.
+///
+/// Single source of truth shared between the producer (the `check` global
+/// circuit-breaker branch below) and the agent-loop exit classifier
+/// (`agent_loop::classify_exit_reason`), which maps the propagated
+/// `LibreFangError::Internal(msg)` back to the `circuit_break` exit reason
+/// for the `librefang_agent_loop_exits_total` metric. Referencing the same
+/// `const` from both sides keeps the match compiler-anchored rather than a
+/// loose string literal duplicated across modules.
+pub(crate) const CIRCUIT_BREAKER_MSG_PREFIX: &str = "Circuit breaker:";
+
 /// Backoff schedule in milliseconds for polling tools.
 const BACKOFF_SCHEDULE_MS: &[u64] = &[5000, 10000, 30000, 60000];
 
@@ -176,7 +187,7 @@ impl LoopGuard {
         if self.total_calls > self.config.global_circuit_breaker {
             self.blocked_calls += 1;
             return LoopGuardVerdict::CircuitBreak(format!(
-                "Circuit breaker: exceeded {} total tool calls in this loop. \
+                "{CIRCUIT_BREAKER_MSG_PREFIX} exceeded {} total tool calls in this loop. \
                  The agent appears to be stuck.",
                 self.config.global_circuit_breaker
             ));

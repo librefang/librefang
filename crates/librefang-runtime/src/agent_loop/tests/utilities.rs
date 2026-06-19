@@ -1293,6 +1293,129 @@ fn test_record_tool_call_metric_success_outcome() {
     );
 }
 
+// ── Agent-loop exit metric (refs #6227) ────────────────────────────────
+//
+// `librefang_agent_loop_exits_total{agent,reason}` must increment exactly
+// once per loop termination, with the `reason` label matching the real
+// termination branch. The wrapper (`run_agent_loop` /
+// `run_agent_loop_streaming`) classifies the single returned `Result` via
+// `classify_exit_reason` and emits through `record_agent_loop_exit`. These
+// tests pin the classifier mapping for every branch and prove the single
+// `record_agent_loop_exit` call increments exactly once with the right
+// labels — the injection site of the metric.
+
+/// `classify_exit_reason` maps each real termination `Result` to its stable
+/// `reason` label. Pins the exact reason set so a future error-variant or
+/// branch change can't silently re-bucket a termination.
+#[test]
+fn test_classify_exit_reason_covers_every_branch() {
+    // completed — any Ok return (finalized reply, silent completion,
+    // MaxTokens partial, interrupt cancel, provider-not-configured).
+    assert_eq!(
+        classify_exit_reason(&Ok(AgentLoopResult::default())),
+        "completed"
+    );
+    // max_iterations — the for-loop ran out.
+    assert_eq!(
+        classify_exit_reason(&Err(LibreFangError::MaxIterationsExceeded(40))),
+        "max_iterations"
+    );
+    // repeated_tool_failures — consecutive_all_failed cap reached.
+    assert_eq!(
+        classify_exit_reason(&Err(LibreFangError::RepeatedToolFailures {
+            iterations: 3,
+            error_count: 3,
+        })),
+        "repeated_tool_failures"
+    );
+    // content_filtered — provider safety / content filter blocked the reply.
+    assert_eq!(
+        classify_exit_reason(&Err(LibreFangError::ContentFiltered {
+            message: "blocked".to_string(),
+        })),
+        "content_filtered"
+    );
+    // circuit_break — loop-guard global breaker surfaces as Internal(msg)
+    // whose text begins with the shared CIRCUIT_BREAKER_MSG_PREFIX const.
+    let cb_msg = format!(
+        "{} exceeded 30 total tool calls in this loop. The agent appears to be stuck.",
+        crate::loop_guard::CIRCUIT_BREAKER_MSG_PREFIX
+    );
+    assert_eq!(
+        classify_exit_reason(&Err(LibreFangError::Internal(cb_msg))),
+        "circuit_break"
+    );
+    // error — any other propagated Err (e.g. an unrelated Internal error).
+    assert_eq!(
+        classify_exit_reason(&Err(LibreFangError::Internal(
+            "some unrelated failure".to_string()
+        ))),
+        "error"
+    );
+}
+
+/// `record_agent_loop_exit` increments the counter exactly once per call,
+/// labeled with the sanitized agent and the classified reason. Mirrors the
+/// `record_tool_call_metric` DebuggingRecorder pattern above.
+#[test]
+fn test_record_agent_loop_exit_increments_once_with_labels() {
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+    // One representative per reason: an Ok (completed) and a structured Err
+    // (max_iterations). Both must produce a single increment with the right
+    // reason label and the agent label.
+    let cases: &[(LibreFangResult<AgentLoopResult>, &str)] = &[
+        (Ok(AgentLoopResult::default()), "completed"),
+        (
+            Err(LibreFangError::MaxIterationsExceeded(40)),
+            "max_iterations",
+        ),
+    ];
+
+    for (result, expected_reason) in cases {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        metrics::with_local_recorder(&recorder, || {
+            record_agent_loop_exit("my-agent", result);
+        });
+
+        let snap = snapshotter.snapshot().into_vec();
+        let exit_counter = snap.iter().find(|(ckey, _, _, val)| {
+            ckey.key().name() == "librefang_agent_loop_exits_total"
+                && ckey
+                    .key()
+                    .labels()
+                    .any(|l| l.key() == "agent" && l.value() == "my-agent")
+                && ckey
+                    .key()
+                    .labels()
+                    .any(|l| l.key() == "reason" && l.value() == *expected_reason)
+                && matches!(val, DebugValue::Counter(_))
+        });
+        assert!(
+            exit_counter.is_some(),
+            "agent-loop exit counter must be recorded with reason={expected_reason}"
+        );
+        if let Some((_, _, _, DebugValue::Counter(count))) = exit_counter {
+            assert_eq!(
+                *count, 1,
+                "exit counter for reason={expected_reason} must increment exactly once"
+            );
+        }
+    }
+}
+
+/// The agent label is sanitized (control chars stripped, length capped)
+/// like the tool / cron agent labels, so a pathological agent name cannot
+/// blow up metric cardinality.
+#[test]
+fn test_sanitize_agent_label_strips_control_and_caps_length() {
+    assert_eq!(sanitize_agent_label("agent\u{0007}\n-1"), "agent-1");
+    let long: String = "a".repeat(200);
+    assert_eq!(sanitize_agent_label(&long).chars().count(), 64);
+}
+
 // ── Incognito persistence guards (refs #4073) ──────────────────────────
 //
 // These two tests prove the `LoopOptions::incognito` guard at the
