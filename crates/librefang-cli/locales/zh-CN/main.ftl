@@ -902,3 +902,23 @@ tui-dashboard-audit-detail = 详情
 tui-dashboard-loading = 正在加载…
 tui-dashboard-no-audit = 暂无审计记录。
 
+# comms.rs
+tui-comms-title = 通信
+tui-comms-tab-topology = 拓扑关系 ({ $agents } 智能体, { $edges } 连接)
+tui-comms-tab-events = 事件 ({ $count })
+tui-comms-hints =   [s] 发送  [t] 任务  [r] 刷新  [Tab] 切换焦点  [↑↓] 滚动
+tui-comms-loading = 正在加载拓扑结构…
+tui-comms-empty = 没有正在运行的智能体。启动智能体以查看通信。
+tui-comms-events-empty = 暂无智能体间的事件。活动将在此处显示。
+tui-comms-modal-send-title =  发送消息 
+tui-comms-modal-send-from = 发送方 (智能体 ID):
+tui-comms-modal-send-to = 接收方 (智能体 ID):
+tui-comms-modal-send-msg = 消息:
+tui-comms-modal-send-hints = [Tab] 切换输入框  [Enter] 发送  [Esc] 取消
+tui-comms-modal-task-title =  发布任务 
+tui-comms-modal-task-title-field = 标题:
+tui-comms-modal-task-desc = 描述:
+tui-comms-modal-task-assign = 指派给 (智能体 ID, 可选):
+tui-comms-modal-task-hints = [Tab] 切换输入框  [Enter] 发布  [Esc] 取消
+
+
