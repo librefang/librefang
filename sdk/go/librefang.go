@@ -440,6 +440,10 @@ func (r *AgentsResource) CompactSession(id string) (interface{}, error) {
 	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/session/compact", id), nil, nil)
 }
 
+func (r *AgentsResource) GetAgentSessionContext(id string, query map[string]string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/session/context", id), nil, query)
+}
+
 func (r *AgentsResource) RebootSession(id string) (interface{}, error) {
 	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/session/reboot", id), nil, nil)
 }

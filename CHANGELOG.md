@@ -844,6 +844,9 @@ _308 PRs from 7 contributors since v2026.5.17-beta.12._
 
 ### Changed
 
+- **refactor(error-contracts): migrate `browser_tools.rs` to `Result<String, ToolError>`** (#3576) (@houko) — another slice of the structured-error-contracts migration.
+  The ten `tool_browser_*` dispatchers (navigate / click / type / screenshot / read_page / close / scroll / wait / run_js / back) now return the typed `ToolError` instead of an opaque `String`: missing params map to `MissingParameter`, an SSRF-blocked URL to `InvalidParameter`, and CDP transport / command failures to `Upstream` via `upstream_msg`.
+  The dispatch boundary drops its per-arm `.map_err(ToolError::upstream_msg)` so the typed variants flow through `tool_result_from_typed`; the `None` (browser-not-wired) arm still yields `Unavailable`.
 - **chore(deps): drop five orphaned email `[workspace.dependencies]` left after the channel sidecar migration** (#6176) (@houko).
   `lettre` / `imap` / `rustls-connector` / `mailparse` / `rustls-pemfile` were declared in the root `Cargo.toml` but had no member consumer (no `.workspace = true`, no `use`) and were already absent from `Cargo.lock`, so they were never compiled or audited — the issue's "adds compile time / binary size / supply-chain surface" framing was inaccurate; the real defect was dead declaration cruft.
   The now-unmatchable `deny.toml` ignore for `RUSTSEC-2025-0134` (`rustls-pemfile`) is dropped in the same change, since that crate no longer appears in the resolved graph.
@@ -872,6 +875,14 @@ In-crate only; no cross-crate error-shape changes.
 
 ### Added
 
+- **sec(sandbox): protect the audit anchor from WASM skill `fs_write` via a capability deny-list** (#6182) (@houko).
+  The WASM sandbox previously gated `fs_write` solely on glob capability matching, so a skill granted a broad `FileWrite` subtree — or the universal `FileWrite("*")` — could truncate the audit anchor (`[audit].anchor_path`, default `data_dir/audit.anchor`) and silently break the tamper-evident Merkle chain.
+  `ToolPolicy` gains a `protected_write_paths()` method (default empty; the kernel returns the boot-resolved anchor), and `host_fs_write` now denies any write whose canonical target matches a protected path *above* the capability check, so even `FileWrite("*")` cannot reach the anchor.
+  The deny-list is scoped strictly to the anchor file, not all of `data_dir`, to keep the blast radius small; closes #6182 and supersedes the duplicate #6181.
+- **channels: per-instance sidecar secrets so each agent can own its own handle** (#6169) (@houko).
+  Two instances of the same sidecar adapter (e.g. one Matrix account per agent) previously had to share one global secret — a Matrix sidecar's identity is its `MATRIX_ACCESS_TOKEN`, so both logged in as the same account.
+  `build_spawn_env` now resolves a `<NAME>__KEY` entry in `secrets.env` to the bare `KEY` for the matching `[[sidecar_channels]]` instance (name uppercased, non-alphanumerics → `_`); the per-instance value overrides the global bare key and the parent env, and another instance's namespaced secret never leaks into this child.
+  Operators keep tokens in `secrets.env` (not plaintext `config.toml`); without a prefix all instances still share the global secret. Closes #6169.
 - **dashboard: a global Auto-Dream on/off switch on the Memory → Auto-Dream tab** (#6188) (@houko).
   The tab previously showed only a read-only status badge and told users to edit `config.toml` to flip the master switch; it is now an interactive toggle wired to the existing `POST /api/config/set` (`auto_dream.enabled` is on the writable allowlist).
   The handler invalidates `autoDreamKeys` in addition to `useSetConfigValue`'s `configKeys` so the badge and the per-agent "Dream now" buttons reflect the new global state immediately rather than after the 15s poll.
@@ -939,6 +950,10 @@ In-crate only; no cross-crate error-shape changes.
   A nullable `compacted_summary_session_id` column (schema v46, backward-compatible) now records which session owns the current summary; `store_llm_summary` stamps it with the compacted session, and the GET handler surfaces the banner only when the requested session matches the owner via the new `MemorySubstrate::compacted_summary_for_session`.
   The summary is scoped, not lost — the session that legitimately produced it still shows it.
   Closes #6225.
+- **fix(cli): bind the macOS launchagent status string to a `let` so the macOS build compiles (E0716)** (#6198) (@houko).
+  The macOS-only launchagent-status block passed `&i18n::t(...)` from inside an `if`/`else` expression to `ui::kv`, but each arm returns an owned `String` whose temporary is freed at the end of the `if`-expression, before `ui::kv` borrows it.
+  The macOS test lane is main-push-only, so this surfaced as a red `main` after merge rather than failing the originating PR.
+  Closes #6198.
 
 - **fix(whatsapp-gateway): resolve the `link-preview-js` peer conflict and commit a lockfile** (#6180) (@houko).
   `npm install` in `packages/whatsapp-gateway` failed with `ERESOLVE` unless `--legacy-peer-deps` was passed: the gateway declared `link-preview-js@^4.0.1` as a direct dependency while `@whiskeysockets/baileys@6.7.22` lists it as `peerOptional ^3.0.0`, and the direct declaration defeated the optional flag.
