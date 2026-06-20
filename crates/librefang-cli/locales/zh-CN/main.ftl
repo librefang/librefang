@@ -1213,4 +1213,51 @@ tui-workflows-result-complete = 完成
 tui-workflows-result-empty = 无结果。
 tui-workflows-hints-run-result =   [Enter/Esc] 返回
 
+# --- Triggers screen ---
+tui-triggers-title-screen = 触发器
+tui-triggers-header-agent = Agent
+tui-triggers-header-pattern = 模式
+tui-triggers-header-fires = 触发次数
+tui-triggers-header-status = 状态
+tui-triggers-loading = 正在加载触发器...
+tui-triggers-empty-state = 未配置触发器。使用 [n] 创建一个。
+tui-triggers-status-active = ● 激活
+tui-triggers-status-off = ○ 关闭
+tui-triggers-create-new-option =   + 创建新触发器
+tui-triggers-hints-list =   [↑↓] 导航  [Enter] 创建  [d] 删除  [r] 刷新
+tui-triggers-title-create = 创建新触发器
+tui-triggers-create-step =   第 { $current } 步，共 { $total } 步
+tui-triggers-label-agent-id = Agent ID:
+tui-triggers-placeholder-agent-id = agent-uuid
+tui-triggers-label-pattern-picker =   选择模式类型:
+tui-triggers-prompt-param = { $type } 的模式参数:
+tui-triggers-placeholder-pattern-param = 例如 .*error.*
+tui-triggers-label-prompt = 提示词模板:
+tui-triggers-placeholder-prompt = 处理此项: {"{"}event{"}"}
+tui-triggers-label-max-fires = 最大触发次数 (0 = 无限制):
+tui-triggers-placeholder-max-fires = 0
+tui-triggers-review-agent =   Agent:   
+tui-triggers-review-pattern =   模式:   
+tui-triggers-review-prompt =   提示词: 
+tui-triggers-review-max =   最大:    
+tui-triggers-review-unlimited = 无限制
+tui-triggers-review-confirm = 按 Enter 创建此触发器。
+tui-triggers-hints-create-submit =   [Enter] 创建  [Esc] 返回
+tui-triggers-hints-create-select =   [↑↓] 导航  [Enter] 选择  [Esc] 返回
+tui-triggers-hints-create-next =   [Enter] 下一步  [Esc] 返回
+
+tui-triggers-type-lifecycle-name = Lifecycle
+tui-triggers-type-lifecycle-desc = Agent 生命周期事件 (start, stop, error)
+tui-triggers-type-agentspawned-name = AgentSpawned
+tui-triggers-type-agentspawned-desc = 新 Agent 创建时触发
+tui-triggers-type-contentmatch-name = ContentMatch
+tui-triggers-type-contentmatch-desc = 匹配消息内容 (正则表达式)
+tui-triggers-type-schedule-name = Schedule
+tui-triggers-type-schedule-desc = 类 Cron 调度触发器
+tui-triggers-type-webhook-name = Webhook
+tui-triggers-type-webhook-desc = HTTP Webhook 触发器
+tui-triggers-type-channelmessage-name = ChannelMessage
+tui-triggers-type-channelmessage-desc = 通道收到消息时触发
+
+
 

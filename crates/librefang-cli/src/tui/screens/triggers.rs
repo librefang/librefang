@@ -20,13 +20,13 @@ pub struct TriggerInfo {
     pub enabled: bool,
 }
 
-const PATTERN_TYPES: &[(&str, &str)] = &[
-    ("Lifecycle", "Agent lifecycle events (start, stop, error)"),
-    ("AgentSpawned", "Fires when a new agent is spawned"),
-    ("ContentMatch", "Match on message content (regex)"),
-    ("Schedule", "Cron-like schedule trigger"),
-    ("Webhook", "HTTP webhook trigger"),
-    ("ChannelMessage", "Message received on a channel"),
+const PATTERN_TYPES: &[&str] = &[
+    "Lifecycle",
+    "AgentSpawned",
+    "ContentMatch",
+    "Schedule",
+    "Webhook",
+    "ChannelMessage",
 ];
 
 // ── State ───────────────────────────────────────────────────────────────────
@@ -228,7 +228,7 @@ impl TriggerState {
                 let max_fires = self.create_max_fires.parse::<u64>().unwrap_or(0);
                 let pattern_type = PATTERN_TYPES
                     .get(self.create_pattern_type)
-                    .map(|(n, _)| n.to_string())
+                    .map(|n| n.to_string())
                     .unwrap_or_default();
                 self.sub = TriggerSubScreen::List;
                 return TriggerAction::CreateTrigger {
@@ -248,7 +248,11 @@ impl TriggerState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut TriggerState) {
-    let inner = widgets::render_screen_block(f, area, "\u{25c9} Triggers");
+    let inner = widgets::render_screen_block(
+        f,
+        area,
+        &format!("⊙ {}", crate::i18n::t("tui-triggers-title-screen")),
+    );
 
     match state.sub {
         TriggerSubScreen::List => draw_list(f, inner, state),
@@ -269,7 +273,10 @@ fn draw_list(f: &mut Frame, area: Rect, state: &mut TriggerState) {
         Paragraph::new(Line::from(vec![Span::styled(
             format!(
                 "  {:<14} {:<20} {:<8} {}",
-                "Agent", "Pattern", "Fires", "Status"
+                crate::i18n::t("tui-triggers-header-agent"),
+                crate::i18n::t("tui-triggers-header-pattern"),
+                crate::i18n::t("tui-triggers-header-fires"),
+                crate::i18n::t("tui-triggers-header-status")
             ),
             theme::table_header(),
         )])),
@@ -280,12 +287,12 @@ fn draw_list(f: &mut Frame, area: Rect, state: &mut TriggerState) {
 
     if state.loading {
         f.render_widget(
-            widgets::spinner(state.tick, "Loading triggers\u{2026}"),
+            widgets::spinner(state.tick, &crate::i18n::t("tui-triggers-loading")),
             chunks[2],
         );
     } else if state.triggers.is_empty() {
         f.render_widget(
-            widgets::empty_state("No triggers configured. Create one with [n]."),
+            widgets::empty_state(&crate::i18n::t("tui-triggers-empty-state")),
             chunks[2],
         );
     } else {
@@ -293,10 +300,16 @@ fn draw_list(f: &mut Frame, area: Rect, state: &mut TriggerState) {
             .triggers
             .iter()
             .map(|tr| {
-                let (enabled_icon, enabled_style) = if tr.enabled {
-                    ("\u{25cf} Active", Style::default().fg(theme::GREEN))
+                let (enabled_text, enabled_style) = if tr.enabled {
+                    (
+                        crate::i18n::t("tui-triggers-status-active"),
+                        Style::default().fg(theme::GREEN),
+                    )
                 } else {
-                    ("\u{25cb} Off", Style::default().fg(theme::RED))
+                    (
+                        crate::i18n::t("tui-triggers-status-off"),
+                        Style::default().fg(theme::RED),
+                    )
                 };
                 ListItem::new(Line::from(vec![
                     Span::styled(
@@ -311,13 +324,13 @@ fn draw_list(f: &mut Frame, area: Rect, state: &mut TriggerState) {
                         format!(" {:<8}", tr.fires),
                         Style::default().fg(theme::TEXT_SECONDARY),
                     ),
-                    Span::styled(format!(" {enabled_icon}"), enabled_style),
+                    Span::styled(format!(" {enabled_text}"), enabled_style),
                 ]))
             })
             .collect();
 
         items.push(ListItem::new(Line::from(vec![Span::styled(
-            "  + Create new trigger",
+            crate::i18n::t("tui-triggers-create-new-option"),
             Style::default()
                 .fg(theme::GREEN)
                 .add_modifier(Modifier::BOLD),
@@ -330,7 +343,7 @@ fn draw_list(f: &mut Frame, area: Rect, state: &mut TriggerState) {
     f.render_widget(
         widgets::status_or_hint(
             &state.status_msg,
-            "  [\u{2191}\u{2193}] Navigate  [Enter] Create  [d] Delete  [r] Refresh",
+            &crate::i18n::t("tui-triggers-hints-list"),
         ),
         chunks[3],
     );
@@ -349,9 +362,9 @@ fn draw_create(f: &mut Frame, area: Rect, state: &mut TriggerState) {
 
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("  \u{25c9} ", Style::default().fg(theme::ACCENT)),
+            Span::styled("  ⊙ ", Style::default().fg(theme::ACCENT)),
             Span::styled(
-                "Create New Trigger",
+                crate::i18n::t("tui-triggers-title-create"),
                 Style::default()
                     .fg(theme::TEXT_PRIMARY)
                     .add_modifier(Modifier::BOLD),
@@ -366,69 +379,90 @@ fn draw_create(f: &mut Frame, area: Rect, state: &mut TriggerState) {
     let progress: Vec<Span> = (0..6)
         .map(|i| {
             if i < state.create_step {
-                Span::styled("\u{25cf} ", Style::default().fg(theme::GREEN))
+                Span::styled("● ", Style::default().fg(theme::GREEN))
             } else if i == state.create_step {
-                Span::styled("\u{25cf} ", Style::default().fg(theme::ACCENT))
+                Span::styled("● ", Style::default().fg(theme::ACCENT))
             } else {
-                Span::styled("\u{25cb} ", Style::default().fg(theme::TEXT_TERTIARY))
+                Span::styled("○ ", Style::default().fg(theme::TEXT_TERTIARY))
             }
         })
         .collect();
     let mut step_line = vec![Span::raw("  ")];
     step_line.extend(progress);
     step_line.push(Span::styled(
-        format!("  Step {} of 6", state.create_step + 1),
+        crate::i18n::t_args(
+            "tui-triggers-create-step",
+            &[
+                ("current", &(state.create_step + 1).to_string()),
+                ("total", "6"),
+            ],
+        ),
         Style::default().fg(theme::TEXT_SECONDARY),
     ));
     f.render_widget(Paragraph::new(Line::from(step_line)), chunks[2]);
+
+    let label_agent_id = crate::i18n::t("tui-triggers-label-agent-id");
+    let placeholder_agent_id = crate::i18n::t("tui-triggers-placeholder-agent-id");
+    let label_prompt = crate::i18n::t("tui-triggers-label-prompt");
+    let placeholder_prompt = crate::i18n::t("tui-triggers-placeholder-prompt");
+    let label_max_fires = crate::i18n::t("tui-triggers-label-max-fires");
+    let placeholder_max_fires = crate::i18n::t("tui-triggers-placeholder-max-fires");
+
+    let pattern_tech_name = PATTERN_TYPES
+        .get(state.create_pattern_type)
+        .copied()
+        .unwrap_or("?");
+    let pattern_type_loc = crate::i18n::t(&format!(
+        "tui-triggers-type-{}-name",
+        pattern_tech_name.to_lowercase()
+    ));
+    let label_pattern_param = crate::i18n::t_args(
+        "tui-triggers-prompt-param",
+        &[("type", pattern_type_loc.as_str())],
+    );
+    let placeholder_pattern_param = crate::i18n::t("tui-triggers-placeholder-pattern-param");
 
     match state.create_step {
         0 => draw_text_field(
             f,
             chunks[4],
-            "Agent ID:",
+            label_agent_id.as_str(),
             &state.create_agent_id,
-            "agent-uuid",
+            placeholder_agent_id.as_str(),
         ),
         1 => draw_pattern_picker(f, chunks[4], state),
         2 => draw_text_field(
             f,
             chunks[4],
-            &format!(
-                "Pattern param for {}:",
-                PATTERN_TYPES
-                    .get(state.create_pattern_type)
-                    .map(|(n, _)| *n)
-                    .unwrap_or("?")
-            ),
+            label_pattern_param.as_str(),
             &state.create_pattern_param,
-            "e.g. .*error.*",
+            placeholder_pattern_param.as_str(),
         ),
         3 => draw_text_field(
             f,
             chunks[4],
-            "Prompt template:",
+            label_prompt.as_str(),
             &state.create_prompt,
-            "Handle this: {{event}}",
+            placeholder_prompt.as_str(),
         ),
         4 => draw_text_field(
             f,
             chunks[4],
-            "Max fires (0 = unlimited):",
+            label_max_fires.as_str(),
             &state.create_max_fires,
-            "0",
+            placeholder_max_fires.as_str(),
         ),
         _ => draw_trigger_review(f, chunks[4], state),
     }
 
-    let hint_text = if state.create_step == 5 {
-        "  [Enter] Create  [Esc] Back"
+    let hint_string = if state.create_step == 5 {
+        crate::i18n::t("tui-triggers-hints-create-submit")
     } else if state.create_step == 1 {
-        "  [\u{2191}\u{2193}] Navigate  [Enter] Select  [Esc] Back"
+        crate::i18n::t("tui-triggers-hints-create-select")
     } else {
-        "  [Enter] Next  [Esc] Back"
+        crate::i18n::t("tui-triggers-hints-create-next")
     };
-    f.render_widget(widgets::hint_bar(hint_text), chunks[5]);
+    f.render_widget(widgets::hint_bar(&hint_string), chunks[5]);
 }
 
 fn draw_text_field(f: &mut Frame, area: Rect, label: &str, value: &str, placeholder: &str) {
@@ -456,7 +490,7 @@ fn draw_text_field(f: &mut Frame, area: Rect, label: &str, value: &str, placehol
     };
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("  \u{276f} ", Style::default().fg(theme::ACCENT)),
+            Span::styled("  ❯ ", Style::default().fg(theme::ACCENT)),
             Span::styled(display, style),
             Span::styled(
                 "\u{2588}",
@@ -474,7 +508,7 @@ fn draw_pattern_picker(f: &mut Frame, area: Rect, state: &mut TriggerState) {
 
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
-            "  Select pattern type:",
+            crate::i18n::t("tui-triggers-label-pattern-picker"),
             Style::default().fg(theme::TEXT_PRIMARY),
         )])),
         chunks[0],
@@ -483,19 +517,28 @@ fn draw_pattern_picker(f: &mut Frame, area: Rect, state: &mut TriggerState) {
     let items: Vec<ListItem> = PATTERN_TYPES
         .iter()
         .enumerate()
-        .map(|(i, (name, desc))| {
+        .map(|(i, name)| {
             let indicator = if Some(i) == state.pattern_type_list.selected() {
-                "\u{25cf}"
+                "●"
             } else {
-                "\u{25cb}"
+                "○"
             };
+
+            let name_key = format!("tui-triggers-type-{}-name", name.to_lowercase());
+            let desc_key = format!("tui-triggers-type-{}-desc", name.to_lowercase());
+            let loc_name = crate::i18n::t(&name_key);
+            let loc_desc = crate::i18n::t(&desc_key);
+
             ListItem::new(Line::from(vec![
                 Span::styled(
                     format!("  {indicator} "),
                     Style::default().fg(theme::ACCENT),
                 ),
-                Span::styled(format!("{:<18}", name), Style::default().fg(theme::CYAN)),
-                Span::styled(*desc, Style::default().fg(theme::TEXT_SECONDARY)),
+                Span::styled(
+                    format!("{:<18}", loc_name),
+                    Style::default().fg(theme::CYAN),
+                ),
+                Span::styled(loc_desc, Style::default().fg(theme::TEXT_SECONDARY)),
             ]))
         })
         .collect();
@@ -505,23 +548,34 @@ fn draw_pattern_picker(f: &mut Frame, area: Rect, state: &mut TriggerState) {
 }
 
 fn draw_trigger_review(f: &mut Frame, area: Rect, state: &TriggerState) {
-    let pattern_name = PATTERN_TYPES
+    let pattern_tech_name = PATTERN_TYPES
         .get(state.create_pattern_type)
-        .map(|(n, _)| *n)
+        .copied()
         .unwrap_or("?");
+    let pattern_name = crate::i18n::t(&format!(
+        "tui-triggers-type-{}-name",
+        pattern_tech_name.to_lowercase()
+    ));
+    let unlimited_str = crate::i18n::t("tui-triggers-review-unlimited");
     let max_fires = if state.create_max_fires.is_empty() {
-        "unlimited"
+        unlimited_str.as_str()
     } else {
         &state.create_max_fires
     };
 
     let lines = vec![
         Line::from(vec![
-            Span::styled("  Agent:   ", Style::default().fg(theme::TEXT_SECONDARY)),
+            Span::styled(
+                crate::i18n::t("tui-triggers-review-agent"),
+                Style::default().fg(theme::TEXT_SECONDARY),
+            ),
             Span::styled(&state.create_agent_id, Style::default().fg(theme::CYAN)),
         ]),
         Line::from(vec![
-            Span::styled("  Pattern: ", Style::default().fg(theme::TEXT_SECONDARY)),
+            Span::styled(
+                crate::i18n::t("tui-triggers-review-pattern"),
+                Style::default().fg(theme::TEXT_SECONDARY),
+            ),
             Span::styled(pattern_name, Style::default().fg(theme::YELLOW)),
             Span::styled(
                 format!(" ({})", state.create_pattern_param),
@@ -529,21 +583,27 @@ fn draw_trigger_review(f: &mut Frame, area: Rect, state: &TriggerState) {
             ),
         ]),
         Line::from(vec![
-            Span::styled("  Prompt:  ", Style::default().fg(theme::TEXT_SECONDARY)),
+            Span::styled(
+                crate::i18n::t("tui-triggers-review-prompt"),
+                Style::default().fg(theme::TEXT_SECONDARY),
+            ),
             Span::styled(
                 &state.create_prompt,
                 Style::default().fg(theme::TEXT_PRIMARY),
             ),
         ]),
         Line::from(vec![
-            Span::styled("  Max:     ", Style::default().fg(theme::TEXT_SECONDARY)),
+            Span::styled(
+                crate::i18n::t("tui-triggers-review-max"),
+                Style::default().fg(theme::TEXT_SECONDARY),
+            ),
             Span::styled(max_fires, Style::default().fg(theme::GREEN)),
         ]),
         Line::from(""),
         Line::from(vec![
-            Span::styled("  \u{25cf} ", Style::default().fg(theme::ACCENT)),
+            Span::styled("  ● ", Style::default().fg(theme::ACCENT)),
             Span::styled(
-                "Press Enter to create this trigger.",
+                crate::i18n::t("tui-triggers-review-confirm"),
                 Style::default().fg(theme::TEXT_SECONDARY),
             ),
         ]),

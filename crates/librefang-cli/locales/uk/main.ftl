@@ -2049,4 +2049,51 @@ tui-workflows-result-complete = Виконано
 tui-workflows-result-empty = Немає результату.
 tui-workflows-hints-run-result =   [Enter/Esc] Назад
 
+# --- Triggers screen ---
+tui-triggers-title-screen = Тригери
+tui-triggers-header-agent = Агент
+tui-triggers-header-pattern = Паттерн
+tui-triggers-header-fires = Запуски
+tui-triggers-header-status = Статус
+tui-triggers-loading = Завантаження тригерів...
+tui-triggers-empty-state = Немає налаштованих тригерів. Створіть новий за допомогою [n].
+tui-triggers-status-active = ● Активний
+tui-triggers-status-off = ○ Вимкнений
+tui-triggers-create-new-option =   + Створити новий тригер
+tui-triggers-hints-list =   [↑↓] Навігація  [Enter] Створити  [d] Видалити  [r] Оновити
+tui-triggers-title-create = Створити новий тригер
+tui-triggers-create-step =   Крок { $current } з { $total }
+tui-triggers-label-agent-id = Agent ID:
+tui-triggers-placeholder-agent-id = agent-uuid
+tui-triggers-label-pattern-picker =   Виберіть тип паттерна:
+tui-triggers-prompt-param = Параметр паттерна для { $type }:
+tui-triggers-placeholder-pattern-param = наприклад, .*error.*
+tui-triggers-label-prompt = Шаблон промпту:
+tui-triggers-placeholder-prompt = Обробити це: {"{"}event{"}"}
+tui-triggers-label-max-fires = Макс. запусків (0 = безлімітно):
+tui-triggers-placeholder-max-fires = 0
+tui-triggers-review-agent =   Агент:   
+tui-triggers-review-pattern =   Паттерн: 
+tui-triggers-review-prompt =   Промпт:  
+tui-triggers-review-max =   Макс:     
+tui-triggers-review-unlimited = безлімітно
+tui-triggers-review-confirm = Натисніть Enter, щоб створити цей тригер.
+tui-triggers-hints-create-submit =   [Enter] Створити  [Esc] Назад
+tui-triggers-hints-create-select =   [↑↓] Навігація  [Enter] Обрати  [Esc] Назад
+tui-triggers-hints-create-next =   [Enter] Далі  [Esc] Назад
+
+tui-triggers-type-lifecycle-name = Lifecycle
+tui-triggers-type-lifecycle-desc = Події життєвого циклу агента (start, stop, error)
+tui-triggers-type-agentspawned-name = AgentSpawned
+tui-triggers-type-agentspawned-desc = Спрацьовує при створенні нового агента
+tui-triggers-type-contentmatch-name = ContentMatch
+tui-triggers-type-contentmatch-desc = Збіг за вмістом повідомлення (regex)
+tui-triggers-type-schedule-name = Schedule
+tui-triggers-type-schedule-desc = Тригер розкладу типу cron
+tui-triggers-type-webhook-name = Webhook
+tui-triggers-type-webhook-desc = Тригер HTTP-вебхука
+tui-triggers-type-channelmessage-name = ChannelMessage
+tui-triggers-type-channelmessage-desc = Повідомлення, отримане в каналі
+
+
 

@@ -2033,5 +2033,52 @@ tui-workflows-result-complete = Complete
 tui-workflows-result-empty = No result.
 tui-workflows-hints-run-result =   [Enter/Esc] Back
 
+# --- Triggers screen ---
+tui-triggers-title-screen = Triggers
+tui-triggers-header-agent = Agent
+tui-triggers-header-pattern = Pattern
+tui-triggers-header-fires = Fires
+tui-triggers-header-status = Status
+tui-triggers-loading = Loading triggers...
+tui-triggers-empty-state = No triggers configured. Create one with [n].
+tui-triggers-status-active = ● Active
+tui-triggers-status-off = ○ Off
+tui-triggers-create-new-option =   + Create new trigger
+tui-triggers-hints-list =   [↑↓] Navigate  [Enter] Create  [d] Delete  [r] Refresh
+tui-triggers-title-create = Create New Trigger
+tui-triggers-create-step =   Step { $current } of { $total }
+tui-triggers-label-agent-id = Agent ID:
+tui-triggers-placeholder-agent-id = agent-uuid
+tui-triggers-label-pattern-picker =   Select pattern type:
+tui-triggers-prompt-param = Pattern param for { $type }:
+tui-triggers-placeholder-pattern-param = e.g. .*error.*
+tui-triggers-label-prompt = Prompt template:
+tui-triggers-placeholder-prompt = Handle this: {"{"}event{"}"}
+tui-triggers-label-max-fires = Max fires (0 = unlimited):
+tui-triggers-placeholder-max-fires = 0
+tui-triggers-review-agent =   Agent:   
+tui-triggers-review-pattern =   Pattern: 
+tui-triggers-review-prompt =   Prompt:  
+tui-triggers-review-max =   Max:     
+tui-triggers-review-unlimited = unlimited
+tui-triggers-review-confirm = Press Enter to create this trigger.
+tui-triggers-hints-create-submit =   [Enter] Create  [Esc] Back
+tui-triggers-hints-create-select =   [↑↓] Navigate  [Enter] Select  [Esc] Back
+tui-triggers-hints-create-next =   [Enter] Next  [Esc] Back
+
+tui-triggers-type-lifecycle-name = Lifecycle
+tui-triggers-type-lifecycle-desc = Agent lifecycle events (start, stop, error)
+tui-triggers-type-agentspawned-name = AgentSpawned
+tui-triggers-type-agentspawned-desc = Fires when a new agent is spawned
+tui-triggers-type-contentmatch-name = ContentMatch
+tui-triggers-type-contentmatch-desc = Match on message content (regex)
+tui-triggers-type-schedule-name = Schedule
+tui-triggers-type-schedule-desc = Cron-like schedule trigger
+tui-triggers-type-webhook-name = Webhook
+tui-triggers-type-webhook-desc = HTTP webhook trigger
+tui-triggers-type-channelmessage-name = ChannelMessage
+tui-triggers-type-channelmessage-desc = Message received on a channel
+
+
 
 
