@@ -2079,6 +2079,30 @@ tui-triggers-type-webhook-desc = HTTP webhook trigger
 tui-triggers-type-channelmessage-name = ChannelMessage
 tui-triggers-type-channelmessage-desc = Message received on a channel
 
+# --- Memory screen ---
+tui-memory-title-screen = Memory
+tui-memory-label-select-agent =   Select an agent to browse its memory:
+tui-memory-header-agent-name = Agent Name
+tui-memory-header-id = ID
+tui-memory-loading-agents = Loading agents...
+tui-memory-empty-agents = No memory entries. Agents store data here automatically.
+tui-memory-hints-agent-select =   ↑↓ Navigate  Enter Browse KV  r Refresh
+tui-memory-pairs-count =   │ { $count } pairs
+tui-memory-header-key = Key
+tui-memory-header-value = Value
+tui-memory-loading = Loading...
+tui-memory-empty-kv = No key-value pairs. Press a to add one.
+tui-memory-confirm-delete =   Delete this key? [y] Yes  [any] Cancel
+tui-memory-hints-kv-browser =   ↑↓ Navigate  a Add  e Edit  d Delete  Esc Back  r Refresh
+tui-memory-title-add = ┼ Add Key-Value Pair
+tui-memory-title-edit = ✎ Edit Value
+tui-memory-field-key = Key:
+tui-memory-placeholder-key = enter key...
+tui-memory-field-value = Value:
+tui-memory-placeholder-value = enter value...
+tui-memory-hints-edit =   Tab Switch field  Enter Save  Esc Cancel
+
+
 
 
 

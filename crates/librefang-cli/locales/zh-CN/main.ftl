@@ -1259,5 +1259,29 @@ tui-triggers-type-webhook-desc = HTTP Webhook 触发器
 tui-triggers-type-channelmessage-name = ChannelMessage
 tui-triggers-type-channelmessage-desc = 通道收到消息时触发
 
+# --- Memory screen ---
+tui-memory-title-screen = 记忆
+tui-memory-label-select-agent =   选择一个 Agent 以浏览其记忆:
+tui-memory-header-agent-name = Agent 名称
+tui-memory-header-id = ID
+tui-memory-loading-agents = 正在加载 Agent...
+tui-memory-empty-agents = 无记忆条目。Agent 会在此自动存储数据。
+tui-memory-hints-agent-select =   ↑↓ 导航  Enter 浏览 KV  r 刷新
+tui-memory-pairs-count =   │ { $count } 对键值
+tui-memory-header-key = 键
+tui-memory-header-value = 值
+tui-memory-loading = 正在加载...
+tui-memory-empty-kv = 无键值对。按 a 添加。
+tui-memory-confirm-delete =   确定删除此键？[y] 确认  [任意键] 取消
+tui-memory-hints-kv-browser =   ↑↓ 导航  a 添加  e 编辑  d 删除  Esc 返回  r 刷新
+tui-memory-title-add = ┼ 添加键值对
+tui-memory-title-edit = ✎ 编辑值
+tui-memory-field-key = 键:
+tui-memory-placeholder-key = 输入键...
+tui-memory-field-value = 值:
+tui-memory-placeholder-value = 输入值...
+tui-memory-hints-edit =   Tab 切换字段  Enter 保存  Esc 取消
+
+
 
 

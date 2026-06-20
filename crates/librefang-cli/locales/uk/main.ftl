@@ -2095,5 +2095,34 @@ tui-triggers-type-webhook-desc = Тригер HTTP-вебхука
 tui-triggers-type-channelmessage-name = ChannelMessage
 tui-triggers-type-channelmessage-desc = Повідомлення, отримане в каналі
 
+# --- Memory screen ---
+tui-memory-title-screen = Пам'ять
+tui-memory-label-select-agent =   Виберіть агента для перегляду його пам'яті:
+tui-memory-header-agent-name = Ім'я агента
+tui-memory-header-id = ID
+tui-memory-loading-agents = Завантаження агентів...
+tui-memory-empty-agents = Немає записів пам'яті. Агенти зберігають дані тут автоматично.
+tui-memory-hints-agent-select =   ↑↓ Навігація  Enter Перегляд KV  r Оновити
+tui-memory-pairs-count =
+    { $count ->
+        [one]   │ { $count } пара
+        [few]   │ { $count } пари
+       *[other]   │ { $count } пар
+    }
+tui-memory-header-key = Ключ
+tui-memory-header-value = Значення
+tui-memory-loading = Завантаження...
+tui-memory-empty-kv = Немає пар ключ-значення. Натисніть a, щоб додати.
+tui-memory-confirm-delete =   Видалити цей ключ? [y] Так  [any] Скасувати
+tui-memory-hints-kv-browser =   ↑↓ Навігація  a Додати  e Редагувати  d Видалити  Esc Назад  r Оновити
+tui-memory-title-add = ┼ Додати пару ключ-значення
+tui-memory-title-edit = ✎ Редагувати значення
+tui-memory-field-key = Ключ:
+tui-memory-placeholder-key = введіть ключ...
+tui-memory-field-value = Значення:
+tui-memory-placeholder-value = введіть значення...
+tui-memory-hints-edit =   Tab Перемкнути поле  Enter Зберегти  Esc Скасувати
+
+
 
 
