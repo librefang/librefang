@@ -99,11 +99,11 @@ pub(super) fn record_tool_call_metric(
     )
     .increment(1);
 
-    // Per-tool latency histogram (#6228; agent dimension #6244). The duration
-    // was already captured for the decision trace; export it here so
-    // dashboards get a `librefang_tool_execution_seconds{agent,tool}`
-    // distribution attributable per agent. Both labels are sanitized + capped,
-    // so cardinality stays bounded.
+    // Per-tool latency histogram (#6228). The duration was already
+    // captured for the decision trace; export it here so dashboards get a
+    // `librefang_tool_execution_seconds{agent,tool}` distribution
+    // attributable per agent. Both labels are sanitized + capped, so
+    // cardinality stays bounded.
     if let Some(ms) = execution_ms {
         metrics::histogram!(
             "librefang_tool_execution_seconds",
