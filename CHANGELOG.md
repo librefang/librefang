@@ -836,6 +836,9 @@ _308 PRs from 7 contributors since v2026.5.17-beta.12._
 
 ### Added
 
+- **fix(runtime): spill oversized `shell_exec` output to the artifact store instead of lossily truncating it** (#6242) (@houko).
+  `shell_exec` capped each of stdout/stderr at `max_output_bytes` (default 100 KB) with `safe_truncate_str` and an `[truncated, N total bytes]` note, so the dropped middle of a long run (e.g. a 25k-line test log) was unrecoverable — the universal artifact spill never saw those bytes because the tool truncated them first.
+  Oversized streams now route through `artifact_store::maybe_spill`, yielding a compact stub the agent can page back in full via `read_artifact`, closing the only place the artifact store leaked information.
 - **feat(dashboard): provider max-token limit on the Providers page** (#6209) (@houko).
   Each provider card now shows the representative model's max-output-token limit (the `max_tokens` override when set, else the catalog `max_output_tokens`), and the config drawer lets you edit it; clearing the field reverts to the catalog default.
   Persisted through the existing per-model override endpoint, so no new persistence path is introduced.

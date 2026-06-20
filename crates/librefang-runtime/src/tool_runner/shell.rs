@@ -196,24 +196,25 @@ pub(super) async fn tool_shell_exec(
                 reg.mark_finished(pid, exit_code);
             }
 
-            let stdout_str = if stdout.len() > max_output {
-                format!(
-                    "{}...\n[truncated, {} total bytes]",
-                    crate::str_utils::safe_truncate_str(&stdout, max_output),
-                    stdout.len()
-                )
-            } else {
-                stdout.to_string()
-            };
-            let stderr_str = if stderr.len() > max_output {
-                format!(
-                    "{}...\n[truncated, {} total bytes]",
-                    crate::str_utils::safe_truncate_str(&stderr, max_output),
-                    stderr.len()
-                )
-            } else {
-                stderr.to_string()
-            };
+            // #6242: route oversized streams through the artifact store so the
+            // full bytes stay recoverable via `read_artifact`, instead of the
+            // old lossy `safe_truncate_str` that dropped the middle of a long
+            // run (e.g. a 25k-line test log) with no way to page it back in.
+            // Streams at or below `max_output` pass through inline; the
+            // universal post-tool spill (#3347) still applies to the assembled
+            // result, so small streams are unaffected.
+            let stdout_str = super::spill::spill_or_passthrough(
+                "shell_exec",
+                stdout.to_string(),
+                max_output as u64,
+                crate::artifact_store::DEFAULT_MAX_ARTIFACT_BYTES,
+            );
+            let stderr_str = super::spill::spill_or_passthrough(
+                "shell_exec",
+                stderr.to_string(),
+                max_output as u64,
+                crate::artifact_store::DEFAULT_MAX_ARTIFACT_BYTES,
+            );
 
             Ok(format!(
                 "Exit code: {exit_code}\n\nSTDOUT:\n{stdout_str}\nSTDERR:\n{stderr_str}"
