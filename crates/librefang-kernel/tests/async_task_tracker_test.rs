@@ -76,6 +76,7 @@ async fn register_inserts_into_registry_and_returns_handle() {
         TaskKind::Workflow {
             run_id: WorkflowRunId(Uuid::new_v4()),
         },
+        None,
     );
 
     assert_eq!(kernel.pending_async_task_count(), 1);
@@ -97,7 +98,7 @@ async fn complete_workflow_task_injects_signal_into_originating_session() {
     let mut rx = attach_injection_receiver(&kernel, agent_id, session_id);
 
     let run_id = WorkflowRunId(Uuid::new_v4());
-    let handle = kernel.register_async_task(agent_id, session_id, TaskKind::Workflow { run_id });
+    let handle = kernel.register_async_task(agent_id, session_id, TaskKind::Workflow { run_id }, None);
 
     let delivered = kernel
         .complete_async_task(
@@ -149,6 +150,7 @@ async fn complete_delegation_task_injects_signal_with_delegation_kind() {
             agent_id: target_agent,
             prompt_hash: "sha256:dead".to_string(),
         },
+        None,
     );
 
     let delivered = kernel
@@ -201,6 +203,7 @@ async fn complete_with_no_attached_receiver_still_removes_entry() {
         TaskKind::Workflow {
             run_id: WorkflowRunId(Uuid::new_v4()),
         },
+        None,
     );
     assert_eq!(kernel.pending_async_task_count(), 1);
 
@@ -244,6 +247,7 @@ async fn wake_idle_path_returns_true_when_self_handle_is_set() {
         TaskKind::Workflow {
             run_id: WorkflowRunId(Uuid::new_v4()),
         },
+        None,
     );
 
     let delivered = kernel
@@ -272,6 +276,7 @@ async fn double_completion_is_a_noop_on_second_call() {
         TaskKind::Workflow {
             run_id: WorkflowRunId(Uuid::new_v4()),
         },
+        None,
     );
 
     // First completion delivers.
@@ -319,8 +324,8 @@ async fn register_dedupes_workflow_kind_against_existing_run_id() {
     let session_id = SessionId(Uuid::new_v4());
     let run_id = WorkflowRunId(Uuid::new_v4());
 
-    let first = kernel.register_async_task(agent_id, session_id, TaskKind::Workflow { run_id });
-    let second = kernel.register_async_task(agent_id, session_id, TaskKind::Workflow { run_id });
+    let first = kernel.register_async_task(agent_id, session_id, TaskKind::Workflow { run_id }, None);
+    let second = kernel.register_async_task(agent_id, session_id, TaskKind::Workflow { run_id }, None);
 
     assert_eq!(
         first.id, second.id,
@@ -347,8 +352,8 @@ async fn register_dedupes_delegation_kind_against_existing_target_and_hash() {
         agent_id: target,
         prompt_hash: "sha256:deadbeef".to_string(),
     };
-    let first = kernel.register_async_task(agent_id, session_id, kind.clone());
-    let second = kernel.register_async_task(agent_id, session_id, kind);
+    let first = kernel.register_async_task(agent_id, session_id, kind.clone(), None);
+    let second = kernel.register_async_task(agent_id, session_id, kind, None);
 
     assert_eq!(first.id, second.id);
     assert_eq!(kernel.pending_async_task_count(), 1);
@@ -370,6 +375,7 @@ async fn register_does_not_dedupe_distinct_delegations_to_same_target() {
             agent_id: target,
             prompt_hash: "sha256:aaaa".to_string(),
         },
+        None,
     );
     let second = kernel.register_async_task(
         agent_id,
@@ -378,6 +384,7 @@ async fn register_does_not_dedupe_distinct_delegations_to_same_target() {
             agent_id: target,
             prompt_hash: "sha256:bbbb".to_string(),
         },
+        None,
     );
 
     assert_ne!(
@@ -409,8 +416,8 @@ async fn register_dedupe_is_cross_session_for_delegation_kind() {
         agent_id: target,
         prompt_hash: "sha256:shared".to_string(),
     };
-    let first = kernel.register_async_task(caller_a_agent, caller_a_session, kind.clone());
-    let second = kernel.register_async_task(caller_b_agent, caller_b_session, kind);
+    let first = kernel.register_async_task(caller_a_agent, caller_a_session, kind.clone(), None);
+    let second = kernel.register_async_task(caller_b_agent, caller_b_session, kind, None);
 
     assert_eq!(
         first.id, second.id,
@@ -515,6 +522,7 @@ async fn complete_falls_through_to_wake_idle_when_injection_channel_is_full() {
         TaskKind::Workflow {
             run_id: WorkflowRunId(Uuid::new_v4()),
         },
+        None,
     );
     assert_eq!(kernel.pending_async_task_count(), 1);
 
@@ -552,7 +560,7 @@ async fn recovery_synthesizes_failed_event_for_matching_pending_workflow() {
     let mut rx = attach_injection_receiver(&kernel, agent_id, session_id);
 
     let run_id = WorkflowRunId(Uuid::new_v4());
-    let handle = kernel.register_async_task(agent_id, session_id, TaskKind::Workflow { run_id });
+    let handle = kernel.register_async_task(agent_id, session_id, TaskKind::Workflow { run_id }, None);
     assert_eq!(kernel.pending_async_task_count(), 1);
 
     // Drive the recovery hook directly. In production this is called
