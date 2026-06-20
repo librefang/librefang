@@ -454,8 +454,8 @@ impl LibreFangKernel {
             // Resolve the agent's home channel so the wake-idle turn
             // has sender context and can forward the response.
             let mut sender_ctx = kernel_arc.resolve_agent_home_channel(agent_id);
-            if let (Some(ref mut ctx), Some(ref cid)) = (sender_ctx.as_mut(), chat_id.as_ref()) {
-                ctx.chat_id = Some((*cid).clone());
+            if let (Some(ref mut ctx), Some(cid)) = (sender_ctx.as_mut(), chat_id.as_ref()) {
+                ctx.chat_id = Some(cid.clone());
             }
             match kernel_arc
                 .send_message_full(
