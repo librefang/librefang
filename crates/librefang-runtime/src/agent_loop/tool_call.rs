@@ -73,7 +73,7 @@ pub(super) fn failure_type_label(
 ///   `outcome` is `"success"` / `"failure"`; `failure_type` breaks the
 ///   failure down into a fixed low-cardinality enum (see
 ///   [`failure_type_label`]). We never push raw error text into labels.
-/// - `librefang_tool_execution_seconds{tool}` histogram — per-tool wall
+/// - `librefang_tool_execution_seconds{agent,tool}` histogram — per-tool wall
 ///   time of the dispatch, recorded only when a duration is available
 ///   (`execution_ms` from the decision trace). Emitted in seconds.
 ///
@@ -99,14 +99,15 @@ pub(super) fn record_tool_call_metric(
     )
     .increment(1);
 
-    // Per-tool latency histogram (#6228). The duration was already
-    // captured for the decision trace; export it here so dashboards get a
-    // `librefang_tool_execution_seconds{tool}` distribution. `tool` is the
-    // only label, and it is already sanitized + capped, so cardinality
-    // stays bounded.
+    // Per-tool latency histogram (#6228; agent dimension #6244). The duration
+    // was already captured for the decision trace; export it here so
+    // dashboards get a `librefang_tool_execution_seconds{agent,tool}`
+    // distribution attributable per agent. Both labels are sanitized + capped,
+    // so cardinality stays bounded.
     if let Some(ms) = execution_ms {
         metrics::histogram!(
             "librefang_tool_execution_seconds",
+            "agent" => sanitize_tool_label(agent_id),
             "tool" => tool,
         )
         .record(ms as f64 / 1000.0);

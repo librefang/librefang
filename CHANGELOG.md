@@ -836,6 +836,9 @@ _308 PRs from 7 contributors since v2026.5.17-beta.12._
 
 ### Added
 
+- **feat(runtime): add the `agent` dimension to `librefang_tool_execution_seconds`** (#6244) (@houko).
+  The per-tool latency histogram carried only a `tool` label, so per-tool p95 was an unweighted blend across every calling agent — a slow agent and a fast agent sharing a tool were indistinguishable, even though the sibling `librefang_tool_call_total` counter already carried `agent` (#6226).
+  The histogram now emits `{agent,tool}`, with `agent` sourced from the `agent_id` already in scope and sanitized + length-capped like `tool`, so tool latency is attributable per agent while cardinality stays bounded.
 - **feat(dashboard): provider max-token limit on the Providers page** (#6209) (@houko).
   Each provider card now shows the representative model's max-output-token limit (the `max_tokens` override when set, else the catalog `max_output_tokens`), and the config drawer lets you edit it; clearing the field reverts to the catalog default.
   Persisted through the existing per-model override endpoint, so no new persistence path is introduced.

@@ -1416,6 +1416,10 @@ fn test_record_tool_call_metric_emits_latency_histogram() {
                 .key()
                 .labels()
                 .any(|l| l.key() == "tool" && l.value() == "histtool")
+            && ckey
+                .key()
+                .labels()
+                .any(|l| l.key() == "agent" && l.value() == "agent")
             && matches!(val, DebugValue::Histogram(_))
     });
     let hist = hist.expect("librefang_tool_execution_seconds{tool=histtool} must be recorded");
