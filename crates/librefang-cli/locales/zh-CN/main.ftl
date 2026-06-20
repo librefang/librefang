@@ -1173,3 +1173,44 @@ tui-agents-detail-none = [无]
 tui-agents-default-desc = 自定义 { $name } Agent
 tui-agents-default-prompt = 您是 { $name }，一个有用的助手。
 
+# --- Workflows screen ---
+tui-workflows-title-screen = 工作流
+tui-workflows-header-id = ID
+tui-workflows-header-name = 名称
+tui-workflows-header-steps = 步骤数
+tui-workflows-header-created = 创建时间
+tui-workflows-loading = 正在加载工作流...
+tui-workflows-empty-state = 未定义工作流。使用 [n] 创建一个。
+tui-workflows-create-new-option =   + 创建新工作流
+tui-workflows-hints-list =   [↑↓] 导航  [Enter] 查看运行  [x] 运行  [n] 新建  [r] 刷新
+tui-workflows-title-runs = 运行历史: { $name }
+tui-workflows-header-run-id = 运行 ID
+tui-workflows-header-state = 状态
+tui-workflows-header-duration = 耗时
+tui-workflows-header-output = 输出
+tui-workflows-runs-empty = 尚无运行记录。在列表中按 [x] 运行。
+tui-workflows-hints-runs =   [↑↓] 导航  [r] 刷新  [Esc] 返回
+tui-workflows-title-create = 创建新工作流
+tui-workflows-create-step =   第 { $current } 步，共 { $total } 步
+tui-workflows-label-name = 工作流名称:
+tui-workflows-placeholder-name = my-workflow
+tui-workflows-label-desc = 描述:
+tui-workflows-placeholder-desc = 此工作流的作用
+tui-workflows-label-steps = 步骤 (JSON 数组):
+tui-workflows-placeholder-steps = [{"action":"..."}]
+tui-workflows-label-review = 确认 — 按 Enter 创建
+tui-workflows-review-name =   名称:  
+tui-workflows-review-desc =   描述:  
+tui-workflows-hints-create-submit =   [Enter] 创建  [Esc] 返回
+tui-workflows-hints-create-next =   [Enter] 下一步  [Esc] 返回
+tui-workflows-title-run-input = 运行: { $name }
+tui-workflows-label-run-input =   输入 (JSON 或文本):
+tui-workflows-placeholder-run-input = 输入工作流输入...
+tui-workflows-hints-run-input =   [Enter] 运行  [Esc] 取消
+tui-workflows-title-run-result = 工作流运行结果
+tui-workflows-running = 正在运行工作流...
+tui-workflows-result-complete = 完成
+tui-workflows-result-empty = 无结果。
+tui-workflows-hints-run-result =   [Enter/Esc] 返回
+
+

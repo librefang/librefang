@@ -2009,3 +2009,44 @@ tui-agents-detail-none = [Немає]
 tui-agents-default-desc = Власний агент { $name }
 tui-agents-default-prompt = Ви — { $name }, корисний помічник.
 
+# --- Workflows screen ---
+tui-workflows-title-screen = Воркфлоу
+tui-workflows-header-id = ID
+tui-workflows-header-name = Назва
+tui-workflows-header-steps = Кроки
+tui-workflows-header-created = Створено
+tui-workflows-loading = Завантаження воркфлоу...
+tui-workflows-empty-state = Немає визначених воркфлоу. Створіть новий за допомогою [n].
+tui-workflows-create-new-option =   + Створити новий воркфлоу
+tui-workflows-hints-list =   [↑↓] Навігація  [Enter] Переглянути запуски  [x] Запуск  [n] Новий  [r] Оновити
+tui-workflows-title-runs = Запуски для: { $name }
+tui-workflows-header-run-id = Run ID
+tui-workflows-header-state = Статус
+tui-workflows-header-duration = Тривалість
+tui-workflows-header-output = Вивід
+tui-workflows-runs-empty = Запусків ще немає. Натисніть [x] у списку, щоб запустити.
+tui-workflows-hints-runs =   [↑↓] Навігація  [r] Оновити  [Esc] Назад
+tui-workflows-title-create = Створити новий воркфлоу
+tui-workflows-create-step =   Крок { $current } з { $total }
+tui-workflows-label-name = Назва воркфлоу:
+tui-workflows-placeholder-name = мій-воркфлоу
+tui-workflows-label-desc = Опис:
+tui-workflows-placeholder-desc = Що робить цей воркфлоу
+tui-workflows-label-steps = Кроки (JSON-масив):
+tui-workflows-placeholder-steps = [{"action":"..."}]
+tui-workflows-label-review = Огляд — натисніть Enter, щоб створити
+tui-workflows-review-name =   Назва: 
+tui-workflows-review-desc =   Опис:  
+tui-workflows-hints-create-submit =   [Enter] Створити  [Esc] Назад
+tui-workflows-hints-create-next =   [Enter] Далі  [Esc] Назад
+tui-workflows-title-run-input = Запуск: { $name }
+tui-workflows-label-run-input =   Вхідні дані (JSON або текст):
+tui-workflows-placeholder-run-input = введіть вхідні дані воркфлоу...
+tui-workflows-hints-run-input =   [Enter] Запуск  [Esc] Скасувати
+tui-workflows-title-run-result = Результат виконання воркфлоу
+tui-workflows-running = Виконання воркфлоу...
+tui-workflows-result-complete = Виконано
+tui-workflows-result-empty = Немає результату.
+tui-workflows-hints-run-result =   [Enter/Esc] Назад
+
+

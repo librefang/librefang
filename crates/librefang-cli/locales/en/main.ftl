@@ -1993,4 +1993,45 @@ tui-agents-detail-none = [None]
 tui-agents-default-desc = A custom { $name } agent
 tui-agents-default-prompt = You are { $name }, a helpful agent.
 
+# --- Workflows screen ---
+tui-workflows-title-screen = Workflows
+tui-workflows-header-id = ID
+tui-workflows-header-name = Name
+tui-workflows-header-steps = Steps
+tui-workflows-header-created = Created
+tui-workflows-loading = Loading workflows...
+tui-workflows-empty-state = No workflows defined. Create one with [n].
+tui-workflows-create-new-option =   + Create new workflow
+tui-workflows-hints-list =   [↑↓] Navigate  [Enter] View runs  [x] Run  [n] New  [r] Refresh
+tui-workflows-title-runs = Runs for: { $name }
+tui-workflows-header-run-id = Run ID
+tui-workflows-header-state = State
+tui-workflows-header-duration = Duration
+tui-workflows-header-output = Output
+tui-workflows-runs-empty = No runs yet. Press [x] from the list to run.
+tui-workflows-hints-runs =   [↑↓] Navigate  [r] Refresh  [Esc] Back
+tui-workflows-title-create = Create New Workflow
+tui-workflows-create-step =   Step { $current } of { $total }
+tui-workflows-label-name = Workflow name:
+tui-workflows-placeholder-name = my-workflow
+tui-workflows-label-desc = Description:
+tui-workflows-placeholder-desc = What this workflow does
+tui-workflows-label-steps = Steps (JSON array):
+tui-workflows-placeholder-steps = [{"action":"..."}]
+tui-workflows-label-review = Review — press Enter to create
+tui-workflows-review-name =   Name:  
+tui-workflows-review-desc =   Desc:  
+tui-workflows-hints-create-submit =   [Enter] Create  [Esc] Back
+tui-workflows-hints-create-next =   [Enter] Next  [Esc] Back
+tui-workflows-title-run-input = Run: { $name }
+tui-workflows-label-run-input =   Input (JSON or text):
+tui-workflows-placeholder-run-input = enter workflow input...
+tui-workflows-hints-run-input =   [Enter] Run  [Esc] Cancel
+tui-workflows-title-run-result = Workflow Run Result
+tui-workflows-running = Running workflow...
+tui-workflows-result-complete = Complete
+tui-workflows-result-empty = No result.
+tui-workflows-hints-run-result =   [Enter/Esc] Back
+
+
 
