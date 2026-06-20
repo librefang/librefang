@@ -78,14 +78,23 @@ mod tests {
 
         // The oversized stream is replaced by a compact stub — not returned
         // verbatim, and not the old lossy `[truncated, N total bytes]` form.
-        assert!(out.len() < 8192, "oversized body must be replaced by a compact stub");
+        assert!(
+            out.len() < 8192,
+            "oversized body must be replaced by a compact stub"
+        );
         assert!(!out.contains("[truncated"), "must not lossily truncate");
         // The full bytes were written to the artifact store, so the agent can
         // page them back via read_artifact — the loss the issue (#6242) flags.
         let artifacts = tmp.path().join("data").join("artifacts");
         let wrote_artifact = std::fs::read_dir(&artifacts)
-            .map(|d| d.flatten().any(|e| e.path().extension().is_some_and(|x| x == "bin")))
+            .map(|d| {
+                d.flatten()
+                    .any(|e| e.path().extension().is_some_and(|x| x == "bin"))
+            })
             .unwrap_or(false);
-        assert!(wrote_artifact, "a recoverable artifact file must be written");
+        assert!(
+            wrote_artifact,
+            "a recoverable artifact file must be written"
+        );
     }
 }
