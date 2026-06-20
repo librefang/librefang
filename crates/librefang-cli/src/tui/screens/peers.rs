@@ -83,11 +83,8 @@ impl PeersState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut PeersState) {
-    let inner = widgets::render_screen_block(
-        f,
-        area,
-        &format!("{} {}", "\u{25cc}", crate::i18n::t("tui-peers-title")),
-    );
+    let inner =
+        widgets::render_screen_block(f, area, &format!("◌ {}", crate::i18n::t("tui-peers-title")));
 
     let chunks = Layout::vertical([
         Constraint::Length(2), // header
@@ -108,8 +105,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut PeersState) {
                 ),
                 Span::styled(
                     format!(
-                        "  {} {}",
-                        "\u{2502}",
+                        "  │ {}",
                         crate::i18n::t_args(
                             "tui-peers-count",
                             &[("count", &state.peers.len().to_string())]
@@ -124,27 +120,27 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut PeersState) {
                     format!("{:<14}", crate::i18n::t("tui-peers-header-node-id")),
                     theme::table_header(),
                 ),
-                Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
+                Span::styled(" │ ", Style::default().fg(theme::BORDER)),
                 Span::styled(
                     format!("{:<16}", crate::i18n::t("tui-peers-header-name")),
                     theme::table_header(),
                 ),
-                Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
+                Span::styled(" │ ", Style::default().fg(theme::BORDER)),
                 Span::styled(
                     format!("{:<20}", crate::i18n::t("tui-peers-header-address")),
                     theme::table_header(),
                 ),
-                Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
+                Span::styled(" │ ", Style::default().fg(theme::BORDER)),
                 Span::styled(
                     format!("{:<10}", crate::i18n::t("tui-peers-header-status")),
                     theme::table_header(),
                 ),
-                Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
+                Span::styled(" │ ", Style::default().fg(theme::BORDER)),
                 Span::styled(
                     format!("{:<6}", crate::i18n::t("tui-peers-header-agents")),
                     theme::table_header(),
                 ),
-                Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
+                Span::styled(" │ ", Style::default().fg(theme::BORDER)),
                 Span::styled(
                     crate::i18n::t("tui-peers-header-protocol"),
                     theme::table_header(),
@@ -171,33 +167,21 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut PeersState) {
             .iter()
             .map(|p| {
                 let id_short = if p.node_id.len() > 12 {
-                    format!("{}\u{2026}", librefang_types::truncate_str(&p.node_id, 12))
+                    format!("{}…", librefang_types::truncate_str(&p.node_id, 12))
                 } else {
                     p.node_id.clone()
                 };
                 let (state_badge, state_style) = match p.state.to_lowercase().as_str() {
                     "connected" | "active" => (
-                        format!(
-                            "{} {}",
-                            "\u{25cf}",
-                            crate::i18n::t("tui-peers-status-active")
-                        ),
+                        format!("● {}", crate::i18n::t("tui-peers-status-active")),
                         Style::default().fg(theme::GREEN),
                     ),
                     "disconnected" | "inactive" => (
-                        format!(
-                            "{} {}",
-                            "\u{25cb}",
-                            crate::i18n::t("tui-peers-status-offline")
-                        ),
+                        format!("○ {}", crate::i18n::t("tui-peers-status-offline")),
                         theme::dim_style(),
                     ),
                     "connecting" | "pending" => (
-                        format!(
-                            "{} {}",
-                            "\u{25cb}",
-                            crate::i18n::t("tui-peers-status-pending")
-                        ),
+                        format!("○ {}", crate::i18n::t("tui-peers-status-pending")),
                         Style::default().fg(theme::YELLOW),
                     ),
                     _ => (p.state.clone(), theme::dim_style()),
@@ -208,24 +192,24 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut PeersState) {
                         format!("{:<14}", id_short),
                         Style::default().fg(theme::PURPLE),
                     ),
-                    Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
+                    Span::styled(" │ ", Style::default().fg(theme::BORDER)),
                     Span::styled(
                         format!("{:<16}", widgets::truncate(&p.node_name, 15)),
                         Style::default().fg(theme::CYAN),
                     ),
-                    Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
+                    Span::styled(" │ ", Style::default().fg(theme::BORDER)),
                     Span::styled(
                         format!("{:<20}", widgets::truncate(&p.address, 19)),
                         Style::default().fg(theme::TEXT_SECONDARY),
                     ),
-                    Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
+                    Span::styled(" │ ", Style::default().fg(theme::BORDER)),
                     Span::styled(format!("{:<10}", state_badge), state_style),
-                    Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
+                    Span::styled(" │ ", Style::default().fg(theme::BORDER)),
                     Span::styled(
                         format!("{:<6}", p.agent_count),
                         Style::default().fg(theme::GREEN),
                     ),
-                    Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
+                    Span::styled(" │ ", Style::default().fg(theme::BORDER)),
                     Span::styled(
                         p.protocol_version.clone(),
                         Style::default().fg(theme::TEXT_TERTIARY),
