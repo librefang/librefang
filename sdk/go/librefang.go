@@ -440,6 +440,10 @@ func (r *AgentsResource) CompactSession(id string) (interface{}, error) {
 	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/session/compact", id), nil, nil)
 }
 
+func (r *AgentsResource) GetAgentSessionContext(id string, query map[string]string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/session/context", id), nil, query)
+}
+
 func (r *AgentsResource) RebootSession(id string) (interface{}, error) {
 	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/session/reboot", id), nil, nil)
 }
@@ -750,6 +754,10 @@ func (r *ChannelsResource) ListChannelRegistry() (interface{}, error) {
 
 func (r *ChannelsResource) ReloadChannels() (interface{}, error) {
 	return r.client.request("POST", "/api/channels/reload", nil, nil)
+}
+
+func (r *ChannelsResource) DeleteSidecarChannel(name string) (interface{}, error) {
+	return r.client.request("DELETE", fmt.Sprintf("/api/channels/sidecar/%s", name), nil, nil)
 }
 
 func (r *ChannelsResource) ConfigureSidecarChannel(name string, data map[string]interface{}) (interface{}, error) {

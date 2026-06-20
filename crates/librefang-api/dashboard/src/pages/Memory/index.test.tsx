@@ -8,7 +8,7 @@
 
 import React from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryPage } from "./index";
 import {
@@ -30,6 +30,7 @@ import {
   useTriggerAutoDream,
   useAbortAutoDream,
   useSetAutoDreamEnabled,
+  useSetAutoDreamGlobalEnabled,
 } from "../../lib/mutations/autoDream";
 
 vi.mock("../../lib/queries/memory", () => ({
@@ -67,6 +68,7 @@ vi.mock("../../lib/mutations/autoDream", () => ({
   useTriggerAutoDream: vi.fn(),
   useAbortAutoDream: vi.fn(),
   useSetAutoDreamEnabled: vi.fn(),
+  useSetAutoDreamGlobalEnabled: vi.fn(),
 }));
 
 vi.mock("../../lib/useCreateShortcut", () => ({
@@ -171,6 +173,7 @@ const useUpdateMemoryConfigMock = useUpdateMemoryConfig as unknown as ReturnType
 const useTriggerAutoDreamMock = useTriggerAutoDream as unknown as ReturnType<typeof vi.fn>;
 const useAbortAutoDreamMock = useAbortAutoDream as unknown as ReturnType<typeof vi.fn>;
 const useSetAutoDreamEnabledMock = useSetAutoDreamEnabled as unknown as ReturnType<typeof vi.fn>;
+const useSetAutoDreamGlobalEnabledMock = useSetAutoDreamGlobalEnabled as unknown as ReturnType<typeof vi.fn>;
 
 const STATS = { total: 7, user_count: 2, session_count: 3, agent_count: 2 };
 const CONFIG = {
@@ -224,6 +227,7 @@ describe("MemoryPage (redesigned)", () => {
   let deleteMutate: ReturnType<typeof vi.fn>;
   let cleanupMutate: ReturnType<typeof vi.fn>;
   let configMutateAsync: ReturnType<typeof vi.fn>;
+  let setConfigMutate: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -233,6 +237,7 @@ describe("MemoryPage (redesigned)", () => {
     deleteMutate = vi.fn();
     cleanupMutate = vi.fn();
     configMutateAsync = vi.fn().mockResolvedValue(undefined);
+    setConfigMutate = vi.fn().mockResolvedValue(undefined);
 
     useMemoryStatsMock.mockReturnValue({
       data: STATS,
@@ -270,6 +275,7 @@ describe("MemoryPage (redesigned)", () => {
     useTriggerAutoDreamMock.mockReturnValue({ mutateAsync: vi.fn(), isPending: false });
     useAbortAutoDreamMock.mockReturnValue({ mutateAsync: vi.fn(), isPending: false });
     useSetAutoDreamEnabledMock.mockReturnValue({ mutateAsync: vi.fn(), isPending: false });
+    useSetAutoDreamGlobalEnabledMock.mockReturnValue({ mutateAsync: setConfigMutate, isPending: false });
   });
 
   it("renders scope summary with totals from useMemoryStats", () => {
@@ -353,5 +359,32 @@ describe("MemoryPage (redesigned)", () => {
     // Health tab surfaces the embedding provider readout. Default values
     // from the i18n mock — not the key strings.
     expect(screen.getByText("Embedding backbone")).toBeInTheDocument();
+  });
+
+  it("toggles the global Auto-Dream switch through useSetAutoDreamGlobalEnabled", async () => {
+    searchState = { tab: "dreams" };
+    // The Auto-Dream tab header only renders when at least one agent exists.
+    useAgentsMock.mockReturnValue({
+      data: [{ id: "agent-1", name: "Agent One" }],
+      isFetching: false,
+      refetch: vi.fn(),
+    });
+    // enabled:false globally, no per-agent dream rows → the global switch is
+    // the only checkbox on the page.
+    useAutoDreamStatusMock.mockReturnValue({
+      data: { enabled: false, agents: [] },
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    });
+    renderPage();
+    const toggle = screen.getByRole("checkbox");
+    expect(toggle).not.toBeChecked();
+    await act(async () => { fireEvent.click(toggle); });
+    expect(setConfigMutate).toHaveBeenCalledTimes(1);
+    expect(setConfigMutate).toHaveBeenCalledWith({
+      path: "auto_dream.enabled",
+      value: true,
+    });
   });
 });

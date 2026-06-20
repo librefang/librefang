@@ -6,7 +6,10 @@ use super::text_recovery::{
     looks_like_hallucinated_action, parse_dash_dash_args, parse_json_tool_call_object,
     user_message_has_action_intent,
 };
-use super::tool_call::{finalize_tool_use_results, record_tool_call_metric, StagedToolUseTurn};
+use super::tool_call::{
+    failure_type_label, finalize_tool_use_results, record_tool_call_metric,
+    record_tool_span_outcome, StagedToolUseTurn,
+};
 use super::tool_resolution::{resolve_request_tools, LAZY_TOOLS_THRESHOLD};
 use super::web_augment::{should_augment_web_search, SEARCH_QUERY_GEN_PROMPT};
 use super::*;

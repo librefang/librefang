@@ -15,7 +15,65 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use thiserror::Error;
 use tokio::process::Command;
+
+// ── error type ─────────────────────────────────────────────────────────────────
+
+/// Structured error returned by [`TmuxController`] methods and [`parse_window_list`].
+///
+/// Replaces the historical `anyhow::Error` shape so callers can branch on the *kind* of failure (spawn vs. timeout vs. non-zero exit vs. malformed output) rather than substring-matching the rendered string.
+/// The `Display` text is preserved byte-for-byte from the previous `anyhow!(…)` call sites because it reaches daemon logs (`warn!(error = %e, …)`) — see `routes/terminal.rs`.
+///
+/// Refs: #3576.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum TmuxError {
+    /// `Command::spawn()` failed before the process started.
+    /// `cmd` names which tmux invocation could not be launched (e.g. `"tmux"`, `"tmux has-session"`, `"tmux new-session"`); the `source` is the underlying spawn `io::Error`.
+    #[error("failed to spawn {cmd}: {source}")]
+    Spawn {
+        cmd: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// The subprocess did not finish within the hard timeout.
+    /// `what` names the operation that stalled (e.g. `"tmux command"`, `"tmux has-session"`, `"tmux new-session"`).
+    #[error("{what} timed out")]
+    Timeout { what: &'static str },
+
+    /// Waiting on the subprocess (collecting its output) failed with an I/O error after it was spawned.
+    #[error("tmux I/O error: {source}")]
+    Io {
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// tmux ran but exited non-zero.
+    /// `status` is the rendered exit status and `stderr` is the trimmed standard-error output.
+    #[error("tmux exited with {status}: {stderr}")]
+    NonZeroExit { status: String, stderr: String },
+
+    /// A window id or name failed validation before any subprocess was spawned.
+    /// The message preserves the regex-pattern detail the previous `anyhow!` call sites surfaced.
+    #[error("{0}")]
+    InvalidArgument(String),
+
+    /// `tmux new-window -P` succeeded but produced no parseable window line.
+    #[error("tmux new-window returned no output")]
+    NoOutput,
+
+    /// A line of `list-windows -F` output was missing an expected field.
+    /// `field` is the absent column (`"window_id"`, `"window_index"`, `"window_name"`, `"window_active"`); `line` is the offending raw line.
+    #[error("missing {field} in tmux output: {line:?}")]
+    MissingField { field: &'static str, line: String },
+
+    /// The `window_index` column could not be parsed as a `u32`.
+    /// `value` is the raw token that failed to parse.
+    #[error("invalid window index {value:?}")]
+    InvalidIndex { value: String },
+}
 
 // ── constants ────────────────────────────────────────────────────────────────
 
@@ -86,27 +144,29 @@ impl TmuxController {
 
     /// Run a command, collect its stdout, and return an error if it exits
     /// non-zero.
-    async fn run(&self, mut cmd: Command) -> anyhow::Result<String> {
+    async fn run(&self, mut cmd: Command) -> Result<String, TmuxError> {
         // Silence stderr so tmux error messages don't bleed into daemon logs.
         cmd.stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
-        let child = cmd
-            .spawn()
-            .map_err(|e| anyhow::anyhow!("failed to spawn tmux: {e}"))?;
+        let child = cmd.spawn().map_err(|e| TmuxError::Spawn {
+            cmd: "tmux",
+            source: e,
+        })?;
 
         let result = tokio::time::timeout(TMUX_TIMEOUT, child.wait_with_output())
             .await
-            .map_err(|_| anyhow::anyhow!("tmux command timed out"))?
-            .map_err(|e| anyhow::anyhow!("tmux I/O error: {e}"))?;
+            .map_err(|_| TmuxError::Timeout {
+                what: "tmux command",
+            })?
+            .map_err(|e| TmuxError::Io { source: e })?;
 
         if !result.status.success() {
             let stderr = String::from_utf8_lossy(&result.stderr);
-            return Err(anyhow::anyhow!(
-                "tmux exited with {}: {}",
-                result.status,
-                stderr.trim()
-            ));
+            return Err(TmuxError::NonZeroExit {
+                status: result.status.to_string(),
+                stderr: stderr.trim().to_string(),
+            });
         }
 
         Ok(String::from_utf8_lossy(&result.stdout).into_owned())
@@ -140,7 +200,7 @@ impl TmuxController {
     /// sequence is inherently racy when multiple requests arrive simultaneously;
     /// a "duplicate session" error from `new-session` means another concurrent
     /// caller already created the session, which is a success condition.
-    pub async fn ensure_session(&self) -> anyhow::Result<()> {
+    pub async fn ensure_session(&self) -> Result<(), TmuxError> {
         // Check whether the session already exists.
         let mut check = self.base_cmd();
         check.arg("has-session").arg("-t").arg(&self.session_name);
@@ -150,14 +210,17 @@ impl TmuxController {
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null());
 
-            let child = check
-                .spawn()
-                .map_err(|e| anyhow::anyhow!("failed to spawn tmux has-session: {e}"))?;
+            let child = check.spawn().map_err(|e| TmuxError::Spawn {
+                cmd: "tmux has-session",
+                source: e,
+            })?;
 
             let out = tokio::time::timeout(TMUX_TIMEOUT, child.wait_with_output())
                 .await
-                .map_err(|_| anyhow::anyhow!("tmux has-session timed out"))?
-                .map_err(|e| anyhow::anyhow!("tmux I/O error: {e}"))?;
+                .map_err(|_| TmuxError::Timeout {
+                    what: "tmux has-session",
+                })?
+                .map_err(|e| TmuxError::Io { source: e })?;
 
             out.status.success()
         };
@@ -177,14 +240,17 @@ impl TmuxController {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped());
 
-        let child = create
-            .spawn()
-            .map_err(|e| anyhow::anyhow!("failed to spawn tmux new-session: {e}"))?;
+        let child = create.spawn().map_err(|e| TmuxError::Spawn {
+            cmd: "tmux new-session",
+            source: e,
+        })?;
 
         let out = tokio::time::timeout(TMUX_TIMEOUT, child.wait_with_output())
             .await
-            .map_err(|_| anyhow::anyhow!("tmux new-session timed out"))?
-            .map_err(|e| anyhow::anyhow!("tmux I/O error: {e}"))?;
+            .map_err(|_| TmuxError::Timeout {
+                what: "tmux new-session",
+            })?
+            .map_err(|e| TmuxError::Io { source: e })?;
 
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
@@ -192,18 +258,17 @@ impl TmuxController {
             if stderr.contains("duplicate session") {
                 return Ok(());
             }
-            return Err(anyhow::anyhow!(
-                "tmux exited with {}: {}",
-                out.status,
-                stderr.trim()
-            ));
+            return Err(TmuxError::NonZeroExit {
+                status: out.status.to_string(),
+                stderr: stderr.trim().to_string(),
+            });
         }
 
         Ok(())
     }
 
     /// Return metadata for all windows in the session.
-    pub async fn list_windows(&self) -> anyhow::Result<Vec<WindowInfo>> {
+    pub async fn list_windows(&self) -> Result<Vec<WindowInfo>, TmuxError> {
         let mut cmd = self.base_cmd();
         cmd.arg("list-windows")
             .arg("-t")
@@ -219,13 +284,13 @@ impl TmuxController {
     ///
     /// If `name` is provided it is validated before the subprocess is spawned;
     /// an invalid name is rejected immediately without touching tmux.
-    pub async fn new_window(&self, name: Option<&str>) -> anyhow::Result<WindowInfo> {
+    pub async fn new_window(&self, name: Option<&str>) -> Result<WindowInfo, TmuxError> {
         if let Some(n) = name {
             if !validate_window_name(n) {
-                return Err(anyhow::anyhow!(
+                return Err(TmuxError::InvalidArgument(format!(
                     "invalid window name {:?}: must match ^[A-Za-z0-9 ._-]{{1,64}}$",
                     n
-                ));
+                )));
             }
         }
 
@@ -244,20 +309,18 @@ impl TmuxController {
 
         let output = self.run(cmd).await?;
         let mut windows = parse_window_list(output.trim())?;
-        windows
-            .pop()
-            .ok_or_else(|| anyhow::anyhow!("tmux new-window returned no output"))
+        windows.pop().ok_or(TmuxError::NoOutput)
     }
 
     /// Switch the active window to the one identified by `id` (e.g. `"@1"`).
     ///
     /// The ID is validated before the subprocess is spawned.
-    pub async fn select_window(&self, id: &str) -> anyhow::Result<()> {
+    pub async fn select_window(&self, id: &str) -> Result<(), TmuxError> {
         if !validate_window_id(id) {
-            return Err(anyhow::anyhow!(
+            return Err(TmuxError::InvalidArgument(format!(
                 "invalid window id {:?}: must match ^@[0-9]{{1,9}}$",
                 id
-            ));
+            )));
         }
 
         let mut cmd = self.base_cmd();
@@ -273,18 +336,18 @@ impl TmuxController {
     ///
     /// Both the ID and the new name are validated before the subprocess is
     /// spawned.
-    pub async fn rename_window(&self, id: &str, name: &str) -> anyhow::Result<()> {
+    pub async fn rename_window(&self, id: &str, name: &str) -> Result<(), TmuxError> {
         if !validate_window_id(id) {
-            return Err(anyhow::anyhow!(
+            return Err(TmuxError::InvalidArgument(format!(
                 "invalid window id {:?}: must match ^@[0-9]{{1,9}}$",
                 id
-            ));
+            )));
         }
         if !validate_window_name(name) {
-            return Err(anyhow::anyhow!(
+            return Err(TmuxError::InvalidArgument(format!(
                 "invalid window name {:?}: must match ^[A-Za-z0-9 ._-]{{1,64}}$",
                 name
-            ));
+            )));
         }
 
         let mut cmd = self.base_cmd();
@@ -299,12 +362,12 @@ impl TmuxController {
     /// Kill a single window by ID (e.g. `"@1"`).
     ///
     /// The ID is validated before the subprocess is spawned.
-    pub async fn kill_window(&self, id: &str) -> anyhow::Result<()> {
+    pub async fn kill_window(&self, id: &str) -> Result<(), TmuxError> {
         if !validate_window_id(id) {
-            return Err(anyhow::anyhow!(
+            return Err(TmuxError::InvalidArgument(format!(
                 "invalid window id {:?}: must match ^@[0-9]{{1,9}}$",
                 id
-            ));
+            )));
         }
 
         let mut cmd = self.base_cmd();
@@ -316,7 +379,7 @@ impl TmuxController {
     }
 
     /// Destroy the entire session. Intended for daemon shutdown / cleanup.
-    pub async fn kill_session(&self) -> anyhow::Result<()> {
+    pub async fn kill_session(&self) -> Result<(), TmuxError> {
         let mut cmd = self.base_cmd();
         cmd.arg("kill-session").arg("-t").arg(&self.session_name);
         self.run(cmd).await?;
@@ -373,7 +436,7 @@ pub fn validate_window_name(name: &str) -> bool {
 /// Each non-empty line is split into exactly four fields using `splitn(4, '|')`.
 /// Window names from tmux are returned as-is (upstream validators ensure names
 /// were whitelisted when created through this controller).
-fn parse_window_list(output: &str) -> anyhow::Result<Vec<WindowInfo>> {
+fn parse_window_list(output: &str) -> Result<Vec<WindowInfo>, TmuxError> {
     let mut windows = Vec::new();
 
     for line in output.lines() {
@@ -383,23 +446,29 @@ fn parse_window_list(output: &str) -> anyhow::Result<Vec<WindowInfo>> {
         }
 
         let mut parts = line.splitn(4, '|');
-        let id = parts
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("missing window_id in tmux output: {:?}", line))?;
-        let index_str = parts
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("missing window_index in tmux output: {:?}", line))?;
-        let name = parts
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("missing window_name in tmux output: {:?}", line))?;
-        let active_str = parts
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("missing window_active in tmux output: {:?}", line))?;
+        let id = parts.next().ok_or_else(|| TmuxError::MissingField {
+            field: "window_id",
+            line: line.to_string(),
+        })?;
+        let index_str = parts.next().ok_or_else(|| TmuxError::MissingField {
+            field: "window_index",
+            line: line.to_string(),
+        })?;
+        let name = parts.next().ok_or_else(|| TmuxError::MissingField {
+            field: "window_name",
+            line: line.to_string(),
+        })?;
+        let active_str = parts.next().ok_or_else(|| TmuxError::MissingField {
+            field: "window_active",
+            line: line.to_string(),
+        })?;
 
         let index: u32 = index_str
             .trim()
             .parse()
-            .map_err(|_| anyhow::anyhow!("invalid window index {:?}", index_str))?;
+            .map_err(|_| TmuxError::InvalidIndex {
+                value: index_str.to_string(),
+            })?;
 
         let active = active_str.trim() == "1";
 
@@ -485,13 +554,27 @@ mod tests {
     fn parse_malformed_line_returns_error() {
         // Missing the active field.
         let raw = "@1|0|editor";
-        assert!(parse_window_list(raw).is_err());
+        let err = parse_window_list(raw).unwrap_err();
+        assert!(matches!(
+            err,
+            TmuxError::MissingField {
+                field: "window_active",
+                ..
+            }
+        ));
+        // Display text preserved byte-for-byte from the previous anyhow! shape.
+        assert_eq!(
+            err.to_string(),
+            "missing window_active in tmux output: \"@1|0|editor\""
+        );
     }
 
     #[test]
     fn parse_bad_index_returns_error() {
         let raw = "@1|abc|editor|1";
-        assert!(parse_window_list(raw).is_err());
+        let err = parse_window_list(raw).unwrap_err();
+        assert!(matches!(err, TmuxError::InvalidIndex { .. }));
+        assert_eq!(err.to_string(), "invalid window index \"abc\"");
     }
 
     // ── validate_window_id ────────────────────────────────────────────────────

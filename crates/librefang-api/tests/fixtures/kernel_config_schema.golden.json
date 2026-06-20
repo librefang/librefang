@@ -895,6 +895,11 @@
     "CompactionTomlConfig": {
       "description": "Session compaction configuration (exposed in `[compaction]` TOML section).\n\nControls when and how the LLM-based history compaction runs. Internal algorithmic ratios (base_chunk_ratio, safety_margin, etc.) are kept as private constants inside the runtime compactor and are not exposed here.",
       "properties": {
+        "aggregate_developer_loops": {
+          "default": false,
+          "description": "Aggregate consecutive developer-tool loops (edit/run/test) during compaction (default: false).",
+          "type": "boolean"
+        },
         "keep_recent": {
           "default": 10,
           "description": "Number of recent messages to preserve verbatim (default: 10).",
@@ -909,6 +914,13 @@
           "minimum": 0.0,
           "type": "integer"
         },
+        "max_loop_steps_before_aggregate": {
+          "default": 5,
+          "description": "Minimum consecutive developer-tool steps before loop aggregation triggers (default: 5).",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
         "max_retries": {
           "default": 3,
           "description": "Maximum retries for LLM summarization (default: 3).",
@@ -920,6 +932,13 @@
           "default": 1024,
           "description": "Maximum tokens for summary output (default: 1024).",
           "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "strip_reasoning_after_turns": {
+          "default": 0,
+          "description": "Strip reasoning from assistant messages older than this many turns during compaction; 0 disables (default: 0).",
+          "format": "uint32",
           "minimum": 0.0,
           "type": "integer"
         },
@@ -5988,10 +6007,13 @@
         }
       ],
       "default": {
+        "aggregate_developer_loops": false,
         "keep_recent": 10,
         "max_chunk_chars": 80000,
+        "max_loop_steps_before_aggregate": 5,
         "max_retries": 3,
         "max_summary_tokens": 1024,
+        "strip_reasoning_after_turns": 0,
         "threshold_messages": 30,
         "token_threshold_ratio": 0.7
       },

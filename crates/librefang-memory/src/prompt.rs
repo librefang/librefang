@@ -238,6 +238,23 @@ impl PromptStore {
 
     pub fn delete_version(&self, id: Uuid) -> LibreFangResult<()> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        // Guard: reject active (bound) version; None (unknown id) falls through to idempotent no-op DELETE.
+        let is_active: Option<bool> = conn
+            .query_row(
+                "SELECT is_active FROM prompt_versions WHERE id = ?1",
+                [id.to_string()],
+                |row| row.get::<_, i64>(0).map(|v| v != 0),
+            )
+            .optional()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        if is_active == Some(true) {
+            return Err(LibreFangError::InvalidState {
+                current: "active prompt version".to_string(),
+                operation:
+                    "delete a prompt version that is still active (bound to its agent); activate another version first"
+                        .to_string(),
+            });
+        }
         conn.execute(
             "DELETE FROM prompt_versions WHERE id = ?1",
             [id.to_string()],
@@ -762,6 +779,48 @@ mod tests {
         let active = store.get_active_version(agent_id).unwrap();
         assert!(active.is_some());
         assert_eq!(active.unwrap().version, 2);
+    }
+
+    #[test]
+    fn test_delete_version_blocks_active_allows_inactive() {
+        let store = create_test_store();
+        let agent_id = AgentId::new();
+        let v1_id = Uuid::new_v4();
+        let v2_id = Uuid::new_v4();
+        let mk = |id: Uuid, ver: u32| PromptVersion {
+            id,
+            agent_id,
+            version: ver,
+            content_hash: format!("h{ver}"),
+            system_prompt: format!("Version {ver}"),
+            tools: vec![],
+            variables: vec![],
+            created_at: Utc::now(),
+            created_by: "test".to_string(),
+            is_active: false,
+            description: None,
+        };
+        store.create_version(mk(v1_id, 1)).unwrap();
+        store.create_version(mk(v2_id, 2)).unwrap();
+        store.set_active_version(v2_id, agent_id).unwrap();
+
+        // The active (bound) version must not be deletable.
+        let err = store.delete_version(v2_id).unwrap_err();
+        assert!(
+            matches!(err, LibreFangError::InvalidState { .. }),
+            "expected InvalidState, got: {err:?}"
+        );
+        assert!(
+            store.get_version(v2_id).unwrap().is_some(),
+            "active version must remain after a blocked delete"
+        );
+
+        // An inactive version deletes fine.
+        store.delete_version(v1_id).unwrap();
+        assert!(store.get_version(v1_id).unwrap().is_none());
+
+        // Unknown id is an idempotent no-op, not an error.
+        store.delete_version(Uuid::new_v4()).unwrap();
     }
 
     #[test]

@@ -334,6 +334,87 @@ async fn update_hand_settings_without_active_instance_returns_404() {
 }
 
 // ---------------------------------------------------------------------------
+// PUT /api/hands/{hand_id}/settings — partial save merges over existing config
+// ---------------------------------------------------------------------------
+
+/// Regression test for #6204: a PUT that changes one setting must preserve the
+/// other saved settings instead of dropping them back to their defaults.
+/// Before the merge fix, `update_hand_settings` passed the incoming config
+/// straight into `update_config`, so saving one key wiped every other key.
+#[tokio::test(flavor = "multi_thread")]
+async fn update_hand_settings_merges_over_existing_config() {
+    let h = boot_router_open().await;
+
+    // Install a hand declaring two settings, each with a default.
+    let toml = r#"
+id = "settings-merge-test"
+name = "Settings Merge Test"
+description = "Two-setting hand for merge coverage."
+category = "data"
+
+[agent]
+name = "settings-merge-agent"
+description = "Test hand agent"
+system_prompt = "Test prompt"
+
+[[settings]]
+key = "region"
+label = "Region"
+setting_type = "text"
+default = "eu"
+
+[[settings]]
+key = "interval"
+label = "Interval"
+setting_type = "text"
+default = "15"
+"#;
+    let (status, body) = json_request(
+        &h.app,
+        Method::POST,
+        "/api/hands/install",
+        Some(serde_json::json!({
+            "toml_content": toml,
+            "skill_content": "# Test skill\n",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "install body: {body}");
+
+    // Activate with both settings at non-default values. Driving activation
+    // through the kernel keeps the test deterministic in the no-LLM harness
+    // (the HTTP /activate path is idempotency-wrapped but spawns the same
+    // instance under the hood).
+    let mut cfg = std::collections::HashMap::new();
+    cfg.insert("region".to_string(), serde_json::json!("us"));
+    cfg.insert("interval".to_string(), serde_json::json!("30"));
+    h._state
+        .kernel
+        .activate_hand("settings-merge-test", cfg)
+        .expect("activate hand");
+
+    // Save only `interval`. The merge must keep `region` = "us".
+    let (status, body) = json_request(
+        &h.app,
+        Method::PUT,
+        "/api/hands/settings-merge-test/settings",
+        Some(serde_json::json!({"interval": "60"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "update body: {body}");
+    assert_eq!(
+        body["config"]["interval"].as_str(),
+        Some("60"),
+        "the changed key must be updated: {body}"
+    );
+    assert_eq!(
+        body["config"]["region"].as_str(),
+        Some("us"),
+        "the untouched key must be preserved by the merge (#6204): {body}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // POST /api/hands/install — input validation
 // ---------------------------------------------------------------------------
 

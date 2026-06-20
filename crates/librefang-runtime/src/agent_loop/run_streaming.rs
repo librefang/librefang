@@ -49,6 +49,75 @@ pub async fn run_agent_loop_streaming(
     pending_messages: Option<&tokio::sync::Mutex<mpsc::Receiver<AgentLoopSignal>>>,
     opts: &LoopOptions,
 ) -> LibreFangResult<AgentLoopResult> {
+    let agent_label = manifest.name.clone();
+    let result = run_agent_loop_streaming_inner(
+        manifest,
+        user_message,
+        session,
+        memory,
+        driver,
+        available_tools,
+        kernel,
+        stream_tx,
+        skill_registry,
+        mcp_connections,
+        web_ctx,
+        browser_ctx,
+        embedding_driver,
+        workspace_root,
+        on_phase,
+        media_engine,
+        media_drivers,
+        tts_engine,
+        docker_config,
+        hooks,
+        context_window_tokens,
+        process_manager,
+        checkpoint_manager,
+        process_registry,
+        user_content_blocks,
+        proactive_memory,
+        context_engine,
+        pending_messages,
+        opts,
+    )
+    .await;
+    super::record_agent_loop_exit(&agent_label, &result);
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_agent_loop_streaming_inner(
+    manifest: &AgentManifest,
+    user_message: &str,
+    session: &mut Session,
+    memory: &MemorySubstrate,
+    driver: Arc<dyn LlmDriver>,
+    available_tools: &[ToolDefinition],
+    kernel: Option<Arc<dyn KernelHandle>>,
+    stream_tx: mpsc::Sender<StreamEvent>,
+    skill_registry: Option<&SkillRegistry>,
+    mcp_connections: Option<&tokio::sync::Mutex<Vec<McpConnection>>>,
+    web_ctx: Option<&WebToolsContext>,
+    browser_ctx: Option<&crate::browser::BrowserManager>,
+    embedding_driver: Option<&(dyn EmbeddingDriver + Send + Sync)>,
+    workspace_root: Option<&Path>,
+    on_phase: Option<&PhaseCallback>,
+    media_engine: Option<&crate::media_understanding::MediaEngine>,
+    media_drivers: Option<&crate::media::MediaDriverCache>,
+    tts_engine: Option<&crate::tts::TtsEngine>,
+    docker_config: Option<&librefang_types::config::DockerSandboxConfig>,
+    hooks: Option<&crate::hooks::HookRegistry>,
+    context_window_tokens: Option<usize>,
+    process_manager: Option<&crate::process_manager::ProcessManager>,
+    checkpoint_manager: Option<Arc<CheckpointManager>>,
+    process_registry: Option<&crate::process_registry::ProcessRegistry>,
+    user_content_blocks: Option<Vec<ContentBlock>>,
+    proactive_memory: Option<Arc<librefang_memory::ProactiveMemoryStore>>,
+    context_engine: Option<&dyn ContextEngine>,
+    pending_messages: Option<&tokio::sync::Mutex<mpsc::Receiver<AgentLoopSignal>>>,
+    opts: &LoopOptions,
+) -> LibreFangResult<AgentLoopResult> {
     info!(agent = %manifest.name, "Starting streaming agent loop");
 
     // Start index of new messages added during this turn. See the matching
