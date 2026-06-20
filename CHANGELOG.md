@@ -834,6 +834,12 @@ _308 PRs from 7 contributors since v2026.5.17-beta.12._
 
 ## [Unreleased]
 
+### Fixed
+
+- **fix(channels): the streaming final answer now fires a push notification** (#6248) (@houko) — reported and diagnosed by @neo-wanderer.
+  On streaming channels (Telegram, Matrix) the agent's final answer was delivered as an *edit* of the `"…"` streaming placeholder, and edits do not generate a client push notification — so the push fired on the empty placeholder and the actual answer landed silently (unless it overflowed the per-message length limit, whose tail chunk is a fresh, notifying message).
+  Both adapters now finalize the answer as a *fresh* message — Telegram sends the answer and deletes the placeholder; Matrix sends a new `m.room.message` and redacts the placeholder — so the notification fires on the answer regardless of length. The overflow path already sent a notifying tail, so finalize-as-new is skipped there to avoid a duplicate ping.
+
 ### Added
 
 - **feat(runtime): add the `agent` dimension to `librefang_tool_execution_seconds`** (#6244) (@houko).
