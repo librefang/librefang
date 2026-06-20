@@ -1928,3 +1928,84 @@ tui-init-routing-pick-prefix = Оберіть модель для
 tui-init-routing-pick-suffix = ({ $step }/3):
 tui-init-complete-setup-prefix = Налаштування завершено — 
 
+# agents.rs
+tui-agents-tool-file-read-desc = Читати файли
+tui-agents-tool-file-write-desc = Записувати файли
+tui-agents-tool-file-list-desc = Показати вміст директорії
+tui-agents-tool-memory-store-desc = Зберегти дані в пам'ять агента
+tui-agents-tool-memory-recall-desc = Відновити дані з пам'яті
+tui-agents-tool-memory-list-desc = Показати всі збережені ключі пам'яті
+tui-agents-tool-web-fetch-desc = Отримувати веб-сторінки
+tui-agents-tool-shell-exec-desc = Виконувати команди оболонки
+tui-agents-tool-agent-send-desc = Надсилати повідомлення іншим агентам
+tui-agents-tool-agent-list-desc = Показати запущених агентів
+
+tui-agents-title-create-method = Створити агента
+tui-agents-title-templates = Шаблони
+tui-agents-title-custom-name = Власний — Ім'я
+tui-agents-title-custom-desc = Власний — Опис
+tui-agents-title-custom-prompt = Власний — Системний промпт
+tui-agents-title-custom-tools = Власний — Інструменти
+tui-agents-title-custom-skills = Власний — Скіли
+tui-agents-title-custom-mcp = Власний — MCP-сервери
+tui-agents-title-spawning = Створення...
+tui-agents-title-screen = Агенти
+tui-agents-title-detail = Деталі агента
+
+tui-agents-prompt-create-method =   Як би ви хотіли створити вашого агента?
+tui-agents-prompt-name = Ім'я агента:
+tui-agents-prompt-desc = Опис:
+tui-agents-prompt-prompt = Системний промпт:
+tui-agents-prompt-tools =   Оберіть інструменти (Space для перемикання):
+tui-agents-prompt-skills =   Оберіть скіли (якщо нічого не вибрано = всі скіли):
+tui-agents-prompt-mcp =   Оберіть MCP-сервери (якщо нічого не вибрано = всі сервери):
+tui-agents-prompt-edit-skills =   Space для перемикання, Enter для збереження (нічого не вибрано = всі):
+tui-agents-prompt-spawning =   Створення агента...
+tui-agents-label-no-agent-selected = Агента не обрано.
+tui-agents-label-none-available = (немає доступних)
+
+tui-agents-opt-templates =   Обрати з шаблонів
+tui-agents-opt-templates-desc =   (попередньо налаштовані агенти)
+tui-agents-opt-custom =   Створити власного агента
+tui-agents-opt-custom-desc =   (вибір імені, інструментів, промпту)
+
+tui-agents-header-state = Статус
+tui-agents-header-name = Ім'я
+tui-agents-header-model = Модель
+tui-agents-header-id = ID
+tui-agents-opt-create-new = Створити нового агента
+
+tui-agents-hints-filter =   [Введення] Фільтр  [Enter] Застосувати  [Esc] Скасувати пошук
+tui-agents-hints-list =   [↑↓] Навігація  [Enter] Деталі  [/] Пошук  [Esc] Назад
+tui-agents-hints-detail =   [s] Змінити скіли  [m] Змінити MCP  [c] Чат  [k] Зупинити  [Esc] Назад
+tui-agents-hints-navigate =     [↑↓] Навігація  [Enter] Обрати  [Esc] Назад
+tui-agents-hints-input =     [Enter] Далі  [Esc] Назад
+tui-agents-hints-tools =     [↑↓] Навігація  [Space] Перемкнути  [Enter] Створити  [Esc] Назад
+tui-agents-hints-skills =     [↑↓] Навігація  [Space] Перемкнути  [Enter] Далі  [Esc] Назад
+tui-agents-hints-mcp =     [↑↓] Навігація  [Space] Перемкнути  [Enter] Створити  [Esc] Назад
+tui-agents-hints-save =     [↑↓] Навігація  [Space] Перемкнути  [Enter] Зберегти  [Esc] Скасувати
+
+tui-agents-placeholder-name = мій-агент
+tui-agents-placeholder-desc = Власний агент
+tui-agents-placeholder-prompt = Ви — корисний помічник.
+tui-agents-label-placeholder =     заповнювач: { $placeholder }
+
+tui-agents-detail-id =   ID:       
+tui-agents-detail-name =   Ім'я:     
+tui-agents-detail-state =   Статус:   
+tui-agents-detail-provider =   Провайдер:
+tui-agents-detail-model =   Модель:   
+tui-agents-detail-created =   Створено: 
+tui-agents-detail-active =   Активність:
+tui-agents-detail-tags =   Теги:     
+tui-agents-detail-caps =   Можливості:
+tui-agents-detail-parent =   Батьківський:
+tui-agents-detail-children =   Дочірні:  
+tui-agents-detail-skills =   Скіли:    
+tui-agents-detail-mcp =   MCP:      
+tui-agents-detail-all-skills = [Усі скіли]
+tui-agents-detail-all-servers = [Усі сервери]
+tui-agents-detail-none = [Немає]
+tui-agents-default-desc = Власний агент { $name }
+tui-agents-default-prompt = Ви — { $name }, корисний помічник.
+

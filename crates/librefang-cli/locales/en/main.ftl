@@ -1912,3 +1912,85 @@ tui-init-routing-pick-prefix = Pick
 tui-init-routing-pick-suffix = model ({ $step }/3):
 tui-init-complete-setup-prefix = Setup complete — 
 
+# agents.rs
+tui-agents-tool-file-read-desc = Read files
+tui-agents-tool-file-write-desc = Write files
+tui-agents-tool-file-list-desc = List directory contents
+tui-agents-tool-memory-store-desc = Store data in agent memory
+tui-agents-tool-memory-recall-desc = Recall data from memory
+tui-agents-tool-memory-list-desc = List all stored memory keys
+tui-agents-tool-web-fetch-desc = Fetch web pages
+tui-agents-tool-shell-exec-desc = Execute shell commands
+tui-agents-tool-agent-send-desc = Send messages to other agents
+tui-agents-tool-agent-list-desc = List running agents
+
+tui-agents-title-create-method = Create Agent
+tui-agents-title-templates = Templates
+tui-agents-title-custom-name = Custom — Name
+tui-agents-title-custom-desc = Custom — Description
+tui-agents-title-custom-prompt = Custom — System Prompt
+tui-agents-title-custom-tools = Custom — Tools
+tui-agents-title-custom-skills = Custom — Skills
+tui-agents-title-custom-mcp = Custom — MCP Servers
+tui-agents-title-spawning = Spawning...
+tui-agents-title-screen = Agents
+tui-agents-title-detail = Agent Detail
+
+tui-agents-prompt-create-method =   How would you like to create your agent?
+tui-agents-prompt-name = Agent name:
+tui-agents-prompt-desc = Description:
+tui-agents-prompt-prompt = System prompt:
+tui-agents-prompt-tools =   Select tools (Space to toggle):
+tui-agents-prompt-skills =   Select skills (none checked = all skills):
+tui-agents-prompt-mcp =   Select MCP servers (none checked = all servers):
+tui-agents-prompt-edit-skills =   Space to toggle, Enter to save (none checked = all):
+tui-agents-prompt-spawning =   Spawning agent...
+tui-agents-label-no-agent-selected = No agent selected.
+tui-agents-label-none-available = (none available)
+
+tui-agents-opt-templates =   Choose from templates
+tui-agents-opt-templates-desc =   (pre-built agents)
+tui-agents-opt-custom =   Build custom agent
+tui-agents-opt-custom-desc =   (pick name, tools, prompt)
+
+tui-agents-header-state = State
+tui-agents-header-name = Name
+tui-agents-header-model = Model
+tui-agents-header-id = ID
+tui-agents-opt-create-new = Create new agent
+
+tui-agents-hints-filter =   [Type] Filter  [Enter] Accept  [Esc] Cancel search
+tui-agents-hints-list =   [↑↓] Navigate  [Enter] Detail  [/] Search  [Esc] Back
+tui-agents-hints-detail =   [s] Edit skills  [m] Edit MCP  [c] Chat  [k] Kill  [Esc] Back
+tui-agents-hints-navigate =     [↑↓] Navigate  [Enter] Select  [Esc] Back
+tui-agents-hints-input =     [Enter] Next  [Esc] Back
+tui-agents-hints-tools =     [↑↓] Navigate  [Space] Toggle  [Enter] Create  [Esc] Back
+tui-agents-hints-skills =     [↑↓] Navigate  [Space] Toggle  [Enter] Next  [Esc] Back
+tui-agents-hints-mcp =     [↑↓] Navigate  [Space] Toggle  [Enter] Create  [Esc] Back
+tui-agents-hints-save =     [↑↓] Navigate  [Space] Toggle  [Enter] Save  [Esc] Cancel
+
+tui-agents-placeholder-name = my-agent
+tui-agents-placeholder-desc = A custom agent
+tui-agents-placeholder-prompt = You are a helpful agent.
+tui-agents-label-placeholder =     placeholder: { $placeholder }
+
+tui-agents-detail-id =   ID:       
+tui-agents-detail-name =   Name:     
+tui-agents-detail-state =   State:    
+tui-agents-detail-provider =   Provider: 
+tui-agents-detail-model =   Model:    
+tui-agents-detail-created =   Created:  
+tui-agents-detail-active =   Active:   
+tui-agents-detail-tags =   Tags:     
+tui-agents-detail-caps =   Caps:     
+tui-agents-detail-parent =   Parent:   
+tui-agents-detail-children =   Children: 
+tui-agents-detail-skills =   Skills:   
+tui-agents-detail-mcp =   MCP:      
+tui-agents-detail-all-skills = [All skills]
+tui-agents-detail-all-servers = [All servers]
+tui-agents-detail-none = [None]
+tui-agents-default-desc = A custom { $name } agent
+tui-agents-default-prompt = You are { $name }, a helpful agent.
+
+

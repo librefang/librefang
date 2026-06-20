@@ -14,16 +14,16 @@ use ratatui::Frame;
 
 /// Available built-in tools for the custom agent builder.
 const TOOL_OPTIONS: &[(&str, &str)] = &[
-    ("file_read", "Read files"),
-    ("file_write", "Write files"),
-    ("file_list", "List directory contents"),
-    ("memory_store", "Store data in agent memory"),
-    ("memory_recall", "Recall data from memory"),
-    ("memory_list", "List all stored memory keys"),
-    ("web_fetch", "Fetch web pages"),
-    ("shell_exec", "Execute shell commands"),
-    ("agent_send", "Send messages to other agents"),
-    ("agent_list", "List running agents"),
+    ("file_read", "tui-agents-tool-file-read-desc"),
+    ("file_write", "tui-agents-tool-file-write-desc"),
+    ("file_list", "tui-agents-tool-file-list-desc"),
+    ("memory_store", "tui-agents-tool-memory-store-desc"),
+    ("memory_recall", "tui-agents-tool-memory-recall-desc"),
+    ("memory_list", "tui-agents-tool-memory-list-desc"),
+    ("web_fetch", "tui-agents-tool-web-fetch-desc"),
+    ("shell_exec", "tui-agents-tool-shell-exec-desc"),
+    ("agent_send", "tui-agents-tool-agent-send-desc"),
+    ("agent_list", "tui-agents-tool-agent-list-desc"),
 ];
 
 const DEFAULT_TOOLS: &[bool] = &[true, false, true, true, true, true, false, false, false];
@@ -587,7 +587,10 @@ impl AgentSelectState {
             }
             KeyCode::Enter if !self.custom_name.is_empty() => {
                 if self.custom_desc.is_empty() {
-                    self.custom_desc = format!("A custom {} agent", self.custom_name);
+                    self.custom_desc = crate::i18n::t_args(
+                        "tui-agents-default-desc",
+                        &[("name", &self.custom_name)],
+                    );
                 }
                 self.sub = AgentSubScreen::CustomDesc;
             }
@@ -609,7 +612,10 @@ impl AgentSelectState {
             }
             KeyCode::Enter => {
                 if self.custom_prompt.is_empty() {
-                    self.custom_prompt = format!("You are {}, a helpful agent.", self.custom_name);
+                    self.custom_prompt = crate::i18n::t_args(
+                        "tui-agents-default-prompt",
+                        &[("name", &self.custom_name)],
+                    );
                 }
                 self.sub = AgentSubScreen::CustomPrompt;
             }
@@ -881,15 +887,15 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
         | AgentSubScreen::AgentDetail
         | AgentSubScreen::EditSkills
         | AgentSubScreen::EditMcpServers => unreachable!(),
-        AgentSubScreen::CreateMethod => "Create Agent",
-        AgentSubScreen::TemplatePicker => "Templates",
-        AgentSubScreen::CustomName => "Custom \u{2014} Name",
-        AgentSubScreen::CustomDesc => "Custom \u{2014} Description",
-        AgentSubScreen::CustomPrompt => "Custom \u{2014} System Prompt",
-        AgentSubScreen::CustomTools => "Custom \u{2014} Tools",
-        AgentSubScreen::CustomSkills => "Custom \u{2014} Skills",
-        AgentSubScreen::CustomMcpServers => "Custom \u{2014} MCP Servers",
-        AgentSubScreen::Spawning => "Spawning...",
+        AgentSubScreen::CreateMethod => crate::i18n::t("tui-agents-title-create-method"),
+        AgentSubScreen::TemplatePicker => crate::i18n::t("tui-agents-title-templates"),
+        AgentSubScreen::CustomName => crate::i18n::t("tui-agents-title-custom-name"),
+        AgentSubScreen::CustomDesc => crate::i18n::t("tui-agents-title-custom-desc"),
+        AgentSubScreen::CustomPrompt => crate::i18n::t("tui-agents-title-custom-prompt"),
+        AgentSubScreen::CustomTools => crate::i18n::t("tui-agents-title-custom-tools"),
+        AgentSubScreen::CustomSkills => crate::i18n::t("tui-agents-title-custom-skills"),
+        AgentSubScreen::CustomMcpServers => crate::i18n::t("tui-agents-title-custom-mcp"),
+        AgentSubScreen::Spawning => crate::i18n::t("tui-agents-title-spawning"),
     };
 
     // Center a card
@@ -919,29 +925,33 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
     match state.sub {
         AgentSubScreen::CreateMethod => draw_create_method(f, inner, state),
         AgentSubScreen::TemplatePicker => draw_template_picker(f, inner, state),
-        AgentSubScreen::CustomName => {
-            draw_text_input(f, inner, "Agent name:", &state.custom_name, "my-agent")
-        }
+        AgentSubScreen::CustomName => draw_text_input(
+            f,
+            inner,
+            &crate::i18n::t("tui-agents-prompt-name"),
+            &state.custom_name,
+            &crate::i18n::t("tui-agents-placeholder-name"),
+        ),
         AgentSubScreen::CustomDesc => draw_text_input(
             f,
             inner,
-            "Description:",
+            &crate::i18n::t("tui-agents-prompt-desc"),
             &state.custom_desc,
-            "A custom agent",
+            &crate::i18n::t("tui-agents-placeholder-desc"),
         ),
         AgentSubScreen::CustomPrompt => draw_text_input(
             f,
             inner,
-            "System prompt:",
+            &crate::i18n::t("tui-agents-prompt-prompt"),
             &state.custom_prompt,
-            "You are a helpful agent.",
+            &crate::i18n::t("tui-agents-placeholder-prompt"),
         ),
         AgentSubScreen::CustomTools => draw_tool_select(f, inner, state),
         AgentSubScreen::CustomSkills => draw_skill_select(f, inner, state),
         AgentSubScreen::CustomMcpServers => draw_mcp_select(f, inner, state),
         AgentSubScreen::Spawning => {
             let msg = Paragraph::new(Line::from(vec![Span::styled(
-                "  Spawning agent...",
+                crate::i18n::t("tui-agents-prompt-spawning"),
                 theme::dim_style(),
             )]));
             f.render_widget(msg, inner);
@@ -952,7 +962,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
 
 /// Full-area agent list with table layout and search bar.
 fn draw_agent_list_full(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
-    let inner = widgets::render_screen_block(f, area, "Agents");
+    let inner = widgets::render_screen_block(f, area, &crate::i18n::t("tui-agents-title-screen"));
 
     let has_search = state.search_active || !state.search_query.is_empty();
     let search_height = if has_search { 1 } else { 0 };
@@ -986,7 +996,13 @@ fn draw_agent_list_full(f: &mut Frame, area: Rect, state: &mut AgentSelectState)
     // ── Table header ────────────────────────────────────────────────────────
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
-            format!("  {:<5} {:<18} {:<24} {}", "State", "Name", "Model", "ID"),
+            format!(
+                "  {:<5} {:<18} {:<24} {}",
+                crate::i18n::t("tui-agents-header-state"),
+                crate::i18n::t("tui-agents-header-name"),
+                crate::i18n::t("tui-agents-header-model"),
+                crate::i18n::t("tui-agents-header-id")
+            ),
             theme::table_header(),
         )])),
         chunks[1],
@@ -1055,7 +1071,7 @@ fn draw_agent_list_full(f: &mut Frame, area: Rect, state: &mut AgentSelectState)
     items.push(ListItem::new(Line::from(vec![
         Span::styled("  \u{2795} ", Style::default().fg(theme::ACCENT)),
         Span::styled(
-            "Create new agent",
+            crate::i18n::t("tui-agents-opt-create-new"),
             Style::default()
                 .fg(theme::ACCENT)
                 .add_modifier(Modifier::BOLD),
@@ -1085,16 +1101,16 @@ fn draw_agent_list_full(f: &mut Frame, area: Rect, state: &mut AgentSelectState)
 
     // ── Hints ───────────────────────────────────────────────────────────────
     let hints = if state.search_active {
-        "  [Type] Filter  [Enter] Accept  [Esc] Cancel search"
+        crate::i18n::t("tui-agents-hints-filter")
     } else {
-        "  [\u{2191}\u{2193}] Navigate  [Enter] Detail  [/] Search  [Esc] Back"
+        crate::i18n::t("tui-agents-hints-list")
     };
-    f.render_widget(widgets::hint_bar(hints), chunks[3]);
+    f.render_widget(widgets::hint_bar(&hints), chunks[3]);
 }
 
 /// Draw agent detail view.
 fn draw_detail(f: &mut Frame, area: Rect, state: &AgentSelectState) {
-    let inner = widgets::render_screen_block(f, area, "Agent Detail");
+    let inner = widgets::render_screen_block(f, area, &crate::i18n::t("tui-agents-title-detail"));
 
     let chunks = Layout::vertical([
         Constraint::Min(10),   // detail
@@ -1108,11 +1124,11 @@ fn draw_detail(f: &mut Frame, area: Rect, state: &AgentSelectState) {
             let mut lines = vec![
                 Line::from(""),
                 Line::from(vec![
-                    Span::raw("  ID:       "),
+                    Span::styled(crate::i18n::t("tui-agents-detail-id"), Style::default()),
                     Span::styled(&detail.id, theme::dim_style()),
                 ]),
                 Line::from(vec![
-                    Span::raw("  Name:     "),
+                    Span::styled(crate::i18n::t("tui-agents-detail-name"), Style::default()),
                     Span::styled(
                         &detail.name,
                         Style::default()
@@ -1121,41 +1137,47 @@ fn draw_detail(f: &mut Frame, area: Rect, state: &AgentSelectState) {
                     ),
                 ]),
                 Line::from(vec![
-                    Span::raw("  State:    "),
+                    Span::styled(crate::i18n::t("tui-agents-detail-state"), Style::default()),
                     Span::styled(badge, badge_style),
                     Span::styled(format!(" ({})", detail.state), theme::dim_style()),
                 ]),
                 Line::from(vec![
-                    Span::raw("  Provider: "),
+                    Span::styled(
+                        crate::i18n::t("tui-agents-detail-provider"),
+                        Style::default(),
+                    ),
                     Span::styled(&detail.provider, Style::default().fg(theme::YELLOW)),
                 ]),
                 Line::from(vec![
-                    Span::raw("  Model:    "),
+                    Span::styled(crate::i18n::t("tui-agents-detail-model"), Style::default()),
                     Span::styled(&detail.model, Style::default().fg(theme::YELLOW)),
                 ]),
             ];
 
             if !detail.created.is_empty() {
                 lines.push(Line::from(vec![
-                    Span::raw("  Created:  "),
+                    Span::styled(
+                        crate::i18n::t("tui-agents-detail-created"),
+                        Style::default(),
+                    ),
                     Span::styled(&detail.created, theme::dim_style()),
                 ]));
             }
             if !detail.last_active.is_empty() {
                 lines.push(Line::from(vec![
-                    Span::raw("  Active:   "),
+                    Span::styled(crate::i18n::t("tui-agents-detail-active"), Style::default()),
                     Span::styled(&detail.last_active, theme::dim_style()),
                 ]));
             }
             if !detail.tags.is_empty() {
                 lines.push(Line::from(vec![
-                    Span::raw("  Tags:     "),
+                    Span::styled(crate::i18n::t("tui-agents-detail-tags"), Style::default()),
                     Span::styled(detail.tags.join(", "), Style::default().fg(theme::CYAN)),
                 ]));
             }
             if !detail.capabilities.is_empty() {
                 lines.push(Line::from(vec![
-                    Span::raw("  Caps:     "),
+                    Span::styled(crate::i18n::t("tui-agents-detail-caps"), Style::default()),
                     Span::styled(
                         detail.capabilities.join(", "),
                         Style::default().fg(theme::YELLOW),
@@ -1164,13 +1186,16 @@ fn draw_detail(f: &mut Frame, area: Rect, state: &AgentSelectState) {
             }
             if let Some(ref parent) = detail.parent {
                 lines.push(Line::from(vec![
-                    Span::raw("  Parent:   "),
+                    Span::styled(crate::i18n::t("tui-agents-detail-parent"), Style::default()),
                     Span::styled(parent, theme::dim_style()),
                 ]));
             }
             if !detail.children.is_empty() {
                 lines.push(Line::from(vec![
-                    Span::raw("  Children: "),
+                    Span::styled(
+                        crate::i18n::t("tui-agents-detail-children"),
+                        Style::default(),
+                    ),
                     Span::styled(detail.children.join(", "), theme::dim_style()),
                 ]));
             }
@@ -1179,12 +1204,15 @@ fn draw_detail(f: &mut Frame, area: Rect, state: &AgentSelectState) {
             lines.push(Line::from(""));
             if detail.skills.is_empty() || detail.skills_mode == "all" {
                 lines.push(Line::from(vec![
-                    Span::raw("  Skills:   "),
-                    Span::styled("[All skills]", Style::default().fg(theme::GREEN)),
+                    Span::styled(crate::i18n::t("tui-agents-detail-skills"), Style::default()),
+                    Span::styled(
+                        crate::i18n::t("tui-agents-detail-all-skills"),
+                        Style::default().fg(theme::GREEN),
+                    ),
                 ]));
             } else {
                 lines.push(Line::from(vec![
-                    Span::raw("  Skills:   "),
+                    Span::styled(crate::i18n::t("tui-agents-detail-skills"), Style::default()),
                     Span::styled(detail.skills.join(", "), Style::default().fg(theme::CYAN)),
                 ]));
             }
@@ -1192,17 +1220,23 @@ fn draw_detail(f: &mut Frame, area: Rect, state: &AgentSelectState) {
             // MCP section (#5855: empty allowlist = no servers, `["*"]` = all)
             if detail.mcp_servers.is_empty() {
                 lines.push(Line::from(vec![
-                    Span::raw("  MCP:      "),
-                    Span::styled("[None]", Style::default().fg(theme::DIM)),
+                    Span::styled(crate::i18n::t("tui-agents-detail-mcp"), Style::default()),
+                    Span::styled(
+                        crate::i18n::t("tui-agents-detail-none"),
+                        Style::default().fg(theme::DIM),
+                    ),
                 ]));
             } else if detail.mcp_servers_mode == "all" {
                 lines.push(Line::from(vec![
-                    Span::raw("  MCP:      "),
-                    Span::styled("[All servers]", Style::default().fg(theme::GREEN)),
+                    Span::styled(crate::i18n::t("tui-agents-detail-mcp"), Style::default()),
+                    Span::styled(
+                        crate::i18n::t("tui-agents-detail-all-servers"),
+                        Style::default().fg(theme::GREEN),
+                    ),
                 ]));
             } else {
                 lines.push(Line::from(vec![
-                    Span::raw("  MCP:      "),
+                    Span::styled(crate::i18n::t("tui-agents-detail-mcp"), Style::default()),
                     Span::styled(
                         detail.mcp_servers.join(", "),
                         Style::default().fg(theme::CYAN),
@@ -1213,12 +1247,15 @@ fn draw_detail(f: &mut Frame, area: Rect, state: &AgentSelectState) {
             f.render_widget(Paragraph::new(lines), chunks[0]);
         }
         None => {
-            f.render_widget(widgets::empty_state("No agent selected."), chunks[0]);
+            f.render_widget(
+                widgets::empty_state(&crate::i18n::t("tui-agents-label-no-agent-selected")),
+                chunks[0],
+            );
         }
     }
 
     f.render_widget(
-        widgets::hint_bar("  [s] Edit skills  [m] Edit MCP  [c] Chat  [k] Kill  [Esc] Back"),
+        widgets::hint_bar(&crate::i18n::t("tui-agents-hints-detail")),
         chunks[1],
     );
 }
@@ -1231,17 +1268,23 @@ fn draw_create_method(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
     ])
     .split(area);
 
-    let prompt = Paragraph::new("  How would you like to create your agent?");
+    let prompt = Paragraph::new(crate::i18n::t("tui-agents-prompt-create-method"));
     f.render_widget(prompt, chunks[0]);
 
     let items = vec![
         ListItem::new(Line::from(vec![
-            Span::raw("  Choose from templates"),
-            Span::styled("  (pre-built agents)", theme::dim_style()),
+            Span::styled(crate::i18n::t("tui-agents-opt-templates"), Style::default()),
+            Span::styled(
+                crate::i18n::t("tui-agents-opt-templates-desc"),
+                theme::dim_style(),
+            ),
         ])),
         ListItem::new(Line::from(vec![
-            Span::raw("  Build custom agent"),
-            Span::styled("  (pick name, tools, prompt)", theme::dim_style()),
+            Span::styled(crate::i18n::t("tui-agents-opt-custom"), Style::default()),
+            Span::styled(
+                crate::i18n::t("tui-agents-opt-custom-desc"),
+                theme::dim_style(),
+            ),
         ])),
     ];
 
@@ -1250,7 +1293,7 @@ fn draw_create_method(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
     f.render_stateful_widget(list, chunks[1], &mut state.create_method_list);
 
     f.render_widget(
-        widgets::hint_bar("    [\u{2191}\u{2193}] Navigate  [Enter] Select  [Esc] Back"),
+        widgets::hint_bar(&crate::i18n::t("tui-agents-hints-navigate")),
         chunks[2],
     );
 }
@@ -1278,7 +1321,7 @@ fn draw_template_picker(f: &mut Frame, area: Rect, state: &mut AgentSelectState)
     f.render_stateful_widget(list, chunks[0], &mut state.template_list);
 
     f.render_widget(
-        widgets::hint_bar("    [\u{2191}\u{2193}] Navigate  [Enter] Select  [Esc] Back"),
+        widgets::hint_bar(&crate::i18n::t("tui-agents-hints-navigate")),
         chunks[1],
     );
 }
@@ -1316,14 +1359,21 @@ fn draw_text_input(f: &mut Frame, area: Rect, label: &str, value: &str, placehol
     f.render_widget(input, chunks[1]);
 
     if value.is_empty() {
+        let hint_text = crate::i18n::t_args(
+            "tui-agents-label-placeholder",
+            &[("placeholder", placeholder)],
+        );
         let hint = Paragraph::new(Line::from(vec![Span::styled(
-            format!("    placeholder: {placeholder}"),
+            hint_text,
             theme::dim_style(),
         )]));
         f.render_widget(hint, chunks[2]);
     }
 
-    f.render_widget(widgets::hint_bar("    [Enter] Next  [Esc] Back"), chunks[4]);
+    f.render_widget(
+        widgets::hint_bar(&crate::i18n::t("tui-agents-hints-input")),
+        chunks[4],
+    );
 }
 
 fn draw_tool_select(f: &mut Frame, area: Rect, state: &AgentSelectState) {
@@ -1334,7 +1384,7 @@ fn draw_tool_select(f: &mut Frame, area: Rect, state: &AgentSelectState) {
     ])
     .split(area);
 
-    let prompt = Paragraph::new("  Select tools (Space to toggle):");
+    let prompt = Paragraph::new(crate::i18n::t("tui-agents-prompt-tools"));
     f.render_widget(prompt, chunks[0]);
 
     let items: Vec<ListItem> = TOOL_OPTIONS
@@ -1351,8 +1401,8 @@ fn draw_tool_select(f: &mut Frame, area: Rect, state: &AgentSelectState) {
                 Style::default()
             };
             ListItem::new(Line::from(vec![
-                Span::styled(format!("  {check} {name:<16}"), highlight),
-                Span::styled(*desc, theme::dim_style()),
+                Span::styled(format!("  {}{:<16}", check, name), highlight),
+                Span::styled(crate::i18n::t(desc), theme::dim_style()),
             ]))
         })
         .collect();
@@ -1361,9 +1411,7 @@ fn draw_tool_select(f: &mut Frame, area: Rect, state: &AgentSelectState) {
     f.render_widget(list, chunks[1]);
 
     f.render_widget(
-        widgets::hint_bar(
-            "    [\u{2191}\u{2193}] Navigate  [Space] Toggle  [Enter] Create  [Esc] Back",
-        ),
+        widgets::hint_bar(&crate::i18n::t("tui-agents-hints-tools")),
         chunks[2],
     );
 }
@@ -1372,10 +1420,10 @@ fn draw_skill_select(f: &mut Frame, area: Rect, state: &AgentSelectState) {
     draw_checkbox_list(
         f,
         area,
-        "Select skills (none checked = all skills):",
+        &crate::i18n::t("tui-agents-prompt-skills"),
         &state.available_skills,
         state.skill_cursor,
-        "    [\u{2191}\u{2193}] Navigate  [Space] Toggle  [Enter] Next  [Esc] Back",
+        &crate::i18n::t("tui-agents-hints-skills"),
     );
 }
 
@@ -1383,21 +1431,25 @@ fn draw_mcp_select(f: &mut Frame, area: Rect, state: &AgentSelectState) {
     draw_checkbox_list(
         f,
         area,
-        "Select MCP servers (none checked = all servers):",
+        &crate::i18n::t("tui-agents-prompt-mcp"),
         &state.available_mcp,
         state.mcp_cursor,
-        "    [\u{2191}\u{2193}] Navigate  [Space] Toggle  [Enter] Create  [Esc] Back",
+        &crate::i18n::t("tui-agents-hints-mcp"),
     );
 }
 
 fn draw_edit_allowlist(f: &mut Frame, area: Rect, state: &AgentSelectState) {
     let (title, items, cursor) = match state.sub {
-        AgentSubScreen::EditSkills => {
-            (" Edit Skills ", &state.available_skills, state.skill_cursor)
-        }
-        AgentSubScreen::EditMcpServers => {
-            (" Edit MCP Servers ", &state.available_mcp, state.mcp_cursor)
-        }
+        AgentSubScreen::EditSkills => (
+            crate::i18n::t("tui-agents-title-custom-skills"),
+            &state.available_skills,
+            state.skill_cursor,
+        ),
+        AgentSubScreen::EditMcpServers => (
+            crate::i18n::t("tui-agents-title-custom-mcp"),
+            &state.available_mcp,
+            state.mcp_cursor,
+        ),
         _ => return,
     };
 
@@ -1406,10 +1458,10 @@ fn draw_edit_allowlist(f: &mut Frame, area: Rect, state: &AgentSelectState) {
     draw_checkbox_list(
         f,
         inner,
-        "Space to toggle, Enter to save (none checked = all):",
+        &crate::i18n::t("tui-agents-prompt-edit-skills"),
         items,
         cursor,
-        "    [\u{2191}\u{2193}] Navigate  [Space] Toggle  [Enter] Save  [Esc] Cancel",
+        &crate::i18n::t("tui-agents-hints-save"),
     );
 }
 
@@ -1432,7 +1484,10 @@ fn draw_checkbox_list(
     f.render_widget(prompt, chunks[0]);
 
     if items.is_empty() {
-        f.render_widget(widgets::empty_state("(none available)"), chunks[1]);
+        f.render_widget(
+            widgets::empty_state(&crate::i18n::t("tui-agents-label-none-available")),
+            chunks[1],
+        );
     } else {
         let list_items: Vec<ListItem> = items
             .iter()

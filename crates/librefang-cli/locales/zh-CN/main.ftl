@@ -1092,3 +1092,84 @@ tui-init-routing-pick-prefix = 选择
 tui-init-routing-pick-suffix = 模型 ({ $step }/3):
 tui-init-complete-setup-prefix = 设置完成 — 
 
+# agents.rs
+tui-agents-tool-file-read-desc = 读取文件
+tui-agents-tool-file-write-desc = 写入文件
+tui-agents-tool-file-list-desc = 列出目录内容
+tui-agents-tool-memory-store-desc = 在 Agent 内存中存储数据
+tui-agents-tool-memory-recall-desc = 从内存中恢复数据
+tui-agents-tool-memory-list-desc = 列出所有存储的内存键
+tui-agents-tool-web-fetch-desc = 获取网页
+tui-agents-tool-shell-exec-desc = 执行 Shell 命令
+tui-agents-tool-agent-send-desc = 向其他 Agent 发送消息
+tui-agents-tool-agent-list-desc = 列出运行中的 Agent
+
+tui-agents-title-create-method = 创建 Agent
+tui-agents-title-templates = 模板
+tui-agents-title-custom-name = 自定义 — 名称
+tui-agents-title-custom-desc = 自定义 — 描述
+tui-agents-title-custom-prompt = 自定义 — 系统提示词
+tui-agents-title-custom-tools = 自定义 — 工具
+tui-agents-title-custom-skills = 自定义 — Skill
+tui-agents-title-custom-mcp = 自定义 — MCP 服务
+tui-agents-title-spawning = 正在创建...
+tui-agents-title-screen = Agent
+tui-agents-title-detail = Agent 详情
+
+tui-agents-prompt-create-method =   您想如何创建您的 Agent？
+tui-agents-prompt-name = Agent 名称:
+tui-agents-prompt-desc = 描述:
+tui-agents-prompt-prompt = 系统提示词:
+tui-agents-prompt-tools =   选择工具 (空格键切换):
+tui-agents-prompt-skills =   选择 Skill (未勾选 = 所有 Skill):
+tui-agents-prompt-mcp =   选择 MCP 服务 (未勾选 = 所有服务):
+tui-agents-prompt-edit-skills =   空格键切换，Enter 保存 (未勾选 = 所有):
+tui-agents-prompt-spawning =   正在创建 Agent...
+tui-agents-label-no-agent-selected = 未选择 Agent。
+tui-agents-label-none-available = (无可用项)
+
+tui-agents-opt-templates =   从模板中选择
+tui-agents-opt-templates-desc =   (预构建的 Agent)
+tui-agents-opt-custom =   构建自定义 Agent
+tui-agents-opt-custom-desc =   (选择名称、工具、提示词)
+
+tui-agents-header-state = 状态
+tui-agents-header-name = 名称
+tui-agents-header-model = 模型
+tui-agents-header-id = ID
+tui-agents-opt-create-new = 创建新 Agent
+
+tui-agents-hints-filter =   [输入] 过滤  [Enter] 应用  [Esc] 取消搜索
+tui-agents-hints-list =   [↑↓] 导航  [Enter] 详情  [/] 搜索  [Esc] 返回
+tui-agents-hints-detail =   [s] 编辑 Skill  [m] 编辑 MCP  [c] 聊天  [k] 停止  [Esc] 返回
+tui-agents-hints-navigate =     [↑↓] 导航  [Enter] 选择  [Esc] 返回
+tui-agents-hints-input =     [Enter] 下一步  [Esc] 返回
+tui-agents-hints-tools =     [↑↓] 导航  [Space] 切换  [Enter] 创建  [Esc] 返回
+tui-agents-hints-skills =     [↑↓] 导航  [Space] 切换  [Enter] 下一步  [Esc] 返回
+tui-agents-hints-mcp =     [↑↓] 导航  [Space] 切换  [Enter] 创建  [Esc] 返回
+tui-agents-hints-save =     [↑↓] 导航  [Space] 切换  [Enter] 保存  [Esc] 取消
+
+tui-agents-placeholder-name = my-agent
+tui-agents-placeholder-desc = 自定义 Agent
+tui-agents-placeholder-prompt = 您是一个有用的助手。
+tui-agents-label-placeholder =     占位符: { $placeholder }
+
+tui-agents-detail-id =   ID:       
+tui-agents-detail-name =   名称:     
+tui-agents-detail-state =   状态:     
+tui-agents-detail-provider =   提供商:   
+tui-agents-detail-model =   模型:     
+tui-agents-detail-created =   创建时间: 
+tui-agents-detail-active =   活跃时间: 
+tui-agents-detail-tags =   标签:     
+tui-agents-detail-caps =   功能:     
+tui-agents-detail-parent =   父级:     
+tui-agents-detail-children =   子级:     
+tui-agents-detail-skills =   Skill:    
+tui-agents-detail-mcp =   MCP:      
+tui-agents-detail-all-skills = [所有 Skill]
+tui-agents-detail-all-servers = [所有服务]
+tui-agents-detail-none = [无]
+tui-agents-default-desc = 自定义 { $name } Agent
+tui-agents-default-prompt = 您是 { $name }，一个有用的助手。
+
