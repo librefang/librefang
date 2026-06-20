@@ -97,6 +97,7 @@ export {
   listSessions,
   getSessionDetails,
   loadAgentSession,
+  getAgentSessionContext,
   // skills (local + hubs)
   listSkills,
   getSkillDetail,
@@ -219,6 +220,7 @@ export {
   // channels & comms
   reloadChannels,
   saveSidecarConfig,
+  removeSidecarConfig,
   sendCommsMessage,
   postCommsTask,
   // attachments

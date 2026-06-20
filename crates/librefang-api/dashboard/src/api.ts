@@ -70,6 +70,16 @@ export interface ProviderItem {
    *  Lets the dashboard distinguish "user-hidden" from "never configured"
    *  for the otherwise indistinguishable `auth_status: "missing"`. */
   suppressed?: boolean;
+  /** True when this provider is a coding-agent CLI (claude-code, codex-cli,
+   *  gemini-cli, qwen-code, codewhale) rather than a raw provider API.
+   *  Sourced from the backend (`is_coding_agent_provider`) so the dashboard
+   *  can group coding agents apart from providers. */
+  is_coding_agent?: boolean;
+  /** Headline max-output-token limit for the provider's representative
+   *  (default, else first) model: the user's `max_tokens` override when set,
+   *  otherwise the model's catalog `max_output_tokens`. Absent when the
+   *  provider has no usable model or declares no output limit (#6209). */
+  max_output_tokens?: number;
 }
 
 export interface MediaProvider {
@@ -1550,6 +1560,32 @@ export async function loadAgentSession(
   return get<AgentSessionResponse>(`/api/agents/${encodeURIComponent(agentId)}/session${qs}`);
 }
 
+/**
+ * Context-window usage snapshot for a session.
+ *
+ * `pct` is `used_tokens / max_context_tokens` clamped to 0..=100 with one
+ * decimal; it is an approximate (chars/4 heuristic) estimate, not the
+ * provider's exact tokenizer count. `max_context_tokens` is 0 when the model
+ * window could not be resolved.
+ */
+export interface SessionContextResponse {
+  used_tokens: number;
+  max_context_tokens: number;
+  pct: number;
+  model: string;
+  pressure: string;
+}
+
+export async function getAgentSessionContext(
+  agentId: string,
+  sessionId?: string | null,
+): Promise<SessionContextResponse> {
+  const qs = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : "";
+  return get<SessionContextResponse>(
+    `/api/agents/${encodeURIComponent(agentId)}/session/context${qs}`,
+  );
+}
+
 export async function sendAgentMessage(
   agentId: string,
   message: string,
@@ -1823,6 +1859,21 @@ export async function saveSidecarConfig(
   return post<SidecarSaveResult>(
     `/api/channels/sidecar/${encodeURIComponent(name)}/configure`,
     { values },
+  );
+}
+
+export interface SidecarRemoveResult {
+  status: "removed";
+  restart_required: boolean;
+  hot_actions_applied: string[];
+}
+
+// Remove a configured sidecar channel: rewrites config.toml and stops the child.
+export async function removeSidecarConfig(
+  name: string,
+): Promise<SidecarRemoveResult> {
+  return del<SidecarRemoveResult>(
+    `/api/channels/sidecar/${encodeURIComponent(name)}`,
   );
 }
 

@@ -1445,6 +1445,15 @@ pub struct CompactionOverrides {
     /// Override `max_retries` — max retry attempts for LLM summarisation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_retries: Option<u32>,
+    /// Override `aggregate_developer_loops` — collapse consecutive developer-tool loops during compaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aggregate_developer_loops: Option<bool>,
+    /// Override `max_loop_steps_before_aggregate` — min consecutive developer-tool steps before aggregation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_loop_steps_before_aggregate: Option<u32>,
+    /// Override `strip_reasoning_after_turns` — strip reasoning from assistant messages older than N turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strip_reasoning_after_turns: Option<u32>,
 }
 
 impl CompactionOverrides {
@@ -1474,6 +1483,15 @@ impl CompactionOverrides {
             token_threshold_ratio,
             max_chunk_chars: self.max_chunk_chars.unwrap_or(global.max_chunk_chars),
             max_retries: self.max_retries.unwrap_or(global.max_retries),
+            aggregate_developer_loops: self
+                .aggregate_developer_loops
+                .unwrap_or(global.aggregate_developer_loops),
+            max_loop_steps_before_aggregate: self
+                .max_loop_steps_before_aggregate
+                .unwrap_or(global.max_loop_steps_before_aggregate),
+            strip_reasoning_after_turns: self
+                .strip_reasoning_after_turns
+                .unwrap_or(global.strip_reasoning_after_turns),
         }
     }
 
@@ -1487,6 +1505,9 @@ impl CompactionOverrides {
             && self.token_threshold_ratio.is_none()
             && self.max_chunk_chars.is_none()
             && self.max_retries.is_none()
+            && self.aggregate_developer_loops.is_none()
+            && self.max_loop_steps_before_aggregate.is_none()
+            && self.strip_reasoning_after_turns.is_none()
     }
 }
 
@@ -3529,6 +3550,7 @@ model = "claude-3-haiku-20240307"
             token_threshold_ratio: 0.7,
             max_chunk_chars: 80_000,
             max_retries: 3,
+            ..Default::default()
         };
         let overrides = CompactionOverrides {
             keep_recent: Some(20),
@@ -3557,6 +3579,7 @@ model = "claude-3-haiku-20240307"
             token_threshold_ratio: Some(0.5),
             max_chunk_chars: Some(120_000),
             max_retries: Some(5),
+            ..Default::default()
         };
         let merged = overrides.resolve(&global);
         assert_eq!(merged.threshold_messages, 50);

@@ -836,6 +836,22 @@ impl AgentsResource {
         .await
     }
 
+    pub async fn get_agent_session_context(
+        &self,
+        id: &str,
+        session_id: Option<&str>,
+    ) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &format!("/api/agents/{}/session/context", id),
+            None,
+            &[("session_id", session_id)],
+        )
+        .await
+    }
+
     pub async fn reboot_session(&self, id: &str) -> Result<Value> {
         do_req(
             &self.client,
@@ -1795,6 +1811,18 @@ impl ChannelsResource {
             &self.base_url,
             reqwest::Method::POST,
             &"/api/channels/reload".to_string(),
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn delete_sidecar_channel(&self, name: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::DELETE,
+            &format!("/api/channels/sidecar/{}", name),
             None,
             &[],
         )

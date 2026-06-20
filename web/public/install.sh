@@ -244,28 +244,31 @@ install() {
         fi
     fi
 
-    if curl -fsSL "$CHECKSUM_URL" -o "$CHECKSUM_FILE" 2>/dev/null; then
-        EXPECTED=$(cut -d ' ' -f 1 < "$CHECKSUM_FILE")
-        if command_exists sha256sum; then
-            ACTUAL=$(sha256sum "$ARCHIVE" | cut -d ' ' -f 1)
-        elif command_exists shasum; then
-            ACTUAL=$(shasum -a 256 "$ARCHIVE" | cut -d ' ' -f 1)
-        else
-            ACTUAL=""
-        fi
-
-        if [ -n "$ACTUAL" ]; then
-            if [ "$EXPECTED" != "$ACTUAL" ]; then
-                echo "  ${C_RED}Checksum verification FAILED!${C_RESET}"
-                echo "    Expected: $EXPECTED"
-                echo "    Got:      $ACTUAL"
-                exit 1
-            fi
-            echo "  ${C_GREEN}Checksum verified.${C_RESET}"
-        else
-            echo "  ${C_YELLOW}No sha256sum/shasum found, skipping checksum verification.${C_RESET}"
-        fi
+    if ! curl -fsSL "$CHECKSUM_URL" -o "$CHECKSUM_FILE" 2>/dev/null; then
+        echo "  ${C_RED}SHA256 checksum file not found on release.${C_RESET}"
+        echo "    URL: $CHECKSUM_URL"
+        echo "  Refusing to install an unverified binary."
+        exit 1
     fi
+
+    EXPECTED=$(cut -d ' ' -f 1 < "$CHECKSUM_FILE")
+    if command_exists sha256sum; then
+        ACTUAL=$(sha256sum "$ARCHIVE" | cut -d ' ' -f 1)
+    elif command_exists shasum; then
+        ACTUAL=$(shasum -a 256 "$ARCHIVE" | cut -d ' ' -f 1)
+    else
+        echo "  ${C_RED}No sha256sum or shasum found in PATH.${C_RESET}"
+        echo "  Install GNU coreutils (or perl) and retry."
+        exit 1
+    fi
+
+    if [ "$EXPECTED" != "$ACTUAL" ]; then
+        echo "  ${C_RED}Checksum verification FAILED!${C_RESET}"
+        echo "    Expected: $EXPECTED"
+        echo "    Got:      $ACTUAL"
+        exit 1
+    fi
+    echo "  ${C_GREEN}Checksum verified.${C_RESET}"
 
     tar xzf "$ARCHIVE" -C "$INSTALL_DIR"
     chmod +x "$INSTALL_DIR/librefang"

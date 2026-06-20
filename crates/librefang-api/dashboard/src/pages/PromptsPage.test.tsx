@@ -320,7 +320,7 @@ describe("PromptsPage", () => {
     });
   });
 
-  it("does not offer bind or delete on the active version", () => {
+  it("offers a disabled delete and no bind on the active version", () => {
     useOverviewMock.mockReturnValue(
       makeQuery<PromptOverviewItem[]>([makeOverviewItem()]),
     );
@@ -329,13 +329,28 @@ describe("PromptsPage", () => {
     renderPage();
 
     fireEvent.click(screen.getByText("Researcher"));
-    // Active version shows the "bound" indicator, no bind/delete buttons.
+    // Active version shows the "bound" indicator and no bind button.
     expect(screen.getByText("prompts.bound")).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: /prompts\.bind/ }),
     ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "prompts.delete" }),
-    ).not.toBeInTheDocument();
+    // Delete is rendered but disabled — active version cannot be deleted until another is activated.
+    expect(screen.getByRole("button", { name: "prompts.delete" })).toBeDisabled();
+  });
+
+  it("deletes an inactive version when its delete button is clicked", () => {
+    useOverviewMock.mockReturnValue(
+      makeQuery<PromptOverviewItem[]>([makeOverviewItem()]),
+    );
+    const inactive = makeVersion({ version: 1, is_active: false });
+    useVersionsMock.mockReturnValue(makeQuery<PromptVersion[]>([inactive]));
+    renderPage();
+
+    fireEvent.click(screen.getByText("Researcher"));
+    const del = screen.getByRole("button", { name: "prompts.delete" });
+    expect(del).not.toBeDisabled();
+    fireEvent.click(del);
+    expect(deleteMut.mutate).toHaveBeenCalledTimes(1);
+    expect(deleteMut.mutate.mock.calls[0][0]).toMatchObject({ versionId: inactive.id });
   });
 });

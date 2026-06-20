@@ -1288,14 +1288,21 @@ impl SessionStore {
     ///
     /// This is used by the LLM-based compactor to replace text-truncation compaction
     /// with an intelligent, LLM-generated summary of older conversation history.
+    ///
+    /// `owning_session_id` records which session's history this summary
+    /// describes (#6225) so the read path only surfaces the dashboard banner
+    /// on that session, never on a different session that merely became the
+    /// agent's active one.
     pub fn store_llm_summary(
         &self,
         agent_id: AgentId,
         summary: &str,
         kept_messages: Vec<Message>,
+        owning_session_id: Option<SessionId>,
     ) -> LibreFangResult<()> {
         let mut canonical = self.load_canonical(agent_id)?;
         canonical.compacted_summary = Some(summary.to_string());
+        canonical.compacted_summary_session_id = owning_session_id;
         canonical.messages = kept_messages
             .into_iter()
             .map(|message| CanonicalEntry {
@@ -1561,6 +1568,15 @@ pub struct CanonicalSession {
     pub compaction_cursor: usize,
     /// Summary of compacted (older) messages.
     pub compacted_summary: Option<String>,
+    /// The session whose own history produced `compacted_summary` (#6225).
+    ///
+    /// The canonical row is agent-scoped and outlives any individual
+    /// session, but the dashboard banner must only surface the summary on
+    /// the session that was actually compacted. `None` means "owned by no
+    /// specific session" — legacy rows written before this column existed,
+    /// or an agent that has never compacted; the read path keeps the banner
+    /// hidden in that case.
+    pub compacted_summary_session_id: Option<SessionId>,
     /// Last update time.
     pub updated_at: String,
 }
@@ -1644,6 +1660,9 @@ impl SessionStore {
                     full_summary = full_summary[safe_start..].to_string();
                 }
                 canonical.compacted_summary = Some(full_summary);
+                // #6225: stamp the session that triggered this compaction so
+                // the read path only surfaces the banner on that session.
+                canonical.compacted_summary_session_id = session_id;
                 canonical.compaction_cursor = to_compact;
                 // Trim messages: keep only the recent window
                 canonical.messages = canonical.messages.split_off(to_compact);
@@ -1696,7 +1715,8 @@ impl SessionStore {
 fn load_canonical_in_tx(conn: &Connection, agent_id: AgentId) -> LibreFangResult<CanonicalSession> {
     let mut stmt = conn
         .prepare(
-            "SELECT messages, compaction_cursor, compacted_summary, updated_at \
+            "SELECT messages, compaction_cursor, compacted_summary, \
+             compacted_summary_session_id, updated_at \
              FROM canonical_sessions WHERE agent_id = ?1",
         )
         .map_err(LibreFangError::memory)?;
@@ -1705,12 +1725,19 @@ fn load_canonical_in_tx(conn: &Connection, agent_id: AgentId) -> LibreFangResult
         let messages_blob: Vec<u8> = row.get(0)?;
         let cursor: i64 = row.get(1)?;
         let summary: Option<String> = row.get(2)?;
-        let updated_at: String = row.get(3)?;
-        Ok((messages_blob, cursor, summary, updated_at))
+        let summary_session_id: Option<String> = row.get(3)?;
+        let updated_at: String = row.get(4)?;
+        Ok((
+            messages_blob,
+            cursor,
+            summary,
+            summary_session_id,
+            updated_at,
+        ))
     });
 
     match result {
-        Ok((messages_blob, cursor, summary, updated_at)) => {
+        Ok((messages_blob, cursor, summary, summary_session_id, updated_at)) => {
             // Try new format (tagged entries); fall back to legacy Vec<Message> for pre-fix rows.
             let messages: Vec<CanonicalEntry> =
                 match rmp_serde::from_slice::<Vec<CanonicalEntry>>(&messages_blob) {
@@ -1727,11 +1754,18 @@ fn load_canonical_in_tx(conn: &Connection, agent_id: AgentId) -> LibreFangResult
                             .collect()
                     }
                 };
+            // Parse the owning-session id; a malformed value (should not
+            // happen) degrades safely to None — the banner stays hidden
+            // rather than erroring the whole session load.
+            let compacted_summary_session_id = summary_session_id
+                .and_then(|s| uuid::Uuid::parse_str(&s).ok())
+                .map(SessionId);
             Ok(CanonicalSession {
                 agent_id,
                 messages,
                 compaction_cursor: cursor as usize,
                 compacted_summary: summary,
+                compacted_summary_session_id,
                 updated_at,
             })
         }
@@ -1742,6 +1776,7 @@ fn load_canonical_in_tx(conn: &Connection, agent_id: AgentId) -> LibreFangResult
                 messages: Vec::new(),
                 compaction_cursor: 0,
                 compacted_summary: None,
+                compacted_summary_session_id: None,
                 updated_at: now,
             })
         }
@@ -1754,14 +1789,17 @@ fn save_canonical_in_tx(conn: &Connection, canonical: &CanonicalSession) -> Libr
     let messages_blob =
         rmp_serde::to_vec(&canonical.messages).map_err(LibreFangError::serialization)?;
     conn.execute(
-        "INSERT INTO canonical_sessions (agent_id, messages, compaction_cursor, compacted_summary, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(agent_id) DO UPDATE SET messages = ?2, compaction_cursor = ?3, compacted_summary = ?4, updated_at = ?5",
+        "INSERT INTO canonical_sessions (agent_id, messages, compaction_cursor, compacted_summary, compacted_summary_session_id, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(agent_id) DO UPDATE SET messages = ?2, compaction_cursor = ?3, compacted_summary = ?4, compacted_summary_session_id = ?5, updated_at = ?6",
         rusqlite::params![
             canonical.agent_id.0.to_string(),
             messages_blob,
             canonical.compaction_cursor as i64,
             canonical.compacted_summary,
+            canonical
+                .compacted_summary_session_id
+                .map(|s| s.0.to_string()),
             canonical.updated_at,
         ],
     )
@@ -2197,6 +2235,42 @@ mod tests {
         let (_, recent) = store.canonical_context(agent_id, None, None).unwrap();
         let text: String = recent.iter().map(|m| m.content.text_content()).collect();
         assert!(text.contains("legacy"));
+    }
+
+    #[test]
+    fn test_store_llm_summary_records_owning_session_and_round_trips() {
+        // #6225: store_llm_summary tags the summary with its owning session,
+        // and the value survives the SQLite round-trip.
+        let store = setup();
+        let agent_id = AgentId::new();
+        let owner = SessionId::new();
+
+        store
+            .store_llm_summary(
+                agent_id,
+                "owned summary",
+                vec![Message::assistant("kept")],
+                Some(owner),
+            )
+            .unwrap();
+
+        let canonical = store.load_canonical(agent_id).unwrap();
+        assert_eq!(
+            canonical.compacted_summary.as_deref(),
+            Some("owned summary")
+        );
+        assert_eq!(
+            canonical.compacted_summary_session_id,
+            Some(owner),
+            "owning session id must survive the SQLite round-trip"
+        );
+
+        // A None owner (legacy / never-compacted) is persisted as NULL.
+        store
+            .store_llm_summary(agent_id, "unowned summary", vec![], None)
+            .unwrap();
+        let canonical = store.load_canonical(agent_id).unwrap();
+        assert_eq!(canonical.compacted_summary_session_id, None);
     }
 
     #[test]

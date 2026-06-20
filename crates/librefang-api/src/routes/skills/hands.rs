@@ -1116,31 +1116,35 @@ pub async fn update_hand_settings(
     Path(hand_id): Path<String>,
     Json(config): Json<std::collections::HashMap<String, serde_json::Value>>,
 ) -> impl IntoResponse {
-    // Find active instance for this hand
-    let instance_id = state
+    let instance = state
         .kernel
         .hands()
         .list_instances()
-        .iter()
-        .find(|i| i.hand_id == hand_id)
-        .map(|i| i.instance_id);
+        .into_iter()
+        .find(|i| i.hand_id == hand_id);
 
-    match instance_id {
-        Some(id) => match state.kernel.hands().update_config(id, config.clone()) {
-            Ok(()) => {
-                state.kernel.persist_hand_state();
-                (
-                    StatusCode::OK,
-                    Json(serde_json::json!({
-                        "status": "ok",
-                        "hand_id": hand_id,
-                        "instance_id": id,
-                        "config": config,
-                    })),
-                )
+    match instance {
+        Some(inst) => {
+            let id = inst.instance_id;
+            // Merge over existing config so untouched keys keep their saved values.
+            let mut merged = inst.config;
+            merged.extend(config);
+            match state.kernel.hands().update_config(id, merged.clone()) {
+                Ok(()) => {
+                    state.kernel.persist_hand_state();
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "status": "ok",
+                            "hand_id": hand_id,
+                            "instance_id": id,
+                            "config": merged,
+                        })),
+                    )
+                }
+                Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
             }
-            Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
-        },
+        }
         None => ApiErrorResponse::not_found(format!(
             "No active instance for hand: {hand_id}. Activate the hand first."
         ))

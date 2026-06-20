@@ -60,6 +60,7 @@ use crate::types;
         routes::send_message_stream,
         routes::attach_session_stream,
         routes::get_agent_session,
+        routes::get_agent_session_context,
         routes::list_agent_sessions,
         routes::create_agent_session,
         routes::switch_agent_session,
@@ -219,6 +220,7 @@ use crate::types;
         // ── Channels ──
         routes::list_channels,
         routes::configure_sidecar_channel,
+        routes::delete_sidecar_channel,
         routes::reload_channels,
         routes::list_channel_registry,
         // Per-channel `/configure` (POST/DELETE) + `/instances` (GET/POST)
@@ -516,6 +518,7 @@ use crate::types;
         routes::agents::AgentStatsPrevView,
         routes::agents::AgentEventRowView,
         routes::agents::AgentEventsResponse,
+        routes::agents::SessionContextResponse,
         routes::users::UserView,
         routes::users::UserUpsert,
         routes::users::BulkImportRequest,

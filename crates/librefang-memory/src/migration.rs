@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 45;
+const SCHEMA_VERSION: u32 = 46;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -218,6 +218,11 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // override) that replaces the non-deterministic `list_agents().first()`
     // fallback chain.
     run_step!(45, migrate_v45);
+    // v46 (#6225): record which session a canonical compaction summary
+    // belongs to, so the GET-session banner is shown only on the session
+    // whose own history was actually compacted — never leaked onto a
+    // freshly created session that merely became the agent's active one.
+    run_step!(46, migrate_v46);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1728,6 +1733,34 @@ fn migrate_v45(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (45, datetime('now'), 'Add channel_instance_defaults + conversation_bindings tables for deterministic inbound dispatch (#5671)')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Version 46: Tag the canonical compaction summary with the session it
+/// belongs to (#6225).
+///
+/// `canonical_sessions.compacted_summary` is agent-scoped (one row per
+/// `agent_id`) and outlives any individual session. Before this column the
+/// GET-session handler exposed the summary on whichever session happened to
+/// be the agent's active one, so creating a brand-new session — which makes
+/// it active without ever compacting it — leaked a prior conversation's
+/// summary onto message #1. The nullable `compacted_summary_session_id`
+/// records which session legitimately owns the current summary; the read
+/// path gates the banner on a match. Backward-compatible: existing rows get
+/// `NULL`, which the read path treats as "owned by no specific session"
+/// (banner hidden) until the next compaction stamps the owning session.
+fn migrate_v46(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !column_exists(conn, "canonical_sessions", "compacted_summary_session_id") {
+        conn.execute(
+            "ALTER TABLE canonical_sessions ADD COLUMN compacted_summary_session_id TEXT",
+            [],
+        )?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (46, datetime('now'), 'Tag canonical compaction summary with owning session_id (#6225)')",
         [],
     )?;
     Ok(())

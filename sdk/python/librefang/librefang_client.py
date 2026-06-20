@@ -271,6 +271,9 @@ class _AgentsResource(_Resource):
     def compact_session(self, id: str):
         return self._c._request("POST", f"/api/agents/{id}/session/compact")
 
+    def get_agent_session_context(self, id: str, session_id: Any = None):
+        return self._c._request("GET", f"/api/agents/{id}/session/context", None, query={"session_id": session_id})
+
     def reboot_session(self, id: str):
         return self._c._request("POST", f"/api/agents/{id}/session/reboot")
 
@@ -514,6 +517,9 @@ class _ChannelsResource(_Resource):
 
     def reload_channels(self):
         return self._c._request("POST", "/api/channels/reload")
+
+    def delete_sidecar_channel(self, name: str):
+        return self._c._request("DELETE", f"/api/channels/sidecar/{name}")
 
     def configure_sidecar_channel(self, name: str, **data):
         return self._c._request("POST", f"/api/channels/sidecar/{name}/configure", data)

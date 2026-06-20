@@ -304,6 +304,10 @@ class AgentsResource {
     return this._c._request("POST", `/api/agents/${id}/session/compact`);
   }
 
+  async getAgentSessionContext(id, query) {
+    return this._c._request("GET", `/api/agents/${id}/session/context`, undefined, query);
+  }
+
   async rebootSession(id) {
     return this._c._request("POST", `/api/agents/${id}/session/reboot`);
   }
@@ -624,6 +628,10 @@ class ChannelsResource {
 
   async reloadChannels() {
     return this._c._request("POST", "/api/channels/reload");
+  }
+
+  async deleteSidecarChannel(name) {
+    return this._c._request("DELETE", `/api/channels/sidecar/${name}`);
   }
 
   async configureSidecarChannel(name, data) {

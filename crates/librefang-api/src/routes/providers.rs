@@ -499,6 +499,38 @@ fn attach_probe_result(
     entry["last_tested"] = serde_json::json!(&probe.probed_at);
 }
 
+/// Resolve the effective max-output-token limit shown for a provider on the
+/// dashboard (issue #6209). The headline value is the provider's
+/// representative model's per-request output cap: the user's `max_tokens`
+/// override when set, otherwise the model's catalog `max_output_tokens`.
+///
+/// "Representative model" is the provider's default model
+/// (`default_model_for_provider`) when one exists, falling back to the first
+/// catalog model for the provider. Returns `None` when the provider has no
+/// usable model or the representative model declares no output limit (e.g. an
+/// image-only provider), so the dashboard renders "-".
+fn provider_max_output_tokens(
+    catalog: &librefang_kernel::model_catalog::ModelCatalog,
+    provider_id: &str,
+) -> Option<u64> {
+    let models = catalog.models_by_provider(provider_id);
+    if models.is_empty() {
+        return None;
+    }
+    let default_id = catalog.default_model_for_provider(provider_id);
+    let model = default_id
+        .as_deref()
+        .and_then(|id| models.iter().copied().find(|m| m.id == id))
+        .or_else(|| models.first().copied())?;
+    let key = format!("{}:{}", model.provider, model.id);
+    let override_max = catalog
+        .get_overrides(&key)
+        .and_then(|o| o.max_tokens)
+        .map(u64::from);
+    let catalog_max = (model.max_output_tokens > 0).then_some(model.max_output_tokens);
+    override_max.or(catalog_max)
+}
+
 /// GET /api/providers — List all providers with auth status.
 ///
 /// For local providers (ollama, vllm, lmstudio), also probes reachability and
@@ -521,9 +553,10 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
     // `enable_provider` mid-iteration would otherwise let the JSON show a
     // provider with `auth_status: "missing"` AND `suppressed: false` (or
     // vice versa), giving the dashboard inconsistent state to render.
-    let (provider_list, suppressed_ids): (
+    let (provider_list, suppressed_ids, max_output_tokens_by_provider): (
         Vec<librefang_types::model_catalog::ProviderInfo>,
         std::collections::HashSet<String>,
+        std::collections::HashMap<String, u64>,
     ) = {
         let catalog = state.kernel.model_catalog_ref().load();
         let providers = catalog.list_providers().to_vec();
@@ -532,7 +565,14 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
             .filter(|p| catalog.is_suppressed(&p.id))
             .map(|p| p.id.clone())
             .collect();
-        (providers, suppressed)
+        // Resolve each provider's headline max-output-token limit while the
+        // catalog snapshot is live so it stays consistent with the rest of
+        // the entry (issue #6209).
+        let max_output: std::collections::HashMap<String, u64> = providers
+            .iter()
+            .filter_map(|p| provider_max_output_tokens(&catalog, &p.id).map(|v| (p.id.clone(), v)))
+            .collect();
+        (providers, suppressed, max_output)
     };
 
     // Collect local providers that need probing
@@ -598,6 +638,8 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
             "media_capabilities": p.media_capabilities,
             "is_custom": p.is_custom,
             "suppressed": suppressed_ids.contains(&p.id),
+            "is_coding_agent": librefang_kernel::drivers::is_coding_agent_provider(&p.id),
+            "max_output_tokens": max_output_tokens_by_provider.get(&p.id),
         });
 
         // Attach region map so the dashboard can show available regions
@@ -666,9 +708,10 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
 pub(crate) async fn providers_snapshot(state: &Arc<AppState>) -> Vec<serde_json::Value> {
     // Same single-load suppression snapshot as `list_providers` — see the
     // comment there for the rationale.
-    let (provider_list, suppressed_ids): (
+    let (provider_list, suppressed_ids, max_output_tokens_by_provider): (
         Vec<librefang_types::model_catalog::ProviderInfo>,
         std::collections::HashSet<String>,
+        std::collections::HashMap<String, u64>,
     ) = {
         let catalog = state.kernel.model_catalog_ref().load();
         let providers = catalog.list_providers().to_vec();
@@ -677,7 +720,11 @@ pub(crate) async fn providers_snapshot(state: &Arc<AppState>) -> Vec<serde_json:
             .filter(|p| catalog.is_suppressed(&p.id))
             .map(|p| p.id.clone())
             .collect();
-        (providers, suppressed)
+        let max_output: std::collections::HashMap<String, u64> = providers
+            .iter()
+            .filter_map(|p| provider_max_output_tokens(&catalog, &p.id).map(|v| (p.id.clone(), v)))
+            .collect();
+        (providers, suppressed, max_output)
     };
 
     let local_providers: Vec<(usize, String, String, Option<String>)> = provider_list
@@ -735,6 +782,8 @@ pub(crate) async fn providers_snapshot(state: &Arc<AppState>) -> Vec<serde_json:
             "media_capabilities": p.media_capabilities,
             "is_custom": p.is_custom,
             "suppressed": suppressed_ids.contains(&p.id),
+            "is_coding_agent": librefang_kernel::drivers::is_coding_agent_provider(&p.id),
+            "max_output_tokens": max_output_tokens_by_provider.get(&p.id),
         });
         if let Some(probe) = probe_map.remove(&i) {
             attach_probe_result(&mut entry, &probe, &p.id, &*state.kernel);
@@ -765,10 +814,11 @@ pub async fn get_provider(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    let (provider, models) = {
+    let (provider, models, max_output_tokens) = {
         let catalog = state.kernel.model_catalog_ref().load();
         match catalog.get_provider(&name) {
             Some(p) => {
+                let max_output_tokens = provider_max_output_tokens(&catalog, &name);
                 let models: Vec<serde_json::Value> = catalog
                     .models_by_provider(&name)
                     .iter()
@@ -799,7 +849,7 @@ pub async fn get_provider(
                         })
                     })
                     .collect();
-                (p.clone(), models)
+                (p.clone(), models, max_output_tokens)
             }
             None => {
                 return ApiErrorResponse::not_found(format!("Provider '{}' not found", name))
@@ -818,6 +868,7 @@ pub async fn get_provider(
         "base_url": provider.base_url,
         "proxy_url": provider.proxy_url,
         "models": models,
+        "max_output_tokens": max_output_tokens,
     });
 
     // For local providers, run a probe and attach the result
