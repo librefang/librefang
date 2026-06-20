@@ -208,6 +208,18 @@ mod tests {
     fn test_detect_system_language() {
         let backup_language = std::env::var("LANGUAGE").ok();
         let backup_lang = std::env::var("LANG").ok();
+        let backup_lc_all = std::env::var("LC_ALL").ok();
+        let backup_lc_messages = std::env::var("LC_MESSAGES").ok();
+        // `detect_system_language` / `is_utf8_locale` read LANGUAGE, LC_ALL,
+        // LC_MESSAGES and LANG, with LC_ALL/LC_MESSAGES taking precedence over
+        // LANG. CI runners (notably the macOS lane) export LC_ALL/LC_MESSAGES
+        // to a UTF-8 locale, which would make `is_utf8_locale()` return true
+        // off LC_ALL and defeat the non-UTF-8 LANG case below (it returned
+        // "uk" instead of "en"). Clear every locale var up front so the test
+        // fully controls the inputs; each case then sets exactly what it needs.
+        std::env::remove_var("LC_ALL");
+        std::env::remove_var("LC_MESSAGES");
+        std::env::remove_var("LANG");
 
         // Test matching "uk" from "uk:en_US"
         std::env::set_var("LANGUAGE", "uk:en_US");
@@ -240,6 +252,14 @@ mod tests {
             std::env::set_var("LANG", val);
         } else {
             std::env::remove_var("LANG");
+        }
+        match backup_lc_all {
+            Some(val) => std::env::set_var("LC_ALL", val),
+            None => std::env::remove_var("LC_ALL"),
+        }
+        match backup_lc_messages {
+            Some(val) => std::env::set_var("LC_MESSAGES", val),
+            None => std::env::remove_var("LC_MESSAGES"),
         }
     }
 }
