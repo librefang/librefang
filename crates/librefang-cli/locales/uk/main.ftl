@@ -2123,6 +2123,94 @@ tui-memory-field-value = Значення:
 tui-memory-placeholder-value = введіть значення...
 tui-memory-hints-edit =   Tab Перемкнути поле  Enter Зберегти  Esc Скасувати
 
+# --- Extensions screen ---
+tui-extensions-title-screen = Екстеншени
+tui-extensions-tab-browse = 1 Огляд
+tui-extensions-tab-installed = 2 Встановлені
+tui-extensions-tab-health = 3 Здоров'я
+tui-extensions-status-ready = Готовий
+tui-extensions-status-setup = Налаштування
+tui-extensions-status-error = Помилка
+tui-extensions-status-off = Вимкнено
+tui-extensions-status-installed = Встановлено
+tui-extensions-status-available = Доступно
+tui-extensions-header-name = Назва
+tui-extensions-header-category = Категорія
+tui-extensions-header-status = Статус
+tui-extensions-header-desc = Опис
+tui-extensions-header-id = ID
+tui-extensions-header-server = Сервер
+tui-extensions-header-tools = Інструменти
+tui-extensions-header-connected = Підключено
+tui-extensions-header-fails = Збої
+tui-extensions-header-last-error = Остання помилка
+tui-extensions-loading = Завантаження MCP-серверів...
+tui-extensions-empty = Немає встановлених екстеншенів. Перегляньте маркетплейс за допомогою [b].
+tui-extensions-remove-confirm =   Натисніть y для підтвердження видалення, будь-яку іншу клавішу для скасування
+tui-extensions-hints-search =   Введіть запит для пошуку • Esc скасувати • Enter підтвердити
+tui-extensions-hints-browse =   j/k навігація • Enter встановити • / пошук • r оновити
+tui-extensions-hints-installed =   j/k навігація • d видалити • r оновити
+tui-extensions-hints-health =   j/k навігація • r/Enter перепідключити • автопідключення активне
+
+# --- Skills screen ---
+tui-skills-title-screen = Скіли
+tui-skills-tab-installed = 1 Встановлені
+tui-skills-tab-clawhub = 2 ClawHub
+tui-skills-tab-mcp = 3 MCP-сервери
+tui-skills-header-name = Назва
+tui-skills-header-runtime = Рантайм
+tui-skills-header-source = Джерело
+tui-skills-header-desc = Опис
+tui-skills-header-downloads = Завантаження
+tui-skills-header-server = Сервер
+tui-skills-header-status = Статус
+tui-skills-header-tools = Інструменти
+tui-skills-loading = Завантаження скілів...
+tui-skills-empty = Немає встановлених скілів. Перегляньте ClawHub, щоб знайти скіли.
+tui-skills-uninstall-confirm =   Видалити цей скіл? [y] Так  [any] Скасувати
+tui-skills-hints-installed =   [↑↓] Навігація  [u] Видалити  [r] Оновити
+tui-skills-sort =   Сортування: { $sort }
+tui-skills-sort-trending = трендові
+tui-skills-sort-popular = популярні
+tui-skills-sort-recent = нові
+tui-skills-searching = Пошук у ClawHub...
+tui-skills-empty-clawhub = Немає результатів. Натисніть [/] для пошуку або [s] для зміни сортування.
+tui-skills-hints-clawhub =   [↑↓] Навігація  [i] Встановити  [/] Пошук  [s] Сортування  [r] Оновити
+tui-skills-loading-mcp = Завантаження MCP-серверів...
+tui-skills-empty-mcp = Немає налаштованих MCP-серверів. Додайте сервери в config.toml.
+tui-skills-hints-mcp =   [↑↓] Навігація  [r] Оновити
+tui-skills-mcp-status-connected = Підключено
+tui-skills-mcp-status-disconnected = Відключено
+tui-skills-mcp-tools-count = Інструментів: { $count }
+
+# --- Setup Wizard screen ---
+tui-wizard-title = Налаштування
+tui-wizard-step-1 = Крок 1 з 3
+tui-wizard-step-2 = Крок 2 з 3
+tui-wizard-step-3 = Крок 3 з 3
+tui-wizard-step-saving = Збереження...
+tui-wizard-step-complete = Завершено
+tui-wizard-prompt-provider = Виберіть провайдера LLM:
+tui-wizard-hint-cli-detected = Виявлено CLI
+tui-wizard-hint-no-key-needed = API-ключ не потрібен
+tui-wizard-hint-local-no-key = локально, ключ не потрібен
+tui-wizard-hint-env-detected = Виявлено { $env }
+tui-wizard-hint-env-required = потрібно { $env }
+tui-wizard-hints-provider =     [↑↓] Навігація  [Enter] Вибрати  [Esc] Скасувати
+tui-wizard-prompt-api-key = Введіть ваш API-ключ для { $provider }:
+tui-wizard-hint-env-alternative = Або встановіть змінну оточення { $env }
+tui-wizard-hints-confirm-back =     [Enter] Підтвердити  [Esc] Назад
+tui-wizard-prompt-model-name = Назва моделі:
+tui-wizard-hint-model-default = за замовчуванням: { $model }
+tui-wizard-status-no-provider = Не вибрано провайдера
+tui-wizard-status-no-home = Не вдалося визначити домашню директорію
+tui-wizard-status-saved = Конфігурацію збережено — { $provider } / { $model }
+tui-wizard-status-save-fail = Не вдалося зберегти конфігурацію: { $error }
+tui-wizard-status-continuing = Продовження...
+
+
+
+
 
 
 

@@ -2102,6 +2102,94 @@ tui-memory-field-value = Value:
 tui-memory-placeholder-value = enter value...
 tui-memory-hints-edit =   Tab Switch field  Enter Save  Esc Cancel
 
+# --- Extensions screen ---
+tui-extensions-title-screen = Extensions
+tui-extensions-tab-browse = 1 Browse
+tui-extensions-tab-installed = 2 Installed
+tui-extensions-tab-health = 3 Health
+tui-extensions-status-ready = Ready
+tui-extensions-status-setup = Setup
+tui-extensions-status-error = Error
+tui-extensions-status-off = Off
+tui-extensions-status-installed = Installed
+tui-extensions-status-available = Available
+tui-extensions-header-name = Name
+tui-extensions-header-category = Category
+tui-extensions-header-status = Status
+tui-extensions-header-desc = Description
+tui-extensions-header-id = ID
+tui-extensions-header-server = Server
+tui-extensions-header-tools = Tools
+tui-extensions-header-connected = Connected
+tui-extensions-header-fails = Fails
+tui-extensions-header-last-error = Last Error
+tui-extensions-loading = Loading MCP servers...
+tui-extensions-empty = No extensions installed. Browse the marketplace with [b].
+tui-extensions-remove-confirm =   Press y to confirm removal, any other key to cancel
+tui-extensions-hints-search =   Type to search • Esc cancel • Enter confirm
+tui-extensions-hints-browse =   j/k navigate • Enter install • / search • r refresh
+tui-extensions-hints-installed =   j/k navigate • d remove • r refresh
+tui-extensions-hints-health =   j/k navigate • r/Enter reconnect • auto-reconnect active
+
+# --- Skills screen ---
+tui-skills-title-screen = Skills
+tui-skills-tab-installed = 1 Installed
+tui-skills-tab-clawhub = 2 ClawHub
+tui-skills-tab-mcp = 3 MCP Servers
+tui-skills-header-name = Name
+tui-skills-header-runtime = Runtime
+tui-skills-header-source = Source
+tui-skills-header-desc = Description
+tui-skills-header-downloads = Downloads
+tui-skills-header-server = Server
+tui-skills-header-status = Status
+tui-skills-header-tools = Tools
+tui-skills-loading = Loading skills...
+tui-skills-empty = No skills installed. Browse ClawHub to find skills.
+tui-skills-uninstall-confirm =   Uninstall this skill? [y] Yes  [any] Cancel
+tui-skills-hints-installed =   [↑↓] Navigate  [u] Uninstall  [r] Refresh
+tui-skills-sort =   Sort: { $sort }
+tui-skills-sort-trending = trending
+tui-skills-sort-popular = popular
+tui-skills-sort-recent = recent
+tui-skills-searching = Searching ClawHub...
+tui-skills-empty-clawhub = No results. Press [/] to search or [s] to change sort.
+tui-skills-hints-clawhub =   [↑↓] Navigate  [i] Install  [/] Search  [s] Sort  [r] Refresh
+tui-skills-loading-mcp = Loading MCP servers...
+tui-skills-empty-mcp = No MCP servers configured. Add servers in config.toml.
+tui-skills-hints-mcp =   [↑↓] Navigate  [r] Refresh
+tui-skills-mcp-status-connected = Connected
+tui-skills-mcp-status-disconnected = Disconnected
+tui-skills-mcp-tools-count = { $count } tools
+
+# --- Setup Wizard screen ---
+tui-wizard-title = Setup
+tui-wizard-step-1 = Step 1 of 3
+tui-wizard-step-2 = Step 2 of 3
+tui-wizard-step-3 = Step 3 of 3
+tui-wizard-step-saving = Saving...
+tui-wizard-step-complete = Complete
+tui-wizard-prompt-provider = Choose your LLM provider:
+tui-wizard-hint-cli-detected = CLI detected
+tui-wizard-hint-no-key-needed = no API key needed
+tui-wizard-hint-local-no-key = local, no key needed
+tui-wizard-hint-env-detected = { $env } detected
+tui-wizard-hint-env-required = requires { $env }
+tui-wizard-hints-provider =     [↑↓] Navigate  [Enter] Select  [Esc] Cancel
+tui-wizard-prompt-api-key = Enter your { $provider } API key:
+tui-wizard-hint-env-alternative = Or set { $env } environment variable
+tui-wizard-hints-confirm-back =     [Enter] Confirm  [Esc] Back
+tui-wizard-prompt-model-name = Model name:
+tui-wizard-hint-model-default = default: { $model }
+tui-wizard-status-no-provider = No provider selected
+tui-wizard-status-no-home = Could not determine home directory
+tui-wizard-status-saved = Config saved — { $provider } / { $model }
+tui-wizard-status-save-fail = Failed to save config: { $error }
+tui-wizard-status-continuing = Continuing...
+
+
+
+
 
 
 

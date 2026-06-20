@@ -431,7 +431,7 @@ impl WizardState {
         let p = match self.selected_provider_info() {
             Some(p) => p,
             None => {
-                self.status_msg = "No provider selected".to_string();
+                self.status_msg = crate::i18n::t("tui-wizard-status-no-provider");
                 self.step = WizardStep::Provider;
                 return;
             }
@@ -443,7 +443,7 @@ impl WizardState {
             match dirs::home_dir() {
                 Some(h) => h.join(".librefang"),
                 None => {
-                    self.status_msg = "Could not determine home directory".to_string();
+                    self.status_msg = crate::i18n::t("tui-wizard-status-no-home");
                     self.step = WizardStep::Done;
                     return;
                 }
@@ -454,11 +454,11 @@ impl WizardState {
         crate::restrict_dir_permissions(&librefang_dir);
 
         let api_key_line = if !self.api_key_input.is_empty() {
-            format!("api_key = \"{}\"", self.api_key_input)
+            format!("api_key{}={}\"{}\"", ' ', ' ', self.api_key_input)
         } else if p.env_var.is_empty() {
             String::new()
         } else {
-            format!("api_key_env = \"{}\"", p.env_var)
+            format!("api_key_env{}={}\"{}\"", ' ', ' ', p.env_var)
         };
 
         let model = if self.model_input.is_empty() {
@@ -489,11 +489,17 @@ listen_addr = "127.0.0.1:4545"
         match std::fs::write(&config_path, &config) {
             Ok(()) => {
                 crate::restrict_file_permissions(&config_path);
-                self.status_msg = format!("Config saved \u{2014} {} / {}", p.name, model);
+                self.status_msg = crate::i18n::t_args(
+                    "tui-wizard-status-saved",
+                    &[("provider", p.name), ("model", model)],
+                );
                 self.created_config = Some(config_path);
             }
             Err(e) => {
-                self.status_msg = format!("Failed to save config: {e}");
+                self.status_msg = crate::i18n::t_args(
+                    "tui-wizard-status-save-fail",
+                    &[("error", &e.to_string())],
+                );
             }
         }
         self.step = WizardStep::Done;
@@ -514,11 +520,11 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut WizardState) {
     );
 
     let step_label = match state.step {
-        WizardStep::Provider => "Step 1 of 3",
-        WizardStep::ApiKey => "Step 2 of 3",
-        WizardStep::Model => "Step 3 of 3",
-        WizardStep::Saving => "Saving...",
-        WizardStep::Done => "Complete",
+        WizardStep::Provider => crate::i18n::t("tui-wizard-step-1"),
+        WizardStep::ApiKey => crate::i18n::t("tui-wizard-step-2"),
+        WizardStep::Model => crate::i18n::t("tui-wizard-step-3"),
+        WizardStep::Saving => crate::i18n::t("tui-wizard-step-saving"),
+        WizardStep::Done => crate::i18n::t("tui-wizard-step-complete"),
     };
 
     // Left-aligned content area
@@ -546,7 +552,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut WizardState) {
     // Header
     let header = Line::from(vec![
         Span::styled(
-            "Setup",
+            crate::i18n::t("tui-wizard-title"),
             Style::default()
                 .fg(theme::ACCENT)
                 .add_modifier(Modifier::BOLD),
@@ -574,7 +580,10 @@ fn draw_provider(f: &mut Frame, area: Rect, state: &mut WizardState) {
     ])
     .split(area);
 
-    let prompt = Paragraph::new(Line::from(vec![Span::raw("  Choose your LLM provider:")]));
+    let prompt = Paragraph::new(Line::from(vec![Span::raw(format!(
+        "  {}",
+        crate::i18n::t("tui-wizard-prompt-provider")
+    ))]));
     f.render_widget(prompt, chunks[0]);
 
     let items: Vec<ListItem> = state
@@ -584,16 +593,16 @@ fn draw_provider(f: &mut Frame, area: Rect, state: &mut WizardState) {
             let p = &PROVIDERS[idx];
             let hint = if p.name == "claude-code" {
                 if librefang_runtime::drivers::claude_code::claude_code_available() {
-                    "CLI detected".to_string()
+                    crate::i18n::t("tui-wizard-hint-cli-detected")
                 } else {
-                    "no API key needed".to_string()
+                    crate::i18n::t("tui-wizard-hint-no-key-needed")
                 }
             } else if !p.needs_key {
-                "local, no key needed".to_string()
+                crate::i18n::t("tui-wizard-hint-local-no-key")
             } else if !p.env_var.is_empty() && std::env::var(p.env_var).is_ok() {
-                format!("{} detected", p.env_var)
+                crate::i18n::t_args("tui-wizard-hint-env-detected", &[("env", p.env_var)])
             } else {
-                format!("requires {}", p.env_var)
+                crate::i18n::t_args("tui-wizard-hint-env-required", &[("env", p.env_var)])
             };
             ListItem::new(Line::from(vec![
                 Span::raw(format!("  {:<14}", p.name)),
@@ -609,12 +618,12 @@ fn draw_provider(f: &mut Frame, area: Rect, state: &mut WizardState) {
                 .bg(theme::BG_HOVER)
                 .add_modifier(Modifier::BOLD),
         )
-        .highlight_symbol("\u{25b8} ");
+        .highlight_symbol("▸ ");
 
     f.render_stateful_widget(list, chunks[1], &mut state.provider_list);
 
     f.render_widget(
-        widgets::hint_bar("    [\u{2191}\u{2193}] Navigate  [Enter] Select  [Esc] Cancel"),
+        widgets::hint_bar(&crate::i18n::t("tui-wizard-hints-provider")),
         chunks[2],
     );
 }
@@ -635,18 +644,18 @@ fn draw_api_key(f: &mut Frame, area: Rect, state: &mut WizardState) {
     .split(area);
 
     let prompt = Paragraph::new(Line::from(vec![Span::raw(format!(
-        "  Enter your {} API key:",
-        p.name
+        "  {}",
+        crate::i18n::t_args("tui-wizard-prompt-api-key", &[("provider", p.name)])
     ))]));
     f.render_widget(prompt, chunks[0]);
 
     // Masked input
-    let masked: String = "\u{2022}".repeat(state.api_key_input.len());
+    let masked: String = "•".repeat(state.api_key_input.len());
     let input = Paragraph::new(Line::from(vec![
         Span::raw("  > "),
         Span::styled(&masked, theme::input_style()),
         Span::styled(
-            "\u{2588}",
+            "█",
             Style::default()
                 .fg(theme::GREEN)
                 .add_modifier(Modifier::SLOW_BLINK),
@@ -655,13 +664,16 @@ fn draw_api_key(f: &mut Frame, area: Rect, state: &mut WizardState) {
     f.render_widget(input, chunks[1]);
 
     let env_hint = Paragraph::new(Line::from(vec![Span::styled(
-        format!("    Or set {} environment variable", p.env_var),
+        format!(
+            "    {}",
+            crate::i18n::t_args("tui-wizard-hint-env-alternative", &[("env", p.env_var)])
+        ),
         theme::dim_style(),
     )]));
     f.render_widget(env_hint, chunks[2]);
 
     f.render_widget(
-        widgets::hint_bar("    [Enter] Confirm  [Esc] Back"),
+        widgets::hint_bar(&crate::i18n::t("tui-wizard-hints-confirm-back")),
         chunks[4],
     );
 }
@@ -681,7 +693,10 @@ fn draw_model(f: &mut Frame, area: Rect, state: &mut WizardState) {
     ])
     .split(area);
 
-    let prompt = Paragraph::new(Line::from(vec![Span::raw("  Model name:")]));
+    let prompt = Paragraph::new(Line::from(vec![Span::raw(format!(
+        "  {}",
+        crate::i18n::t("tui-wizard-prompt-model-name")
+    ))]));
     f.render_widget(prompt, chunks[0]);
 
     let display_text = if state.model_input.is_empty() {
@@ -693,7 +708,7 @@ fn draw_model(f: &mut Frame, area: Rect, state: &mut WizardState) {
         Span::raw("  > "),
         Span::styled(display_text, theme::input_style()),
         Span::styled(
-            "\u{2588}",
+            "█",
             Style::default()
                 .fg(theme::GREEN)
                 .add_modifier(Modifier::SLOW_BLINK),
@@ -702,13 +717,19 @@ fn draw_model(f: &mut Frame, area: Rect, state: &mut WizardState) {
     f.render_widget(input, chunks[1]);
 
     let default_hint = Paragraph::new(Line::from(vec![Span::styled(
-        format!("    default: {}", p.default_model),
+        format!(
+            "    {}",
+            crate::i18n::t_args(
+                "tui-wizard-hint-model-default",
+                &[("model", p.default_model)]
+            )
+        ),
         theme::dim_style(),
     )]));
     f.render_widget(default_hint, chunks[2]);
 
     f.render_widget(
-        widgets::hint_bar("    [Enter] Confirm  [Esc] Back"),
+        widgets::hint_bar(&crate::i18n::t("tui-wizard-hints-confirm-back")),
         chunks[4],
     );
 }
@@ -722,9 +743,9 @@ fn draw_done(f: &mut Frame, area: Rect, state: &WizardState) {
     .split(area);
 
     let icon = if state.created_config.is_some() {
-        Span::styled("  \u{2714} ", Style::default().fg(theme::GREEN))
+        Span::styled("  ✔ ", Style::default().fg(theme::GREEN))
     } else {
-        Span::styled("  \u{2718} ", Style::default().fg(theme::RED))
+        Span::styled("  ✘ ", Style::default().fg(theme::RED))
     };
 
     let msg = Paragraph::new(Line::from(vec![icon, Span::raw(&state.status_msg)]));
@@ -732,7 +753,7 @@ fn draw_done(f: &mut Frame, area: Rect, state: &WizardState) {
 
     if state.created_config.is_some() {
         let cont = Paragraph::new(Line::from(vec![Span::styled(
-            "    Continuing...",
+            format!("    {}", crate::i18n::t("tui-wizard-status-continuing")),
             theme::dim_style(),
         )]));
         f.render_widget(cont, chunks[1]);

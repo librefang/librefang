@@ -1282,6 +1282,94 @@ tui-memory-field-value = 值:
 tui-memory-placeholder-value = 输入值...
 tui-memory-hints-edit =   Tab 切换字段  Enter 保存  Esc 取消
 
+# --- Extensions screen ---
+tui-extensions-title-screen = 扩展
+tui-extensions-tab-browse = 1 浏览
+tui-extensions-tab-installed = 2 已安装
+tui-extensions-tab-health = 3 健康度
+tui-extensions-status-ready = 就绪
+tui-extensions-status-setup = 设置中
+tui-extensions-status-error = 错误
+tui-extensions-status-off = 关闭
+tui-extensions-status-installed = 已安装
+tui-extensions-status-available = 可用
+tui-extensions-header-name = 名称
+tui-extensions-header-category = 分类
+tui-extensions-header-status = 状态
+tui-extensions-header-desc = 描述
+tui-extensions-header-id = ID
+tui-extensions-header-server = 服务端
+tui-extensions-header-tools = 工具数
+tui-extensions-header-connected = 已连接时间
+tui-extensions-header-fails = 失败次数
+tui-extensions-header-last-error = 上次错误
+tui-extensions-loading = 正在加载 MCP 服务端...
+tui-extensions-empty = 未安装扩展。按 [b] 浏览市场。
+tui-extensions-remove-confirm =   按 y 确认删除，按其他任意键取消
+tui-extensions-hints-search =   输入内容进行搜索 • Esc 取消 • Enter 确认
+tui-extensions-hints-browse =   j/k 导航 • Enter 安装 • / 搜索 • r 刷新
+tui-extensions-hints-installed =   j/k 导航 • d 删除 • r 刷新
+tui-extensions-hints-health =   j/k 导航 • r/Enter 重连 • 自动重连已启用
+
+# --- Skills screen ---
+tui-skills-title-screen = 技能
+tui-skills-tab-installed = 1 已安装
+tui-skills-tab-clawhub = 2 ClawHub
+tui-skills-tab-mcp = 3 MCP 服务端
+tui-skills-header-name = 名称
+tui-skills-header-runtime = 运行环境
+tui-skills-header-source = 来源
+tui-skills-header-desc = 描述
+tui-skills-header-downloads = 下载量
+tui-skills-header-server = 服务端
+tui-skills-header-status = 状态
+tui-skills-header-tools = 工具
+tui-skills-loading = 正在加载技能...
+tui-skills-empty = 未安装技能。请在 ClawHub 中浏览寻找技能。
+tui-skills-uninstall-confirm =   卸载此技能？[y] 是  [任意键] 取消
+tui-skills-hints-installed =   [↑↓] 导航  [u] 卸载  [r] 刷新
+tui-skills-sort =   排序: { $sort }
+tui-skills-sort-trending = 趋势
+tui-skills-sort-popular = 热门
+tui-skills-sort-recent = 最新
+tui-skills-searching = 正在搜索 ClawHub...
+tui-skills-empty-clawhub = 无结果。按 [/] 搜索，或按 [s] 更改排序。
+tui-skills-hints-clawhub =   [↑↓] 导航  [i] 安装  [/] 搜索  [s] 排序  [r] 刷新
+tui-skills-loading-mcp = 正在加载 MCP 服务端...
+tui-skills-empty-mcp = 未配置 MCP 服务端。在 config.toml 中添加。
+tui-skills-hints-mcp =   [↑↓] 导航  [r] 刷新
+tui-skills-mcp-status-connected = 已连接
+tui-skills-mcp-status-disconnected = 已断开
+tui-skills-mcp-tools-count = { $count } 个工具
+
+# --- Setup Wizard screen ---
+tui-wizard-title = 设置
+tui-wizard-step-1 = 步骤 1 / 3
+tui-wizard-step-2 = 步骤 2 / 3
+tui-wizard-step-3 = 步骤 3 / 3
+tui-wizard-step-saving = 保存中...
+tui-wizard-step-complete = 完成
+tui-wizard-prompt-provider = 选择您的 LLM 供应商:
+tui-wizard-hint-cli-detected = 检测到 CLI
+tui-wizard-hint-no-key-needed = 不需要 API 密钥
+tui-wizard-hint-local-no-key = 本地，不需要密钥
+tui-wizard-hint-env-detected = 检测到 { $env }
+tui-wizard-hint-env-required = 需要 { $env }
+tui-wizard-hints-provider =     [↑↓] 导航  [Enter] 选择  [Esc] 取消
+tui-wizard-prompt-api-key = 输入您的 { $provider } API 密钥:
+tui-wizard-hint-env-alternative = 或设置 { $env } 环境变量
+tui-wizard-hints-confirm-back =     [Enter] 确认  [Esc] 返回
+tui-wizard-prompt-model-name = 模型名称:
+tui-wizard-hint-model-default = 默认: { $model }
+tui-wizard-status-no-provider = 未选择供应商
+tui-wizard-status-no-home = 无法确定主目录
+tui-wizard-status-saved = 配置已保存 — { $provider } / { $model }
+tui-wizard-status-save-fail = 保存配置失败: { $error }
+tui-wizard-status-continuing = 正在继续...
+
+
+
+
 
 
 
