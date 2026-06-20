@@ -196,13 +196,6 @@ pub(super) async fn tool_shell_exec(
                 reg.mark_finished(pid, exit_code);
             }
 
-            // #6242: route oversized streams through the artifact store so the
-            // full bytes stay recoverable via `read_artifact`, instead of the
-            // old lossy `safe_truncate_str` that dropped the middle of a long
-            // run (e.g. a 25k-line test log) with no way to page it back in.
-            // Streams at or below `max_output` pass through inline; the
-            // universal post-tool spill (#3347) still applies to the assembled
-            // result, so small streams are unaffected.
             let stdout_str = super::spill::spill_or_passthrough(
                 "shell_exec",
                 stdout.to_string(),
