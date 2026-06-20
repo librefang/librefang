@@ -1188,11 +1188,23 @@ fn aggregate_developer_loops(messages: &mut Vec<Message>, max_steps: u32) {
         if steps.len() >= max_steps && steps.len() > 2 {
             let first = steps[0];
             let last = steps[steps.len() - 1];
-            result.push(messages[first.0].clone());
-            result.push(messages[first.1].clone());
             let elided = steps.len() - 2;
             let tools = collect_dev_tool_names(messages, &steps[1..steps.len() - 1]);
-            result.push(developer_loop_placeholder(elided, &tools));
+
+            // Keep the first assistant turn and its matching user result delivery.
+            result.push(messages[first.0].clone());
+            let mut first_user_msg = messages[first.1].clone();
+            // Embed the aggregation notice in the first result delivery instead of
+            // creating a standalone User message. A standalone placeholder would be
+            // consecutive with the result delivery, and session_repair intentionally
+            // skips merging pure tool-result deliveries, leading Anthropic's API to
+            // reject the history with "role User cannot follow role User" (#6251).
+            append_block_to_message(
+                &mut first_user_msg,
+                developer_loop_placeholder(elided, &tools),
+            );
+            result.push(first_user_msg);
+
             result.push(messages[last.0].clone());
             result.push(messages[last.1].clone());
             i = j;
@@ -1265,8 +1277,9 @@ fn collect_dev_tool_names(messages: &[Message], steps: &[(usize, usize)]) -> Vec
     names.into_iter().collect()
 }
 
+/// Returns a text block describing the elided intermediate developer-loop steps.
 /// `timestamp: None` keeps output byte-stable across runs.
-fn developer_loop_placeholder(elided: usize, tools: &[String]) -> Message {
+fn developer_loop_placeholder(elided: usize, tools: &[String]) -> ContentBlock {
     let tool_list = if tools.is_empty() {
         String::new()
     } else {
@@ -1275,11 +1288,28 @@ fn developer_loop_placeholder(elided: usize, tools: &[String]) -> Message {
     let text = format!(
         "[DEVELOPER LOOP AGGREGATED] {elided} intermediate developer-tool step(s) elided during compaction{tool_list}. The first and last steps are retained for context."
     );
-    Message {
-        role: Role::User,
-        content: MessageContent::Text(text),
-        pinned: false,
-        timestamp: None,
+    ContentBlock::Text {
+        text,
+        provider_metadata: None,
+    }
+}
+
+/// Append a `ContentBlock` to a message, upgrading Text content to Blocks if needed.
+fn append_block_to_message(msg: &mut Message, block: ContentBlock) {
+    match &mut msg.content {
+        MessageContent::Blocks(blocks) => {
+            blocks.push(block);
+        }
+        MessageContent::Text(text) => {
+            let existing_text = std::mem::take(text);
+            msg.content = MessageContent::Blocks(vec![
+                ContentBlock::Text {
+                    text: existing_text,
+                    provider_metadata: None,
+                },
+                block,
+            ]);
+        }
     }
 }
 
@@ -1402,6 +1432,9 @@ mod tests {
     fn has_loop_placeholder(msgs: &[Message]) -> bool {
         msgs.iter().any(|m| {
             matches!(&m.content, MessageContent::Text(t) if t.contains("DEVELOPER LOOP AGGREGATED"))
+                || matches!(&m.content, MessageContent::Blocks(bs) if bs.iter().any(|b| {
+                    matches!(b, ContentBlock::Text { text, .. } if text.contains("DEVELOPER LOOP AGGREGATED"))
+                }))
         })
     }
 
@@ -1496,8 +1529,9 @@ mod tests {
             msgs.push(tool_result(&format!("t{k}"), "file_write"));
         }
         aggregate_developer_loops(&mut msgs, 2);
-        // first step (2) + placeholder (1) + last step (2) = 5
-        assert_eq!(msgs.len(), 5);
+        // first step (2) + last step (2) = 4; placeholder is embedded in the
+        // first user result delivery to avoid consecutive User messages (#6251).
+        assert_eq!(msgs.len(), 4);
         assert!(has_loop_placeholder(&msgs));
         assert!(
             tool_pairing_intact(&msgs),
@@ -1526,8 +1560,8 @@ mod tests {
             msgs.push(tool_result(&format!("t{k}"), "file_write"));
         }
         aggregate_developer_loops(&mut msgs, 3);
-        // first + placeholder + last = 5
-        assert_eq!(msgs.len(), 5);
+        // first step (2) + last step (2) = 4; placeholder embedded in first result delivery.
+        assert_eq!(msgs.len(), 4);
         assert!(has_loop_placeholder(&msgs));
         assert!(tool_pairing_intact(&msgs));
     }
@@ -1542,6 +1576,39 @@ mod tests {
         aggregate_developer_loops(&mut msgs, 0);
         assert_eq!(msgs.len(), 20);
         assert!(!has_loop_placeholder(&msgs));
+    }
+
+    #[test]
+    fn aggregate_developer_loops_avoids_consecutive_user_messages() {
+        // After aggregation the remaining history must alternate roles.
+        // Embedding the placeholder in the first result delivery prevents the
+        // previous standalone User placeholder from sitting next to another
+        // User message (#6251).
+        let mut msgs = Vec::new();
+        for k in 0..4 {
+            msgs.push(dev_tool_use(&format!("t{k}"), "file_write"));
+            msgs.push(tool_result(&format!("t{k}"), "file_write"));
+        }
+        aggregate_developer_loops(&mut msgs, 2);
+
+        for window in msgs.windows(2) {
+            assert!(
+                !(window[0].role == Role::User && window[1].role == Role::User),
+                "aggregation must not produce consecutive User messages: {:?} -> {:?}",
+                window[0].role,
+                window[1].role
+            );
+        }
+
+        // The placeholder text should live inside the first result delivery.
+        let first_user = &msgs[1];
+        assert!(
+            first_user
+                .content
+                .text_content()
+                .contains("DEVELOPER LOOP AGGREGATED"),
+            "placeholder should be embedded in the first result delivery"
+        );
     }
 
     #[test]
