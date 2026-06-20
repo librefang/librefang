@@ -1805,7 +1805,7 @@ class MatrixAdapter(SidecarAdapter):
         # tails as fresh, notifying events.
         while len(state["buffer"]) > MAX_MESSAGE_LEN:
             await self._stream_flush(state)
-        # #6248: finalize the answer as a fresh (notifying) message instead of a
+        # Finalize the answer as a fresh (notifying) message instead of a
         # final m.replace edit, which never fires a push notification.
         await self._finalize_as_new_message(state)
         self._stream_state_set(cmd.stream_id, None)
@@ -1854,12 +1854,12 @@ class MatrixAdapter(SidecarAdapter):
         state["buffer"] = tail
         state["last_flushed_len"] = len(tail)
         state["last_flush_t"] = time.monotonic()
-        # #6248: an overflow tail was sent as a fresh (notifying) event, so the
+        # An overflow tail was sent as a fresh (notifying) event, so the
         # final frame already notifies — don't re-send it at stream end.
         state["overflowed"] = True
 
     async def _finalize_as_new_message(self, state: dict) -> None:
-        """#6248: deliver the final streaming answer as a fresh
+        """Deliver the final streaming answer as a fresh
         ``m.room.message`` rather than a final ``m.replace`` edit, which does
         not trigger a push notification, then redact the ``"…"`` placeholder.
 

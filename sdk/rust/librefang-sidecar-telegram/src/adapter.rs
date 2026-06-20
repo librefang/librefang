@@ -54,7 +54,7 @@ pub struct TelegramAdapter {
 struct StreamState {
     chat_id: i64,
     message_id: i64,
-    // #6248: the topic/thread the placeholder was posted in, so the final
+    // The topic/thread the placeholder was posted in, so the final
     // answer can be delivered as a fresh (notifying) message in the same thread.
     thread_id: Option<i64>,
     buf: String,
@@ -132,7 +132,7 @@ impl TelegramAdapter {
         }
     }
 
-    /// #6248: deliver the final streaming answer as a *fresh* message instead
+    /// Deliver the final streaming answer as a *fresh* message instead
     /// of an edit of the `"…"` placeholder. Telegram edits never fire a push
     /// notification, so a user who backgrounded the client after the placeholder
     /// ping received nothing when the answer landed. A new message notifies
