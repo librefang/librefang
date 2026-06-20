@@ -1862,6 +1862,21 @@ export async function saveSidecarConfig(
   );
 }
 
+export interface SidecarRemoveResult {
+  status: "removed";
+  restart_required: boolean;
+  hot_actions_applied: string[];
+}
+
+// Remove a configured sidecar channel: rewrites config.toml and stops the child.
+export async function removeSidecarConfig(
+  name: string,
+): Promise<SidecarRemoveResult> {
+  return del<SidecarRemoveResult>(
+    `/api/channels/sidecar/${encodeURIComponent(name)}`,
+  );
+}
+
 export async function reloadChannels(): Promise<ApiActionResponse> {
   return post<ApiActionResponse>("/api/channels/reload", {});
 }

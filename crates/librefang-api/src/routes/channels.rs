@@ -37,6 +37,10 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
             "/channels/sidecar/{name}/configure",
             axum::routing::post(configure_sidecar_channel),
         )
+        .route(
+            "/channels/sidecar/{name}",
+            axum::routing::delete(delete_sidecar_channel),
+        )
 }
 
 use super::sidecar_describe::{describe_sidecar, SidecarSchema, SidecarSchemaField};
@@ -1058,6 +1062,71 @@ pub async fn configure_sidecar_channel(
             .collect::<Vec<_>>(),
         "restart_required": plan.restart_required,
         "shadowed_secrets": shadowed_secrets,
+    })))
+}
+
+/// `DELETE /api/channels/sidecar/{name}` — remove a configured sidecar channel and stop its child process.
+#[utoipa::path(
+    delete,
+    path = "/api/channels/sidecar/{name}",
+    tag = "channels",
+    params(
+        ("name" = String, Path, description = "Configured sidecar channel name to remove")
+    ),
+    responses(
+        (status = 200, description = "Removed; reload plan returned. Body fields: `status` (\"removed\"), `hot_actions_applied` ([String]), `restart_required` (bool).", body = crate::types::JsonObject),
+        (status = 404, description = "No configured sidecar channel with that name", body = crate::types::JsonObject)
+    )
+)]
+pub async fn delete_sidecar_channel(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    let config_path = state.kernel.home_dir().join("config.toml");
+
+    // Rewrite config.toml under the same lock that gates configure and POST /api/config/set.
+    let removed = {
+        let _config_guard = state.config_write_lock.lock().await;
+        super::sidecar_toml::remove_sidecar_block(&config_path, &name)
+            .map_err(|e| ApiErrorResponse::internal_scrub(e).into_json_tuple())?
+    };
+    if !removed {
+        return Err(ApiErrorResponse::not_found(format!(
+            "no configured sidecar channel named `{name}`"
+        ))
+        .into_json_tuple());
+    }
+
+    let plan = state
+        .kernel
+        .reload_config()
+        .await
+        .map_err(|e| ApiErrorResponse::internal_scrub(e).into_json_tuple())?;
+
+    // Re-enter the bridge so the removed sidecar child is actually stopped, not just dropped from disk.
+    if plan
+        .hot_actions
+        .contains(&librefang_kernel::config_reload::HotAction::ReloadChannels)
+    {
+        if let Err(e) = crate::channel_bridge::reload_channels_from_disk(&state).await {
+            tracing::error!("sidecar delete: bridge restart failed: {e}");
+            // Surface the actionable partial-failure signal (config WAS removed) but
+            // not the raw error chain — the full `e` is already logged above.
+            return Err(ApiErrorResponse::internal(
+                "removed from config.toml but bridge restart failed",
+            )
+            .into_json_tuple());
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "status": "removed",
+        "hot_actions_applied": plan
+            .hot_actions
+            .iter()
+            .map(|a| format!("{a:?}"))
+            .collect::<Vec<_>>(),
+        "restart_required": plan.restart_required,
     })))
 }
 

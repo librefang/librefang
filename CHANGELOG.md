@@ -836,6 +836,9 @@ _308 PRs from 7 contributors since v2026.5.17-beta.12._
 
 ### Added
 
+- **feat(runtime): add the `agent` dimension to `librefang_tool_execution_seconds`** (#6244) (@houko).
+  The per-tool latency histogram carried only a `tool` label, so per-tool p95 was an unweighted blend across every calling agent — a slow agent and a fast agent sharing a tool were indistinguishable, even though the sibling `librefang_tool_call_total` counter already carried `agent` (#6226).
+  The histogram now emits `{agent,tool}`, with `agent` sourced from the `agent_id` already in scope and sanitized + length-capped like `tool`, so tool latency is attributable per agent while cardinality stays bounded.
 - **feat(dashboard): provider max-token limit on the Providers page** (#6209) (@houko).
   Each provider card now shows the representative model's max-output-token limit (the `max_tokens` override when set, else the catalog `max_output_tokens`), and the config drawer lets you edit it; clearing the field reverts to the catalog default.
   Persisted through the existing per-model override endpoint, so no new persistence path is introduced.
@@ -900,6 +903,11 @@ In-crate only; no cross-crate error-shape changes.
 
 ### Added
 
+- **channels: remove a configured sidecar channel from the dashboard** (#6186) (@houko).
+  Channels could only be added — the only way to remove one was hand-editing `config.toml`.
+  A new `DELETE /api/channels/sidecar/{name}` rewrites `config.toml` under the same lock that gates configure, then hot-reloads so the removed sidecar child is stopped rather than left running until restart.
+  The dashboard configured-channel cards gain a confirm-guarded Trash button wired to a `useRemoveSidecarConfig` mutation; the channel's `secrets.env` keys are deliberately left untouched, since purging secrets is a separate destructive action.
+  Closes #6186.
 - **dashboard(agents): group the Agents list into Core Agents and Hands sections** (#6189) (@houko).
   The Agents page rendered every agent in one flat list, with hand-role agents distinguished only by a small per-row badge.
   The already-filtered and -sorted list is now split on the `is_hand` flag into two titled sections (using the pre-seeded `agents.core_agents` / `agents.hands` i18n keys); each header only shows when its group is non-empty, so the `Show hands` toggle keeps its meaning and a single-group view shows no empty banner.
@@ -1034,6 +1042,9 @@ In-crate only; no cross-crate error-shape changes.
   A `package-lock.json` is now committed so installs are reproducible and CI can run `npm audit` against a locked graph.
   Closes #6180.
 
+- **sec(install): enforce SHA256 verification in install.sh, remove silent skip paths** (#6179) (@mrchn).
+  `install.sh` previously skipped SHA256 verification silently in two cases: when no hash tool (`sha256sum`/`shasum`) was present on the system, and when the expected `.sha256` file was missing from the GitHub release — in both cases the install proceeded as if verification had passed.
+  Verification now fails loudly (non-zero exit, clear error message) instead of silently succeeding, closing the integrity-check bypass.
 - **ci: the Windows test lane is green again — `librefang-api` now builds vendored OpenSSL on Windows so `webauthn-rs` links** (#6161) (@houko).
   The passkey/WebAuthn work (#5981) added `webauthn-rs`, which pulls in `webauthn-rs-core` → native `openssl-sys`; the Windows MSVC runners have no discoverable system OpenSSL, so `cargo test --no-run --workspace` failed there with "Could not find directory of OpenSSL installation".
   A Windows-gated `openssl = { features = ["vendored"] }` dependency in `crates/librefang-api/Cargo.toml` makes cargo feature-unification build `openssl-sys` from source on Windows only; Unix keeps using the system library and is unaffected.

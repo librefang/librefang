@@ -939,8 +939,13 @@ jobs:
         run: mkdir -p crates/librefang-api/static/react
       - name: Run tests
         run: |
-          echo "Running workspace tests (full run)…"
-          cargo nextest run --workspace --no-fail-fast
+          echo "Running workspace tests (full run, excluding network-dependent hands registry tests)…"
+          # librefang-hands `registry::tests` clone github.com/librefang/librefang-registry at runtime — a live network fetch from inside a unit test.
+          # GitHub-hosted macOS runners resolve crates.io but consistently fail to resolve github.com for this clone ("Could not resolve host: github.com" -> "expected at least 15 hands, got 0"), so the set fails deterministically on macOS while passing on Linux/Windows where the clone succeeds.
+          # The logic under test is platform-independent and fully covered by those lanes, so skip just this network-dependent module on macOS rather than red-flagging every main push (#6240).
+          # The deeper fix — offline fixtures so the tests don't live-clone — is tracked as a follow-up.
+          cargo nextest run --workspace --no-fail-fast \
+            -E 'not (package(librefang-hands) and test(/registry::tests::/))'
 
   # ── Linux aarch64 compile check: runs on PRs ───────────────────────────────────
   # The x86 Ubuntu shards never exercise aarch64-gated code paths, so an

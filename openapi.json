@@ -5000,6 +5000,48 @@
         }
       }
     },
+    "/api/channels/sidecar/{name}": {
+      "delete": {
+        "tags": [
+          "channels"
+        ],
+        "summary": "`DELETE /api/channels/sidecar/{name}` — remove a configured sidecar channel and stop its child process.",
+        "operationId": "delete_sidecar_channel",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Configured sidecar channel name to remove",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Removed; reload plan returned. Body fields: `status` (\"removed\"), `hot_actions_applied` ([String]), `restart_required` (bool).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No configured sidecar channel with that name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/channels/sidecar/{name}/configure": {
       "post": {
         "tags": [

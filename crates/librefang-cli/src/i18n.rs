@@ -208,6 +208,12 @@ mod tests {
     fn test_detect_system_language() {
         let backup_language = std::env::var("LANGUAGE").ok();
         let backup_lang = std::env::var("LANG").ok();
+        let backup_lc_all = std::env::var("LC_ALL").ok();
+        let backup_lc_messages = std::env::var("LC_MESSAGES").ok();
+        // macOS CI exports LC_ALL/LC_MESSAGES at UTF-8, which takes precedence over LANG and defeats the non-UTF-8 cases below.
+        std::env::remove_var("LC_ALL");
+        std::env::remove_var("LC_MESSAGES");
+        std::env::remove_var("LANG");
 
         // Test matching "uk" from "uk:en_US"
         std::env::set_var("LANGUAGE", "uk:en_US");
@@ -240,6 +246,14 @@ mod tests {
             std::env::set_var("LANG", val);
         } else {
             std::env::remove_var("LANG");
+        }
+        match backup_lc_all {
+            Some(val) => std::env::set_var("LC_ALL", val),
+            None => std::env::remove_var("LC_ALL"),
+        }
+        match backup_lc_messages {
+            Some(val) => std::env::set_var("LC_MESSAGES", val),
+            None => std::env::remove_var("LC_MESSAGES"),
         }
     }
 }

@@ -220,6 +220,7 @@ export {
   // channels & comms
   reloadChannels,
   saveSidecarConfig,
+  removeSidecarConfig,
   sendCommsMessage,
   postCommsTask,
   // attachments
