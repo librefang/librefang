@@ -869,7 +869,8 @@ async fn agent_send_no_key_with_caller_routes_to_send_to_agent_as() {
     let input = serde_json::json!({ "agent_id": "target", "message": "hi" });
 
     let result =
-        super::agent::tool_agent_send(&input, Some(&kernel), Some("parent-agent"), None, None).await;
+        super::agent::tool_agent_send(&input, Some(&kernel), Some("parent-agent"), None, None)
+            .await;
 
     assert_eq!(result.unwrap(), "no-key-with-parent");
     let calls = cap.calls.lock().unwrap();
@@ -959,10 +960,15 @@ async fn agent_send_async_routes_to_tracked_path_and_returns_task_id() {
     });
     let session = SessionId(uuid::Uuid::new_v4());
 
-    let out =
-        super::agent::tool_agent_send(&input, Some(&kernel), Some("parent-agent"), Some(session), None)
-            .await
-            .unwrap();
+    let out = super::agent::tool_agent_send(
+        &input,
+        Some(&kernel),
+        Some("parent-agent"),
+        Some(session),
+        None,
+    )
+    .await
+    .unwrap();
 
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v["task_id"], "task-fake-1234");
@@ -1024,7 +1030,8 @@ async fn agent_send_depth_exceeded_is_permission_denied() {
     // task-local depth to 10 reaches the `>= max_depth` branch.
     let result = AGENT_CALL_DEPTH
         .scope(std::cell::Cell::new(10), async {
-            super::agent::tool_agent_send(&input, Some(&kernel), Some("parent-agent"), None, None).await
+            super::agent::tool_agent_send(&input, Some(&kernel), Some("parent-agent"), None, None)
+                .await
         })
         .await;
 

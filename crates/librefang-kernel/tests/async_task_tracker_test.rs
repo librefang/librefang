@@ -98,7 +98,8 @@ async fn complete_workflow_task_injects_signal_into_originating_session() {
     let mut rx = attach_injection_receiver(&kernel, agent_id, session_id);
 
     let run_id = WorkflowRunId(Uuid::new_v4());
-    let handle = kernel.register_async_task(agent_id, session_id, TaskKind::Workflow { run_id }, None);
+    let handle =
+        kernel.register_async_task(agent_id, session_id, TaskKind::Workflow { run_id }, None);
 
     let delivered = kernel
         .complete_async_task(
@@ -324,8 +325,10 @@ async fn register_dedupes_workflow_kind_against_existing_run_id() {
     let session_id = SessionId(Uuid::new_v4());
     let run_id = WorkflowRunId(Uuid::new_v4());
 
-    let first = kernel.register_async_task(agent_id, session_id, TaskKind::Workflow { run_id }, None);
-    let second = kernel.register_async_task(agent_id, session_id, TaskKind::Workflow { run_id }, None);
+    let first =
+        kernel.register_async_task(agent_id, session_id, TaskKind::Workflow { run_id }, None);
+    let second =
+        kernel.register_async_task(agent_id, session_id, TaskKind::Workflow { run_id }, None);
 
     assert_eq!(
         first.id, second.id,
@@ -560,7 +563,8 @@ async fn recovery_synthesizes_failed_event_for_matching_pending_workflow() {
     let mut rx = attach_injection_receiver(&kernel, agent_id, session_id);
 
     let run_id = WorkflowRunId(Uuid::new_v4());
-    let handle = kernel.register_async_task(agent_id, session_id, TaskKind::Workflow { run_id }, None);
+    let handle =
+        kernel.register_async_task(agent_id, session_id, TaskKind::Workflow { run_id }, None);
     assert_eq!(kernel.pending_async_task_count(), 1);
 
     // Drive the recovery hook directly. In production this is called
