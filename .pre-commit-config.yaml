@@ -7,12 +7,10 @@
 # refuses direct pushes to protected branches).
 #
 # Setup:
-#   pipx install pre-commit detect-secrets
+#   pipx install pre-commit
 #   pre-commit install --install-hooks               # commit stage
 #
-# Re-baseline on legitimate findings:
-#   detect-secrets scan --baseline .secrets.baseline
-#   detect-secrets audit .secrets.baseline
+# A new false positive? Add a path or regex to [allowlist] in .gitleaks.toml.
 
 repos:
   - repo: local
@@ -25,35 +23,12 @@ repos:
         types: [rust]
         stages: [pre-commit]
 
-  - repo: https://github.com/Yelp/detect-secrets
-    rev: v1.5.0
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
     hooks:
-      - id: detect-secrets
-        name: detect-secrets
-        args:
-          - --baseline
-          - .secrets.baseline
-        # Skip generated / vendored / lockfile / fixture content where
-        # high-entropy strings are expected and not real secrets.
-        exclude: |
-          (?x)^(
-            .*\.lock$
-          | Cargo\.lock$
-          | package-lock\.json$
-          | pnpm-lock\.yaml$
-          | yarn\.lock$
-          | poetry\.lock$
-          | go\.sum$
-          | sdk/.*
-          | openapi\.json$
-          | crates/librefang-api/dashboard/dist/.*
-          | crates/librefang-api/dashboard/node_modules/.*
-          | docs/.*\.(svg|png|jpg|jpeg|gif|ico)$
-          | .*\.snap$
-          | .*\.snapshot$
-          | .*/fixtures/.*
-          | .*/testdata/.*
-          | target/.*
-          | \.secrets\.baseline$
-          )$
+      - id: gitleaks
+        # Scans staged changes (`gitleaks protect --staged`) and reads
+        # `.gitleaks.toml` automatically. Path / regex allowlists for
+        # generated / vendored / lockfile / fixture content live there,
+        # not inline here.
         stages: [pre-commit]

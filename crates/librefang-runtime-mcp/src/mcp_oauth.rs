@@ -1143,6 +1143,7 @@ mod tests {
             client_id: Some("override-client".to_string()),
             scopes: vec!["admin".to_string()],
             user_scopes: Vec::new(),
+            client_secret_env: None,
         };
         let merged = merge_metadata_with_config(discovered, &config);
         assert_eq!(merged.authorization_endpoint, "https://override.com/auth");

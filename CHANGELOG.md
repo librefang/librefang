@@ -834,6 +834,12 @@ _308 PRs from 7 contributors since v2026.5.17-beta.12._
 
 ## [Unreleased]
 
+### Changed
+
+- **chore(secrets): replace the detect-secrets baseline with gitleaks** (#6262) (@houko).
+  The 4296-line `.secrets.baseline` pinned 534 unaudited high-entropy findings and forced every fixture-adding PR to append to it, which made it the repo's most merge-conflict-prone file.
+  gitleaks scans against a fixed rule set plus rule-based path/regex allowlists in `.gitleaks.toml`, which do not churn the way a per-finding snapshot does; CI runs `gitleaks dir .` and the pre-commit hook runs `gitleaks protect --staged`.
+
 ### Fixed
 
 - **fix(channels): the streaming final answer now fires a push notification** (#6248) (@houko) — reported and diagnosed by @neo-wanderer.

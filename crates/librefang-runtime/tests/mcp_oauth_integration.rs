@@ -13,6 +13,7 @@ async fn test_discover_fallback_to_config() {
         client_id: Some("test-id".into()),
         scopes: vec!["read".into()],
         user_scopes: Vec::new(),
+        client_secret_env: None,
     };
     let result =
         discover_oauth_metadata("https://nonexistent.example.com/mcp", None, Some(&config)).await;
