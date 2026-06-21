@@ -1062,7 +1062,7 @@ fn test_no_dead_locale_keys() {
 }
 
 #[test]
-fn test_english_and_ukrainian_locales_cover_used_i18n_keys() {
+fn test_locales_cover_used_i18n_keys() {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set");
     let manifest_dir = Path::new(&manifest_dir);
     let english_keys: std::collections::BTreeSet<String> =
@@ -1074,4 +1074,5 @@ fn test_english_and_ukrainian_locales_cover_used_i18n_keys() {
 
     assert_locale_covers_required_i18n_keys(manifest_dir, "en", "English", &required_keys);
     assert_locale_covers_required_i18n_keys(manifest_dir, "uk", "Ukrainian", &required_keys);
+    assert_locale_covers_required_i18n_keys(manifest_dir, "zh-CN", "Chinese", &required_keys);
 }
