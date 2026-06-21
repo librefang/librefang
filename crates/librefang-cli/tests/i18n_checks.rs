@@ -838,11 +838,93 @@ fn collect_locale_keys(locale_file: &Path) -> Vec<String> {
         .collect()
 }
 
+fn locale_key_prefixes(keys: &[String]) -> std::collections::BTreeSet<String> {
+    keys.iter()
+        .filter_map(|key| key.split_once('-').map(|(prefix, _)| prefix.to_string()))
+        .collect()
+}
+
+fn is_likely_i18n_key_literal(
+    literal: &str,
+    known_prefixes: &std::collections::BTreeSet<String>,
+) -> bool {
+    const TECHNICAL_FALSE_POSITIVES: &[&str] = &["daemon-reload"];
+
+    let Some((prefix, _)) = literal.split_once('-') else {
+        return false;
+    };
+    if literal.ends_with('-')
+        || TECHNICAL_FALSE_POSITIVES.contains(&literal)
+        || literal
+            .split('-')
+            .skip(1)
+            .all(|part| part.chars().all(|c| c.is_ascii_digit()))
+        || literal.starts_with("agent-uuid-")
+    {
+        return false;
+    }
+    known_prefixes.contains(prefix)
+        && literal
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+}
+
 fn is_dynamic_i18n_key(key: &str) -> bool {
     (key.starts_with("tui-templates-name-") || key.starts_with("tui-templates-desc-"))
         || (key.starts_with("tui-triggers-type-")
             && (key.ends_with("-name") || key.ends_with("-desc")))
         || key.starts_with("tui-skills-sort-")
+}
+
+fn extract_const_array_string_literals(content: &str, const_name: &str) -> Vec<String> {
+    let Some(start) = content.find(&format!("const {const_name}")) else {
+        return Vec::new();
+    };
+    let Some(array_start) = content[start..].find("&[") else {
+        return Vec::new();
+    };
+    let block_start = start + array_start;
+    let Some(array_end) = content[block_start..].find("];") else {
+        return Vec::new();
+    };
+    collect_rust_string_literals(&content[block_start..block_start + array_end])
+}
+
+fn template_slug(name: &str) -> String {
+    name.to_lowercase().replace(' ', "-")
+}
+
+fn collect_dynamic_required_english_keys(
+    manifest_dir: &Path,
+) -> std::collections::BTreeSet<String> {
+    let mut keys = std::collections::BTreeSet::new();
+
+    let templates_rs =
+        fs::read_to_string(manifest_dir.join("src/tui/screens/templates.rs")).unwrap();
+    for chunk in extract_const_array_string_literals(&templates_rs, "BUILTIN_TEMPLATES").chunks(5) {
+        let Some(name) = chunk.first() else {
+            continue;
+        };
+        let slug = template_slug(name);
+        keys.insert(format!("tui-templates-name-{slug}"));
+        keys.insert(format!("tui-templates-desc-{slug}"));
+    }
+
+    let triggers_rs = fs::read_to_string(manifest_dir.join("src/tui/screens/triggers.rs")).unwrap();
+    for name in extract_const_array_string_literals(&triggers_rs, "PATTERN_TYPES") {
+        let slug = name.to_lowercase();
+        keys.insert(format!("tui-triggers-type-{slug}-name"));
+        keys.insert(format!("tui-triggers-type-{slug}-desc"));
+    }
+
+    let skills_rs = fs::read_to_string(manifest_dir.join("src/tui/screens/skills.rs")).unwrap();
+    for literal in collect_rust_string_literals(&skills_rs) {
+        if matches!(literal.as_str(), "trending" | "popular" | "recent") {
+            keys.insert(format!("tui-skills-sort-{literal}"));
+        }
+    }
+
+    keys
 }
 
 #[test]
@@ -929,6 +1011,44 @@ fn test_no_dead_locale_keys() {
         panic!(
             "Found locale keys that are not referenced by CLI Rust code:\n{}",
             dead_keys.join("\n")
+        );
+    }
+}
+
+#[test]
+fn test_english_locale_covers_used_i18n_keys() {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set");
+    let manifest_dir = Path::new(&manifest_dir);
+    let src_dir = manifest_dir.join("src");
+    let english_keys: std::collections::BTreeSet<String> =
+        collect_locale_keys(&manifest_dir.join("locales/en/main.ftl"))
+            .into_iter()
+            .collect();
+    let known_prefixes = locale_key_prefixes(&english_keys.iter().cloned().collect::<Vec<_>>());
+
+    let mut required_keys = collect_dynamic_required_english_keys(manifest_dir);
+    for entry in WalkDir::new(&src_dir) {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if path.is_file() && path.extension().is_some_and(|ext| ext == "rs") {
+            let content = fs::read_to_string(path).unwrap();
+            for literal in collect_rust_string_literals(&content) {
+                if is_likely_i18n_key_literal(&literal, &known_prefixes) {
+                    required_keys.insert(literal);
+                }
+            }
+        }
+    }
+
+    let missing_keys: Vec<String> = required_keys
+        .into_iter()
+        .filter(|key| !english_keys.contains(key))
+        .collect();
+
+    if !missing_keys.is_empty() {
+        panic!(
+            "English locale is missing keys referenced by CLI Rust code:\n{}",
+            missing_keys.join("\n")
         );
     }
 }

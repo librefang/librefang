@@ -655,6 +655,10 @@ hand-no-settings = Hand '{ $id }' has no configurable settings.
 hand-settings-title = Settings for '{ $id }'
 hand-set-setting-success = Set { $key }={ $value } for hand '{ $id }'.
 hand-reloaded-summary = Reloaded hands: { $added } added, { $updated } updated, { $total } total.
+label-chat-with = Chat with
+hand-chat-quit-hint = (type /quit to exit)
+hand-chat-prompt-you = you >
+label-no-response = [no response]
 # mcp_cmds.rs
 mcp-catalog-unknown-entry = Unknown MCP catalog entry: '{ $name }'
 mcp-catalog-available-header =
@@ -982,6 +986,12 @@ label-header-alias = ALIAS
 label-header-provider = PROVIDER
 label-header-id = ID
 label-header-agent = AGENT
+label-header-category = CATEGORY
+label-header-description = DESCRIPTION
+label-header-hand = HAND
+label-header-instance = INSTANCE
+label-header-model = MODEL
+label-header-status = STATUS
 label-header-type = TYPE
 label-header-timestamp = TIMESTAMP
 label-header-event = EVENT
@@ -2124,7 +2134,6 @@ tui-wizard-status-no-home = Could not determine home directory
 tui-wizard-status-saved = Config saved — { $provider } / { $model }
 tui-wizard-status-save-fail = Failed to save config: { $error }
 tui-wizard-status-continuing = Continuing...
-
 
 
 
