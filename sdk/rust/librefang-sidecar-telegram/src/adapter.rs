@@ -54,6 +54,9 @@ pub struct TelegramAdapter {
 struct StreamState {
     chat_id: i64,
     message_id: i64,
+    // The topic/thread the placeholder was posted in, so the final
+    // answer can be delivered as a fresh (notifying) message in the same thread.
+    thread_id: Option<i64>,
     buf: String,
     last_edit: Instant,
 }
@@ -126,6 +129,62 @@ impl TelegramAdapter {
             Err(e) => {
                 eprintln!("[telegram] stream edit failed: {e}");
             }
+        }
+    }
+
+    /// Deliver the final streaming answer as a *fresh* message instead
+    /// of an edit of the `"…"` placeholder. Telegram edits never fire a push
+    /// notification, so a user who backgrounded the client after the placeholder
+    /// ping received nothing when the answer landed. A new message notifies
+    /// reliably; the placeholder is then deleted. Mirrors `edit_with_fallback`'s
+    /// HTML→plain fallback, and if the fresh send fails outright it falls back to
+    /// editing the placeholder in place (answer still visible, just no push).
+    async fn finalize_as_new_message(
+        client: &BotClient,
+        chat_id: i64,
+        placeholder_id: i64,
+        thread_id: Option<i64>,
+        html_body: &str,
+    ) {
+        if html_body.trim().is_empty() {
+            // No answer to deliver — leave the placeholder as-is (matches the
+            // empty-body early return in `edit_with_fallback`).
+            return;
+        }
+        let sent = match client
+            .send_message(chat_id, html_body, Some("HTML"), thread_id, None)
+            .await
+        {
+            Ok(_) => true,
+            Err(e) if is_parse_entities_error(&e) => {
+                let plain = crate::dispatcher::html_to_plain(html_body);
+                match client
+                    .send_message(chat_id, &plain, None, thread_id, None)
+                    .await
+                {
+                    Ok(_) => true,
+                    Err(e2) => {
+                        eprintln!("[telegram] stream finalize (plain fallback) failed: {e2}");
+                        false
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("[telegram] stream finalize failed: {e}");
+                false
+            }
+        };
+        if sent {
+            // Drop the "…" placeholder now the real answer has landed. Deletion
+            // can fail (message too old / no rights) — harmless, the new message
+            // already notified; the placeholder just lingers.
+            if let Err(e) = client.delete_message(chat_id, placeholder_id).await {
+                eprintln!("[telegram] stream placeholder delete failed: {e}");
+            }
+        } else {
+            // Fresh send failed outright — fall back to the old edit-in-place so
+            // the answer is still visible (no notification, but not lost).
+            Self::edit_with_fallback(client, chat_id, placeholder_id, html_body).await;
         }
     }
 }
@@ -247,6 +306,7 @@ impl SidecarAdapter for TelegramAdapter {
                     StreamState {
                         chat_id,
                         message_id: res.message_id,
+                        thread_id,
                         buf: String::new(),
                         // `Instant::now() - 2s` panics if the system has been up less than 2 s (cold-boot container, embedded sidecar). saturating_sub returns `Instant::now()` in that case — the first delta will be throttled instead of firing immediately, which is fine.
                         last_edit: Instant::now()
@@ -289,8 +349,10 @@ impl SidecarAdapter for TelegramAdapter {
                 let body = crate::format::format_and_sanitize(&state.buf);
                 let chat_id = state.chat_id;
                 let message_id = state.message_id;
+                let thread_id = state.thread_id;
                 drop(map);
-                Self::edit_with_fallback(&self.client, chat_id, message_id, &body).await;
+                Self::finalize_as_new_message(&self.client, chat_id, message_id, thread_id, &body)
+                    .await;
                 Ok(())
             }
             // Unknown / forward-compat commands are silently tolerated.

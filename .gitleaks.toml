@@ -1,0 +1,94 @@
+# gitleaks configuration for LibreFang.
+#
+# Replaces the detect-secrets `.secrets.baseline` snapshot. That baseline pinned
+# 534 individual high-entropy findings across 201 files, so every PR that added
+# a token-shaped fixture had to append a line to a 4296-line JSON file — a
+# structural merge-conflict magnet, and the findings were never even audited
+# (none carried an is_secret verdict), so the file acted purely as a diff anchor.
+# gitleaks scans against a fixed rule set (provider-specific key formats plus a
+# guarded generic-api-key rule) and suppresses expected matches through the
+# path / regex / stopword allowlists below, which change far less often than a
+# per-finding snapshot.
+#
+# Local:  gitleaks protect --staged     (the scripts/hooks/pre-commit hook runs this)
+# Tree:   gitleaks dir .                 (the `secrets` CI workflow runs this)
+# A new false positive? Add a path or regex to [allowlist] below, not a per-line entry.
+
+title = "LibreFang gitleaks config"
+
+[extend]
+# Inherit gitleaks' built-in rule set; we only layer allowlist entries on top.
+useDefault = true
+
+[allowlist]
+description = "Paths and patterns where high-entropy strings are expected and are not real credentials."
+
+# File paths (matched against the path) where high-entropy strings are inherent
+# and never a real secret. Mirrors the old detect-secrets `exclude` block.
+paths = [
+  # Lockfiles — pinned dependency hashes, not secrets.
+  '''(^|/)Cargo\.lock$''',
+  '''(^|/)package-lock\.json$''',
+  '''(^|/)pnpm-lock\.yaml$''',
+  '''(^|/)yarn\.lock$''',
+  '''(^|/)poetry\.lock$''',
+  '''(^|/)go\.sum$''',
+  '''(^|/)mise\.lock$''',
+  '''(^|/)flake\.lock$''',
+  '''\.lock$''',
+  # Generated / vendored artifacts.
+  '''^sdk/''',
+  '''^openapi\.json$''',
+  '''^crates/librefang-api/dashboard/dist/''',
+  '''^crates/librefang-api/dashboard/node_modules/''',
+  '''^target/''',
+  # Snapshot + fixture test data: high-entropy strings are the point of the test.
+  '''\.snap$''',
+  '''\.snapshot$''',
+  '''(^|/)fixtures/''',
+  '''(^|/)testdata/''',
+  # Binary documentation assets.
+  '''^docs/.*\.(svg|png|jpg|jpeg|gif|ico)$''',
+  # Example / template config shipped for users to copy.
+  '''\.example$''',
+  '''(^|/)examples/''',
+]
+
+# Matched against the detected secret value. Common placeholder shapes that
+# appear in docs and examples. Kept narrow so a real secret cannot hide behind
+# a generic prefix.
+regexes = [
+  '''(?i)(example|dummy|placeholder|changeme|redacted|your[-_]?(api[-_]?)?(key|token|secret))''',
+  '''AKIA[0-9A-Z]{12}EXAMPLE''',
+  # `api_key_env` (and similar `*_env` config fields) hold an ENV VAR NAME, never
+  # the secret itself — an all-caps `[A-Z0-9_]` identifier with at least one
+  # underscore. Requiring an underscore keeps real AWS keys (AKIA…, no
+  # underscore) in scope. Covers the docs config examples and X_API_KEY-style
+  # source fixtures.
+  '''^[A-Z][A-Z0-9]*(_[A-Z0-9]+)+$''',
+  # The canonical jwt.io HS256 example token (its fixed public signature),
+  # embedded in JWT-handling tests and docs; not a real signing key.
+  '''SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c''',
+  # Intentional fake credentials embedded in redaction / sanitization / driver
+  # tests (the tests assert these get stripped) and one openfang→librefang doc
+  # example. Each is a fixed literal or a tight test-only convention, so
+  # allowlisting it cannot mask a real secret. The retired detect-secrets
+  # baseline covered the same fixtures; add new test fixtures here if they trip
+  # the scan, rather than reviving a per-finding snapshot.
+  '''sk-abc123xyz''',
+  '''sk-proj-abcdefg12345''',
+  '''sk-(open|libre)fang-abc123''',
+  '''test-nvidia-key-12345''',
+  '''ABCDEFGHIJ1234567890XYZ''',
+  '''(keep-me|strip-(groq|openai|gemini|suffix))-5006''',
+]
+
+# A finding whose surrounding context contains one of these substrings is
+# ignored. Conservative list — only unambiguous test / placeholder markers.
+stopwords = [
+  "example",
+  "EXAMPLE",
+  "dummy",
+  "placeholder",
+  "test-only",
+]

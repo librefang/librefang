@@ -468,6 +468,39 @@ impl AgentRouter {
         None
     }
 
+    /// Evaluate only *specific* bindings — those whose `match_rule` pins a
+    /// `peer_id` (a per-conversation route, e.g. a Matrix room or a DM peer).
+    ///
+    /// The inbound dispatcher uses this to rank an operator's explicit
+    /// per-conversation binding **above** the channel-wide instance default
+    /// (`[[sidecar_channels]] agent`). Without that ranking a sidecar
+    /// `default_agent` shadows every per-room binding: the channel-wide default
+    /// is consulted first and the more-specific `[[bindings]]` entry never gets
+    /// a turn, collapsing all inbound traffic onto the default agent.
+    ///
+    /// Channel-only bindings (no `peer_id`) are intentionally excluded here —
+    /// they stay in the lower-precedence [`resolve`] / [`resolve_with_context`]
+    /// chain, below the instance default, preserving the #5671 precedence.
+    /// Returns `None` when no peer-specific binding matches.
+    pub fn resolve_specific_binding(&self, ctx: &BindingContext<'_>) -> Option<AgentId> {
+        let bindings = self.bindings.lock().unwrap_or_else(|e| e.into_inner());
+        for (binding, _agent_name) in bindings.iter() {
+            if binding.match_rule.peer_id.is_none() {
+                continue;
+            }
+            if self.binding_matches(binding, ctx) {
+                if let Some(id) = self.agent_name_cache.get(&binding.agent) {
+                    return Some(*id);
+                }
+                warn!(
+                    agent = %binding.agent,
+                    "Specific binding matched but agent not found in cache"
+                );
+            }
+        }
+        None
+    }
+
     /// Check if a single binding's match_rule matches the context.
     ///
     /// Delegates to [`BindingMatchRule::matches`] in `librefang-types` — the
@@ -582,6 +615,64 @@ mod tests {
         assert_eq!(
             router.resolve(&ChannelType::Telegram, "u1", None),
             Some(new_id)
+        );
+    }
+
+    #[test]
+    fn resolve_specific_binding_only_matches_peer_id_rules() {
+        let router = AgentRouter::new();
+        let room_agent = AgentId::new();
+        let channel_agent = AgentId::new();
+        router.register_agent("room-agent".to_string(), room_agent);
+        router.register_agent("channel-agent".to_string(), channel_agent);
+        router.load_bindings(&[
+            // Peer-specific binding (a room) — this is what should win over a
+            // channel-wide instance default.
+            AgentBinding {
+                agent: "room-agent".to_string(),
+                match_rule: librefang_types::config::BindingMatchRule {
+                    channel: Some("matrix".to_string()),
+                    peer_id: Some("!room:example.org".to_string()),
+                    ..Default::default()
+                },
+            },
+            // Channel-only binding — must be IGNORED by resolve_specific_binding
+            // (it stays in the lower-precedence chain, under the instance default).
+            AgentBinding {
+                agent: "channel-agent".to_string(),
+                match_rule: librefang_types::config::BindingMatchRule {
+                    channel: Some("matrix".to_string()),
+                    ..Default::default()
+                },
+            },
+        ]);
+
+        let room_ctx = BindingContext {
+            channel: std::borrow::Cow::Borrowed("matrix"),
+            account_id: None,
+            peer_id: std::borrow::Cow::Borrowed("!room:example.org"),
+            guild_id: None,
+            roles: SmallVec::new(),
+        };
+        assert_eq!(
+            router.resolve_specific_binding(&room_ctx),
+            Some(room_agent),
+            "peer-specific binding must resolve"
+        );
+
+        // A different room: no peer-specific binding matches, and the
+        // channel-only binding must NOT be returned here.
+        let other_ctx = BindingContext {
+            channel: std::borrow::Cow::Borrowed("matrix"),
+            account_id: None,
+            peer_id: std::borrow::Cow::Borrowed("!other:example.org"),
+            guild_id: None,
+            roles: SmallVec::new(),
+        };
+        assert_eq!(
+            router.resolve_specific_binding(&other_ctx),
+            None,
+            "channel-only binding must be excluded from specific resolution"
         );
     }
 
