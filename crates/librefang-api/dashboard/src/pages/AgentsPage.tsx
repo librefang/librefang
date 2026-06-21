@@ -1245,7 +1245,10 @@ export function AgentsPage() {
     if (isCrashed && agentTab === "conversation") {
       return (
         <EmptyState
-          title={t("agents.detail.crashed_title", { defaultValue: `${agent.name} is in error state` })}
+          title={t("agents.detail.crashed_title", {
+            defaultValue: "{{name}} is in error state",
+            name: agent.name,
+          })}
           icon={<X className="h-6 w-6 text-error" />}
           action={
             <Button variant="primary" size="sm" leftIcon={<RotateCcw className="h-3.5 w-3.5" />} onClick={async () => {
@@ -3196,4 +3199,3 @@ export function AgentsPage() {
     </div>
   );
 }
-

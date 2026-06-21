@@ -1521,7 +1521,11 @@ export function ProvidersPage() {
       addToast(t("providers.batch_test_all_failed", { defaultValue: "All tests failed" }), "error");
     } else {
       addToast(
-        t("providers.batch_test_partial", { defaultValue: `${successCount} passed, ${failCount} failed` }),
+        t("providers.batch_test_partial", {
+          defaultValue: "{{success}} passed, {{failed}} failed",
+          success: successCount,
+          failed: failCount,
+        }),
         "error",
       );
     }

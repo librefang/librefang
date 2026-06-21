@@ -171,7 +171,9 @@
     "none": "无",
     "metadata": "元数据",
     "size": "大小",
-    "path": "路径"
+    "path": "路径",
+    "select_options": "选择选项",
+    "error_loading_data": "加载记忆失败"
   },
   "status": {
     "running": "运行中",
@@ -256,7 +258,8 @@
       "title": "费用",
       "vs_prior": "对比上期",
       "no_prior": "无前期支出",
-      "provider_all_time": "全部时间提供商占比"
+      "provider_all_time": "全部时间提供商占比",
+      "no_provider_data": "没有提供商数据"
     },
     "alerts": {
       "title": "告警",
@@ -272,7 +275,9 @@
       "connected": "已连接",
       "approvals_pending": "{{count}} 个待审批",
       "approvals_pending_sub": "前往审批队列处理",
-      "degraded": "降级"
+      "degraded": "降级",
+      "budget_threshold": "每日预算达到 {{pct}}%",
+      "budget_threshold_sub": "{{used}} / 上限 {{cap}}"
     },
     "col": {
       "agent": "智能体",
@@ -283,7 +288,10 @@
       "task": "任务",
       "msgs": "消息数",
       "started": "开始时间",
-      "no_label": "(无标题)"
+      "no_label": "(无标题)",
+      "tokens": "令牌",
+      "cost": "成本",
+      "duration": "时长"
     },
     "system": {
       "runtime": "运行时",
@@ -299,7 +307,8 @@
       "degraded": "降级",
       "peers": "个节点",
       "no_peers": "暂无节点"
-    }
+    },
+    "setup_failed": "快速初始化失败"
   },
   "agents": {
     "title": "智能体",
@@ -796,9 +805,66 @@
         "edit": "编辑触发器",
         "created": "触发器已创建",
         "updated": "触发器已更新",
-        "deleted": "触发器已删除"
-      }
-    }
+        "deleted": "触发器已删除",
+        "pattern_custom": "自定义事件模式（JSON 或字符串）"
+      },
+      "skill_meta": "已安装",
+      "skill_remove": "移除 {{name}}",
+      "live_conversation": "实时对话",
+      "no_conversation": "还没有对话 — 打开聊天发送第一条消息。",
+      "open_chat": "打开聊天",
+      "memory_label": "记忆 · sqlite",
+      "open_memory": "打开",
+      "no_memory": "此智能体还没有记忆条目。",
+      "skills_saved": "已保存到 agent.toml",
+      "skill_update_failed": "更新技能失败",
+      "auto_evolve_enabled": "自动演化已启用",
+      "auto_evolve_disabled": "自动演化已禁用",
+      "installed_skills": "已安装技能",
+      "skills_all": "全部",
+      "install_skill": "安装",
+      "auto_evolve_label": "自动演化",
+      "auto_evolve_desc": "每次轮次后进行后台技能演化审查",
+      "skills_loading": "正在加载技能…",
+      "skills_disabled_title": "技能已禁用",
+      "skills_disabled_desc": "清单固定了 skills_disabled = true — 智能体运行时不分发技能",
+      "skills_all_title": "使用所有可用技能",
+      "skills_all_desc": "清单未固定 allowlist — 注册表中的所有技能都可用",
+      "skills_customize": "自定义",
+      "skills_assigned": "已分配",
+      "skills_reset_all": "重置为全部",
+      "no_skills_assigned": "未分配技能 — 从下方列表添加，或重置为全部。",
+      "skills_available": "可用",
+      "tools_saved": "已保存到 agent.toml",
+      "tools_label": "工具",
+      "tools_all": "全部",
+      "tools_included": "已包含",
+      "tools_customize": "自定义 — 切换到 allowlist",
+      "tools_all_title": "使用所有可用工具",
+      "tools_all_desc": "系统中还没有注册工具",
+      "tools_fine_grain": "配置单个工具",
+      "tools_remove_group": "移除整个组",
+      "tools_available": "可用",
+      "tools_click_assign": "点击分配",
+      "tools_reset_to_all": "重置为使用所有工具",
+      "events_tail": "事件 · 尾部",
+      "no_logs": "此智能体还没有记录的轮次。",
+      "crashed_title": "{{name}} 处于错误状态"
+    },
+    "tab": {
+      "conversation": "对话",
+      "memory": "记忆",
+      "skills": "技能",
+      "tools": "工具",
+      "schedule": "计划",
+      "logs": "日志"
+    },
+    "configure": "配置",
+    "select_an_agent": "选择智能体",
+    "select_an_agent_hint": "在左侧选择智能体以查看其会话、记忆、技能和实时日志。",
+    "tools_declared_count": "已声明",
+    "tools_declared_title": "已声明工具",
+    "tools_declared_desc": "此智能体可使用的工具。留空则可不受限制地访问所有工具。"
   },
   "providers": {
     "title": "供应商",
@@ -905,7 +971,11 @@
     "empty_body": "接入 OpenAI、Anthropic、Gemini、Groq 或其他 LLM 供应商，让 agent 可以路由提示词并使用模型。",
     "connect_first": "添加一个供应商",
     "picker_title": "添加供应商",
-    "create_custom": "创建自定义供应商"
+    "create_custom": "创建自定义供应商",
+    "reenabled": "提供商已重新启用",
+    "batch_test_all_failed": "所有测试失败",
+    "reenable": "重新启用",
+    "batch_test_partial": "{{success}} 通过，{{failed}} 失败"
   },
   "channels": {
     "add": "添加",
@@ -939,7 +1009,11 @@
     "select_all": "全选",
     "shadowed_secrets_warning": "警告：以下 token 被 shell 环境变量遮蔽，需要先 unset 并重启才会生效：{{keys}}",
     "subtitle": "消息通道适配器管理。",
-    "title": "通道"
+    "title": "通道",
+    "configured": "已配置",
+    "login_success": "登录成功",
+    "qr_failed": "二维码登录失败",
+    "qr_login": "二维码登录"
   },
   "skills": {
     "title": "技能",
@@ -1056,7 +1130,14 @@
     "evo_load_failed": "加载文件失败",
     "evo_action_failed": "操作失败",
     "evo_delete_failed": "删除失败",
-    "reload_failed": "刷新失败"
+    "reload_failed": "刷新失败",
+    "via": "通过",
+    "propose_registry": "提交到注册表",
+    "propose_registry_failed": "提交技能到注册表失败",
+    "propose_registry_hint": "打开 PR，将此技能贡献到公共注册表（需要 GitHub token）",
+    "search_to_explore": "输入以搜索各个 hub",
+    "propose_registry_confirm": "打开 pull request，将 {{name}} 贡献到公共技能注册表？",
+    "propose_registry_opened": "Pull request 已打开：{{pr_url}}"
   },
   "hands": {
     "title": "Hands",
@@ -1190,7 +1271,27 @@
     "min_max": "最小 / 最大",
     "model": "模型",
     "model_performance_table": "模型性能",
-    "tokens": "Token 数"
+    "tokens": "Token 数",
+    "provider_budgets": {
+      "bad_input": "{{field}} 必须是非负数",
+      "saved": "已保存提供商上限",
+      "save_failed": "保存提供商上限失败",
+      "title": "提供商上限和支出",
+      "row_count": "{{n}} 个提供商",
+      "help": "这里显示每个带有 [budget.providers.<id>] 配置或近期支出的提供商。上限 0 表示无限制。LLM fallback 链当前因耗尽而跳过的行会显示红色徽章。",
+      "loading": "正在加载提供商支出…",
+      "empty": "未配置提供商，也没有近期支出记录。",
+      "col_provider": "提供商",
+      "col_hourly": "每小时",
+      "col_daily": "每日",
+      "col_monthly": "每月",
+      "col_tokens": "令牌/小时",
+      "col_state": "状态",
+      "col_actions": "",
+      "unconfigured": "设置上限",
+      "healthy": "正常",
+      "edit": "编辑上限"
+    }
   },
   "memory": {
     "title": "记忆",
@@ -1511,7 +1612,10 @@
     "template_params": "模板参数",
     "template_search": "搜索模板...",
     "use_template": "使用模板",
-    "workflow_load_error": "加载工作流失败"
+    "workflow_load_error": "加载工作流失败",
+    "ctx_menu_label": "上下文菜单",
+    "output": "输出",
+    "prompt_sent": "已发送提示"
   },
   "workflows": {
     "title": "工作流",
@@ -1601,7 +1705,16 @@
     "prompt_sent": "发送的提示词：",
     "output": "输出：",
     "generated_images": "生成的图片：",
-    "loading_details": "正在加载详情…"
+    "loading_details": "正在加载详情…",
+    "flows_count": "{{n}} 个流程",
+    "templates_count_meta": "{{n}} 个模板",
+    "search_templates_placeholder": "搜索模板…",
+    "steps_unit": "步骤",
+    "preview_template": "在画布中预览",
+    "no_templates_match": "没有匹配的模板。",
+    "no_match": "没有匹配的工作流。",
+    "selected_review": "已选审查",
+    "from_review_banner": "来自审查横幅"
   },
   "scheduler": {
     "title": "调度器",
@@ -1831,7 +1944,14 @@
     "max_msg_size": "最大消息大小",
     "max_msg_min": "最大消息数/分",
     "fuel_limit": "Fuel 上限",
-    "timeout": "超时"
+    "timeout": "超时",
+    "queue_concurrency": "队列上限和每智能体默认值",
+    "main_lane_help": "从渠道桥接的用户消息",
+    "cron_lane_help": "计划 cron 作业分发",
+    "subagent_lane_help": "生成的子智能体（agent_send）",
+    "trigger_lane_help": "事件触发分发（TaskPosted、MessageReceived、…）",
+    "default_per_agent_help": "当清单省略 max_concurrent_invocations 时的每智能体 fallback",
+    "audit_anchor": "锚点"
   },
   "logs": {
     "title": "日志",
@@ -2591,7 +2711,15 @@
     "tool_error": "错误",
     "tool_input": "输入",
     "tool_result": "结果",
-    "tool_running": "执行中…"
+    "tool_running": "执行中…",
+    "attachment_uploading": "正在上传…",
+    "attachment_remove": "移除附件",
+    "attachment_unsupported_type": "不支持的文件类型。允许：图片、PDF 和常见文本/代码文件。",
+    "attachment_too_large": "文件过大（最大 10MB）",
+    "attachment_drop_hint": "松开以附加",
+    "attachment_add": "附加文件",
+    "open_agent_picker": "打开智能体选择器",
+    "session_attach_watching": "正在监听"
   },
   "goals": {
     "title": "目标",
@@ -2622,7 +2750,9 @@
     "run_stop": "停止自主执行",
     "run_needs_agent": "请先为该目标指派一个 agent 才能自主执行",
     "run_active": "执行中 · 第 {{iteration}}/{{max}} 轮",
-    "help": "Goals 是战略规划面——一棵 agent（或你）正在追的目标树，含进度、状态和父子关系。模板播种常见目标形状；树视图展示层级和向上汇总的进度。\n\n使用步骤：\n\n1. 创建。\"Create goal\" 打开表单填标题、描述、父目标、状态。或 \"Pick template\" 一次性铺开预置目标树（如 \"ship a feature\"、\"research a topic\"）。\n\n2. 跟踪。每个节点显示 pending / in-progress / completed。父节点进度由子节点汇总。点节点可内联编辑状态或描述。\n\n3. 清理。\"Clear all\" 整棵清空（带二次确认）——开新阶段时常用。\n\n跟 Scheduler / Workflows 的区别：\n\n  · Goals —— 想做什么。长期意图，可被 agent 读取。\n  · Scheduler / Workflows —— 怎么做。具体的触发与步骤。\n\n典型场景：\n\n  · 给 agent 一个长期方向，规划时可以参考。\n  · 跟踪一个跨周项目，人和 agent 都看同一棵树。\n\n注意事项：\n\n  · 模板是起点，应用后随便改。\n  · 删父节点会带走子节点，\"Clear all\" 前请确认。"
+    "help": "Goals 是战略规划面——一棵 agent（或你）正在追的目标树，含进度、状态和父子关系。模板播种常见目标形状；树视图展示层级和向上汇总的进度。\n\n使用步骤：\n\n1. 创建。\"Create goal\" 打开表单填标题、描述、父目标、状态。或 \"Pick template\" 一次性铺开预置目标树（如 \"ship a feature\"、\"research a topic\"）。\n\n2. 跟踪。每个节点显示 pending / in-progress / completed。父节点进度由子节点汇总。点节点可内联编辑状态或描述。\n\n3. 清理。\"Clear all\" 整棵清空（带二次确认）——开新阶段时常用。\n\n跟 Scheduler / Workflows 的区别：\n\n  · Goals —— 想做什么。长期意图，可被 agent 读取。\n  · Scheduler / Workflows —— 怎么做。具体的触发与步骤。\n\n典型场景：\n\n  · 给 agent 一个长期方向，规划时可以参考。\n  · 跟踪一个跨周项目，人和 agent 都看同一棵树。\n\n注意事项：\n\n  · 模板是起点，应用后随便改。\n  · 删父节点会带走子节点，\"Clear all\" 前请确认。",
+    "progress": "进度",
+    "status": "状态"
   },
   "sessions": {
     "title": "会话",
@@ -2638,7 +2768,9 @@
     "set_label": "设置标签",
     "no_label": "添加标签",
     "label_placeholder": "标签...",
-    "open_in_chat": "在聊天页打开此会话"
+    "open_in_chat": "在聊天页打开此会话",
+    "agents_load_warning": "无法加载智能体名称 — 会话列表可能显示未知智能体。",
+    "load_error": "加载会话失败。"
   },
   "approvals": {
     "title": "审批",
@@ -2949,7 +3081,8 @@
     "format_aac": "aac",
     "status_submitted": "已提交",
     "status_completed": "已完成",
-    "status_failed": "失败"
+    "status_failed": "失败",
+    "image_too_large": "图片过大，无法显示"
   },
   "auth": {
     "title": "需要 API Key",
@@ -2971,7 +3104,8 @@
     "or": "或",
     "passkey_signin": "使用通行密钥登录",
     "passkey_failed": "通行密钥登录失败。",
-    "passkey_cancelled": "通行密钥登录已取消。"
+    "passkey_cancelled": "通行密钥登录已取消。",
+    "checking": "正在检查认证…"
   },
   "network": {
     "section": "OFP 网络",
@@ -3326,7 +3460,28 @@
       "pii_credit_card": "拦截信用卡号",
       "pii_ssn": "拦截社会安全号码",
       "sensitive_key_name": "拦截名为 `authorization`/`api_key`/… 的 JSON 键"
-    }
+    },
+    "tools_count_short": "{{count}} 个工具",
+    "reconnect_success": "已请求重新连接",
+    "reconnect_failed": "重新连接失败",
+    "reconnect": "重新连接",
+    "detail_tabs_label": "服务器详情",
+    "tab_tools": "工具",
+    "tab_logs": "日志",
+    "tab_config": "配置",
+    "auth_state": "认证",
+    "timeout_secs": "超时",
+    "tools_empty": "未公布工具",
+    "tools_empty_desc": "服务器尚未报告任何工具 — 请确认它已连接。",
+    "col_name": "名称",
+    "col_description": "描述",
+    "col_calls": "调用",
+    "col_ok": "ok %",
+    "col_last": "上次",
+    "logs_empty": "日志不可用",
+    "logs_empty_desc": "尚未公开单服务器 MCP 日志 — 请检查守护进程 stdout 中的连接跟踪。",
+    "config_env_notice": "env 变量只按名称引用；连接时从主机环境解析密钥。",
+    "tabs_label": "服务器视图"
   },
   "toml_viewer": {
     "tab_toml": "TOML",
@@ -3745,7 +3900,8 @@
     "error_default_connect": "连接失败",
     "error_default_pairing": "配对失败",
     "btn_try_again": "重试",
-    "device_name_default": "LibreFang Mobile"
+    "device_name_default": "LibreFang Mobile",
+    "url_placeholder": "http://127.0.0.1:4545"
   },
   "mobile_pairing": {
     "title": "移动配对",

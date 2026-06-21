@@ -171,7 +171,9 @@
     "none": "None",
     "metadata": "Metadata",
     "size": "Size",
-    "path": "Path"
+    "path": "Path",
+    "select_options": "Select options",
+    "error_loading_data": "Failed to load memories"
   },
   "status": {
     "running": "Running",
@@ -256,7 +258,8 @@
       "title": "Cost",
       "vs_prior": "vs prior",
       "no_prior": "no prior spend",
-      "provider_all_time": "provider share all-time"
+      "provider_all_time": "provider share all-time",
+      "no_provider_data": "No provider data"
     },
     "alerts": {
       "title": "Alerts",
@@ -272,7 +275,9 @@
       "connected": "connected",
       "approvals_pending": "{{count}} approval(s) pending",
       "approvals_pending_sub": "Review in Approvals queue",
-      "degraded": "Degraded"
+      "degraded": "Degraded",
+      "budget_threshold": "Daily budget at {{pct}}%",
+      "budget_threshold_sub": "{{used}} / cap {{cap}}"
     },
     "col": {
       "agent": "Agent",
@@ -283,7 +288,10 @@
       "task": "Task",
       "msgs": "Msgs",
       "started": "Started",
-      "no_label": "(no label)"
+      "no_label": "(no label)",
+      "tokens": "Tokens",
+      "cost": "Cost",
+      "duration": "Dur"
     },
     "system": {
       "runtime": "Runtime",
@@ -299,7 +307,8 @@
       "degraded": "deg",
       "peers": "peers",
       "no_peers": "no peers"
-    }
+    },
+    "setup_failed": "Quick init failed"
   },
   "agents": {
     "title": "Agents",
@@ -796,9 +805,66 @@
         "edit": "Edit trigger",
         "created": "Trigger created",
         "updated": "Trigger updated",
-        "deleted": "Trigger deleted"
-      }
-    }
+        "deleted": "Trigger deleted",
+        "pattern_custom": "Custom event pattern (JSON or string)"
+      },
+      "skill_meta": "installed",
+      "skill_remove": "Remove {{name}}",
+      "live_conversation": "Live conversation",
+      "no_conversation": "No conversation yet — open the chat to send the first message.",
+      "open_chat": "Open chat",
+      "memory_label": "Memory · sqlite",
+      "open_memory": "Open",
+      "no_memory": "No memory entries yet for this agent.",
+      "skills_saved": "Saved to agent.toml",
+      "skill_update_failed": "Failed to update skills",
+      "auto_evolve_enabled": "Auto-evolve enabled",
+      "auto_evolve_disabled": "Auto-evolve disabled",
+      "installed_skills": "Installed skills",
+      "skills_all": "all",
+      "install_skill": "Install",
+      "auto_evolve_label": "Auto-evolve",
+      "auto_evolve_desc": "Background skill evolution review after each turn",
+      "skills_loading": "Loading skills…",
+      "skills_disabled_title": "Skills disabled",
+      "skills_disabled_desc": "manifest pinned skills_disabled = true — the agent runs without skill dispatch",
+      "skills_all_title": "Using all available skills",
+      "skills_all_desc": "manifest doesn't pin an allowlist — every skill in the registry is available",
+      "skills_customize": "Customize",
+      "skills_assigned": "Assigned",
+      "skills_reset_all": "Reset to all",
+      "no_skills_assigned": "No skills assigned — add from the list below, or reset to all.",
+      "skills_available": "Available",
+      "tools_saved": "Saved to agent.toml",
+      "tools_label": "Tools",
+      "tools_all": "all",
+      "tools_included": "included",
+      "tools_customize": "Customize — switch to allowlist",
+      "tools_all_title": "Using all available tools",
+      "tools_all_desc": "no tools registered in the system yet",
+      "tools_fine_grain": "Configure individual tools",
+      "tools_remove_group": "Remove entire group",
+      "tools_available": "Available",
+      "tools_click_assign": "click to assign",
+      "tools_reset_to_all": "Reset to use all tools",
+      "events_tail": "events · tail",
+      "no_logs": "No turns recorded yet for this agent.",
+      "crashed_title": "{{name}} is in error state"
+    },
+    "tab": {
+      "conversation": "Conversation",
+      "memory": "Memory",
+      "skills": "Skills",
+      "tools": "Tools",
+      "schedule": "Schedule",
+      "logs": "Logs"
+    },
+    "configure": "Configure",
+    "select_an_agent": "Select an agent",
+    "select_an_agent_hint": "Choose an agent on the left to inspect its sessions, memory, skills, and live logs.",
+    "tools_declared_count": "declared",
+    "tools_declared_title": "Declared Tools",
+    "tools_declared_desc": "Tools this agent can use. Leave empty for unrestricted access to all tools."
   },
   "providers": {
     "title": "Providers",
@@ -905,7 +971,11 @@
     "empty_body": "Connect OpenAI, Anthropic, Gemini, Groq, or any other LLM provider so agents can route prompts and consume models.",
     "connect_first": "Connect a provider",
     "picker_title": "Add provider",
-    "create_custom": "Create custom provider"
+    "create_custom": "Create custom provider",
+    "reenabled": "Provider re-enabled",
+    "batch_test_all_failed": "All tests failed",
+    "reenable": "Re-enable",
+    "batch_test_partial": "{{success}} passed, {{failed}} failed"
   },
   "channels": {
     "add": "Add",
@@ -939,7 +1009,11 @@
     "select_all": "Select All",
     "shadowed_secrets_warning": "Warning: these tokens are shadowed by shell environment variables and won't take effect until you unset them and restart: {{keys}}",
     "subtitle": "Messaging adapters and integration gateways.",
-    "title": "Channels"
+    "title": "Channels",
+    "configured": "configured",
+    "login_success": "Login successful",
+    "qr_failed": "QR login failed",
+    "qr_login": "QR Login"
   },
   "skills": {
     "title": "Skills",
@@ -1056,7 +1130,14 @@
     "evo_load_failed": "Failed to load file",
     "evo_action_failed": "Action failed",
     "evo_delete_failed": "Delete failed",
-    "reload_failed": "Reload failed"
+    "reload_failed": "Reload failed",
+    "via": "via",
+    "propose_registry": "Propose to Registry",
+    "propose_registry_failed": "Failed to propose skill to registry",
+    "propose_registry_hint": "Open a PR contributing this skill to the public registry (requires GitHub token)",
+    "search_to_explore": "Type to search across hubs",
+    "propose_registry_confirm": "Open a pull request contributing {{name}} to the public skill registry?",
+    "propose_registry_opened": "Pull request opened: {{pr_url}}"
   },
   "hands": {
     "title": "Hands",
@@ -1190,7 +1271,27 @@
     "min_max": "Min / Max",
     "model": "Model",
     "model_performance_table": "Model Performance",
-    "tokens": "Tokens"
+    "tokens": "Tokens",
+    "provider_budgets": {
+      "bad_input": "{{field}} must be a non-negative number",
+      "saved": "Per-provider caps saved",
+      "save_failed": "Failed to save per-provider caps",
+      "title": "Per-provider caps & spend",
+      "row_count": "{{n}} providers",
+      "help": "Each provider with a [budget.providers.<id>] entry or recent spend appears here. A cap of 0 means unlimited. Rows the LLM fallback chain is currently skipping (exhausted) carry a red badge.",
+      "loading": "Loading provider spend…",
+      "empty": "No providers configured and no recent spend recorded.",
+      "col_provider": "Provider",
+      "col_hourly": "Hourly",
+      "col_daily": "Daily",
+      "col_monthly": "Monthly",
+      "col_tokens": "Tokens/hr",
+      "col_state": "State",
+      "col_actions": "",
+      "unconfigured": "set a cap",
+      "healthy": "healthy",
+      "edit": "Edit caps"
+    }
   },
   "memory": {
     "title": "Memory",
@@ -1511,7 +1612,10 @@
     "template_params": "Template Parameters",
     "template_search": "Search templates...",
     "use_template": "Use Template",
-    "workflow_load_error": "Failed to load workflow"
+    "workflow_load_error": "Failed to load workflow",
+    "ctx_menu_label": "Context menu",
+    "output": "Output",
+    "prompt_sent": "Prompt sent"
   },
   "workflows": {
     "title": "Workflows",
@@ -1601,7 +1705,16 @@
     "prompt_sent": "Prompt sent:",
     "output": "Output:",
     "generated_images": "Generated images:",
-    "loading_details": "Loading details…"
+    "loading_details": "Loading details…",
+    "flows_count": "{{n}} flows",
+    "templates_count_meta": "{{n}} templates",
+    "search_templates_placeholder": "Search templates…",
+    "steps_unit": "steps",
+    "preview_template": "Preview in canvas",
+    "no_templates_match": "No templates match.",
+    "no_match": "No workflows match.",
+    "selected_review": "Selected review",
+    "from_review_banner": "from review banner"
   },
   "scheduler": {
     "title": "Scheduler",
@@ -1831,7 +1944,14 @@
     "max_msg_size": "Max Msg Size",
     "max_msg_min": "Max Msg/Min",
     "fuel_limit": "Fuel Limit",
-    "timeout": "Timeout"
+    "timeout": "Timeout",
+    "queue_concurrency": "Lane Caps & Per-Agent Default",
+    "main_lane_help": "User messages bridged from channels",
+    "cron_lane_help": "Scheduled cron job dispatch",
+    "subagent_lane_help": "Spawned child agents (agent_send)",
+    "trigger_lane_help": "Event-trigger dispatches (TaskPosted, MessageReceived, …)",
+    "default_per_agent_help": "Per-agent fallback when manifest omits max_concurrent_invocations",
+    "audit_anchor": "anchor"
   },
   "telemetry": {
     "badge": "Observability",
@@ -2634,7 +2754,15 @@
     "tool_error": "Error",
     "tool_input": "Input",
     "tool_result": "Result",
-    "tool_running": "Running…"
+    "tool_running": "Running…",
+    "attachment_uploading": "Uploading…",
+    "attachment_remove": "Remove attachment",
+    "attachment_unsupported_type": "Unsupported file type. Allowed: images, PDF, and common text/code files.",
+    "attachment_too_large": "File too large (max 10MB)",
+    "attachment_drop_hint": "Drop to attach",
+    "attachment_add": "Attach file",
+    "open_agent_picker": "Open agent picker",
+    "session_attach_watching": "Watching"
   },
   "goals": {
     "title": "Goals",
@@ -2665,7 +2793,9 @@
     "run_stop": "Stop autonomous run",
     "run_needs_agent": "Assign an agent to run this goal autonomously",
     "run_active": "Running · iteration {{iteration}}/{{max}}",
-    "help": "Goals is the strategic-planning surface — a tree of objectives the agent (or you) is working towards, with progress, status, and parent / child relationships. Templates seed common goal shapes; the tree view shows hierarchy and roll-up progress.\n\nHow to use this page:\n\n1. Create. \"Create goal\" opens a form for title, description, parent goal, and status. Or \"Pick template\" to apply a pre-built goal tree (e.g. \"ship a feature\", \"research a topic\").\n\n2. Track. Each node shows pending / in-progress / completed. Parent progress aggregates from children. Edit a node inline to flip its state or refine its description.\n\n3. Prune. \"Clear all\" wipes the tree (with a confirm) — useful when starting a new initiative.\n\nWhen to use it (vs. Scheduler / Workflows):\n\n  · Goals — what we want. Long-lived intentions, often agent-readable.\n  · Scheduler / Workflows — how it gets done. Concrete fires and steps.\n\nTypical scenarios:\n\n  · Giving an agent a long-term direction it can refer back to during planning.\n  · Tracking a multi-week project as a tree the human and the agent both see.\n\nThings to know:\n\n  · Templates are starting points — feel free to edit the tree after applying.\n  · Deleting a parent deletes its children. Confirm before \"Clear all\"."
+    "help": "Goals is the strategic-planning surface — a tree of objectives the agent (or you) is working towards, with progress, status, and parent / child relationships. Templates seed common goal shapes; the tree view shows hierarchy and roll-up progress.\n\nHow to use this page:\n\n1. Create. \"Create goal\" opens a form for title, description, parent goal, and status. Or \"Pick template\" to apply a pre-built goal tree (e.g. \"ship a feature\", \"research a topic\").\n\n2. Track. Each node shows pending / in-progress / completed. Parent progress aggregates from children. Edit a node inline to flip its state or refine its description.\n\n3. Prune. \"Clear all\" wipes the tree (with a confirm) — useful when starting a new initiative.\n\nWhen to use it (vs. Scheduler / Workflows):\n\n  · Goals — what we want. Long-lived intentions, often agent-readable.\n  · Scheduler / Workflows — how it gets done. Concrete fires and steps.\n\nTypical scenarios:\n\n  · Giving an agent a long-term direction it can refer back to during planning.\n  · Tracking a multi-week project as a tree the human and the agent both see.\n\nThings to know:\n\n  · Templates are starting points — feel free to edit the tree after applying.\n  · Deleting a parent deletes its children. Confirm before \"Clear all\".",
+    "progress": "Progress",
+    "status": "Status"
   },
   "sessions": {
     "title": "Sessions",
@@ -2681,7 +2811,9 @@
     "set_label": "Set label",
     "no_label": "add label",
     "label_placeholder": "Label...",
-    "open_in_chat": "Open this session in the chat page"
+    "open_in_chat": "Open this session in the chat page",
+    "agents_load_warning": "Could not load agent names — session list may show unknown agents.",
+    "load_error": "Failed to load sessions."
   },
   "approvals": {
     "title": "Approvals",
@@ -2992,7 +3124,8 @@
     "format_aac": "aac",
     "status_submitted": "submitted",
     "status_completed": "completed",
-    "status_failed": "failed"
+    "status_failed": "failed",
+    "image_too_large": "Image too large to display"
   },
   "auth": {
     "title": "API Key Required",
@@ -3014,7 +3147,8 @@
     "or": "or",
     "passkey_signin": "Sign in with passkey",
     "passkey_failed": "Passkey sign-in failed.",
-    "passkey_cancelled": "Passkey sign-in was cancelled."
+    "passkey_cancelled": "Passkey sign-in was cancelled.",
+    "checking": "Checking authentication…"
   },
   "network": {
     "section": "OFP Network",
@@ -3326,7 +3460,28 @@
       "pii_credit_card": "Blocks credit-card numbers",
       "pii_ssn": "Blocks Social Security numbers",
       "sensitive_key_name": "Blocks JSON keys named `authorization`/`api_key`/..."
-    }
+    },
+    "tools_count_short": "{{count}} tools",
+    "reconnect_success": "Reconnect requested",
+    "reconnect_failed": "Reconnect failed",
+    "reconnect": "Reconnect",
+    "detail_tabs_label": "Server details",
+    "tab_tools": "Tools",
+    "tab_logs": "Logs",
+    "tab_config": "Config",
+    "auth_state": "Auth",
+    "timeout_secs": "Timeout",
+    "tools_empty": "No tools advertised",
+    "tools_empty_desc": "The server hasn't reported any tools yet — confirm it's connected.",
+    "col_name": "name",
+    "col_description": "description",
+    "col_calls": "calls",
+    "col_ok": "ok %",
+    "col_last": "last",
+    "logs_empty": "Logs not available",
+    "logs_empty_desc": "Per-server MCP logs aren't exposed yet — check the daemon's stdout for connection traces.",
+    "config_env_notice": "env vars are referenced by name only; secrets resolved from the host environment at connect-time.",
+    "tabs_label": "Server views"
   },
   "toml_viewer": {
     "tab_toml": "TOML",
@@ -3745,7 +3900,8 @@
     "error_default_connect": "Connection failed",
     "error_default_pairing": "Pairing failed",
     "btn_try_again": "Try again",
-    "device_name_default": "LibreFang Mobile"
+    "device_name_default": "LibreFang Mobile",
+    "url_placeholder": "http://127.0.0.1:4545"
   },
   "mobile_pairing": {
     "title": "Mobile Pairing",
