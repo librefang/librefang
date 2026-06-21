@@ -22,6 +22,21 @@ type UsedKey = {
   line: number;
 };
 
+type DynamicKeyPattern = {
+  pattern: RegExp;
+  source: string;
+  path: string;
+  line: number;
+};
+
+type I18nUsage = {
+  keys: UsedKey[];
+  looseKeys: UsedKey[];
+  dynamicPatterns: DynamicKeyPattern[];
+};
+
+let usageCache: I18nUsage | null = null;
+
 function flatten(node: JsonValue, prefix = ""): string[] {
   if (node === null || typeof node !== "object" || Array.isArray(node)) {
     return [prefix];
@@ -81,8 +96,24 @@ function isTranslationCall(node: ts.CallExpression): boolean {
   );
 }
 
-function collectUsedKeys(): UsedKey[] {
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function templatePattern(node: ts.TemplateExpression): RegExp {
+  const parts = [escapeRegExp(node.head.text)];
+  for (const span of node.templateSpans) {
+    parts.push(".+", escapeRegExp(span.literal.text));
+  }
+  return new RegExp(`^${parts.join("")}$`);
+}
+
+function collectI18nUsage(): I18nUsage {
+  if (usageCache) return usageCache;
+
   const keys: UsedKey[] = [];
+  const looseKeys: UsedKey[] = [];
+  const dynamicPatterns: DynamicKeyPattern[] = [];
 
   for (const file of sourceFiles(SRC_DIR)) {
     const text = readFileSync(file, "utf8");
@@ -103,12 +134,38 @@ function collectUsedKeys(): UsedKey[] {
       });
     }
 
+    function addLooseKey(key: string, node: ts.Node) {
+      const { line } = source.getLineAndCharacterOfPosition(node.getStart());
+      looseKeys.push({
+        key,
+        path: relative(SRC_DIR, file),
+        line: line + 1,
+      });
+    }
+
+
+    function addDynamicPattern(node: ts.TemplateExpression) {
+      const { line } = source.getLineAndCharacterOfPosition(node.getStart());
+      dynamicPatterns.push({
+        pattern: templatePattern(node),
+        source: node.getText(source),
+        path: relative(SRC_DIR, file),
+        line: line + 1,
+      });
+    }
+
     function visit(node: ts.Node) {
+      const literalKey = stringLiteralText(node);
+      if (literalKey && isLikelyLocaleKey(literalKey)) {
+        addLooseKey(literalKey, node);
+      }
+
       if (ts.isCallExpression(node) && isTranslationCall(node)) {
         const firstArg = node.arguments[0];
         if (firstArg) {
           const key = stringLiteralText(firstArg);
           if (key) addKey(key, firstArg);
+          if (ts.isTemplateExpression(firstArg)) addDynamicPattern(firstArg);
         }
       }
 
@@ -117,6 +174,12 @@ function collectUsedKeys(): UsedKey[] {
         const key = stringLiteralText(node.initializer);
         if (propertyName?.endsWith("Key") && key && isLikelyLocaleKey(key)) {
           addKey(key, node.initializer);
+        }
+        if (
+          propertyName?.endsWith("Key") &&
+          ts.isTemplateExpression(node.initializer)
+        ) {
+          addDynamicPattern(node.initializer);
         }
       }
 
@@ -136,7 +199,25 @@ function collectUsedKeys(): UsedKey[] {
     visit(source);
   }
 
-  return keys;
+  usageCache = { keys, looseKeys, dynamicPatterns };
+  return usageCache;
+}
+
+function collectUsedKeys(): UsedKey[] {
+  return collectI18nUsage().keys;
+}
+
+function localeFiles(): string[] {
+  return readdirSync(LOCALES_DIR)
+    .filter((file) => file.endsWith(".json"))
+    .map((file) => join(LOCALES_DIR, file));
+}
+
+function keyMatchesDynamicUsage(
+  key: string,
+  dynamicPatterns: DynamicKeyPattern[],
+): boolean {
+  return dynamicPatterns.some(({ pattern }) => pattern.test(key));
 }
 
 describe("Dashboard locale coverage", () => {
@@ -163,6 +244,36 @@ describe("Dashboard locale coverage", () => {
     expect(
       missing,
       "Dashboard source references i18n keys that are missing from src/locales/en.json.",
+    ).toEqual([]);
+  });
+
+  it("does not carry dead keys in locale files", () => {
+    const { keys, looseKeys, dynamicPatterns } = collectI18nUsage();
+    const usedKeys = new Set(
+      [...keys, ...looseKeys].map(({ key }) => key),
+    );
+
+    const deadKeys = localeFiles()
+      .flatMap((localeFile) => {
+        const localeName = relative(LOCALES_DIR, localeFile);
+        return flatten(
+          JSON.parse(readFileSync(localeFile, "utf8")) as JsonValue,
+        )
+          .filter((key) => {
+            const base = pluralBase(key);
+            return (
+              !usedKeys.has(key) &&
+              (base === null || !usedKeys.has(base)) &&
+              !keyMatchesDynamicUsage(key, dynamicPatterns)
+            );
+          })
+          .map((key) => `${localeName}: ${key}`);
+      })
+      .sort();
+
+    expect(
+      deadKeys,
+      "Locale files define i18n keys that are not referenced by dashboard source.",
     ).toEqual([]);
   });
 });
