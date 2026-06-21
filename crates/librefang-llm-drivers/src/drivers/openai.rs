@@ -3931,6 +3931,68 @@ mod tests {
         );
     }
 
+    /// Regression (#6251): the developer-loop aggregation notice that the
+    /// compactor folds into the *first `ToolResult`'s `content`* must survive
+    /// translation into the OpenAI wire format and reach the provider.
+    ///
+    /// This is the exact failure mode the original #6254 fix introduced: the
+    /// notice was appended as a separate `ContentBlock::Text` *after* the
+    /// `ToolResult` in the same user message. The OpenAI driver gates emission
+    /// of accumulated text `parts` on `!has_tool_results`, so any `Text` block
+    /// sharing a message with a `ToolResult` is silently dropped — the notice
+    /// never reached OpenAI / Groq / Moonshot. Folding it into the `ToolResult`
+    /// `content` string (the shape this test pins) survives instead.
+    #[test]
+    fn build_request_folds_dev_loop_notice_into_tool_result_content() {
+        use librefang_types::message::Message;
+
+        const NOTICE: &str =
+            "[DEVELOPER LOOP AGGREGATED] 3 intermediate developer-tool step(s) elided during compaction (tools: file_write). The first and last steps are retained for context.";
+
+        let driver = OpenAIDriver::new("k".to_string(), "https://api.openai.com/v1".to_string());
+        let request = CompletionRequest {
+            model: "gpt-4o-mini".to_string(),
+            messages: std::sync::Arc::new(vec![Message {
+                role: Role::User,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                    tool_use_id: "t0".to_string(),
+                    tool_name: "file_write".to_string(),
+                    content: format!("ok\n\n{NOTICE}"),
+                    is_error: false,
+                    status: Default::default(),
+                    approval_request_id: None,
+                }]),
+                pinned: false,
+                timestamp: None,
+            }]),
+            max_tokens: 256,
+            ..Default::default()
+        };
+
+        let wire = driver.build_request(&request).expect("build");
+        // The ToolResult becomes a role="tool" message; its content must carry
+        // the notice verbatim.
+        let tool_msg = wire
+            .messages
+            .iter()
+            .find(|m| m.role == "tool")
+            .expect("tool message present");
+        let content = match tool_msg.content.as_ref().expect("content present") {
+            OaiMessageContent::Text(t) => t.clone(),
+            OaiMessageContent::Parts(_) => panic!("tool content should be a plain string"),
+        };
+        assert!(
+            content.contains(NOTICE),
+            "aggregation notice must reach the OpenAI wire payload, got: {content}"
+        );
+        // And it must survive full JSON serialization of the request body.
+        let body = serde_json::to_string(&wire).expect("serialize request");
+        assert!(
+            body.contains("DEVELOPER LOOP AGGREGATED"),
+            "notice must be present in the serialized OpenAI request body"
+        );
+    }
+
     /// Regression: `ContentBlock::ImageFile` paths must be read via
     /// `tokio::task::block_in_place` so a multi-MB image read does not
     /// stall the tokio worker pool. The base64-encoded bytes embedded
