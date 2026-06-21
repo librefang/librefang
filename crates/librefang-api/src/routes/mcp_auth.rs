@@ -355,6 +355,137 @@ pub async fn auth_start(
         provider.vault_get_or_warn(&KernelOAuthProvider::vault_key(&server_url, "client_id"))
     });
 
+    // ── client_secret_env resolution (PR #5060) ──────────────────────
+    //
+    // Resolve the optional OAuth client secret from the environment and
+    // reconcile it with the vault so both `auth_callback` (initial token
+    // exchange) and `try_refresh` (later refresh requests) see the same
+    // value the operator has currently exported. Confidential clients
+    // (e.g. Google Workspace MCP servers) reject refresh requests without
+    // `client_secret`; public PKCE clients leave `client_secret_env`
+    // unset and the vault entry is removed.
+    let vault_key_secret = KernelOAuthProvider::vault_key(&server_url, "client_secret");
+    let resolved_secret: Option<zeroize::Zeroizing<String>> = oauth_config
+        .client_secret_env
+        .as_deref()
+        .and_then(|env_var| match std::env::var(env_var) {
+            Ok(secret) if !secret.is_empty() => Some(zeroize::Zeroizing::new(secret)),
+            Ok(_) => {
+                tracing::warn!(
+                    target: "audit",
+                    op = "client_secret_env_resolve",
+                    env_var,
+                    server = %name,
+                    "client_secret_env resolved to an empty value — treating as unset \
+                     and clearing any stale vault entry"
+                );
+                None
+            }
+            Err(_) => {
+                tracing::warn!(
+                    target: "audit",
+                    op = "client_secret_env_resolve",
+                    env_var,
+                    server = %name,
+                    "client_secret_env points at an undefined environment variable — \
+                     treating as unset and clearing any stale vault entry"
+                );
+                None
+            }
+        });
+
+    // Bug-D ordering (PR #5060 review): check DCR incompatibility BEFORE
+    // persisting the secret to the vault. If the operator declared
+    // `client_secret_env` but has no `client_id`, DCR would register a
+    // public client that receives a `client_secret` it does not recognise.
+    // Fail-fast here so no stale vault entry is left behind.
+    if client_id.is_none()
+        && metadata.registration_endpoint.is_some()
+        && oauth_config.client_secret_env.is_some()
+    {
+        tracing::warn!(
+            target: "audit",
+            op = "auth_start_misconfig",
+            server = %name,
+            "client_secret_env is set but no client_id is available; \
+             refusing to run Dynamic Client Registration as a public \
+             client for a confidential configuration"
+        );
+        let mut auth_states = state.kernel.mcp_auth_states_ref().lock().await;
+        auth_states.insert(
+            name.clone(),
+            McpAuthState::Error {
+                message: "Confidential OAuth client (client_secret_env set) requires \
+                     a pre-registered client_id. Dynamic Client Registration only \
+                     produces public clients. Set `oauth.client_id` in config.toml \
+                     or remove `client_secret_env` to use public PKCE."
+                    .to_string(),
+            },
+        );
+        return ApiErrorResponse::bad_request(
+            "Confidential OAuth (client_secret_env) requires `oauth.client_id` \
+             in config.toml; Dynamic Client Registration cannot register a \
+             confidential client.",
+        )
+        .into_json_tuple();
+    }
+
+    // Now safe to persist the resolved secret (or clear stale entry).
+    match resolved_secret {
+        Some(secret) => {
+            if let Err(e) = provider.vault_set(&vault_key_secret, secret.as_str()) {
+                tracing::error!(
+                    target: "audit",
+                    op = "vault_set",
+                    key = %vault_key_secret,
+                    error = %e,
+                    "vault op failed persisting MCP client_secret — aborting auth_start"
+                );
+                let mut auth_states = state.kernel.mcp_auth_states_ref().lock().await;
+                auth_states.insert(
+                    name.clone(),
+                    McpAuthState::Error {
+                        message: "Failed to persist OAuth client secret to vault — \
+                             check LIBREFANG_VAULT_KEY and ~/.librefang permissions."
+                            .to_string(),
+                    },
+                );
+                return ApiErrorResponse::internal(format!(
+                    "Failed to persist OAuth client secret to vault: {e}. \
+                     Ensure LIBREFANG_VAULT_KEY is set and ~/.librefang is writable."
+                ))
+                .into_json_tuple();
+            }
+        }
+        None => {
+            // No env-derived secret: keep the vault aligned with env.
+            // `vault_remove` is best-effort — the entry may simply not
+            // exist (fresh install / pure public client).
+            match provider.vault_remove(&vault_key_secret) {
+                Ok(true) => {
+                    tracing::info!(
+                        target: "audit",
+                        op = "vault_remove",
+                        key = %vault_key_secret,
+                        server = %name,
+                        "Cleared stale client_secret from vault (env no longer set)"
+                    );
+                }
+                Ok(false) => {} // nothing to clear
+                Err(e) => {
+                    tracing::warn!(
+                        target: "audit",
+                        op = "vault_remove",
+                        key = %vault_key_secret,
+                        error = %e,
+                        server = %name,
+                        "Failed to clear stale client_secret from vault (non-fatal)"
+                    );
+                }
+            }
+        }
+    }
+
     if client_id.is_none() {
         if let Some(ref reg_endpoint) = metadata.registration_endpoint {
             tracing::info!(
@@ -816,6 +947,13 @@ pub async fn auth_callback(
     ];
     if let Some(ref cid) = client_id {
         form_params.push(("client_id", cid.clone()));
+    }
+    // Persisted at auth_start when McpOAuthConfig::client_secret_env was set.
+    if let Some(secret) = provider.vault_get_or_warn(&KernelOAuthProvider::vault_key(
+        &server_url,
+        "client_secret",
+    )) {
+        form_params.push(("client_secret", secret));
     }
 
     // #3730: user-visible errors must NOT leak the token endpoint URL or the

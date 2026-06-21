@@ -2419,6 +2419,28 @@ fn apply_channel_proxy<A>(
 // EmailCredentials + resolve_email_credentials removed alongside the
 // in-process adapter. See SIDECAR_CATALOG in routes/channels.rs.
 
+/// Seed the router's name->id cache used for binding resolution.
+///
+/// `identities` should enumerate *every defined* agent (the canonical identity
+/// registry), so a binding to an agent that has not been spawned yet still
+/// resolves; `spawned` overlays the live runtime set (which additionally
+/// carries hand-derived `<hand>:<role>` agents that are absent from the
+/// identity registry). Later inserts win, so passing `spawned` last lets the
+/// live id override the canonical one in the (refs #4614: identical) event they
+/// ever diverge.
+fn seed_router_agent_names(
+    router: &AgentRouter,
+    identities: impl IntoIterator<Item = (String, AgentId)>,
+    spawned: impl IntoIterator<Item = (String, AgentId)>,
+) {
+    for (name, id) in identities {
+        router.register_agent(name, id);
+    }
+    for (name, id) in spawned {
+        router.register_agent(name, id);
+    }
+}
+
 /// Start the channel bridge for all configured channels based on kernel config.
 ///
 /// Returns `Some(BridgeManager)` if any channels were configured and started,
@@ -2723,10 +2745,37 @@ pub async fn start_channel_bridge_with_config(
     let bindings = kernel.list_bindings();
     if !bindings.is_empty() {
         // Register all known agents in the router's name cache for binding
-        // resolution. Read-only iteration; cheap Arc clones (#3569).
-        for entry in kernel.agent_registry().list_arcs() {
-            router.register_agent(entry.name.clone(), entry.id);
-        }
+        // resolution. A binding references its target agent by *name*, so the
+        // router must be able to map every bindable name -> AgentId.
+        //
+        // The runtime `agent_registry()` only holds agents that have been
+        // *spawned* (`registry.register()` is called from the spawn path).
+        // Standalone agents that spawn lazily (e.g. first cron fire) — or any
+        // agent reconciled to Suspended after an unclean shutdown — are absent
+        // from it at bridge-startup, so seeding from `list_arcs()` alone leaves
+        // their channel bindings unresolvable: `resolve_binding` matches the
+        // peer_id but the name->id lookup misses, and inbound traffic silently
+        // falls through to the system default agent.
+        //
+        // The canonical identity registry maps *every defined* agent name to
+        // its canonical UUID (== the runtime id once spawned, refs #4614),
+        // independent of spawn state, so seed from it first. Then overlay the
+        // live spawned set, which also covers hand-derived agents (their
+        // namespaced `<hand>:<role>` names are not in the identity registry but
+        // are present once their hand is activated at boot).
+        seed_router_agent_names(
+            &router,
+            kernel
+                .agent_identities()
+                .list()
+                .into_iter()
+                .map(|(name, record)| (name, record.canonical_uuid)),
+            kernel
+                .agent_registry()
+                .list_arcs()
+                .into_iter()
+                .map(|entry| (entry.name.clone(), entry.id)),
+        );
         router.load_bindings(&bindings);
         info!(count = bindings.len(), "Loaded agent bindings into router");
     }
@@ -2972,6 +3021,96 @@ pub async fn reload_channels_from_disk(
 mod tests {
     use super::*;
     use librefang_kernel::event_bus::EventBus;
+
+    // ── seed_router_agent_names: defined-but-unspawned agents ─────
+    //
+    // Regression for inbound channel bindings silently falling through
+    // to the system default agent. A binding references its target by
+    // *name*; the router can only honour it if that name is in its cache.
+    // Standalone agents spawn lazily (first cron fire) or reconcile to
+    // Suspended after an unclean shutdown, so at channel-bridge startup
+    // they are absent from the runtime `agent_registry` (`list_arcs`) —
+    // seeding from spawned agents alone leaves their bindings dead and
+    // inbound traffic lands on the default agent (which lacks all context).
+    // Seeding from the canonical identity registry (every *defined* agent)
+    // fixes it.
+    #[test]
+    fn seed_router_includes_defined_but_unspawned_agents() {
+        use librefang_channels::types::ChannelType;
+        use librefang_types::config::{AgentBinding, BindingMatchRule};
+
+        let unspawned = AgentId::new();
+        let default_agent = AgentId::new();
+        let room = "!room:example.org";
+        let binding = AgentBinding {
+            agent: "lifeos-health".to_string(),
+            match_rule: BindingMatchRule {
+                channel: Some("matrix".to_string()),
+                peer_id: Some(room.to_string()),
+                ..Default::default()
+            },
+        };
+
+        // Old behaviour: seed from the spawned set only. The lazily-spawned
+        // agent is absent, so the binding matches peer_id but the name->id
+        // lookup misses and resolution falls to the system default.
+        let mut buggy = AgentRouter::new();
+        buggy.set_default(default_agent);
+        seed_router_agent_names(&buggy, std::iter::empty(), std::iter::empty());
+        buggy.load_bindings(std::slice::from_ref(&binding));
+        assert_eq!(
+            buggy.resolve(&ChannelType::Matrix, room, None),
+            Some(default_agent),
+            "pre-fix: unspawned bound agent should fall through to default"
+        );
+
+        // Fixed behaviour: seed from the identity registry (every defined
+        // agent), even though nothing is spawned. The binding now resolves
+        // to the intended agent.
+        let mut fixed = AgentRouter::new();
+        fixed.set_default(default_agent);
+        seed_router_agent_names(
+            &fixed,
+            std::iter::once(("lifeos-health".to_string(), unspawned)),
+            std::iter::empty(),
+        );
+        fixed.load_bindings(std::slice::from_ref(&binding));
+        assert_eq!(
+            fixed.resolve(&ChannelType::Matrix, room, None),
+            Some(unspawned),
+            "post-fix: defined-but-unspawned bound agent resolves from identity registry"
+        );
+    }
+
+    // ── seed_router_agent_names: spawned overlays identity ────────
+    #[test]
+    fn seed_router_spawned_overlays_identity() {
+        use librefang_channels::types::ChannelType;
+        use librefang_types::config::{AgentBinding, BindingMatchRule};
+
+        let canonical = AgentId::new();
+        let live = AgentId::new();
+        let mut router = AgentRouter::new();
+        router.set_default(AgentId::new());
+        // Same name in both sets; spawned is applied last and must win.
+        seed_router_agent_names(
+            &router,
+            std::iter::once(("agent-x".to_string(), canonical)),
+            std::iter::once(("agent-x".to_string(), live)),
+        );
+        router.load_bindings(&[AgentBinding {
+            agent: "agent-x".to_string(),
+            match_rule: BindingMatchRule {
+                channel: Some("matrix".to_string()),
+                ..Default::default()
+            },
+        }]);
+        assert_eq!(
+            router.resolve(&ChannelType::Matrix, "anyone", None),
+            Some(live),
+            "spawned (live) id must override the canonical id for the same name"
+        );
+    }
 
     // ── resolve_no_pending_message ───────────────────────────────
     //

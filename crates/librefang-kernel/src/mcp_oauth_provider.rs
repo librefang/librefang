@@ -235,6 +235,7 @@ const ALL_VAULT_FIELDS: &[&str] = &[
     "expires_at",
     "token_endpoint",
     "client_id",
+    "client_secret",
     "pkce_verifier",
     "pkce_state",
     "redirect_uri",
@@ -365,6 +366,9 @@ impl KernelOAuthProvider {
         }
 
         let client_id = self.vault_get_or_warn(&Self::vault_key(server_url, "client_id"));
+        // Confidential clients (Google Workspace MCP) require client_secret
+        // on refresh; persisted at auth_start when client_secret_env was set.
+        let client_secret = self.vault_get_or_warn(&Self::vault_key(server_url, "client_secret"));
 
         let client = librefang_extensions::http_client::new_client();
         let mut params = vec![
@@ -373,6 +377,9 @@ impl KernelOAuthProvider {
         ];
         if let Some(cid) = &client_id {
             params.push(("client_id", cid.clone()));
+        }
+        if let Some(ref secret) = client_secret {
+            params.push(("client_secret", secret.clone()));
         }
 
         let resp = match client.post(&token_endpoint).form(&params).send().await {
@@ -1135,6 +1142,7 @@ mod tests {
             "expires_at",
             "token_endpoint",
             "client_id",
+            "client_secret",
             "pkce_verifier",
             "pkce_state",
             "redirect_uri",
@@ -1147,7 +1155,7 @@ mod tests {
         }
         assert_eq!(
             fields.len(),
-            8,
+            9,
             "Unexpected field count in ALL_VAULT_FIELDS — update this assertion if new fields are intentionally added"
         );
     }
@@ -1543,6 +1551,54 @@ mod tests {
         assert_eq!(
             token, None,
             "expired token with no refresh token must yield Ok(None), not the stale token"
+        );
+    }
+
+    /// Integration test for the `client_secret_env` → vault → `try_refresh`
+    /// form-params wire (PR #5060). Validates the full round-trip:
+    ///   1. `vault_set` persists `client_secret` under the expected vault key
+    ///   2. `vault_get` reads it back through a fresh provider instance
+    ///   3. The vault key namespace matches what `try_refresh` reads
+    ///
+    /// This does NOT exercise the HTTP POST (that requires a real token
+    /// endpoint); it pins the storage contract so a future rename /
+    /// re-keying of the vault field breaks a test, not production.
+    #[test]
+    #[serial_test::serial(librefang_vault_key)]
+    fn client_secret_env_vault_round_trip() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().to_path_buf();
+        let _vault_key = VaultKeyEnvGuard::set(TEST_VAULT_KEY);
+
+        let provider = KernelOAuthProvider::new(home.clone());
+        let server_url = "https://accounts.google.com/mcp";
+        let vault_key = KernelOAuthProvider::vault_key(server_url, "client_secret");
+
+        // Initially absent.
+        assert_eq!(
+            provider.vault_get_or_warn(&vault_key),
+            None,
+            "client_secret must be absent before auth_start persists it"
+        );
+
+        // Simulate what auth_start does: resolve env → vault_set.
+        provider
+            .vault_set(&vault_key, "GOCSPX-test-secret-value")
+            .expect("vault_set client_secret");
+
+        // Read through a fresh provider (simulates daemon restart).
+        let reader = KernelOAuthProvider::new(home);
+        assert_eq!(
+            reader.vault_get(&vault_key).expect("vault_get"),
+            Some("GOCSPX-test-secret-value".to_string()),
+            "client_secret must survive a provider reinstantiation (vault round-trip)"
+        );
+
+        // Verify the key namespace matches what try_refresh reads.
+        assert_eq!(
+            vault_key,
+            format!("mcp_oauth:{server_url}:client_secret"),
+            "vault key must be in the mcp_oauth:<url>:client_secret namespace"
         );
     }
 }

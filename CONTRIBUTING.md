@@ -176,7 +176,7 @@ gate (clippy, openapi/SDK drift, security audit, full test matrix).
 
 | Hook        | Runs                                                                  | Target time |
 |-------------|-----------------------------------------------------------------------|-------------|
-| `pre-commit`| `cargo fmt --check` on staged `*.rs` only, CHANGELOG guard + `(@user)` attribution check, `detect-secrets` (if installed) | < 2s |
+| `pre-commit`| `cargo fmt --check` on staged `*.rs` only, CHANGELOG guard + `(@user)` attribution check, `gitleaks` (if installed) | < 2s |
 | `pre-push`  | Refuses direct push to `main` / `master`. Nothing else.                | < 100ms |
 | `commit-msg`| Reject Claude / Anthropic attribution                                  | < 50ms |
 
@@ -188,11 +188,11 @@ Skip the pre-push branch guard with
 `LIBREFANG_PREPUSH_SKIP=1 git push` (or `--no-verify`) when the
 maintainers have agreed to a release / hotfix push to `main`.
 
-For secret scanning, install `detect-secrets` once (`pipx install detect-secrets`). False positives are managed via `.secrets.baseline`:
+For secret scanning, install `gitleaks` once (`brew install gitleaks`, or grab a binary from the [gitleaks releases](https://github.com/gitleaks/gitleaks/releases)). Expected false positives (test fixtures, lockfiles, examples) are suppressed by the path and regex allowlists in `.gitleaks.toml`; add a new entry there when a legitimate high-entropy string trips the scan:
 
 ```bash
-detect-secrets scan --baseline .secrets.baseline   # update findings
-detect-secrets audit .secrets.baseline             # mark each as real / false-positive
+gitleaks protect --staged   # scan staged changes (what the pre-commit hook runs)
+gitleaks dir .              # scan the whole working tree (what CI runs)
 ```
 
 If you also use the `pre-commit` framework (`pipx install pre-commit`), the equivalent staged-only fmt + secret scan is wired in `.pre-commit-config.yaml`. The framework's `pre-push` stage is intentionally not wired — CI is the gate, no need to duplicate locally:
