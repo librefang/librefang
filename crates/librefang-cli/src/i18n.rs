@@ -66,9 +66,7 @@ impl I18n {
         args: Option<&FluentArgs>,
     ) -> Option<String> {
         let message = bundle.get_message(key)?;
-        let Some(pattern) = message.value() else {
-            return None;
-        };
+        let pattern = message.value()?;
 
         let mut errors = vec![];
         let result = bundle.format_pattern(pattern, args, &mut errors);

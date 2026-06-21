@@ -710,10 +710,8 @@ fn collect_rust_string_literals(content: &str) -> Vec<String> {
 
                 if let Some((_, first)) = temp_chars.next() {
                     consume_count += 1;
-                    if first == '\\' {
-                        if temp_chars.next().is_some() {
-                            consume_count += 1;
-                        }
+                    if first == '\\' && temp_chars.next().is_some() {
+                        consume_count += 1;
                     }
                     if let Some((_, '\'')) = temp_chars.next() {
                         consume_count += 1;
@@ -750,7 +748,7 @@ fn collect_rust_string_literals(content: &str) -> Vec<String> {
                 let remaining = &content[idx..];
                 if remaining.starts_with("r\"") {
                     chars.next();
-                    while let Some((_, rc)) = chars.next() {
+                    for (_, rc) in chars.by_ref() {
                         if rc == '"' {
                             break;
                         }
@@ -759,8 +757,8 @@ fn collect_rust_string_literals(content: &str) -> Vec<String> {
                 }
                 if remaining.starts_with("r#") {
                     let mut hashes = 0;
-                    let mut temp_chars = chars.clone();
-                    while let Some((_, hc)) = temp_chars.next() {
+                    let temp_chars = chars.clone();
+                    for (_, hc) in temp_chars {
                         if hc == '#' {
                             hashes += 1;
                         } else if hc == '"' {
