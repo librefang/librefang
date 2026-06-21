@@ -220,6 +220,7 @@ use crate::types;
         // ── Channels ──
         routes::list_channels,
         routes::configure_sidecar_channel,
+        routes::delete_sidecar_channel,
         routes::reload_channels,
         routes::list_channel_registry,
         // Per-channel `/configure` (POST/DELETE) + `/instances` (GET/POST)

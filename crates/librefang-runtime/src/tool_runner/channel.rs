@@ -123,6 +123,33 @@ fn trim_opt_string(val: Option<&str>) -> Option<&str> {
     val.map(str::trim).filter(|s| !s.is_empty())
 }
 
+/// Resolve the `channel_send` target.
+///
+/// An explicit `recipient` wins. Otherwise the send replies to the current
+/// conversation — the platform chat/room/group id (`sender_chat_id`), NOT the
+/// individual speaker (`sender_id`). In a group the legitimate reply target is
+/// the group, not the member who spoke; only in a DM (where the chat id
+/// coincides with the sender, or none is stamped) does it fall back to
+/// `sender_id`.
+///
+/// This is the SAME canonical target the cross-chat dispatch guard validates
+/// against (`expected_chat`), so the two can never disagree: previously the
+/// auto-fill resolved `sender_id` (the speaker) while the guard expected
+/// `sender_chat_id` (the group). In a group that mismatch made a no-recipient
+/// send target the speaker's user id as if it were a room — e.g. a Matrix send
+/// to `@user:hs` instead of the room `!room:hs`, which the homeserver rejected
+/// with `403 not in room` while the tool still reported success (#6117 guard
+/// only scrutinised the explicit path).
+fn resolve_send_target<'a>(
+    explicit_recipient: Option<&'a str>,
+    sender_chat_id: Option<&'a str>,
+    sender_id: Option<&'a str>,
+) -> Option<&'a str> {
+    explicit_recipient
+        .or_else(|| sender_chat_id.filter(|s| !s.is_empty()))
+        .or(sender_id)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn tool_channel_send(
     input: &serde_json::Value,
@@ -148,16 +175,19 @@ pub(super) async fn tool_channel_send(
         .to_string();
 
     // An explicitly-supplied recipient is the only cross-chat-leak vector — an
-    // auto-filled one (reply to the inbound peer) targets the current chat by
-    // construction. Keep the two apart so the guard below only scrutinises an
-    // explicit `recipient`.
+    // auto-filled one (reply to the current conversation) targets the inbound
+    // chat by construction (see `resolve_send_target`). Keep the two apart so
+    // the guard below only scrutinises an explicit `recipient`.
     let explicit_recipient = input["recipient"]
         .as_str()
         .map(str::trim)
         .filter(|s| !s.is_empty());
 
-    let recipient = explicit_recipient
-        .or(sender_id)
+    // Auto-fill replies to the conversation id (`sender_chat_id` — the group /
+    // room), falling back to `sender_id` only for DMs. This is the same target
+    // the cross-chat guard treats as canonical, so a no-recipient send can
+    // never resolve a chat the guard would have rejected.
+    let recipient = resolve_send_target(explicit_recipient, sender_chat_id, sender_id)
         .ok_or("Missing 'recipient' parameter. When replying to the original sender, recipient is auto-filled — ensure channel_send is called in response to a message.")?
         .trim();
 
@@ -178,11 +208,14 @@ pub(super) async fn tool_channel_send(
     // legitimately reach a different contact, the agent uses `notify_owner`
     // (kernel-mediated) or waits for that contact's own inbound message.
     if let (Some(explicit), Some(turn_channel)) = (explicit_recipient, sender_channel) {
-        // Filter an empty `sender_chat_id` before the DM fallback: the
-        // in-process path stamps the raw metadata value (unlike the `/mcp`
-        // bridge, which drops empty headers), so `Some("")` must not mask the
-        // `sender_id` fallback and silently disable the guard.
-        let expected_chat = sender_chat_id.filter(|s| !s.is_empty()).or(sender_id);
+        // The expected chat is the same canonical reply target a no-recipient
+        // send resolves to (`resolve_send_target` with no explicit recipient):
+        // the conversation id, falling back to `sender_id` for DMs. The empty
+        // filter on `sender_chat_id` is load-bearing — the in-process path
+        // stamps the raw metadata value (unlike the `/mcp` bridge, which drops
+        // empty headers), so `Some("")` must not mask the `sender_id` fallback
+        // and silently disable the guard.
+        let expected_chat = resolve_send_target(None, sender_chat_id, sender_id);
         if let Some(expected) = expected_chat {
             // Compare the recipient case-SENSITIVELY: `send_channel_*` lookups
             // are case-sensitive (#6078), so a case-insensitive match here would
@@ -458,4 +491,60 @@ pub(super) async fn tool_channel_send(
             .map_err(|e| e.to_string()),
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_send_target;
+
+    // A group turn: the speaker (`sender_id`) and the room (`sender_chat_id`)
+    // differ. A no-recipient send must reply to the room, not the speaker —
+    // the bug where a Matrix file send targeted `@user:hs` instead of the room
+    // `!room:hs` and the homeserver returned `403 not in room`.
+    #[test]
+    fn auto_fill_replies_to_group_not_speaker() {
+        let target = resolve_send_target(None, Some("!room:hs"), Some("@user:hs"));
+        assert_eq!(target, Some("!room:hs"));
+    }
+
+    // DM: no chat id stamped (or it coincides with the sender) — fall back to
+    // the sender so 1:1 replies keep working.
+    #[test]
+    fn auto_fill_falls_back_to_sender_for_dm() {
+        assert_eq!(
+            resolve_send_target(None, None, Some("@user:hs")),
+            Some("@user:hs")
+        );
+        assert_eq!(
+            resolve_send_target(None, Some(""), Some("@user:hs")),
+            Some("@user:hs")
+        );
+    }
+
+    // An explicit recipient always wins, even over a present chat id — the
+    // cross-chat guard (not this resolver) is what rejects a mismatched one.
+    #[test]
+    fn explicit_recipient_wins() {
+        let target = resolve_send_target(Some("@other:hs"), Some("!room:hs"), Some("@user:hs"));
+        assert_eq!(target, Some("@other:hs"));
+    }
+
+    // The guard's `expected_chat` is this resolver with no explicit recipient,
+    // so the auto-fill target and the guard's expectation are byte-identical —
+    // a no-recipient send can never resolve a chat the guard would reject.
+    #[test]
+    fn auto_fill_matches_guard_expected_chat() {
+        let chat = Some("!room:hs");
+        let sender = Some("@user:hs");
+        let auto_fill = resolve_send_target(None, chat, sender);
+        let expected_chat = resolve_send_target(None, chat, sender);
+        assert_eq!(auto_fill, expected_chat);
+    }
+
+    // No identity at all (out-of-band caller — cron, trigger): nothing to
+    // resolve, the caller surfaces the "Missing 'recipient'" error.
+    #[test]
+    fn no_identity_resolves_none() {
+        assert_eq!(resolve_send_target(None, None, None), None);
+    }
 }

@@ -301,7 +301,7 @@ use instead of web_fetch + file_write (which round-trips the entire body through
             },
             ToolDefinition {
                 name: tool_name::AGENT_SEND.to_string(),
-                description: "Send a message to another agent and receive their response. Accepts UUID or agent name. Use agent_find first to discover agents.".to_string(),
+                description: "Send a message to another agent. By default this BLOCKS until the agent replies and returns their response — only use the blocking mode for quick sub-questions whose answer you need within this turn. For any delegation that may take a while (research, multi-step work), set \"async\": true so you are not blocked and don't hit the tool timeout. Accepts UUID or agent name. Use agent_find first to discover agents.".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -310,6 +310,10 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                         "conversation_key": {
                             "type": "string",
                             "description": "Optional key to control which conversation thread is used. Provide the same key across calls to preserve history and keep a multi-turn context with the callee. Omit to use the callee's default session mode. A fresh or unique key starts a new isolated thread."
+                        },
+                        "async": {
+                            "type": "boolean",
+                            "description": "When true, returns immediately with a task_id instead of blocking for the reply. The target agent's response is delivered back to your session automatically when it finishes, so you can continue or end your turn. Use this for any delegation that might take longer than a few seconds (it avoids the tool-execution timeout). Defaults to false (blocking)."
                         }
                     },
                     "required": ["agent_id", "message"]

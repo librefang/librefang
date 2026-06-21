@@ -30,10 +30,19 @@ pub(crate) fn cmd_models_list(provider_filter: Option<&str>, json: bool) {
             .or_else(|| body.as_array())
         {
             if arr.is_empty() {
-                println!("No models found.");
+                println!("{}", i18n::t("model-none-found"));
                 return;
             }
-            let mut t = crate::table::Table::new(&["MODEL", "PROVIDER", "TIER", "CONTEXT"]);
+            let header_model = i18n::t("model-header-model");
+            let header_provider = i18n::t("label-header-provider");
+            let header_tier = i18n::t("model-header-tier");
+            let header_context = i18n::t("model-header-context");
+            let mut t = crate::table::Table::new(&[
+                &header_model,
+                &header_provider,
+                &header_tier,
+                &header_context,
+            ]);
             for m in arr {
                 t.add_row(&[
                     m["id"].as_str().unwrap_or("?"),
@@ -70,10 +79,19 @@ pub(crate) fn cmd_models_list(provider_filter: Option<&str>, json: bool) {
             return;
         }
         if models.is_empty() {
-            println!("No models in catalog.");
+            println!("{}", i18n::t("model-none-in-catalog"));
             return;
         }
-        let mut t = crate::table::Table::new(&["MODEL", "PROVIDER", "TIER", "CONTEXT"]);
+        let header_model = i18n::t("model-header-model");
+        let header_provider = i18n::t("label-header-provider");
+        let header_tier = i18n::t("model-header-tier");
+        let header_context = i18n::t("model-header-context");
+        let mut t = crate::table::Table::new(&[
+            &header_model,
+            &header_provider,
+            &header_tier,
+            &header_context,
+        ]);
         for m in models {
             if let Some(p) = provider_filter {
                 if m.provider != p {
@@ -103,7 +121,9 @@ pub(crate) fn cmd_models_aliases(json: bool) {
             return;
         }
         if let Some(arr) = body.get("aliases").and_then(|v| v.as_array()) {
-            let mut t = crate::table::Table::new(&["ALIAS", "RESOLVES TO"]);
+            let header_alias = i18n::t("label-header-alias");
+            let header_resolves = i18n::t("model-header-resolves-to");
+            let mut t = crate::table::Table::new(&[&header_alias, &header_resolves]);
             for entry in arr {
                 t.add_row(&[
                     entry["alias"].as_str().unwrap_or("?"),
@@ -113,7 +133,9 @@ pub(crate) fn cmd_models_aliases(json: bool) {
             t.print();
         } else if let Some(obj) = body.as_object() {
             // Fallback for plain {alias: model_id} format
-            let mut t = crate::table::Table::new(&["ALIAS", "RESOLVES TO"]);
+            let header_alias = i18n::t("label-header-alias");
+            let header_resolves = i18n::t("model-header-resolves-to");
+            let mut t = crate::table::Table::new(&[&header_alias, &header_resolves]);
             for (alias, target) in obj {
                 t.add_row(&[alias.as_str(), target.as_str().unwrap_or("?")]);
             }
@@ -135,7 +157,9 @@ pub(crate) fn cmd_models_aliases(json: bool) {
             println!("{}", serde_json::to_string_pretty(&obj).unwrap_or_default());
             return;
         }
-        let mut t = crate::table::Table::new(&["ALIAS", "RESOLVES TO"]);
+        let header_alias = i18n::t("label-header-alias");
+        let header_resolves = i18n::t("model-header-resolves-to");
+        let mut t = crate::table::Table::new(&[&header_alias, &header_resolves]);
         for (alias, target) in aliases {
             t.add_row(&[alias, target]);
         }
@@ -159,7 +183,16 @@ pub(crate) fn cmd_models_providers(json: bool) {
             .and_then(|v| v.as_array())
             .or_else(|| body.as_array())
         {
-            let mut t = crate::table::Table::new(&["PROVIDER", "AUTH", "MODELS", "BASE URL"]);
+            let header_provider = i18n::t("label-header-provider");
+            let header_auth = i18n::t("model-header-auth");
+            let header_models = i18n::t("model-header-models");
+            let header_base_url = i18n::t("model-header-base-url");
+            let mut t = crate::table::Table::new(&[
+                &header_provider,
+                &header_auth,
+                &header_models,
+                &header_base_url,
+            ]);
             for p in arr {
                 t.add_row(&[
                     p["id"].as_str().unwrap_or("?"),
@@ -193,7 +226,16 @@ pub(crate) fn cmd_models_providers(json: bool) {
             println!("{}", serde_json::to_string_pretty(&arr).unwrap_or_default());
             return;
         }
-        let mut t = crate::table::Table::new(&["PROVIDER", "AUTH", "MODELS", "BASE URL"]);
+        let header_provider = i18n::t("label-header-provider");
+        let header_auth = i18n::t("model-header-auth");
+        let header_models = i18n::t("model-header-models");
+        let header_base_url = i18n::t("model-header-base-url");
+        let mut t = crate::table::Table::new(&[
+            &header_provider,
+            &header_auth,
+            &header_models,
+            &header_base_url,
+        ]);
         for p in providers {
             t.add_row(&[
                 &p.id,
@@ -257,15 +299,27 @@ pub(crate) fn pick_model() -> String {
     for (provider, provider_models) in &by_provider {
         println!("  {}:", provider.bold());
         for m in provider_models {
-            println!("    {idx:>3}. {:<36} {:?}", m.id, m.tier);
+            let idx_padded = format!("{:>3}", idx);
+            let id_padded = format!("{:<36}", m.id);
+            let tier_str = format!("{:?}", m.tier);
+            let display_str = i18n::t_args(
+                "model-picker-item",
+                &[
+                    ("idx", &idx_padded),
+                    ("id", &id_padded),
+                    ("tier", &tier_str),
+                ],
+            );
+            println!("{display_str}");
             numbered.push(&m.id);
             idx += 1;
         }
     }
     ui::blank();
 
+    let prompt_msg = i18n::t("model-prompt-selection");
     loop {
-        let input = prompt_input("  Enter number or model ID: ");
+        let input = prompt_input(&prompt_msg);
         if input.is_empty() {
             continue;
         }
@@ -310,10 +364,15 @@ pub(crate) fn cmd_approvals_list(json: bool) {
         .or_else(|| body.as_array())
     {
         if arr.is_empty() {
-            println!("No pending approvals.");
+            println!("{}", i18n::t("approval-none-pending"));
             return;
         }
-        let mut t = crate::table::Table::new(&["ID", "AGENT", "TYPE", "REQUEST"]);
+        let header_id = i18n::t("label-header-id");
+        let header_agent = i18n::t("label-header-agent");
+        let header_type = i18n::t("label-header-type");
+        let header_request = i18n::t("approval-header-request");
+        let mut t =
+            crate::table::Table::new(&[&header_id, &header_agent, &header_type, &header_request]);
         for a in arr {
             t.add_row(&[
                 a["id"].as_str().unwrap_or("?"),

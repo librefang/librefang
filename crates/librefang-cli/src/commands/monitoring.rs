@@ -68,10 +68,19 @@ pub(crate) fn cmd_security_audit(limit: usize, json: bool) {
         .or_else(|| body.as_array())
     {
         if arr.is_empty() {
-            println!("No audit entries.");
+            println!("{}", i18n::t("monitoring-no-audit"));
             return;
         }
-        let mut t = crate::table::Table::new(&["TIMESTAMP", "AGENT", "TYPE", "EVENT"]);
+        let header_timestamp = i18n::t("label-header-timestamp");
+        let header_agent = i18n::t("label-header-agent");
+        let header_type = i18n::t("label-header-type");
+        let header_event = i18n::t("label-header-event");
+        let mut t = crate::table::Table::new(&[
+            &header_timestamp,
+            &header_agent,
+            &header_type,
+            &header_event,
+        ]);
         for entry in arr {
             let agent_id = entry["agent_id"].as_str().unwrap_or("");
             let agent_col = if agent_id.len() > 16 {
@@ -279,10 +288,15 @@ pub(crate) fn cmd_memory_list(agent: &str, json: bool) {
         .or_else(|| body.as_array())
     {
         if arr.is_empty() {
-            println!("No memory entries for agent '{agent}'.");
+            println!(
+                "{}",
+                i18n::t_args("monitoring-no-memory", &[("agent", &agent)])
+            );
             return;
         }
-        let mut t = crate::table::Table::new(&["KEY", "VALUE"]);
+        let header_key = i18n::t("label-header-key");
+        let header_value = i18n::t("label-header-value");
+        let mut t = crate::table::Table::new(&[&header_key, &header_value]);
         for kv in arr {
             t.add_row(&[
                 kv["key"].as_str().unwrap_or("?"),
@@ -387,10 +401,13 @@ pub(crate) fn cmd_devices_list(json: bool) {
     }
     if let Some(arr) = body.as_array() {
         if arr.is_empty() {
-            println!("No paired devices.");
+            println!("{}", i18n::t("monitoring-no-devices"));
             return;
         }
-        let mut t = crate::table::Table::new(&["ID", "NAME", "LAST SEEN"]);
+        let header_id = i18n::t("label-header-id");
+        let header_name = i18n::t("label-header-name");
+        let header_last_seen = i18n::t("label-last-seen");
+        let mut t = crate::table::Table::new(&[&header_id, &header_name, &header_last_seen]);
         for d in arr {
             t.add_row(&[
                 d["id"].as_str().unwrap_or("?"),
@@ -468,18 +485,25 @@ pub(crate) fn cmd_webhooks_list(json: bool) {
         .or_else(|| body.as_array())
     {
         if arr.is_empty() {
-            println!("No webhooks configured.");
+            println!("{}", i18n::t("monitoring-no-webhooks"));
             return;
         }
-        let mut t = crate::table::Table::new(&["ID", "NAME", "ENABLED", "URL"]);
+        let header_id = i18n::t("label-header-id");
+        let header_name = i18n::t("label-header-name");
+        let header_enabled = i18n::t("label-header-enabled");
+        let header_url = i18n::t("label-header-url");
+        let yes_str = i18n::t("label-yes");
+        let no_str = i18n::t("label-no");
+        let mut t =
+            crate::table::Table::new(&[&header_id, &header_name, &header_enabled, &header_url]);
         for w in arr {
             t.add_row(&[
                 w["id"].as_str().unwrap_or("?"),
                 w["name"].as_str().unwrap_or("?"),
                 if w["enabled"].as_bool().unwrap_or(false) {
-                    "yes"
+                    &yes_str
                 } else {
-                    "no"
+                    &no_str
                 },
                 w["url"].as_str().unwrap_or(""),
             ]);

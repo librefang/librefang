@@ -546,10 +546,9 @@ fn draw_menu(frame: &mut ratatui::Frame, state: &mut LauncherState) {
         // Daemon status
         if let Some(ref url) = state.daemon_url {
             let agent_suffix = if state.daemon_agents > 0 {
-                format!(
-                    " ({} agent{})",
-                    state.daemon_agents,
-                    if state.daemon_agents == 1 { "" } else { "s" }
+                i18n::t_args(
+                    "launcher-daemon-agents",
+                    &[("count", &state.daemon_agents.to_string())],
                 )
             } else {
                 String::new()
@@ -689,9 +688,9 @@ fn draw_menu(frame: &mut ratatui::Frame, state: &mut LauncherState) {
     // ── Migration hint ────────────────────────────────────────────────────────
     if state.first_run && (state.openclaw_detected || state.openfang_detected) {
         let source = match (state.openclaw_detected, state.openfang_detected) {
-            (true, true) => "OpenClaw / OpenFang",
-            (true, false) => "OpenClaw",
-            (false, true) => "OpenFang",
+            (true, true) => i18n::t("brand-openclaw-openfang"),
+            (true, false) => i18n::t("brand-openclaw"),
+            (false, true) => i18n::t("brand-openfang"),
             _ => unreachable!(),
         };
         let hint_lines = vec![
@@ -699,7 +698,7 @@ fn draw_menu(frame: &mut ratatui::Frame, state: &mut LauncherState) {
             Line::from(vec![
                 Span::styled("\u{2192} ", Style::default().fg(theme::BLUE)),
                 Span::styled(
-                    i18n::t_args("launcher-migration-question", &[("source", source)]),
+                    i18n::t_args("launcher-migration-question", &[("source", &source)]),
                     Style::default().fg(theme::BLUE),
                 ),
                 Span::styled(i18n::t("launcher-migration-hint"), theme::hint_style()),

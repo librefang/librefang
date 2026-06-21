@@ -424,21 +424,21 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
     // needs editing here, not the list of providers checked.
     fn display_name(provider_id: &str) -> String {
         match provider_id {
-            "openai" => "OpenAI".to_string(),
-            "openrouter" => "OpenRouter".to_string(),
-            "deepseek" => "DeepSeek".to_string(),
-            "deepinfra" => "DeepInfra".to_string(),
-            "byteplus" => "BytePlus".to_string(),
-            "azure-openai" => "Azure OpenAI".to_string(),
-            "github-copilot" => "GitHub Copilot".to_string(),
-            "huggingface" => "Hugging Face".to_string(),
-            "openai-codex" => "OpenAI Codex".to_string(),
-            "claude-code" => "Claude Code".to_string(),
-            "vertex-ai" => "Vertex AI".to_string(),
-            "nvidia-nim" => "NVIDIA NIM".to_string(),
-            "z.ai" | "zai" => "Z.ai".to_string(),
-            "kimi-coding" | "kimi_coding" => "Kimi Coding".to_string(),
-            "alibaba-coding-plan" => "Alibaba Coding Plan".to_string(),
+            "openai" => i18n::t("brand-openai"),
+            "openrouter" => i18n::t("brand-openrouter"),
+            "deepseek" => i18n::t("brand-deepseek"),
+            "deepinfra" => i18n::t("brand-deepinfra"),
+            "byteplus" => i18n::t("brand-byteplus"),
+            "azure-openai" => i18n::t("brand-azure-openai"),
+            "github-copilot" => i18n::t("brand-github-copilot"),
+            "huggingface" => i18n::t("brand-huggingface"),
+            "openai-codex" => i18n::t("brand-openai-codex"),
+            "claude-code" => i18n::t("brand-claude-code"),
+            "vertex-ai" => i18n::t("brand-vertex-ai"),
+            "nvidia-nim" => i18n::t("brand-nvidia-nim"),
+            "z.ai" | "zai" => i18n::t("brand-zai"),
+            "kimi-coding" | "kimi_coding" => i18n::t("brand-kimi-coding"),
+            "alibaba-coding-plan" => i18n::t("brand-alibaba-coding-plan"),
             other => {
                 // Title-case fallback for unlisted providers so `xiaomi` →
                 // `Xiaomi` instead of leaking the raw lowercase id.
@@ -572,10 +572,10 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
         println!("{}", i18n::t("doctor-section-channels"));
     }
     let channel_keys = [
-        ("TELEGRAM_BOT_TOKEN", "Telegram"),
-        ("DISCORD_BOT_TOKEN", "Discord"),
-        ("SLACK_APP_TOKEN", "Slack App"),
-        ("SLACK_BOT_TOKEN", "Slack Bot"),
+        ("TELEGRAM_BOT_TOKEN", i18n::t("brand-telegram")),
+        ("DISCORD_BOT_TOKEN", i18n::t("brand-discord")),
+        ("SLACK_APP_TOKEN", i18n::t("brand-slack-app")),
+        ("SLACK_BOT_TOKEN", i18n::t("brand-slack-bot")),
     ];
     for (env_var, name) in &channel_keys {
         let set = std::env::var(env_var).is_ok();

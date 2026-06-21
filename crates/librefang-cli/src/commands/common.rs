@@ -26,7 +26,13 @@ pub(crate) fn cli_librefang_home() -> std::path::PathBuf {
 
 pub(crate) fn daemon_config_context(config: Option<&std::path::Path>) -> DaemonConfigContext {
     let config = load_config(config).unwrap_or_else(|e| {
-        eprintln!("warning: {e}; using default config values for this command");
+        eprintln!(
+            "{}",
+            i18n::t_args(
+                "common-warning-config-default",
+                &[("error", &e.to_string())]
+            )
+        );
         librefang_types::config::KernelConfig::default()
     });
     let api_key = {
@@ -444,32 +450,52 @@ pub(crate) fn dir_size_bytes(dir: &std::path::Path) -> Option<u64> {
 }
 
 pub(crate) fn format_bytes(bytes: u64) -> String {
-    const UNITS: &[(&str, u64)] = &[
-        ("GiB", 1u64 << 30),
-        ("MiB", 1u64 << 20),
-        ("KiB", 1u64 << 10),
-    ];
-    for (unit, thresh) in UNITS {
-        if bytes >= *thresh {
-            return format!("{:.2} {}", bytes as f64 / *thresh as f64, unit);
-        }
+    let (key, thresh) = if bytes >= (1u64 << 30) {
+        ("format-bytes-gib", 1u64 << 30)
+    } else if bytes >= (1u64 << 20) {
+        ("format-bytes-mib", 1u64 << 20)
+    } else if bytes >= (1u64 << 10) {
+        ("format-bytes-kib", 1u64 << 10)
+    } else {
+        ("format-bytes-b", 1)
+    };
+
+    if thresh > 1 {
+        let value = format!("{:.2}", bytes as f64 / thresh as f64);
+        i18n::t_args(key, &[("value", &value)])
+    } else {
+        i18n::t_args(key, &[("value", &bytes.to_string())])
     }
-    format!("{bytes} B")
 }
 
 pub(crate) fn format_uptime(secs: u64) -> String {
     if secs < 60 {
-        format!("{secs}s")
+        i18n::t_args("format-uptime-s", &[("secs", &secs.to_string())])
     } else if secs < 3600 {
-        format!("{}m {}s", secs / 60, secs % 60)
+        i18n::t_args(
+            "format-uptime-ms",
+            &[
+                ("mins", &(secs / 60).to_string()),
+                ("secs", &(secs % 60).to_string()),
+            ],
+        )
     } else if secs < 86400 {
-        format!("{}h {}m {}s", secs / 3600, (secs % 3600) / 60, secs % 60)
+        i18n::t_args(
+            "format-uptime-hms",
+            &[
+                ("hours", &(secs / 3600).to_string()),
+                ("mins", &((secs % 3600) / 60).to_string()),
+                ("secs", &(secs % 60).to_string()),
+            ],
+        )
     } else {
-        format!(
-            "{}d {}h {}m",
-            secs / 86400,
-            (secs % 86400) / 3600,
-            (secs % 3600) / 60
+        i18n::t_args(
+            "format-uptime-dhm",
+            &[
+                ("days", &(secs / 86400).to_string()),
+                ("hours", &((secs % 86400) / 3600).to_string()),
+                ("mins", &((secs % 3600) / 60).to_string()),
+            ],
         )
     }
 }
@@ -729,7 +755,8 @@ pub(crate) fn test_api_key(provider: &str, key: &str) -> bool {
 ///
 /// Polls for daemon health for up to 10 seconds. Returns the daemon URL on success.
 pub(crate) fn start_daemon_background() -> Result<String, String> {
-    let exe = std::env::current_exe().map_err(|e| format!("Cannot find executable: {e}"))?;
+    let exe = std::env::current_exe()
+        .map_err(|e| i18n::t_args("common-error-find-exe", &[("error", &e.to_string())]))?;
 
     #[cfg(windows)]
     {
@@ -743,7 +770,7 @@ pub(crate) fn start_daemon_background() -> Result<String, String> {
             .stderr(std::process::Stdio::null())
             .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
             .spawn()
-            .map_err(|e| format!("Failed to spawn daemon: {e}"))?;
+            .map_err(|e| i18n::t_args("common-error-spawn-daemon", &[("error", &e.to_string())]))?;
     }
 
     #[cfg(not(windows))]
@@ -754,7 +781,7 @@ pub(crate) fn start_daemon_background() -> Result<String, String> {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
-            .map_err(|e| format!("Failed to spawn daemon: {e}"))?;
+            .map_err(|e| i18n::t_args("common-error-spawn-daemon", &[("error", &e.to_string())]))?;
     }
 
     // Poll for daemon readiness
@@ -765,7 +792,7 @@ pub(crate) fn start_daemon_background() -> Result<String, String> {
         }
     }
 
-    Err("Daemon did not become ready within 10 seconds".to_string())
+    Err(i18n::t("common-error-daemon-timeout"))
 }
 
 // ---------------------------------------------------------------------------
@@ -778,7 +805,7 @@ pub(crate) fn librefang_home() -> PathBuf {
     }
     dirs::home_dir()
         .unwrap_or_else(|| {
-            eprintln!("Error: Could not determine home directory");
+            eprintln!("{}", i18n::t("migrate-error-home-dir"));
             std::process::exit(1);
         })
         .join(".librefang")

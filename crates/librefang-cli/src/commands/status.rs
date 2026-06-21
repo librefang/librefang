@@ -36,10 +36,16 @@ pub(crate) fn cmd_status(
             let _ = std::io::stdout().flush();
             let _ = render_status_once(config.clone(), false, verbose, false);
             ui::blank();
+            let hint_prefix = "hint:".dimmed().to_string();
             println!(
-                "  {} (refreshing every {}s, Ctrl+C to exit)",
-                "hint:".dimmed(),
-                secs.max(1),
+                "{}",
+                i18n::t_args(
+                    "status-watch-header",
+                    &[
+                        ("status", &hint_prefix),
+                        ("interval", &secs.max(1).to_string())
+                    ]
+                )
             );
             std::thread::sleep(interval);
         }
@@ -80,7 +86,10 @@ pub(crate) fn render_status_daemon(
         .as_deref()
         .and_then(|k| fetch_status_detail(base, k));
     let cfg = load_config(config).unwrap_or_else(|e| {
-        eprintln!("warning: {e}; using default config values for status display");
+        eprintln!(
+            "{}",
+            i18n::t_args("status-warning-config", &[("error", &e.to_string())])
+        );
         librefang_types::config::KernelConfig::default()
     });
 
@@ -373,7 +382,19 @@ pub(crate) fn render_status_quiet_daemon(
     } else {
         "locked".to_string()
     };
-    println!("librefang {version} {state} uptime={uptime_s} {auth_s} ({base})");
+    println!(
+        "{}",
+        i18n::t_args(
+            "status-summary-up",
+            &[
+                ("version", version),
+                ("state", state),
+                ("uptime", &uptime_s),
+                ("auth", &auth_s),
+                ("base", base),
+            ]
+        )
+    );
     exit_code
 }
 
@@ -421,7 +442,13 @@ pub(crate) fn render_verbose_section(
         if enabled {
             ui::kv(
                 &i18n::t("label-peers"),
-                &format!("{connected} connected / {total} known"),
+                &i18n::t_args(
+                    "status-peers-connected",
+                    &[
+                        ("connected", &connected.to_string()),
+                        ("total", &total.to_string()),
+                    ],
+                ),
             );
         }
     }
@@ -502,11 +529,20 @@ pub(crate) fn render_detail_section(body: &serde_json::Value) {
     ui::blank();
     ui::kv(
         &i18n::t("label-agents"),
-        &format!("{active} running / {total} total"),
+        &i18n::t_args(
+            "status-agents-active",
+            &[
+                ("active", &active.to_string()),
+                ("total", &total.to_string()),
+            ],
+        ),
     );
     ui::kv(&i18n::t("label-sessions"), &sessions.to_string());
     if let Some(mb) = memory_mb {
-        ui::kv(&i18n::t("label-memory"), &format!("{mb} MB"));
+        ui::kv(
+            &i18n::t("label-memory"),
+            &i18n::t_args("status-mb", &[("mb", &mb.to_string())]),
+        );
     }
 
     if let Some(agents) = body["agents"].as_array() {
@@ -535,7 +571,11 @@ pub(crate) fn render_agents_table(agents: &[serde_json::Value]) {
     // Migrated to crate::table::Table (#3306) — keeps content layout stable
     // while removing 30+ lines of manual width math and giving us automatic
     // ASCII fallback when stdout is piped.
-    let mut t = crate::table::Table::new(&["NAME", "ID", "STATE", "MODEL"]);
+    let header_name = i18n::t("label-header-name");
+    let header_id = i18n::t("label-header-id");
+    let header_state = i18n::t("label-header-state");
+    let header_model = i18n::t("model-header-model");
+    let mut t = crate::table::Table::new(&[&header_name, &header_id, &header_state, &header_model]);
     for a in agents {
         let id = id_trim(a["id"].as_str().unwrap_or("?"));
         let model = format!(
@@ -559,14 +599,22 @@ pub(crate) fn render_status_inprocess(config: Option<PathBuf>, json: bool, quiet
     // the config file alone.
     if quiet {
         let cfg = load_config(config.as_deref()).unwrap_or_else(|e| {
-            eprintln!("warning: {e}; using default config values for status display");
+            eprintln!(
+                "{}",
+                i18n::t_args("status-warning-config", &[("error", &e.to_string())])
+            );
             librefang_types::config::KernelConfig::default()
         });
         println!(
-            "librefang down home={} default={}/{}",
-            cfg.home_dir.display(),
-            cfg.default_model.provider,
-            cfg.default_model.model,
+            "{}",
+            i18n::t_args(
+                "status-summary-down",
+                &[
+                    ("home", &cfg.home_dir.display().to_string()),
+                    ("provider", &cfg.default_model.provider),
+                    ("model", &cfg.default_model.model),
+                ]
+            )
         );
         return 1;
     }
@@ -698,7 +746,13 @@ pub(crate) fn cmd_health(json: bool) {
             if let Some(uptime) = body.get("uptime_secs").and_then(|v| v.as_u64()) {
                 let hours = uptime / 3600;
                 let mins = (uptime % 3600) / 60;
-                ui::kv(&i18n::t("label-uptime"), &format!("{hours}h {mins}m"));
+                ui::kv(
+                    &i18n::t("label-uptime"),
+                    &i18n::t_args(
+                        "status-uptime-format",
+                        &[("hours", &hours.to_string()), ("mins", &mins.to_string())],
+                    ),
+                );
             }
         }
         None => {

@@ -53,7 +53,10 @@ pub(crate) fn cmd_init(quick: bool) {
     let data_dir = librefang_dir.join("data");
     if !data_dir.exists() {
         std::fs::create_dir_all(&data_dir).unwrap_or_else(|e| {
-            eprintln!("Error creating data dir: {e}");
+            ui::error(&i18n::t_args(
+                "init-error-create-data-dir",
+                &[("error", &e.to_string())],
+            ));
             std::process::exit(1);
         });
     }
@@ -460,7 +463,7 @@ pub(crate) fn cmd_init_interactive(librefang_dir: &std::path::Path) {
             ui::kv(&i18n::t("label-model"), &model);
 
             if daemon_started {
-                ui::kv_ok(&i18n::t("label-daemon"), "running");
+                ui::kv_ok(&i18n::t("label-daemon"), &i18n::t("label-running"));
             }
             ui::blank();
 

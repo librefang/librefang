@@ -14,13 +14,22 @@ pub(crate) fn cmd_config_show() {
     let config_path = home.join("config.toml");
 
     if !config_path.exists() {
-        println!("No configuration found at: {}", config_path.display());
-        println!("Run `librefang init` to create one.");
+        println!(
+            "{}",
+            i18n::t_args(
+                "config-no-file-found",
+                &[("path", &config_path.display().to_string())]
+            )
+        );
+        println!("{}", i18n::t("config-run-init-hint"));
         return;
     }
 
     let content = std::fs::read_to_string(&config_path).unwrap_or_else(|e| {
-        eprintln!("Error reading config: {e}");
+        eprintln!(
+            "{}",
+            i18n::t_args("config-read-error", &[("error", &e.to_string())])
+        );
         std::process::exit(1);
     });
 
@@ -49,11 +58,20 @@ pub(crate) fn cmd_config_edit() {
     match status {
         Ok(s) if s.success() => {}
         Ok(s) => {
-            eprintln!("Editor exited with: {s}");
+            eprintln!(
+                "{}",
+                i18n::t_args("config-editor-exit", &[("status", &s.to_string())])
+            );
         }
         Err(e) => {
-            eprintln!("Failed to open editor '{editor}': {e}");
-            eprintln!("Set $EDITOR to your preferred editor.");
+            eprintln!(
+                "{}",
+                i18n::t_args(
+                    "config-editor-open-fail",
+                    &[("editor", &editor), ("error", &e.to_string())]
+                )
+            );
+            eprintln!("{}", i18n::t("config-editor-env-hint"));
         }
     }
 }
@@ -115,13 +133,13 @@ pub(crate) fn parse_toml_integer(raw: &str) -> Result<toml::Value, String> {
     if let Ok(v) = raw.parse::<u64>() {
         return match i64::try_from(v) {
             Ok(v) => Ok(toml::Value::Integer(v)),
-            Err(_) => Err(format!(
-                "value {v} exceeds i64::MAX ({}); TOML cannot store unsigned integers above this bound",
-                i64::MAX
+            Err(_) => Err(i18n::t_args(
+                "config-val-exceeds-i64",
+                &[("value", &v.to_string()), ("max", &i64::MAX.to_string())],
             )),
         };
     }
-    Err(format!("'{raw}' is not a valid integer"))
+    Err(i18n::t_args("config-invalid-integer", &[("raw", raw)]))
 }
 
 pub(crate) fn cmd_config_set(key: &str, value: &str) {
@@ -335,7 +353,10 @@ pub(crate) fn cmd_config_unset(key: &str) {
 pub(crate) fn cmd_config_set_key(provider: &str) {
     let env_var = provider_to_env_var(provider);
 
-    let key = prompt_input(&format!("  Paste your {provider} API key: "));
+    let key = prompt_input(&i18n::t_args(
+        "config-paste-api-key-prompt",
+        &[("provider", provider)],
+    ));
     if key.is_empty() {
         ui::error(&i18n::t("config-no-key"));
         return;
@@ -345,12 +366,12 @@ pub(crate) fn cmd_config_set_key(provider: &str) {
         Ok(()) => {
             ui::success(&i18n::t_args("config-saved-key", &[("env_var", &env_var)]));
             // Test the key
-            print!("  Testing key... ");
+            print!("{}", i18n::t("config-testing-key"));
             io::stdout().flush().unwrap();
             if test_api_key(provider, &key) {
-                println!("{}", "OK".bright_green());
+                println!("{}", i18n::t("config-test-ok").bright_green());
             } else {
-                println!("{}", "could not verify (may still work)".bright_yellow());
+                println!("{}", i18n::t("config-test-unverified").bright_yellow());
             }
         }
         Err(e) => {
@@ -396,12 +417,18 @@ pub(crate) fn cmd_config_test_key(provider: &str) {
         std::process::exit(1);
     }
 
-    print!("  Testing {provider} ({env_var})... ");
+    print!(
+        "{}",
+        i18n::t_args(
+            "config-testing-provider-key",
+            &[("provider", provider), ("env_var", &env_var)]
+        )
+    );
     io::stdout().flush().unwrap();
     if test_api_key(provider, &std::env::var(&env_var).unwrap_or_default()) {
-        println!("{}", "OK".bright_green());
+        println!("{}", i18n::t("config-test-ok").bright_green());
     } else {
-        println!("{}", "FAILED (401/403)".bright_red());
+        println!("{}", i18n::t("config-test-failed").bright_red());
         ui::hint(&i18n::t_args(
             "config-update-key-hint",
             &[("provider", provider)],

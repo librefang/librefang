@@ -8066,6 +8066,7 @@ dependencies = [
  "subtle",
  "tar",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -8084,6 +8085,7 @@ dependencies = [
  "webauthn-rs",
  "which",
  "windows-sys 0.61.2",
+ "zeroize",
  "zip 8.6.0",
 ]
 

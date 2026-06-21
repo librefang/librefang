@@ -518,6 +518,9 @@ class _ChannelsResource(_Resource):
     def reload_channels(self):
         return self._c._request("POST", "/api/channels/reload")
 
+    def delete_sidecar_channel(self, name: str):
+        return self._c._request("DELETE", f"/api/channels/sidecar/{name}")
+
     def configure_sidecar_channel(self, name: str, **data):
         return self._c._request("POST", f"/api/channels/sidecar/{name}/configure", data)
 

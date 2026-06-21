@@ -123,7 +123,7 @@ async fn create_webhook_rejects_typo_in_events_field() {
     );
 
     // No webhook may have been persisted by the rejected request.
-    let listed = h.state.webhook_store.list();
+    let listed = h.state.webhook_store.list().await;
     assert!(
         listed.is_empty(),
         "rejected request must not create a webhook subscription; got: {:?}",

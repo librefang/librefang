@@ -186,7 +186,11 @@ impl HandsState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut HandsState) {
-    let inner = widgets::render_screen_block(f, area, "\u{270b} Hands");
+    let inner = widgets::render_screen_block(
+        f,
+        area,
+        &format!("{} {}", "\u{270b}", crate::i18n::t("tui-hands-title")),
+    );
 
     let chunks = Layout::vertical([
         Constraint::Length(1), // sub-tab bar
@@ -208,8 +212,11 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut HandsState) {
 
 fn draw_sub_tabs(f: &mut Frame, area: Rect, active: HandsSub) {
     let tabs = [
-        (HandsSub::Marketplace, "\u{25cf} Marketplace"),
-        (HandsSub::Active, "\u{25cf} Active"),
+        (
+            HandsSub::Marketplace,
+            crate::i18n::t("tui-hands-tab-marketplace"),
+        ),
+        (HandsSub::Active, crate::i18n::t("tui-hands-tab-active")),
     ];
     let mut spans = vec![Span::raw("  ")];
     for (i, (sub, label)) in tabs.iter().enumerate() {
@@ -218,7 +225,10 @@ fn draw_sub_tabs(f: &mut Frame, area: Rect, active: HandsSub) {
         } else {
             theme::tab_inactive()
         };
-        spans.push(Span::styled(format!(" {} {label} ", i + 1), style));
+        spans.push(Span::styled(
+            format!(" {} {} {} ", i + 1, "\u{25cf}", label),
+            style,
+        ));
         spans.push(Span::raw("  "));
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -237,7 +247,11 @@ fn draw_marketplace(f: &mut Frame, area: Rect, state: &mut HandsState) {
         Paragraph::new(Line::from(vec![Span::styled(
             format!(
                 "  {:<4} {:<16} {:<14} {:<8} {}",
-                "", "Name", "Category", "Status", "Description"
+                "",
+                crate::i18n::t("tui-hands-header-name"),
+                crate::i18n::t("tui-hands-header-category"),
+                crate::i18n::t("tui-hands-header-status"),
+                crate::i18n::t("tui-hands-header-description")
             ),
             theme::table_header(),
         )])),
@@ -248,12 +262,12 @@ fn draw_marketplace(f: &mut Frame, area: Rect, state: &mut HandsState) {
 
     if state.loading {
         f.render_widget(
-            widgets::spinner(state.tick, "Loading hands\u{2026}"),
+            widgets::spinner(state.tick, &crate::i18n::t("tui-hands-loading")),
             chunks[2],
         );
     } else if state.definitions.is_empty() {
         f.render_widget(
-            widgets::empty_state("No hand definitions loaded."),
+            widgets::empty_state(&crate::i18n::t("tui-hands-empty-marketplace")),
             chunks[2],
         );
     } else {
@@ -262,9 +276,23 @@ fn draw_marketplace(f: &mut Frame, area: Rect, state: &mut HandsState) {
             .iter()
             .map(|h| {
                 let ready_badge = if h.requirements_met {
-                    Span::styled("\u{25cf} Ready ", Style::default().fg(theme::GREEN))
+                    Span::styled(
+                        format!(
+                            "{} {} ",
+                            "\u{25cf}",
+                            crate::i18n::t("tui-hands-status-ready")
+                        ),
+                        Style::default().fg(theme::GREEN),
+                    )
                 } else {
-                    Span::styled("\u{25cb} Setup ", Style::default().fg(theme::YELLOW))
+                    Span::styled(
+                        format!(
+                            "{} {} ",
+                            "\u{25cb}",
+                            crate::i18n::t("tui-hands-status-setup")
+                        ),
+                        Style::default().fg(theme::YELLOW),
+                    )
                 };
                 let category_style = match h.category.as_str() {
                     "Content" => Style::default().fg(theme::PURPLE),
@@ -273,6 +301,13 @@ fn draw_marketplace(f: &mut Frame, area: Rect, state: &mut HandsState) {
                     "Productivity" => Style::default().fg(theme::GREEN),
                     _ => Style::default().fg(theme::CYAN),
                 };
+                let category_label = match h.category.as_str() {
+                    "Content" => crate::i18n::t("tui-hands-category-content"),
+                    "Security" => crate::i18n::t("tui-hands-category-security"),
+                    "Development" => crate::i18n::t("tui-hands-category-development"),
+                    "Productivity" => crate::i18n::t("tui-hands-category-productivity"),
+                    other => other.to_string(),
+                };
                 ListItem::new(Line::from(vec![
                     Span::raw(format!("  {:<4}", &h.icon)),
                     Span::styled(
@@ -280,7 +315,7 @@ fn draw_marketplace(f: &mut Frame, area: Rect, state: &mut HandsState) {
                         Style::default().fg(theme::CYAN),
                     ),
                     Span::styled(
-                        format!("{:<14}", widgets::truncate(&h.category, 13)),
+                        format!("{:<14}", widgets::truncate(&category_label, 13)),
                         category_style,
                     ),
                     ready_badge,
@@ -299,7 +334,7 @@ fn draw_marketplace(f: &mut Frame, area: Rect, state: &mut HandsState) {
     f.render_widget(
         widgets::status_or_hint(
             &state.status_msg,
-            "  [\u{2191}\u{2193}] Navigate  [a/Enter] Activate  [r] Refresh",
+            &crate::i18n::t("tui-hands-hints-marketplace"),
         ),
         chunks[3],
     );
@@ -318,7 +353,10 @@ fn draw_active(f: &mut Frame, area: Rect, state: &mut HandsState) {
         Paragraph::new(Line::from(vec![Span::styled(
             format!(
                 "  {:<16} {:<12} {:<20} {}",
-                "Agent", "Status", "Hand", "Since"
+                crate::i18n::t("tui-hands-header-agent"),
+                crate::i18n::t("tui-hands-header-status"),
+                crate::i18n::t("tui-hands-header-hand"),
+                crate::i18n::t("tui-hands-header-since")
             ),
             theme::table_header(),
         )])),
@@ -329,12 +367,12 @@ fn draw_active(f: &mut Frame, area: Rect, state: &mut HandsState) {
 
     if state.loading {
         f.render_widget(
-            widgets::spinner(state.tick, "Loading active hands\u{2026}"),
+            widgets::spinner(state.tick, &crate::i18n::t("tui-hands-loading-active")),
             chunks[2],
         );
     } else if state.instances.is_empty() {
         f.render_widget(
-            widgets::empty_state("No active hands. Press [1] to browse the marketplace."),
+            widgets::empty_state(&crate::i18n::t("tui-hands-empty-active")),
             chunks[2],
         );
     } else {
@@ -347,12 +385,20 @@ fn draw_active(f: &mut Frame, area: Rect, state: &mut HandsState) {
                     "Paused" => ("\u{25cb}", Style::default().fg(theme::YELLOW)),
                     _ => ("\u{25cb}", Style::default().fg(theme::RED)),
                 };
+                let status_label = match i.status.as_str() {
+                    "Active" => crate::i18n::t("tui-hands-status-active"),
+                    "Paused" => crate::i18n::t("tui-hands-status-paused"),
+                    _ => crate::i18n::t("tui-hands-status-unknown"),
+                };
                 ListItem::new(Line::from(vec![
                     Span::styled(
                         format!("  {:<16}", widgets::truncate(&i.agent_name, 15)),
                         Style::default().fg(theme::CYAN),
                     ),
-                    Span::styled(format!("{status_icon} {:<10}", &i.status), status_style),
+                    Span::styled(
+                        format!("{} {:<10}", status_icon, status_label),
+                        status_style,
+                    ),
                     Span::styled(
                         format!("{:<20}", widgets::truncate(&i.hand_id, 19)),
                         Style::default().fg(theme::TEXT_SECONDARY),
@@ -372,9 +418,9 @@ fn draw_active(f: &mut Frame, area: Rect, state: &mut HandsState) {
     f.render_widget(
         widgets::confirm_or_status_or_hint(
             state.confirm_deactivate,
-            "  Deactivate this hand? [y] Yes  [any] Cancel",
+            &crate::i18n::t("tui-hands-confirm-deactivate"),
             &state.status_msg,
-            "  [\u{2191}\u{2193}] Navigate  [p] Pause/Resume  [d] Deactivate  [r] Refresh",
+            &crate::i18n::t("tui-hands-hints-active"),
         ),
         chunks[3],
     );

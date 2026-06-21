@@ -1772,6 +1772,7 @@ class MatrixAdapter(SidecarAdapter):
             "last_flushed_len": 0,
             "flushed_initial": False,
             "thread_extra": thread_extra,
+            "overflowed": False,
         })
 
     async def _on_stream_delta(self, cmd) -> None:
@@ -1800,11 +1801,13 @@ class MatrixAdapter(SidecarAdapter):
         state = self._stream_state_get(cmd.stream_id)
         if state is None:
             return
-        # Drain remaining buffer with overflow splits.
+        # Drain any overflow chunks first; `_stream_flush` already sends those
+        # tails as fresh, notifying events.
         while len(state["buffer"]) > MAX_MESSAGE_LEN:
             await self._stream_flush(state)
-        if state["buffer"]:
-            await self._stream_flush(state)
+        # Finalize the answer as a fresh (notifying) message instead of a
+        # final m.replace edit, which never fires a push notification.
+        await self._finalize_as_new_message(state)
         self._stream_state_set(cmd.stream_id, None)
 
     async def _stream_flush(self, state: dict) -> None:
@@ -1851,6 +1854,48 @@ class MatrixAdapter(SidecarAdapter):
         state["buffer"] = tail
         state["last_flushed_len"] = len(tail)
         state["last_flush_t"] = time.monotonic()
+        # An overflow tail was sent as a fresh (notifying) event, so the
+        # final frame already notifies — don't re-send it at stream end.
+        state["overflowed"] = True
+
+    async def _finalize_as_new_message(self, state: dict) -> None:
+        """Deliver the final streaming answer as a fresh
+        ``m.room.message`` rather than a final ``m.replace`` edit, which does
+        not trigger a push notification, then redact the ``"…"`` placeholder.
+
+        Only fires when the whole answer was delivered via edits to the
+        placeholder (the common short-answer case). When the answer overflowed
+        ``MAX_MESSAGE_LEN``, ``_stream_flush`` already sent the tail as a fresh
+        notifying event, so we keep the final edit in place to avoid a duplicate
+        notification.
+        """
+        final_text = state["buffer"]
+        if not final_text:
+            return
+        if state.get("overflowed"):
+            # Overflow already notified via a fresh tail event; just apply the
+            # remaining edit as before.
+            await self._stream_flush(state)
+            return
+        room_id = state["room_id"]
+        placeholder_id = state["placeholder_id"]
+        thread_extra = state.get("thread_extra")
+        loop = asyncio.get_event_loop()
+
+        def _do() -> None:
+            body = text_body_with_html(final_text, thread_extra)
+            self._put_event(room_id, "m.room.message", body)
+            # Drop the "…" placeholder (and its edit chain) now the real answer
+            # has landed as a notifying message. Best-effort; ``_redact`` logs
+            # and skips on failure.
+            self._redact(room_id, placeholder_id, "#6248 finalize as new message")
+
+        try:
+            await loop.run_in_executor(None, _do)
+        except Exception as e:  # noqa: BLE001
+            log.warn("matrix stream finalize failed", error=str(e))
+            # Fall back to the old edit-in-place so the answer is still visible.
+            await self._stream_flush(state)
 
     # ---- public sidecar surface -------------------------------------
 

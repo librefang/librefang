@@ -1817,6 +1817,18 @@ impl ChannelsResource {
         .await
     }
 
+    pub async fn delete_sidecar_channel(&self, name: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::DELETE,
+            &format!("/api/channels/sidecar/{}", name),
+            None,
+            &[],
+        )
+        .await
+    }
+
     pub async fn configure_sidecar_channel(&self, name: &str, data: Value) -> Result<Value> {
         do_req(
             &self.client,

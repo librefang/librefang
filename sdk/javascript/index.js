@@ -630,6 +630,10 @@ class ChannelsResource {
     return this._c._request("POST", "/api/channels/reload");
   }
 
+  async deleteSidecarChannel(name) {
+    return this._c._request("DELETE", `/api/channels/sidecar/${name}`);
+  }
+
   async configureSidecarChannel(name, data) {
     return this._c._request("POST", `/api/channels/sidecar/${name}/configure`, data, undefined);
   }

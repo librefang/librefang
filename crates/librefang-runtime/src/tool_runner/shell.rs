@@ -16,6 +16,7 @@
 
 use super::error::{ToolError, ToolResult};
 use std::path::Path;
+use tracing::warn;
 
 fn resolve_timeout(
     input: &serde_json::Value,
@@ -23,6 +24,16 @@ fn resolve_timeout(
 ) -> u64 {
     let policy_timeout = exec_policy.map(|p| p.timeout_secs).unwrap_or(30);
     input["timeout_seconds"].as_u64().unwrap_or(policy_timeout)
+}
+
+/// Kill the shell child process tree and log if cleanup fails.
+/// `reason` is included in the log for observability (e.g. "interrupted",
+/// "timed_out").
+async fn kill_child_tree(pid: Option<u32>, reason: &str) {
+    let Some(pid) = pid else { return };
+    if let Err(e) = crate::subprocess_sandbox::kill_process_tree(pid, 0).await {
+        warn!(pid, reason, error = %e, "failed to kill shell process tree");
+    }
 }
 
 pub(super) async fn tool_shell_exec(
@@ -169,15 +180,11 @@ pub(super) async fn tool_shell_exec(
             }),
             _ = interrupt_tick.tick() => {
                 if interrupt_clone.as_ref().is_some_and(|i| i.is_cancelled()) {
-                    if let Some(pid) = child_pid {
-                        let _ = crate::subprocess_sandbox::kill_process_tree(pid, 0).await;
-                    }
+                    kill_child_tree(child_pid, "interrupted").await;
                     return Err(ToolError::upstream_msg("[interrupted]"));
                 }
                 if tokio::time::Instant::now() >= deadline {
-                    if let Some(pid) = child_pid {
-                        let _ = crate::subprocess_sandbox::kill_process_tree(pid, 0).await;
-                    }
+                    kill_child_tree(child_pid, "timed_out").await;
                     return Err(ToolError::upstream_msg(format!(
                         "Command timed out after {timeout_secs}s"
                     )));
@@ -196,24 +203,18 @@ pub(super) async fn tool_shell_exec(
                 reg.mark_finished(pid, exit_code);
             }
 
-            let stdout_str = if stdout.len() > max_output {
-                format!(
-                    "{}...\n[truncated, {} total bytes]",
-                    crate::str_utils::safe_truncate_str(&stdout, max_output),
-                    stdout.len()
-                )
-            } else {
-                stdout.to_string()
-            };
-            let stderr_str = if stderr.len() > max_output {
-                format!(
-                    "{}...\n[truncated, {} total bytes]",
-                    crate::str_utils::safe_truncate_str(&stderr, max_output),
-                    stderr.len()
-                )
-            } else {
-                stderr.to_string()
-            };
+            let stdout_str = super::spill::spill_or_passthrough(
+                "shell_exec",
+                stdout.to_string(),
+                max_output as u64,
+                crate::artifact_store::DEFAULT_MAX_ARTIFACT_BYTES,
+            );
+            let stderr_str = super::spill::spill_or_passthrough(
+                "shell_exec",
+                stderr.to_string(),
+                max_output as u64,
+                crate::artifact_store::DEFAULT_MAX_ARTIFACT_BYTES,
+            );
 
             Ok(format!(
                 "Exit code: {exit_code}\n\nSTDOUT:\n{stdout_str}\nSTDERR:\n{stderr_str}"

@@ -28,6 +28,7 @@ librefang-import = { path = "../librefang-import" }
 librefang-telemetry = { path = "../librefang-telemetry" }
 librefang-http = { path = "../librefang-http" }
 anyhow = { workspace = true }
+thiserror = { workspace = true }
 arc-swap = { workspace = true }
 dashmap = { workspace = true }
 portable-pty = { workspace = true }
@@ -65,6 +66,7 @@ sha2 = { workspace = true }
 argon2 = "0.5"
 hex = { workspace = true }
 rand = { workspace = true }
+zeroize = { workspace = true }
 tracing-subscriber = { workspace = true }
 utoipa = { version = "5", features = ["axum_extras"] }
 include_dir = "0.7"
