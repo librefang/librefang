@@ -842,6 +842,10 @@ _308 PRs from 7 contributors since v2026.5.17-beta.12._
 
 ### Fixed
 
+- **fix(runtime): `channel_send` without a `recipient` now replies to the group, not the speaker** (#6261) (@neo-wanderer).
+  In a group conversation a no-recipient `channel_send` auto-filled the recipient from `sender_id` (the individual who spoke) instead of `sender_chat_id` (the room / group).
+  The send then targeted the speaker's user id as if it were a conversation — e.g. a Matrix file send routed to `@user:hs` rather than the room `!room:hs`, which the homeserver rejected with `403 not in room` (visible only on the sidecar's stderr, so the tool still reported success).
+  The auto-fill now resolves the same canonical target the #6117 cross-chat guard validates against — the conversation id first, falling back to `sender_id` only for DMs — via a shared `resolve_send_target` helper, so the send target and the guard's `expected_chat` can no longer disagree.
 - **fix(channels): the streaming final answer now fires a push notification** (#6248) (@houko) — reported and diagnosed by @neo-wanderer.
   On streaming channels (Telegram, Matrix) the agent's final answer was delivered as an *edit* of the `"…"` streaming placeholder, and edits do not generate a client push notification — so the push fired on the empty placeholder and the actual answer landed silently (unless it overflowed the per-message length limit, whose tail chunk is a fresh, notifying message).
   Both adapters now finalize the answer as a *fresh* message — Telegram sends the answer and deletes the placeholder; Matrix sends a new `m.room.message` and redacts the placeholder — so the notification fires on the answer regardless of length.
