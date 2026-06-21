@@ -207,8 +207,18 @@ pub(super) fn format_task_completion_text(
     let status_str = match &event.status {
         TaskStatus::Completed(value) => {
             let rendered = value.to_string();
-            let preview = librefang_types::truncate_str(&rendered, 300);
-            format!("completed. Output: {preview}")
+            // When the delegation spawn spilled the result to the artifact
+            // store, surface the real handle so the caller can read the
+            // full content instead of receiving a truncated preview that
+            // provokes a hallucinated hash.
+            if let Some(handle) = value.get("artifact_handle").and_then(|v| v.as_str()) {
+                let preview = librefang_types::truncate_str(&rendered, 300);
+                format!(
+                    "completed (full result spilled). Preview: {preview}\nUse read_artifact(\"{handle}\") to read the complete response.",
+                )
+            } else {
+                format!("completed. Output: {rendered}")
+            }
         }
         TaskStatus::Failed(msg) => {
             let preview = librefang_types::truncate_str(msg, 300);

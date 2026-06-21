@@ -48,7 +48,7 @@ pub fn banner() {
     println!(
         "  {} {}",
         ">>".bright_cyan().bold(),
-        "BossFang Agent OS".bold()
+        i18n::t("ui-brand-title").bold()
     );
     println!("     {}", i18n::t("ui-brand-tagline").dimmed());
 }

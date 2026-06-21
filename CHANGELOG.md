@@ -834,13 +834,44 @@ _308 PRs from 7 contributors since v2026.5.17-beta.12._
 
 ## [Unreleased]
 
+### Changed
+
+- **chore(secrets): replace the detect-secrets baseline with gitleaks** (#6262) (@houko).
+  The 4296-line `.secrets.baseline` pinned 534 unaudited high-entropy findings and forced every fixture-adding PR to append to it, which made it the repo's most merge-conflict-prone file.
+  gitleaks scans against a fixed rule set plus rule-based path/regex allowlists in `.gitleaks.toml`, which do not churn the way a per-finding snapshot does; CI runs `gitleaks dir .` and the pre-commit hook runs `gitleaks protect --staged`.
+
+### Fixed
+
+- **fix(runtime): `channel_send` without a `recipient` now replies to the group, not the speaker** (#6261) (@neo-wanderer).
+  In a group conversation a no-recipient `channel_send` auto-filled the recipient from `sender_id` (the individual who spoke) instead of `sender_chat_id` (the room / group).
+  The send then targeted the speaker's user id as if it were a conversation — e.g. a Matrix file send routed to `@user:hs` rather than the room `!room:hs`, which the homeserver rejected with `403 not in room` (visible only on the sidecar's stderr, so the tool still reported success).
+  The auto-fill now resolves the same canonical target the #6117 cross-chat guard validates against — the conversation id first, falling back to `sender_id` only for DMs — via a shared `resolve_send_target` helper, so the send target and the guard's `expected_chat` can no longer disagree.
+- **fix(channels): the streaming final answer now fires a push notification** (#6248) (@houko) — reported and diagnosed by @neo-wanderer.
+  On streaming channels (Telegram, Matrix) the agent's final answer was delivered as an *edit* of the `"…"` streaming placeholder, and edits do not generate a client push notification — so the push fired on the empty placeholder and the actual answer landed silently (unless it overflowed the per-message length limit, whose tail chunk is a fresh, notifying message).
+  Both adapters now finalize the answer as a *fresh* message — Telegram sends the answer and deletes the placeholder; Matrix sends a new `m.room.message` and redacts the placeholder — so the notification fires on the answer regardless of length.
+  The overflow path already sent a notifying tail, so finalize-as-new is skipped there to avoid a duplicate ping.
+
 ### Added
 
+- **feat(runtime): add the `agent` dimension to `librefang_tool_execution_seconds`** (#6244) (@houko).
+  The per-tool latency histogram carried only a `tool` label, so per-tool p95 was an unweighted blend across every calling agent — a slow agent and a fast agent sharing a tool were indistinguishable, even though the sibling `librefang_tool_call_total` counter already carried `agent` (#6226).
+  The histogram now emits `{agent,tool}`, with `agent` sourced from the `agent_id` already in scope and sanitized + length-capped like `tool`, so tool latency is attributable per agent while cardinality stays bounded.
+- **feat(dashboard): provider max-token limit on the Providers page** (#6209) (@houko).
+  Each provider card now shows the representative model's max-output-token limit (the `max_tokens` override when set, else the catalog `max_output_tokens`), and the config drawer lets you edit it; clearing the field reverts to the catalog default.
+  Persisted through the existing per-model override endpoint, so no new persistence path is introduced.
 - **feat(runtime): emit `librefang_agent_loop_exits_total{agent,reason}`** so operators can alert on non-success agent-loop terminations (#6227) (@houko).
   The agent loop previously recorded no metric when it aborted on repeated tool failures, max iterations, a loop-guard circuit break, or a provider content-filter — the only signal was reading transcripts, and a cron/trigger fire that aborted still recorded `librefang_cron_fires_total{outcome="ok"}` because the loop returned.
   Reasons: `completed`, `max_iterations`, `repeated_tool_failures`, `circuit_break`, `content_filtered`, `error`.
   The counter increments exactly once per termination from a thin wrapper around the streaming and non-streaming loops, so no branch fall-through can double-count.
   Alert with `rate(librefang_agent_loop_exits_total{reason!="completed"}) > 0` per agent.
+- **feat(runtime): CoT-pruning for stale reasoning traces during compaction** (#6173) (@houko).
+  Strips `<think>...</think>` spans and `Thinking` content blocks from assistant turns older than `[compaction] strip_reasoning_after_turns` (default 0, disabled), reclaiming context that stale reasoning would otherwise occupy.
+  Runs only at the compaction boundary, never on the per-turn hot path, so it does not invalidate the provider prompt cache more often than compaction already does.
+  Skipped entirely for models whose `ReasoningEchoPolicy` is `Echo` (DeepSeek V4 Flash), which require the reasoning echoed back on tool_calls turns.
+  Implements part of the proposal in #6173 by @pavver.
+- **feat(runtime): developer-loop aggregation during compaction** (#6173) (@houko).
+  Collapses long runs of consecutive developer-tool steps — classified by the existing `ToolClass` taxonomy (`Mutating` / `ExecCapable`), not a hardcoded name list — into the first step, a deterministic placeholder, and the last step, opt-in via `[compaction] aggregate_developer_loops` (default off) with `max_loop_steps_before_aggregate` (default 5).
+  Whole tool-use/result pairs are removed together so no `tool_use_id` is orphaned.
 
 ### Breaking Changes
 
@@ -862,12 +893,18 @@ _308 PRs from 7 contributors since v2026.5.17-beta.12._
 
 ### Changed
 
+- **fix(runtime): spill oversized `shell_exec` output to the artifact store instead of lossily truncating it** (#6242) (@houko).
+  `shell_exec` capped each of stdout/stderr at `max_output_bytes` (default 100 KB) with `safe_truncate_str` and an `[truncated, N total bytes]` note, so the dropped middle of a long run (e.g. a 25k-line test log) was unrecoverable — the universal artifact spill never saw those bytes because the tool truncated them first.
+  Oversized streams now route through `artifact_store::maybe_spill`, yielding a compact stub the agent can page back in full via `read_artifact`, closing the only place the artifact store leaked information.
 - **dashboard(agents): drop the arbitrary 200000 cap on the model `max_tokens` input** (#6209) (@houko).
   The agent model-config `max_tokens` field hard-capped its input at `max={200000}`, silently preventing operators from setting a higher output budget; the provider validates the real per-model ceiling anyway, so the UI no longer imposes its own arbitrary limit (`min={1}` is kept).
   Closes #6209.
 - **refactor(error-contracts): migrate `browser_tools.rs` to `Result<String, ToolError>`** (#3576) (@houko) — another slice of the structured-error-contracts migration.
   The ten `tool_browser_*` dispatchers (navigate / click / type / screenshot / read_page / close / scroll / wait / run_js / back) now return the typed `ToolError` instead of an opaque `String`: missing params map to `MissingParameter`, an SSRF-blocked URL to `InvalidParameter`, and CDP transport / command failures to `Upstream` via `upstream_msg`.
   The dispatch boundary drops its per-arm `.map_err(ToolError::upstream_msg)` so the typed variants flow through `tool_result_from_typed`; the `None` (browser-not-wired) arm still yields `Unavailable`.
+- **refactor(api): replace `anyhow` with a typed `TmuxError` in `terminal_tmux`** (#3576) (@houko) — another slice of the structured-error-contracts migration.
+  The `TmuxController` methods and `parse_window_list` now return `Result<T, TmuxError>` instead of `anyhow::Result<T>`: spawn failures carry the underlying `io::Error` on the `source()` chain, plus typed variants for subprocess timeout, post-spawn I/O error, non-zero exit (rendered status + trimmed stderr), pre-spawn argument validation, empty `new-window` output, and the `parse_window_list` missing-field / bad-index cases.
+  Every `Display` string is preserved byte-for-byte from the old `anyhow!(…)` text because it reaches daemon logs via `warn!(error = %e, …)` in `routes/terminal.rs`, so callers compile unchanged with equivalent behavior.
 - **chore(deps): drop five orphaned email `[workspace.dependencies]` left after the channel sidecar migration** (#6176) (@houko).
   `lettre` / `imap` / `rustls-connector` / `mailparse` / `rustls-pemfile` were declared in the root `Cargo.toml` but had no member consumer (no `.workspace = true`, no `use`) and were already absent from `Cargo.lock`, so they were never compiled or audited — the issue's "adds compile time / binary size / supply-chain surface" framing was inaccurate; the real defect was dead declaration cruft.
   The now-unmatchable `deny.toml` ignore for `RUSTSEC-2025-0134` (`rustls-pemfile`) is dropped in the same change, since that crate no longer appears in the resolved graph.
@@ -896,6 +933,25 @@ In-crate only; no cross-crate error-shape changes.
 
 ### Added
 
+- **channels: remove a configured sidecar channel from the dashboard** (#6186) (@houko).
+  Channels could only be added — the only way to remove one was hand-editing `config.toml`.
+  A new `DELETE /api/channels/sidecar/{name}` rewrites `config.toml` under the same lock that gates configure, then hot-reloads so the removed sidecar child is stopped rather than left running until restart.
+  The dashboard configured-channel cards gain a confirm-guarded Trash button wired to a `useRemoveSidecarConfig` mutation; the channel's `secrets.env` keys are deliberately left untouched, since purging secrets is a separate destructive action.
+  Closes #6186.
+- **dashboard(agents): group the Agents list into Core Agents and Hands sections** (#6189) (@houko).
+  The Agents page rendered every agent in one flat list, with hand-role agents distinguished only by a small per-row badge.
+  The already-filtered and -sorted list is now split on the `is_hand` flag into two titled sections (using the pre-seeded `agents.core_agents` / `agents.hands` i18n keys); each header only shows when its group is non-empty, so the `Show hands` toggle keeps its meaning and a single-group view shows no empty banner.
+  Presentational only — no data-layer, query, or backend change.
+  Closes #6189.
+- **observability: tool-call telemetry fidelity — failure-type breakdown, per-tool latency histogram, and span error status** (#6228) (@houko).
+  `librefang_tool_call_total` gains a bounded `failure_type` label that no longer collapses every failure to one `outcome=failure` bucket: a loop-guard / allowlist block (`blocked`), an approval denial or modify-and-retry (`approval_denied`), a tool timeout (`timeout`), a genuine crash (`hard_error`), and a circuit break (`circuit_break`) are now distinguishable on a dashboard.
+  The label is derived from the existing `ToolExecutionStatus` (`Skipped → blocked`, `Denied`/`ModifyAndRetry → approval_denied`, `Expired → timeout`, `Error → hard_error`, no-status circuit break → `circuit_break`); the success path carries `failure_type=none`.
+  A new `librefang_tool_execution_seconds{tool}` histogram exports the per-tool dispatch latency that was already measured for the decision trace (`execution_ms / 1000.0`), so latency distributions are now visible per tool.
+  The `execute_single_tool_call` span now records `tool.outcome` and sets the OpenTelemetry span status to error (`otel.status_code=error`) on a genuine service failure (hard error, circuit break, or timeout) — but not on a model-fat-fingered blocked / denied call — so a `hasError=true` trace filter and service-level errorRate finally match a failed tool. Closes #6228.
+- **dashboard(agents): edit the system prompt and bind a prompt-library version from the agent detail drawer** (#6187) (@houko).
+  The Agents page previously showed the system prompt read-only and the "Prompts" modal's activate only flipped the store's active flag without changing the live prompt; the Hands page already had a full editor (#6151 / #6166), leaving the two pages inconsistent.
+  `SystemPromptSection` is now an inline editor: edit and save via `PATCH /api/agents/{id}`, or open the prompt library and bind a saved version via `useBindPromptVersionToAgent` (which hot-swaps the live `system_prompt` and flips `is_active` together).
+  Dashboard-only — the backend `update_system_prompt` path is unchanged; i18n added to en/zh/uk and the editor is covered by a new `AgentsPage.test.tsx`. Closes #6187.
 - **observability: `librefang_tool_call_total` now carries an `agent` label** (#6226) (@houko).
   The counter added in #3495 was labeled only by `tool` and `outcome`, so tool failures could not be attributed per-agent.
   It is now `librefang_tool_call_total{agent, tool, outcome}`, mirroring the existing per-agent `librefang_cron_fires_total{agent}` precedent.
@@ -946,6 +1002,10 @@ In-crate only; no cross-crate error-shape changes.
   The diff helper is dependency-free (no new npm package).
   Background skill-review prompt tuning is out of scope here.
 - **kernel(triggers): `TaskClaimed` and `TaskCompleted` triggers gain an optional `creator_match` filter** (#5960) (@nevgenov), symmetrical to `TaskPosted`'s `assignee_match`, so an orchestrator can scope claim/completion notifications to tasks it originally posted instead of firing on every claim/completion system-wide.
+- **feat(runtime,kernel): non-blocking `agent_send` — `"async": true` delegates without blocking the caller** (#6043) (@DaBlitzStein).
+  `agent_send` was synchronous-only: it awaited the target agent's full reply as the tool result, so any delegation longer than `tool_timeout_secs` (default 120s) was killed mid-flight and the caller's loop stayed blocked the whole time (a Telegram-facing agent went unresponsive while it waited).
+  Passing `"async": true` now registers the delegation on the existing async-task tracker (#4983, previously wired only to `workflow_start`) via the new `KernelHandle::send_to_agent_async_tracked`, spawns the callee loop detached, and returns a `task_id` immediately. The callee's response is injected back into the caller's session when it finishes — mid-turn if the loop is live, else wake-idle — reusing `TaskKind::Delegation` and `complete_async_task`.
+  Blocking `agent_send` (the default) is unchanged; the depth guard still rejects too-deep chains before they can fire async.
   Accepts an agent UUID, display name, or `"self"`; absent (`#[serde(default)]`) it preserves the legacy fire-for-all behaviour and existing string-form triggers still parse. The original poster is threaded onto the `TaskClaimed` / `TaskCompleted` events from the task record.
 - **runtime(exec): opt-in `exec_policy.safe_bins_skip_approval` lets allowlist-mode `shell_exec` calls whose every base command is a declared `safe_bin` skip the approval prompt; default off preserves today's approve-every-shell posture** (#5962) (@jerrywang121).
 - **context engine: out-of-process `engine = "sidecar"`** — run the per-turn context **policy** (recall, window assembly, after-turn bookkeeping) in a subprocess of any language, keeping the **mechanism** it needs in Rust. The `ContextEngine` trait was already the right seam (`ingest` / `assemble` / `after_turn` / `bootstrap`); `SidecarContextEngine` implements it by delegating those async, non-LLM hooks to a child process over a newline-delimited JSON request/reply protocol, and wraps a built-in engine for the rest. LLM-bearing `compact` (its `Arc<dyn LlmDriver>` can't cross a process boundary) and the cheap synchronous hooks (`truncate_tool_result`, `should_compress`, `update_model`, metrics) stay on the inner engine. Robustness is the headline: the context engine is on the per-turn critical path, so **every bridged call falls back to the built-in engine on any failure** — spawn failure, write error, request timeout, malformed reply, or a crashed process — and a flaky sidecar never breaks a turn. Configured via `[context_engine] engine = "sidecar"` + a `[context_engine.sidecar]` block (`command`, `args`, `request_timeout_secs`); the command is trusted operator config so its environment is inherited. Ships a dependency-free Python reference (`docs/examples/context_engine_sidecar.py`) and a protocol/design doc (`docs/architecture/sidecar-context-engine.md`). Tests cover an end-to-end `assemble` round-trip through a real subprocess and spawn-failure fallback. (@houko)
@@ -978,6 +1038,17 @@ In-crate only; no cross-crate error-shape changes.
 
 ### Fixed
 
+- **fix(sec): wrap `EmbeddingConfig.api_key` in `Zeroizing<String>` to ensure credential zeroization on drop** (@mrchn).
+  The embedding config struct held the API key as a plain `String`, which stayed in memory after deallocation.
+  Wrapping in `Zeroizing<String>` ensures the key is zeroed on drop, consistent with how the internal driver structs already stored it.
+- **fix(hands): saving one Hand setting no longer drops the others** (#6204) (@houko).
+  The Hand settings editor PUTs only the keys changed this session, but `update_hand_settings` passed that partial map straight to `HandRegistry::update_config`, which replaces the whole instance config — so for a Hand with several settings, saving one reverted every other to its default.
+  The route now reads the instance's current config and merges the incoming keys over it (a true partial update; the registry's replace contract is unchanged), and the editor also seeds its payload from the saved values as defense in depth.
+  Closes #6204.
+- **fix(dashboard): serve the SPA shell on a hard refresh of the Prompts and Tasks pages** (#6197) (@houko).
+  `/dashboard/prompts` and `/dashboard/tasks` are real router routes, but they were never added to the server-side `SPA_ROUTES` allowlist, so a direct navigation or browser refresh returned `asset not found` (404) instead of `index.html`.
+  Both slugs are added to the allowlist, and a drift-guard test now parses `router.tsx` and asserts every top-level dashboard route falls back to the shell, so a future route added without updating the allowlist fails loudly.
+  Closes #6197.
 - **fix(api): scope the compaction-summary banner to the session that was actually compacted** (#6225) (@houko).
   The dashboard "Session summary (older messages compacted)" banner appeared on a freshly created session that was never compacted, showing a previous unrelated conversation's summary.
   `compacted_summary` lives in the agent-scoped `canonical_sessions` row (one per `agent_id`) and outlives any individual session, but `get_agent_session` exposed it whenever the requested session was the agent's *active* one — so creating a new session, which makes it active without compacting it, leaked the prior summary onto message #1.
@@ -1004,6 +1075,9 @@ In-crate only; no cross-crate error-shape changes.
   A `package-lock.json` is now committed so installs are reproducible and CI can run `npm audit` against a locked graph.
   Closes #6180.
 
+- **sec(install): enforce SHA256 verification in install.sh, remove silent skip paths** (#6179) (@mrchn).
+  `install.sh` previously skipped SHA256 verification silently in two cases: when no hash tool (`sha256sum`/`shasum`) was present on the system, and when the expected `.sha256` file was missing from the GitHub release — in both cases the install proceeded as if verification had passed.
+  Verification now fails loudly (non-zero exit, clear error message) instead of silently succeeding, closing the integrity-check bypass.
 - **ci: the Windows test lane is green again — `librefang-api` now builds vendored OpenSSL on Windows so `webauthn-rs` links** (#6161) (@houko).
   The passkey/WebAuthn work (#5981) added `webauthn-rs`, which pulls in `webauthn-rs-core` → native `openssl-sys`; the Windows MSVC runners have no discoverable system OpenSSL, so `cargo test --no-run --workspace` failed there with "Could not find directory of OpenSSL installation".
   A Windows-gated `openssl = { features = ["vendored"] }` dependency in `crates/librefang-api/Cargo.toml` makes cargo feature-unification build `openssl-sys` from source on Windows only; Unix keeps using the system library and is unaffected.

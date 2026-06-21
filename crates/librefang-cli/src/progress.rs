@@ -387,7 +387,7 @@ impl ProgressReporter for LogReporter {
         eprintln!("{msg}");
     }
     fn finish_with_failure(&mut self, msg: &str) {
-        eprintln!("[FAIL] {msg}");
+        eprintln!("{} {msg}", crate::i18n::t("progress-fail"));
     }
 }
 

@@ -57,10 +57,18 @@ pub(crate) fn spawn_detached_daemon(
     config: Option<&std::path::Path>,
     log_path: &std::path::Path,
 ) -> Result<std::process::Child, String> {
-    let exe = std::env::current_exe().map_err(|e| format!("resolve current executable: {e}"))?;
+    let exe = std::env::current_exe()
+        .map_err(|e| i18n::t_args("daemon-error-resolve-exe", &[("error", &e.to_string())]))?;
     if let Some(log_dir) = log_path.parent() {
-        std::fs::create_dir_all(log_dir)
-            .map_err(|e| format!("create log directory {}: {e}", log_dir.display()))?;
+        std::fs::create_dir_all(log_dir).map_err(|e| {
+            i18n::t_args(
+                "daemon-error-create-log-dir",
+                &[
+                    ("path", &log_dir.display().to_string()),
+                    ("error", &e.to_string()),
+                ],
+            )
+        })?;
         restrict_dir_permissions(log_dir);
     }
 
@@ -68,10 +76,24 @@ pub(crate) fn spawn_detached_daemon(
         .create(true)
         .append(true)
         .open(log_path)
-        .map_err(|e| format!("open daemon log {}: {e}", log_path.display()))?;
-    let stderr = stdout
-        .try_clone()
-        .map_err(|e| format!("clone daemon log handle {}: {e}", log_path.display()))?;
+        .map_err(|e| {
+            i18n::t_args(
+                "daemon-error-open-log",
+                &[
+                    ("path", &log_path.display().to_string()),
+                    ("error", &e.to_string()),
+                ],
+            )
+        })?;
+    let stderr = stdout.try_clone().map_err(|e| {
+        i18n::t_args(
+            "daemon-error-clone-log-handle",
+            &[
+                ("path", &log_path.display().to_string()),
+                ("error", &e.to_string()),
+            ],
+        )
+    })?;
 
     let mut command = std::process::Command::new(exe);
     command
@@ -108,7 +130,7 @@ pub(crate) fn spawn_detached_daemon(
 
     command
         .spawn()
-        .map_err(|e| format!("spawn detached daemon: {e}"))
+        .map_err(|e| i18n::t_args("daemon-error-spawn-detached", &[("error", &e.to_string())]))
 }
 
 /// Generate a daily log path for the current daemon start.
@@ -174,7 +196,16 @@ pub(crate) fn setup_foreground_tee(log_path: &std::path::Path) -> ForegroundTeeG
             // Report the failure on the real stderr (not yet redirected), then
             // exit instead of limping forward into the silent-hang regime the
             // old ordering produced.
-            eprintln!("Failed to create log directory {}: {e}", parent.display());
+            eprintln!(
+                "{}",
+                i18n::t_args(
+                    "daemon-error-failed-create-log-dir",
+                    &[
+                        ("path", &parent.display().to_string()),
+                        ("error", &e.to_string())
+                    ]
+                )
+            );
             std::process::exit(1);
         }
     }
@@ -191,7 +222,16 @@ pub(crate) fn setup_foreground_tee(log_path: &std::path::Path) -> ForegroundTeeG
             .append(true)
             .open(log_path)
             .unwrap_or_else(|e| {
-                eprintln!("Failed to open daemon log file {}: {e}", log_path.display());
+                eprintln!(
+                    "{}",
+                    i18n::t_args(
+                        "daemon-error-failed-open-log",
+                        &[
+                            ("path", &log_path.display().to_string()),
+                            ("error", &e.to_string())
+                        ]
+                    )
+                );
                 std::process::exit(1);
             }),
     );

@@ -36,8 +36,8 @@ pub(crate) fn cmd_spawn_alias(
 ) {
     if template_path.is_some() && target.is_some() {
         ui::error_with_fix(
-            "Choose either a positional target or `--template`, not both.",
-            "Use `librefang spawn coder` or `librefang spawn --template agents/custom/my-agent.toml`.",
+            &i18n::t("agent-spawn-choose-target-or-template"),
+            &i18n::t("agent-spawn-choose-target-or-template-fix"),
         );
         std::process::exit(1);
     }
@@ -45,15 +45,15 @@ pub(crate) fn cmd_spawn_alias(
     if target.is_none() && template_path.is_none() {
         if name_override.is_some() {
             ui::error_with_fix(
-                "`--name` requires a template name or manifest path.",
-                "Use `librefang spawn coder --name backend-coder` or `librefang spawn --template path/to/agent.toml --name backend-coder`.",
+                &i18n::t("agent-spawn-name-requires-template"),
+                &i18n::t("agent-spawn-name-requires-template-fix"),
             );
             std::process::exit(1);
         }
         if dry_run {
             ui::error_with_fix(
-                "Dry run needs a template name or manifest path.",
-                "Use `librefang spawn coder --dry-run` or `librefang spawn --template path/to/agent.toml --dry-run`.",
+                &i18n::t("agent-spawn-dry-run-requires-template"),
+                &i18n::t("agent-spawn-dry-run-requires-template-fix"),
             );
             std::process::exit(1);
         }
@@ -89,8 +89,11 @@ pub(crate) fn cmd_spawn_alias(
         .find(|t| t.name == target)
         .unwrap_or_else(|| {
             ui::error_with_fix(
-                &format!("Template or manifest path not found: {target}"),
-                "Run `librefang agent new` to browse templates, or pass a valid manifest path.",
+                &i18n::t_args(
+                    "agent-spawn-template-or-path-not-found",
+                    &[("target", &target)],
+                ),
+                &i18n::t("agent-spawn-template-or-path-not-found-fix"),
             );
             std::process::exit(1);
         });
@@ -150,8 +153,11 @@ pub(crate) fn prepared_agent_manifest_from_contents(
 ) -> PreparedAgentManifest {
     let mut manifest: AgentManifest = toml::from_str(contents).unwrap_or_else(|e| {
         ui::error_with_fix(
-            &format!("Failed to parse agent manifest from {source_label}: {e}"),
-            "Check the manifest TOML syntax and required fields.",
+            &i18n::t_args(
+                "agent-manifest-parse-failed",
+                &[("source", &source_label), ("error", &e.to_string())],
+            ),
+            &i18n::t("agent-manifest-parse-failed-fix"),
         );
         std::process::exit(1);
     });
@@ -223,19 +229,32 @@ pub(crate) fn spawn_prepared_agent(config: Option<PathBuf>, prepared: PreparedAg
         );
         if body.get("agent_id").is_some() {
             println!("{}", i18n::t("agent-spawn-success"));
-            println!("  ID:   {}", body["agent_id"].as_str().unwrap_or("?"));
             println!(
-                "  Name: {}",
-                body["name"]
-                    .as_str()
-                    .unwrap_or(prepared.manifest.name.as_str())
+                "{}",
+                i18n::t_args(
+                    "agent-spawn-id-label",
+                    &[("id", body["agent_id"].as_str().unwrap_or("?"))]
+                )
+            );
+            println!(
+                "{}",
+                i18n::t_args(
+                    "agent-spawn-name-label",
+                    &[(
+                        "name",
+                        body["name"]
+                            .as_str()
+                            .unwrap_or(prepared.manifest.name.as_str())
+                    )]
+                )
             );
         } else {
+            let err_fallback = i18n::t("error-unknown");
             eprintln!(
                 "{}",
                 i18n::t_args(
                     "agent-spawn-agent-failed",
-                    &[("error", body["error"].as_str().unwrap_or("Unknown error"))]
+                    &[("error", body["error"].as_str().unwrap_or(&err_fallback))]
                 )
             );
             std::process::exit(1);
@@ -246,9 +265,16 @@ pub(crate) fn spawn_prepared_agent(config: Option<PathBuf>, prepared: PreparedAg
         match kernel.spawn_agent_with_source(prepared.manifest, None) {
             Ok(id) => {
                 println!("{}", i18n::t("agent-spawn-inprocess-mode"));
-                println!("  ID:   {id}");
-                println!("  Name: {agent_name}");
-                println!("\n  {}", i18n::t("agent-note-lost"));
+                println!(
+                    "{}",
+                    i18n::t_args("agent-spawn-id-label", &[("id", &id.to_string())])
+                );
+                println!(
+                    "{}",
+                    i18n::t_args("agent-spawn-name-label", &[("name", &agent_name)])
+                );
+                println!();
+                println!("  {}", i18n::t("agent-note-lost"));
                 println!("  {}", i18n::t("agent-note-persistent"));
             }
             Err(e) => {
@@ -287,7 +313,18 @@ pub(crate) fn cmd_agent_list(config: Option<PathBuf>, json: bool) {
                 // self-size to the actual content (instead of hard-coded
                 // {:<38} which truncates / over-pads), and so piped output
                 // automatically falls back to ASCII (#3306).
-                let mut t = crate::table::Table::new(&["ID", "NAME", "STATE", "PROVIDER", "MODEL"]);
+                let header_id = i18n::t("label-header-id");
+                let header_name = i18n::t("label-header-name");
+                let header_state = i18n::t("label-header-state");
+                let header_provider = i18n::t("label-header-provider");
+                let header_model = i18n::t("label-header-model");
+                let mut t = crate::table::Table::new(&[
+                    &header_id,
+                    &header_name,
+                    &header_state,
+                    &header_provider,
+                    &header_model,
+                ]);
                 for a in agents {
                     t.add_row(&[
                         a["id"].as_str().unwrap_or("?"),
@@ -329,7 +366,12 @@ pub(crate) fn cmd_agent_list(config: Option<PathBuf>, json: bool) {
             return;
         }
 
-        let mut t = crate::table::Table::new(&["ID", "NAME", "STATE", "CREATED"]);
+        let header_id = i18n::t("label-header-id");
+        let header_name = i18n::t("label-header-name");
+        let header_state = i18n::t("label-header-state");
+        let header_created = i18n::t("label-header-created");
+        let mut t =
+            crate::table::Table::new(&[&header_id, &header_name, &header_state, &header_created]);
         for entry in agents {
             let id = entry.id.to_string();
             let state = format!("{:?}", entry.state);
@@ -367,11 +409,12 @@ pub(crate) fn cmd_agent_kill(config: Option<PathBuf>, agent_id_str: &str) {
         if body.get("status").is_some() {
             println!("{}", i18n::t_args("agent-killed", &[("id", &agent_id)]));
         } else {
+            let err_fallback = i18n::t("error-unknown");
             eprintln!(
                 "{}",
                 i18n::t_args(
                     "agent-kill-failed",
-                    &[("error", body["error"].as_str().unwrap_or("Unknown error"))]
+                    &[("error", body["error"].as_str().unwrap_or(&err_fallback))]
                 )
             );
             std::process::exit(1);
@@ -412,11 +455,12 @@ pub(crate) fn cmd_agent_kill(config: Option<PathBuf>, agent_id_str: &str) {
 /// DELETE. This is the long-form companion to `librefang agent kill <id>`
 /// — useful when the operator only knows the agent's name.
 pub(crate) fn cmd_agent_delete(config: Option<PathBuf>, name: &str, yes: bool) {
-    eprintln!("WARNING: Deleting agent \"{name}\" will permanently remove its canonical UUID");
-    eprintln!("    and all associated memories and sessions.");
-    eprintln!("    This action cannot be undone.");
-    if !yes && !prompt_yes_no("Confirm?", false) {
-        eprintln!("Aborted.");
+    eprintln!(
+        "{}",
+        i18n::t_args("agent-delete-warning-text", &[("name", name)])
+    );
+    if !yes && !prompt_yes_no(&i18n::t("label-confirm-prompt"), false) {
+        eprintln!("{}", i18n::t("label-aborted"));
         std::process::exit(1);
     }
 
@@ -427,7 +471,8 @@ pub(crate) fn cmd_agent_delete(config: Option<PathBuf>, name: &str, yes: bool) {
             Some(id) => id,
             None => {
                 eprintln!(
-                    "No canonical UUID recorded for agent name '{name}' — nothing to delete."
+                    "{}",
+                    i18n::t_args("agent-delete-no-uuid", &[("name", name)])
                 );
                 std::process::exit(1);
             }
@@ -438,11 +483,20 @@ pub(crate) fn cmd_agent_delete(config: Option<PathBuf>, name: &str, yes: bool) {
                 .send(),
         );
         if body.get("status").is_some() {
-            println!("Agent \"{name}\" deleted (canonical UUID purged).");
+            println!(
+                "{}",
+                i18n::t_args("agent-deleted-success", &[("name", name)])
+            );
         } else {
             eprintln!(
-                "Failed to delete agent: {}",
-                body["error"].as_str().unwrap_or("Unknown error")
+                "{}",
+                i18n::t_args(
+                    "agent-delete-failed-with-reason",
+                    &[(
+                        "error",
+                        body["error"].as_str().unwrap_or(&i18n::t("error-unknown"))
+                    )]
+                )
             );
             std::process::exit(1);
         }
@@ -452,15 +506,25 @@ pub(crate) fn cmd_agent_delete(config: Option<PathBuf>, name: &str, yes: bool) {
             Some(id) => id,
             None => {
                 eprintln!(
-                    "No canonical UUID recorded for agent name '{name}' — nothing to delete."
+                    "{}",
+                    i18n::t_args("agent-delete-no-uuid", &[("name", name)])
                 );
                 std::process::exit(1);
             }
         };
         match kernel.kill_agent_with_purge(canonical_uuid, true) {
-            Ok(()) => println!("Agent \"{name}\" deleted (canonical UUID purged)."),
+            Ok(()) => println!(
+                "{}",
+                i18n::t_args("agent-deleted-success", &[("name", name)])
+            ),
             Err(e) => {
-                eprintln!("Failed to delete agent: {e}");
+                eprintln!(
+                    "{}",
+                    i18n::t_args(
+                        "agent-delete-failed-with-reason",
+                        &[("error", &e.to_string())]
+                    )
+                );
                 std::process::exit(1);
             }
         }
@@ -474,11 +538,12 @@ pub(crate) fn cmd_agent_delete(config: Option<PathBuf>, name: &str, yes: bool) {
 /// the new canonical binding; prior sessions / memories tied to the old
 /// UUID are orphaned. `--yes` skips the prompt.
 pub(crate) fn cmd_agent_reset_uuid(config: Option<PathBuf>, name: &str, yes: bool) {
-    eprintln!("WARNING: Resetting the canonical UUID for \"{name}\" will orphan all sessions");
-    eprintln!("    and memories tied to its current UUID. The next spawn under this");
-    eprintln!("    name will start with a fresh UUID. This action cannot be undone.");
-    if !yes && !prompt_yes_no("Confirm?", false) {
-        eprintln!("Aborted.");
+    eprintln!(
+        "{}",
+        i18n::t_args("agent-reset-uuid-warning-text", &[("name", name)])
+    );
+    if !yes && !prompt_yes_no(&i18n::t("label-confirm-prompt"), false) {
+        eprintln!("{}", i18n::t("label-aborted"));
         std::process::exit(1);
     }
 
@@ -494,25 +559,43 @@ pub(crate) fn cmd_agent_reset_uuid(config: Option<PathBuf>, name: &str, yes: boo
                 .send(),
         );
         if body.get("status").is_some() {
+            let prev_fallback = i18n::t("label-unknown");
+            let prev = body["previous_canonical_uuid"]
+                .as_str()
+                .unwrap_or(&prev_fallback);
             println!(
-                "Canonical UUID for \"{name}\" reset (was {}).",
-                body["previous_canonical_uuid"]
-                    .as_str()
-                    .unwrap_or("<unknown>")
+                "{}",
+                i18n::t_args(
+                    "agent-reset-uuid-success",
+                    &[("name", name), ("previous", prev)]
+                )
             );
         } else {
+            let err_fallback = i18n::t("error-unknown");
             eprintln!(
-                "Failed to reset canonical UUID: {}",
-                body["error"].as_str().unwrap_or("Unknown error")
+                "{}",
+                i18n::t_args(
+                    "agent-reset-uuid-failed-with-reason",
+                    &[("error", body["error"].as_str().unwrap_or(&err_fallback))]
+                )
             );
             std::process::exit(1);
         }
     } else {
         let kernel = boot_kernel(config);
         match kernel.identities_ref().purge(name) {
-            Some(prev) => println!("Canonical UUID for \"{name}\" reset (was {prev})."),
+            Some(prev) => println!(
+                "{}",
+                i18n::t_args(
+                    "agent-reset-uuid-success",
+                    &[("name", name), ("previous", &prev.to_string())]
+                )
+            ),
             None => {
-                eprintln!("No canonical UUID recorded for agent name '{name}'.");
+                eprintln!(
+                    "{}",
+                    i18n::t_args("agent-reset-uuid-not-found", &[("name", name)])
+                );
                 std::process::exit(1);
             }
         }
@@ -525,10 +608,13 @@ pub(crate) fn cmd_agent_reset_uuid(config: Option<PathBuf>, name: &str, yes: boo
 /// long_about on `AgentCommands::MergeHistory` for the rationale (deep
 /// memory-substrate surgery across 10+ tables under one transaction).
 pub(crate) fn cmd_agent_merge_history(name: &str, from: &str) {
-    eprintln!("merge-history is not yet implemented (refs #4614 follow-up).");
-    eprintln!("Reassignment of sessions / memories from {from} to the canonical UUID");
-    eprintln!("for agent \"{name}\" requires cross-table SQL surgery in the memory");
-    eprintln!("substrate that is being tracked separately.");
+    eprintln!(
+        "{}",
+        i18n::t_args(
+            "agent-merge-history-not-implemented",
+            &[("from", from), ("name", name)]
+        )
+    );
     std::process::exit(2);
 }
 
@@ -564,21 +650,34 @@ pub(crate) fn cmd_agent_set(agent_id_str: &str, field: &str, value: &str) {
                         .send(),
                 );
                 if body.get("status").is_some() {
-                    println!("Agent {agent_id} model set to {value}.");
+                    println!(
+                        "{}",
+                        i18n::t_args(
+                            "agent-set-model-success",
+                            &[("id", &agent_id), ("value", value)]
+                        )
+                    );
                 } else {
+                    let err_fallback = i18n::t("error-unknown");
                     eprintln!(
-                        "Failed to set model: {}",
-                        body["error"].as_str().unwrap_or("Unknown error")
+                        "{}",
+                        i18n::t_args(
+                            "agent-set-model-failed-with-reason",
+                            &[("error", body["error"].as_str().unwrap_or(&err_fallback))]
+                        )
                     );
                     std::process::exit(1);
                 }
             } else {
-                eprintln!("No running daemon found. Start one with: librefang start");
+                eprintln!("{}", i18n::t("agent-set-no-daemon"));
                 std::process::exit(1);
             }
         }
         _ => {
-            eprintln!("Unknown field: {field}. Supported fields: model");
+            eprintln!(
+                "{}",
+                i18n::t_args("agent-set-unknown-field", &[("field", field)])
+            );
             std::process::exit(1);
         }
     }
@@ -588,8 +687,8 @@ pub(crate) fn cmd_agent_new(config: Option<PathBuf>, template_name: Option<Strin
     let all_templates = templates::load_all_templates();
     if all_templates.is_empty() {
         ui::error_with_fix(
-            "No agent templates found",
-            "Run `librefang init` to set up the agents directory",
+            &i18n::t("agent-new-no-templates"),
+            &i18n::t("agent-new-no-templates-fix"),
         );
         std::process::exit(1);
     }
@@ -600,8 +699,8 @@ pub(crate) fn cmd_agent_new(config: Option<PathBuf>, template_name: Option<Strin
             Some(t) => t,
             None => {
                 ui::error_with_fix(
-                    &format!("Template '{name}' not found"),
-                    "Run `librefang agent new` to see available templates",
+                    &i18n::t_args("agent-new-template-not-found", &[("name", name)]),
+                    &i18n::t("agent-new-template-not-found-fix"),
                 );
                 std::process::exit(1);
             }
@@ -623,7 +722,7 @@ pub(crate) fn cmd_agent_new(config: Option<PathBuf>, template_name: Option<Strin
                 );
             }
             ui::blank();
-            let choice = prompt_input("  Choose template [1]: ");
+            let choice = prompt_input(&i18n::t("agent-new-choose-template-prompt"));
             let idx = if choice.is_empty() {
                 0
             } else {
@@ -672,9 +771,10 @@ pub(crate) fn spawn_template_agent(
                 &[("name", &agent_name)],
             ));
         } else {
+            let err_fallback = i18n::t("error-unknown");
             ui::error(&i18n::t_args(
                 "agent-spawn-failed",
-                &[("error", body["error"].as_str().unwrap_or("Unknown error"))],
+                &[("error", body["error"].as_str().unwrap_or(&err_fallback))],
             ));
             std::process::exit(1);
         }
@@ -803,15 +903,30 @@ pub(crate) fn cmd_sessions(agent: Option<&str>, json: bool, active_only: bool) {
             .collect();
         if filtered.is_empty() {
             if active_only {
-                println!("No active sessions.");
+                println!("{}", i18n::t("agent-sessions-none-active"));
             } else {
-                println!("No sessions found.");
+                println!("{}", i18n::t("agent-sessions-none-found"));
             }
             return;
         }
-        let mut t = crate::table::Table::new(&["ID", "AGENT", "MSGS", "STATE", "LAST ACTIVE"]);
+        let header_id = i18n::t("label-header-id");
+        let header_agent = i18n::t("label-header-agent");
+        let header_msgs = i18n::t("label-header-msgs");
+        let header_state = i18n::t("label-header-state");
+        let header_last_active = i18n::t("label-header-last-active");
+        let mut t = crate::table::Table::new(&[
+            &header_id,
+            &header_agent,
+            &header_msgs,
+            &header_state,
+            &header_last_active,
+        ]);
         for s in filtered {
-            let state = if is_running(s) { "running" } else { "idle" };
+            let state_str = if is_running(s) {
+                i18n::t("label-session-state-running")
+            } else {
+                i18n::t("label-session-state-idle")
+            };
             let agent_id = s["agent_id"].as_str().unwrap_or("");
             let agent_col = if agent_id.len() > 16 {
                 &agent_id[..16]
@@ -827,7 +942,7 @@ pub(crate) fn cmd_sessions(agent: Option<&str>, json: bool, active_only: bool) {
                     .unwrap_or("?"),
                 agent_col,
                 &s["message_count"].as_u64().unwrap_or(0).to_string(),
-                state,
+                &state_str,
                 s["created_at"]
                     .as_str()
                     .or_else(|| s["last_active"].as_str())

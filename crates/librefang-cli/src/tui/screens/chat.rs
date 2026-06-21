@@ -475,6 +475,11 @@ impl ChatState {
 
 /// Render the chat screen.
 pub fn draw(f: &mut Frame, area: Rect, state: &mut ChatState) {
+    let mode = match state.mode_label.as_str() {
+        "daemon" => crate::i18n::t("tui-chat-mode-daemon"),
+        "in-process" => crate::i18n::t("tui-chat-mode-inprocess"),
+        other => other.to_string(),
+    };
     let block = Block::default()
         .title(Line::from(vec![Span::styled(
             format!(" {} ", state.agent_name),
@@ -482,7 +487,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut ChatState) {
         )]))
         .title_alignment(Alignment::Left)
         .title_bottom(Line::from(vec![Span::styled(
-            format!(" {} \u{2014} {} ", state.model_label, state.mode_label),
+            format!(" {} — {} ", state.model_label, mode),
             theme::dim_style(),
         )]))
         .borders(Borders::ALL)
@@ -514,7 +519,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut ChatState) {
             Span::styled(" > ", Style::default().fg(theme::YELLOW)),
             Span::raw(&state.input),
             Span::styled(
-                "\u{2588}",
+                "█",
                 Style::default()
                     .fg(theme::YELLOW)
                     .add_modifier(Modifier::SLOW_BLINK),
@@ -522,7 +527,10 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut ChatState) {
         ];
         if !state.staged_messages.is_empty() {
             spans.push(Span::styled(
-                format!("  ({} staged)", state.staged_messages.len()),
+                crate::i18n::t_args(
+                    "tui-chat-input-staged",
+                    &[("count", &state.staged_messages.len().to_string())],
+                ),
                 Style::default().fg(theme::PURPLE),
             ));
         }
@@ -532,7 +540,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut ChatState) {
             Span::styled(" > ", theme::input_style()),
             Span::raw(&state.input),
             Span::styled(
-                "\u{2588}",
+                "█",
                 Style::default()
                     .fg(theme::ACCENT)
                     .add_modifier(Modifier::SLOW_BLINK),
@@ -541,7 +549,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut ChatState) {
         if let Some(idx) = state.history_idx {
             spans.push(Span::styled(
                 format!(
-                    "  \u{2191}{}/{}",
+                    "  ↑{}/{}",
                     state.input_history.len() - idx,
                     state.input_history.len()
                 ),
@@ -554,15 +562,15 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut ChatState) {
 
     // ── Hints ────────────────────────────────────────────────────────────────
     let hints = if state.show_model_picker {
-        "    [\u{2191}\u{2193}] Navigate  [Enter] Select  [Esc] Close  [type] Filter"
+        crate::i18n::t("tui-chat-hints-modelpicker")
     } else if state.is_streaming {
-        "    [Enter] Stage  [\u{2191}\u{2193}] Scroll  [Esc] Stop"
+        crate::i18n::t("tui-chat-hints-streaming")
     } else if state.history_idx.is_some() {
-        "    [Enter] Send  [\u{2191}\u{2193}] History  [PgUp/PgDn] Scroll  [Esc] Back"
+        crate::i18n::t("tui-chat-hints-history")
     } else {
-        "    [Enter] Send  [Ctrl+M] Models  [\u{2191}\u{2193}] History  [PgUp/PgDn] Scroll  [Esc] Back"
+        crate::i18n::t("tui-chat-hints-normal")
     };
-    f.render_widget(widgets::hint_bar(hints), chunks[3]);
+    f.render_widget(widgets::hint_bar(&hints), chunks[3]);
 
     // ── Model picker overlay ────────────────────────────────────────────────
     if state.show_model_picker {
@@ -588,7 +596,7 @@ fn draw_model_picker(f: &mut Frame, area: Rect, state: &ChatState) {
 
     let block = Block::default()
         .title(Line::from(vec![Span::styled(
-            " Switch Model ",
+            crate::i18n::t("tui-chat-modelpicker-title"),
             theme::title_style(),
         )]))
         .borders(Borders::ALL)
@@ -611,7 +619,7 @@ fn draw_model_picker(f: &mut Frame, area: Rect, state: &ChatState) {
         Span::styled("/ ", theme::dim_style()),
         Span::raw(&state.model_picker_filter),
         Span::styled(
-            "\u{2588}",
+            "█",
             Style::default()
                 .fg(theme::ACCENT)
                 .add_modifier(Modifier::SLOW_BLINK),
@@ -624,7 +632,10 @@ fn draw_model_picker(f: &mut Frame, area: Rect, state: &ChatState) {
     let total = filtered.len();
 
     if total == 0 {
-        f.render_widget(widgets::empty_state("No models match"), chunks[1]);
+        f.render_widget(
+            widgets::empty_state(&crate::i18n::t("tui-chat-modelpicker-empty")),
+            chunks[1],
+        );
         return;
     }
 
@@ -644,7 +655,7 @@ fn draw_model_picker(f: &mut Frame, area: Rect, state: &ChatState) {
         .take(visible_h)
     {
         let selected = i == state.model_picker_idx;
-        let indicator = if selected { "\u{25b6} " } else { "  " };
+        let indicator = if selected { "▶ " } else { "  " };
 
         let name = if entry.display_name.is_empty() {
             &entry.id
@@ -653,7 +664,7 @@ fn draw_model_picker(f: &mut Frame, area: Rect, state: &ChatState) {
         };
         let name_display = if name.len() > max_name && max_name > 1 {
             let truncated = librefang_types::truncate_str(name, max_name.saturating_sub(1));
-            format!("{truncated}\u{2026}")
+            format!("{truncated}…")
         } else {
             name.to_string()
         };
@@ -700,40 +711,40 @@ fn draw_messages(f: &mut Frame, area: Rect, state: &ChatState) {
             lines.push(Line::from(""));
         }
         lines.push(Line::from(vec![Span::styled(
-            "  \u{25b8} Ready to chat",
+            format!("  ▸ {}", crate::i18n::t("tui-chat-welcome-ready")),
             Style::default()
                 .fg(theme::ACCENT)
                 .add_modifier(Modifier::BOLD),
         )]));
         lines.push(Line::from(""));
         lines.push(Line::from(vec![Span::styled(
-            "  Try asking:",
+            crate::i18n::t("tui-chat-welcome-suggest"),
             theme::dim_style(),
         )]));
         lines.push(Line::from(vec![
-            Span::styled("    \u{25e6} ", Style::default().fg(theme::BORDER)),
+            Span::styled("    ◦ ", Style::default().fg(theme::BORDER)),
             Span::styled(
-                "\"Explain this codebase\"",
+                crate::i18n::t("tui-chat-welcome-q1"),
                 Style::default().fg(theme::TEXT_SECONDARY),
             ),
         ]));
         lines.push(Line::from(vec![
-            Span::styled("    \u{25e6} ", Style::default().fg(theme::BORDER)),
+            Span::styled("    ◦ ", Style::default().fg(theme::BORDER)),
             Span::styled(
-                "\"Write a unit test for...\"",
+                crate::i18n::t("tui-chat-welcome-q2"),
                 Style::default().fg(theme::TEXT_SECONDARY),
             ),
         ]));
         lines.push(Line::from(vec![
-            Span::styled("    \u{25e6} ", Style::default().fg(theme::BORDER)),
+            Span::styled("    ◦ ", Style::default().fg(theme::BORDER)),
             Span::styled(
-                "\"What does this function do?\"",
+                crate::i18n::t("tui-chat-welcome-q3"),
                 Style::default().fg(theme::TEXT_SECONDARY),
             ),
         ]));
         lines.push(Line::from(""));
         lines.push(Line::from(vec![Span::styled(
-            "  Type /help for commands  \u{2022}  Ctrl+M to switch models",
+            crate::i18n::t("tui-chat-welcome-footer"),
             theme::hint_style(),
         )]));
         f.render_widget(Paragraph::new(lines), area);
@@ -749,7 +760,7 @@ fn draw_messages(f: &mut Frame, area: Rect, state: &ChatState) {
                 for (i, wline) in wrapped.into_iter().enumerate() {
                     if i == 0 {
                         lines.push(Line::from(vec![
-                            Span::styled("  \u{276f} ", theme::input_style()),
+                            Span::styled("  ❯ ", theme::input_style()),
                             Span::styled(wline, Style::default().fg(theme::TEXT_PRIMARY)),
                         ]));
                     } else {
@@ -781,19 +792,19 @@ fn draw_messages(f: &mut Frame, area: Rect, state: &ChatState) {
                     let is_err = info.is_error;
                     let border_color = if is_err { theme::RED } else { theme::GREEN };
                     let icon = if info.result.is_empty() {
-                        "\u{2026}" // … (running)
+                        "…" // (running)
                     } else if is_err {
-                        "\u{2718}" // ✘
+                        "✘"
                     } else {
-                        "\u{2714}" // ✔
+                        "✔"
                     };
                     let icon_color = if is_err { theme::RED } else { theme::GREEN };
 
                     // Header: ╭─ ✔ tool_name ────────
                     let header_rest = width.saturating_sub(6 + info.name.len());
-                    let fill = "\u{2500}".repeat(header_rest);
+                    let fill = "─".repeat(header_rest);
                     lines.push(Line::from(vec![
-                        Span::styled("  \u{256d}\u{2500} ", Style::default().fg(border_color)),
+                        Span::styled("  ╭─ ", Style::default().fg(border_color)),
                         Span::styled(format!("{icon} "), Style::default().fg(icon_color)),
                         Span::styled(
                             info.name.clone(),
@@ -808,8 +819,8 @@ fn draw_messages(f: &mut Frame, area: Rect, state: &ChatState) {
                     if !info.input.is_empty() {
                         let val = widgets::truncate(&info.input, max_val);
                         lines.push(Line::from(vec![
-                            Span::styled("  \u{2502} ", Style::default().fg(border_color)),
-                            Span::styled("input: ", theme::dim_style()),
+                            Span::styled("  │ ", Style::default().fg(border_color)),
+                            Span::styled(crate::i18n::t("tui-chat-tool-input"), theme::dim_style()),
                             Span::raw(val),
                         ]));
                     }
@@ -819,38 +830,44 @@ fn draw_messages(f: &mut Frame, area: Rect, state: &ChatState) {
                         let spinner = theme::SPINNER_FRAMES
                             [state.spinner_frame % theme::SPINNER_FRAMES.len()];
                         lines.push(Line::from(vec![
-                            Span::styled("  \u{2502} ", Style::default().fg(border_color)),
+                            Span::styled("  │ ", Style::default().fg(border_color)),
                             Span::styled(
-                                format!("{spinner} running\u{2026}"),
+                                format!("{spinner} {}", crate::i18n::t("tui-chat-tool-running")),
                                 Style::default().fg(theme::CYAN),
                             ),
                         ]));
                     } else if is_err {
                         let val = widgets::truncate(&info.result, max_val);
                         lines.push(Line::from(vec![
-                            Span::styled("  \u{2502} ", Style::default().fg(border_color)),
-                            Span::styled("error: ", Style::default().fg(theme::RED)),
+                            Span::styled("  │ ", Style::default().fg(border_color)),
+                            Span::styled(
+                                crate::i18n::t("tui-chat-tool-error"),
+                                Style::default().fg(theme::RED),
+                            ),
                             Span::raw(val),
                         ]));
                     } else {
                         let val = widgets::truncate(&info.result, max_val);
                         lines.push(Line::from(vec![
-                            Span::styled("  \u{2502} ", Style::default().fg(border_color)),
-                            Span::styled("result: ", theme::dim_style()),
+                            Span::styled("  │ ", Style::default().fg(border_color)),
+                            Span::styled(
+                                crate::i18n::t("tui-chat-tool-result"),
+                                theme::dim_style(),
+                            ),
                             Span::raw(val),
                         ]));
                     }
 
                     // Footer: ╰───────────
-                    let footer_fill = "\u{2500}".repeat(width.saturating_sub(4));
+                    let footer_fill = "─".repeat(width.saturating_sub(4));
                     lines.push(Line::from(vec![Span::styled(
-                        format!("  \u{2570}{footer_fill}"),
+                        format!("  ╰{footer_fill}"),
                         Style::default().fg(border_color),
                     )]));
                 } else {
                     // Fallback for tool messages without ToolInfo
                     lines.push(Line::from(vec![Span::styled(
-                        format!("  \u{2714} {}", msg.text),
+                        format!("  ✔ {}", msg.text),
                         Style::default().fg(theme::YELLOW),
                     )]));
                 }
@@ -872,7 +889,7 @@ fn draw_messages(f: &mut Frame, area: Rect, state: &ChatState) {
         let frame = theme::SPINNER_FRAMES[state.spinner_frame % theme::SPINNER_FRAMES.len()];
         lines.push(Line::from(vec![
             Span::styled(format!("  {frame} "), Style::default().fg(theme::CYAN)),
-            Span::styled("thinking\u{2026}", theme::dim_style()),
+            Span::styled(crate::i18n::t("tui-chat-thinking"), theme::dim_style()),
         ]));
     }
 
@@ -889,7 +906,10 @@ fn draw_messages(f: &mut Frame, area: Rect, state: &ChatState) {
     if state.is_streaming && state.streaming_chars > 0 {
         let est_tokens = state.streaming_chars / 4;
         lines.push(Line::from(vec![Span::styled(
-            format!("  ~{est_tokens} tokens"),
+            crate::i18n::t_args(
+                "tui-chat-tokens-estimated",
+                &[("count", &est_tokens.to_string())],
+            ),
             theme::dim_style(),
         )]));
     }
@@ -902,7 +922,14 @@ fn draw_messages(f: &mut Frame, area: Rect, state: &ChatState) {
                 _ => String::new(),
             };
             lines.push(Line::from(vec![Span::styled(
-                format!("  [tokens: {} in / {} out{}]", input, output, cost_str),
+                crate::i18n::t_args(
+                    "tui-chat-tokens-detail",
+                    &[
+                        ("in", &input.to_string()),
+                        ("out", &output.to_string()),
+                        ("cost", &cost_str),
+                    ],
+                ),
                 theme::dim_style(),
             )]));
         }

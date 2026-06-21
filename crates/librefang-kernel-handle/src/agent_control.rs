@@ -105,6 +105,40 @@ pub trait AgentControl: Send + Sync {
             .await
     }
 
+    /// Non-blocking variant of [`send_to_agent_as`](Self::send_to_agent_as):
+    /// register the delegation on the kernel's async-task tracker (#4983),
+    /// run the callee loop detached, and return a **task id** immediately
+    /// (not the reply). The callee's response is injected back into the
+    /// caller's session as a `TaskCompletionEvent` when it finishes (mid-turn
+    /// if the loop is live, else wake-idle), so a long delegation no longer
+    /// blocks the caller or trips `tool_timeout_secs`. Issue #6043.
+    ///
+    /// `caller_session_id` is the originating session the completion event is
+    /// delivered to; `conversation_key` optionally pins the callee session
+    /// (see [`send_to_agent_with_key`](Self::send_to_agent_with_key)).
+    ///
+    /// Defaults to the blocking [`send_to_agent_as`](Self::send_to_agent_as)
+    /// for handles that don't support the tracker (mocks/tests) — in that
+    /// fallback the returned string is the response body, delivered inline,
+    /// because there is no tracker to register against.
+    async fn send_to_agent_async_tracked(
+        &self,
+        agent_id: &str,
+        message: &str,
+        caller_agent_id: &str,
+        caller_session_id: Option<&str>,
+        conversation_key: Option<&str>,
+        chat_id: Option<&str>,
+    ) -> Result<String, KernelOpError> {
+        let _ = (caller_session_id, conversation_key, chat_id);
+        tracing::trace!(
+            agent = %agent_id,
+            "send_to_agent_async_tracked: default impl — async tracking not supported by this handle; falling back to blocking send_to_agent_as"
+        );
+        self.send_to_agent_as(agent_id, message, caller_agent_id)
+            .await
+    }
+
     /// List all running agents.
     fn list_agents(&self) -> Vec<AgentInfo>;
 

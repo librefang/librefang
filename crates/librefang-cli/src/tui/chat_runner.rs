@@ -164,7 +164,10 @@ impl StandaloneChat {
             // TUI is for owner use already so DM routing has no meaning here.
             StreamEvent::OwnerNotice { text } => {
                 let preview: String = text.chars().take(80).collect();
-                self.chat.status_msg = Some(format!("[owner_notice] {preview}"));
+                self.chat.status_msg = Some(crate::i18n::t_args(
+                    "chat-runner-owner-notice",
+                    &[("preview", &preview)],
+                ));
             }
             _ => {}
         }
@@ -189,7 +192,10 @@ impl StandaloneChat {
                 self.chat.last_cost_usd = r.cost_usd;
             }
             Err(e) => {
-                self.chat.status_msg = Some(format!("Error: {e}"));
+                self.chat.status_msg = Some(crate::i18n::t_args(
+                    "chat-runner-error-prefix",
+                    &[("error", &e)],
+                ));
             }
         }
         // Auto-send the next staged message if any
@@ -220,7 +226,10 @@ impl StandaloneChat {
     }
 
     fn handle_agent_spawn_error(&mut self, err: String) {
-        self.chat.status_msg = Some(format!("Failed to spawn agent: {err}"));
+        self.chat.status_msg = Some(crate::i18n::t_args(
+            "chat-runner-spawn-failed",
+            &[("error", &err)],
+        ));
     }
 
     // ── Chat action dispatch ─────────────────────────────────────────────────
@@ -266,7 +275,7 @@ impl StandaloneChat {
             }
             _ => {
                 self.chat.is_streaming = false;
-                self.chat.status_msg = Some("No active connection".to_string());
+                self.chat.status_msg = Some(crate::i18n::t("chat-runner-no-active-connection"));
             }
         }
     }
@@ -285,8 +294,10 @@ impl StandaloneChat {
         let canonical = match commands::lookup(bare) {
             Some(def) if def.scope.contains(Scope::CLI) => def.name,
             _ => {
-                self.chat
-                    .push_message(Role::System, format!("Unknown command: {head}. Type /help"));
+                self.chat.push_message(
+                    Role::System,
+                    crate::i18n::t_args("chat-runner-unknown-command", &[("command", head)]),
+                );
                 return;
             }
         };
@@ -303,15 +314,27 @@ impl StandaloneChat {
                 let mut s = Vec::new();
                 match &self.backend {
                     Backend::Daemon { base_url } => {
-                        s.push(format!("Mode: daemon ({base_url})"));
-                        s.push(format!("Agent: {}", self.agent_name));
+                        s.push(crate::i18n::t_args(
+                            "chat-runner-status-mode-daemon",
+                            &[("url", base_url)],
+                        ));
+                        s.push(crate::i18n::t_args(
+                            "chat-runner-status-agent",
+                            &[("name", &self.agent_name)],
+                        ));
                     }
                     Backend::InProcess { kernel } => {
-                        s.push("Mode: in-process".to_string());
-                        s.push(format!("Agents: {}", kernel.agent_registry_ref().count()));
-                        s.push(format!("Agent: {}", self.agent_name));
+                        s.push(crate::i18n::t("chat-runner-status-mode-inprocess"));
+                        s.push(crate::i18n::t_args(
+                            "chat-runner-status-agents-count",
+                            &[("count", &kernel.agent_registry_ref().count().to_string())],
+                        ));
+                        s.push(crate::i18n::t_args(
+                            "chat-runner-status-agent",
+                            &[("name", &self.agent_name)],
+                        ));
                     }
-                    Backend::None => s.push("Mode: disconnected".to_string()),
+                    Backend::None => s.push(crate::i18n::t("chat-runner-status-mode-disconnected")),
                 }
                 self.chat.push_message(Role::System, s.join("\n"));
             }
@@ -333,8 +356,10 @@ impl StandaloneChat {
                 self.chat.agent_name = name;
                 self.chat.model_label = model;
                 self.chat.mode_label = mode;
-                self.chat
-                    .push_message(Role::System, "Chat history cleared.".to_string());
+                self.chat.push_message(
+                    Role::System,
+                    crate::i18n::t("chat-runner-chat-history-cleared"),
+                );
             }
             "kill" => {
                 let name = self.agent_name.clone();
@@ -347,14 +372,20 @@ impl StandaloneChat {
                                 Ok(r) if r.status().is_success() => {
                                     self.chat.push_message(
                                         Role::System,
-                                        format!("Agent \"{name}\" killed."),
+                                        crate::i18n::t_args(
+                                            "chat-runner-agent-killed",
+                                            &[("name", &name)],
+                                        ),
                                     );
                                     self.should_quit = true;
                                 }
                                 _ => {
                                     self.chat.push_message(
                                         Role::System,
-                                        format!("Failed to kill agent \"{name}\"."),
+                                        crate::i18n::t_args(
+                                            "chat-runner-failed-kill-agent",
+                                            &[("name", &name)],
+                                        ),
                                     );
                                 }
                             }
@@ -366,20 +397,30 @@ impl StandaloneChat {
                                 Ok(()) => {
                                     self.chat.push_message(
                                         Role::System,
-                                        format!("Agent \"{name}\" killed."),
+                                        crate::i18n::t_args(
+                                            "chat-runner-agent-killed",
+                                            &[("name", &name)],
+                                        ),
                                     );
                                     self.should_quit = true;
                                 }
                                 Err(e) => {
-                                    self.chat
-                                        .push_message(Role::System, format!("Kill failed: {e}"));
+                                    self.chat.push_message(
+                                        Role::System,
+                                        crate::i18n::t_args(
+                                            "chat-runner-kill-failed",
+                                            &[("error", &e.to_string())],
+                                        ),
+                                    );
                                 }
                             }
                         }
                     }
                     Backend::None => {
-                        self.chat
-                            .push_message(Role::System, "No backend connected.".to_string());
+                        self.chat.push_message(
+                            Role::System,
+                            crate::i18n::t("chat-runner-no-backend-connected"),
+                        );
                     }
                 }
             }
@@ -438,8 +479,10 @@ impl StandaloneChat {
         };
 
         if models.is_empty() {
-            self.chat
-                .push_message(Role::System, "No models available.".to_string());
+            self.chat.push_message(
+                Role::System,
+                crate::i18n::t("chat-runner-no-models-available"),
+            );
             return;
         }
 
@@ -477,13 +520,21 @@ impl StandaloneChat {
                                     self.chat.model_label = format!("{provider}/{model}");
                                 }
                             }
-                            self.chat
-                                .push_message(Role::System, format!("Switched to {model_id}"));
+                            self.chat.push_message(
+                                Role::System,
+                                crate::i18n::t_args(
+                                    "chat-runner-switched-model",
+                                    &[("model", model_id)],
+                                ),
+                            );
                         }
                         _ => {
                             self.chat.push_message(
                                 Role::System,
-                                format!("Failed to switch to {model_id}"),
+                                crate::i18n::t_args(
+                                    "chat-runner-failed-switch-model",
+                                    &[("model", model_id)],
+                                ),
                             );
                         }
                     }
@@ -517,19 +568,31 @@ impl StandaloneChat {
                                     .unwrap_or_else(|| "?".to_string())
                             });
                             self.chat.model_label = format!("{prov_label}/{model_id}");
-                            self.chat
-                                .push_message(Role::System, format!("Switched to {model_id}"));
+                            self.chat.push_message(
+                                Role::System,
+                                crate::i18n::t_args(
+                                    "chat-runner-switched-model",
+                                    &[("model", model_id)],
+                                ),
+                            );
                         }
                         Err(e) => {
-                            self.chat
-                                .push_message(Role::System, format!("Switch failed: {e}"));
+                            self.chat.push_message(
+                                Role::System,
+                                crate::i18n::t_args(
+                                    "chat-runner-switch-failed",
+                                    &[("error", &e.to_string())],
+                                ),
+                            );
                         }
                     }
                 }
             }
             Backend::None => {
-                self.chat
-                    .push_message(Role::System, "No backend connected.".to_string());
+                self.chat.push_message(
+                    Role::System,
+                    crate::i18n::t("chat-runner-no-backend-connected"),
+                );
             }
         }
     }
@@ -556,7 +619,7 @@ impl StandaloneChat {
 
         self.chat.push_message(
             Role::System,
-            "/help for commands \u{2022} /exit to quit".to_string(),
+            crate::i18n::t("chat-runner-welcome-help-hint"),
         );
     }
 
@@ -577,7 +640,7 @@ impl StandaloneChat {
 
         self.chat.push_message(
             Role::System,
-            "/help for commands \u{2022} /exit to quit".to_string(),
+            crate::i18n::t("chat-runner-welcome-help-hint"),
         );
     }
 
@@ -629,11 +692,13 @@ impl StandaloneChat {
                     crate::read_api_key(),
                     self.event_tx.clone(),
                 );
-                self.chat.status_msg = Some(format!("Spawning '{}' agent\u{2026}", t.name));
+                self.chat.status_msg = Some(crate::i18n::t_args(
+                    "chat-runner-spawning-agent",
+                    &[("name", &t.name)],
+                ));
             }
             None => {
-                self.boot_error =
-                    Some("No agent templates found. Run `librefang init`.".to_string());
+                self.boot_error = Some(crate::i18n::t("chat-runner-no-agent-templates"));
             }
         }
     }
@@ -673,8 +738,10 @@ impl StandaloneChat {
                     match toml::from_str(&t.content) {
                         Ok(m) => m,
                         Err(e) => {
-                            self.chat.status_msg =
-                                Some(format!("Invalid template '{}': {e}", t.name));
+                            self.chat.status_msg = Some(crate::i18n::t_args(
+                                "chat-runner-invalid-template",
+                                &[("name", &t.name), ("error", &e.to_string())],
+                            ));
                             return;
                         }
                     };
@@ -684,13 +751,15 @@ impl StandaloneChat {
                         self.enter_chat_inprocess(id, name);
                     }
                     Err(e) => {
-                        self.chat.status_msg = Some(format!("Spawn failed: {e}"));
+                        self.chat.status_msg = Some(crate::i18n::t_args(
+                            "chat-runner-spawn-failed",
+                            &[("error", &e.to_string())],
+                        ));
                     }
                 }
             }
             None => {
-                self.chat.status_msg =
-                    Some("No agent templates found. Run `librefang init`.".to_string());
+                self.chat.status_msg = Some(crate::i18n::t("chat-runner-no-agent-templates"));
             }
         }
     }
@@ -727,13 +796,13 @@ impl StandaloneChat {
             Line::from(vec![
                 Span::styled(format!(" {spinner} "), Style::default().fg(theme::ACCENT)),
                 Span::styled(
-                    "Booting kernel\u{2026}",
+                    crate::i18n::t("chat-runner-booting-kernel"),
                     Style::default().fg(theme::TEXT_PRIMARY),
                 ),
             ]),
             Line::from(""),
             Line::from(vec![Span::styled(
-                "  This may take a moment while the kernel initializes.",
+                crate::i18n::t("chat-runner-booting-kernel-hint"),
                 theme::dim_style(),
             )]),
         ];
@@ -753,7 +822,10 @@ impl StandaloneChat {
         let lines = vec![
             Line::from(vec![
                 Span::styled(" \u{2718} ", Style::default().fg(theme::RED)),
-                Span::styled("Failed to start", Style::default().fg(theme::RED)),
+                Span::styled(
+                    crate::i18n::t("chat-runner-failed-start"),
+                    Style::default().fg(theme::RED),
+                ),
             ]),
             Line::from(""),
             Line::from(vec![Span::styled(
@@ -762,7 +834,7 @@ impl StandaloneChat {
             )]),
             Line::from(""),
             Line::from(vec![Span::styled(
-                "  Press Esc to exit.",
+                crate::i18n::t("chat-runner-press-esc-to-exit"),
                 theme::hint_style(),
             )]),
         ];

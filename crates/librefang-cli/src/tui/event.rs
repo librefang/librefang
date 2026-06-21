@@ -348,7 +348,10 @@ pub fn spawn_inprocess_stream(
         let rt = match tokio::runtime::Runtime::new() {
             Ok(rt) => rt,
             Err(e) => {
-                let _ = tx.send(AppEvent::StreamDone(Err(format!("Runtime error: {e}"))));
+                let _ = tx.send(AppEvent::StreamDone(Err(crate::i18n::t_args(
+                    "tui-event-stream-runtime-error",
+                    &[("error", &e.to_string())],
+                ))));
                 return;
             }
         };
@@ -418,7 +421,10 @@ pub fn spawn_daemon_stream(
                 return;
             }
             Err(e) => {
-                let _ = tx.send(AppEvent::StreamDone(Err(format!("Connection failed: {e}"))));
+                let _ = tx.send(AppEvent::StreamDone(Err(crate::i18n::t_args(
+                    "tui-event-stream-connection-failed",
+                    &[("error", &e.to_string())],
+                ))));
                 return;
             }
         };
@@ -615,8 +621,10 @@ pub fn spawn_daemon_agent(
                     let _ = tx.send(AppEvent::AgentSpawnError(
                         body["error"]
                             .as_str()
-                            .unwrap_or("Failed to spawn agent")
-                            .to_string(),
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| {
+                                crate::i18n::t("tui-event-agent-spawn-failed-fallback")
+                            }),
                     ));
                 }
             }
@@ -868,8 +876,8 @@ pub fn spawn_run_workflow(
                     let body: serde_json::Value = resp.json().unwrap_or_default();
                     let result = body["output"]
                         .as_str()
-                        .unwrap_or("Workflow completed")
-                        .to_string();
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| crate::i18n::t("tui-event-workflow-completed"));
                     let _ = tx.send(AppEvent::WorkflowRunResult(result));
                 }
                 Err(e) => {
@@ -878,9 +886,9 @@ pub fn spawn_run_workflow(
             }
         }
         BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::WorkflowRunResult(
-                "Workflow execution not available in in-process mode".to_string(),
-            ));
+            let _ = tx.send(AppEvent::WorkflowRunResult(crate::i18n::t(
+                "tui-event-workflow-exec-not-available-in-process",
+            )));
         }
     });
 }
@@ -918,9 +926,9 @@ pub fn spawn_create_workflow(
             }
         }
         BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::FetchError(
-                "Workflow creation not available in in-process mode".to_string(),
-            ));
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-workflow-create-not-available-in-process",
+            )));
         }
     });
 }
@@ -994,9 +1002,9 @@ pub fn spawn_create_trigger(
             }
         }
         BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::FetchError(
-                "Trigger creation not available in in-process mode".to_string(),
-            ));
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-trigger-create-not-available-in-process",
+            )));
         }
     });
 }
@@ -1015,16 +1023,17 @@ pub fn spawn_delete_trigger(backend: BackendRef, trigger_id: String, tx: mpsc::S
                     let _ = tx.send(AppEvent::TriggerDeleted(trigger_id));
                 }
                 _ => {
-                    let _ = tx.send(AppEvent::FetchError(format!(
-                        "Failed to delete trigger {trigger_id}"
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-trigger-delete-failed",
+                        &[("trigger_id", &trigger_id)],
                     )));
                 }
             }
         }
         BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::FetchError(
-                "Trigger deletion not available in in-process mode".to_string(),
-            ));
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-trigger-delete-not-available-in-process",
+            )));
         }
     });
 }
@@ -1043,8 +1052,9 @@ pub fn spawn_kill_agent(backend: BackendRef, agent_id: String, tx: mpsc::Sender<
                     let _ = tx.send(AppEvent::AgentKilled { id: agent_id });
                 }
                 _ => {
-                    let _ = tx.send(AppEvent::AgentKillError(format!(
-                        "Failed to kill agent {agent_id}"
+                    let _ = tx.send(AppEvent::AgentKillError(crate::i18n::t_args(
+                        "tui-event-agent-kill-failed",
+                        &[("agent_id", &agent_id)],
                     )));
                 }
             }
@@ -1062,8 +1072,9 @@ pub fn spawn_kill_agent(backend: BackendRef, agent_id: String, tx: mpsc::Sender<
                     }
                 }
             } else {
-                let _ = tx.send(AppEvent::AgentKillError(format!(
-                    "Invalid agent ID: {agent_id}"
+                let _ = tx.send(AppEvent::AgentKillError(crate::i18n::t_args(
+                    "tui-event-agent-invalid-id",
+                    &[("agent_id", &agent_id)],
                 )));
             }
         }
@@ -1103,7 +1114,9 @@ pub fn spawn_fetch_agent_skills(backend: BackendRef, agent_id: String, tx: mpsc:
                     return;
                 }
             }
-            let _ = tx.send(AppEvent::FetchError("Failed to fetch skills".to_string()));
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-skills-fetch-failed",
+            )));
         }
         BackendRef::InProcess(kernel) => {
             if let Ok(uuid) = uuid::Uuid::parse_str(&agent_id) {
@@ -1164,9 +1177,9 @@ pub fn spawn_fetch_agent_mcp_servers(
                     return;
                 }
             }
-            let _ = tx.send(AppEvent::FetchError(
-                "Failed to fetch MCP servers".to_string(),
-            ));
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-mcp-fetch-failed",
+            )));
         }
         BackendRef::InProcess(kernel) => {
             if let Ok(uuid) = uuid::Uuid::parse_str(&agent_id) {
@@ -1223,7 +1236,9 @@ pub fn spawn_update_agent_skills(
                     let _ = tx.send(AppEvent::AgentSkillsUpdated(agent_id));
                 }
                 _ => {
-                    let _ = tx.send(AppEvent::FetchError("Failed to update skills".to_string()));
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                        "tui-event-skills-update-failed",
+                    )));
                 }
             }
         }
@@ -1235,7 +1250,10 @@ pub fn spawn_update_agent_skills(
                         let _ = tx.send(AppEvent::AgentSkillsUpdated(agent_id));
                     }
                     Err(e) => {
-                        let _ = tx.send(AppEvent::FetchError(format!("Skills update: {e}")));
+                        let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                            "tui-event-skills-update-error",
+                            &[("error", &e.to_string())],
+                        )));
                     }
                 }
             }
@@ -1262,9 +1280,9 @@ pub fn spawn_update_agent_mcp_servers(
                     let _ = tx.send(AppEvent::AgentMcpServersUpdated(agent_id));
                 }
                 _ => {
-                    let _ = tx.send(AppEvent::FetchError(
-                        "Failed to update MCP servers".to_string(),
-                    ));
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                        "tui-event-mcp-update-failed",
+                    )));
                 }
             }
         }
@@ -1276,7 +1294,10 @@ pub fn spawn_update_agent_mcp_servers(
                         let _ = tx.send(AppEvent::AgentMcpServersUpdated(agent_id));
                     }
                     Err(e) => {
-                        let _ = tx.send(AppEvent::FetchError(format!("MCP update: {e}")));
+                        let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                            "tui-event-mcp-update-error",
+                            &[("error", &e.to_string())],
+                        )));
                     }
                 }
             }
@@ -1359,16 +1380,17 @@ pub fn spawn_delete_session(backend: BackendRef, session_id: String, tx: mpsc::S
                     let _ = tx.send(AppEvent::SessionDeleted(session_id));
                 }
                 _ => {
-                    let _ = tx.send(AppEvent::FetchError(format!(
-                        "Failed to delete session {session_id}"
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-session-delete-failed",
+                        &[("session_id", &session_id)],
                     )));
                 }
             }
         }
         BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::FetchError(
-                "Session management not available in in-process mode".to_string(),
-            ));
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-session-management-not-available-in-process",
+            )));
         }
     });
 }
@@ -1460,14 +1482,16 @@ pub fn spawn_save_memory_kv(
                     let _ = tx.send(AppEvent::MemoryKvSaved { key });
                 }
                 _ => {
-                    let _ = tx.send(AppEvent::FetchError("Failed to save KV pair".to_string()));
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                        "tui-event-kv-save-failed",
+                    )));
                 }
             }
         }
         BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::FetchError(
-                "Memory KV not available in in-process mode".to_string(),
-            ));
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-kv-not-available-in-process",
+            )));
         }
     });
 }
@@ -1490,14 +1514,16 @@ pub fn spawn_delete_memory_kv(
                     let _ = tx.send(AppEvent::MemoryKvDeleted(key));
                 }
                 _ => {
-                    let _ = tx.send(AppEvent::FetchError("Failed to delete KV pair".to_string()));
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                        "tui-event-kv-delete-failed",
+                    )));
                 }
             }
         }
         BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::FetchError(
-                "Memory KV not available in in-process mode".to_string(),
-            ));
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-kv-not-available-in-process",
+            )));
         }
     });
 }
@@ -1619,14 +1645,17 @@ pub fn spawn_install_skill(backend: BackendRef, slug: String, tx: mpsc::Sender<A
                     let _ = tx.send(AppEvent::SkillInstalled(slug));
                 }
                 _ => {
-                    let _ = tx.send(AppEvent::FetchError(format!("Failed to install {slug}")));
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-skill-install-failed",
+                        &[("slug", &slug)],
+                    )));
                 }
             }
         }
         BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::FetchError(
-                "Skill installation not available in in-process mode".to_string(),
-            ));
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-skill-install-not-available-in-process",
+            )));
         }
     });
 }
@@ -1645,14 +1674,17 @@ pub fn spawn_uninstall_skill(backend: BackendRef, name: String, tx: mpsc::Sender
                     let _ = tx.send(AppEvent::SkillUninstalled(name));
                 }
                 _ => {
-                    let _ = tx.send(AppEvent::FetchError(format!("Failed to uninstall {name}")));
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-skill-uninstall-failed",
+                        &[("name", &name)],
+                    )));
                 }
             }
         }
         BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::FetchError(
-                "Skill uninstall not available in in-process mode".to_string(),
-            ));
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-skill-uninstall-not-available-in-process",
+            )));
         }
     });
 }
@@ -1772,8 +1804,10 @@ pub fn spawn_verify_chain(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
                     let valid = body["valid"].as_bool().unwrap_or(false);
                     let message = body["message"]
                         .as_str()
-                        .unwrap_or("Verification complete")
-                        .to_string();
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| {
+                            crate::i18n::t("tui-event-security-verification-complete")
+                        });
                     let _ = tx.send(AppEvent::SecurityChainVerified { valid, message });
                     let _ = tx.send(AppEvent::AuditChainVerified(valid));
                 }
@@ -1788,7 +1822,7 @@ pub fn spawn_verify_chain(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
         BackendRef::InProcess(_) => {
             let _ = tx.send(AppEvent::SecurityChainVerified {
                 valid: true,
-                message: "In-process mode: chain not applicable".to_string(),
+                message: crate::i18n::t("tui-event-security-chain-not-applicable"),
             });
         }
     });
@@ -2029,16 +2063,17 @@ pub fn spawn_save_provider_key(
                     let _ = tx.send(AppEvent::ProviderKeySaved(name));
                 }
                 _ => {
-                    let _ = tx.send(AppEvent::FetchError(format!(
-                        "Failed to save key for {name}"
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-provider-save-key-failed",
+                        &[("name", &name)],
                     )));
                 }
             }
         }
         BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::FetchError(
-                "Provider key management not available in in-process mode".to_string(),
-            ));
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-provider-key-management-not-available-in-process",
+            )));
         }
     });
 }
@@ -2056,16 +2091,17 @@ pub fn spawn_delete_provider_key(backend: BackendRef, name: String, tx: mpsc::Se
                     let _ = tx.send(AppEvent::ProviderKeyDeleted(name));
                 }
                 _ => {
-                    let _ = tx.send(AppEvent::FetchError(format!(
-                        "Failed to delete key for {name}"
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-provider-delete-key-failed",
+                        &[("name", &name)],
                     )));
                 }
             }
         }
         BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::FetchError(
-                "Provider key management not available in in-process mode".to_string(),
-            ));
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-provider-key-management-not-available-in-process",
+            )));
         }
     });
 }
@@ -2087,12 +2123,14 @@ pub fn spawn_test_provider(backend: BackendRef, name: String, tx: mpsc::Sender<A
                     let body: serde_json::Value = resp.json().unwrap_or_default();
                     let message = body["message"]
                         .as_str()
-                        .unwrap_or(if success {
-                            "Connection OK"
-                        } else {
-                            "Test failed"
-                        })
-                        .to_string();
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| {
+                            if success {
+                                crate::i18n::t("tui-event-provider-connection-ok")
+                            } else {
+                                crate::i18n::t("tui-event-provider-test-failed")
+                            }
+                        });
                     let _ = tx.send(AppEvent::ProviderTestResult(TestResult {
                         provider: name,
                         success,
@@ -2115,7 +2153,7 @@ pub fn spawn_test_provider(backend: BackendRef, name: String, tx: mpsc::Sender<A
                 provider: name,
                 success: false,
                 latency_ms: 0,
-                message: "Provider test not available in in-process mode".to_string(),
+                message: crate::i18n::t("tui-event-provider-test-not-available-in-process"),
             }));
         }
     });
@@ -2326,11 +2364,14 @@ pub fn spawn_activate_hand(backend: BackendRef, hand_id: String, tx: mpsc::Sende
                         .json::<serde_json::Value>()
                         .ok()
                         .and_then(|b| b["error"].as_str().map(|s| s.to_string()))
-                        .unwrap_or_else(|| "Activation failed".to_string());
+                        .unwrap_or_else(|| crate::i18n::t("tui-event-hand-activation-failed"));
                     let _ = tx.send(AppEvent::FetchError(msg));
                 }
                 Err(e) => {
-                    let _ = tx.send(AppEvent::FetchError(format!("Failed to activate: {e}")));
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-hand-activate-failed-error",
+                        &[("error", &e.to_string())],
+                    )));
                 }
             }
         }
@@ -2340,7 +2381,10 @@ pub fn spawn_activate_hand(backend: BackendRef, hand_id: String, tx: mpsc::Sende
                     let _ = tx.send(AppEvent::HandActivated(hand_id));
                 }
                 Err(e) => {
-                    let _ = tx.send(AppEvent::FetchError(format!("Activation failed: {e}")));
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-hand-activation-failed-error",
+                        &[("error", &e.to_string())],
+                    )));
                 }
             }
         }
@@ -2360,8 +2404,9 @@ pub fn spawn_deactivate_hand(backend: BackendRef, instance_id: String, tx: mpsc:
                     let _ = tx.send(AppEvent::HandDeactivated(instance_id));
                 }
                 _ => {
-                    let _ = tx.send(AppEvent::FetchError(format!(
-                        "Failed to deactivate {instance_id}"
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-hand-deactivate-failed",
+                        &[("instance_id", &instance_id)],
                     )));
                 }
             }
@@ -2372,11 +2417,17 @@ pub fn spawn_deactivate_hand(backend: BackendRef, instance_id: String, tx: mpsc:
                     let _ = tx.send(AppEvent::HandDeactivated(instance_id));
                 }
                 Err(e) => {
-                    let _ = tx.send(AppEvent::FetchError(format!("Deactivate failed: {e}")));
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-hand-deactivate-failed-error",
+                        &[("error", &e.to_string())],
+                    )));
                 }
             },
             Err(e) => {
-                let _ = tx.send(AppEvent::FetchError(format!("Invalid instance ID: {e}")));
+                let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                    "tui-event-hand-invalid-instance-id",
+                    &[("error", &e.to_string())],
+                )));
             }
         },
     });
@@ -2397,8 +2448,9 @@ pub fn spawn_pause_hand(backend: BackendRef, instance_id: String, tx: mpsc::Send
                     let _ = tx.send(AppEvent::HandPaused(instance_id));
                 }
                 _ => {
-                    let _ = tx.send(AppEvent::FetchError(format!(
-                        "Failed to pause {instance_id}"
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-hand-pause-failed",
+                        &[("instance_id", &instance_id)],
                     )));
                 }
             }
@@ -2409,11 +2461,17 @@ pub fn spawn_pause_hand(backend: BackendRef, instance_id: String, tx: mpsc::Send
                     let _ = tx.send(AppEvent::HandPaused(instance_id));
                 }
                 Err(e) => {
-                    let _ = tx.send(AppEvent::FetchError(format!("Pause failed: {e}")));
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-hand-pause-failed-error",
+                        &[("error", &e.to_string())],
+                    )));
                 }
             },
             Err(e) => {
-                let _ = tx.send(AppEvent::FetchError(format!("Invalid instance ID: {e}")));
+                let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                    "tui-event-hand-invalid-instance-id",
+                    &[("error", &e.to_string())],
+                )));
             }
         },
     });
@@ -2434,8 +2492,9 @@ pub fn spawn_resume_hand(backend: BackendRef, instance_id: String, tx: mpsc::Sen
                     let _ = tx.send(AppEvent::HandResumed(instance_id));
                 }
                 _ => {
-                    let _ = tx.send(AppEvent::FetchError(format!(
-                        "Failed to resume {instance_id}"
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-hand-resume-failed",
+                        &[("instance_id", &instance_id)],
                     )));
                 }
             }
@@ -2446,11 +2505,17 @@ pub fn spawn_resume_hand(backend: BackendRef, instance_id: String, tx: mpsc::Sen
                     let _ = tx.send(AppEvent::HandResumed(instance_id));
                 }
                 Err(e) => {
-                    let _ = tx.send(AppEvent::FetchError(format!("Resume failed: {e}")));
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-hand-resume-failed-error",
+                        &[("error", &e.to_string())],
+                    )));
                 }
             },
             Err(e) => {
-                let _ = tx.send(AppEvent::FetchError(format!("Invalid instance ID: {e}")));
+                let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                    "tui-event-hand-invalid-instance-id",
+                    &[("error", &e.to_string())],
+                )));
             }
         },
     });
@@ -2614,18 +2679,26 @@ pub fn spawn_install_extension(backend: BackendRef, id: String, tx: mpsc::Sender
                     let body = resp.json::<serde_json::Value>().ok();
                     let err = body
                         .and_then(|b| b["error"].as_str().map(String::from))
-                        .unwrap_or_else(|| format!("Failed to install {id}"));
+                        .unwrap_or_else(|| {
+                            crate::i18n::t_args(
+                                "tui-event-extension-install-failed",
+                                &[("id", &id)],
+                            )
+                        });
                     let _ = tx.send(AppEvent::FetchError(err));
                 }
                 Err(e) => {
-                    let _ = tx.send(AppEvent::FetchError(format!("Install failed: {e}")));
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-extension-install-failed-error",
+                        &[("error", &e.to_string())],
+                    )));
                 }
             }
         }
         BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::FetchError(
-                "Install via in-process mode not supported — use CLI".to_string(),
-            ));
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-extension-install-not-supported",
+            )));
         }
     });
 }
@@ -2651,14 +2724,17 @@ pub fn spawn_remove_extension(backend: BackendRef, id: String, tx: mpsc::Sender<
                     let _ = tx.send(AppEvent::ExtensionRemoved(id));
                 }
                 _ => {
-                    let _ = tx.send(AppEvent::FetchError(format!("Failed to remove {id}")));
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-extension-remove-failed",
+                        &[("id", &id)],
+                    )));
                 }
             }
         }
         BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::FetchError(
-                "Remove via in-process mode not supported — use CLI".to_string(),
-            ));
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-extension-remove-not-supported",
+            )));
         }
     });
 }
@@ -2681,14 +2757,17 @@ pub fn spawn_reconnect_extension(backend: BackendRef, id: String, tx: mpsc::Send
                     let _ = tx.send(AppEvent::ExtensionReconnected(id, tool_count));
                 }
                 _ => {
-                    let _ = tx.send(AppEvent::FetchError(format!("Failed to reconnect {id}")));
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-extension-reconnect-failed",
+                        &[("id", &id)],
+                    )));
                 }
             }
         }
         BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::FetchError(
-                "Reconnect via in-process mode not supported".to_string(),
-            ));
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-extension-reconnect-not-supported",
+            )));
         }
     });
 }
@@ -2795,13 +2874,15 @@ pub fn spawn_comms_send(
             {
                 Ok(resp) => {
                     if resp.status().is_success() {
-                        let _ = tx.send(AppEvent::CommsSendResult("Message sent".to_string()));
+                        let _ = tx.send(AppEvent::CommsSendResult(crate::i18n::t(
+                            "tui-event-comms-message-sent",
+                        )));
                     } else {
                         let err = resp
                             .json::<serde_json::Value>()
                             .ok()
                             .and_then(|v| v["error"].as_str().map(String::from))
-                            .unwrap_or_else(|| "Send failed".to_string());
+                            .unwrap_or_else(|| crate::i18n::t("tui-event-comms-send-failed"));
                         let _ = tx.send(AppEvent::CommsSendResult(err));
                     }
                 }
@@ -2811,9 +2892,9 @@ pub fn spawn_comms_send(
             }
         }
         BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::CommsSendResult(
-                "Send not supported in-process".to_string(),
-            ));
+            let _ = tx.send(AppEvent::CommsSendResult(crate::i18n::t(
+                "tui-event-comms-send-not-supported-in-process",
+            )));
         }
     });
 }
@@ -2843,13 +2924,15 @@ pub fn spawn_comms_task(
             {
                 Ok(resp) => {
                     if resp.status().is_success() {
-                        let _ = tx.send(AppEvent::CommsTaskResult("Task posted".to_string()));
+                        let _ = tx.send(AppEvent::CommsTaskResult(crate::i18n::t(
+                            "tui-event-comms-task-posted",
+                        )));
                     } else {
                         let err = resp
                             .json::<serde_json::Value>()
                             .ok()
                             .and_then(|v| v["error"].as_str().map(String::from))
-                            .unwrap_or_else(|| "Post failed".to_string());
+                            .unwrap_or_else(|| crate::i18n::t("tui-event-comms-post-failed"));
                         let _ = tx.send(AppEvent::CommsTaskResult(err));
                     }
                 }
@@ -2859,9 +2942,9 @@ pub fn spawn_comms_task(
             }
         }
         BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::CommsTaskResult(
-                "Task post not supported in-process".to_string(),
-            ));
+            let _ = tx.send(AppEvent::CommsTaskResult(crate::i18n::t(
+                "tui-event-comms-post-not-supported-in-process",
+            )));
         }
     });
 }

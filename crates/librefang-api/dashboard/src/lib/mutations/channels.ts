@@ -2,6 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   reloadChannels,
   saveSidecarConfig,
+  removeSidecarConfig,
   sendCommsMessage,
   postCommsTask,
 } from "../http/client";
@@ -32,6 +33,18 @@ export function useSaveSidecarConfig() {
       name: string;
       values: Record<string, string>;
     }) => saveSidecarConfig(name, values),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: channelKeys.all });
+    },
+  });
+}
+
+// Remove a configured sidecar channel. Invalidates the whole channelKeys.all
+// subtree because removal flips the channel back to "discovery".
+export function useRemoveSidecarConfig() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => removeSidecarConfig(name),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: channelKeys.all });
     },

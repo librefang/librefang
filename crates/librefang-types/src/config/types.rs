@@ -2670,6 +2670,15 @@ pub struct CompactionTomlConfig {
     /// Maximum retries for LLM summarization (default: 3).
     #[serde(default = "default_compaction_max_retries")]
     pub max_retries: u32,
+    /// Aggregate consecutive developer-tool loops (edit/run/test) during compaction (default: false).
+    #[serde(default = "default_compaction_aggregate_developer_loops")]
+    pub aggregate_developer_loops: bool,
+    /// Minimum consecutive developer-tool steps before loop aggregation triggers (default: 5).
+    #[serde(default = "default_compaction_max_loop_steps_before_aggregate")]
+    pub max_loop_steps_before_aggregate: u32,
+    /// Strip reasoning from assistant messages older than this many turns during compaction; 0 disables (default: 0).
+    #[serde(default = "default_compaction_strip_reasoning_after_turns")]
+    pub strip_reasoning_after_turns: u32,
 }
 
 fn default_compaction_threshold() -> usize {
@@ -2690,6 +2699,15 @@ fn default_compaction_max_chunk_chars() -> usize {
 fn default_compaction_max_retries() -> u32 {
     3
 }
+fn default_compaction_aggregate_developer_loops() -> bool {
+    false
+}
+fn default_compaction_max_loop_steps_before_aggregate() -> u32 {
+    5
+}
+fn default_compaction_strip_reasoning_after_turns() -> u32 {
+    0
+}
 
 impl Default for CompactionTomlConfig {
     fn default() -> Self {
@@ -2700,6 +2718,9 @@ impl Default for CompactionTomlConfig {
             token_threshold_ratio: default_compaction_token_threshold_ratio(),
             max_chunk_chars: default_compaction_max_chunk_chars(),
             max_retries: default_compaction_max_retries(),
+            aggregate_developer_loops: default_compaction_aggregate_developer_loops(),
+            max_loop_steps_before_aggregate: default_compaction_max_loop_steps_before_aggregate(),
+            strip_reasoning_after_turns: default_compaction_strip_reasoning_after_turns(),
         }
     }
 }
@@ -6225,6 +6246,7 @@ pub enum McpTransportEntry {
 /// auth_url = "https://my-server.com/oauth/authorize"
 /// token_url = "https://my-server.com/oauth/token"
 /// client_id = "my-client-id"
+/// client_secret_env = "MY_SERVER_CLIENT_SECRET"
 /// scopes = ["read", "write"]
 /// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
@@ -6235,6 +6257,20 @@ pub struct McpOAuthConfig {
     pub token_url: Option<String>,
     #[serde(default)]
     pub client_id: Option<String>,
+    /// Name of the environment variable holding the OAuth client secret.
+    /// The secret itself is never stored in `config.toml`. Required when the
+    /// upstream provider treats the client as confidential (e.g. Google
+    /// Workspace MCP servers reject the refresh request without
+    /// `client_secret`, even for Desktop/Installed OAuth client types).
+    /// Leave unset for purely public PKCE clients (Notion, ChatGPT, etc.)
+    /// — the OAuth flow is unchanged.
+    ///
+    /// Resolved once at `auth_start`; the resolved value is persisted in the
+    /// credential vault under the `client_secret` field alongside
+    /// `refresh_token`, so it survives daemon restarts and is reused on
+    /// every refresh.
+    #[serde(default)]
+    pub client_secret_env: Option<String>,
     #[serde(default)]
     pub scopes: Vec<String>,
     /// Slack-style user scopes, appended to the authorization URL as

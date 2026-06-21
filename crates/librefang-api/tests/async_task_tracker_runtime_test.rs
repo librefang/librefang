@@ -167,10 +167,12 @@ async fn register_and_complete_workflow_task_through_kernel_api() {
     let mut rx = attach_injection_receiver(&h.state, agent_id, session_id);
 
     let run_id = WorkflowRunId(Uuid::new_v4());
-    let handle =
-        h.state
-            .kernel
-            .register_async_task(agent_id, session_id, TaskKind::Workflow { run_id });
+    let handle = h.state.kernel.register_async_task(
+        agent_id,
+        session_id,
+        TaskKind::Workflow { run_id },
+        None,
+    );
 
     assert_eq!(h.state.kernel.pending_async_task_count(), 1);
 
@@ -217,6 +219,7 @@ async fn wake_idle_spawn_when_no_receiver_attached() {
         TaskKind::Workflow {
             run_id: WorkflowRunId(Uuid::new_v4()),
         },
+        None,
     );
 
     let delivered = h
@@ -297,10 +300,12 @@ async fn timeout_completion_text_format_is_stable() {
     let mut rx = attach_injection_receiver(&h.state, agent_id, session_id);
 
     let run_id = WorkflowRunId(Uuid::new_v4());
-    let handle =
-        h.state
-            .kernel
-            .register_async_task(agent_id, session_id, TaskKind::Workflow { run_id });
+    let handle = h.state.kernel.register_async_task(
+        agent_id,
+        session_id,
+        TaskKind::Workflow { run_id },
+        None,
+    );
 
     // Inject the exact `TaskStatus::Failed` payload `start_workflow_async_tracked`
     // produces for the `Err(_elapsed)` branch. Pinning this against
@@ -452,6 +457,7 @@ async fn double_completion_via_appstate_is_a_noop() {
         TaskKind::Workflow {
             run_id: WorkflowRunId(Uuid::new_v4()),
         },
+        None,
     );
 
     let first = h

@@ -251,7 +251,10 @@
         "max_summary_tokens": 1024,
         "token_threshold_ratio": 0.7,
         "max_chunk_chars": 80000,
-        "max_retries": 3
+        "max_retries": 3,
+        "aggregate_developer_loops": false,
+        "max_loop_steps_before_aggregate": 5,
+        "strip_reasoning_after_turns": 0
       },
       "allOf": [
         {
@@ -2519,6 +2522,11 @@
       "description": "Session compaction configuration (exposed in `[compaction]` TOML section).\n\nControls when and how the LLM-based history compaction runs. Internal algorithmic ratios (base_chunk_ratio, safety_margin, etc.) are kept as private constants inside the runtime compactor and are not exposed here.",
       "type": "object",
       "properties": {
+        "aggregate_developer_loops": {
+          "description": "Aggregate consecutive developer-tool loops (edit/run/test) during compaction (default: false).",
+          "default": false,
+          "type": "boolean"
+        },
         "keep_recent": {
           "description": "Number of recent messages to preserve verbatim (default: 10).",
           "default": 10,
@@ -2533,6 +2541,13 @@
           "format": "uint",
           "minimum": 0.0
         },
+        "max_loop_steps_before_aggregate": {
+          "description": "Minimum consecutive developer-tool steps before loop aggregation triggers (default: 5).",
+          "default": 5,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
         "max_retries": {
           "description": "Maximum retries for LLM summarization (default: 3).",
           "default": 3,
@@ -2545,6 +2560,13 @@
           "default": 1024,
           "type": "integer",
           "format": "uint",
+          "minimum": 0.0
+        },
+        "strip_reasoning_after_turns": {
+          "description": "Strip reasoning from assistant messages older than this many turns during compaction; 0 disables (default: 0).",
+          "default": 0,
+          "type": "integer",
+          "format": "uint32",
           "minimum": 0.0
         },
         "threshold_messages": {
@@ -4111,7 +4133,7 @@
       }
     },
     "McpOAuthConfig": {
-      "description": "Optional OAuth configuration for an MCP server.\n\nUsed as fallback when the server doesn't support `.well-known` discovery, or to override specific values from discovery. All fields are optional — discovery results fill gaps, config values take precedence.\n\n# Example (config.toml)\n\n```toml [[mcp_servers]] name = \"custom-server\" transport = { type = \"http\", url = \"https://my-server.com/mcp\" }\n\n[mcp_servers.oauth] auth_url = \"https://my-server.com/oauth/authorize\" token_url = \"https://my-server.com/oauth/token\" client_id = \"my-client-id\" scopes = [\"read\", \"write\"] ```",
+      "description": "Optional OAuth configuration for an MCP server.\n\nUsed as fallback when the server doesn't support `.well-known` discovery, or to override specific values from discovery. All fields are optional — discovery results fill gaps, config values take precedence.\n\n# Example (config.toml)\n\n```toml [[mcp_servers]] name = \"custom-server\" transport = { type = \"http\", url = \"https://my-server.com/mcp\" }\n\n[mcp_servers.oauth] auth_url = \"https://my-server.com/oauth/authorize\" token_url = \"https://my-server.com/oauth/token\" client_id = \"my-client-id\" client_secret_env = \"MY_SERVER_CLIENT_SECRET\" scopes = [\"read\", \"write\"] ```",
       "type": "object",
       "properties": {
         "auth_url": {
@@ -4122,6 +4144,14 @@
           ]
         },
         "client_id": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "client_secret_env": {
+          "description": "Name of the environment variable holding the OAuth client secret. The secret itself is never stored in `config.toml`. Required when the upstream provider treats the client as confidential (e.g. Google Workspace MCP servers reject the refresh request without `client_secret`, even for Desktop/Installed OAuth client types). Leave unset for purely public PKCE clients (Notion, ChatGPT, etc.) — the OAuth flow is unchanged.\n\nResolved once at `auth_start`; the resolved value is persisted in the credential vault under the `client_secret` field alongside `refresh_token`, so it survives daemon restarts and is reused on every refresh.",
           "default": null,
           "type": [
             "string",

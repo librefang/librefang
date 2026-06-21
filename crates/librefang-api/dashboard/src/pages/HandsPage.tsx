@@ -897,7 +897,8 @@ function HandSettingsEditor({
   };
 
   const handleSave = () => {
-    const payload: Record<string, unknown> = {};
+    // Seed from saved values so a partial draft doesn't wipe unedited keys.
+    const payload: Record<string, unknown> = { ...(settings.current_values ?? {}) };
     for (const [k, v] of Object.entries(draft)) {
       payload[k] = v;
     }

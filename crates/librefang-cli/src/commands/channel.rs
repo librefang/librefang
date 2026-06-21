@@ -24,11 +24,24 @@ pub(crate) fn cmd_channel_list() {
         .cloned()
         .unwrap_or_default();
     if items.is_empty() {
-        println!("No channels configured.");
-        println!("Use `librefang channel setup` to add one.");
+        println!("{}", i18n::t("channel-none-configured"));
+        println!("{}", i18n::t("channel-use-setup-hint"));
         return;
     }
-    let mut t = crate::table::Table::new(&["NAME", "KIND", "CONFIGURED", "TOKEN", "24H MSGS"]);
+    let yes_str = i18n::t("label-yes");
+    let no_str = i18n::t("label-no");
+    let name_header = i18n::t("label-header-name");
+    let kind_header = i18n::t("label-header-kind");
+    let conf_header = i18n::t("label-header-configured");
+    let token_header = i18n::t("label-header-token");
+    let msgs_header = i18n::t("channel-header-msgs-24h");
+    let mut t = crate::table::Table::new(&[
+        &name_header,
+        &kind_header,
+        &conf_header,
+        &token_header,
+        &msgs_header,
+    ]);
     for ch in &items {
         let name = ch.get("name").and_then(|v| v.as_str()).unwrap_or("?");
         let kind = ch.get("category").and_then(|v| v.as_str()).unwrap_or("?");
@@ -44,8 +57,8 @@ pub(crate) fn cmd_channel_list() {
         t.add_row(&[
             name,
             kind,
-            if configured { "yes" } else { "no" },
-            if has_token { "yes" } else { "no" },
+            if configured { &yes_str } else { &no_str },
+            if has_token { &yes_str } else { &no_str },
             &msgs.to_string(),
         ]);
     }
@@ -66,7 +79,10 @@ pub(crate) fn cmd_channel_reload() {
         .and_then(|v| v.as_array())
         .map(|a| a.len())
         .unwrap_or(0);
-    println!("Channels reloaded ({started} sidecar(s) started).");
+    println!(
+        "{}",
+        i18n::t_args("channel-reloaded", &[("started", &started.to_string())])
+    );
 }
 
 pub(crate) fn cmd_channel_setup(name: Option<&str>) {
@@ -105,10 +121,10 @@ pub(crate) fn cmd_channel_setup(name: Option<&str>) {
             //    knows about. Use `librefang channel list` to see /
             //    `librefang channel rm <name>` to drop one.
             if all.is_empty() {
-                println!("Daemon's channel registry is empty.");
-                println!("Install the sidecar SDK so adapters appear in the catalog:");
-                println!("  pip install librefang-sdk");
-                println!("Then re-run `librefang channel setup`.");
+                println!("{}", i18n::t("channel-registry-empty"));
+                println!("{}", i18n::t("channel-install-sdk-hint"));
+                println!("{}", i18n::t("channel-install-sdk-cmd"));
+                println!("{}", i18n::t("channel-rerun-setup-hint"));
                 return;
             }
             let candidates: Vec<&serde_json::Value> = all
@@ -116,18 +132,18 @@ pub(crate) fn cmd_channel_setup(name: Option<&str>) {
                 .filter(|c| c.get("configured").and_then(|v| v.as_bool()) != Some(true))
                 .collect();
             if candidates.is_empty() {
-                println!("Every available channel is already configured.");
-                println!("Use `librefang channel list` to see them, or");
-                println!("`librefang channel rm <name>` to remove an entry first.");
+                println!("{}", i18n::t("channel-all-configured"));
+                println!("{}", i18n::t("channel-see-list-hint"));
+                println!("{}", i18n::t("channel-remove-entry-hint"));
                 return;
             }
-            println!("Pick a channel to set up:");
+            println!("{}", i18n::t("channel-pick-setup"));
             for (i, ch) in candidates.iter().enumerate() {
                 let n = ch.get("name").and_then(|v| v.as_str()).unwrap_or("?");
                 let d = ch.get("display_name").and_then(|v| v.as_str()).unwrap_or(n);
                 println!("  {:>2}. {:<14} {}", i + 1, n, d);
             }
-            let choice = prompt_input("Choice [1]: ");
+            let choice = prompt_input(&i18n::t("channel-choice-prompt"));
             let idx = if choice.trim().is_empty() {
                 0
             } else {
@@ -145,8 +161,8 @@ pub(crate) fn cmd_channel_setup(name: Option<&str>) {
         Some(t) => t,
         None => {
             ui::error_with_fix(
-                &format!("Unknown channel: {}", name.unwrap_or("?")),
-                "Run `librefang channel list` to see the available adapters.",
+                &i18n::t_args("channel-unknown-error", &[("name", name.unwrap_or("?"))]),
+                &i18n::t("channel-unknown-error-fix"),
             );
             std::process::exit(1);
         }
@@ -162,8 +178,11 @@ pub(crate) fn cmd_channel_setup(name: Option<&str>) {
         .cloned()
         .unwrap_or_default();
     if fields.is_empty() {
-        println!("`{chan_name}` exposes no configurable fields — nothing to prompt for.");
-        println!("(Hot-reload anyway with `librefang channel reload` if you've already edited config.toml by hand.)");
+        println!(
+            "{}",
+            i18n::t_args("channel-no-configurable-fields", &[("name", &chan_name)])
+        );
+        println!("{}", i18n::t("channel-hot-reload-manual-hint"));
         return;
     }
 
@@ -185,13 +204,19 @@ pub(crate) fn cmd_channel_setup(name: Option<&str>) {
         // Secret-typed + has_value=true: blank means "keep existing".
         // Non-secret + has current value: show as default-in-brackets.
         let prompt = if ftype == "secret" && has_value {
-            format!("  {label} ({key}) [set — leave blank to keep]: ")
+            i18n::t_args(
+                "channel-prompt-secret-keep",
+                &[("label", label), ("key", key)],
+            )
         } else if !current.is_empty() {
-            format!("  {label} ({key}) [{current}]: ")
+            i18n::t_args(
+                "channel-prompt-default",
+                &[("label", label), ("key", key), ("current", current)],
+            )
         } else if required {
-            format!("  {label} ({key}) *: ")
+            i18n::t_args("channel-prompt-required", &[("label", label), ("key", key)])
         } else {
-            format!("  {label} ({key}): ")
+            i18n::t_args("channel-prompt-optional", &[("label", label), ("key", key)])
         };
         let entered = prompt_input(&prompt);
         let val = entered.trim();
@@ -215,14 +240,18 @@ pub(crate) fn cmd_channel_setup(name: Option<&str>) {
     // alias kept for legacy callers); prefer the nested one, fall
     // through to the flat alias for older deployments.
     if body.get("status").and_then(|v| v.as_str()) != Some("saved") {
+        let fallback_err = i18n::t("channel-error-save-failed-no-body");
         let err = body
             .pointer("/error/message")
             .and_then(|v| v.as_str())
             .or_else(|| body.get("message").and_then(|v| v.as_str()))
-            .unwrap_or("save failed (no error body)");
+            .unwrap_or(&fallback_err);
         ui::error_with_fix(
-            &format!("Save for `{chan_name}` rejected: {err}"),
-            "Re-run with corrected values, or check the daemon log for details.",
+            &i18n::t_args(
+                "channel-save-rejected",
+                &[("name", &chan_name), ("error", err)],
+            ),
+            &i18n::t("channel-save-rejected-fix"),
         );
         std::process::exit(1);
     }
@@ -236,9 +265,15 @@ pub(crate) fn cmd_channel_setup(name: Option<&str>) {
         .cloned()
         .unwrap_or_default();
     if restart_required {
-        println!("✓ Saved `{chan_name}` — restart the daemon for changes to apply.");
+        println!(
+            "{}",
+            i18n::t_args("channel-saved-restart-required", &[("name", &chan_name)])
+        );
     } else {
-        println!("✓ Saved `{chan_name}` — hot-reload applied.");
+        println!(
+            "{}",
+            i18n::t_args("channel-saved-hot-reload", &[("name", &chan_name)])
+        );
     }
     if !shadowed.is_empty() {
         let keys: Vec<String> = shadowed
@@ -246,8 +281,8 @@ pub(crate) fn cmd_channel_setup(name: Option<&str>) {
             .filter_map(|v| v.as_str().map(String::from))
             .collect();
         eprintln!(
-            "Warning: shell environment variables shadow these tokens — unset them and restart for the new value to take effect: {}",
-            keys.join(", "),
+            "{}",
+            i18n::t_args("channel-env-shadowing-warn", &[("keys", &keys.join(", "))])
         );
     }
 }
@@ -263,8 +298,14 @@ pub(crate) fn cmd_channel_rm(name: &str) {
         Ok(s) => s,
         Err(e) => {
             ui::error_with_fix(
-                &format!("Cannot read {}: {e}", path.display()),
-                "Run `librefang init` to create the config file.",
+                &i18n::t_args(
+                    "channel-config-read-fail",
+                    &[
+                        ("path", &path.display().to_string()),
+                        ("error", &e.to_string()),
+                    ],
+                ),
+                &i18n::t("channel-config-read-fail-fix"),
             );
             std::process::exit(1);
         }
@@ -273,8 +314,14 @@ pub(crate) fn cmd_channel_rm(name: &str) {
         Ok(d) => d,
         Err(e) => {
             ui::error_with_fix(
-                &format!("Cannot parse {}: {e}", path.display()),
-                "Fix the TOML syntax and retry.",
+                &i18n::t_args(
+                    "channel-config-parse-fail",
+                    &[
+                        ("path", &path.display().to_string()),
+                        ("error", &e.to_string()),
+                    ],
+                ),
+                &i18n::t("channel-config-parse-fail-fix"),
             );
             std::process::exit(1);
         }
@@ -285,7 +332,7 @@ pub(crate) fn cmd_channel_rm(name: &str) {
     {
         Some(a) => a,
         None => {
-            println!("No [[sidecar_channels]] entries in config.toml — nothing to remove.");
+            println!("{}", i18n::t("channel-no-entries-to-remove"));
             return;
         }
     };
@@ -304,17 +351,32 @@ pub(crate) fn cmd_channel_rm(name: &str) {
         arr.remove(i);
     }
     if removed == 0 {
-        println!("No [[sidecar_channels]] entry with name=\"{name}\".");
+        println!(
+            "{}",
+            i18n::t_args("channel-no-entry-with-name", &[("name", name)])
+        );
         return;
     }
     if let Err(e) = std::fs::write(&path, doc.to_string()) {
         ui::error_with_fix(
-            &format!("Failed to write {}: {e}", path.display()),
-            "Check filesystem permissions.",
+            &i18n::t_args(
+                "channel-config-write-fail",
+                &[
+                    ("path", &path.display().to_string()),
+                    ("error", &e.to_string()),
+                ],
+            ),
+            &i18n::t("channel-config-write-fail-fix"),
         );
         std::process::exit(1);
     }
-    println!("✓ Removed {removed} [[sidecar_channels]] entry/entries named `{name}`.");
+    println!(
+        "{}",
+        i18n::t_args(
+            "channel-removed-entries",
+            &[("count", &removed.to_string()), ("name", name)]
+        )
+    );
     match find_daemon() {
         Some(base) => {
             let client = daemon_client();
@@ -323,16 +385,31 @@ pub(crate) fn cmd_channel_rm(name: &str) {
                 .json(&serde_json::json!({}))
                 .send()
             {
-                Ok(r) if r.status().is_success() => println!("  Hot-reloaded daemon."),
-                Ok(r) => eprintln!(
-                    "  Reload returned {}: change will apply on next daemon restart.",
-                    r.status()
-                ),
-                Err(e) => eprintln!(
-                    "  Could not contact daemon for reload ({e}); change will apply on next start."
-                ),
+                Ok(r) if r.status().is_success() => {
+                    println!("{}", i18n::t("channel-hot-reloaded-daemon"));
+                }
+                Ok(r) => {
+                    eprintln!(
+                        "{}",
+                        i18n::t_args(
+                            "channel-reload-status-warn",
+                            &[("status", &r.status().to_string())]
+                        )
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "{}",
+                        i18n::t_args(
+                            "channel-reload-contact-fail-warn",
+                            &[("error", &e.to_string())]
+                        )
+                    );
+                }
             }
         }
-        None => println!("  Daemon not running; change will apply on next start."),
+        None => {
+            println!("{}", i18n::t("channel-reload-daemon-offline"));
+        }
     }
 }

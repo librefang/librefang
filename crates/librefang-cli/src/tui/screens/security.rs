@@ -27,11 +27,11 @@ pub enum SecuritySection {
 }
 
 impl SecuritySection {
-    fn label(self) -> &'static str {
+    fn label_localized(self) -> String {
         match self {
-            Self::Core => "Core Security",
-            Self::Configurable => "Configurable",
-            Self::Monitoring => "Monitoring",
+            Self::Core => crate::i18n::t("tui-security-section-core"),
+            Self::Configurable => crate::i18n::t("tui-security-section-configurable"),
+            Self::Monitoring => crate::i18n::t("tui-security-section-monitoring"),
         }
     }
 }
@@ -42,95 +42,95 @@ fn builtin_features() -> Vec<SecurityFeature> {
     vec![
         // Core (8)
         SecurityFeature {
-            name: "Path Traversal Prevention".into(),
+            name: crate::i18n::t("tui-security-feat-path-traversal-name"),
             active: true,
-            description: "safe_resolve_path blocks ../../ attacks".into(),
+            description: crate::i18n::t("tui-security-feat-path-traversal-desc"),
             section: SecuritySection::Core,
         },
         SecurityFeature {
-            name: "SSRF Protection".into(),
+            name: crate::i18n::t("tui-security-feat-ssrf-name"),
             active: true,
-            description: "Blocks private IPs and metadata endpoints in HTTP fetches".into(),
+            description: crate::i18n::t("tui-security-feat-ssrf-desc"),
             section: SecuritySection::Core,
         },
         SecurityFeature {
-            name: "Subprocess Isolation".into(),
+            name: crate::i18n::t("tui-security-feat-subprocess-name"),
             active: true,
-            description: "env_clear() + selective vars on child processes".into(),
+            description: crate::i18n::t("tui-security-feat-subprocess-desc"),
             section: SecuritySection::Core,
         },
         SecurityFeature {
-            name: "WASM Dual Metering".into(),
+            name: crate::i18n::t("tui-security-feat-wasm-name"),
             active: true,
-            description: "Fuel + epoch interruption with watchdog thread".into(),
+            description: crate::i18n::t("tui-security-feat-wasm-desc"),
             section: SecuritySection::Core,
         },
         SecurityFeature {
-            name: "Capability Inheritance".into(),
+            name: crate::i18n::t("tui-security-feat-capability-name"),
             active: true,
-            description: "validate_capability_inheritance prevents privilege escalation".into(),
+            description: crate::i18n::t("tui-security-feat-capability-desc"),
             section: SecuritySection::Core,
         },
         SecurityFeature {
-            name: "Secret Zeroization".into(),
+            name: crate::i18n::t("tui-security-feat-secret-name"),
             active: true,
-            description: "Zeroizing<String> auto-wipes API keys from memory".into(),
+            description: crate::i18n::t("tui-security-feat-secret-desc"),
             section: SecuritySection::Core,
         },
         SecurityFeature {
-            name: "Ed25519 Manifest Signing".into(),
+            name: crate::i18n::t("tui-security-feat-ed25519-name"),
             active: true,
-            description: "Signed agent manifests with Ed25519 verification".into(),
+            description: crate::i18n::t("tui-security-feat-ed25519-desc"),
             section: SecuritySection::Core,
         },
         SecurityFeature {
-            name: "Taint Tracking".into(),
+            name: crate::i18n::t("tui-security-feat-taint-name"),
             active: true,
-            description: "Information flow tracking across tool boundaries".into(),
+            description: crate::i18n::t("tui-security-feat-taint-desc"),
             section: SecuritySection::Core,
         },
         // Configurable (4)
         SecurityFeature {
-            name: "OFP Wire Auth".into(),
+            name: crate::i18n::t("tui-security-feat-ofp-name"),
             active: true,
-            description: "HMAC-SHA256 mutual authentication with nonce".into(),
+            description: crate::i18n::t("tui-security-feat-ofp-desc"),
             section: SecuritySection::Configurable,
         },
         SecurityFeature {
-            name: "RBAC Multi-User".into(),
+            name: crate::i18n::t("tui-security-feat-rbac-name"),
             active: true,
-            description: "Role-based access control with user hierarchy".into(),
+            description: crate::i18n::t("tui-security-feat-rbac-desc"),
             section: SecuritySection::Configurable,
         },
         SecurityFeature {
-            name: "Rate Limiting".into(),
+            name: crate::i18n::t("tui-security-feat-rate-name"),
             active: true,
-            description: "GCRA rate limiter with cost-aware tokens".into(),
+            description: crate::i18n::t("tui-security-feat-rate-desc"),
             section: SecuritySection::Configurable,
         },
         SecurityFeature {
-            name: "Security Headers".into(),
+            name: crate::i18n::t("tui-security-feat-headers-name"),
             active: true,
-            description: "CSP, X-Frame-Options, HSTS middleware".into(),
+            description: crate::i18n::t("tui-security-feat-headers-desc"),
             section: SecuritySection::Configurable,
         },
         // Monitoring (3)
         SecurityFeature {
-            name: "Merkle Audit Trail".into(),
+            name: crate::i18n::t("tui-security-feat-merkle-name"),
             active: true,
-            description: "Hash chain audit log with tamper detection".into(),
+            description: crate::i18n::t("tui-security-feat-merkle-desc"),
             section: SecuritySection::Monitoring,
         },
         SecurityFeature {
-            name: "Heartbeat Monitor".into(),
+            name: crate::i18n::t("tui-security-feat-heartbeat-name"),
             active: true,
-            description: "Background health checks with restart limits".into(),
+            description: crate::i18n::t("tui-security-feat-heartbeat-desc"),
             section: SecuritySection::Monitoring,
         },
         SecurityFeature {
-            name: "Prompt Injection Scanner".into(),
+            name: crate::i18n::t("tui-security-feat-prompt-name"),
             active: true,
-            description: "Detects override attempts and data exfiltration".into(),
+            description: crate::i18n::t("tui-security-feat-prompt-desc"),
             section: SecuritySection::Monitoring,
         },
     ]
@@ -197,7 +197,11 @@ impl SecurityState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut SecurityState) {
-    let inner = widgets::render_screen_block(f, area, "\u{25c6} Security");
+    let inner = widgets::render_screen_block(
+        f,
+        area,
+        &format!("{} {}", "\u{25c6}", crate::i18n::t("tui-security-title")),
+    );
 
     let chunks = Layout::vertical([
         Constraint::Length(2), // summary bar
@@ -214,13 +218,19 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SecurityState) {
         Paragraph::new(vec![
             Line::from(vec![
                 Span::styled(
-                    format!("  {active_count}/{total_count} features active"),
+                    crate::i18n::t_args(
+                        "tui-security-active-features",
+                        &[
+                            ("active", &active_count.to_string()),
+                            ("total", &total_count.to_string()),
+                        ],
+                    ),
                     Style::default()
                         .fg(theme::GREEN)
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    "  \u{2502}  Core \u{00b7} Configurable \u{00b7} Monitoring",
+                    crate::i18n::t("tui-security-sections-sub"),
                     theme::dim_style(),
                 ),
             ]),
@@ -250,29 +260,50 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SecurityState) {
                 lines.push(Line::raw(""));
             }
             lines.push(Line::from(vec![Span::styled(
-                format!("  {} {} ", section_icon(feat.section), feat.section.label()),
+                format!(
+                    "  {} {} ",
+                    section_icon(feat.section),
+                    feat.section.label_localized()
+                ),
                 Style::default()
                     .fg(theme::ACCENT)
                     .add_modifier(Modifier::BOLD),
             )]));
             lines.push(Line::from(vec![
-                Span::styled(format!("  {:<30}", "Feature"), theme::table_header()),
-                Span::styled(format!(" {:<12}", "Status"), theme::table_header()),
-                Span::styled(" Description", theme::table_header()),
+                Span::styled(
+                    format!("  {:<30}", crate::i18n::t("tui-security-header-feature")),
+                    theme::table_header(),
+                ),
+                Span::styled(
+                    format!(" {:<12}", crate::i18n::t("tui-security-header-status")),
+                    theme::table_header(),
+                ),
+                Span::styled(
+                    format!(" {}", crate::i18n::t("tui-security-header-description")),
+                    theme::table_header(),
+                ),
             ]));
             current_section = Some(feat.section);
         }
 
         let (badge, badge_style) = if feat.active {
             (
-                "\u{25cf} Active",
+                format!(
+                    "{} {}",
+                    "\u{25cf}",
+                    crate::i18n::t("tui-security-status-active")
+                ),
                 Style::default()
                     .fg(theme::GREEN)
                     .add_modifier(Modifier::BOLD),
             )
         } else {
             (
-                "\u{25cb} Inactive",
+                format!(
+                    "{} {}",
+                    "\u{25cb}",
+                    crate::i18n::t("tui-security-status-inactive")
+                ),
                 Style::default().fg(theme::RED).add_modifier(Modifier::BOLD),
             )
         };
@@ -299,13 +330,17 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SecurityState) {
         None => {
             if state.loading {
                 f.render_widget(
-                    widgets::spinner(state.tick, "Verifying audit chain\u{2026}"),
+                    widgets::spinner(state.tick, &crate::i18n::t("tui-security-verifying")),
                     chunks[2],
                 );
             } else {
                 f.render_widget(
                     Paragraph::new(Line::from(vec![Span::styled(
-                        "  \u{25cb} Press [v] to verify audit chain integrity",
+                        format!(
+                            "  {} {}",
+                            "\u{25cb}",
+                            crate::i18n::t("tui-security-verify-prompt")
+                        ),
                         theme::dim_style(),
                     )])),
                     chunks[2],
@@ -316,7 +351,11 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SecurityState) {
             f.render_widget(
                 Paragraph::new(vec![
                     Line::from(vec![Span::styled(
-                        "  \u{2714} Audit chain verified",
+                        format!(
+                            "  {} {}",
+                            "\u{2714}",
+                            crate::i18n::t("tui-security-verify-success")
+                        ),
                         Style::default()
                             .fg(theme::GREEN)
                             .add_modifier(Modifier::BOLD),
@@ -333,7 +372,11 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SecurityState) {
             f.render_widget(
                 Paragraph::new(vec![
                     Line::from(vec![Span::styled(
-                        "  \u{2718} Audit chain verification failed",
+                        format!(
+                            "  {} {}",
+                            "\u{2718}",
+                            crate::i18n::t("tui-security-verify-failed")
+                        ),
                         Style::default().fg(theme::RED).add_modifier(Modifier::BOLD),
                     )]),
                     Line::from(vec![Span::styled(
@@ -348,7 +391,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SecurityState) {
 
     // ── Hints ──
     f.render_widget(
-        widgets::hint_bar("  [\u{2191}\u{2193}] Scroll  [v] Verify Chain  [r] Refresh"),
+        widgets::hint_bar(&crate::i18n::t("tui-security-hints")),
         chunks[3],
     );
 }
