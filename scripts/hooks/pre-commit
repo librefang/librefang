@@ -10,7 +10,8 @@
 # Checks performed:
 #   1. cargo fmt --check on staged *.rs files only (no full-workspace scan)
 #   2. CHANGELOG guard: reject duplicate `## [Unreleased]` headings (#3395)
-#   3. detect-secrets scan against .secrets.baseline (if installed)
+#   3. detect-secrets scan against .secrets.baseline (hard error if the
+#      tool is missing; set LIBREFANG_SKIP_SECRETS_SCAN=1 to opt out)
 #   4. openapi.sha256 baseline auto-sync when openapi.json is staged (#4690)
 
 set -eu
@@ -90,10 +91,20 @@ if git diff --cached --name-only | grep -qx "CHANGELOG.md"; then
     fi
 fi
 
-# 3. Secret detection. Soft-fail if detect-secrets is not installed —
-# the .pre-commit-config.yaml entry pins the canonical version, and CI
-# is the authoritative gate. We don't want to wedge contributors who
-# haven't installed it yet, but we do warn.
+# 3. Secret detection. Hard error if detect-secrets is not installed.
+#
+# This used to soft-skip when the tool was missing, on the theory that
+# CI is the authoritative gate. In practice that let baseline drift sail
+# straight to main: a commit changes a fixture so a previously-flagged
+# line no longer matches (e.g. #6190 swapping a plain-string api_key for
+# Zeroizing::new("bogus")), the committer's hook skips because they never
+# installed detect-secrets, and the `secrets` CI job goes red on every
+# subsequent push until someone regenerates .secrets.baseline. Erroring
+# locally moves that failure to the one place that can fix it cheaply.
+#
+# Escape hatch for the genuinely tool-less host (e.g. the Docker-only dev
+# box in CLAUDE.md > Build & Verify, mirroring the rustfmt soft-skip and
+# pre-push's LIBREFANG_PREPUSH_SKIP): set LIBREFANG_SKIP_SECRETS_SCAN=1.
 if [ -f .secrets.baseline ]; then
     if command -v detect-secrets >/dev/null 2>&1; then
         STAGED=$(git diff --cached --name-only --diff-filter=ACMR || true)
@@ -107,9 +118,15 @@ if [ -f .secrets.baseline ]; then
                 exit 1
             fi
         fi
+    elif [ "${LIBREFANG_SKIP_SECRETS_SCAN:-0}" = "1" ]; then
+        echo "warning: detect-secrets not installed; secret scan skipped via LIBREFANG_SKIP_SECRETS_SCAN=1." >&2
     else
-        echo "warning: detect-secrets not installed; skipping secret scan." >&2
-        echo "  install with: pipx install detect-secrets" >&2
+        echo "Error: detect-secrets is not installed; cannot scan staged files for credentials." >&2
+        echo "  Install it:    pipx install detect-secrets   (or: pip install 'detect-secrets>=1.5.0,<2.0.0')" >&2
+        echo "  After install, re-stage and commit again." >&2
+        echo "  Tool-less host (e.g. Docker-only dev box)? Bypass once with:" >&2
+        echo "    LIBREFANG_SKIP_SECRETS_SCAN=1 git commit ..." >&2
+        exit 1
     fi
 fi
 
