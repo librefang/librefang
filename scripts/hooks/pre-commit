@@ -10,8 +10,8 @@
 # Checks performed:
 #   1. cargo fmt --check on staged *.rs files only (no full-workspace scan)
 #   2. CHANGELOG guard: reject duplicate `## [Unreleased]` headings (#3395)
-#   3. detect-secrets scan against .secrets.baseline (hard error if the
-#      tool is missing; set LIBREFANG_SKIP_SECRETS_SCAN=1 to opt out)
+#   3. gitleaks scan of staged changes (soft-warn if gitleaks is missing;
+#      set LIBREFANG_SKIP_SECRETS_SCAN=1 to silence the warning)
 #   4. openapi.sha256 baseline auto-sync when openapi.json is staged (#4690)
 
 set -eu
@@ -57,7 +57,7 @@ if git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs' \
         fi
     else
         # Soft-skip when no native rustfmt is installed (e.g. a Docker-only
-        # host — see CLAUDE.md > Build & Verify). Mirrors the detect-secrets
+        # host — see CLAUDE.md > Build & Verify). Mirrors the gitleaks
         # step below; verify formatting in the dev container instead.
         echo "Warning: rustfmt not on PATH; skipping staged-Rust fmt check." >&2
         echo "         Verify in the dev container (CLAUDE.md > Build & Verify)." >&2
@@ -91,43 +91,28 @@ if git diff --cached --name-only | grep -qx "CHANGELOG.md"; then
     fi
 fi
 
-# 3. Secret detection. Hard error if detect-secrets is not installed.
+# 3. Secret detection (gitleaks). Soft-warn when gitleaks is not installed.
 #
-# This used to soft-skip when the tool was missing, on the theory that
-# CI is the authoritative gate. In practice that let baseline drift sail
-# straight to main: a commit changes a fixture so a previously-flagged
-# line no longer matches (e.g. #6190 swapping a plain-string api_key for
-# Zeroizing::new("bogus")), the committer's hook skips because they never
-# installed detect-secrets, and the `secrets` CI job goes red on every
-# subsequent push until someone regenerates .secrets.baseline. Erroring
-# locally moves that failure to the one place that can fix it cheaply.
-#
-# Escape hatch for the genuinely tool-less host (e.g. the Docker-only dev
-# box in CLAUDE.md > Build & Verify, mirroring the rustfmt soft-skip and
-# pre-push's LIBREFANG_PREPUSH_SKIP): set LIBREFANG_SKIP_SECRETS_SCAN=1.
-if [ -f .secrets.baseline ]; then
-    if command -v detect-secrets >/dev/null 2>&1; then
-        STAGED=$(git diff --cached --name-only --diff-filter=ACMR || true)
-        if [ -n "$STAGED" ]; then
-            # shellcheck disable=SC2086
-            if ! detect-secrets-hook --baseline .secrets.baseline $STAGED; then
-                echo "Error: detect-secrets flagged a potential credential."
-                echo "If this is a false positive, audit & update the baseline:"
-                echo "  detect-secrets scan --baseline .secrets.baseline"
-                echo "  detect-secrets audit .secrets.baseline"
-                exit 1
-            fi
-        fi
-    elif [ "${LIBREFANG_SKIP_SECRETS_SCAN:-0}" = "1" ]; then
-        echo "warning: detect-secrets not installed; secret scan skipped via LIBREFANG_SKIP_SECRETS_SCAN=1." >&2
-    else
-        echo "Error: detect-secrets is not installed; cannot scan staged files for credentials." >&2
-        echo "  Install it:    pipx install detect-secrets   (or: pip install 'detect-secrets>=1.5.0,<2.0.0')" >&2
-        echo "  After install, re-stage and commit again." >&2
-        echo "  Tool-less host (e.g. Docker-only dev box)? Bypass once with:" >&2
-        echo "    LIBREFANG_SKIP_SECRETS_SCAN=1 git commit ..." >&2
+# Unlike the old detect-secrets setup, there is no per-finding baseline to
+# drift: gitleaks scans against a fixed rule set plus the path/regex
+# allowlists in .gitleaks.toml. A tool-less local commit therefore cannot
+# push a stale baseline to main the way detect-secrets could — the worst
+# case is CI's `secrets` job catches a real leak instead of this hook. So a
+# missing tool soft-warns (mirroring the rustfmt soft-skip) rather than
+# hard-erroring. Silence the warning on a deliberately tool-less host with
+# LIBREFANG_SKIP_SECRETS_SCAN=1.
+if command -v gitleaks >/dev/null 2>&1; then
+    if ! gitleaks protect --staged --config .gitleaks.toml --redact --no-banner; then
+        echo "Error: gitleaks flagged a potential credential in the staged diff." >&2
+        echo "If this is a real secret: unstage it; rotate it if it ever hit disk." >&2
+        echo "If this is a false positive: add a path/regex to [allowlist] in .gitleaks.toml." >&2
         exit 1
     fi
+elif [ "${LIBREFANG_SKIP_SECRETS_SCAN:-0}" = "1" ]; then
+    : # deliberately tool-less host; stay quiet
+else
+    echo "warning: gitleaks not installed; staged secret scan skipped (CI is the gate)." >&2
+    echo "  install: brew install gitleaks  (or see https://github.com/gitleaks/gitleaks/releases)" >&2
 fi
 
 # 4. openapi.sha256 baseline auto-sync (#4690).
