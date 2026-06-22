@@ -97,9 +97,7 @@ function Get-Architecture {
     }
 }
 
-# Return $true when both the .zip and its .sha256 are downloadable for the
-# given version + target. A release tag can become GitHub's "latest" before its
-# assets finish uploading; probing avoids pinning to such a "stuck" release.
+# Probe the .zip and .sha256 for a version+target; returns $false for "stuck" releases (assets still uploading).
 function Test-AssetExists {
     param([string]$Version, [string]$Target)
     $base = "https://github.com/$Repo/releases/download/$Version/librefang-$Target.zip"
@@ -113,10 +111,7 @@ function Test-AssetExists {
     }
 }
 
-# Resolve the version to install. An explicit LIBREFANG_VERSION is a hard pin
-# honored verbatim. LIBREFANG_PREFERRED_VERSION (set by `librefang update`) is a
-# soft hint: try it, then walk back through the release list to the newest one
-# that actually ships a package for this target. Returns $null when none does.
+# Resolve the version to install: LIBREFANG_VERSION is a hard pin; LIBREFANG_PREFERRED_VERSION is a soft hint with fallback.
 function Resolve-InstallableVersion {
     param([string]$Target)
 
@@ -160,9 +155,7 @@ function Resolve-InstallableVersion {
     return $null
 }
 
-# Replace $Dest with $Source, backing up the current binary so a new one that
-# fails to run is rolled back to the previous version rather than leaving a
-# broken or missing install. Returns $true on success.
+# Atomically replace $Dest with $Source, rolling back on failure; returns $true on success.
 function Install-WithRollback {
     param([string]$Source, [string]$Dest)
 
@@ -287,8 +280,7 @@ function Install-LibreFang {
         }
     }
 
-    # Install atomically with rollback: a new binary that fails to run is rolled
-    # back to the previous version instead of leaving a broken install behind.
+    # Atomic install with rollback: a failing new binary restores the previous version.
     if (-not (Install-WithRollback -Source $exePath -Dest (Join-Path $InstallDir "librefang.exe"))) {
         Write-Host "  Install from source instead:" -ForegroundColor Yellow
         Write-Host "    cargo install --git https://github.com/$Repo librefang-cli"

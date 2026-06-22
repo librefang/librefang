@@ -145,9 +145,6 @@ RESTART_SHELL=""
 pass "RESTART_SHELL falls back to USER_SHELL when SHELL is empty"
 
 # --- resolve_installable_version: asset-aware fallback --------------------
-# A release tag can be GitHub's "latest" before its per-platform assets finish
-# uploading (or a build job failed). Resolution must skip such "stuck" releases
-# and walk back to the newest one that actually ships a package.
 FAKE_CURL_BIN=$(mktemp -d)
 cat > "$FAKE_CURL_BIN/curl" <<'CURL_EOF'
 #!/bin/sh
@@ -214,8 +211,7 @@ resolve_installable_version >/dev/null 2>&1 || fail "hard pin should always reso
 unset LIBREFANG_VERSION
 pass "resolve_installable_version honors an explicit hard pin"
 
-# LIBREFANG_PREFERRED_VERSION (set by `librefang update`) is used when its
-# package exists, but falls back when the preferred tag is stuck.
+# LIBREFANG_PREFERRED_VERSION is a soft hint: used when its package exists, falls back when stuck.
 MOCK_GOOD_TAGS="v2-good v1-good"; MOCK_BAD_PLATFORM=""
 export LIBREFANG_PREFERRED_VERSION="v2-good"; VERSION=""; PLATFORM="$PLATFORM_PRIMARY"
 resolve_installable_version >/dev/null 2>&1 || fail "preferred installable should resolve"

@@ -617,9 +617,7 @@ pub(crate) fn cmd_update(check: bool, version: Option<String>, channel_override:
     let default_install = default_install_executable();
     let cargo_install = cargo_install_executable();
     let target_version = target_tag.as_deref();
-    // An explicit `--version` is a hard pin; an auto-resolved "latest" tag is a
-    // soft preference the installer may fall back from when its package is
-    // missing (a "stuck" release). See `installer_version_env`.
+    // Explicit --version is a hard pin; auto-resolved latest is a soft preference — see installer_version_env.
     let target_pinned = requested_version.is_some();
 
     #[cfg(windows)]
@@ -804,17 +802,7 @@ pub(crate) fn parse_version_core(version: &str) -> Option<Vec<u64>> {
         .collect()
 }
 
-/// Map a resolved version + pin intent to the environment variable the
-/// installer scripts read.
-///
-/// An explicit `--version` is a *hard pin* (`LIBREFANG_VERSION`): the installer
-/// must install exactly that tag or fail. A version resolved for "latest" is a
-/// *soft preference* (`LIBREFANG_PREFERRED_VERSION`): the installer tries it but
-/// falls back to the newest installable release when that tag's package is
-/// missing (e.g. a release that became visible before its assets finished
-/// uploading, or whose build failed). Not hard-pinning the auto-resolved tag is
-/// what lets `librefang update` recover from a "stuck" release instead of
-/// erroring out and leaving the user on a now-overwritten install.
+/// Maps version + pin intent to `LIBREFANG_VERSION` (hard pin) or `LIBREFANG_PREFERRED_VERSION` (soft hint that falls back on stuck releases).
 fn installer_version_env(version: Option<&str>, pinned: bool) -> Option<(&'static str, String)> {
     let tag = version?;
     let key = if pinned {
@@ -1459,8 +1447,7 @@ mod tests {
 
     #[test]
     fn installer_version_env_hard_pins_explicit_version() {
-        // `librefang update --version vX` must install exactly vX or fail, so it
-        // maps to the hard-pin variable the installers honor verbatim.
+        // --version maps to LIBREFANG_VERSION (hard pin: must install exactly this tag or fail).
         assert_eq!(
             installer_version_env(Some("v2026.6.22-beta.21"), true),
             Some(("LIBREFANG_VERSION", "v2026.6.22-beta.21".to_string()))
@@ -1469,8 +1456,7 @@ mod tests {
 
     #[test]
     fn installer_version_env_soft_prefers_resolved_latest() {
-        // An auto-resolved "latest" tag is a soft preference: the installer may
-        // fall back from it when its package is missing (a "stuck" release).
+        // Auto-resolved latest maps to LIBREFANG_PREFERRED_VERSION (soft hint: falls back on stuck releases).
         assert_eq!(
             installer_version_env(Some("v2026.6.22-beta.21"), false),
             Some((
@@ -1482,8 +1468,7 @@ mod tests {
 
     #[test]
     fn installer_version_env_none_sets_nothing() {
-        // No version resolved (e.g. GitHub unreachable) → set no env var and let
-        // the installer scripts resolve the newest installable release.
+        // No version → no env var; installer resolves the newest installable release.
         assert_eq!(installer_version_env(None, true), None);
         assert_eq!(installer_version_env(None, false), None);
     }

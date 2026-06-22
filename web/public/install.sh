@@ -74,19 +74,11 @@ detect_platform() {
             ;;
     esac
 
-    # Remember the primary target so per-tag resolution can retry the fallback
-    # variant without losing the primary across repeated calls.
+    # Remember the primary so per-tag resolution can retry the fallback without losing it.
     PLATFORM_PRIMARY="$PLATFORM"
 }
 
 # --- Release resolution ---------------------------------------------------
-#
-# A release tag can become GitHub's "latest" before its per-platform assets
-# finish uploading, and a failed build job can leave a release that will never
-# carry this platform's package. Installing such a "stuck" release fails
-# outright. Resolve to the newest release that actually has a downloadable
-# package for this platform, walking back through the release list when the
-# newest is not yet installable.
 
 # Newest-first list of release tags. Isolated so tests can mock `curl`.
 fetch_release_tags() {
@@ -95,17 +87,14 @@ fetch_release_tags() {
         | cut -d '"' -f 4
 }
 
-# Return 0 when both the tarball and its .sha256 are downloadable for
-# $1=tag $2=platform. A 1-byte range request confirms the asset resolves past
-# GitHub's redirect to the CDN without pulling the whole ~60 MB archive.
+# Probe archive + .sha256 with a 1-byte range (avoids pulling the full 60 MB) for $1=tag $2=platform.
 asset_available() {
     _aa_url="https://github.com/$REPO/releases/download/$1/librefang-$2.tar.gz"
     curl -fsSL -r 0-0 -o /dev/null "$_aa_url" 2>/dev/null \
         && curl -fsSL -o /dev/null "$_aa_url.sha256" 2>/dev/null
 }
 
-# For $1=tag, set PLATFORM to whichever variant (primary, then fallback) ships
-# a package. Returns 0 when one is found.
+# Set PLATFORM to the first variant (primary, then fallback) that ships a package for $1=tag; returns 0 on success.
 resolve_platform_for_tag() {
     for _pf in "${PLATFORM_PRIMARY:-$PLATFORM}" "${PLATFORM_FALLBACK:-}"; do
         [ -n "$_pf" ] || continue
@@ -117,10 +106,7 @@ resolve_platform_for_tag() {
     return 1
 }
 
-# Resolve VERSION (and PLATFORM) to an installable release. An explicit
-# LIBREFANG_VERSION is a hard pin honored verbatim. LIBREFANG_PREFERRED_VERSION
-# (set by `librefang update`) is a soft hint: try it first, then fall back to
-# the newest installable release when its package is missing.
+# Resolve VERSION+PLATFORM: LIBREFANG_VERSION is a hard pin; LIBREFANG_PREFERRED_VERSION is a soft hint with fallback.
 resolve_installable_version() {
     if [ -n "${LIBREFANG_VERSION:-}" ]; then
         VERSION="$LIBREFANG_VERSION"
@@ -152,9 +138,7 @@ resolve_installable_version() {
     return 1
 }
 
-# Replace $2 (installed path) with $1 (staged binary), atomically and with a
-# backup so a binary that fails to run is rolled back to the previous version
-# instead of leaving the user with a broken or missing install.
+# Atomically replace $2 with $1, rolling back to $2's backup if the new binary fails to run.
 install_binary_with_rollback() {
     _src="$1"
     _dest="$2"
@@ -169,9 +153,7 @@ install_binary_with_rollback() {
         fi
     fi
 
-    # cp into the destination directory (same filesystem) then rename, so the
-    # swap itself is atomic even though $_src lives under a temp dir that may be
-    # on a different filesystem.
+    # cp to same filesystem first so the mv rename is atomic even when $_src is on a different mount.
     _staged="$_dest.new.$$"
     if ! cp "$_src" "$_staged"; then
         echo "  ${C_RED}Could not write the new binary into $(dirname "$_dest").${C_RESET}"
@@ -390,8 +372,7 @@ install() {
     fi
     echo "  ${C_GREEN}Checksum verified.${C_RESET}"
 
-    # Extract into a staging dir so a broken or half-uploaded build is verified
-    # before it can touch — let alone clobber — a working install.
+    # Extract to staging so the build is verified before touching the live install.
     STAGE="$TMPDIR/stage"
     mkdir -p "$STAGE"
     tar xzf "$ARCHIVE" -C "$STAGE"
@@ -411,8 +392,7 @@ install() {
         chmod +x "$NEW_SIDECAR"
     fi
 
-    # Ad-hoc codesign on macOS (prevents SIGKILL on Apple Silicon) — sign the
-    # staged binary before it is run or installed. Remove quarantine xattr first.
+    # Ad-hoc codesign on macOS (prevents SIGKILL on Apple Silicon); sign staged binary before run or install.
     if [ "$OS" = "darwin" ]; then
         if command_exists xattr; then
             xattr -cr "$NEW_BIN" 2>/dev/null || true
@@ -432,17 +412,14 @@ install() {
         fi
     fi
 
-    # Atomically replace the installed binary, backing up the current one so a
-    # new binary that fails to run is rolled back instead of leaving the user
-    # with nothing installable.
+    # Atomic replace with rollback: a failing new binary restores the backup rather than leaving nothing installed.
     if ! install_binary_with_rollback "$NEW_BIN" "$INSTALL_DIR/librefang"; then
         echo "  Install from source instead:"
         echo "    cargo install --git https://github.com/$REPO librefang-cli"
         exit 1
     fi
 
-    # The sidecar is best-effort: a failure here must not roll back the main
-    # binary, which is already installed and verified.
+    # Sidecar install is best-effort: a failure must not roll back the already-verified main binary.
     if [ -f "$NEW_SIDECAR" ]; then
         SIDECAR_DEST="$INSTALL_DIR/librefang-sidecar-telegram"
         SIDECAR_TMP="$SIDECAR_DEST.new.$$"
