@@ -60,7 +60,7 @@ fn gh_api(endpoint: &str) -> Result<serde_json::Value, Box<dyn std::error::Error
 fn download_avatar_as_data_uri(avatar_url: &str) -> Option<String> {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
 
-    let url = format!("{}&s=96", avatar_url);
+    let url = format!("{}&s=48", avatar_url);
     let output = Command::new("curl")
         .args(["-fsSL", "--max-time", "10", &url])
         .output()
@@ -141,7 +141,7 @@ fn generate_contributors_svg(
             Some(data_uri) => data_uri,
             None => {
                 eprintln!("  Warning: failed to download avatar for {}", login);
-                format!("{}&s=96", avatar_url)
+                format!("{}&s=48", avatar_url)
             }
         };
 
