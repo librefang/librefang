@@ -97,30 +97,128 @@ function Get-Architecture {
     }
 }
 
-function Get-LatestVersion {
+# Return $true when both the .zip and its .sha256 are downloadable for the
+# given version + target. A release tag can become GitHub's "latest" before its
+# assets finish uploading; probing avoids pinning to such a "stuck" release.
+function Test-AssetExists {
+    param([string]$Version, [string]$Target)
+    $base = "https://github.com/$Repo/releases/download/$Version/librefang-$Target.zip"
+    try {
+        Invoke-WebRequest -Uri $base -Method Head -UseBasicParsing -ErrorAction Stop | Out-Null
+        Invoke-WebRequest -Uri "$base.sha256" -Method Head -UseBasicParsing -ErrorAction Stop | Out-Null
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
+# Resolve the version to install. An explicit LIBREFANG_VERSION is a hard pin
+# honored verbatim. LIBREFANG_PREFERRED_VERSION (set by `librefang update`) is a
+# soft hint: try it, then walk back through the release list to the newest one
+# that actually ships a package for this target. Returns $null when none does.
+function Resolve-InstallableVersion {
+    param([string]$Target)
+
     if ($env:LIBREFANG_VERSION) {
+        Write-Host "  Using specified version: $($env:LIBREFANG_VERSION)"
         return $env:LIBREFANG_VERSION
+    }
+
+    $preferred = $env:LIBREFANG_PREFERRED_VERSION
+    if ($preferred -and (Test-AssetExists -Version $preferred -Target $Target)) {
+        return $preferred
     }
 
     Write-Host "  Fetching latest release..."
     try {
-        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest"
-        return $release.tag_name
+        $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases?per_page=30"
     }
     catch {
-        Write-Host "  No GitHub Releases are published for $Repo yet." -ForegroundColor Red
-        Write-Host "  Install from source instead:" -ForegroundColor Yellow
-        Write-Host "    cargo install --git https://github.com/$Repo librefang-cli"
-        exit 1
+        return $null
     }
+
+    $zip = "librefang-$Target.zip"
+    $scanned = 0
+    foreach ($rel in $releases) {
+        if ($rel.draft) { continue }
+        $scanned++
+        if ($scanned -gt 10) { break }
+        $tag = $rel.tag_name
+        if (-not $tag) { continue }
+        $names = @($rel.assets | ForEach-Object { $_.name })
+        if (($names -contains $zip) -and ($names -contains "$zip.sha256")) {
+            if ($preferred -and ($tag -ne $preferred)) {
+                Write-Host "  Release $preferred has no $Target package yet; falling back to $tag." -ForegroundColor Yellow
+            }
+            elseif ($scanned -gt 1) {
+                Write-Host "  Newest release has no $Target package yet; using $tag." -ForegroundColor Yellow
+            }
+            return $tag
+        }
+    }
+    return $null
+}
+
+# Replace $Dest with $Source, backing up the current binary so a new one that
+# fails to run is rolled back to the previous version rather than leaving a
+# broken or missing install. Returns $true on success.
+function Install-WithRollback {
+    param([string]$Source, [string]$Dest)
+
+    $backup = "$Dest.bak"
+    $hadExisting = Test-Path $Dest
+    if ($hadExisting) {
+        if (Test-Path $backup) { Remove-Item -Force $backup -ErrorAction SilentlyContinue }
+        Copy-Item -Path $Dest -Destination $backup -Force
+    }
+
+    try {
+        Copy-Item -Path $Source -Destination $Dest -Force -ErrorAction Stop
+    }
+    catch {
+        if ($hadExisting) { Move-Item -Path $backup -Destination $Dest -Force }
+        Write-Host "  Could not install the new binary to $Dest." -ForegroundColor Red
+        return $false
+    }
+
+    $ok = $false
+    try {
+        & $Dest --version *> $null
+        if ($LASTEXITCODE -eq 0) { $ok = $true }
+    }
+    catch {
+        $ok = $false
+    }
+
+    if (-not $ok) {
+        if ($hadExisting) {
+            Move-Item -Path $backup -Destination $Dest -Force
+            Write-Host "  The new binary failed to run; rolled back to the previous version." -ForegroundColor Red
+        }
+        else {
+            Write-Host "  The new binary failed to run." -ForegroundColor Red
+        }
+        return $false
+    }
+
+    if ($hadExisting -and (Test-Path $backup)) { Remove-Item -Force $backup -ErrorAction SilentlyContinue }
+    return $true
 }
 
 function Install-LibreFang {
     Write-Banner
 
     $arch = Get-Architecture
-    $version = Get-LatestVersion
     $target = "${arch}-pc-windows-msvc"
+    $version = Resolve-InstallableVersion -Target $target
+    if (-not $version) {
+        Write-Host "  No installable release with a $target package was found." -ForegroundColor Red
+        Write-Host "  The latest release may still be building its assets, or none is" -ForegroundColor Yellow
+        Write-Host "  published for $Repo yet. Install from source instead:" -ForegroundColor Yellow
+        Write-Host "    cargo install --git https://github.com/$Repo librefang-cli"
+        exit 1
+    }
     $archive = "librefang-${target}.zip"
     $url = "https://github.com/$Repo/releases/download/$version/$archive"
     $checksumUrl = "$url.sha256"
@@ -189,8 +287,14 @@ function Install-LibreFang {
         }
     }
 
-    # Install
-    Copy-Item -Path $exePath -Destination (Join-Path $InstallDir "librefang.exe") -Force
+    # Install atomically with rollback: a new binary that fails to run is rolled
+    # back to the previous version instead of leaving a broken install behind.
+    if (-not (Install-WithRollback -Source $exePath -Dest (Join-Path $InstallDir "librefang.exe"))) {
+        Write-Host "  Install from source instead:" -ForegroundColor Yellow
+        Write-Host "    cargo install --git https://github.com/$Repo librefang-cli"
+        Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
+        exit 1
+    }
 
     # The Rust Telegram sidecar binary ships inside the same archive since the
     # release pipeline bundles it. Older archives lack it, so install it only

@@ -73,6 +73,134 @@ detect_platform() {
             exit 1
             ;;
     esac
+
+    # Remember the primary target so per-tag resolution can retry the fallback
+    # variant without losing the primary across repeated calls.
+    PLATFORM_PRIMARY="$PLATFORM"
+}
+
+# --- Release resolution ---------------------------------------------------
+#
+# A release tag can become GitHub's "latest" before its per-platform assets
+# finish uploading, and a failed build job can leave a release that will never
+# carry this platform's package. Installing such a "stuck" release fails
+# outright. Resolve to the newest release that actually has a downloadable
+# package for this platform, walking back through the release list when the
+# newest is not yet installable.
+
+# Newest-first list of release tags. Isolated so tests can mock `curl`.
+fetch_release_tags() {
+    curl -fsSL "https://api.github.com/repos/$REPO/releases?per_page=30" 2>/dev/null \
+        | grep '"tag_name"' \
+        | cut -d '"' -f 4
+}
+
+# Return 0 when both the tarball and its .sha256 are downloadable for
+# $1=tag $2=platform. A 1-byte range request confirms the asset resolves past
+# GitHub's redirect to the CDN without pulling the whole ~60 MB archive.
+asset_available() {
+    _aa_url="https://github.com/$REPO/releases/download/$1/librefang-$2.tar.gz"
+    curl -fsSL -r 0-0 -o /dev/null "$_aa_url" 2>/dev/null \
+        && curl -fsSL -o /dev/null "$_aa_url.sha256" 2>/dev/null
+}
+
+# For $1=tag, set PLATFORM to whichever variant (primary, then fallback) ships
+# a package. Returns 0 when one is found.
+resolve_platform_for_tag() {
+    for _pf in "${PLATFORM_PRIMARY:-$PLATFORM}" "${PLATFORM_FALLBACK:-}"; do
+        [ -n "$_pf" ] || continue
+        if asset_available "$1" "$_pf"; then
+            PLATFORM="$_pf"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Resolve VERSION (and PLATFORM) to an installable release. An explicit
+# LIBREFANG_VERSION is a hard pin honored verbatim. LIBREFANG_PREFERRED_VERSION
+# (set by `librefang update`) is a soft hint: try it first, then fall back to
+# the newest installable release when its package is missing.
+resolve_installable_version() {
+    if [ -n "${LIBREFANG_VERSION:-}" ]; then
+        VERSION="$LIBREFANG_VERSION"
+        echo "  Using specified version: $VERSION"
+        return 0
+    fi
+
+    _preferred="${LIBREFANG_PREFERRED_VERSION:-}"
+    if [ -n "$_preferred" ] && resolve_platform_for_tag "$_preferred"; then
+        VERSION="$_preferred"
+        return 0
+    fi
+
+    echo "  Fetching latest release..."
+    _scanned=0
+    for _tag in $(fetch_release_tags); do
+        _scanned=$((_scanned + 1))
+        [ "$_scanned" -le 10 ] || break
+        if resolve_platform_for_tag "$_tag"; then
+            VERSION="$_tag"
+            if [ -n "$_preferred" ] && [ "$_tag" != "$_preferred" ]; then
+                echo "  ${C_YELLOW}Release $_preferred has no $PLATFORM package yet; falling back to $_tag.${C_RESET}"
+            elif [ "$_scanned" -gt 1 ]; then
+                echo "  ${C_YELLOW}Newest release has no $PLATFORM package yet; using $_tag.${C_RESET}"
+            fi
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Replace $2 (installed path) with $1 (staged binary), atomically and with a
+# backup so a binary that fails to run is rolled back to the previous version
+# instead of leaving the user with a broken or missing install.
+install_binary_with_rollback() {
+    _src="$1"
+    _dest="$2"
+    _backup=""
+
+    if [ -e "$_dest" ]; then
+        _backup="$_dest.bak"
+        rm -f "$_backup"
+        if ! cp "$_dest" "$_backup"; then
+            echo "  ${C_RED}Could not back up the existing binary at $_dest.${C_RESET}"
+            return 1
+        fi
+    fi
+
+    # cp into the destination directory (same filesystem) then rename, so the
+    # swap itself is atomic even though $_src lives under a temp dir that may be
+    # on a different filesystem.
+    _staged="$_dest.new.$$"
+    if ! cp "$_src" "$_staged"; then
+        echo "  ${C_RED}Could not write the new binary into $(dirname "$_dest").${C_RESET}"
+        rm -f "$_staged"
+        if [ -n "$_backup" ]; then rm -f "$_backup"; fi
+        return 1
+    fi
+    chmod +x "$_staged"
+
+    if ! mv -f "$_staged" "$_dest"; then
+        echo "  ${C_RED}Could not install the new binary to $_dest.${C_RESET}"
+        rm -f "$_staged"
+        if [ -n "$_backup" ]; then mv -f "$_backup" "$_dest"; fi
+        return 1
+    fi
+
+    # Confirm the freshly installed binary actually runs; roll back if not.
+    if ! "$_dest" --version >/dev/null 2>&1; then
+        if [ -n "$_backup" ]; then
+            mv -f "$_backup" "$_dest"
+            echo "  ${C_RED}The new binary failed to run; rolled back to the previous version.${C_RESET}"
+        else
+            echo "  ${C_RED}The new binary failed to run.${C_RESET}"
+        fi
+        return 1
+    fi
+
+    if [ -n "$_backup" ]; then rm -f "$_backup"; fi
+    return 0
 }
 
 detect_user_shell() {
@@ -179,18 +307,10 @@ install() {
     echo "  ==================="
     echo ""
 
-    REQUESTED_VERSION="${LIBREFANG_VERSION:-}"
-    if [ -n "$REQUESTED_VERSION" ]; then
-        VERSION="$REQUESTED_VERSION"
-        echo "  Using specified version: $VERSION"
-    else
-        echo "  Fetching latest release..."
-        VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null | grep '"tag_name"' | head -1 | cut -d '"' -f 4 || true)
-    fi
-
-    if [ -z "$VERSION" ]; then
-        echo "  No GitHub Releases are published for $REPO yet."
-        echo "  Install from source instead:"
+    if ! resolve_installable_version; then
+        echo "  ${C_RED}No installable release with a $PLATFORM package was found.${C_RESET}"
+        echo "  The latest release may still be building its assets, or none is"
+        echo "  published for $REPO yet. Install from source instead:"
         echo "    cargo install --git https://github.com/$REPO librefang-cli"
         exit 1
     fi
@@ -270,35 +390,65 @@ install() {
     fi
     echo "  ${C_GREEN}Checksum verified.${C_RESET}"
 
-    tar xzf "$ARCHIVE" -C "$INSTALL_DIR"
-    chmod +x "$INSTALL_DIR/librefang"
+    # Extract into a staging dir so a broken or half-uploaded build is verified
+    # before it can touch — let alone clobber — a working install.
+    STAGE="$TMPDIR/stage"
+    mkdir -p "$STAGE"
+    tar xzf "$ARCHIVE" -C "$STAGE"
+
+    NEW_BIN="$STAGE/librefang"
+    if [ ! -f "$NEW_BIN" ]; then
+        echo "  ${C_RED}Archive did not contain the librefang binary.${C_RESET}"
+        exit 1
+    fi
+    chmod +x "$NEW_BIN"
 
     # The Rust Telegram sidecar binary ships inside the same tarball since
     # the release pipeline bundles it. Older tarballs lack it, so install it
     # only when present and stay silent otherwise (backward compatible).
-    SIDECAR="$INSTALL_DIR/librefang-sidecar-telegram"
-    if [ -f "$SIDECAR" ]; then
-        chmod +x "$SIDECAR"
+    NEW_SIDECAR="$STAGE/librefang-sidecar-telegram"
+    if [ -f "$NEW_SIDECAR" ]; then
+        chmod +x "$NEW_SIDECAR"
     fi
 
-    # Ad-hoc codesign on macOS (prevents SIGKILL on Apple Silicon).
-    # Remove quarantine xattr before signing.
+    # Ad-hoc codesign on macOS (prevents SIGKILL on Apple Silicon) — sign the
+    # staged binary before it is run or installed. Remove quarantine xattr first.
     if [ "$OS" = "darwin" ]; then
         if command_exists xattr; then
-            xattr -cr "$INSTALL_DIR/librefang" 2>/dev/null || true
-            [ -f "$SIDECAR" ] && xattr -cr "$SIDECAR" 2>/dev/null || true
+            xattr -cr "$NEW_BIN" 2>/dev/null || true
+            [ -f "$NEW_SIDECAR" ] && xattr -cr "$NEW_SIDECAR" 2>/dev/null || true
         fi
         if command_exists codesign; then
-            if ! codesign --force --sign - "$INSTALL_DIR/librefang"; then
+            if ! codesign --force --sign - "$NEW_BIN"; then
                 echo ""
                 echo "  ${C_YELLOW}Warning: ad-hoc code signing failed.${C_RESET}"
                 echo "  On Apple Silicon, the binary may be killed (SIGKILL) by Gatekeeper."
                 echo "  Try manually: xattr -cr $INSTALL_DIR/librefang && codesign --force --sign - $INSTALL_DIR/librefang"
                 echo ""
             fi
-            if [ -f "$SIDECAR" ]; then
-                codesign --force --sign - "$SIDECAR" 2>/dev/null || true
+            if [ -f "$NEW_SIDECAR" ]; then
+                codesign --force --sign - "$NEW_SIDECAR" 2>/dev/null || true
             fi
+        fi
+    fi
+
+    # Atomically replace the installed binary, backing up the current one so a
+    # new binary that fails to run is rolled back instead of leaving the user
+    # with nothing installable.
+    if ! install_binary_with_rollback "$NEW_BIN" "$INSTALL_DIR/librefang"; then
+        echo "  Install from source instead:"
+        echo "    cargo install --git https://github.com/$REPO librefang-cli"
+        exit 1
+    fi
+
+    # The sidecar is best-effort: a failure here must not roll back the main
+    # binary, which is already installed and verified.
+    if [ -f "$NEW_SIDECAR" ]; then
+        SIDECAR_DEST="$INSTALL_DIR/librefang-sidecar-telegram"
+        SIDECAR_TMP="$SIDECAR_DEST.new.$$"
+        if cp "$NEW_SIDECAR" "$SIDECAR_TMP" 2>/dev/null; then
+            chmod +x "$SIDECAR_TMP" 2>/dev/null || true
+            mv -f "$SIDECAR_TMP" "$SIDECAR_DEST" 2>/dev/null || rm -f "$SIDECAR_TMP"
         fi
     fi
 
