@@ -73,6 +73,17 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Network resilience for crate downloads. A release that fails one
+  # CLI build job ships without that platform's asset and becomes a
+  # "stuck" release (see #6272). The dominant cause is a flaky
+  # `cargo fetch`: crates.io over HTTP/2 intermittently returns
+  # "[16] Error in the HTTP2 framing layer", which aborted the
+  # x86_64-apple-darwin job after 17s in v2026.6.22-beta.22. Bump
+  # cargo's network retry count and disable HTTP/2 multiplexing
+  # (the canonical workaround for that framing error) so a transient
+  # registry hiccup retries instead of dropping an asset.
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_MULTIPLEXING: "false"
   # Effective ref for source-using checkouts.
   # - tag push (normal release): use the pushed tag's frozen commit
   # - workflow_dispatch channel=current: use main HEAD so a hotfix
