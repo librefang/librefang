@@ -1,0 +1,91 @@
+{
+  "captured_with": {
+    "base_url": "https://open.bigmodel.cn/api/paas/v4",
+    "driver": "openai",
+    "model": "glm-4-flash",
+    "prompt_caching": false,
+    "provider": "zhipu"
+  },
+  "samples": {
+    "cjk_01": {
+      "input_tokens": 192,
+      "model": "glm-4-flash",
+      "provider": "zhipu"
+    },
+    "cjk_02": {
+      "input_tokens": 53,
+      "model": "glm-4-flash",
+      "provider": "zhipu"
+    },
+    "cjk_03": {
+      "input_tokens": 226,
+      "model": "glm-4-flash",
+      "provider": "zhipu"
+    },
+    "cjk_04": {
+      "input_tokens": 50,
+      "model": "glm-4-flash",
+      "provider": "zhipu"
+    },
+    "english_prose_01": {
+      "input_tokens": 179,
+      "model": "glm-4-flash",
+      "provider": "zhipu"
+    },
+    "english_prose_02": {
+      "input_tokens": 39,
+      "model": "glm-4-flash",
+      "provider": "zhipu"
+    },
+    "english_prose_03": {
+      "input_tokens": 216,
+      "model": "glm-4-flash",
+      "provider": "zhipu"
+    },
+    "english_prose_04": {
+      "input_tokens": 213,
+      "model": "glm-4-flash",
+      "provider": "zhipu"
+    },
+    "mixed_01": {
+      "input_tokens": 53,
+      "model": "glm-4-flash",
+      "provider": "zhipu"
+    },
+    "mixed_02": {
+      "input_tokens": 284,
+      "model": "glm-4-flash",
+      "provider": "zhipu"
+    },
+    "mixed_03": {
+      "input_tokens": 66,
+      "model": "glm-4-flash",
+      "provider": "zhipu"
+    },
+    "mixed_04": {
+      "input_tokens": 84,
+      "model": "glm-4-flash",
+      "provider": "zhipu"
+    },
+    "tool_json_01": {
+      "input_tokens": 107,
+      "model": "glm-4-flash",
+      "provider": "zhipu"
+    },
+    "tool_json_02": {
+      "input_tokens": 142,
+      "model": "glm-4-flash",
+      "provider": "zhipu"
+    },
+    "tool_json_03": {
+      "input_tokens": 190,
+      "model": "glm-4-flash",
+      "provider": "zhipu"
+    },
+    "tool_json_04": {
+      "input_tokens": 138,
+      "model": "glm-4-flash",
+      "provider": "zhipu"
+    }
+  }
+}
