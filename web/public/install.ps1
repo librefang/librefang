@@ -97,32 +97,20 @@ function Get-Architecture {
     }
 }
 
-# Probe the .zip and .sha256 for a version+target; returns $false for "stuck" releases (assets still uploading).
-function Test-AssetExists {
-    param([string]$Version, [string]$Target)
-    $base = "https://github.com/$Repo/releases/download/$Version/librefang-$Target.zip"
-    try {
-        Invoke-WebRequest -Uri $base -Method Head -UseBasicParsing -ErrorAction Stop | Out-Null
-        Invoke-WebRequest -Uri "$base.sha256" -Method Head -UseBasicParsing -ErrorAction Stop | Out-Null
-        return $true
-    }
-    catch {
-        return $false
-    }
+# Return $true when a release object lists both the .zip and its .sha256 for this target; the listing's assets array only contains fully-uploaded assets, avoiding a HEAD probe whose behavior against GitHub's asset-download redirect is unreliable on Windows PowerShell 5.1.
+function Test-ReleaseHasPackage {
+    param($Release, [string]$Zip)
+    $names = @($Release.assets | ForEach-Object { $_.name })
+    return (($names -contains $Zip) -and ($names -contains "$Zip.sha256"))
 }
 
-# Resolve the version to install: LIBREFANG_VERSION is a hard pin; LIBREFANG_PREFERRED_VERSION is a soft hint with fallback.
+# Resolve the version to install: LIBREFANG_VERSION is a hard pin; LIBREFANG_PREFERRED_VERSION is a soft hint used when its package exists, else walk back to the newest release that ships a package (so a "stuck" release is skipped, not pinned).
 function Resolve-InstallableVersion {
     param([string]$Target)
 
     if ($env:LIBREFANG_VERSION) {
         Write-Host "  Using specified version: $($env:LIBREFANG_VERSION)"
         return $env:LIBREFANG_VERSION
-    }
-
-    $preferred = $env:LIBREFANG_PREFERRED_VERSION
-    if ($preferred -and (Test-AssetExists -Version $preferred -Target $Target)) {
-        return $preferred
     }
 
     Write-Host "  Fetching latest release..."
@@ -134,6 +122,17 @@ function Resolve-InstallableVersion {
     }
 
     $zip = "librefang-$Target.zip"
+    $preferred = $env:LIBREFANG_PREFERRED_VERSION
+
+    # Soft preference: use it when its package is present in the listing.
+    if ($preferred) {
+        foreach ($rel in $releases) {
+            if (($rel.tag_name -eq $preferred) -and (Test-ReleaseHasPackage -Release $rel -Zip $zip)) {
+                return $preferred
+            }
+        }
+    }
+
     $scanned = 0
     foreach ($rel in $releases) {
         if ($rel.draft) { continue }
@@ -141,8 +140,7 @@ function Resolve-InstallableVersion {
         if ($scanned -gt 10) { break }
         $tag = $rel.tag_name
         if (-not $tag) { continue }
-        $names = @($rel.assets | ForEach-Object { $_.name })
-        if (($names -contains $zip) -and ($names -contains "$zip.sha256")) {
+        if (Test-ReleaseHasPackage -Release $rel -Zip $zip) {
             if ($preferred -and ($tag -ne $preferred)) {
                 Write-Host "  Release $preferred has no $Target package yet; falling back to $tag." -ForegroundColor Yellow
             }
@@ -190,6 +188,9 @@ function Install-WithRollback {
             Write-Host "  The new binary failed to run; rolled back to the previous version." -ForegroundColor Red
         }
         else {
+            # Fresh install with nothing to roll back to: remove the broken
+            # binary so a non-runnable librefang.exe is not left behind.
+            Remove-Item -Force $Dest -ErrorAction SilentlyContinue
             Write-Host "  The new binary failed to run." -ForegroundColor Red
         }
         return $false
@@ -280,7 +281,7 @@ function Install-LibreFang {
         }
     }
 
-    # Atomic install with rollback: a failing new binary restores the previous version.
+    # Install with backup + rollback: a new binary that fails to run is rolled back to the previous version instead of leaving a broken install behind.
     if (-not (Install-WithRollback -Source $exePath -Dest (Join-Path $InstallDir "librefang.exe"))) {
         Write-Host "  Install from source instead:" -ForegroundColor Yellow
         Write-Host "    cargo install --git https://github.com/$Repo librefang-cli"

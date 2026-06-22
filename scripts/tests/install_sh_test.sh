@@ -163,6 +163,17 @@ for arg in "$@"; do
         *"/releases/download/"*)
             _t="${arg#*/releases/download/}"
             _t="${_t%%/*}"
+            # The tarball probe must use a 1-byte range request; fail loudly if a
+            # regression drops it (which would start pulling full archives). The
+            # checksum probe (.sha256) is exempt — it is fetched in full.
+            case "$arg" in
+                *.tar.gz)
+                    case " $* " in
+                        *" -r 0-0 "*) ;;
+                        *) echo "mock curl: tarball probe missing -r 0-0" >&2; exit 99 ;;
+                    esac
+                    ;;
+            esac
             case " ${MOCK_GOOD_TAGS:-} " in
                 *" $_t "*) ;;
                 *) exit 22 ;;
@@ -267,5 +278,16 @@ fi
 [ "$("$RB_DEST" --version)" = "new 2.0" ] || fail "broken upgrade should roll back to the previous binary"
 [ ! -e "$RB_DEST.bak" ] || fail "backup should be cleaned up after a rollback"
 pass "install_binary_with_rollback rolls back a broken new binary"
+
+# Fresh install (no existing binary) with a broken new binary must NOT leave a
+# non-runnable binary on PATH — there is nothing to roll back to.
+RB_FRESH="$RB_DIR/fresh/librefang"
+mkdir -p "$RB_DIR/fresh"
+if install_binary_with_rollback "$RB_BAD" "$RB_FRESH" >/dev/null 2>&1; then
+    fail "install_binary_with_rollback should fail for a broken fresh install"
+fi
+[ ! -e "$RB_FRESH" ] || fail "broken fresh install should not leave a binary behind"
+[ ! -e "$RB_FRESH.bak" ] || fail "broken fresh install should not leave a backup behind"
+pass "install_binary_with_rollback removes a broken fresh install"
 
 echo "All install.sh tests passed."

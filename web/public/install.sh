@@ -87,7 +87,7 @@ fetch_release_tags() {
         | cut -d '"' -f 4
 }
 
-# Probe archive + .sha256 with a 1-byte range (avoids pulling the full 60 MB) for $1=tag $2=platform.
+# Return 0 when the archive and its .sha256 exist for $1=tag $2=platform; the archive is probed with a 1-byte range request the CDN honors, confirming a present asset without fetching the whole file.
 asset_available() {
     _aa_url="https://github.com/$REPO/releases/download/$1/librefang-$2.tar.gz"
     curl -fsSL -r 0-0 -o /dev/null "$_aa_url" 2>/dev/null \
@@ -176,6 +176,9 @@ install_binary_with_rollback() {
             mv -f "$_backup" "$_dest"
             echo "  ${C_RED}The new binary failed to run; rolled back to the previous version.${C_RESET}"
         else
+            # Fresh install with nothing to roll back to: remove the broken
+            # binary so a non-runnable librefang is not left on PATH.
+            rm -f "$_dest"
             echo "  ${C_RED}The new binary failed to run.${C_RESET}"
         fi
         return 1
