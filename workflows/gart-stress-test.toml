@@ -1,0 +1,21 @@
+name = "gart-stress-test"
+version = "1.0.0"
+description = "Continuous Adversarial Red-Teaming loop to stress-test the pipeline."
+cron = "0 2 * * *" # Run at 2 AM daily
+
+[[stage]]
+id = "synthesize"
+agent = "gart-synthesizer"
+action = "generate_claims"
+
+[[stage]]
+id = "inject"
+agent = "watchdog"
+action = "ingest_synthetic"
+depends_on = ["synthesize"]
+
+[[stage]]
+id = "evaluate"
+agent = "disinfo-orchestrator"
+action = "measure_f2_degradation"
+depends_on = ["inject"]

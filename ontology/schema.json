@@ -1,0 +1,66 @@
+{
+  "version": "1.0.0",
+  "description": "LibreFang knowledge graph schema for disinformation tracking",
+  "nodes": {
+    "Actor": {
+      "fields": {
+        "id":                { "type": "uuid",   "required": true },
+        "name":              { "type": "string", "required": true },
+        "aliases":           { "type": "array",  "items": "string", "default": [] },
+        "type":              { "type": "enum",   "values": ["person", "outlet", "organization", "account", "bot"], "required": true },
+        "credibility_score": { "type": "float",  "min": 0.0, "max": 1.0, "default": 0.5 },
+        "country":           { "type": "string", "description": "ISO 3166-1 alpha-2" },
+        "affiliation":       { "type": "string", "description": "Political/editorial affiliation if known" }
+      },
+      "description": "A person, outlet, organization, or account making or amplifying claims"
+    },
+    "Claim": {
+      "fields": {
+        "id":              { "type": "uuid",   "required": true },
+        "text":            { "type": "string", "required": true },
+        "fingerprint":     { "type": "string", "description": "SHA256 of normalized claim text for dedup" },
+        "verdict":         { "type": "enum",   "values": ["TRUE", "FALSE", "MISLEADING", "UNVERIFIABLE", "PENDING"], "default": "PENDING" },
+        "confidence":      { "type": "float",  "min": 0.0, "max": 1.0 },
+        "date_made":       { "type": "datetime" },
+        "date_verified":   { "type": "datetime" },
+        "source_lang":     { "type": "string", "description": "ISO 639-1 language code of original claim" },
+        "modality":        { "type": "enum",   "values": ["text", "image", "video", "audio"] }
+      },
+      "description": "A discrete checkable factual assertion"
+    },
+    "Source": {
+      "fields": {
+        "id":                { "type": "uuid",   "required": true },
+        "url":               { "type": "string", "required": true },
+        "outlet":            { "type": "string" },
+        "credibility_score": { "type": "float",  "min": 0.0, "max": 1.0, "default": 0.5 },
+        "bias_label":        { "type": "enum",   "values": ["center", "center-left", "center-right", "left", "right", "pro-kremlin", "nationalist", "unknown"] },
+        "owner":             { "type": "string", "description": "Ownership entity if known" },
+        "country":           { "type": "string", "description": "ISO 3166-1 alpha-2" }
+      },
+      "description": "A news outlet, webpage, document, or social media post used as evidence"
+    },
+    "NarrativeCluster": {
+      "fields": {
+        "id":           { "type": "uuid",     "required": true },
+        "label":        { "type": "string",   "required": true },
+        "description":  { "type": "string" },
+        "first_seen":   { "type": "datetime" },
+        "last_seen":    { "type": "datetime" },
+        "spread_score": { "type": "float",    "min": 0.0, "max": 1.0, "description": "Virality/coordination signal" },
+        "origin_actor": { "type": "uuid",     "description": "Actor ID of likely origin" },
+        "tags":         { "type": "array",    "items": "string", "description": "Topic tags e.g. ukraine, nato, covid" }
+      },
+      "description": "A group of semantically related claims indicating a coordinated disinformation narrative"
+    }
+  },
+  "edges": {
+    "MADE":         { "from": "Actor",           "to": "Claim",           "description": "Actor made or published the claim" },
+    "SUPPORTED_BY": { "from": "Claim",           "to": "Source",          "description": "Source supports the claim" },
+    "REFUTED_BY":   { "from": "Claim",           "to": "Source",          "description": "Source refutes the claim" },
+    "BELONGS_TO":   { "from": "Claim",           "to": "NarrativeCluster", "description": "Claim is part of a narrative cluster" },
+    "AMPLIFIED_BY": { "from": "Claim",           "to": "Actor",           "description": "Actor amplified/shared the claim" },
+    "CITED_BY":     { "from": "Source",          "to": "Claim",           "description": "Source was cited as evidence for claim" },
+    "MEMBER_OF":    { "from": "Actor",           "to": "NarrativeCluster", "description": "Actor is a known participant in this narrative" }
+  }
+}

@@ -1,0 +1,17 @@
+name        = "qsvm-classifier"
+version     = "1.0.0"
+description = "Quantum Support Vector Machine (QSVM) using Google Willow (105-qubit) for exponential speedup on complex narrative classification."
+author      = "librefang"
+module      = "builtin:quantum"
+tags        = ["qsvm", "quantum", "willow", "classification"]
+
+[model]
+provider = "google"
+model = "willow-qpu"
+api_key_env = "GOOGLE_APPLICATION_CREDENTIALS"
+
+capabilities = ["hilbert_space_projection", "topological_error_correction"]
+
+[config]
+qubits_required = 105
+fallback_mode = "simulator" # Fallback to local simulator if QPU is calibrating

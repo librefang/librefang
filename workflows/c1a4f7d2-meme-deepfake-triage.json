@@ -1,0 +1,77 @@
+{
+  "id": "c1a4f7d2-9b3e-4f81-a0c5-8e2d6f4b1c90",
+  "name": "meme-deepfake-triage",
+  "description": "Dedicated visual disinformation pipeline: fetches, OCR-extracts, reasons about, and generates factcheck overlays for memes, deepfakes, and manipulated screenshots. Triggered by watchdog visual flag.",
+  "trigger": {
+    "event": "visual_flag"
+  },
+  "steps": [
+    {
+      "name": "fetch-asset",
+      "agent": { "name": "visual-analyst" },
+      "model": "nvidia/nemotron-nano-12b-v2-vl:free",
+      "prompt_template": "Fetch and cache the visual asset at URL: {{input.asset_url}}. Store locally and return asset_hash (SHA256), asset_type (image|video|gif), and local_path.",
+      "mode": "sequential",
+      "timeout_secs": 60,
+      "error_mode": "fail",
+      "output_var": "cached_asset"
+    },
+    {
+      "name": "ocr-extract",
+      "agent": { "name": "visual-analyst" },
+      "model": "nvidia/nemotron-nano-12b-v2-vl:free",
+      "prompt_template": "Extract all text visible in the image at {{cached_asset.local_path}}. Include captions, overlaid text, watermarks, chart labels, and any embedded statistics. Return extracted_text as a single string.",
+      "mode": "sequential",
+      "timeout_secs": 90,
+      "error_mode": "skip",
+      "output_var": "ocr_result"
+    },
+    {
+      "name": "visual-reason",
+      "agent": { "name": "visual-analyst" },
+      "model": "nvidia/nemotron-nano-12b-v2-vl:free",
+      "prompt_template": "Analyze the image at {{cached_asset.local_path}} with extracted text: {{ocr_result.extracted_text}}. Determine: (1) Is overlaid text authentic or post-edited? (2) Does context match claimed event/date/location? (3) Are charts or statistics manipulated? (4) Deepfake indicators? Return visual_verdict, reasoning_summary, confidence 0.0-1.0, and deepfake_indicators list.",
+      "mode": "sequential",
+      "timeout_secs": 180,
+      "error_mode": "fail",
+      "output_var": "visual_analysis",
+      "extra_body": { "enable_thinking": true },
+      "config": { "thinking_budget": 6000 }
+    },
+    {
+      "name": "generate-overlay",
+      "agent": { "name": "visual-analyst" },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "Using nano-banana-pro skill, generate a factcheck overlay for the image at {{cached_asset.local_path}}. Apply a red badge with text: WARNING FACT CHECKED: FALSE. Include the LibreFang logo. Save to output/visual/overlays/{{cached_asset.asset_hash}}.png. Return overlay_path.",
+      "mode": "sequential",
+      "timeout_secs": 120,
+      "error_mode": "skip",
+      "output_var": "overlay_result",
+      "condition": "step.visual-reason.visual_analysis.visual_verdict in ['manipulated', 'out-of-context', 'misleading-caption']"
+    },
+    {
+      "name": "escalate-to-inquisitor",
+      "agent": { "name": "inquisitor" },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "Investigate the claim embedded in this visual asset. Visual analysis result: {{visual_analysis}}. OCR text: {{ocr_result.extracted_text}}. Source URL: {{input.source_url}}. Provide full fact-check verdict.",
+      "mode": "sequential",
+      "timeout_secs": 300,
+      "error_mode": "fail",
+      "output_var": "inquisitor_verdict",
+      "extra_body": { "enable_thinking": true },
+      "condition": "step.visual-reason.visual_analysis.confidence < 0.85"
+    },
+    {
+      "name": "deliver-visual-debunk",
+      "agent": { "name": "impact-comms" },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "Publish visual debunk. Verdict: {{inquisitor_verdict}}. Overlay image: {{overlay_result.overlay_path}}. Draft bilingual (SK+EN) social media post using humanizer skill and deliver via api-gateway.",
+      "mode": "sequential",
+      "timeout_secs": 120,
+      "error_mode": "skip",
+      "output_var": "delivery_result",
+      "output_path": "{{output.dir}}/meme-deepfake-triage/{{run.id}}/delivery_result.json"
+    }
+  ],
+  "created_at": "2026-05-04T12:50:00.000000000Z"
+}

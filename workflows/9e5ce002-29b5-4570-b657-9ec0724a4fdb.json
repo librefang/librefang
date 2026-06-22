@@ -1,0 +1,56 @@
+{
+  "id": "9e5ce002-29b5-4570-b657-9ec0724a4fdb",
+  "name": "social-impact-accountability",
+  "description": "Orchestrates notification of third parties (advertisers, regulators, and civil society) regarding confirmed misinformation to achieve social responsibility and blowback against malicious actors.",
+  "steps": [
+    {
+      "name": "identify-stakeholders",
+      "agent": {
+        "name": "researcher-hand"
+      },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "For the following debunked claim: {{input}}, identify associated stakeholders including the hosting platform, major advertisers on that platform, and relevant regulatory bodies or fact-checking NGOs. Include Slovak/EU-specific bodies: RTVS, Rada pre medi\u00e1lne slu\u017eby, AFP Fact Check SK.",
+      "mode": "sequential",
+      "timeout_secs": 120,
+      "error_mode": "fail",
+      "output_var": "stakeholder_list"
+    },
+    {
+      "name": "legal-review",
+      "agent": {
+        "name": "legal-assistant"
+      },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "Review the debunked claim and associated evidence. Assess whether the content may constitute a violation of Slovak law (\u00a7 360 TZ \u2014 \u0161\u00edrenie popla\u0161nej spr\u00e1vy), EU Digital Services Act Art. 34, or relevant platform Terms of Service. Summarize legal exposure for notification drafts.",
+      "mode": "sequential",
+      "timeout_secs": 180,
+      "error_mode": "skip",
+      "output_var": "legal_assessment"
+    },
+    {
+      "name": "draft-alerts",
+      "agent": {
+        "name": "analyst"
+      },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "Using the verified evidence from the debunking report and the legal assessment: {{legal_assessment}}, draft professional but firm 'Misinformation Alerts' tailored for each group in {{stakeholder_list}}. Highlight the breach of social responsibility, legal exposure, and potential reputational blowback for associated brands.",
+      "mode": "sequential",
+      "timeout_secs": 180,
+      "error_mode": "fail",
+      "output_var": "drafted_alerts"
+    },
+    {
+      "name": "disseminate-reports",
+      "agent": {
+        "name": "email-assistant"
+      },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "Prepare the drafted alerts in {{drafted_alerts}} for dissemination. Format as formal PDF reports for local storage at {{output.dir}}/social-impact/{{run.id}}/. NOTE: SMTP email delivery requires SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS environment variables \u2014 delivery will be skipped if not configured.",
+      "mode": "sequential",
+      "timeout_secs": 120,
+      "error_mode": "skip",
+      "output_var": "dissemination_log"
+    }
+  ],
+  "created_at": "2026-05-03T16:23:15.003893196Z"
+}

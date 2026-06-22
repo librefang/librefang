@@ -1,0 +1,62 @@
+[skill]
+name        = "image-forensics"
+version     = "0.1.0"
+description = "VLM-powered image forensics: caption consistency, EXIF metadata validation, manipulation detection, reverse image lineage via Firecrawl, video frame sampling."
+author      = "librefang"
+tags        = ["vision", "deepfake", "forensics", "exif", "reverse-image", "osint"]
+
+[config]
+vlm_primary   = { value = "qwen3-vl-235b-a22b-instruct" }
+vlm_fallback  = { value = "qwen-vl-max-latest" }
+api_key_env   = { env = "DASHSCOPE_API_KEY" }
+
+# Number of keyframes to extract per 30-second video segment
+video_keyframe_sample_rate = { value = 5 }
+
+# Confidence below which visual-analyst escalates to inquisitor
+vlm_escalation_threshold = { value = 0.85 }
+
+# Reverse image search via Firecrawl
+reverse_image_search_enabled = { value = true }
+wayback_archive_on_collect   = { value = true }
+
+[prompts]
+caption_consistency = """
+Given this image and its associated caption/claim, answer:
+1. Does the image actually depict what the caption states?
+2. Are there visible indicators that the image is from a different time, place, or event than claimed?
+3. Is any overlaid text authentic to the original image or post-edited on top?
+Return: { "caption_matches": bool, "discrepancy_description": str, "confidence": float }
+"""
+
+manipulation_check = """
+Analyse this image for signs of digital manipulation:
+1. Unnatural lighting or shadow directions
+2. Edge artifacts, blurring, or compression inconsistencies around faces or objects
+3. Background tiling or cloning artifacts
+4. Face blending seams (deepfake indicators)
+5. Metadata-image date/location mismatch
+Return: { "manipulation_detected": bool, "indicators": [str], "manipulation_type": "deepfake|splice|recolor|caption-overlay|none", "confidence": float }
+"""
+
+exif_validation = """
+Given EXIF metadata and the stated claim context:
+1. Does GPS location match the claimed event location?
+2. Does capture timestamp match the claimed event date?
+3. Is the camera/device metadata consistent with the claimed source?
+Flag any mismatch as an anomaly.
+Return: { "exif_consistent": bool, "anomalies": [str], "confidence": float }
+"""
+
+video_frame_analysis = """
+You are analysing a keyframe extracted from a video at timestamp {{timestamp}}.
+Apply the same deepfake and manipulation checks as for static images.
+Additionally: does facial expression, lip movement, or audio transcript (if provided) show signs of synthetic generation?
+Return standard visual evidence JSON with added field: "synthetic_av_indicators": [str]
+"""
+
+[output]
+overlay_badge_text_false      = "⚠️ FACT CHECKED: FALSE"
+overlay_badge_text_misleading = "⚠️ FACT CHECKED: MISLEADING"
+overlay_badge_text_oc         = "⚠️ OUT OF CONTEXT"
+output_dir                    = "output/visual/forensics"

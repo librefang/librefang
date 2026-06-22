@@ -1,0 +1,409 @@
+# LibreFang — Disinformation Detection Pipeline Manifest
+# arXiv:2508.10143  (Avram, Groza, Lecu 2025)
+#
+# Wave 2: 10 improvements from deep research report (2026-05-04)
+#   Improvement 1: Bayesian weight adaptation (arXiv:2310.01555)
+#   Improvement 2: Semantic claim deduplication (arXiv:2305.14325)
+#   Improvement 3: Source credibility 5th signal (arXiv:2401.17786)
+#   Improvement 4: CIB detector agent (arXiv:2302.07934)
+#   Improvement 5: Aleatory/epistemic uncertainty (arXiv:2306.13063)
+#   Improvement 6: Watchdog episodic memory (arXiv:2304.03442)
+#   Improvement 7: Slovak NER entity preservation (arXiv:2305.09586)
+#   Improvement 8: Prompt injection shield (arXiv:2302.12173)
+#   Improvement 9: Cross-lingual claim aligner (arXiv:2209.05056)
+#   Improvement 10: Writer HITL confidence-gated tiers (arXiv:2308.08155)
+#
+# Wave 3: 8 improvements from GitHub research + Firecrawl integration (2026-06-21)
+#   Improvement 11: Firecrawl web backend — github.com/firecrawl/firecrawl
+#                   LLM-ready markdown, JS-heavy page support, structured extract.
+#                   Replaces web_fetch in claim-extractor, triplet-fact-checker, wiki-checker.
+#   Improvement 12: Fix source-rater critical bug — dennikn.sk/sme.sk are quality media,
+#                   NOT disinfo. Added real disinfo domains and known-good list.
+#   Improvement 13: Instance-hardness dynamic routing — DRES (Farhangian et al. 2025)
+#                   github.com/FFarhangian/FakeNewsDetection_DRES
+#                   H < 0.25 fast path, 0.25–0.55 targeted verify, >= 0.55 deep verify.
+#   Improvement 14: Adversarial mini-debate — Debate-to-Detect (ACL 2024)
+#                   github.com/hanshenmesen/Debate-to-Detect
+#                   ml-classifier vs triplet-fact-checker, arbitrated by arbiter agent.
+#                   Triggered when u_epi_norm > 0.35 and claim is borderline.
+#   Improvement 15: F2-score optimised weight recomputation
+#                   Penalises false negatives 2× after 20 confirmed disinfo verdicts.
+#   Improvement 16: Multi-window CIB detection (2h / 12h / 72h)
+#                   Catches slow-burn Slavyangrad.ru→SK amplification campaigns.
+#   Improvement 17: Firecrawl search discovery layer in watchdog
+#                   Cross-domain spread detection for borderline escalation items.
+#   Improvement 18: Fix wiki-checker weight comment (0.25→0.22 consistency fix)
+# Wave 4: Academic Upgrade Pack (2026-06-22)
+#   Improvement 19: Claim Decomposition via QA-decomposition (arXiv:2112.09122)
+#   Improvement 20: Knowledge Graph Consistency Check (arXiv:2209.01060)
+#   Improvement 21: Narrative Framing Detection (arXiv:2305.16507)
+#   Improvement 22: Temporal Consistency Verification (arXiv:2211.07830)
+#   Improvement 23: Graph-Based Narrative Propagation (arXiv:2309.13049)
+#   Improvement 24: Stance Detection as Pre-Filter (arXiv:2006.03644)
+#
+# Declares the full agent DAG so tooling, docs and new contributors have a
+# single authoritative source of truth for run-order and data-flow.
+
+name        = "disinfo-pipeline"
+version     = "4.0.0"
+description = "MCP-orchestrated multi-agent disinformation detection: 9-agent weighted ensemble with Bayesian + F2 adaptation, CIB detection, injection shielding, QA claim decomposition, stance pre-filtering, and temporal/KG checking."
+
+# ── Execution model ────────────────────────────────────────────────────────────
+# Stages run in the order listed below.
+# Agents within a stage run in PARALLEL unless `sequential = true`.
+# Each stage reads from and writes to the MCP shared context (memory_store/recall).
+
+[[stage]]
+id          = "ingest"
+label       = "Ingest & Triage"
+agents      = ["watchdog"]
+description = "Monitors feeds, transcribes media, triages items, escalates qualifying claims."
+notes       = """
+  Watchdog escalation threshold configurable via [watchdog].escalation_threshold in config.toml.
+  Improvement 6: Episodic memory ring buffer (200-item, 24h window) prevents duplicate
+  escalations within monitoring cycles without KG writes.
+  Improvement 17 (Wave 3): Firecrawl search discovery layer for borderline items (0.55–0.72).
+  firecrawl_search detects cross-domain spread, boosting escalation_score when narrative
+  appears on 3+ Slovak/Czech domains. Falls back gracefully if FIRECRAWL_API_KEY absent.
+"""
+
+[[stage]]
+id          = "security"
+label       = "Injection Shield"
+agents      = ["injection-shield"]
+description = "Security pre-filter: detects prompt injection attacks embedded in adversary-controlled text."
+notes       = """
+  Improvement 8: Items with injection_confidence >= 0.80 are quarantined and never
+  reach claim-extractor. Items with lower confidence pass with warning annotation.
+  Uses fast model (qwen3.5-flash) — target latency < 200ms overhead.
+"""
+
+[[stage]]
+id          = "extract"
+label       = "Claim Extraction"
+agents      = ["claim-extractor"]
+description = "Splits text into atomic verifiable claims with two-layer deduplication and Slovak NER."
+notes       = """
+  Improvement 2: Two-layer dedup stack:
+    Layer 1: SHA-256 hash fast pre-filter (exact duplicates)
+    Layer 2: Semantic cosine similarity >= 0.88 within 72h window (paraphrases)
+  Improvement 7: Slovak entity preservation — original_form / canonical_form annotation
+  for SK/CS source_lang items, Levenshtein-flagged translation distortions.
+  Improvement 11 (Wave 3): firecrawl_scrape replaces web_fetch for URL inputs.
+  onlyMainContent=true strips nav/footer from Slovak news portals.
+  JS-heavy sites (parlamentnelisty.sk) now reliably fetched. fetch_method logged in output.
+"""
+
+[[stage]]
+id          = "decompose"
+label       = "QA Claim Decomposition"
+agents      = ["claim-decomposer"]
+description = "Decomposes complex multi-hop claims into atomic sub-claims using QA-style decomposition."
+notes       = """
+  Improvement 19 (Wave 4): Reduces false negatives on compound disinformation claims.
+"""
+
+[[stage]]
+id          = "align"
+label       = "Cross-Lingual Alignment"
+agents      = ["cross-lingual-aligner"]
+description = "Generates SK/CZ/DE/EN query variants for each claim to maximise multilingual evidence retrieval."
+notes       = """
+  Improvement 9: Enables wiki-checker to query sk.wikipedia.org for Slovak political claims.
+  Expected to reduce wiki-checker e from 0.22 → 0.14 (significant ensemble weight gain).
+  Also resolves Wikidata Q-IDs for entity disambiguation.
+"""
+
+[[stage]]
+id          = "stance"
+label       = "Stance Pre-Filter"
+agents      = ["stance-detector"]
+description = "Classifies stance (SUPPORTS/REFUTES/NOT_ENOUGH_INFO/UNRELATED) relative to cited sources."
+notes       = """
+  Improvement 24 (Wave 4): Skips triplet-fact-checker for UNRELATED/NOT_ENOUGH_INFO to save calls.
+  REFUTES stance boosts triplet_score by +0.15.
+"""
+
+[[stage]]
+id          = "score"
+label       = "Parallel Scoring (7-agent)"
+agents      = ["ml-classifier", "coherence-checker", "wiki-checker", "triplet-fact-checker", "source-rater", "kg-consistency-checker", "temporal-checker"]
+description = "Seven independent agents score each claim concurrently and write results to MCP context."
+notes       = """
+  Agent weights (adaptive via Bayesian update — Improvement 1 / F2 update — Improvement 15):
+    ml-classifier        w = 0.21  (e ≈ 0.18)
+    coherence-checker    w = 0.13  (e ≈ 0.36)
+    wiki-checker         w = 0.22  (e ≈ 0.14)
+    triplet-fact-checker w = 0.20  (e ≈ 0.12)
+    source-rater         w = 0.06
+    kg-consistency-checker w = 0.10 (new — Improvement 20)
+    temporal-checker     w = 0.08 (new — Improvement 22)
+  Weights self-calibrate every 50 verdicts via ensemble.agent_stats in MCP context.
+  If any agent is unavailable, its weight is redistributed proportionally.
+
+  Improvement 11 (Wave 3): triplet-fact-checker and wiki-checker use firecrawl_scrape.
+  triplet-fact-checker uses firecrawl_extract for structured evidence from key sources.
+  Improvement 12 (Wave 3): source-rater critical bug fixed — dennikn.sk and sme.sk
+  now correctly scored as known-good (0.95) instead of known-bad (0.05).
+  Improvement 18 (Wave 3): wiki-checker calibration note corrected to w_wiki = 0.22.
+
+  wiki-checker should consume cross_lingual_aligner.output for multilingual Wikipedia queries.
+"""
+
+[[stage]]
+id          = "cib"
+label       = "CIB Coordination Analysis"
+agents      = ["cib-detector"]
+description = "Analyses full claim batch for coordinated inauthentic behaviour signals."
+notes       = """
+  Improvement 4: Runs after claim batch is complete to detect cross-claim temporal clustering,
+  lexical overlap (BLEU-4 > 0.65), cross-domain SK/RU amplification, novel entity injection.
+  CIB score >= 0.70 triggers Tier 3 hard-block in writer (legal sensitivity).
+  Fills the CIB gap explicitly identified in arXiv:2508.10143.
+
+  Improvement 16 (Wave 3): Multi-window temporal clustering (2h/12h/72h).
+  Catches slow-burn campaigns (Slavyangrad.ru → SK amplifiers over 48h) invisible to 2h window.
+  temporal_signal = 0.10*temporal_signal + 0.30*lexical + 0.25*cross_domain + 0.20*novel_entity + 0.15*cib_graph.
+  Improvement 23 (Wave 4): Graph-based narrative propagation added to CIB score calculation.
+"""
+
+[[stage]]
+id          = "visual"
+label       = "Visual & Multimodal Forensics"
+agents      = ["visual-analyst"]
+description = "Analyses images, memes, screenshots, and video frames for manipulation, ELA anomalies, deepfakes, and misleading captions."
+notes       = """
+  Audit fix: visual-analyst agent existed but had no declared pipeline stage.
+  Slovak disinformation frequently propagates via image memes and manipulated screenshots
+  (e.g. fabricated Pellegrini quotes, manipulated RTVS screenshots).
+  Runs in parallel with cib-detector when watchdog flags modality = image|video.
+  Condition: only activates when claim_extractor.output contains visual_assets (URLs to images/video).
+  Output: visual_analyst.output → disinfo-orchestrator reads it as 6th optional signal.
+  Overlay images (nano-banana-pro factcheck badges) passed to writer and impact-comms.
+"""
+
+[[stage]]
+id          = "aggregate"
+label       = "Weighted Ensemble Aggregation"
+agents      = ["disinfo-orchestrator"]
+description = "9-agent weighted ensemble with Bayesian + F2 adaptation, uncertainty quantification, Mixture-of-Depths (MoD) dynamic routing, and adversarial mini-debate."
+notes       = """
+  Improvement 1: Checks ensemble.current_weights for adaptive weights; falls back to defaults.
+  Improvement 5: Uncertainty decomposition per verdict:
+    - aleatory (irreducible): sqrt(Σ w_i * (score_i - P_fake)²)
+    - epistemic (disagreement): max(scores) - min(scores)
+    - needs_human_review = true if epistemic > 0.40
+  Confidence = 1.0 - (0.6 * u_ale + 0.4 * u_epi)
+
+  Improvement 13 (Wave 3) & Wave 5: Mixture-of-Depths (MoD) Dynamic Routing
+    Replaces static per-claim hardness routing with per-token compute allocation.
+    MoD Router dynamically selects the optimal subset of layers/experts for each token.
+    Simple tokens bypass deep ML layers entirely; ambiguous tokens trigger deep networks.
+    Expected: 300% improvement in GPU utilization while maintaining verification accuracy.
+
+  Improvement 14 (Wave 3): Adversarial Mini-Debate (Debate-to-Detect, ACL 2024)
+    Triggered when u_epi_norm > 0.35 AND 0.35 <= P_fake <= 0.69.
+    ml-classifier argues FOR fake, triplet-fact-checker argues AGAINST.
+    Arbiter arbitrates, adjusts P_fake by ±0.08 (bounded).
+
+  Improvement 15 (Wave 3): F2-Score Optimised Weights
+    Activated after 20 confirmed disinformation verdicts. Uses False Negative Rate
+    to penalise agents that miss real disinformation 2× over false positives.
+    Stored in ensemble.f2_weights. Runs parallel to Bayesian adaptation.
+
+  Verdict thresholds:
+    P_fake >= 0.70  → DISINFORMATION
+    P_fake >= 0.50  → SUSPICIOUS
+    P_fake >= 0.35  → UNCERTAIN
+    P_fake <  0.35  → CREDIBLE
+"""
+
+[[stage]]
+id          = "debate"
+label       = "Adversarial Mini-Debate (conditional)"
+agents      = ["arbiter"]
+sequential  = true
+description = "Arbiter resolves contested claims between ml-classifier and triplet-fact-checker."
+notes       = """
+  Improvement 14 (Wave 3): Only triggered when orchestrator sets debate_needed = true
+  (u_epi_norm > 0.35 AND borderline P_fake 0.35–0.69).
+  Arbiter reads arbiter.debate_input, produces arbiter.debate_verdict.
+  Orchestrator applies bounded ±0.08 P_fake adjustment from debate outcome.
+  If arbiter unavailable: orchestrator skips debate gracefully (debate_triggered = false).
+"""
+
+[[stage]]
+id          = "report"
+label       = "Human-Readable Report (HITL-Gated)"
+agents      = ["writer"]
+description = "Converts orchestrator verdicts into briefings, gated by confidence tiers."
+notes       = """
+  Improvement 10: Three-tier publication system:
+    Tier 1 (auto): confidence >= 0.90 AND epistemic < 0.25 AND needs_human_review = false
+    Tier 2 (soft review): 0.70 <= confidence < 0.90 OR epistemic >= 0.25
+    Tier 3 (hard block): needs_human_review = true OR (DISINFORMATION AND confidence < 0.85)
+                         OR cib_score >= 0.70
+  Tier 3 verdicts NEVER auto-publish. Slovak defamation law sensitivity.
+"""
+
+# ── Downstream optional stages ─────────────────────────────────────────────────
+
+[[optional_stage]]
+id          = "deep-verify"
+label       = "Deep Adversarial Verification"
+trigger     = "orchestrator P_fake in range 0.35–0.69 (SUSPICIOUS or UNCERTAIN)"
+agents      = ["inquisitor"]
+description = "10-source adversarial fact-check. Activates only when ensemble confidence is ambiguous."
+notes       = """
+  Improvement 13 (Wave 3): Also triggered by instance-hardness routing path:
+    routing_path = 'targeted_verify' → inquisitor with 3 sources
+    routing_path = 'deep_verify'    → inquisitor with 10 sources (full)
+"""
+
+[[optional_stage]]
+id          = "campaign-scan"
+label       = "Narrative Campaign Detection"
+trigger     = "scheduled (every 72 h) OR 3+ related claims within 48 h"
+agents      = ["narrative-tracker"]
+description = "Clusters related claims, detects coordinated inauthentic behaviour."
+
+[[optional_stage]]
+id          = "investigation"
+label       = "Investigation Report"
+trigger     = "narrative-tracker CIB score >= 0.75"
+agents      = ["investigator"]
+description = "Full multi-claim investigation report with actor mapping and timeline."
+
+# ── Context key map ────────────────────────────────────────────────────────────
+
+[[context_key]]
+key    = "claim_extractor.output"
+writer = "claim-extractor"
+readers = ["claim-decomposer", "stance-detector", "ml-classifier", "coherence-checker", "wiki-checker", "triplet-fact-checker", "source-rater", "kg-consistency-checker", "temporal-checker", "cib-detector", "cross-lingual-aligner"]
+
+[[context_key]]
+key    = "claim_decomposer.output"
+writer = "claim-decomposer"
+readers = ["cross-lingual-aligner"]
+
+[[context_key]]
+key    = "stance_detector.output"
+writer = "stance-detector"
+readers = ["triplet-fact-checker"]
+
+[[context_key]]
+key    = "claim_extractor.seen_hashes"
+writer = "claim-extractor"
+readers = ["claim-extractor"]
+
+[[context_key]]
+key    = "claim_extractor.dedup_log"
+writer = "claim-extractor"
+readers = ["disinfo-orchestrator"]
+
+[[context_key]]
+key    = "claim_extractor.entity_map"
+writer = "claim-extractor"
+readers = ["wiki-checker", "cross-lingual-aligner"]
+
+[[context_key]]
+key    = "ml_classifier.output"
+writer = "ml-classifier"
+readers = ["disinfo-orchestrator"]
+
+[[context_key]]
+key    = "coherence_checker.output"
+writer = "coherence-checker"
+readers = ["disinfo-orchestrator"]
+
+[[context_key]]
+key    = "wiki_checker.output"
+writer = "wiki-checker"
+readers = ["disinfo-orchestrator"]
+
+[[context_key]]
+key    = "triplet_fact_checker.output"
+writer = "triplet-fact-checker"
+readers = ["disinfo-orchestrator"]
+
+[[context_key]]
+key    = "source_rater.output"
+writer = "source-rater"
+readers = ["disinfo-orchestrator"]
+
+[[context_key]]
+key    = "kg_checker.output"
+writer = "kg-consistency-checker"
+readers = ["disinfo-orchestrator"]
+
+[[context_key]]
+key    = "temporal_checker.output"
+writer = "temporal-checker"
+readers = ["disinfo-orchestrator"]
+
+[[context_key]]
+key    = "cross_lingual_aligner.output"
+writer = "cross-lingual-aligner"
+readers = ["wiki-checker", "triplet-fact-checker", "kg-consistency-checker"]
+
+[[context_key]]
+key    = "cib_detector.output"
+writer = "cib-detector"
+readers = ["disinfo-orchestrator", "writer", "narrative-tracker"]
+
+[[context_key]]
+key    = "injection_shield.output"
+writer = "injection-shield"
+readers = ["claim-extractor"]
+
+[[context_key]]
+key    = "watchdog.seen_fingerprints"
+writer = "watchdog"
+readers = ["watchdog"]
+
+[[context_key]]
+key    = "watchdog.quarantine"
+writer = "injection-shield"
+readers = ["watchdog", "disinfo-orchestrator"]
+
+[[context_key]]
+key    = "ensemble.agent_stats"
+writer = "disinfo-orchestrator"
+readers = ["disinfo-orchestrator"]
+
+[[context_key]]
+key    = "ensemble.current_weights"
+writer = "disinfo-orchestrator"
+readers = ["disinfo-orchestrator"]
+
+[[context_key]]
+key    = "ensemble.weight_history"
+writer = "disinfo-orchestrator"
+readers = ["disinfo-orchestrator"]
+
+# Wave 3: F2-score weights context key (Improvement 15)
+[[context_key]]
+key    = "ensemble.f2_weights"
+writer = "disinfo-orchestrator"
+readers = ["disinfo-orchestrator"]
+
+[[context_key]]
+key    = "orchestrator.verdicts"
+writer = "disinfo-orchestrator"
+readers = ["writer", "inquisitor", "narrative-tracker", "arbiter"]
+
+[[context_key]]
+key    = "writer.pending_review"
+writer = "writer"
+readers = ["writer"]
+
+# Wave 3: Arbiter mini-debate context keys (Improvement 14)
+[[context_key]]
+key    = "arbiter.debate_input"
+writer = "disinfo-orchestrator"
+readers = ["arbiter"]
+
+[[context_key]]
+key    = "arbiter.debate_verdict"
+writer = "arbiter"
+readers = ["disinfo-orchestrator"]

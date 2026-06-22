@@ -1,0 +1,4484 @@
+{
+  "articles": [
+    {
+      "_fixture": "calibration-good-0",
+      "source_url": "https://www.sme.sk/clanok-0",
+      "source_domain": "sme.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1000",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on sme.sk in segment 0.",
+          "entities": [
+            "Slovak government",
+            "sme.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "2ac230858f4303949235c3999e956b222b56b233867a7ea401cbf54c31b42506"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-1",
+      "source_url": "https://www.dennikn.sk/clanok-1",
+      "source_domain": "dennikn.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1001",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on dennikn.sk in segment 1.",
+          "entities": [
+            "Slovak government",
+            "dennikn.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "9a6ee7090032c963e03db821511adc4253c9ff96efb3ed8399382e7f54a5c4ae"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-2",
+      "source_url": "https://www.aktuality.sk/clanok-2",
+      "source_domain": "aktuality.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1002",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on aktuality.sk in segment 2.",
+          "entities": [
+            "Slovak government",
+            "aktuality.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "2f9c776a957e15503851bf10436a07cb7b4d3ae900159f4958aa06e2955918e6"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-3",
+      "source_url": "https://www.rtvs.sk/clanok-3",
+      "source_domain": "rtvs.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1003",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on rtvs.sk in segment 3.",
+          "entities": [
+            "Slovak government",
+            "rtvs.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "b723c81939cd07a0c55de45d40680e9accdc63b459118f0f7b7a6e76a46e40b2"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-4",
+      "source_url": "https://www.tasr.sk/clanok-4",
+      "source_domain": "tasr.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1004",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on tasr.sk in segment 4.",
+          "entities": [
+            "Slovak government",
+            "tasr.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "cce8ee3084b605157d23d8aef82bc2d14a233a8e655f2e5705695e481d1ba7d9"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-5",
+      "source_url": "https://www.sme.sk/clanok-5",
+      "source_domain": "sme.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1005",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on sme.sk in segment 5.",
+          "entities": [
+            "Slovak government",
+            "sme.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "9077ea2b3272cdcd47d1a6a55f682bb851b44b07cd9ff1385fa347a8390533c1"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-6",
+      "source_url": "https://www.dennikn.sk/clanok-6",
+      "source_domain": "dennikn.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1006",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on dennikn.sk in segment 6.",
+          "entities": [
+            "Slovak government",
+            "dennikn.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "af272fa69de562c0cfa39236d1e7960e4fdd4fc85b37ca5d595a23817543b81f"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-7",
+      "source_url": "https://www.aktuality.sk/clanok-7",
+      "source_domain": "aktuality.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1007",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on aktuality.sk in segment 7.",
+          "entities": [
+            "Slovak government",
+            "aktuality.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "79a47de87f60d153fe577cca3648a323bba6bc60d8df83b03d5b0b8308762a59"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-8",
+      "source_url": "https://www.rtvs.sk/clanok-8",
+      "source_domain": "rtvs.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1008",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on rtvs.sk in segment 8.",
+          "entities": [
+            "Slovak government",
+            "rtvs.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "ebf97c01763963f0e47146f6d951e91e22a4a1cc8865e58093a66398e59dedc1"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-9",
+      "source_url": "https://www.tasr.sk/clanok-9",
+      "source_domain": "tasr.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1009",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on tasr.sk in segment 9.",
+          "entities": [
+            "Slovak government",
+            "tasr.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "c76e886316dd5a69f2cd5b39fa366259b29bb82b6d35031c119eefac276ed98b"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-10",
+      "source_url": "https://www.sme.sk/clanok-10",
+      "source_domain": "sme.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1010",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on sme.sk in segment 10.",
+          "entities": [
+            "Slovak government",
+            "sme.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "00efb8177bbb1b6e3eb56f6cf762befac8b9280c2ef7c4e9288435f66792cb96"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-11",
+      "source_url": "https://www.dennikn.sk/clanok-11",
+      "source_domain": "dennikn.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1011",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on dennikn.sk in segment 11.",
+          "entities": [
+            "Slovak government",
+            "dennikn.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "70bfe1a6c1a2fb046ea113e26a7630d9e0e0c6678090cddd6b365601c3c251af"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-12",
+      "source_url": "https://www.aktuality.sk/clanok-12",
+      "source_domain": "aktuality.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1012",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on aktuality.sk in segment 12.",
+          "entities": [
+            "Slovak government",
+            "aktuality.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "3355c2fd317340fc5bb3e8b02e10c3ab4464d891a595d126207c8cf7dec09d66"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-13",
+      "source_url": "https://www.rtvs.sk/clanok-13",
+      "source_domain": "rtvs.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1013",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on rtvs.sk in segment 13.",
+          "entities": [
+            "Slovak government",
+            "rtvs.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "73d0346ca7e72e1fa5ecaf554c0c758a019d464e302eda3a0eaf1199d52e7663"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-14",
+      "source_url": "https://www.tasr.sk/clanok-14",
+      "source_domain": "tasr.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1014",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on tasr.sk in segment 14.",
+          "entities": [
+            "Slovak government",
+            "tasr.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "c2230c10747a6f0ac9bcf588cf640168f630619b353f01c8ec1b62ed8ecbc8a4"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-15",
+      "source_url": "https://www.sme.sk/clanok-15",
+      "source_domain": "sme.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1015",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on sme.sk in segment 15.",
+          "entities": [
+            "Slovak government",
+            "sme.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "5e41c06f0da851bc6eafcca1be406b6aafe0a532b90839b30fe0d3dfccca667c"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-16",
+      "source_url": "https://www.dennikn.sk/clanok-16",
+      "source_domain": "dennikn.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1016",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on dennikn.sk in segment 16.",
+          "entities": [
+            "Slovak government",
+            "dennikn.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "35f901246f5e56e43f1e564721b96e0793a05e50793e4224f819600541370f07"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-17",
+      "source_url": "https://www.aktuality.sk/clanok-17",
+      "source_domain": "aktuality.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1017",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on aktuality.sk in segment 17.",
+          "entities": [
+            "Slovak government",
+            "aktuality.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "9698b034b895cfa6e5a1e8779250463ec9ec369b2227653d7151ee0618ee464b"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-18",
+      "source_url": "https://www.rtvs.sk/clanok-18",
+      "source_domain": "rtvs.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1018",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on rtvs.sk in segment 18.",
+          "entities": [
+            "Slovak government",
+            "rtvs.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "2546c8ed3d50c7704f83c84afd2044c3bcec5d29d04346290e4b2f43d840f300"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-19",
+      "source_url": "https://www.tasr.sk/clanok-19",
+      "source_domain": "tasr.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1019",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on tasr.sk in segment 19.",
+          "entities": [
+            "Slovak government",
+            "tasr.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "034edf9f82f905c281bc9b68f70d5bbba910105f9eaa43e2a3d2523cfa53cbae"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-20",
+      "source_url": "https://www.sme.sk/clanok-20",
+      "source_domain": "sme.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1020",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on sme.sk in segment 20.",
+          "entities": [
+            "Slovak government",
+            "sme.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "12d15c0f0d0cd8e86bedb02e8b42089945f5174a9fcf0428bea558fd2623db66"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-21",
+      "source_url": "https://www.dennikn.sk/clanok-21",
+      "source_domain": "dennikn.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1021",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on dennikn.sk in segment 21.",
+          "entities": [
+            "Slovak government",
+            "dennikn.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "0a4c203efadb2529fba4ad4bad41d74d7a10270a49c8fa172ab8bb9763dc821e"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-22",
+      "source_url": "https://www.aktuality.sk/clanok-22",
+      "source_domain": "aktuality.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1022",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on aktuality.sk in segment 22.",
+          "entities": [
+            "Slovak government",
+            "aktuality.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "785e492ab99663625db9a2a991b95b239762ff038c5e04f39945243bf2c1f023"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-23",
+      "source_url": "https://www.rtvs.sk/clanok-23",
+      "source_domain": "rtvs.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1023",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on rtvs.sk in segment 23.",
+          "entities": [
+            "Slovak government",
+            "rtvs.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "f083b49e11ab9c4cc7b5c837b8b01f77c09c3ac8e68455fc89e6e64d35e7531f"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-24",
+      "source_url": "https://www.tasr.sk/clanok-24",
+      "source_domain": "tasr.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1024",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on tasr.sk in segment 24.",
+          "entities": [
+            "Slovak government",
+            "tasr.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "b9e4960c18f59f29b4db4c9d0fe9d02a5f86a934ee49846b22e024ea4dac6748"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-25",
+      "source_url": "https://www.sme.sk/clanok-25",
+      "source_domain": "sme.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1025",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on sme.sk in segment 25.",
+          "entities": [
+            "Slovak government",
+            "sme.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "bb564410f026c73bd62ad8a0a080b1b4d2c4240e543713dc835537c30a059fd7"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-26",
+      "source_url": "https://www.dennikn.sk/clanok-26",
+      "source_domain": "dennikn.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1026",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on dennikn.sk in segment 26.",
+          "entities": [
+            "Slovak government",
+            "dennikn.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "caa92ceae9e1a92d3ea9716f6f4ee809427a15cf1647220f05c942714b5a5cf2"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-27",
+      "source_url": "https://www.aktuality.sk/clanok-27",
+      "source_domain": "aktuality.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1027",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on aktuality.sk in segment 27.",
+          "entities": [
+            "Slovak government",
+            "aktuality.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "35fe82196332b98e3e97f20e9ff8405b1c5930113219ae6cee464a1d7ceb4c28"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-28",
+      "source_url": "https://www.rtvs.sk/clanok-28",
+      "source_domain": "rtvs.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1028",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on rtvs.sk in segment 28.",
+          "entities": [
+            "Slovak government",
+            "rtvs.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "2a0b7f9d223827e5e780f5a821b827532172aaabb6bda782dbda9b553e4bae2b"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-29",
+      "source_url": "https://www.tasr.sk/clanok-29",
+      "source_domain": "tasr.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1029",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on tasr.sk in segment 29.",
+          "entities": [
+            "Slovak government",
+            "tasr.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "8eb9015750b920960da0e55ed35b4b9f738234192403952da7e72345594627b1"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-30",
+      "source_url": "https://www.sme.sk/clanok-30",
+      "source_domain": "sme.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1030",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on sme.sk in segment 30.",
+          "entities": [
+            "Slovak government",
+            "sme.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "488b194b700472e13462b486e8ebd1608888b976e5acf32ccc57ab2c198aa57c"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-31",
+      "source_url": "https://www.dennikn.sk/clanok-31",
+      "source_domain": "dennikn.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1031",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on dennikn.sk in segment 31.",
+          "entities": [
+            "Slovak government",
+            "dennikn.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "0d86c743047ce130e4c818d11b13a965189efa579c81aecd7726a4e25ff42d0c"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-32",
+      "source_url": "https://www.aktuality.sk/clanok-32",
+      "source_domain": "aktuality.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1032",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on aktuality.sk in segment 32.",
+          "entities": [
+            "Slovak government",
+            "aktuality.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "09e6fe673021556e06c604b0ddaa211403dc2080cb03f7b04f6ba0e8b6308bad"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-33",
+      "source_url": "https://www.rtvs.sk/clanok-33",
+      "source_domain": "rtvs.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1033",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on rtvs.sk in segment 33.",
+          "entities": [
+            "Slovak government",
+            "rtvs.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "6da45cd1e3069155a7d97c11313da1520e4b7c5e92eb0a2b0de6e7947d5a0df3"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-34",
+      "source_url": "https://www.tasr.sk/clanok-34",
+      "source_domain": "tasr.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1034",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on tasr.sk in segment 34.",
+          "entities": [
+            "Slovak government",
+            "tasr.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "0f9fd1613591299bdc4ae28875dc14db4f0b1c990e628bf11473c868fa201b00"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-35",
+      "source_url": "https://www.sme.sk/clanok-35",
+      "source_domain": "sme.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1035",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on sme.sk in segment 35.",
+          "entities": [
+            "Slovak government",
+            "sme.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "6a62938570b515d56818e10b98d433e779201db164ecd6de31a0af8938c8c6ce"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-36",
+      "source_url": "https://www.dennikn.sk/clanok-36",
+      "source_domain": "dennikn.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1036",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on dennikn.sk in segment 36.",
+          "entities": [
+            "Slovak government",
+            "dennikn.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "f69a1958528b12d6c729aa723313d22bae4102837b2653e6d74960c8f6fc7a0d"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-37",
+      "source_url": "https://www.aktuality.sk/clanok-37",
+      "source_domain": "aktuality.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1037",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on aktuality.sk in segment 37.",
+          "entities": [
+            "Slovak government",
+            "aktuality.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "8bf9269ba2d271fc0ff1afb3b046e20ea65dd93ed6963672e1114f5cfd8ed40a"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-38",
+      "source_url": "https://www.rtvs.sk/clanok-38",
+      "source_domain": "rtvs.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1038",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on rtvs.sk in segment 38.",
+          "entities": [
+            "Slovak government",
+            "rtvs.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "1a410493212ff9ec68c7fff94edb8199282d471d9c1e263167b6d39dd18dce9d"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-39",
+      "source_url": "https://www.tasr.sk/clanok-39",
+      "source_domain": "tasr.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1039",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on tasr.sk in segment 39.",
+          "entities": [
+            "Slovak government",
+            "tasr.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "e277870645956cb5700dafca1d15e2a53cd8f336f57be0ec833bce510480ee9d"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-40",
+      "source_url": "https://www.sme.sk/clanok-40",
+      "source_domain": "sme.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1040",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on sme.sk in segment 40.",
+          "entities": [
+            "Slovak government",
+            "sme.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "0e75d5b3583ccedcf46ac7e73be76d9df5272f6f8f40d26d40d1f0f08419a57e"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-41",
+      "source_url": "https://www.dennikn.sk/clanok-41",
+      "source_domain": "dennikn.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1041",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on dennikn.sk in segment 41.",
+          "entities": [
+            "Slovak government",
+            "dennikn.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "f76b1e3cdd1d75cce1285bbec3af6c521fc33f118bf05dc466f32078e0e89b5f"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-42",
+      "source_url": "https://www.aktuality.sk/clanok-42",
+      "source_domain": "aktuality.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1042",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on aktuality.sk in segment 42.",
+          "entities": [
+            "Slovak government",
+            "aktuality.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "8a304ca3b20d315feaab91a528405b8ab7a9d521a5346f49cf06aa391272196d"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-43",
+      "source_url": "https://www.rtvs.sk/clanok-43",
+      "source_domain": "rtvs.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1043",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on rtvs.sk in segment 43.",
+          "entities": [
+            "Slovak government",
+            "rtvs.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "2110d1a808da175ae00f54fd2b4bfde0bca0fb457cdefc31df1061bf34314e8b"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-44",
+      "source_url": "https://www.tasr.sk/clanok-44",
+      "source_domain": "tasr.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1044",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on tasr.sk in segment 44.",
+          "entities": [
+            "Slovak government",
+            "tasr.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "12671b9c9d74dbb3a6d8cffc0744573e86603cbb1fa2e2571cd211e8e5f229bc"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-45",
+      "source_url": "https://www.sme.sk/clanok-45",
+      "source_domain": "sme.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1045",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on sme.sk in segment 45.",
+          "entities": [
+            "Slovak government",
+            "sme.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "f04e9af3929fb61ef3e51d2bf1f8f31bf62ca88e1d5cb780579c666a8b54c4dc"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-46",
+      "source_url": "https://www.dennikn.sk/clanok-46",
+      "source_domain": "dennikn.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1046",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on dennikn.sk in segment 46.",
+          "entities": [
+            "Slovak government",
+            "dennikn.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "98fdfbad78271c4cfb2804bd51209472a5d332050e709b6b125b37f98f94452c"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-47",
+      "source_url": "https://www.aktuality.sk/clanok-47",
+      "source_domain": "aktuality.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1047",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on aktuality.sk in segment 47.",
+          "entities": [
+            "Slovak government",
+            "aktuality.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "f4c923f6479d7aa8f6009b546f55cfde94f68e9538172d7cbe6197f23b948a55"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-48",
+      "source_url": "https://www.rtvs.sk/clanok-48",
+      "source_domain": "rtvs.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1048",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on rtvs.sk in segment 48.",
+          "entities": [
+            "Slovak government",
+            "rtvs.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "f728d22af7d52557b3e7cac8a0bfdfb75219df69a8e5c33f148bdfe8eb478dff"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-49",
+      "source_url": "https://www.tasr.sk/clanok-49",
+      "source_domain": "tasr.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1049",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on tasr.sk in segment 49.",
+          "entities": [
+            "Slovak government",
+            "tasr.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "7414dba875dd6eb12ee757cc5783fa0ac553e76c454d5adba23ec48ddb6b9302"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-50",
+      "source_url": "https://www.sme.sk/clanok-50",
+      "source_domain": "sme.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1050",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on sme.sk in segment 50.",
+          "entities": [
+            "Slovak government",
+            "sme.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "3334ca3add001310d5636029a9ed0b6bcc51a7b75fe421466f54070c5b2252a4"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-51",
+      "source_url": "https://www.dennikn.sk/clanok-51",
+      "source_domain": "dennikn.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1051",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on dennikn.sk in segment 51.",
+          "entities": [
+            "Slovak government",
+            "dennikn.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "c3ac75ae304ab5ccc8d49680ce41883ee8f70013563dd3e80beafd00c4d6f679"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-52",
+      "source_url": "https://www.aktuality.sk/clanok-52",
+      "source_domain": "aktuality.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1052",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on aktuality.sk in segment 52.",
+          "entities": [
+            "Slovak government",
+            "aktuality.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "d9698c0bfdbe107fded0114b2e980f77880bc23ebc6c620daaba2952edce12ee"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-53",
+      "source_url": "https://www.rtvs.sk/clanok-53",
+      "source_domain": "rtvs.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1053",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on rtvs.sk in segment 53.",
+          "entities": [
+            "Slovak government",
+            "rtvs.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "69c5984a1fdd56fb25e7387a338e6dca3c6b0ff754c7352b66995fefe12fd903"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-54",
+      "source_url": "https://www.tasr.sk/clanok-54",
+      "source_domain": "tasr.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1054",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on tasr.sk in segment 54.",
+          "entities": [
+            "Slovak government",
+            "tasr.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "6b56eaca47e54411bcdc2e786f89159fa8afa40fd0b05640d25b46a588bcda71"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-55",
+      "source_url": "https://www.sme.sk/clanok-55",
+      "source_domain": "sme.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1055",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on sme.sk in segment 55.",
+          "entities": [
+            "Slovak government",
+            "sme.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "9c8e8dcadf6ba70760a9acff6c7a2f366d1345d5812ab4f2ba6bb2c0707e056a"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-56",
+      "source_url": "https://www.dennikn.sk/clanok-56",
+      "source_domain": "dennikn.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1056",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on dennikn.sk in segment 56.",
+          "entities": [
+            "Slovak government",
+            "dennikn.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "18ace1442d2444af03b7a379669d4c288121e48e6b983723cf44f1ad43bd6ddc"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-57",
+      "source_url": "https://www.aktuality.sk/clanok-57",
+      "source_domain": "aktuality.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1057",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on aktuality.sk in segment 57.",
+          "entities": [
+            "Slovak government",
+            "aktuality.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "0b7bfb2b3725f8fe2221c00edca858b1f4dc0ad915887da41d79a576e8ec288a"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-58",
+      "source_url": "https://www.rtvs.sk/clanok-58",
+      "source_domain": "rtvs.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1058",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on rtvs.sk in segment 58.",
+          "entities": [
+            "Slovak government",
+            "rtvs.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "e3febbf1eb53972f5228dfd5d832e457e2aa472b0ebcea574ba340108d993b51"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-59",
+      "source_url": "https://www.tasr.sk/clanok-59",
+      "source_domain": "tasr.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1059",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on tasr.sk in segment 59.",
+          "entities": [
+            "Slovak government",
+            "tasr.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "dcb0ba85deea994c1c5cb3561ca03918439465f34bccfb0a76896f823ee19168"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-60",
+      "source_url": "https://www.sme.sk/clanok-60",
+      "source_domain": "sme.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1060",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on sme.sk in segment 60.",
+          "entities": [
+            "Slovak government",
+            "sme.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "561cce1a5ea43d029a317328f03e30ad6a94e252c6a3b6bcbb9a1ef35c1098e6"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-61",
+      "source_url": "https://www.dennikn.sk/clanok-61",
+      "source_domain": "dennikn.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1061",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on dennikn.sk in segment 61.",
+          "entities": [
+            "Slovak government",
+            "dennikn.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "1a274f453e7c46bb3b9f279281ce4a4770d0798a72d542315744d8ccf27f5a34"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-62",
+      "source_url": "https://www.aktuality.sk/clanok-62",
+      "source_domain": "aktuality.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1062",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on aktuality.sk in segment 62.",
+          "entities": [
+            "Slovak government",
+            "aktuality.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "26cc380632cf3660b0ce1e4df6980aa0cd8880e79803578288f5a9ad5625030b"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-63",
+      "source_url": "https://www.rtvs.sk/clanok-63",
+      "source_domain": "rtvs.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1063",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on rtvs.sk in segment 63.",
+          "entities": [
+            "Slovak government",
+            "rtvs.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "fc984321ac2614fab38a9a06f9211bc5a7ed931f23c81829fbae273d5fa334c6"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-64",
+      "source_url": "https://www.tasr.sk/clanok-64",
+      "source_domain": "tasr.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1064",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on tasr.sk in segment 64.",
+          "entities": [
+            "Slovak government",
+            "tasr.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "b3a3fd3a2ac5f610701b65330d60fa792afb8bec4f0c129fa15b4d0dfd20cce1"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-65",
+      "source_url": "https://www.sme.sk/clanok-65",
+      "source_domain": "sme.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1065",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on sme.sk in segment 65.",
+          "entities": [
+            "Slovak government",
+            "sme.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "3c51d173a64ce2d1dc7d510aa9f329f15972ae5bfb953696381776a800423fb3"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-66",
+      "source_url": "https://www.dennikn.sk/clanok-66",
+      "source_domain": "dennikn.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1066",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on dennikn.sk in segment 66.",
+          "entities": [
+            "Slovak government",
+            "dennikn.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "5ac17a13627911b16e17bc3d39e2d76a876fb03b4a93b4fd4854b2a512a54575"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-67",
+      "source_url": "https://www.aktuality.sk/clanok-67",
+      "source_domain": "aktuality.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1067",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on aktuality.sk in segment 67.",
+          "entities": [
+            "Slovak government",
+            "aktuality.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "6557b8f31eca709b16163283189abd8186ac6ab56ec1c0d02e0341bd01d1f803"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-68",
+      "source_url": "https://www.rtvs.sk/clanok-68",
+      "source_domain": "rtvs.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1068",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on rtvs.sk in segment 68.",
+          "entities": [
+            "Slovak government",
+            "rtvs.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "33b45a8b826f2ba70c842b2fad30d4a6e0aa4a786b6a478c298e95ef82f20088"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-69",
+      "source_url": "https://www.tasr.sk/clanok-69",
+      "source_domain": "tasr.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1069",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on tasr.sk in segment 69.",
+          "entities": [
+            "Slovak government",
+            "tasr.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "faffbecca9c0be42a34fbccc6f3ebcd27eaceb5de992433de340b3012d5564f0"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-70",
+      "source_url": "https://www.sme.sk/clanok-70",
+      "source_domain": "sme.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1070",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on sme.sk in segment 70.",
+          "entities": [
+            "Slovak government",
+            "sme.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "d921261a24ec2535480fc293649df36bff8ca448e0872bb5cf1298ca4071c86c"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-71",
+      "source_url": "https://www.dennikn.sk/clanok-71",
+      "source_domain": "dennikn.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1071",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on dennikn.sk in segment 71.",
+          "entities": [
+            "Slovak government",
+            "dennikn.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "f62d063ea334f8d909d1c25790253375d53cb75a6ea86cb086f16ea9d64c5e47"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-72",
+      "source_url": "https://www.aktuality.sk/clanok-72",
+      "source_domain": "aktuality.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1072",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on aktuality.sk in segment 72.",
+          "entities": [
+            "Slovak government",
+            "aktuality.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "dfe5ccf0f34ab2be064395c3e6276487b35fbcbdde364a2c6380d212e3837d07"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-73",
+      "source_url": "https://www.rtvs.sk/clanok-73",
+      "source_domain": "rtvs.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1073",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on rtvs.sk in segment 73.",
+          "entities": [
+            "Slovak government",
+            "rtvs.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "867bef2017184b420ce4fca57384377b98e4626286a90f532297d1c7aff7243f"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-74",
+      "source_url": "https://www.tasr.sk/clanok-74",
+      "source_domain": "tasr.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1074",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on tasr.sk in segment 74.",
+          "entities": [
+            "Slovak government",
+            "tasr.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "fa2a469ef3d341c1659e7717f25f6991589536e52e37d3548a417272a71c183c"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-75",
+      "source_url": "https://www.sme.sk/clanok-75",
+      "source_domain": "sme.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1075",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on sme.sk in segment 75.",
+          "entities": [
+            "Slovak government",
+            "sme.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "0f420d80f6c34e96735ca356d466a04c9851065a891258463ef8912044cf30d7"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-76",
+      "source_url": "https://www.dennikn.sk/clanok-76",
+      "source_domain": "dennikn.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1076",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on dennikn.sk in segment 76.",
+          "entities": [
+            "Slovak government",
+            "dennikn.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "c6bfd1d77d7e96683feb46bb3b89b34fcbb97d01971682e61ae3c61f53954d3d"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-77",
+      "source_url": "https://www.aktuality.sk/clanok-77",
+      "source_domain": "aktuality.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1077",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on aktuality.sk in segment 77.",
+          "entities": [
+            "Slovak government",
+            "aktuality.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "83217cecd4ce7e031d66a6938d6beb4f2619f4f49ce1bc100789e465e97d77f3"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-78",
+      "source_url": "https://www.rtvs.sk/clanok-78",
+      "source_domain": "rtvs.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1078",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on rtvs.sk in segment 78.",
+          "entities": [
+            "Slovak government",
+            "rtvs.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "d331cd413e4a84f21ae5595ec7436894e7470882ccacd7ba0b0c727d715d35a1"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-good-79",
+      "source_url": "https://www.tasr.sk/clanok-79",
+      "source_domain": "tasr.sk",
+      "expected_verdict": "CREDIBLE",
+      "claims": [
+        {
+          "id": "c1079",
+          "text": "Slovak government announced new economic reforms to support small businesses, reported on tasr.sk in segment 79.",
+          "entities": [
+            "Slovak government",
+            "tasr.sk"
+          ],
+          "checkworthiness": 0.35,
+          "claim_hash": "b057f9dabe4868dddd1babffbd73b09275c571f643485da04ad80b27a8d93b24"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-0",
+      "source_url": "https://www.hlavnespravy.sk/hoax-0",
+      "source_domain": "hlavnespravy.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2000",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by hlavnespravy.sk 0.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "hlavnespravy.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "dec3534190b64c14407e7c6b02dedbccd6bcc2cb6478301f19ae212fb8456c0d"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-1",
+      "source_url": "https://www.infovojna.to/hoax-1",
+      "source_domain": "infovojna.to",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2001",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by infovojna.to 1.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "infovojna.to"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "5ffd97372e7a750be3ab1a72d517a2ad40e799933d235749061de6e677695d72"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-2",
+      "source_url": "https://www.zemavek.sk/hoax-2",
+      "source_domain": "zemavek.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2002",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by zemavek.sk 2.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "zemavek.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "ae7a992a41b5bb80cd88e6f7565c6561dd058b1202b948fe531cdf508658e4e3"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-3",
+      "source_url": "https://www.bad-news-portal.sk/hoax-3",
+      "source_domain": "bad-news-portal.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2003",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by bad-news-portal.sk 3.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "bad-news-portal.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "1d4f0169c1af5bea8c1f1851310c13c4e28db47683673d3c369c4d498a0ab500"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-4",
+      "source_url": "https://www.slobodnyvysielac.sk/hoax-4",
+      "source_domain": "slobodnyvysielac.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2004",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by slobodnyvysielac.sk 4.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "slobodnyvysielac.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "9ae46a55b74638a52f7998f684cf82606cfcfadb0694f41b79233ede786277ff"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-5",
+      "source_url": "https://www.hlavnespravy.sk/hoax-5",
+      "source_domain": "hlavnespravy.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2005",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by hlavnespravy.sk 5.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "hlavnespravy.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "a985621ccb1350902ecbe6cc64bb4214c58826dc3fb09c44aaaa4d5cfdc865fe"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-6",
+      "source_url": "https://www.infovojna.to/hoax-6",
+      "source_domain": "infovojna.to",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2006",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by infovojna.to 6.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "infovojna.to"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "9f9da24bfed40703ab1493710b49c35cb3289f4f639e10a80fb1ec390f7f0591"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-7",
+      "source_url": "https://www.zemavek.sk/hoax-7",
+      "source_domain": "zemavek.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2007",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by zemavek.sk 7.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "zemavek.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "f02c4e20eb65b0df155ad211fd4afbc2a5dfee0c26541a292997c884425118c2"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-8",
+      "source_url": "https://www.bad-news-portal.sk/hoax-8",
+      "source_domain": "bad-news-portal.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2008",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by bad-news-portal.sk 8.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "bad-news-portal.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "fa5e4edeaf4db3c451474e95d9222b32ff7f0d9bd8edfc27560246ae9eb161ca"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-9",
+      "source_url": "https://www.slobodnyvysielac.sk/hoax-9",
+      "source_domain": "slobodnyvysielac.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2009",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by slobodnyvysielac.sk 9.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "slobodnyvysielac.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "317477e47d355914afaed1787e91795a63e42d1e01f6c00de1251e7e16ef5daa"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-10",
+      "source_url": "https://www.hlavnespravy.sk/hoax-10",
+      "source_domain": "hlavnespravy.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2010",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by hlavnespravy.sk 10.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "hlavnespravy.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "964e3ed480cf0390c7fcc71d87247b91f1705c8cbf6992ef674a4774fc0abd12"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-11",
+      "source_url": "https://www.infovojna.to/hoax-11",
+      "source_domain": "infovojna.to",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2011",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by infovojna.to 11.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "infovojna.to"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "05e692edc4bf9b01fd3f2049d82d80d54e47205b4706ab6c4b2b6c16017e9863"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-12",
+      "source_url": "https://www.zemavek.sk/hoax-12",
+      "source_domain": "zemavek.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2012",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by zemavek.sk 12.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "zemavek.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "04ad49b2cb7558651484738d89016741d227a365dcac0caa1cee3c299294af1a"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-13",
+      "source_url": "https://www.bad-news-portal.sk/hoax-13",
+      "source_domain": "bad-news-portal.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2013",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by bad-news-portal.sk 13.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "bad-news-portal.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "f3045cd445393dba2b1495d2002765380665a96a2bb5cb9a71cafe781499a2e2"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-14",
+      "source_url": "https://www.slobodnyvysielac.sk/hoax-14",
+      "source_domain": "slobodnyvysielac.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2014",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by slobodnyvysielac.sk 14.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "slobodnyvysielac.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "9da2a6c5beaa9c72dc1d3b87647232d730100382c35f9c4d6c761364ea8fa2b7"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-15",
+      "source_url": "https://www.hlavnespravy.sk/hoax-15",
+      "source_domain": "hlavnespravy.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2015",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by hlavnespravy.sk 15.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "hlavnespravy.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "04f9f4b7bd6d43b8f83c19beea0f660a61207cea77e15fe4cf10d70ebcfad6dd"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-16",
+      "source_url": "https://www.infovojna.to/hoax-16",
+      "source_domain": "infovojna.to",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2016",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by infovojna.to 16.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "infovojna.to"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "494ee935d02ec637839477ec9a54a8069f28ba9f4730e4be213a362e8546a9e0"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-17",
+      "source_url": "https://www.zemavek.sk/hoax-17",
+      "source_domain": "zemavek.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2017",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by zemavek.sk 17.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "zemavek.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "6fbe8a790d2eb86dd169afb48503153afe8d60d1b5754beb86e6634b33764243"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-18",
+      "source_url": "https://www.bad-news-portal.sk/hoax-18",
+      "source_domain": "bad-news-portal.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2018",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by bad-news-portal.sk 18.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "bad-news-portal.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "ddeda64f04a534b860ed5bea0de5067c8e293166711e513af7702bafde51f469"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-19",
+      "source_url": "https://www.slobodnyvysielac.sk/hoax-19",
+      "source_domain": "slobodnyvysielac.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2019",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by slobodnyvysielac.sk 19.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "slobodnyvysielac.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "748c3fdfd5389edf2778194eec6f1bd954acd2125932cf86412806217d1749cf"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-20",
+      "source_url": "https://www.hlavnespravy.sk/hoax-20",
+      "source_domain": "hlavnespravy.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2020",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by hlavnespravy.sk 20.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "hlavnespravy.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "4131c62fa4b373d06f6ef84ccce710e1279a36ce4a0b089af5e691a84456cce4"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-21",
+      "source_url": "https://www.infovojna.to/hoax-21",
+      "source_domain": "infovojna.to",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2021",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by infovojna.to 21.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "infovojna.to"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "942f12a68519308f4e16e120cabe9ebc08a3ef1ff1e90e67516f445ac942ffbf"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-22",
+      "source_url": "https://www.zemavek.sk/hoax-22",
+      "source_domain": "zemavek.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2022",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by zemavek.sk 22.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "zemavek.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "a301d086b2d1eee348801e30398904ddf93fb44784217f5862e17b8815d494e1"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-23",
+      "source_url": "https://www.bad-news-portal.sk/hoax-23",
+      "source_domain": "bad-news-portal.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2023",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by bad-news-portal.sk 23.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "bad-news-portal.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "2ba0400371f5a968e7511ef0e82403ccf5d9783e4c2a23befae556f6c9c50d92"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-24",
+      "source_url": "https://www.slobodnyvysielac.sk/hoax-24",
+      "source_domain": "slobodnyvysielac.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2024",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by slobodnyvysielac.sk 24.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "slobodnyvysielac.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "8eba2b037dd41b01c6bff4c10007e673a89fb9a22179b42b512e0c7a271f1aa0"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-25",
+      "source_url": "https://www.hlavnespravy.sk/hoax-25",
+      "source_domain": "hlavnespravy.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2025",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by hlavnespravy.sk 25.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "hlavnespravy.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "13f52429f67c967182b630e48299a4333ce534deb04b01a9a4db1d57a7db1d0a"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-26",
+      "source_url": "https://www.infovojna.to/hoax-26",
+      "source_domain": "infovojna.to",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2026",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by infovojna.to 26.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "infovojna.to"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "49333d6adc8312c83724b11bf4d11a9d1c43a10aa47287f72f0518d5465d9bea"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-27",
+      "source_url": "https://www.zemavek.sk/hoax-27",
+      "source_domain": "zemavek.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2027",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by zemavek.sk 27.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "zemavek.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "6660bc4f32d62e945f45d02a3b58a7db472a113dbfa457764bb1849a4db7de17"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-28",
+      "source_url": "https://www.bad-news-portal.sk/hoax-28",
+      "source_domain": "bad-news-portal.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2028",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by bad-news-portal.sk 28.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "bad-news-portal.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "88a17a30a1f6424203855657a552efc875aa30d0518b0afbfc35b8bb4dad41e5"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-29",
+      "source_url": "https://www.slobodnyvysielac.sk/hoax-29",
+      "source_domain": "slobodnyvysielac.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2029",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by slobodnyvysielac.sk 29.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "slobodnyvysielac.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "18a09d0984f202b55d75d0cfa8e25ee1cc979ede7f538a2d3a1ea29123875e1e"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-30",
+      "source_url": "https://www.hlavnespravy.sk/hoax-30",
+      "source_domain": "hlavnespravy.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2030",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by hlavnespravy.sk 30.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "hlavnespravy.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "9aa2b1cc7810bb1a9dd5a77b5d3a70bed0789584325b3b1bc1310010b6008e1b"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-31",
+      "source_url": "https://www.infovojna.to/hoax-31",
+      "source_domain": "infovojna.to",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2031",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by infovojna.to 31.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "infovojna.to"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "a09e1ffedd587c4d7177e80ddd3f2d452dddba89f70f18850264fcb66a7bc3c1"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-32",
+      "source_url": "https://www.zemavek.sk/hoax-32",
+      "source_domain": "zemavek.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2032",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by zemavek.sk 32.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "zemavek.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "840e4250db3447b9e17ff7df3d46bc19ed3a14e70e5075036b962c461c052770"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-33",
+      "source_url": "https://www.bad-news-portal.sk/hoax-33",
+      "source_domain": "bad-news-portal.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2033",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by bad-news-portal.sk 33.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "bad-news-portal.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "5626427e1c8cd74e1695b117816a1b61907bf2c9ee1d3b39c0097685858ee2af"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-34",
+      "source_url": "https://www.slobodnyvysielac.sk/hoax-34",
+      "source_domain": "slobodnyvysielac.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2034",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by slobodnyvysielac.sk 34.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "slobodnyvysielac.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "7b40856156b1b7eed36e29b14a9b96d4ef78feb76fcc890a729ac8fc08fef309"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-35",
+      "source_url": "https://www.hlavnespravy.sk/hoax-35",
+      "source_domain": "hlavnespravy.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2035",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by hlavnespravy.sk 35.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "hlavnespravy.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "2ef88ac30be0fc1dbaf1dabca9ba367197b4a5321f3476908018b5882be72e7f"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-36",
+      "source_url": "https://www.infovojna.to/hoax-36",
+      "source_domain": "infovojna.to",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2036",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by infovojna.to 36.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "infovojna.to"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "f56a402c3c4e09eb7ef71bf844065712e02a39625ce36aa0025eb06360de6d07"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-37",
+      "source_url": "https://www.zemavek.sk/hoax-37",
+      "source_domain": "zemavek.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2037",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by zemavek.sk 37.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "zemavek.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "51e19377809903b7d7249dfeebc4204ecf07f6b2f071430446abd87ae33d261b"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-38",
+      "source_url": "https://www.bad-news-portal.sk/hoax-38",
+      "source_domain": "bad-news-portal.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2038",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by bad-news-portal.sk 38.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "bad-news-portal.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "8fabffee3169e8ee019a4947366d733f213e8d6445924a4572a175bcda42b1d7"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-39",
+      "source_url": "https://www.slobodnyvysielac.sk/hoax-39",
+      "source_domain": "slobodnyvysielac.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2039",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by slobodnyvysielac.sk 39.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "slobodnyvysielac.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "8c9409dbd99be8999c48e179dad5af7febe6112f21352e70d2d23ba5ed5d8bdd"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-40",
+      "source_url": "https://www.hlavnespravy.sk/hoax-40",
+      "source_domain": "hlavnespravy.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2040",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by hlavnespravy.sk 40.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "hlavnespravy.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "7c2abc10f267a108a499e96ea7ab5f8ebaff5a2bce22e3537f96bdfccd5f2e02"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-41",
+      "source_url": "https://www.infovojna.to/hoax-41",
+      "source_domain": "infovojna.to",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2041",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by infovojna.to 41.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "infovojna.to"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "56eaa1c061f22e29fa645e36e4d8a3d4957af8475e6de5ba18b39ecec8e964f2"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-42",
+      "source_url": "https://www.zemavek.sk/hoax-42",
+      "source_domain": "zemavek.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2042",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by zemavek.sk 42.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "zemavek.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "0dfe3c0a47431c18eb11c5ca55dda262c152950289cbbc04995a7f19c04418e1"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-43",
+      "source_url": "https://www.bad-news-portal.sk/hoax-43",
+      "source_domain": "bad-news-portal.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2043",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by bad-news-portal.sk 43.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "bad-news-portal.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "8b15755805431a7b4018c7d4716799b50498f71b53df12c11ba231c8b25fe77c"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-44",
+      "source_url": "https://www.slobodnyvysielac.sk/hoax-44",
+      "source_domain": "slobodnyvysielac.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2044",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by slobodnyvysielac.sk 44.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "slobodnyvysielac.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "7c0c061098021caaaef652e29d1540226aa5cf15e965920ec6eedd3df231cf96"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-45",
+      "source_url": "https://www.hlavnespravy.sk/hoax-45",
+      "source_domain": "hlavnespravy.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2045",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by hlavnespravy.sk 45.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "hlavnespravy.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "6f88eb37eafb84157b3e98b598b345b92d417a9d592a0a096e96fd0bce7cf9c7"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-46",
+      "source_url": "https://www.infovojna.to/hoax-46",
+      "source_domain": "infovojna.to",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2046",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by infovojna.to 46.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "infovojna.to"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "4d3c4d67cdf177258f0c7686bbd53d6bcc3c7548db89c9d035e452a5eb0d4ffe"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-47",
+      "source_url": "https://www.zemavek.sk/hoax-47",
+      "source_domain": "zemavek.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2047",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by zemavek.sk 47.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "zemavek.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "9d49490748e7d0426086258a97aa764c789de13a00dc2ec0cbc5cd0ead8fcee7"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-48",
+      "source_url": "https://www.bad-news-portal.sk/hoax-48",
+      "source_domain": "bad-news-portal.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2048",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by bad-news-portal.sk 48.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "bad-news-portal.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "7b467e74fe8775f031f4d2e2304daee919cf863857a5e853988e195c5c7ef919"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-49",
+      "source_url": "https://www.slobodnyvysielac.sk/hoax-49",
+      "source_domain": "slobodnyvysielac.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2049",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by slobodnyvysielac.sk 49.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "slobodnyvysielac.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "a8cd0c4eb342c5ff5d3ad415e71b90e7ad9c913c726913db68269477f9d25ff6"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-50",
+      "source_url": "https://www.hlavnespravy.sk/hoax-50",
+      "source_domain": "hlavnespravy.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2050",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by hlavnespravy.sk 50.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "hlavnespravy.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "5340cbf9e3e13a2ce2ed123fccd1f17b34ffb51f640ac62ae042901b64249c3c"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-51",
+      "source_url": "https://www.infovojna.to/hoax-51",
+      "source_domain": "infovojna.to",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2051",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by infovojna.to 51.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "infovojna.to"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "8a1030159b83915a7126c1a07a0d72f2592a722be05ff22d51a829e76e1d1a39"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-52",
+      "source_url": "https://www.zemavek.sk/hoax-52",
+      "source_domain": "zemavek.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2052",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by zemavek.sk 52.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "zemavek.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "c2dc5ca554d3f936f5fb214c1f48e4f966c816649b75f2b24a4bbbb5288c6ae7"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-53",
+      "source_url": "https://www.bad-news-portal.sk/hoax-53",
+      "source_domain": "bad-news-portal.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2053",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by bad-news-portal.sk 53.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "bad-news-portal.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "cda6e199927eef42a35260043a3697e2a22f59ec6f8cc7adfa21e51fd462808a"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-54",
+      "source_url": "https://www.slobodnyvysielac.sk/hoax-54",
+      "source_domain": "slobodnyvysielac.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2054",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by slobodnyvysielac.sk 54.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "slobodnyvysielac.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "5ddd25b2659fb146d6f4b6181ae6c309f7190ecab9541a3607a26cf2bdf25749"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-55",
+      "source_url": "https://www.hlavnespravy.sk/hoax-55",
+      "source_domain": "hlavnespravy.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2055",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by hlavnespravy.sk 55.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "hlavnespravy.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "6aef297d6a9986160124f965037aaa985b2f22966b7efa70239f4eee092f5242"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-56",
+      "source_url": "https://www.infovojna.to/hoax-56",
+      "source_domain": "infovojna.to",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2056",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by infovojna.to 56.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "infovojna.to"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "b924f4135872e40785270cd95801803d7932766e36a84efdc3612c569ffd3493"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-57",
+      "source_url": "https://www.zemavek.sk/hoax-57",
+      "source_domain": "zemavek.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2057",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by zemavek.sk 57.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "zemavek.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "b8579f429d7f88019bb2b2895a60586f7855016f04be792fd648c068906feb02"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-58",
+      "source_url": "https://www.bad-news-portal.sk/hoax-58",
+      "source_domain": "bad-news-portal.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2058",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by bad-news-portal.sk 58.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "bad-news-portal.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "33d664dbf629fc4c5a8ebf49aa952a9cbd660900772d82c275a5e227f879f77d"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-59",
+      "source_url": "https://www.slobodnyvysielac.sk/hoax-59",
+      "source_domain": "slobodnyvysielac.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2059",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by slobodnyvysielac.sk 59.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "slobodnyvysielac.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "b8a67cc4f8d46f7f8f3c27380cbec114b49b2bfece183d251496266d365c56c5"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-60",
+      "source_url": "https://www.hlavnespravy.sk/hoax-60",
+      "source_domain": "hlavnespravy.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2060",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by hlavnespravy.sk 60.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "hlavnespravy.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "e880f444c9e3717c1213b2410627f3aca23ebb549c749c97a2fdf958b68667af"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-61",
+      "source_url": "https://www.infovojna.to/hoax-61",
+      "source_domain": "infovojna.to",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2061",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by infovojna.to 61.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "infovojna.to"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "4f8bcc815c5225a26185d12527822c694939d5448ea16f3fe61123002dd721c0"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-62",
+      "source_url": "https://www.zemavek.sk/hoax-62",
+      "source_domain": "zemavek.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2062",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by zemavek.sk 62.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "zemavek.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "834eb61db6cc37ea11d3eaca3c47dd7c9c3b245e267ad66b4e9aaec37f31ac1a"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-63",
+      "source_url": "https://www.bad-news-portal.sk/hoax-63",
+      "source_domain": "bad-news-portal.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2063",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by bad-news-portal.sk 63.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "bad-news-portal.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "a852368321e200a4396fa88e109c999f53d8db0b04219584afbac53c1b5b3415"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-64",
+      "source_url": "https://www.slobodnyvysielac.sk/hoax-64",
+      "source_domain": "slobodnyvysielac.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2064",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by slobodnyvysielac.sk 64.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "slobodnyvysielac.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "e78c15dbc416e7f4ac7fd93ce13045457fa98dda6bc1179a288f85fdd84c732a"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-65",
+      "source_url": "https://www.hlavnespravy.sk/hoax-65",
+      "source_domain": "hlavnespravy.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2065",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by hlavnespravy.sk 65.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "hlavnespravy.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "e4c97041aa7a3cfad169aad40aefe7dbcdf20a785275823ffd97b77a40dab36a"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-66",
+      "source_url": "https://www.infovojna.to/hoax-66",
+      "source_domain": "infovojna.to",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2066",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by infovojna.to 66.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "infovojna.to"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "a4cae85dd320c4a804ef16214ba0310080d35ac403afbfcc6960877076223b54"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-67",
+      "source_url": "https://www.zemavek.sk/hoax-67",
+      "source_domain": "zemavek.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2067",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by zemavek.sk 67.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "zemavek.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "48b2b3b6fae53e7b888fe88ce3fd0796e100ade02bf5fe937914d9161e1d75b5"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-68",
+      "source_url": "https://www.bad-news-portal.sk/hoax-68",
+      "source_domain": "bad-news-portal.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2068",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by bad-news-portal.sk 68.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "bad-news-portal.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "bfb625adff89a827dcd2a52bd26bf5fe3c2bc1a38ce3855541e4684fcd8a16de"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-69",
+      "source_url": "https://www.slobodnyvysielac.sk/hoax-69",
+      "source_domain": "slobodnyvysielac.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2069",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by slobodnyvysielac.sk 69.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "slobodnyvysielac.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "56e4a6715edf673046c190b7d1aed2ef20196a3525fa4b86d61371e66ab60699"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-70",
+      "source_url": "https://www.hlavnespravy.sk/hoax-70",
+      "source_domain": "hlavnespravy.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2070",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by hlavnespravy.sk 70.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "hlavnespravy.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "5152681a41b3cd2ab9899ff1c34d191d0ff402adfa734ce2913bcca4d28d1ffb"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-71",
+      "source_url": "https://www.infovojna.to/hoax-71",
+      "source_domain": "infovojna.to",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2071",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by infovojna.to 71.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "infovojna.to"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "91a6885aa2aed8a3d53e51f494a1cffff03457ca470af314614956e492c2b137"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-72",
+      "source_url": "https://www.zemavek.sk/hoax-72",
+      "source_domain": "zemavek.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2072",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by zemavek.sk 72.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "zemavek.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "8464308828fc83736ada95884f23080491e02aab5dd9df14bfd504e5362862c7"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-73",
+      "source_url": "https://www.bad-news-portal.sk/hoax-73",
+      "source_domain": "bad-news-portal.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2073",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by bad-news-portal.sk 73.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "bad-news-portal.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "ab1c1eae11933dcece53ae4a7f74125e577cb4285c1de7cb3880d77eeb8dfb52"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-74",
+      "source_url": "https://www.slobodnyvysielac.sk/hoax-74",
+      "source_domain": "slobodnyvysielac.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2074",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by slobodnyvysielac.sk 74.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "slobodnyvysielac.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "c94dd5711bc8c9605bef82afc61892258790dfac8ecc2a8b41bdf7056a5721c6"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-75",
+      "source_url": "https://www.hlavnespravy.sk/hoax-75",
+      "source_domain": "hlavnespravy.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2075",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by hlavnespravy.sk 75.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "hlavnespravy.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "7bba93653e9abb344a9e0ddc8f6f5aac29bce0daf927be8240a2f150430b3ce0"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-76",
+      "source_url": "https://www.infovojna.to/hoax-76",
+      "source_domain": "infovojna.to",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2076",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by infovojna.to 76.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "infovojna.to"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "8f07a01d7e6a6ee3d2f43e9d5e9b06869e00a3e7f2c738da76c5a33371340ef1"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-77",
+      "source_url": "https://www.zemavek.sk/hoax-77",
+      "source_domain": "zemavek.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2077",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by zemavek.sk 77.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "zemavek.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "c0e180cca6777addae926b7e735e1978bacfd2f2d4491033f9a618a9156ab6e7"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-78",
+      "source_url": "https://www.bad-news-portal.sk/hoax-78",
+      "source_domain": "bad-news-portal.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2078",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by bad-news-portal.sk 78.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "bad-news-portal.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "38bffcb8518bbd4e5dde0f68921c8da3833061dd4717f9bdc6bdbfdaa00ff4ff"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-bad-79",
+      "source_url": "https://www.slobodnyvysielac.sk/hoax-79",
+      "source_domain": "slobodnyvysielac.sk",
+      "expected_verdict": "DISINFORMATION",
+      "claims": [
+        {
+          "id": "c2079",
+          "text": "SHOCKING: Secret documents reveal NATO is preparing an immediate invasion from Slovakia, published by slobodnyvysielac.sk 79.",
+          "entities": [
+            "NATO",
+            "Slovakia",
+            "slobodnyvysielac.sk"
+          ],
+          "checkworthiness": 0.95,
+          "claim_hash": "f2bf0c821f102df75a9a1ce3d77bd5c105d2067d15dc6a5a14ab70cc36b5574d"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-ambiguous-0",
+      "source_url": "https://www.facebook.com/post-0",
+      "source_domain": "facebook.com",
+      "expected_verdict": "SUSPICIOUS",
+      "claims": [
+        {
+          "id": "c3000",
+          "text": "Contested political debate on Slovak media regulation and security cooperation with foreign allies, discussed on facebook.com 0.",
+          "entities": [
+            "Slovak media",
+            "facebook.com"
+          ],
+          "checkworthiness": 0.65,
+          "claim_hash": "be31de71707266adfe1b593b89b7cba92a7f8ade6cfed5685a66c300e8d7a781"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-ambiguous-1",
+      "source_url": "https://www.telegram.org/post-1",
+      "source_domain": "telegram.org",
+      "expected_verdict": "UNCERTAIN",
+      "claims": [
+        {
+          "id": "c3001",
+          "text": "Contested political debate on Slovak media regulation and security cooperation with foreign allies, discussed on telegram.org 1.",
+          "entities": [
+            "Slovak media",
+            "telegram.org"
+          ],
+          "checkworthiness": 0.65,
+          "claim_hash": "f42903b2527040a7cadb62f1ffda32645da001a128bcdfee777d43d872c48106"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-ambiguous-2",
+      "source_url": "https://www.hlavnydennik.sk/post-2",
+      "source_domain": "hlavnydennik.sk",
+      "expected_verdict": "SUSPICIOUS",
+      "claims": [
+        {
+          "id": "c3002",
+          "text": "Contested political debate on Slovak media regulation and security cooperation with foreign allies, discussed on hlavnydennik.sk 2.",
+          "entities": [
+            "Slovak media",
+            "hlavnydennik.sk"
+          ],
+          "checkworthiness": 0.65,
+          "claim_hash": "57838ae7e7197cbd20243121122d0dce9109f78ff415f51faa3b720a6ecd98ff"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-ambiguous-3",
+      "source_url": "https://www.parlamentnelisty.sk/post-3",
+      "source_domain": "parlamentnelisty.sk",
+      "expected_verdict": "UNCERTAIN",
+      "claims": [
+        {
+          "id": "c3003",
+          "text": "Contested political debate on Slovak media regulation and security cooperation with foreign allies, discussed on parlamentnelisty.sk 3.",
+          "entities": [
+            "Slovak media",
+            "parlamentnelisty.sk"
+          ],
+          "checkworthiness": 0.65,
+          "claim_hash": "46d146a8874da660819fa257778f9591045bf56e8b45352530a9806ac155bbeb"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-ambiguous-4",
+      "source_url": "https://www.facebook.com/post-4",
+      "source_domain": "facebook.com",
+      "expected_verdict": "SUSPICIOUS",
+      "claims": [
+        {
+          "id": "c3004",
+          "text": "Contested political debate on Slovak media regulation and security cooperation with foreign allies, discussed on facebook.com 4.",
+          "entities": [
+            "Slovak media",
+            "facebook.com"
+          ],
+          "checkworthiness": 0.65,
+          "claim_hash": "1910dd3d358a7cd3e810c2387673ce27b16f3656bd739366970bdbd9e9acc36b"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-ambiguous-5",
+      "source_url": "https://www.telegram.org/post-5",
+      "source_domain": "telegram.org",
+      "expected_verdict": "UNCERTAIN",
+      "claims": [
+        {
+          "id": "c3005",
+          "text": "Contested political debate on Slovak media regulation and security cooperation with foreign allies, discussed on telegram.org 5.",
+          "entities": [
+            "Slovak media",
+            "telegram.org"
+          ],
+          "checkworthiness": 0.65,
+          "claim_hash": "5c395b97a6ec8f858b59e37a664a2c6456aa8e0655c9d63f3ff564732e67c378"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-ambiguous-6",
+      "source_url": "https://www.hlavnydennik.sk/post-6",
+      "source_domain": "hlavnydennik.sk",
+      "expected_verdict": "SUSPICIOUS",
+      "claims": [
+        {
+          "id": "c3006",
+          "text": "Contested political debate on Slovak media regulation and security cooperation with foreign allies, discussed on hlavnydennik.sk 6.",
+          "entities": [
+            "Slovak media",
+            "hlavnydennik.sk"
+          ],
+          "checkworthiness": 0.65,
+          "claim_hash": "ae83973e10dbfde9fde031aa0317d67e9cc029cd36929df6e871592b52307a79"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-ambiguous-7",
+      "source_url": "https://www.parlamentnelisty.sk/post-7",
+      "source_domain": "parlamentnelisty.sk",
+      "expected_verdict": "UNCERTAIN",
+      "claims": [
+        {
+          "id": "c3007",
+          "text": "Contested political debate on Slovak media regulation and security cooperation with foreign allies, discussed on parlamentnelisty.sk 7.",
+          "entities": [
+            "Slovak media",
+            "parlamentnelisty.sk"
+          ],
+          "checkworthiness": 0.65,
+          "claim_hash": "09efb6feee825cb5dd29db489497137de9075f47f46a3369849bc44ccfa56be9"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-ambiguous-8",
+      "source_url": "https://www.facebook.com/post-8",
+      "source_domain": "facebook.com",
+      "expected_verdict": "SUSPICIOUS",
+      "claims": [
+        {
+          "id": "c3008",
+          "text": "Contested political debate on Slovak media regulation and security cooperation with foreign allies, discussed on facebook.com 8.",
+          "entities": [
+            "Slovak media",
+            "facebook.com"
+          ],
+          "checkworthiness": 0.65,
+          "claim_hash": "119275c9b0392a1a2be82dab4c03c747b354bde40d95005fd239b2c3686276b2"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-ambiguous-9",
+      "source_url": "https://www.telegram.org/post-9",
+      "source_domain": "telegram.org",
+      "expected_verdict": "UNCERTAIN",
+      "claims": [
+        {
+          "id": "c3009",
+          "text": "Contested political debate on Slovak media regulation and security cooperation with foreign allies, discussed on telegram.org 9.",
+          "entities": [
+            "Slovak media",
+            "telegram.org"
+          ],
+          "checkworthiness": 0.65,
+          "claim_hash": "fab17402e3402c1525c517df487a6e901e0b068b66b16aaf52998f49a6dc0866"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-ambiguous-10",
+      "source_url": "https://www.hlavnydennik.sk/post-10",
+      "source_domain": "hlavnydennik.sk",
+      "expected_verdict": "SUSPICIOUS",
+      "claims": [
+        {
+          "id": "c3010",
+          "text": "Contested political debate on Slovak media regulation and security cooperation with foreign allies, discussed on hlavnydennik.sk 10.",
+          "entities": [
+            "Slovak media",
+            "hlavnydennik.sk"
+          ],
+          "checkworthiness": 0.65,
+          "claim_hash": "678f2ee6801048294b245118c5162cd038704f75df9d17781cbf7b3d4204f4a7"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-ambiguous-11",
+      "source_url": "https://www.parlamentnelisty.sk/post-11",
+      "source_domain": "parlamentnelisty.sk",
+      "expected_verdict": "UNCERTAIN",
+      "claims": [
+        {
+          "id": "c3011",
+          "text": "Contested political debate on Slovak media regulation and security cooperation with foreign allies, discussed on parlamentnelisty.sk 11.",
+          "entities": [
+            "Slovak media",
+            "parlamentnelisty.sk"
+          ],
+          "checkworthiness": 0.65,
+          "claim_hash": "aba543cd741ea9a436fe356bffd45efd9800f20437901b39d8d5ba042c09b760"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-ambiguous-12",
+      "source_url": "https://www.facebook.com/post-12",
+      "source_domain": "facebook.com",
+      "expected_verdict": "SUSPICIOUS",
+      "claims": [
+        {
+          "id": "c3012",
+          "text": "Contested political debate on Slovak media regulation and security cooperation with foreign allies, discussed on facebook.com 12.",
+          "entities": [
+            "Slovak media",
+            "facebook.com"
+          ],
+          "checkworthiness": 0.65,
+          "claim_hash": "2d67f6e434e6487f742b87efc6b84d00bba5c299c5efca6b085e36a872cb9cd4"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-ambiguous-13",
+      "source_url": "https://www.telegram.org/post-13",
+      "source_domain": "telegram.org",
+      "expected_verdict": "UNCERTAIN",
+      "claims": [
+        {
+          "id": "c3013",
+          "text": "Contested political debate on Slovak media regulation and security cooperation with foreign allies, discussed on telegram.org 13.",
+          "entities": [
+            "Slovak media",
+            "telegram.org"
+          ],
+          "checkworthiness": 0.65,
+          "claim_hash": "16e6769cf884d5906f359e5e46accec211baab8bfb9cd5972c07f6a7ec01c643"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-ambiguous-14",
+      "source_url": "https://www.hlavnydennik.sk/post-14",
+      "source_domain": "hlavnydennik.sk",
+      "expected_verdict": "SUSPICIOUS",
+      "claims": [
+        {
+          "id": "c3014",
+          "text": "Contested political debate on Slovak media regulation and security cooperation with foreign allies, discussed on hlavnydennik.sk 14.",
+          "entities": [
+            "Slovak media",
+            "hlavnydennik.sk"
+          ],
+          "checkworthiness": 0.65,
+          "claim_hash": "9c528f401ff0022249b0067d0098c6b5b5872b8c6bb88b364bc790f6a7a22bce"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-ambiguous-15",
+      "source_url": "https://www.parlamentnelisty.sk/post-15",
+      "source_domain": "parlamentnelisty.sk",
+      "expected_verdict": "UNCERTAIN",
+      "claims": [
+        {
+          "id": "c3015",
+          "text": "Contested political debate on Slovak media regulation and security cooperation with foreign allies, discussed on parlamentnelisty.sk 15.",
+          "entities": [
+            "Slovak media",
+            "parlamentnelisty.sk"
+          ],
+          "checkworthiness": 0.65,
+          "claim_hash": "ae6f2dfc24d6cdaa36b265ff3764f74e8870ff4c55f5420535efc2327eeaf516"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-ambiguous-16",
+      "source_url": "https://www.facebook.com/post-16",
+      "source_domain": "facebook.com",
+      "expected_verdict": "SUSPICIOUS",
+      "claims": [
+        {
+          "id": "c3016",
+          "text": "Contested political debate on Slovak media regulation and security cooperation with foreign allies, discussed on facebook.com 16.",
+          "entities": [
+            "Slovak media",
+            "facebook.com"
+          ],
+          "checkworthiness": 0.65,
+          "claim_hash": "0f5dad8296f3de811231567a47e2cfab2fba659f933025e9a17181a98bed869b"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-ambiguous-17",
+      "source_url": "https://www.telegram.org/post-17",
+      "source_domain": "telegram.org",
+      "expected_verdict": "UNCERTAIN",
+      "claims": [
+        {
+          "id": "c3017",
+          "text": "Contested political debate on Slovak media regulation and security cooperation with foreign allies, discussed on telegram.org 17.",
+          "entities": [
+            "Slovak media",
+            "telegram.org"
+          ],
+          "checkworthiness": 0.65,
+          "claim_hash": "900bea2e09f1845dbc95b31a43a50b84b4f2159bf028e604f4800a05c8d56628"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-ambiguous-18",
+      "source_url": "https://www.hlavnydennik.sk/post-18",
+      "source_domain": "hlavnydennik.sk",
+      "expected_verdict": "SUSPICIOUS",
+      "claims": [
+        {
+          "id": "c3018",
+          "text": "Contested political debate on Slovak media regulation and security cooperation with foreign allies, discussed on hlavnydennik.sk 18.",
+          "entities": [
+            "Slovak media",
+            "hlavnydennik.sk"
+          ],
+          "checkworthiness": 0.65,
+          "claim_hash": "905151f2febade406844957487638a441c11913c26b7ff1ef900f05dacb015bb"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-ambiguous-19",
+      "source_url": "https://www.parlamentnelisty.sk/post-19",
+      "source_domain": "parlamentnelisty.sk",
+      "expected_verdict": "UNCERTAIN",
+      "claims": [
+        {
+          "id": "c3019",
+          "text": "Contested political debate on Slovak media regulation and security cooperation with foreign allies, discussed on parlamentnelisty.sk 19.",
+          "entities": [
+            "Slovak media",
+            "parlamentnelisty.sk"
+          ],
+          "checkworthiness": 0.65,
+          "claim_hash": "3ce0e5051ac9591f09fa46b47294c468ba56d2710bfa92a9931d3ef26efcd4fd"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-ambiguous-20",
+      "source_url": "https://www.facebook.com/post-20",
+      "source_domain": "facebook.com",
+      "expected_verdict": "SUSPICIOUS",
+      "claims": [
+        {
+          "id": "c3020",
+          "text": "Contested political debate on Slovak media regulation and security cooperation with foreign allies, discussed on facebook.com 20.",
+          "entities": [
+            "Slovak media",
+            "facebook.com"
+          ],
+          "checkworthiness": 0.65,
+          "claim_hash": "05e354bfa742be49c1b01403c19520993e312d09eafded70c47fd0bb7921878c"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-ambiguous-21",
+      "source_url": "https://www.telegram.org/post-21",
+      "source_domain": "telegram.org",
+      "expected_verdict": "UNCERTAIN",
+      "claims": [
+        {
+          "id": "c3021",
+          "text": "Contested political debate on Slovak media regulation and security cooperation with foreign allies, discussed on telegram.org 21.",
+          "entities": [
+            "Slovak media",
+            "telegram.org"
+          ],
+          "checkworthiness": 0.65,
+          "claim_hash": "9ec73d7f43dfe42e7064aaade69165e8e610fd4e0d08a9f2e513c27463a49446"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-ambiguous-22",
+      "source_url": "https://www.hlavnydennik.sk/post-22",
+      "source_domain": "hlavnydennik.sk",
+      "expected_verdict": "SUSPICIOUS",
+      "claims": [
+        {
+          "id": "c3022",
+          "text": "Contested political debate on Slovak media regulation and security cooperation with foreign allies, discussed on hlavnydennik.sk 22.",
+          "entities": [
+            "Slovak media",
+            "hlavnydennik.sk"
+          ],
+          "checkworthiness": 0.65,
+          "claim_hash": "66c864fd8033ea5fa30bc0e0a8297d4a5bafa3caa387d8d6801e254270d9d4ef"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-ambiguous-23",
+      "source_url": "https://www.parlamentnelisty.sk/post-23",
+      "source_domain": "parlamentnelisty.sk",
+      "expected_verdict": "UNCERTAIN",
+      "claims": [
+        {
+          "id": "c3023",
+          "text": "Contested political debate on Slovak media regulation and security cooperation with foreign allies, discussed on parlamentnelisty.sk 23.",
+          "entities": [
+            "Slovak media",
+            "parlamentnelisty.sk"
+          ],
+          "checkworthiness": 0.65,
+          "claim_hash": "e702d57a0cf854f58c84478db427e86ccda2b8c32ee1610f74448dc6bfdaf5c0"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-ambiguous-24",
+      "source_url": "https://www.facebook.com/post-24",
+      "source_domain": "facebook.com",
+      "expected_verdict": "SUSPICIOUS",
+      "claims": [
+        {
+          "id": "c3024",
+          "text": "Contested political debate on Slovak media regulation and security cooperation with foreign allies, discussed on facebook.com 24.",
+          "entities": [
+            "Slovak media",
+            "facebook.com"
+          ],
+          "checkworthiness": 0.65,
+          "claim_hash": "3227b5293e93c536c261fee009065505fb8c80f57679b6f331956a52f78d397d"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-ambiguous-25",
+      "source_url": "https://www.telegram.org/post-25",
+      "source_domain": "telegram.org",
+      "expected_verdict": "UNCERTAIN",
+      "claims": [
+        {
+          "id": "c3025",
+          "text": "Contested political debate on Slovak media regulation and security cooperation with foreign allies, discussed on telegram.org 25.",
+          "entities": [
+            "Slovak media",
+            "telegram.org"
+          ],
+          "checkworthiness": 0.65,
+          "claim_hash": "5071d27a4880abe7f946269a4d98ecb56024a2e6cc078267d6af76ec0a9811d8"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-ambiguous-26",
+      "source_url": "https://www.hlavnydennik.sk/post-26",
+      "source_domain": "hlavnydennik.sk",
+      "expected_verdict": "SUSPICIOUS",
+      "claims": [
+        {
+          "id": "c3026",
+          "text": "Contested political debate on Slovak media regulation and security cooperation with foreign allies, discussed on hlavnydennik.sk 26.",
+          "entities": [
+            "Slovak media",
+            "hlavnydennik.sk"
+          ],
+          "checkworthiness": 0.65,
+          "claim_hash": "8fbbaa6e9b43119ffd7b88e937c578de325d23a76e4d677b4637c33c73a0aa93"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-ambiguous-27",
+      "source_url": "https://www.parlamentnelisty.sk/post-27",
+      "source_domain": "parlamentnelisty.sk",
+      "expected_verdict": "UNCERTAIN",
+      "claims": [
+        {
+          "id": "c3027",
+          "text": "Contested political debate on Slovak media regulation and security cooperation with foreign allies, discussed on parlamentnelisty.sk 27.",
+          "entities": [
+            "Slovak media",
+            "parlamentnelisty.sk"
+          ],
+          "checkworthiness": 0.65,
+          "claim_hash": "12b7b592be2bdec73e590fa43b06d22ad55a0afa19f272d4fb99b2a0fe1f965f"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-ambiguous-28",
+      "source_url": "https://www.facebook.com/post-28",
+      "source_domain": "facebook.com",
+      "expected_verdict": "SUSPICIOUS",
+      "claims": [
+        {
+          "id": "c3028",
+          "text": "Contested political debate on Slovak media regulation and security cooperation with foreign allies, discussed on facebook.com 28.",
+          "entities": [
+            "Slovak media",
+            "facebook.com"
+          ],
+          "checkworthiness": 0.65,
+          "claim_hash": "26f5f4031d0395651dcb4a7b394116b1435885b9756177fd59d85b6f03b74c9c"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-ambiguous-29",
+      "source_url": "https://www.telegram.org/post-29",
+      "source_domain": "telegram.org",
+      "expected_verdict": "UNCERTAIN",
+      "claims": [
+        {
+          "id": "c3029",
+          "text": "Contested political debate on Slovak media regulation and security cooperation with foreign allies, discussed on telegram.org 29.",
+          "entities": [
+            "Slovak media",
+            "telegram.org"
+          ],
+          "checkworthiness": 0.65,
+          "claim_hash": "da318c823ae3fe6182f9c1e011929493cf4dffde0d8fb8e20d1748ec99e593de"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-ambiguous-30",
+      "source_url": "https://www.hlavnydennik.sk/post-30",
+      "source_domain": "hlavnydennik.sk",
+      "expected_verdict": "SUSPICIOUS",
+      "claims": [
+        {
+          "id": "c3030",
+          "text": "Contested political debate on Slovak media regulation and security cooperation with foreign allies, discussed on hlavnydennik.sk 30.",
+          "entities": [
+            "Slovak media",
+            "hlavnydennik.sk"
+          ],
+          "checkworthiness": 0.65,
+          "claim_hash": "8ed4b3c1a15766ed023c7c636aba6fb6c8f020935b1a7cd2b211c45fb7c20982"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-ambiguous-31",
+      "source_url": "https://www.parlamentnelisty.sk/post-31",
+      "source_domain": "parlamentnelisty.sk",
+      "expected_verdict": "UNCERTAIN",
+      "claims": [
+        {
+          "id": "c3031",
+          "text": "Contested political debate on Slovak media regulation and security cooperation with foreign allies, discussed on parlamentnelisty.sk 31.",
+          "entities": [
+            "Slovak media",
+            "parlamentnelisty.sk"
+          ],
+          "checkworthiness": 0.65,
+          "claim_hash": "335e05414eb031ebadc92a9bbc8c8577f2f676bb5ce093f34c39577b771ef520"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-ambiguous-32",
+      "source_url": "https://www.facebook.com/post-32",
+      "source_domain": "facebook.com",
+      "expected_verdict": "SUSPICIOUS",
+      "claims": [
+        {
+          "id": "c3032",
+          "text": "Contested political debate on Slovak media regulation and security cooperation with foreign allies, discussed on facebook.com 32.",
+          "entities": [
+            "Slovak media",
+            "facebook.com"
+          ],
+          "checkworthiness": 0.65,
+          "claim_hash": "a67d72670fb4ebe6c20732122d4fc3cb9723b5e97edd43907eb153de790b7e83"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-ambiguous-33",
+      "source_url": "https://www.telegram.org/post-33",
+      "source_domain": "telegram.org",
+      "expected_verdict": "UNCERTAIN",
+      "claims": [
+        {
+          "id": "c3033",
+          "text": "Contested political debate on Slovak media regulation and security cooperation with foreign allies, discussed on telegram.org 33.",
+          "entities": [
+            "Slovak media",
+            "telegram.org"
+          ],
+          "checkworthiness": 0.65,
+          "claim_hash": "0e9f47bfecc24f282fe8c685aab3a08919549b6c9d8b57571db1e91c6fc4c8b4"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-ambiguous-34",
+      "source_url": "https://www.hlavnydennik.sk/post-34",
+      "source_domain": "hlavnydennik.sk",
+      "expected_verdict": "SUSPICIOUS",
+      "claims": [
+        {
+          "id": "c3034",
+          "text": "Contested political debate on Slovak media regulation and security cooperation with foreign allies, discussed on hlavnydennik.sk 34.",
+          "entities": [
+            "Slovak media",
+            "hlavnydennik.sk"
+          ],
+          "checkworthiness": 0.65,
+          "claim_hash": "8ef53e80671a475760b0f42d1de11714cec7c3b675fddd082484236339688b1e"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-ambiguous-35",
+      "source_url": "https://www.parlamentnelisty.sk/post-35",
+      "source_domain": "parlamentnelisty.sk",
+      "expected_verdict": "UNCERTAIN",
+      "claims": [
+        {
+          "id": "c3035",
+          "text": "Contested political debate on Slovak media regulation and security cooperation with foreign allies, discussed on parlamentnelisty.sk 35.",
+          "entities": [
+            "Slovak media",
+            "parlamentnelisty.sk"
+          ],
+          "checkworthiness": 0.65,
+          "claim_hash": "5eb282f134c106a5e70b06dbfc7376f2f9692a9c149e734cd75551060813fb5b"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-ambiguous-36",
+      "source_url": "https://www.facebook.com/post-36",
+      "source_domain": "facebook.com",
+      "expected_verdict": "SUSPICIOUS",
+      "claims": [
+        {
+          "id": "c3036",
+          "text": "Contested political debate on Slovak media regulation and security cooperation with foreign allies, discussed on facebook.com 36.",
+          "entities": [
+            "Slovak media",
+            "facebook.com"
+          ],
+          "checkworthiness": 0.65,
+          "claim_hash": "0bc9c6939c00ee8811a6e5d1c91a4a03b38f0126fcbbc473f5c93aa912870aa0"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-ambiguous-37",
+      "source_url": "https://www.telegram.org/post-37",
+      "source_domain": "telegram.org",
+      "expected_verdict": "UNCERTAIN",
+      "claims": [
+        {
+          "id": "c3037",
+          "text": "Contested political debate on Slovak media regulation and security cooperation with foreign allies, discussed on telegram.org 37.",
+          "entities": [
+            "Slovak media",
+            "telegram.org"
+          ],
+          "checkworthiness": 0.65,
+          "claim_hash": "9ee31fe98c2f4058272ce0eae2614a24e6f3d41c541f66e522a882c2bb9941b3"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-ambiguous-38",
+      "source_url": "https://www.hlavnydennik.sk/post-38",
+      "source_domain": "hlavnydennik.sk",
+      "expected_verdict": "SUSPICIOUS",
+      "claims": [
+        {
+          "id": "c3038",
+          "text": "Contested political debate on Slovak media regulation and security cooperation with foreign allies, discussed on hlavnydennik.sk 38.",
+          "entities": [
+            "Slovak media",
+            "hlavnydennik.sk"
+          ],
+          "checkworthiness": 0.65,
+          "claim_hash": "751671b17ae61a76bb5033c48272318ad2db8b68e60555785c91dfe71dc38fec"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    },
+    {
+      "_fixture": "calibration-ambiguous-39",
+      "source_url": "https://www.parlamentnelisty.sk/post-39",
+      "source_domain": "parlamentnelisty.sk",
+      "expected_verdict": "UNCERTAIN",
+      "claims": [
+        {
+          "id": "c3039",
+          "text": "Contested political debate on Slovak media regulation and security cooperation with foreign allies, discussed on parlamentnelisty.sk 39.",
+          "entities": [
+            "Slovak media",
+            "parlamentnelisty.sk"
+          ],
+          "checkworthiness": 0.65,
+          "claim_hash": "d1939ff70f6e348da60bb4f513b2760fccfce3e894ca9fc90cd4d051fe5ec538"
+        }
+      ],
+      "total_sentences": 1,
+      "total_claims": 1,
+      "duplicates_skipped": 0,
+      "extraction_timestamp": "2026-06-22T12:00:00Z"
+    }
+  ]
+}

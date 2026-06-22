@@ -1,0 +1,76 @@
+{
+  "id": "d4e5f6a7-investigative-report-generation-v1",
+  "name": "investigative-report-generation-v1",
+  "description": "Full investigative journalism pipeline: actor mapping, timeline reconstruction, evidence chain assembly, impact assessment, report generation, editorial handoff or auto-publish.",
+  "trigger": {
+    "event": "investigation_commissioned",
+    "filter": { "source": ["narrative-tracker", "manual"] }
+  },
+  "steps": [
+    {
+      "name": "actor-mapping",
+      "agent": { "name": "investigator" },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "ACTOR MAPPING phase for cluster: {{input.cluster_id}}. Brief: {{input.investigator_brief}}. Claim IDs: {{input.claim_ids}}. Map all actors: people, organisations, domains, social accounts. Use browser-use for corporate registry, WHOIS, social graph lookups. Cross-reference with ontology Actor nodes. Return actor_network JSON with relationship edges.",
+      "mode": "sequential",
+      "timeout_secs": 600,
+      "error_mode": "fail",
+      "output_var": "actor_network",
+      "extra_body": { "enable_thinking": true }
+    },
+    {
+      "name": "timeline-reconstruction",
+      "agent": { "name": "investigator" },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "TIMELINE RECONSTRUCTION for cluster {{input.cluster_id}}. Actor network: {{actor_network}}. Claims: {{input.claim_ids}}. Reconstruct chronological sequence: first appearance, amplification nodes, mainstream pickup. Identify patient-zero origin. Flag if narrative was seeded before the real-world event it references. Return timeline JSON array.",
+      "mode": "sequential",
+      "timeout_secs": 300,
+      "error_mode": "fail",
+      "output_var": "timeline",
+      "extra_body": { "enable_thinking": true }
+    },
+    {
+      "name": "evidence-chain-assembly",
+      "agent": { "name": "archivist" },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "Retrieve full provenance chains for all claims in cluster {{input.cluster_id}}: {{input.claim_ids}}. Export chain-of-evidence for each. Filter: only include evidence with confidence >= 0.75. Flag gaps as [UNVERIFIED - REQUIRES HUMAN REPORTER]. Return assembled evidence_appendix JSON.",
+      "mode": "sequential",
+      "timeout_secs": 180,
+      "error_mode": "fail",
+      "output_var": "evidence_appendix"
+    },
+    {
+      "name": "impact-assessment",
+      "agent": { "name": "analyst" },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "IMPACT ASSESSMENT for campaign cluster {{input.cluster_id}}. Timeline: {{timeline}}. Actor network: {{actor_network}}. Estimate: total audience reach, most viral amplification nodes, real-world harm potential (elections, public health, ethnic tensions, financial markets). Source registry credibility context for all domains involved. Return impact_assessment JSON.",
+      "mode": "sequential",
+      "timeout_secs": 180,
+      "error_mode": "skip",
+      "output_var": "impact_assessment"
+    },
+    {
+      "name": "report-synthesis",
+      "agent": { "name": "investigator" },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "Generate full investigation report for cluster {{input.cluster_id}}. Actor network: {{actor_network}}. Timeline: {{timeline}}. Evidence appendix: {{evidence_appendix}}. Impact assessment: {{impact_assessment}}. Write report with: Executive Summary, Key Findings, Actor Network, Timeline, Evidence Appendix, Gaps & Limitations, Recommended Actions. Save DOCX and JSON to output/investigations/{{input.cluster_id}}/. Return report summary and file paths.",
+      "mode": "sequential",
+      "timeout_secs": 600,
+      "error_mode": "fail",
+      "output_var": "investigation_report",
+      "extra_body": { "enable_thinking": true }
+    },
+    {
+      "name": "editorial-routing",
+      "agent": { "name": "impact-comms" },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "Route investigation report for cluster {{input.cluster_id}}. Report: {{investigation_report}}. Impact: {{impact_assessment}}. If harm_potential=high AND evidence_gaps=[] → auto-publish. If evidence_gaps present → create human-reporter handoff brief. If harm_potential=critical → trigger Tier 3 accountability (regulator alert + phone outreach). Execute appropriate action.",
+      "mode": "sequential",
+      "timeout_secs": 180,
+      "error_mode": "skip",
+      "output_var": "editorial_result",
+      "output_path": "{{output.dir}}/investigative-report/{{run.id}}/result.json"
+    }
+  ],
+  "created_at": "2026-05-04T16:13:00.000000000Z"
+}

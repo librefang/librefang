@@ -1,0 +1,76 @@
+{
+  "id": "b2c3d4e5-visual-debunk-pipeline-v1",
+  "name": "visual-debunk-pipeline-v1",
+  "description": "Full visual evidence pipeline: image/video forensics via VLM → caption cross-check → inquisitor integration → consensus vote. Handles deepfakes, out-of-context imagery, and misleading captions.",
+  "trigger": {
+    "event": "media_asset_flagged",
+    "filter": { "asset_types": ["image", "video", "meme", "screenshot"] }
+  },
+  "steps": [
+    {
+      "name": "asset-retrieve",
+      "agent": { "name": "collector-hand" },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "Retrieve and archive the media asset at URL: {{input.asset_url}}. Compute SHA256 hash. If video: extract {{config.video_keyframe_sample_rate}} keyframes per 30-second segment. Archive original URL to Wayback Machine. Return: asset_hash, archived_url, keyframe_paths (if video), extracted_audio_transcript (if video, use openai-whisper skill).",
+      "mode": "sequential",
+      "timeout_secs": 120,
+      "error_mode": "fail",
+      "output_var": "asset_data"
+    },
+    {
+      "name": "vlm-forensics",
+      "agent": { "name": "visual-analyst" },
+      "model": "nvidia/nemotron-nano-12b-v2-vl:free",
+      "prompt_template": "Apply full image forensics pipeline to asset {{asset_data.asset_hash}}. Run: (1) caption_consistency check against claim: {{input.claim_text}}, (2) manipulation_check for deepfake/splice indicators, (3) EXIF validation if metadata available. For video: analyse each keyframe in {{asset_data.keyframe_paths}} individually then aggregate. Use image-forensics skill prompts. Return full VisualEvidence JSON.",
+      "mode": "sequential",
+      "timeout_secs": 300,
+      "error_mode": "fail",
+      "output_var": "vlm_forensics_result",
+      "config": { "skill": "image-forensics" }
+    },
+    {
+      "name": "reverse-image-search",
+      "agent": { "name": "researcher-hand" },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "Perform reverse image lineage search for asset hash {{asset_data.asset_hash}}, URL: {{input.asset_url}}. Use multi-search-engine and browser-use to find earlier publications of this image/video. Identify original context, original date, and any prior fact-checks. Return: earliest_known_url, original_context, original_date, prior_factchecks.",
+      "mode": "fan_out",
+      "timeout_secs": 180,
+      "error_mode": "skip",
+      "output_var": "reverse_image_result"
+    },
+    {
+      "name": "caption-cross-check",
+      "agent": { "name": "inquisitor" },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "Cross-check visual findings against textual claim. VLM forensics result: {{vlm_forensics_result}}. Reverse image search: {{reverse_image_result}}. Original claim: {{input.claim_text}}. Does the visual evidence support, refute, or complicate the textual claim? Output updated verdict JSON incorporating visual evidence.",
+      "mode": "sequential",
+      "timeout_secs": 300,
+      "error_mode": "fail",
+      "output_var": "integrated_verdict",
+      "extra_body": { "enable_thinking": true }
+    },
+    {
+      "name": "overlay-generation",
+      "agent": { "name": "visual-analyst" },
+      "model": "nvidia/nemotron-nano-12b-v2-vl:free",
+      "prompt_template": "Generate factcheck overlay badge for asset {{asset_data.asset_hash}} using nano-banana-pro skill. Integrated verdict: {{integrated_verdict}}. Apply appropriate badge text from image-forensics skill config. Save to output/visual/forensics/{{asset_data.asset_hash}}_overlay.png.",
+      "mode": "sequential",
+      "timeout_secs": 120,
+      "error_mode": "skip",
+      "output_var": "overlay_result",
+      "condition": "integrated_verdict.verdict != 'TRUE'"
+    },
+    {
+      "name": "provenance-attach-visual",
+      "agent": { "name": "archivist" },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "Attach VisualEvidence node to provenance graph. Claim ID: {{input.claim_id}}. VLM forensics: {{vlm_forensics_result}}. Reverse image: {{reverse_image_result}}. Overlay path: {{overlay_result.overlay_path}}. Asset data: {{asset_data}}.",
+      "mode": "sequential",
+      "timeout_secs": 60,
+      "error_mode": "skip",
+      "output_var": "provenance_visual_node",
+      "output_path": "{{output.dir}}/visual-debunk/{{run.id}}/result.json"
+    }
+  ],
+  "created_at": "2026-05-04T16:13:00.000000000Z"
+}

@@ -1,0 +1,23 @@
+# Pre-Deployment Security Scan
+name        = "security-scan"
+version     = "1.0.0"
+description = "Runs the security-checklist against the repository and agent configurations to block updates containing misconfigurations or vulnerabilities."
+author      = "librefang"
+
+[[stages]]
+id          = "run_audit"
+agent       = "security-auditor"
+action      = "execute_security_checklist"
+input       = "repository_diff"
+timeout_s   = 120
+
+[[stages]]
+id          = "enforce_compliance"
+action      = "assert_verdict"
+depends_on  = ["run_audit"]
+assertions  = [
+    "run_audit.vulnerabilities_found == 0",
+    "run_audit.checklist_completion == 100"
+]
+on_pass     = "approve_deployment"
+on_fail     = "reject_deployment + trigger_alert"

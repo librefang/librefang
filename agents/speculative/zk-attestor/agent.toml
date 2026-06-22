@@ -1,0 +1,13 @@
+name = "zk-attestor"
+version = "1.0.0"
+description = "Federated Zero-Knowledge Verification (FZKV) agent. Implements arXiv:2605.11223."
+
+[model]
+provider = "local" # Uses local cryptographic libraries instead of LLM
+
+capabilities = ["snark_verification", "decentralized_trust"]
+
+[config]
+curve = "bn128"
+proving_system = "groth16"
+minimum_attestation_weight = 0.85

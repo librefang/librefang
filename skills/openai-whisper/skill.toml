@@ -1,0 +1,40 @@
+prompt_context = """
+# Whisper (CLI)
+
+Use `whisper` to transcribe audio locally.
+
+Quick start
+- `whisper /path/audio.mp3 --model medium --output_format txt --output_dir .`
+- `whisper /path/audio.m4a --task translate --output_format srt`
+
+Notes
+- Models download to `~/.cache/whisper` on first run.
+- `--model` defaults to `turbo` on this install.
+- Use smaller models for speed, larger for accuracy."""
+
+[skill]
+name = "openai-whisper"
+version = "0.1.0"
+description = "Local speech-to-text with the Whisper CLI (no API key)."
+author = ""
+license = ""
+tags = [
+    "openclaw-compat",
+    "prompt-only",
+]
+
+[runtime]
+type = "promptonly"
+entry = ""
+
+[tools]
+provided = []
+
+[requirements]
+tools = []
+capabilities = []
+
+[source]
+type = "open_claw"
+
+[config]

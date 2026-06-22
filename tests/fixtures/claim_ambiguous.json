@@ -1,0 +1,19 @@
+{
+  "_fixture": "golden-path: UNCERTAIN / SUSPICIOUS claim",
+  "_description": "A claim that is partly verifiable, partly unverifiable. Ensemble should land in the 0.35–0.69 range, triggering inquisitor Mode B.",
+  "source": "direct_text",
+  "claims": [
+    {
+      "id": "c001",
+      "text": "Slovak Prime Minister Robert Fico stated that NATO military advisors are present in Ukrainian combat zones.",
+      "entities": ["Robert Fico", "Slovakia", "NATO", "Ukraine"],
+      "sentence_index": 0,
+      "checkworthiness": 0.91,
+      "claim_hash": "f1e2d3c4b5a6f7e8d9c0b1a2f3e4d5c6b7a8f9e0d1c2b3a4f5e6d7c8b9a0f1e2"
+    }
+  ],
+  "total_sentences": 1,
+  "total_claims": 1,
+  "duplicates_skipped": 0,
+  "extraction_timestamp": "2026-05-04T18:00:00Z"
+}

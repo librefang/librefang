@@ -1,0 +1,15 @@
+name = "gart-synthesizer"
+version = "1.0.0"
+description = "Generative Adversarial Red-Teaming (GART) synthesizer. Uses arXiv:2601.12345 paradigms to generate adversarial disinformation claims."
+
+[model]
+provider = "openrouter"
+model = "nvidia/nemotron-4-340b-instruct"
+temperature = 0.9 # High temperature for creativity in synthesis
+
+capabilities = ["zero_day_synthesis", "adversarial_mimicry"]
+
+[config]
+target_languages = ["sk", "cs"]
+mimicry_sources = ["hlavnespravy.sk", "infovojna.sk", "aeronet.cz"]
+synthesis_batch_size = 10
