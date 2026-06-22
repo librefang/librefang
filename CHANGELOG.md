@@ -7,77 +7,15 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ## [2026.6.22] - 2026-06-22
 
-_45 PRs from 7 contributors since v2026.6.17-beta.20._
+_1 PR from 1 contributor since v2026.6.22-beta.21._
 
 ### Highlights
 
-- **Context-window awareness** — a live usage indicator shows how much context remains, quota errors are classified honestly, and agents now guide you to open a new session when you hit a token or context limit.
-- **Dashboard agent management** — you can now edit and bind a system prompt directly from the agent detail drawer, remove a configured sidecar channel, and view agents grouped into Core Agents and Hands sections.
-- **Per-agent sidecar secrets & provider controls** — each agent instance can hold its own private credentials, and you can view and edit the provider max-token limit from the UI; the arbitrary 200k cap on agent max tokens has been removed.
-- **CoT pruning + streaming reliability** — chain-of-thought steps are pruned and developer-loop turns aggregated to keep sessions lean; streaming final answers now arrive as a fresh message instead of being lost on delivery.
-- **Confidential OAuth clients** — OAuth clients can now supply their `client_secret` via an env variable (`client_secret_env`), keeping secrets out of config files.
-
-### Added
-
-- Non-blocking agent_send via the async-task tracker (#6044) (@DaBlitzStein)
-- Global Auto-Dream on/off switch on the Memory tab (#6194) (@houko)
-- Edit + bind system prompt from the agent detail drawer (#6201) (@houko)
-- Remove a configured sidecar channel from the dashboard (#6202) (@houko)
-- Group the Agents list into Core Agents and Hands sections (#6205) (@houko)
-- Context-window usage indicator + honest quota-error classification (#6215) (@houko)
-- Per-instance sidecar secrets so each agent can own its own handle (#6217) (@houko)
-- Coding-agent class, actual_model reporting, CodeWhale driver, provider grouping (#6220) (@houko)
-- Add agent label to librefang_tool_call_total (#6226) (#6229) (@houko)
-- Guide user to a new session on token/context limit (#6211) (#6231) (@houko)
-- Emit agent-loop exit-reason metric (#6227) (#6232) (@houko)
-- Tool-call telemetry fidelity — failure-type breakdown, per-tool latency histogram, span error status (#6233) (@houko)
-- Display + edit provider max-token limit (#6209) (#6238) (@houko)
-- CoT-pruning + developer-loop aggregation (#6173) (#6239) (@houko)
-- Localize TUI main interface, welcome, sessions, and peers screens (#6241) (@pavver)
-- Add agent dimension to librefang_tool_execution_seconds (#6244) (#6245) (@houko)
-- Confidential OAuth clients via client_secret_env (revives #5060) (#6260) (@houko)
+- **Safer upgrades** — the installer now falls back to the last known-good release and automatically rolls back a failed upgrade instead of leaving the app in a broken state.
 
 ### Fixed
 
-- Zeroize EmbeddingConfig.api_key on drop (partial LF-001) (#6190) (@BunnyMoth)
-- Enforce SHA256 verification in install.sh, remove silent skip paths (#6191) (@BunnyMoth)
-- Resolve link-preview-js peer conflict and commit lockfile (#6192) (@houko)
-- Deny WASM fs_write to the audit anchor via a capability deny-list (#6196) (@houko)
-- Bind launchctl status string to a let so the macOS build compiles (E0716) (#6203) (@houko)
-- Serve the SPA shell on a hard refresh of Prompts and Tasks pages (#6207) (@houko)
-- Refuse to delete the active (bound) prompt version (#6208) (@houko)
-- Stop the agent-creation wizard stamping a hidden 200k hourly token cap (#6212) (@houko)
-- Merge Hand settings on save instead of replacing the whole config (#6213) (@houko)
-- Drop the arbitrary 200000 cap on the agent max_tokens input (#6214) (@houko)
-- Allow close_range, getresuid/gid, and pipe splicing syscalls in seccomp sandbox (#6221) (@pavver)
-- Scope compaction-summary banner to the compacted session (#6225) (#6230) (@houko)
-- Make i18n locale-detection test deterministic on macOS (refs #6240) (#6243) (@houko)
-- Spill oversized shell_exec output instead of truncating (#6242) (#6246) (@houko)
-- Deliver streaming final answer as a fresh notifying message (#6248) (#6249) (@houko)
-- Rank explicit per-peer bindings above the sidecar instance default (#6258) (@neo-wanderer)
-- Clear .secrets.baseline drift from #6190 and hard-error pre-commit when detect-secrets missing (#6259) (@houko)
-- Channel_send without recipient replies to the group, not the speaker (#6261) (@neo-wanderer)
-
-### Changed
-
-- Migrate browser_tools.rs to ToolError (#3576 slice) (#6218) (@houko)
-- Typed TmuxError for terminal_tmux (#3576) (#6237) (@houko)
-- Make WebhookStore async-safe with tokio RwLock (closes #2) (#6256) (@maoxin1234)
-
-<details>
-<summary>Documentation, maintenance, and other internal changes</summary>
-
-### Maintenance
-
-- Bump the dashboard-minor-patch group in /crates/librefang-api/dashboard with 7 updates (#6183) (@app/dependabot)
-- Bump the web-minor-patch group in /web with 5 updates (#6184) (@app/dependabot)
-- Drop five orphaned email workspace dependencies (#6193) (@houko)
-- Bump the docs-minor-patch group in /docs with 3 updates (#6224) (@app/dependabot)
-- Skip network-dependent hands registry tests on the macOS lane (#6240) (#6247) (@houko)
-- Warn on cleanup failures in shell and web_fetch_to_file (#6255) (@maoxin1234)
-- Replace detect-secrets baseline with gitleaks (#6262) (@houko)
-
-</details>
+- Fall back to installable release, roll back bad upgrades (#6272) (@houko)
 
 
 ## [2026.6.17] - 2026-06-17
