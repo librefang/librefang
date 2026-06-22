@@ -1,0 +1,109 @@
+[skill]
+name        = "provenance-graph"
+version     = "0.1.0"
+description = "Immutable chain-of-evidence graph: creates and traverses RDF-style provenance nodes for every claim, ensuring full auditability of every Verification Report."
+author      = "librefang"
+tags        = ["provenance", "evidence", "graph", "audit", "knowledge-graph", "osint"]
+
+[config]
+storage_backend  = { value = "filesystem" }
+graph_path       = { value = "data/provenance-graph/" }
+immutable_writes = { value = true }
+wayback_archive  = { value = true }
+
+[node_types]
+
+Claim = """
+{
+  "node_type": "Claim",
+  "claim_id": "uuid (root node)",
+  "claim_text": "string",
+  "claim_fingerprint": "sha256 of normalized claim text",
+  "first_observed": "ISO8601",
+  "collector_agent": "agent id",
+  "platform": "string",
+  "priority": "low|medium|high|critical"
+}
+"""
+
+Source = """
+{
+  "node_type": "Source",
+  "source_id": "uuid",
+  "domain": "string",
+  "url": "string",
+  "archived_url": "wayback machine url",
+  "retrieved_at": "ISO8601",
+  "retrieved_by": "agent id",
+  "credibility_score_at_retrieval": "integer from source-registry",
+  "content_hash": "sha256"
+}
+"""
+
+Evidence = """
+{
+  "node_type": "Evidence",
+  "evidence_id": "uuid",
+  "type": "primary|secondary|visual|archive|expert-statement",
+  "source_id": "uuid (parent Source node)",
+  "excerpt": "string",
+  "supports": "claim|refutation|contextualises",
+  "collected_by": "agent id",
+  "model_used": "string",
+  "confidence": "float"
+}
+"""
+
+CrossCheck = """
+{
+  "node_type": "CrossCheck",
+  "crosscheck_id": "uuid",
+  "agent": "agent id",
+  "model": "string",
+  "verdict": "TRUE|FALSE|MISLEADING|UNVERIFIABLE",
+  "confidence": "float",
+  "reasoning_summary": "string",
+  "evidence_ids": ["uuid"],
+  "timestamp": "ISO8601"
+}
+"""
+
+VisualEvidence = """
+{
+  "node_type": "VisualEvidence",
+  "visual_id": "uuid",
+  "asset_url": "string",
+  "archived_url": "string",
+  "asset_hash": "sha256",
+  "extracted_text": "string",
+  "visual_verdict": "authentic|manipulated|out-of-context|misleading-caption",
+  "manipulation_type": "deepfake|splice|recolor|caption-overlay|none",
+  "vl_model_used": "string",
+  "confidence": "float",
+  "overlay_image_path": "string or null"
+}
+"""
+
+ConsensusVote = """
+{
+  "node_type": "ConsensusVote",
+  "vote_id": "uuid",
+  "claim_id": "uuid",
+  "arbiter_verdict": "TRUE|FALSE|MISLEADING|UNVERIFIABLE",
+  "consensus_score": "float",
+  "confidence_spread": "float",
+  "weighted_votes": [],
+  "decision": "auto-publish|monitor|escalate-human|false-debunk",
+  "published_at": "ISO8601 or null"
+}
+"""
+
+[api]
+create_claim_node  = "Creates root Claim node. Returns claim_id."
+attach_source      = "Attaches a Source node to a Claim. Archives URL via Wayback."
+attach_evidence    = "Attaches Evidence node to a Source node."
+attach_crosscheck  = "Attaches CrossCheck node from an agent verdict."
+attach_visual      = "Attaches VisualEvidence node."
+attach_consensus   = "Attaches final ConsensusVote node. Marks provenance chain complete."
+export_report      = "Serialises full provenance tree as auditable JSON + human-readable footnotes for Verification Report."
+get_chain          = "Returns full chain of evidence for a claim_id in depth-first order."

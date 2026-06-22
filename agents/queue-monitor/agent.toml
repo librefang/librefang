@@ -1,0 +1,33 @@
+name = "queue-monitor"
+version = "1.0.0"
+description = "Monitors review_queue.json for stale Tier 2/3 items and escalates via the configured alert channel."
+author = "librefang"
+module = "builtin:cron_task"
+
+[schedule]
+cron = "*/15 * * * *"
+
+[queue_monitor]
+queue_path             = "${LIBREFANG_OUTPUT_DIR}/review_queue.json"
+sla_hours              = 4
+escalation_channel     = "proactive-agent"
+max_queue_depth        = 50
+max_queue_alert_channel = "proactive-agent"
+stale_item_action      = "escalate"
+auto_reject_verdict    = "UNCERTAIN"
+
+system_prompt = """
+You are QueueMonitor, a watchdog agent for the LibreFang human-review queue.
+
+On each scheduled run:
+1. Read the review_queue.json file at the path defined in [queue_monitor].queue_path.
+2. For each item, compute age = now() - item.created_at.
+3. If age > sla_hours AND item.status == "pending_review":
+   a. Set item.status = "escalated".
+   b. Send an escalation alert to the channel defined in escalation_channel,
+      including: claim_id, verdict, confidence, age_hours, review_deadline.
+4. If total pending+escalated items > max_queue_depth:
+   Send a queue-depth alert to max_queue_alert_channel.
+5. Write the updated queue back to disk atomically (write to .tmp, then rename).
+6. Log a summary: N_checked, N_escalated, N_resolved, queue_depth.
+"""

@@ -1,0 +1,45 @@
+# LibreFang GART weekly evaluation workflow
+# Improvement: GART weekly evaluation loop
+# Periodically stress tests the pipeline using adversarial red-teaming.
+# Evaluates 20 newly synthesized adversarial articles to compute the pipeline's bypass rate.
+# Logs results to output/gart_evaluation.log.
+
+name        = "gart-evaluation"
+version     = "1.0.0"
+description = "Weekly evaluation of pipeline bypass rate using 20 synthesized adversarial articles."
+author      = "librefang"
+tags        = ["gart", "evaluation", "stress-test", "red-team"]
+
+[[stages]]
+id          = "synthesize-adversarial-articles"
+agent       = "gart-synthesizer"
+description = "Generate 20 adversarial articles designed to bypass the current pipeline settings."
+trigger     = "schedule:0 3 * * 0" # Every Sunday at 3:00 AM
+output      = "synthetic_adversarial_batch"
+timeout_s   = 120
+notes       = "Generates exactly 20 articles using current hot topics and disinformation templates. Quarantined in speculative agent directory but called as part of the weekly stress-test."
+
+[[stages]]
+id          = "evaluate-bypass-rate"
+agent       = "disinfo-orchestrator"
+description = "Run the 20 adversarial articles through the pipeline and measure bypass rate (False Negative rate)."
+depends_on  = ["synthesize-adversarial-articles"]
+input       = "synthetic_adversarial_batch"
+output      = "gart_evaluation_results"
+timeout_s   = 180
+notes       = "Computes the bypass rate = (number of undetected adversarial claims / 20) * 100%. If bypass rate > 15%, flags for potential threshold recalibration."
+
+[[stages]]
+id          = "log-gart-results"
+agent       = "archivist"
+description = "Append the bypass rate and evaluation metrics to output/gart_evaluation.log."
+depends_on  = ["evaluate-bypass-rate"]
+input       = "gart_evaluation_results"
+output      = "gart_evaluation_logged"
+timeout_s   = 30
+notes       = "Appends structured log lines containing timestamp, total_generated (20), bypass_rate, and undetected_claims to output/gart_evaluation.log."
+
+[settings]
+max_concurrent_claims = 1
+global_timeout_s      = 330
+failure_mode          = "log-and-continue"

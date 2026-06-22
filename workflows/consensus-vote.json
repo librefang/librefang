@@ -1,0 +1,124 @@
+{
+  "id": "a1b2c3d4-consensus-vote-protocol-v1",
+  "name": "consensus-vote-protocol-v1",
+  "description": "Multi-model consensus gate: fans a claim out to three agents using different LLM backends, then routes through arbiter for weighted Bayesian decision. No report is published without quorum.",
+  "trigger": {
+    "event": "claim_verified",
+    "filter": {
+      "requires_consensus": true
+    }
+  },
+  "steps": [
+    {
+      "name": "provenance-init",
+      "agent": {
+        "name": "archivist"
+      },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "Create a new Claim provenance node for: claim_id={{input.claim_id}}, claim_text={{input.claim_text}}, platform={{input.platform}}, priority={{input.priority}}. Archive all source URLs. Return claim_id and provenance node confirmation.",
+      "mode": "sequential",
+      "timeout_secs": 60,
+      "error_mode": "fail",
+      "output_var": "provenance_node"
+    },
+    {
+      "name": "vote-deep-reasoning",
+      "agent": {
+        "name": "inquisitor"
+      },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "CONSENSUS VOTE \u2014 DEEP REASONING BACKEND. Evaluate claim: {{input.claim_text}}. Ontology context: {{input.ontology_context}}. Return structured verdict JSON with fields: agent, model, verdict, confidence, reasoning_chain. thinking_budget=10000.",
+      "mode": "fan_out",
+      "timeout_secs": 600,
+      "error_mode": "fail",
+      "output_var": "vote_deep",
+      "extra_body": {
+        "enable_thinking": true
+      },
+      "config": {
+        "thinking_budget": 10000
+      }
+    },
+    {
+      "name": "vote-large-model",
+      "agent": {
+        "name": "inquisitor"
+      },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "CONSENSUS VOTE \u2014 LARGE MODEL BACKEND. Independently evaluate claim WITHOUT seeing the deep reasoning vote: {{input.claim_text}}. Ontology context: {{input.ontology_context}}. Return structured verdict JSON with fields: agent, model, verdict, confidence, reasoning_chain.",
+      "mode": "fan_out",
+      "timeout_secs": 300,
+      "error_mode": "fail",
+      "output_var": "vote_large",
+      "extra_body": {
+        "enable_thinking": true
+      }
+    },
+    {
+      "name": "vote-retrieval-grounded",
+      "agent": {
+        "name": "researcher-hand"
+      },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "CONSENSUS VOTE \u2014 RETRIEVAL-GROUNDED BACKEND. Evaluate claim using current source retrieval only (no prior reasoning): {{input.claim_text}}. Source registry context: lookup sources for each URL in {{input.source_urls}}. Return structured verdict JSON: agent, model, verdict, confidence, reasoning_chain.",
+      "mode": "fan_out",
+      "timeout_secs": 180,
+      "error_mode": "skip",
+      "output_var": "vote_retrieval"
+    },
+    {
+      "name": "visual-vote",
+      "agent": {
+        "name": "visual-analyst"
+      },
+      "model": "nvidia/nemotron-nano-12b-v2-vl:free",
+      "prompt_template": "CONSENSUS VOTE \u2014 VISUAL EVIDENCE BACKEND. Analyse all images/videos associated with claim {{input.claim_id}}: {{input.media_urls}}. Apply caption consistency, manipulation detection, and EXIF validation checks via image-forensics skill. Return visual evidence JSON and verdict contribution.",
+      "mode": "fan_out",
+      "timeout_secs": 300,
+      "error_mode": "skip",
+      "output_var": "vote_visual",
+      "condition": "input.media_urls != null and input.media_urls != []"
+    },
+    {
+      "name": "arbiter-consensus",
+      "agent": {
+        "name": "arbiter"
+      },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "Apply Consensus Protocol to the following votes. Deep reasoning vote: {{vote_deep}}. Large model vote: {{vote_large}}. Retrieval vote: {{vote_retrieval}}. Visual vote: {{vote_visual}}. Provenance node: {{provenance_node}}. Apply weighted Bayesian merge, safety rules, and output final arbiter decision JSON.",
+      "mode": "sequential",
+      "timeout_secs": 120,
+      "error_mode": "fail",
+      "output_var": "arbiter_decision",
+      "extra_body": {
+        "enable_thinking": true
+      }
+    },
+    {
+      "name": "provenance-consensus-attach",
+      "agent": {
+        "name": "archivist"
+      },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "Attach ConsensusVote node to provenance graph for claim {{input.claim_id}}. Data: {{arbiter_decision}}. Attach all CrossCheck nodes from individual votes. Mark provenance chain complete.",
+      "mode": "sequential",
+      "timeout_secs": 60,
+      "error_mode": "skip",
+      "output_var": "provenance_complete"
+    },
+    {
+      "name": "route-decision",
+      "agent": {
+        "name": "orchestrator"
+      },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "Route arbiter decision: {{arbiter_decision}}. If decision=auto-publish: trigger coordinated-debunk-engine-v2. If decision=monitor: log to watchlist. If decision=escalate-human: create human-review task. If decision=false-debunk: trigger accountability workflow. Provenance: {{provenance_complete}}.",
+      "mode": "sequential",
+      "timeout_secs": 60,
+      "error_mode": "fail",
+      "output_var": "routing_result",
+      "output_path": "{{output.dir}}/consensus-vote/{{run.id}}/result.json"
+    }
+  ],
+  "created_at": "2026-05-04T16:13:00.000000000Z"
+}

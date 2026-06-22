@@ -1,0 +1,56 @@
+# LibreFang Self-Healing Pipeline Validator
+# This workflow runs when triggered by pipeline errors or via cron,
+# utilizing the self-improving-agent skill to propose and implement fixes.
+
+name        = "self-healing-pipeline"
+version     = "1.0.0"
+description = "Monitors pipeline runs and applies the self-improving-agent skill to automatically propose and implement fixes for failures."
+author      = "librefang"
+tags        = ["infrastructure", "stability", "self-healing", "monitoring"]
+
+[schedule]
+# Runs hourly to check error logs and attempt recovery
+cron        = "30 * * * *"
+timezone    = "Europe/Bratislava"
+
+# ─────────────────────────────────────────────
+# STAGE 1: FETCH LOGS
+# ─────────────────────────────────────────────
+[[stages]]
+id          = "fetch_errors"
+description = "Fetch recent pipeline errors from the last hour."
+action      = "read_error_logs"
+output      = "recent_errors"
+
+# ─────────────────────────────────────────────
+# STAGE 2: ANALYZE & PROPOSE
+# ─────────────────────────────────────────────
+[[stages]]
+id          = "analyze_failures"
+agent       = "code-reviewer"  # Using code-reviewer, which can be equipped with self-improving-agent
+depends_on  = ["fetch_errors"]
+input       = "recent_errors"
+description = "Analyze the stack traces and pipeline states to propose a fix."
+timeout_s   = 120
+output      = "proposed_fix"
+
+# ─────────────────────────────────────────────
+# STAGE 3: APPLY FIX
+# ─────────────────────────────────────────────
+[[stages]]
+id          = "apply_fix"
+agent       = "maintainer"
+depends_on  = ["analyze_failures"]
+input       = "proposed_fix"
+description = "Apply the proposed fix and restart the affected agents."
+timeout_s   = 120
+
+# ─────────────────────────────────────────────
+# STAGE 4: ALERT
+# ─────────────────────────────────────────────
+[[stages]]
+id          = "alert_operator"
+agent       = "orchestrator"
+depends_on  = ["apply_fix"]
+description = "Notify the operator in the command-center that a self-healing action was taken."
+timeout_s   = 30

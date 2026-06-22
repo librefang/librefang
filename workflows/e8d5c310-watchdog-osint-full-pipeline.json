@@ -1,0 +1,87 @@
+{
+  "id": "e8d5c310-7f2a-4b96-8d41-3c0e5a1f9b72",
+  "name": "watchdog-osint-full-pipeline",
+  "description": "Full end-to-end OSINT pipeline: watchdog ingests and triages -> translator preprocesses SK/CZ/HU/RU -> watchdog classifies -> visual-analyst handles images/video -> inquisitor fact-checks -> archivist updates graph -> impact-comms delivers debunks.",
+  "trigger": {
+    "cron": "*/5 * * * *"
+  },
+  "steps": [
+    {
+      "name": "ingest-and-triage",
+      "agent": { "name": "watchdog" },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "Ingest latest content from all configured OSINT sources: {{input.sources}}. Sources include: RSS feeds from hlavnespravy.sk, infovojna.sk, parlamentnelisty.sk, dennikn.sk, sme.sk, aktuality.sk; YouTube RSS; Telegram webhooks; Twitter webhooks. Normalize, deduplicate, and extract claim objects. Return array of raw claim objects.",
+      "mode": "fan_out",
+      "timeout_secs": 120,
+      "error_mode": "skip",
+      "output_var": "raw_claims"
+    },
+    {
+      "name": "translate-foreign-content",
+      "agent": { "name": "translator" },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "Translate all non-English claims in {{raw_claims}} to English. Preserve original text alongside translation. Source languages: Slovak (sk), Czech (cs), Hungarian (hu), Russian (ru). Return claims with added fields: translated_text, source_lang.",
+      "mode": "sequential",
+      "timeout_secs": 120,
+      "error_mode": "skip",
+      "output_var": "translated_claims"
+    },
+    {
+      "name": "classify-and-route",
+      "agent": { "name": "watchdog" },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "Classify each claim in {{translated_claims}}. For each: (1) assign escalation_score 0.0-1.0, (2) assign modality text|image|video|audio, (3) assign priority low|medium|high|critical, (4) assign route_to: inquisitor (score>=0.72 and text), visual-analyst (image/video), archive (historical). Return classified_claims array.",
+      "mode": "sequential",
+      "timeout_secs": 180,
+      "error_mode": "fail",
+      "output_var": "classified_claims",
+      "extra_body": { "enable_thinking": true }
+    },
+    {
+      "name": "visual-triage",
+      "agent": { "name": "visual-analyst" },
+      "model": "nvidia/nemotron-nano-12b-v2-vl:free",
+      "prompt_template": "Analyze visual claims from {{classified_claims}} where modality is image or video. For each: extract text (OCR), assess authenticity, detect manipulation or out-of-context usage. Return visual_evidence array with visual_verdict and confidence.",
+      "mode": "fan_out",
+      "timeout_secs": 300,
+      "error_mode": "skip",
+      "output_var": "visual_evidence",
+      "condition": "any(c.modality in ['image', 'video'] for c in classified_claims)"
+    },
+    {
+      "name": "fact-check",
+      "agent": { "name": "inquisitor" },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "Fact-check all escalated claims from {{classified_claims}} where escalation_score >= 0.72 and modality == text. Visual evidence available: {{visual_evidence}}. Apply CRAAP methodology. Return verdict array.",
+      "mode": "fan_out",
+      "timeout_secs": 300,
+      "error_mode": "skip",
+      "output_var": "verdicts",
+      "extra_body": { "enable_thinking": true },
+      "condition": "any(c.escalation_score >= 0.72 for c in classified_claims)"
+    },
+    {
+      "name": "enrich-graph",
+      "agent": { "name": "archivist" },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "Update the knowledge graph with all new verdicts: {{verdicts}}. Upsert Actor, Claim, Source, NarrativeCluster nodes. Update source credibility scores. Detect new narrative clusters (spread_score > 0.80 triggers watchdog alert). Output graph_mutations JSON.",
+      "mode": "sequential",
+      "timeout_secs": 120,
+      "error_mode": "skip",
+      "output_var": "graph_mutations"
+    },
+    {
+      "name": "prepare-debunks",
+      "agent": { "name": "impact-comms" },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "For all FALSE or MISLEADING verdicts in {{verdicts}} with confidence >= 0.80: draft bilingual (SK+EN) debunk posts using humanizer skill. Attach visual overlays from {{visual_evidence}} where available. Return debunk_drafts array.",
+      "mode": "sequential",
+      "timeout_secs": 120,
+      "error_mode": "skip",
+      "output_var": "debunk_drafts",
+      "condition": "any(v.verdict in ['FALSE', 'MISLEADING'] and v.confidence >= 0.80 for v in verdicts)",
+      "output_path": "{{output.dir}}/watchdog-osint-full-pipeline/{{run.id}}/debunk_drafts.json"
+    }
+  ],
+  "created_at": "2026-05-04T12:50:00.000000000Z"
+}

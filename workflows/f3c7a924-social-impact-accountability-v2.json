@@ -1,0 +1,66 @@
+{
+  "id": "f3c7a924-1d58-4e72-9c30-b7a4f2d6e841",
+  "name": "social-impact-accountability-v2",
+  "description": "Notifies advertisers, regulators, and civil society on confirmed high-confidence verdicts. Supports DOCX letters, email/webhook delivery, and outbound phone calls.",
+  "trigger": {
+    "event": "verdict_confirmed",
+    "filter": { "min_confidence": 0.85 }
+  },
+  "steps": [
+    {
+      "name": "determine-tier",
+      "agent": { "name": "impact-comms" },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "Evaluate verdict: {{input.verdict_json}}. Determine action tier: Tier 1 (confidence >= 0.80), Tier 2 (confidence >= 0.85, recommended_action=notify), Tier 3 (confidence >= 0.90, recommended_action=escalate-legal). Return tier number and justification.",
+      "mode": "sequential",
+      "timeout_secs": 60,
+      "error_mode": "fail",
+      "output_var": "action_tier"
+    },
+    {
+      "name": "draft-advertiser-notice",
+      "agent": { "name": "impact-comms" },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "Draft a formal DOCX advertiser notification using Word/DOCX and humanizer skills. Template: advertiser-notice. Tone: formal. Include: claim text, verdict, confidence score, evidence summary, request to suspend ad placements on {{input.verdict_json.actor}} properties. Verdict: {{input.verdict_json}}.",
+      "mode": "sequential",
+      "timeout_secs": 120,
+      "error_mode": "skip",
+      "output_var": "advertiser_notice_doc",
+      "condition": "action_tier.tier >= 2"
+    },
+    {
+      "name": "draft-regulator-complaint",
+      "agent": { "name": "impact-comms" },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "Draft a formal DOCX regulatory complaint using Word/DOCX and humanizer skills. Template: regulatory-complaint. Tone: legal. Address to: Slovak Press Council (Tlačová rada), RTVS Council, EU DSA enforcement body. Include full evidence package. Verdict: {{input.verdict_json}}.",
+      "mode": "sequential",
+      "timeout_secs": 120,
+      "error_mode": "skip",
+      "output_var": "regulator_complaint_doc",
+      "condition": "action_tier.tier >= 3"
+    },
+    {
+      "name": "phone-outreach",
+      "agent": { "name": "impact-comms" },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "Use agent-phone-call skill to place outbound calls to trust-and-safety contacts and journalists. Script template: journalist-briefing. Max duration: 180 seconds. Briefing context: {{regulator_complaint_doc}}. Target contacts: {{input.contact_list}}.",
+      "mode": "sequential",
+      "timeout_secs": 240,
+      "error_mode": "skip",
+      "output_var": "call_results",
+      "condition": "action_tier.tier >= 3"
+    },
+    {
+      "name": "deliver-notifications",
+      "agent": { "name": "impact-comms" },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "Deliver all prepared notifications via api-gateway and automation-workflows skills. Channels: email, webhook, signal. Attach documents: {{advertiser_notice_doc}}, {{regulator_complaint_doc}}. Log all delivery confirmations.",
+      "mode": "fan_out",
+      "timeout_secs": 180,
+      "error_mode": "skip",
+      "output_var": "delivery_confirmations",
+      "output_path": "{{output.dir}}/social-impact-accountability-v2/{{run.id}}/delivery_confirmations.json"
+    }
+  ],
+  "created_at": "2026-05-04T12:50:00.000000000Z"
+}

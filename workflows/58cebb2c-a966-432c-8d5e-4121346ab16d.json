@@ -1,0 +1,72 @@
+{
+  "id": "58cebb2c-a966-432c-8d5e-4121346ab16d",
+  "name": "high-impact-misinfo-monitor",
+  "description": "Continuous monitoring of high-profile actors and news outlets to detect malicious demagoguery and high-impact lies.",
+  "steps": [
+    {
+      "name": "ingest-feeds",
+      "agent": {
+        "name": "collector-hand"
+      },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "Monitor the following list of high-profile social media accounts and news RSS feeds for new statements: {{input}}. Extract all factual claims made in the last 24 hours with author, reach estimate, and platform.",
+      "mode": "fan_out",
+      "timeout_secs": 120,
+      "error_mode": "skip",
+      "output_var": "extracted_claims"
+    },
+    {
+      "name": "translate-claims",
+      "agent": {
+        "name": "translator"
+      },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "Translate all non-English claims in {{extracted_claims}} to English. Preserve original language text. Source languages: SK, CZ, HU, RU.",
+      "mode": "sequential",
+      "timeout_secs": 90,
+      "error_mode": "skip",
+      "output_var": "translated_claims"
+    },
+    {
+      "name": "identify-demagoguery",
+      "agent": {
+        "name": "analyst"
+      },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "Review the following claims: {{translated_claims}}. Identify statements that exhibit demagoguery (appealing to prejudices, using inflammatory language) or contain potentially high-impact malicious lies that could cause public harm or misinformation spread. Include a brief reasoning chain for each flag.",
+      "mode": "sequential",
+      "timeout_secs": 180,
+      "error_mode": "fail",
+      "output_var": "flagged_claims"
+    },
+    {
+      "name": "impact-scoring",
+      "agent": {
+        "name": "analyst"
+      },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "extra_body": {
+        "enable_thinking": true
+      },
+      "prompt_template": "For each flagged claim in {{flagged_claims}}, assign an impact score (0-100) based on the reach of the author, platform virality potential, and the potential for social disruption in the Slovak/Central European context. Filter for claims with a score > 75 and output them as a structured JSON list with fields: claim_text, author, source_url, impact_score, flag_reason.",
+      "mode": "sequential",
+      "timeout_secs": 180,
+      "error_mode": "fail",
+      "output_var": "scored_claims"
+    },
+    {
+      "name": "qa-review",
+      "agent": {
+        "name": "analyst"
+      },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "Review the scored claims {{scored_claims}} for scoring consistency, evidence quality, and flag accuracy. Verify that high-impact_score claims (>75) genuinely warrant escalation in the Slovak/Central European context. Correct or remove any mis-scored claims.",
+      "mode": "sequential",
+      "timeout_secs": 90,
+      "error_mode": "skip",
+      "output_var": "high_priority_claims",
+      "output_path": "{{output.dir}}/high-impact-misinfo-monitor/{{run.id}}/high_priority_claims.json"
+    }
+  ],
+  "created_at": "2026-05-03T16:20:53.128055154Z"
+}

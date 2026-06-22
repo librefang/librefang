@@ -1,0 +1,69 @@
+{
+  "id": "abd57e3b-8984-4869-b928-744e5fbe529b",
+  "name": "osint-dezinformacia-monitor",
+  "description": "Continuous OSINT monitor that ingests feeds, normalizes text, detects misinformation via regex/ML, enriches with Wikidata, and prepares fact-checked replies.",
+  "steps": [
+    {
+      "name": "ingest-feeds",
+      "agent": { "name": "collector-hand" },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "Ingest recent data from the following OSINT sources: {{input}}. Use web_fetch and web_search to gather content, authors, and timestamps.",
+      "mode": "fan_out",
+      "timeout_secs": 120,
+      "error_mode": "skip",
+      "output_var": "raw_data"
+    },
+    {
+      "name": "translate-content",
+      "agent": { "name": "translator" },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "Translate all non-English content in {{raw_data}} to English. Preserve original text alongside the translation. Source languages include Slovak (SK), Czech (CZ), and Hungarian (HU).",
+      "mode": "sequential",
+      "timeout_secs": 120,
+      "error_mode": "skip",
+      "output_var": "translated_data"
+    },
+    {
+      "name": "normalize-content",
+      "agent": { "name": "analyst" },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "Normalize the raw data: {{translated_data}}. Remove HTML tags, clean whitespace, and extract structured claim objects (claim_text, author, source_url, publish_date).",
+      "mode": "sequential",
+      "timeout_secs": 60,
+      "error_mode": "fail",
+      "output_var": "normalized_data"
+    },
+    {
+      "name": "detect-misinformation",
+      "agent": { "name": "analyst" },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "Analyze {{normalized_data}} for misinformation. Use regex patterns for known Slovak/Czech disinformation keywords and cross-reference with the Google Fact Check API. Flag suspicious statements with a confidence score 0-100.",
+      "mode": "sequential",
+      "timeout_secs": 180,
+      "error_mode": "fail",
+      "output_var": "flagged_statements"
+    },
+    {
+      "name": "enrich-with-context",
+      "agent": { "name": "researcher-hand" },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "For each flagged statement in {{flagged_statements}}, search Wikidata and authoritative news archives to add context and verified entity information. Cross-reference with dennikn.sk fact-check archive.",
+      "mode": "fan_out",
+      "timeout_secs": 300,
+      "error_mode": "skip",
+      "output_var": "enriched_graph"
+    },
+    {
+      "name": "prepare-responses",
+      "agent": { "name": "social-media" },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "Based on the enriched context: {{enriched_graph}}, draft polite but factual corrections in both Slovak and English. Prepare as alerts for Slack and drafts for social media platforms.",
+      "mode": "sequential",
+      "timeout_secs": 120,
+      "error_mode": "fail",
+      "output_var": "response_drafts",
+      "output_path": "{{output.dir}}/osint-dezinformacia-monitor/{{run.id}}/response_drafts.json"
+    }
+  ],
+  "created_at": "2026-05-03T16:30:10.999842169Z"
+}

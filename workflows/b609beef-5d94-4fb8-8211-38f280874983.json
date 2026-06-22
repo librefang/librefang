@@ -1,0 +1,30 @@
+{
+  "id": "b609beef-5d94-4fb8-8211-38f280874983",
+  "name": "msm-archive-audit",
+  "description": "Audits mainstream media archives to verify past predictions and core narratives against historical outcomes.",
+  "steps": [
+    {
+      "id": "search-archives",
+      "name": "archive-search",
+      "agent": {
+        "name": "researcher-hand"
+      },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "Search Slovak and international mainstream media archives (SME, Pravda, Denn\u00edk N, NYT, BBC) for predictions and core narratives regarding {{input}} from the specific historical period requested. Retrieve full article texts where available.",
+      "mode": "fan_out",
+      "timeout_secs": 300,
+      "error_mode": "skip"
+    },
+    {
+      "id": "narrative-verification",
+      "name": "cross-reference-narratives",
+      "agent": {
+        "name": "analyst"
+      },
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt_template": "Analyze the retrieved media archives for {{input}}. Compare the published predictions against the verified outcomes provided in the current OSINT context. Identify narrative shifts, omissions, and successful forecasts. Focus on the accountability of specific outlets.",
+      "mode": "sequential"
+    }
+  ],
+  "created_at": "2026-05-04T13:45:00Z"
+}

@@ -1,0 +1,37 @@
+# Critical Health Check
+# Probes the core data ingestion and research agents.
+name        = "health-check-critical"
+version     = "1.0.0"
+description = "Probes the researcher-hand and collector-hand with a benign request to ensure they are online and responding within thresholds. Auto-restarts on failure."
+author      = "librefang"
+tags        = ["system", "health", "critical"]
+
+[schedule]
+cron        = "*/30 * * * *"   # Every 30 minutes
+timezone    = "Europe/Bratislava"
+
+[test_fixture]
+prompt = "Ping. Please return the string 'ACK'."
+expected_response = "ACK"
+
+[[stages]]
+id          = "probe_collector"
+agent       = "collector-hand"
+input       = "test_fixture"
+timeout_s   = 15
+
+[[stages]]
+id          = "probe_researcher"
+agent       = "researcher-hand"
+input       = "test_fixture"
+timeout_s   = 15
+
+[[stages]]
+id          = "assert_health"
+action      = "assert_verdict"
+depends_on  = ["probe_collector", "probe_researcher"]
+assertions  = [
+    "probe_collector.output == test_fixture.expected_response",
+    "probe_researcher.output == test_fixture.expected_response"
+]
+on_fail     = "trigger_alert + trigger_self_healing_pipeline"

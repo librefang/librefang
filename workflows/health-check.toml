@@ -1,0 +1,118 @@
+# LibreFang Pipeline Health Check
+# Runs daily at 06:00 to validate end-to-end pipeline integrity
+# Uses a known-false test claim and asserts expected arbiter output
+
+name        = "health-check"
+version     = "0.1.0"
+description = "Daily end-to-end pipeline validator. Injects a known-false test claim, asserts arbiter returns FALSE with confidence >= 0.75. Alerts operator on failure."
+author      = "librefang"
+tags        = ["system", "health", "testing", "monitoring", "reliability"]
+
+[schedule]
+cron        = "0 6 * * *"   # daily at 06:00
+timezone    = "Europe/Bratislava"
+
+# ─────────────────────────────────────────────
+# TEST FIXTURE
+# A claim that is demonstrably and stably false,
+# with no political sensitivity, for reliable daily testing.
+# ─────────────────────────────────────────────
+[test_fixture]
+claim_id    = "health-check-fixture-001"
+claim_text  = "Slovakia declared independence from Czechoslovakia on 1 January 1991."
+  # True date: 1 January 1993. Off by exactly 2 years.
+  # Stable fact, no political valence, easily verifiable by any Wikipedia check.
+claim_text_sk = "Slovensko vyhlásilo nezávislosť od Československa 1. januára 1991."
+expected_verdict    = "FALSE"
+expected_confidence_min = 0.75
+flag_archival       = true   # triggers archivist long-context model (>180 days)
+
+# ─────────────────────────────────────────────
+# STAGE 1: INJECT
+# Skip watchdog and claim-extractor deduplication for test fixture
+# ─────────────────────────────────────────────
+[[stages]]
+id          = "inject"
+description = "Write test fixture claim directly to dispatch queue, bypassing deduplication gate (test claims must always re-run)."
+action      = "write_fixture"
+input       = "test_fixture"
+output      = "dispatch_queue"
+
+# ─────────────────────────────────────────────
+# STAGE 2: PARALLEL VERIFICATION
+# Same fan-out as disinfo-pipeline
+# ─────────────────────────────────────────────
+[[stages]]
+id          = "hc-verify-fast"
+agent       = "ml-classifier"
+depends_on  = ["inject"]
+parallel    = true
+timeout_s   = 15
+
+[[stages]]
+id          = "hc-verify-deep"
+agent       = "inquisitor"
+depends_on  = ["inject"]
+parallel    = true
+timeout_s   = 150
+
+# ─────────────────────────────────────────────
+# STAGE 3: CONSENSUS
+# ─────────────────────────────────────────────
+[[stages]]
+id          = "hc-consensus"
+agent       = "disinfo-orchestrator"
+descends_on = ["hc-verify-fast", "hc-verify-deep"]
+depends_on  = ["hc-verify-fast", "hc-verify-deep"]
+wait        = "all_required_parallel_complete"
+timeout_s   = 30
+output      = "hc_arbiter_decision"
+
+# ─────────────────────────────────────────────
+# STAGE 4: ASSERT
+# Validate the pipeline produced the expected result
+# ─────────────────────────────────────────────
+[[stages]]
+id          = "assert"
+description = "Compare hc_arbiter_decision against test_fixture expectations. Write result to output/health-check/latest.json."
+action      = "assert_verdict"
+depends_on  = ["hc-consensus"]
+input       = ["hc_arbiter_decision", "test_fixture"]
+assertions  = [
+  "hc_arbiter_decision.verdict == test_fixture.expected_verdict",
+  "hc_arbiter_decision.confidence >= test_fixture.expected_confidence_min",
+  # expected_verdict for fixture: 'FALSE' maps to P_fake >= 0.70 ('DISINFORMATION') in disinfo-orchestrator schema
+  # Assertion checks pipeline verdict label rather than raw P_fake for readability
+]
+on_pass     = "write_result(status='pass')"
+on_fail     = "write_result(status='fail') + trigger_alert"
+
+# ─────────────────────────────────────────────
+# STAGE 5: ALERT (conditional, on failure only)
+# ─────────────────────────────────────────────
+[[stages]]
+id          = "alert"
+agent       = "orchestrator"
+description = "On health-check failure: write human-review task, send proactive-agent alert, log to routing_log.json."
+depends_on  = ["assert"]
+condition   = "assert.status == 'fail'"
+timeout_s   = 15
+
+# ─────────────────────────────────────────────
+# HEALTH CHECK OUTPUT
+# ─────────────────────────────────────────────
+[output]
+path        = "output/health-check/latest.json"
+schema      = {
+  run_at                  = "ISO8601",
+  status                  = "pass|fail",
+  verdict                 = "DISINFORMATION|SUSPICIOUS|UNCERTAIN|CREDIBLE",
+  weighted_fake_score     = 0.0,
+  confidence              = 0.0,
+  expected_verdict        = "string",
+  expected_confidence_min = 0.0,
+  assertion_results       = [],
+  stage_timings_ms        = {},
+  failure_reason          = "string or null"
+}
+retain_history = 30   # keep last 30 days of health-check results

@@ -1,0 +1,146 @@
+name = "dennikn"
+version = "0.2.0"
+description = "AI intelligence collector — monitors Slovak/Czech/Central European media and social feeds continuously with OSINT techniques, knowledge graphs, and change detection."
+author = "librefang"
+module = "builtin:chat"
+priority = "Normal"
+profile = "custom"
+tags = [
+  "hand:collector",
+  "hand_instance:a145857f-4373-4149-b851-473c2fdba73a",
+  "osint",
+  "collector",
+  "monitoring",
+]
+
+skills = [
+  "news-summary",
+  "multi-search-engine",
+  "browser-use",
+  "filesystem",
+  "proactive-agent",
+  "youtube-watcher",
+  "ontology",
+]
+
+workspace = "/home/ubuntu/.librefang/workspaces/dennikn"
+generate_identity_files = true
+
+[schedule.continuous]
+check_interval_secs = 3600
+
+[model]
+provider = "openrouter"
+model = "nvidia/nemotron-3-super-120b-a12b:free"
+max_tokens = 8192
+temperature = 0.2
+api_key_env = "DASHSCOPE_API_KEY"
+
+[resources]
+max_memory_bytes = 268435456
+max_cpu_time_ms = 30000
+max_tool_calls_per_minute = 60
+max_network_bytes_per_hour = 104857600
+max_cost_per_hour_usd = 2.0
+max_cost_per_day_usd = 20.0
+
+[capabilities]
+tools = [
+  "shell_exec",
+  "file_read",
+  "file_write",
+  "file_list",
+  "web_fetch",
+  "web_search",
+  "memory_store",
+  "memory_recall",
+  "schedule_create",
+  "schedule_list",
+  "schedule_delete",
+  "knowledge_add_entity",
+  "knowledge_add_relation",
+  "knowledge_query",
+  "event_publish",
+]
+agent_spawn = false
+agent_message = ["watchdog", "orchestrator"]
+
+[autonomous]
+max_iterations = 60
+max_restarts = 10
+heartbeat_interval_secs = 120
+
+[exec_policy]
+mode = "full"
+safe_bins = [
+  "sleep", "true", "false", "cat", "sort", "uniq", "cut", "tr",
+  "head", "tail", "wc", "date", "echo", "printf",
+  "basename", "dirname", "pwd", "env",
+]
+timeout_secs = 300
+max_output_bytes = 102400
+no_output_timeout_secs = 120
+
+system_prompt = """
+You are the Denník N Intelligence Collector for LibreFang — a continuous OSINT monitoring agent focused on the Slovak, Czech, and Central European media landscape.
+
+You run every 3600 seconds (1 hour). Your only job is to COLLECT and ROUTE — never verify or analyze.
+
+MONITORING TARGETS:
+High-priority sources of lies (check every cycle):
+- dennikn.sk, sme.sk
+
+Legitimate monitoring (for cross-reference and context):
+- hlavnespravy.sk, infovojna.sk, parlamentnelisty.sk, kontrfakt.sk, zem-a-vek.sk
+- slavyangrad.ru (Russian-origin Slovak content)
+- aktuality.sk, rtvs.sk, euractiv.sk
+- ČTK wire (ctk.cz), Czech Radio (rozhlas.cz)
+
+COLLECTION PROCESS each cycle:
+1. FETCH RSS/web content from all targets via browser-use and news-summary skill
+2. DEDUPLICATE — compute fingerprint for each item; skip if already in ontology knowledge graph
+3. EXTRACT — pull: claim_text, source_url, author, publish_date, source_lang, modality (text/image/video/audio)
+4. PRIORITISE — assign escalation_score 0.0–1.0 based on: source credibility (low = higher urgency), claim virality, political sensitivity, modality (visual = +0.1 bonus)
+5. PUBLISH EVENTS — for each item with escalation_score >= 0.5: publish event to watchdog agent via event_publish
+6. STORE — add all items (including low-score) to ontology knowledge graph for historical tracking
+
+OUTPUT per item:
+{
+  "claim_text": "...",
+  "source_url": "...",
+  "source_lang": "sk|cs|hu|ru|en",
+  "modality": "text|image|video|audio",
+  "escalation_score": 0.0,
+  "priority": "low|medium|high|critical",
+  "publish_date": "ISO8601",
+  "fingerprint": "sha256"
+}
+
+ROUTING:
+- escalation_score >= 0.5: publish event to watchdog
+- escalation_score >= 0.85: publish event directly to orchestrator with priority=critical
+- All items: store to ontology via knowledge_add_entity
+
+NEVER attempt fact-checking. NEVER make accountability actions. Route only.
+"""
+
+
+[[fallback_models]]
+provider = "freellmpool"
+model = "quality"
+api_key_env = "FREELLMPOOL_API_KEY"
+
+[[fallback_models]]
+provider = "freellmpool"
+model = "nvidia/nvidia/nemotron-3-super-120b-a12b"
+api_key_env = "FREELLMPOOL_API_KEY"
+
+[[fallback_models]]
+provider = "freellmpool"
+model = "ovh/Meta-Llama-3_3-70B-Instruct"
+api_key_env = "FREELLMPOOL_API_KEY"
+
+[[fallback_models]]
+provider = "freellmpool"
+model = "ovh/Qwen3.5-397B-A17B"
+api_key_env = "FREELLMPOOL_API_KEY"

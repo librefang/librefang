@@ -1,0 +1,73 @@
+[skill]
+name        = "source-registry"
+version     = "0.1.0"
+description = "Permanent Source Registry: persistent longitudinal credibility tracking for domains and social accounts with score decay, bias vectors, and correction rate."
+author      = "librefang"
+tags        = ["credibility", "source", "registry", "bias", "osint", "provenance"]
+
+[config]
+storage_backend   = { value = "filesystem" }
+registry_path     = { value = "data/source-registry/registry.json" }
+backup_interval_h = { value = 24 }
+
+# Score decay: positive credibility events lose weight over 6 months (180 days)
+score_decay_half_life_days = { value = 180 }
+
+# Thresholds
+low_credibility_threshold    = { value = 40 }
+blacklist_threshold          = { value = 15 }
+high_credibility_threshold   = { value = 80 }
+
+[schema]
+# JSON schema for each source entity in the registry
+source_entity = """
+{
+  "domain": "string (primary key for websites)",
+  "account_id": "string (primary key for social accounts, format: platform:handle)",
+  "display_name": "string",
+  "type": "news-outlet|blog|social-account|government|academic|wire-service",
+  "country": "ISO 3166-1 alpha-2",
+  "language": "ISO 639-1",
+  "credibility_score": "integer 0-100",
+  "score_history": [
+    { "date": "ISO8601", "event": "string", "delta": "integer", "claim_id": "uuid" }
+  ],
+  "bias_vector": {
+    "political": "far-left|left|center-left|center|center-right|right|far-right|unknown",
+    "sensationalism": "float 0.0-1.0",
+    "government_alignment": "float -1.0 to 1.0 (negative=opposition, positive=pro-government)"
+  },
+  "correction_rate": "float (corrections issued / total claims published)",
+  "verified_claims": "integer",
+  "debunked_claims": "integer",
+  "unverifiable_claims": "integer",
+  "first_seen": "ISO8601",
+  "last_reviewed": "ISO8601",
+  "blacklisted": "bool",
+  "blacklist_reason": "string or null",
+  "notes": "string"
+}
+"""
+
+[api]
+# Functions exposed to agents via skill call
+lookup_source     = "Returns full source entity by domain or account_id. Creates stub entry if not found."
+update_score      = "Applies a credibility delta event. Automatically applies decay to prior positive events."
+flag_domain       = "Sets blacklisted=true with reason. Broadcasts alert to all active agents."
+batch_import      = "Import source list from CSV or JSON. Used for seeding from MBFC, NewsGuard, etc."
+export_registry   = "Export full registry as JSON or CSV for audit."
+get_low_credibility = "Returns all sources below low_credibility_threshold. Used by researcher-hand at session start."
+
+[seed_sources]
+# Known high-credibility seeds for Slovak/Czech/Central European context
+high_credibility = [
+  { domain = "dennikn.sk", credibility_score = 88, bias_vector = { political = "center-left" }, country = "SK" },
+  { domain = "sme.sk", credibility_score = 82, bias_vector = { political = "center" }, country = "SK" },
+  { domain = "ihned.cz", credibility_score = 80, bias_vector = { political = "center" }, country = "CZ" },
+  { domain = "reuters.com", credibility_score = 95, bias_vector = { political = "center" }, country = "GB" },
+  { domain = "ap.org", credibility_score = 96, bias_vector = { political = "center" }, country = "US" }
+]
+low_credibility = [
+  { domain = "hlavnespravy.sk", credibility_score = 12, bias_vector = { political = "far-right" }, country = "SK", blacklisted = true },
+  { domain = "zvedavec.org", credibility_score = 10, bias_vector = { political = "far-right" }, country = "CZ", blacklisted = true }
+]

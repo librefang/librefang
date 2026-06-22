@@ -1,0 +1,23 @@
+[skill]
+name = "cloudcraft"
+version = "1.0.0"
+description = "Visualize cloud architecture (AWS and Azure) through smart diagrams and automatic reverse engineering of existing environments."
+author = "librefang"
+tags = ["cloud", "architecture", "diagram", "aws", "azure", "infrastructure"]
+
+[runtime]
+type = "command"
+entry = "/home/ubuntu/librefang/skills/cloudcraft/cloudcraft"
+
+[tools]
+provided = ["cloudcraft"]
+
+[requirements]
+tools = []
+capabilities = []
+
+[source]
+type = "local"
+
+[config]
+api_key_env = "CLOUDCRAFT_API_KEY"

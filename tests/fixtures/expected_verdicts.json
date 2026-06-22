@@ -1,0 +1,28 @@
+{
+  "_fixture": "Expected orchestrator verdicts for the three golden-path fixtures",
+  "_note": "These are reference outputs for manual and automated regression testing. Tolerances: +/- 0.10 on all probability scores.",
+  "expected": [
+    {
+      "fixture_file": "claim_true.json",
+      "claim_id": "c001",
+      "expected_verdict": "CREDIBLE",
+      "expected_P_fake_max": 0.34,
+      "rationale": "WHO/COVID-19 pandemic declaration is confirmed by Wikipedia, triplet-verified, linguistically neutral. All agents should score low."
+    },
+    {
+      "fixture_file": "claim_fake.json",
+      "claim_id": "c001",
+      "expected_verdict": "DISINFORMATION",
+      "expected_P_fake_min": 0.70,
+      "rationale": "Contains extreme language (SHOCKING, 100%), unverifiable secret vote, fabricated date. ML-classifier and coherence-checker should both score high. Triplet checker will find no supporting sources."
+    },
+    {
+      "fixture_file": "claim_ambiguous.json",
+      "claim_id": "c001",
+      "expected_verdict_range": ["SUSPICIOUS", "UNCERTAIN"],
+      "expected_P_fake_min": 0.35,
+      "expected_P_fake_max": 0.69,
+      "rationale": "Fico has made similar statements publicly but NATO denies. Conflicting sources. Ensemble should land in ambiguous zone, triggering inquisitor Mode B deep verification."
+    }
+  ]
+}

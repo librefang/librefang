@@ -1,0 +1,193 @@
+# LibreFang Disinformation Detection Pipeline
+# Full orchestrated workflow: ingestion → orchestration → parallel verification → consensus → action
+#
+# Wave 3 improvements applied (2026-06-21):
+#   Imp 11: Firecrawl web backend (claim-extractor, triplet-fact-checker, wiki-checker)
+#   Imp 12: source-rater critical bug fix (dennikn.sk/sme.sk known-good; real disinfo domains)
+#   Imp 13: Instance-hardness dynamic routing in consensus stage
+#   Imp 14: Adversarial mini-debate via arbiter (u_epi_norm > 0.35)
+#   Imp 15: F2-score optimised weights after 20 confirmed disinfo verdicts
+#   Imp 16: Multi-window CIB (2h/12h/72h) in narrative-scan
+#   Imp 17: Firecrawl search discovery layer in watchdog ingest
+#   Imp 18: wiki-checker calibration weight comment fix (0.22)
+
+name        = "disinfo-pipeline"
+version     = "3.0.0"
+description = "End-to-end disinformation detection: Firecrawl web backend, claim extraction, orchestrator gate, parallel multi-agent verification, instance-hardness routing, adversarial mini-debate, Bayesian+F2 consensus, multi-window CIB, and impact comms."
+author      = "librefang"
+tags        = ["osint", "disinformation", "pipeline", "fact-check", "slovak", "czech", "firecrawl", "instance-hardness", "f2-score"]
+
+# ─────────────────────────────────────────────
+# STAGE 1: INGESTION
+# Entry point: accepts URL, raw text, social post, or media.
+# Triggered by: watchdog, collector-hand, manual, webhook
+# ─────────────────────────────────────────────
+[[stages]]
+id          = "ingest"
+agent       = "claim-extractor"
+description = "Accept raw input. Extract atomic claims via Firecrawl (Imp 11), assign UUIDs, write to ontology, build dispatch queue. Watchdog uses firecrawl_search for cross-domain discovery (Imp 17)."
+trigger     = "manual|webhook|watchdog|collector-hand"
+output      = "dispatch_queue"
+timeout_s   = 60
+notes       = "Imp 11: firecrawl_scrape (onlyMainContent=true) fetches JS-heavy Slovak news portals. Imp 17: watchdog firecrawl_search detects cross-domain spread for borderline items."
+
+# ─────────────────────────────────────────────
+# STAGE 1.5: SANITIZATION
+# ─────────────────────────────────────────────
+[[stages]]
+id          = "sanitize"
+agent       = "injection-shield"
+description = "Blocks adversarial inputs, prompt injections, and poisoned data in the extracted claims before orchestration."
+depends_on  = ["ingest"]
+input       = "dispatch_queue"
+output      = "sanitized_queue"
+timeout_s   = 15
+
+# ─────────────────────────────────────────────
+# STAGE 2: ORCHESTRATION GATE
+# Deduplication, cost guard, circuit breaker.
+# Orchestrator may hold, batch, or pass-through claims.
+# ─────────────────────────────────────────────
+[[stages]]
+id          = "orchestrate"
+agent       = "orchestrator"
+description = "Deduplication gate: skip already-verified claims. Cost guard: hold if hourly cost > $5. Circuit breaker: batch if >20 claims/5min. Outputs approved dispatch_queue."
+depends_on  = ["sanitize"]
+input       = "sanitized_queue"
+output      = "approved_queue"
+timeout_s   = 15
+
+# ─────────────────────────────────────────────
+# STAGE 3: PARALLEL VERIFICATION (fan-out)
+# All three run simultaneously on approved_queue claim_ids
+# ─────────────────────────────────────────────
+[[stages]]
+id          = "verify-fast"
+agent       = "ml-classifier"
+description = "Fast linguistic + structural first-pass. No web access. Confidence capped at 0.80. Returns verdict JSON for arbiter."
+depends_on  = ["orchestrate"]
+parallel    = true
+input       = "approved_queue.ml_classifier"
+output      = "verdict_ml"
+timeout_s   = 10
+notes       = "Imp 14: ml-classifier top_signals used as Affirmative argument in mini-debate when u_epi_norm > 0.35."
+
+[[stages]]
+id          = "verify-deep"
+agent       = "inquisitor"
+description = "Deep CRAAP + adversarial multi-source verification. Min 10 sources (or 3 for targeted_verify path). Triggers archivist for claims >180 days. Checks COST_HOLD flag before starting."
+depends_on  = ["orchestrate"]
+parallel    = true
+input       = "approved_queue.inquisitor"
+output      = "verdict_inquisitor"
+timeout_s   = 120
+notes       = "Imp 13: routing_path from orchestrator controls inquisitor depth — 'targeted_verify' uses 3 sources, 'deep_verify' uses 10. 'ensemble_fast' skips inquisitor entirely (~60% of claims)."
+
+[[stages]]
+id          = "verify-visual"
+agent       = "visual-analyst"
+description = "Multimodal forensics: ELA, EXIF, deepfake detection, OCR. Only runs if approved_queue.visual_analyst is non-empty."
+depends_on  = ["orchestrate"]
+parallel    = true
+condition   = "len(approved_queue.visual_analyst) > 0"
+input       = "approved_queue.visual_analyst"
+output      = "verdict_visual"
+timeout_s   = 60
+
+# ─────────────────────────────────────────────
+# STAGE 3b: NARRATIVE SCAN (optional parallel)
+# Only when cluster threshold is met (3+ claims share actor/narrative)
+# ─────────────────────────────────────────────
+[[stages]]
+id          = "narrative-scan"
+agent       = "narrative-tracker"
+description = "Campaign detection: multi-window CIB analysis (2h/12h/72h), cluster related claims, score coordinated inauthentic behaviour, emit CampaignAlert if threshold met."
+depends_on  = ["orchestrate"]
+parallel    = true
+condition   = "len(approved_queue.narrative_tracker) > 0"
+input       = "approved_queue.narrative_tracker"
+output      = "narrative_brief"
+timeout_s   = 90
+notes       = "Imp 16: cib-detector now runs three temporal windows (2h/12h/72h) with weights 0.40/0.35/0.25. Catches slow-burn Slavyangrad.ru→SK amplification campaigns previously missed by single 2h window."
+
+# ─────────────────────────────────────────────
+# STAGE 4: CONSENSUS GATE
+# Waits for all required parallel stages to complete.
+# confidence = consensus_score (field alias bridge for impact-comms)
+# ─────────────────────────────────────────────
+[[stages]]
+id          = "consensus"
+agent       = "arbiter"
+description = "Bayesian+F2 weighted merge of all verdicts. Instance-hardness routing. Adversarial mini-debate for borderline claims. Applies safety override rules. Emits: auto-publish | monitor | escalate-human | false-debunk."
+depends_on  = ["verify-fast", "verify-deep", "verify-visual"]
+wait        = "all_required_parallel_complete"
+input       = ["verdict_ml", "verdict_inquisitor", "verdict_visual"]
+output      = "arbiter_decision"
+timeout_s   = 30
+notes       = "Imp 13: hardness_index H = u_epi*(1-max_conf) routes claims: H<0.25 fast, 0.25-0.55 targeted, >=0.55 deep. Imp 14: mini-debate triggered when u_epi_norm>0.35 and borderline P_fake 0.35-0.69; adjusts P_fake by ±0.08. Imp 15: F2-optimised weights activated after 20 confirmed disinfo verdicts, stored in ensemble.f2_weights."
+
+# Field alias: impact-comms reads 'confidence', arbiter outputs 'consensus_score'
+[stages.output_mapping]
+"arbiter_decision.confidence" = "arbiter_decision.consensus_score"
+
+# ─────────────────────────────────────────────
+# STAGE 5a: ESCALATION PATH
+# Deep actor/network investigation for escalated or high-CIB claims
+# ─────────────────────────────────────────────
+[[stages]]
+id          = "investigate"
+agent       = "investigator"
+description = "Deep actor/network investigation: provenance graph, financial flows, account network analysis. Only on escalated or high-CIB claims."
+depends_on  = ["consensus"]
+condition   = "arbiter_decision.decision in ['escalate-human', 'false-debunk'] or narrative_brief.cib_score >= 0.75"
+input       = ["arbiter_decision", "narrative_brief"]
+output      = "investigation_report"
+timeout_s   = 300
+
+# ─────────────────────────────────────────────
+# STAGE 5b: PUBLISH PATH
+# Bilingual debunk generation and channel distribution
+# ─────────────────────────────────────────────
+[[stages]]
+id          = "communicate"
+agent       = "impact-comms"
+description = "Generate bilingual (SK+EN) debunk summary, factcheck overlay, push to configured channels. Uses arbiter_decision.confidence (= consensus_score)."
+depends_on  = ["consensus"]
+condition   = "arbiter_decision.decision in ['auto-publish', 'false-debunk', 'monitor']"
+input       = ["arbiter_decision", "verdict_inquisitor"]
+output      = "published_debunk"
+timeout_s   = 60
+
+# ─────────────────────────────────────────────
+# STAGE 6: ARCHIVAL
+# Immutable logging for reproducibility
+# ─────────────────────────────────────────────
+[[stages]]
+id          = "archive_record"
+agent       = "archivist"
+description = "Immutable logging of final reports, investigation findings, and debunks for reproducibility."
+depends_on  = ["communicate", "investigate"]
+wait        = "any_completed"
+input       = ["investigation_report", "published_debunk"]
+output      = "archived_record"
+timeout_s   = 60
+
+# ─────────────────────────────────────────────
+# PIPELINE SETTINGS
+# ─────────────────────────────────────────────
+[settings]
+max_concurrent_claims   = 10
+global_timeout_s        = 600
+failure_mode            = "escalate-human"  # any unhandled error → human review
+log_all_verdicts        = true
+provenance_graph        = true              # write every stage output to provenance-graph skill
+self_improvement        = true              # archivist consumes disagreement logs
+ontology_sync           = true             # sync all claim/verdict nodes to ontology after each stage
+cost_hold_flag_path     = "output/orchestrator/COST_HOLD"  # inquisitor checks this file before starting
+
+# Wave 3 settings
+firecrawl_enabled        = true             # Imp 11: Firecrawl web backend active
+f2_weighting_enabled     = true             # Imp 15: F2-score weights after 20 disinfo verdicts
+instance_hardness_routing = true            # Imp 13: per-claim difficulty routing
+mini_debate_enabled      = true             # Imp 14: adversarial debate for borderline claims
+cib_temporal_windows     = [2, 12, 72]      # Imp 16: multi-window CIB detection

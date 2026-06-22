@@ -1,0 +1,21 @@
+# LibreFang agent manifest
+# arXiv:2508.10143 — Agent 1: ML Classifier
+# Part of fix: Fix 1 — Replace fake ml-classifier with real trained model
+name        = "ml-classifier"
+version     = "1.2.0"
+description = "SlovakBERT / SlavicBERT sequence classifier served locally via scripts/serve_ml_classifier.py (falls back to TF-IDF + Logistic Regression when PyTorch/Transformers are unavailable)."
+author      = "librefang"
+module      = "builtin:http_scorer"
+tags        = ["disinfo", "ml", "classifier", "tfidf", "pipeline"]
+
+[http_scorer]
+endpoint = "http://127.0.0.1:${ML_CLASSIFIER_PORT:-8090}/score"
+input_field  = "text"
+output_field = "score"
+timeout_seconds = 5
+fallback_score  = 0.5
+
+[capabilities]
+tools        = ["memory_store", "memory_recall", "file_write", "file_read"]
+memory_read  = ["claim_extractor.*"]
+memory_write = ["ml_classifier.*"]

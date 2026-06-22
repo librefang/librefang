@@ -1,0 +1,19 @@
+{
+  "_fixture": "golden-path: DISINFORMATION claim",
+  "_description": "A clearly fabricated claim with fake entities and extreme language. All agents should score high fake probability.",
+  "source": "direct_text",
+  "claims": [
+    {
+      "id": "c001",
+      "text": "SHOCKING: The European Parliament secretly voted to ban all cash payments across the EU on January 1, 2026, confirmed by 100% of MEPs.",
+      "entities": ["European Parliament", "EU", "January 1, 2026"],
+      "sentence_index": 0,
+      "checkworthiness": 0.97,
+      "claim_hash": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2"
+    }
+  ],
+  "total_sentences": 1,
+  "total_claims": 1,
+  "duplicates_skipped": 0,
+  "extraction_timestamp": "2026-05-04T18:00:00Z"
+}

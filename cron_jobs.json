@@ -1,0 +1,59 @@
+[
+  {
+    "job": {
+      "id": "092d7cc7-35b0-452d-acb2-8abfa00fea00",
+      "agent_id": "5bb35868-43b9-5452-956d-cd6d908d5ded",
+      "name": "Hourly collection cycle for Denník N intelligence",
+      "enabled": true,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 * * * *",
+        "tz": null
+      },
+      "action": {
+        "kind": "agent_turn",
+        "message": "Hourly collection cycle for Denník N intelligence",
+        "timeout_secs": null
+      },
+      "delivery": {
+        "kind": "none"
+      },
+      "delivery_targets": [],
+      "created_at": "2026-05-04T15:42:08.457917830Z",
+      "last_run": "2026-06-21T09:00:00Z",
+      "next_run": "2026-06-21T10:00:00Z"
+    },
+    "one_shot": false,
+    "last_status": "ok",
+    "consecutive_errors": 0,
+    "_fix_note": "Removed model_override: gemini-1.5-flash — free tier exhausted. Now uses agent default (nvidia/nemotron-3-super-120b-a12b via DASHSCOPE_API_KEY). Fixed 2026-06-21."
+  },
+  {
+    "job": {
+      "id": "7cc46979-54c0-5452-956d-cd6d908d5ded",
+      "agent_id": "queue-monitor",
+      "name": "Queue Monitor schedule",
+      "enabled": true,
+      "schedule": {
+        "kind": "cron",
+        "expr": "*/15 * * * *",
+        "tz": null
+      },
+      "action": {
+        "kind": "agent_turn",
+        "message": "Run queue monitor checks",
+        "timeout_secs": null
+      },
+      "delivery": {
+        "kind": "none"
+      },
+      "delivery_targets": [],
+      "created_at": "2026-06-22T16:00:00.000000000Z",
+      "last_run": null,
+      "next_run": "2026-06-22T16:15:00Z"
+    },
+    "one_shot": false,
+    "last_status": "pending",
+    "consecutive_errors": 0
+  }
+]

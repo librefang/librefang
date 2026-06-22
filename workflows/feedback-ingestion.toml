@@ -1,0 +1,66 @@
+# LibreFang feedback ingestion workflow
+# Wires the feedback loop so Improvement 1 (Bayesian weight adaptation) can converge.
+# Archivist reads confirmed verdicts from writer.pending_review and ingests them
+# into ensemble.agent_stats so orchestrator weight recomputation has ground truth.
+#
+# Schedule: runs every 15 minutes, or triggered by writer after human confirmation.
+
+name        = "feedback-ingestion"
+version     = "1.0.0"
+description = "Ingests human-confirmed verdicts from writer review queue into ensemble.agent_stats. Enables Bayesian weight adaptation (Improvement 1) to converge. Wires the open feedback loop identified in audit."
+author      = "librefang"
+tags        = ["feedback", "bayesian", "ensemble", "self-improvement", "audit-fix"]
+
+[[stages]]
+id          = "read-review-queue"
+agent       = "writer"
+description = "Read confirmed verdicts from writer.pending_review queue (human-approved items only)."
+trigger     = "schedule:*/15 * * * * | webhook:writer.verdict_confirmed"
+output      = "confirmed_verdicts_batch"
+timeout_s   = 30
+notes       = "Only processes verdicts with human_confirmed = true. Skips auto-published Tier 1 verdicts (those already fed back via archivist)."
+
+[[stages]]
+id          = "ingest-to-ensemble-stats"
+agent       = "archivist"
+description = "Ingest confirmed verdicts into ensemble.agent_stats, requiring minimum 2 independent reviews for borderline P_fake [0.45, 0.75] claims."
+depends_on  = ["read-review-queue"]
+input       = "confirmed_verdicts_batch"
+output      = "ensemble_stats_updated"
+timeout_s   = 60
+notes       = """
+  For each confirmed verdict:
+    1. If claim P_fake was in range [0.45, 0.75] (borderline), require MINIMUM 2 independent annotator verdicts before adding to Bayesian loop.
+    2. Compute Krippendorff's alpha on the accumulated annotator labels every 50 verdicts. Log to output/annotation_quality.log.
+    3. If alpha < 0.65, automatically pause the Bayesian weight update loop and alert: '⚠️ Annotation quality below threshold (alpha = X.XX) — weight update paused.'
+    4. Otherwise, update ensemble.agent_stats (correct/total counters for each of the 5 scoring agents).
+  Also updates feedback.confirmed_verdicts counter (used by F2-score activation, Improvement 15).
+  Triggers orchestrator weight recompute when total confirmed >= min_confirmed_for_update (10) and alpha >= 0.65.
+"""
+
+[[stages]]
+id          = "trigger-weight-recompute"
+agent       = "disinfo-orchestrator"
+description = "Trigger Bayesian weight recomputation when threshold is reached and quality threshold is met."
+depends_on  = ["ingest-to-ensemble-stats"]
+condition   = "ensemble_stats_updated.total_confirmed >= 10 && ensemble_stats_updated.alpha_paused == false"
+input       = "ensemble_stats_updated"
+output      = "weight_recompute_result"
+timeout_s   = 30
+notes       = "Orchestrator recomputes w_i = (1-e_i) / sum(1-e_j) and writes to ensemble.current_weights. Logs event to output/weight_history.jsonl."
+
+[[stages]]
+id          = "archive-feedback-record"
+agent       = "archivist"
+description = "Immutable log of the feedback ingestion batch and any weight changes."
+depends_on  = ["trigger-weight-recompute"]
+wait        = "any_completed"
+input       = ["ensemble_stats_updated", "weight_recompute_result"]
+output      = "feedback_archive_record"
+timeout_s   = 30
+
+[settings]
+max_concurrent_claims = 1
+global_timeout_s      = 180
+failure_mode          = "log-and-continue"
+log_all_verdicts      = true

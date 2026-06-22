@@ -1,0 +1,165 @@
+api_listen = "127.0.0.1:4200"
+cors_origin = "http://localhost:4200"
+schema_version = "2"
+security_headers = true
+
+[cib_detector]
+cib_escalation_threshold = 0.7
+lexical_overlap_threshold = 0.65
+temporal_window_hours = 2
+# Wave 3 — Improvement 16: Multi-window CIB detection
+temporal_windows = [2, 12, 72]
+temporal_window_weights = [0.40, 0.35, 0.25]
+cross_domain_tier_a_weight = 0.25
+cross_domain_tier_b_weight = 0.12
+# Tier C generates cross_domain_info = true but has no weight contribution.
+debunk_keywords = ["falošné", "nepravdivé", "dementi", "hoax", "fact-check", "overenie", "false", "debunk", "disproven", "refuted"]
+
+[circuit_breaker]
+alert_channel = "proactive-agent"
+alert_on_trip = true
+enabled = true
+log_path = "${LIBREFANG_OUTPUT_DIR}/circuit_breaker.log"
+pause_duration_minutes = 30
+quarantine_threshold_per_window = 20
+quarantine_window_minutes = 10
+
+[claim_extractor]
+embedding_model = "nvidia/nemotron-3-super-120b-a12b:free"
+entity_translation_flag_threshold = 3
+preserve_original_entities = true
+semantic_dedup_enabled = true
+semantic_dedup_threshold = 0.88
+semantic_dedup_window_hours = 72
+slovak_ner_mode = true
+
+[default_model]
+api_key_env = "NVIDIA_API_KEY"
+model = "nvidia/llama-3.1-nemotron-70b-instruct"
+provider = "nvidia"
+
+[disinfo_pipeline]
+weight_adaptation_enabled = true
+weight_deviation_threshold = 0.08
+weight_recompute_interval = 50
+
+# WARNING: these weights come from arXiv:2508.10143 (general multilingual corpus).
+# They have NOT been validated on Slovak-language claims.
+# Run scripts/calibrate_weights.py once you have >= 50 labelled verdicts.
+# See docs/calibration_guide.md.
+[disinfo_pipeline.baseline_weights]
+coh = 0.13
+ml = 0.21
+src = 0.06
+trip = 0.20
+wiki = 0.22
+kg = 0.10
+temporal = 0.08
+
+[kg_checker]
+expiry_days = 90
+weight = 0.10
+
+# Wave 3 — Improvement 15: F2-score optimised weighting
+[ensemble]
+f2_weighting_enabled = true
+f2_min_disinfo_verdicts = 20
+
+[feedback]
+confirmed_verdict_key = "feedback.confirmed_verdicts"
+enabled = true
+feedback_ingest_agent = "disinfo-orchestrator"
+feedback_log_path = "${LIBREFANG_OUTPUT_DIR}/feedback.log"
+min_confirmed_for_update = 10
+review_queue_path = "${LIBREFANG_OUTPUT_DIR}/review_queue.json"
+
+[knowledge_graph]
+backend = "sqlite"
+enabled = true
+# Portable path — falls back to ~/.librefang if LIBREFANG_DATA_DIR is unset
+path = "${LIBREFANG_DATA_DIR}/knowledge-graph.db"
+
+[memory]
+decay_rate = 0.05
+
+[monitoring]
+healthcheck_path = "/health"
+prometheus_port = 9100
+
+[network]
+listen_addr = "127.0.0.1:4200"
+
+[output]
+# Set LIBREFANG_OUTPUT_DIR in .env to override (default: ~/.librefang/output)
+dir = "${LIBREFANG_OUTPUT_DIR}"
+
+[provider.openrouter]
+api_key_env = "OPENROUTER_API_KEY"
+
+[provider.freellmpool]
+api_key_env = "FREELLMPOOL_API_KEY"
+
+[provider.qwen]
+api_key_env = "DASHSCOPE_API_KEY"
+
+[provider.qwen-code]
+api_key_env = "DASHSCOPE_API_KEY"
+
+# Wave 3 — Improvement 11/17: Firecrawl self-hosted instance
+# Instance: https://firecrawl.dev.significa.sk/ (API key optional on this instance)
+# Docs: https://docs.firecrawl.dev/
+[provider.firecrawl]
+api_key_env = "FIRECRAWL_API_KEY"
+api_key_optional = true
+
+[provider_urls]
+-cf = "http://127.0.0.1:8085/v1"
+freellmpool = "http://127.0.0.1:8085/v1"
+openrouter = "https://openrouter.ai/api/v1"
+qwen = "http://127.0.0.1:8085/v1"
+qwen-code = "http://127.0.0.1:8085/v1"
+firecrawl = "https://firecrawl.dev.significa.sk"
+
+[security]
+injection_log_path = "${LIBREFANG_OUTPUT_DIR}/quarantine.log"
+injection_quarantine_threshold = 0.8
+injection_shield_enabled = true
+
+[watchdog]
+escalation_threshold = 0.72
+
+[web]
+search_fallback_provider = "tavily"
+search_provider = "brave"
+firecrawl_search_enabled = true
+firecrawl_search_limit = 10
+
+[web.brave]
+api_key_env = "BRAVE_API_KEY"
+
+[web.tavily]
+api_key_env = "TAVILY_API_KEY"
+
+[web.firecrawl]
+api_key_env = "FIRECRAWL_API_KEY"
+api_key_optional = true
+base_url = "https://firecrawl.dev.significa.sk"
+
+[writer]
+review_queue_path = "${LIBREFANG_OUTPUT_DIR}/review_queue.json"
+tier1_confidence_threshold = 0.9
+tier1_epistemic_max = 0.25
+tier2_confidence_min = 0.7
+tier3_auto_publish_on_timeout = false
+
+# Telegram channel adapter for impact-comms public alerts
+[channels.telegram]
+enabled = true
+api_key_env = "TELEGRAM_BOT_TOKEN"
+chat_id_env = "TELEGRAM_CHAT_ID"
+# Only confirmed DISINFORMATION verdicts with confidence >= 0.80 auto-post
+min_confidence = 0.80
+verdict_filter = ["DISINFORMATION"]
+
+[agents.queue_monitor]
+enabled = true

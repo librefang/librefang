@@ -1,0 +1,46 @@
+# Dashboard KPI Tracker
+# Runs periodically to aggregate statistics for the command-center dashboard.
+
+name        = "dashboard-kpi-tracker"
+version     = "1.0.0"
+description = "Calculates research velocity, fact-check accuracy, and agent uptime from session-logs and agent states."
+author      = "librefang"
+tags        = ["dashboard", "kpi", "monitoring", "metrics"]
+
+[schedule]
+# Runs every 15 minutes to keep dashboard fresh
+cron        = "*/15 * * * *"
+timezone    = "Europe/Bratislava"
+
+# ─────────────────────────────────────────────
+# STAGE 1: AGGREGATE LOGS
+# ─────────────────────────────────────────────
+[[stages]]
+id          = "fetch_logs"
+description = "Read recent session-logs and workflow output states."
+action      = "read_metrics"
+output      = "raw_metrics_data"
+
+# ─────────────────────────────────────────────
+# STAGE 2: CALCULATE KPIs
+# ─────────────────────────────────────────────
+[[stages]]
+id          = "calculate_kpis"
+agent       = "data-scientist"
+depends_on  = ["fetch_logs"]
+input       = "raw_metrics_data"
+description = "Process logs into KPI metrics: Research Velocity (reports/hr), Fact-Check Accuracy (verification success rate), Agent Uptime (ping success %)."
+timeout_s   = 60
+output      = "kpi_json"
+
+# ─────────────────────────────────────────────
+# STAGE 3: UPDATE DASHBOARD
+# ─────────────────────────────────────────────
+[[stages]]
+id          = "push_to_dashboard"
+description = "Write the calculated KPIs to the command-center local data store or API."
+action      = "write_result"
+depends_on  = ["calculate_kpis"]
+input       = "kpi_json"
+# Assume command-center reads from this output path
+path        = "output/command-center/kpi_latest.json"

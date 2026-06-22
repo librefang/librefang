@@ -1,0 +1,102 @@
+{
+  "name": "notion-move-pages",
+  "title": "Move Notion pages",
+  "description": "Move user-selected Notion pages or databases to a new parent after confirming the exact source items and destination.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "page_or_database_ids": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "minItems": 1,
+        "maxItems": 100,
+        "description": "Page or database IDs to move. Supply only the items the user explicitly selected, show the exact target list before moving, and use small confirmed batches for larger changes. IDs are v4 UUIDs and can be supplied with or without dashes (e.g. extracted from a <page> or <database> URL given by the \"search\" or \"fetch\" tool). Data Sources under Databases can't be moved individually."
+      },
+      "new_parent": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "page_id": {
+                "type": "string",
+                "description": "The ID of the parent page (with or without dashes), for example, 195de9221179449fab8075a27c979105"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "page_id"
+                ]
+              }
+            },
+            "required": [
+              "page_id"
+            ],
+            "additionalProperties": true
+          },
+          {
+            "type": "object",
+            "properties": {
+              "database_id": {
+                "type": "string",
+                "description": "The ID of the parent database (with or without dashes), for example, 195de9221179449fab8075a27c979105"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "database_id"
+                ]
+              }
+            },
+            "required": [
+              "database_id"
+            ],
+            "additionalProperties": true
+          },
+          {
+            "type": "object",
+            "properties": {
+              "data_source_id": {
+                "type": "string",
+                "description": "The ID of the parent data source (collection), with or without dashes. For example, f336d0bc-b841-465b-8045-024475c079dd"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "data_source_id"
+                ]
+              }
+            },
+            "required": [
+              "data_source_id"
+            ],
+            "additionalProperties": true
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "workspace"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "additionalProperties": true
+          }
+        ],
+        "description": "The new parent under which the pages will be moved. Prefer a page, database, or specific data source parent. Use the workspace parent only when the user explicitly requests that destination and confirms the target list."
+      }
+    },
+    "required": [
+      "page_or_database_ids",
+      "new_parent"
+    ],
+    "additionalProperties": false,
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  }
+}
