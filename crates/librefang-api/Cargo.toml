@@ -9,6 +9,13 @@ readme = "README.md"
 [dependencies]
 librefang-types = { path = "../librefang-types" }
 schemars = { version = "0.8", features = ["chrono", "uuid1"] }
+# webauthn-rs (via webauthn-rs-core) links against OpenSSL through openssl-sys, which is a non-optional transitive dependency present for every target.
+# Pull `openssl` in directly with the `vendored` feature so cargo feature-unification builds openssl-sys from source on ALL targets instead of probing for a system library.
+# This must be unconditional, not target-gated: Windows MSVC runners have no discoverable system OpenSSL, and the cross-compiled release targets (aarch64-linux-gnu, *-apple-darwin, aarch64-linux-android, *-musl) have no usable cross OpenSSL either — openssl-sys otherwise finds the build host's library (e.g. 1.0.2g) and aborts on the version mismatch.
+# Vendoring everywhere also makes the released binaries self-contained (statically linked OpenSSL) rather than depending on the user's system OpenSSL at runtime.
+# The vendored builder (openssl-src) auto-detects nasm and falls back to a no-asm build when it is absent, so a host Perl + C compiler are the only prerequisites (all release runners and cross images ship them).
+# Refs #6161 (Windows-only fix this supersedes).
+openssl = { version = "0.10", features = ["vendored"] }
 librefang-kernel = { path = "../librefang-kernel" }
 librefang-acp = { path = "../librefang-acp", features = ["kernel-adapter"] }
 agent-client-protocol = { workspace = true }
@@ -119,12 +126,6 @@ windows-sys = { version = "0.61", features = [
     "Win32_Security",
     "Win32_Security_Authorization",
 ] }
-# webauthn-rs (via webauthn-rs-core) links against system OpenSSL through openssl-sys.
-# The Windows MSVC CI runners have no discoverable system OpenSSL (openssl-sys fails its probe with "Could not find directory of OpenSSL installation").
-# Enable the vendored feature here so cargo feature-unification builds openssl-sys from source on Windows only; Unix keeps using the system library already present on those runners.
-# The vendored builder (openssl-src) auto-detects nasm and falls back to a no-asm build when it is absent, so the runners' bundled Perl is the only host prerequisite (both Windows images ship it).
-# Refs #6161.
-openssl = { version = "0.10", features = ["vendored"] }
 
 [build-dependencies]
 # `build.rs` uses `chrono::Utc::now()` to stamp `BUILD_DATE` instead of
