@@ -319,6 +319,7 @@ impl LibreFangKernel {
                 .is_empty()
     }
 
+    /// Execute the default LLM-based agent loop.
     #[instrument(
         skip_all,
         fields(
