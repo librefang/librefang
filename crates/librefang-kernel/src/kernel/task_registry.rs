@@ -342,19 +342,30 @@ impl LibreFangKernel {
             // read and continue, but the NL response may not reach
             // the channel until the turn ends — this forward fires
             // instantly.
-            if let Some(ref chat_id) = entry.chat_id {
-                if !chat_id.is_empty() {
-                    let kernel_arc = match self.self_handle.get().and_then(|w| w.upgrade()) {
-                        Some(arc) => arc,
-                        None => return Ok(true),
-                    };
+            //
+            // Destination resolution (#6266): prefer the originating
+            // turn's inbound conversation (`entry.chat_id`). A turn that
+            // came in from the web UI carries no `chat_id` (the WS sender
+            // sets none and uses the canonical session), so fall back to
+            // the home channel's configured `default_conversation`. If
+            // neither is available the home channel has no well-defined
+            // default destination — skip the forward rather than guess a
+            // recipient.
+            if let Some(arc) = self.self_handle.get().and_then(|w| w.upgrade()) {
+                let kernel_arc = arc;
+                let destination = entry
+                    .chat_id
+                    .clone()
+                    .filter(|c| !c.is_empty())
+                    .or_else(|| kernel_arc.resolve_agent_default_conversation(entry.agent_id));
+                if let Some(chat_id) = destination {
                     let body = format_task_completion_text(&event);
                     if let Some(ctx) = kernel_arc.resolve_agent_home_channel(entry.agent_id) {
                         use librefang_runtime::kernel_handle::ChannelSender;
                         let _ = kernel_arc
                             .send_channel_message(
                                 &ctx.channel,
-                                chat_id,
+                                &chat_id,
                                 &body,
                                 None,
                                 ctx.account_id.as_deref(),

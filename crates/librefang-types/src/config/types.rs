@@ -2467,6 +2467,23 @@ pub struct SidecarChannelConfig {
     /// session. Default `0` (disabled).
     #[serde(default)]
     pub message_coalesce_window_ms: u64,
+    /// Default outbound conversation id for this channel (#6266).
+    ///
+    /// The platform-native conversation identifier (Telegram chat_id,
+    /// Discord channel id, …) the agent should fall back to when it
+    /// produces a result that needs to reach this channel but the
+    /// originating turn carried no inbound conversation — e.g. an async
+    /// delegation kicked off from the web UI, whose turn has no
+    /// `chat_id`. Without it, the mid-turn delegation-completion forward
+    /// (`complete_async_task` in `kernel/task_registry.rs`) is skipped
+    /// for web-UI-originated turns and the result surfaces only in the
+    /// web-UI session, never on the agent's channel.
+    ///
+    /// `None` (the default) means "no well-defined default destination":
+    /// the forward stays a no-op in the ambiguous case rather than
+    /// guessing a recipient. Set it to the owner / home chat to opt in.
+    #[serde(default)]
+    pub default_conversation: Option<String>,
 }
 
 fn default_sidecar_restart() -> bool {

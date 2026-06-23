@@ -95,6 +95,8 @@ In-crate only; no cross-crate error-shape changes.
 
 ### Fixed
 
+- **fix(kernel): forward web-UI-initiated delegation results to the agent's home channel** (#6266) (@houko) — reported by @DaBlitzStein.
+  A delegation kicked off from a web-UI turn carries no inbound `chat_id`, so the mid-turn completion forward added in #6267 was skipped and the result surfaced only in the web-UI session, never on the agent's channel. The forward now falls back to the home channel's configured `default_conversation` (new optional `[[sidecar_channels]].default_conversation`); with no default configured it stays a no-op rather than guessing a recipient.
 - **fix(runtime): `channel_send` without a `recipient` now replies to the group, not the speaker** (#6261) (@neo-wanderer).
   In a group conversation a no-recipient `channel_send` auto-filled the recipient from `sender_id` (the individual who spoke) instead of `sender_chat_id` (the room / group).
   The send then targeted the speaker's user id as if it were a conversation — e.g. a Matrix file send routed to `@user:hs` rather than the room `!room:hs`, which the homeserver rejected with `403 not in room` (visible only on the sidecar's stderr, so the tool still reported success).

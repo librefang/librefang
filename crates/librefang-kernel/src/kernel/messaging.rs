@@ -400,6 +400,52 @@ impl LibreFangKernel {
         })
     }
 
+    /// Resolve the **default outbound conversation id** for an agent's home
+    /// channel, if one is configured (#6266).
+    ///
+    /// Mirrors [`Self::resolve_agent_home_channel`]'s home-channel lookup but
+    /// surfaces the channel instance's `default_conversation`
+    /// (`[[sidecar_channels]].default_conversation`). Callers use this as a
+    /// fallback destination when a turn carries no inbound conversation —
+    /// e.g. the mid-turn delegation-completion forward for a web-UI-originated
+    /// turn, whose `chat_id` is `None`.
+    ///
+    /// Returns `None` when no channel's `default_agent` matches this agent, or
+    /// the matching channel defines no (non-empty) `default_conversation`. In
+    /// that ambiguous case callers MUST NOT invent a destination — skipping
+    /// the forward is correct; delivering to a guessed chat is not.
+    pub(crate) fn resolve_agent_default_conversation(&self, agent_id: AgentId) -> Option<String> {
+        let entry = self.agents.registry.get(agent_id)?;
+        let agent_name = entry.name.clone();
+        let cfg = self.config.load_full();
+        sidecar_default_conversation(&cfg.sidecar_channels, agent_name.as_str())
+    }
+}
+
+/// Pure resolver: the `default_conversation` of the first `sidecar_channels`
+/// entry whose `agent` (a.k.a. `default_agent`) names `agent_name`, filtered
+/// to non-empty values.
+///
+/// First-match wins, deterministic because `sidecar_channels` is an ordered
+/// `Vec` — same ordering contract `sidecar_default_agent` in
+/// `handles/channel_sender.rs` relies on. Factored out as a free function so
+/// it is unit-testable without standing up a kernel.
+fn sidecar_default_conversation(
+    sidecar_channels: &[librefang_types::config::SidecarChannelConfig],
+    agent_name: &str,
+) -> Option<String> {
+    sidecar_channels.iter().find_map(|sc| {
+        if sc.agent.as_deref() != Some(agent_name) {
+            return None;
+        }
+        sc.default_conversation
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    })
+}
+
+impl LibreFangKernel {
     /// Send an ephemeral "side question" to an agent (`/btw` command).
     ///
     /// The message is answered using the agent's system prompt and model, but in a
@@ -3311,5 +3357,113 @@ impl LibreFangKernel {
         }
 
         Ok((rx, handle))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sidecar_default_conversation;
+    use librefang_types::config::SidecarChannelConfig;
+
+    fn sc(json: serde_json::Value) -> SidecarChannelConfig {
+        serde_json::from_value(json).expect("valid SidecarChannelConfig")
+    }
+
+    /// #6266 — a home channel with a configured `default_conversation`
+    /// surfaces it as the fallback destination for an agent whose turn
+    /// carries no inbound `chat_id` (e.g. a web-UI-originated delegation).
+    #[test]
+    fn default_conversation_resolves_for_matching_agent() {
+        let chans = vec![sc(serde_json::json!({
+            "name": "tg",
+            "command": "python3",
+            "channel_type": "telegram",
+            "default_agent": "coder",
+            "default_conversation": "123456",
+        }))];
+        assert_eq!(
+            sidecar_default_conversation(&chans, "coder").as_deref(),
+            Some("123456")
+        );
+    }
+
+    /// Ambiguous case: the home channel matches the agent but defines no
+    /// `default_conversation` → `None`, so the forward stays a no-op
+    /// rather than guessing a recipient.
+    #[test]
+    fn default_conversation_is_none_when_unset() {
+        let chans = vec![sc(serde_json::json!({
+            "name": "tg",
+            "command": "python3",
+            "channel_type": "telegram",
+            "default_agent": "coder",
+        }))];
+        assert_eq!(sidecar_default_conversation(&chans, "coder"), None);
+    }
+
+    /// An empty-string `default_conversation` is treated as unset — never
+    /// delivered to.
+    #[test]
+    fn default_conversation_empty_string_is_none() {
+        let chans = vec![sc(serde_json::json!({
+            "name": "tg",
+            "command": "python3",
+            "channel_type": "telegram",
+            "default_agent": "coder",
+            "default_conversation": "",
+        }))];
+        assert_eq!(sidecar_default_conversation(&chans, "coder"), None);
+    }
+
+    /// A channel whose `default_agent` names a different agent does not
+    /// leak its `default_conversation` to this agent.
+    #[test]
+    fn default_conversation_ignores_non_matching_agent() {
+        let chans = vec![sc(serde_json::json!({
+            "name": "tg",
+            "command": "python3",
+            "channel_type": "telegram",
+            "default_agent": "someone-else",
+            "default_conversation": "999",
+        }))];
+        assert_eq!(sidecar_default_conversation(&chans, "coder"), None);
+    }
+
+    /// First-match wins, deterministic over the ordered `Vec`: when two
+    /// channels both name the agent, the first entry's
+    /// `default_conversation` is used.
+    #[test]
+    fn default_conversation_first_match_wins() {
+        let chans = vec![
+            sc(serde_json::json!({
+                "name": "tg-primary",
+                "command": "python3",
+                "channel_type": "telegram",
+                "default_agent": "coder",
+                "default_conversation": "first",
+            })),
+            sc(serde_json::json!({
+                "name": "tg-secondary",
+                "command": "python3",
+                "channel_type": "telegram",
+                "default_agent": "coder",
+                "default_conversation": "second",
+            })),
+        ];
+        assert_eq!(
+            sidecar_default_conversation(&chans, "coder").as_deref(),
+            Some("first")
+        );
+    }
+
+    /// `default_conversation` round-trips through serde and is absent by
+    /// default (additive field, existing configs keep deserializing).
+    #[test]
+    fn default_conversation_serde_default_absent() {
+        let c = sc(serde_json::json!({
+            "name": "tg",
+            "command": "python3",
+        }));
+        assert!(c.default_conversation.is_none());
     }
 }
