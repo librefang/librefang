@@ -1,0 +1,15 @@
+{
+  "_about": "Example shape of tokens_truth.json. The real file is produced by the capture tool (see README.md) against live providers and committed alongside corpus.json. The benchmark keys ground truth by `<sample_id>` and reads `input_tokens` as the authoritative prompt-token count. Numbers below are illustrative placeholders, not measured values.",
+  "captured_with": {
+    "note": "Free-form provenance recorded by the capture tool: provider, model, base_url, date, prompt_caching disabled.",
+    "prompt_caching": false
+  },
+  "samples": {
+    "english_prose_01": { "provider": "openai", "model": "gpt-4o-mini", "input_tokens": 0 },
+    "english_prose_02": { "provider": "openai", "model": "gpt-4o-mini", "input_tokens": 0 },
+    "cjk_01": { "provider": "openai", "model": "gpt-4o-mini", "input_tokens": 0 },
+    "mixed_01": { "provider": "openai", "model": "gpt-4o-mini", "input_tokens": 0 },
+    "tool_json_01": { "provider": "openai", "model": "gpt-4o-mini", "input_tokens": 0 },
+    "tool_json_02": { "provider": "openai", "model": "gpt-4o-mini", "input_tokens": 0 }
+  }
+}

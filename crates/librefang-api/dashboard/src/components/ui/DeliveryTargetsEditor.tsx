@@ -380,7 +380,7 @@ export function DeliveryTargetsEditor({ value, onChange, disabled }: DeliveryTar
                   <input
                     value={draft.recipient}
                     onChange={(e) => setDraft({ ...draft, recipient: e.target.value })}
-                    placeholder="chat ID / channel ID"
+                    placeholder={t("scheduler.delivery.recipient_placeholder", { defaultValue: "chat ID / channel ID" })}
                     className={`${INPUT_CLASS} font-mono text-xs`}
                   />
                 </div>
@@ -408,7 +408,7 @@ export function DeliveryTargetsEditor({ value, onChange, disabled }: DeliveryTar
                   <input
                     value={draft.thread_id}
                     onChange={(e) => setDraft({ ...draft, thread_id: e.target.value })}
-                    placeholder="Slack thread_ts / Telegram topic"
+                    placeholder={t("scheduler.delivery.thread_id_placeholder", { defaultValue: "Slack thread_ts / Telegram topic" })}
                     className={`${INPUT_CLASS} font-mono text-xs`}
                   />
                 </div>
@@ -508,7 +508,7 @@ export function DeliveryTargetsEditor({ value, onChange, disabled }: DeliveryTar
                 <input
                   value={draft.subject_template}
                   onChange={(e) => setDraft({ ...draft, subject_template: e.target.value })}
-                  placeholder="Cron: {job}"
+                  placeholder={t("scheduler.delivery.subject_template_placeholder", { defaultValue: "Cron: {job}" })}
                   className={`${INPUT_CLASS} font-mono text-xs`}
                 />
               </div>

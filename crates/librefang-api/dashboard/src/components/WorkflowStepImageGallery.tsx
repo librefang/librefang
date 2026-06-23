@@ -4,6 +4,7 @@
 // checked, so we render `<img src={ref.src}>` directly.
 
 import type { ImageRef } from "../lib/workflowOutputImages";
+import { useTranslation } from "react-i18next";
 
 interface Props {
   refs: ImageRef[];
@@ -12,6 +13,7 @@ interface Props {
 }
 
 export function WorkflowStepImageGallery({ refs, label }: Props) {
+  const { t } = useTranslation();
   if (refs.length === 0) return null;
 
   return (
@@ -31,7 +33,9 @@ export function WorkflowStepImageGallery({ refs, label }: Props) {
           >
             <img
               src={ref.src}
-              alt={ref.alt || "generated image"}
+              alt={ref.alt || t("workflows.generated_image_alt", {
+                defaultValue: "generated image",
+              })}
               loading="lazy"
               className="block max-h-[200px] w-auto object-contain bg-main/30"
             />

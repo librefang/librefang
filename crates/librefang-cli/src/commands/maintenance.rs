@@ -617,6 +617,8 @@ pub(crate) fn cmd_update(check: bool, version: Option<String>, channel_override:
     let default_install = default_install_executable();
     let cargo_install = cargo_install_executable();
     let target_version = target_tag.as_deref();
+    // Explicit --version is a hard pin; auto-resolved latest is a soft preference — see installer_version_env.
+    let target_pinned = requested_version.is_some();
 
     #[cfg(windows)]
     if same_path(&current_exe, &default_install) && find_daemon().is_some() {
@@ -628,7 +630,7 @@ pub(crate) fn cmd_update(check: bool, version: Option<String>, channel_override:
     }
 
     if same_path(&current_exe, &default_install) {
-        match run_official_update(target_version) {
+        match run_official_update(target_version, target_pinned) {
             #[cfg(not(windows))]
             Ok(UpdateLaunch::Completed) => {
                 ui::success(&i18n::t("maintenance-update-cli-success"));
@@ -800,7 +802,21 @@ pub(crate) fn parse_version_core(version: &str) -> Option<Vec<u64>> {
         .collect()
 }
 
-pub(crate) fn run_official_update(version: Option<&str>) -> Result<UpdateLaunch, String> {
+/// Maps version + pin intent to `LIBREFANG_VERSION` (hard pin) or `LIBREFANG_PREFERRED_VERSION` (soft hint that falls back on stuck releases).
+fn installer_version_env(version: Option<&str>, pinned: bool) -> Option<(&'static str, String)> {
+    let tag = version?;
+    let key = if pinned {
+        "LIBREFANG_VERSION"
+    } else {
+        "LIBREFANG_PREFERRED_VERSION"
+    };
+    Some((key, tag.to_string()))
+}
+
+pub(crate) fn run_official_update(
+    version: Option<&str>,
+    pinned: bool,
+) -> Result<UpdateLaunch, String> {
     let script_url = if cfg!(windows) {
         POWERSHELL_INSTALLER_URL
     } else {
@@ -834,8 +850,8 @@ pub(crate) fn run_official_update(version: Option<&str>) -> Result<UpdateLaunch,
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
-        if let Some(tag) = version {
-            command.env("LIBREFANG_VERSION", tag);
+        if let Some((key, value)) = installer_version_env(version, pinned) {
+            command.env(key, value);
         }
 
         command.spawn().map_err(|e| {
@@ -852,8 +868,8 @@ pub(crate) fn run_official_update(version: Option<&str>) -> Result<UpdateLaunch,
         let script_path = write_update_script(&script, "sh")?;
         let mut command = std::process::Command::new("sh");
         command.arg(&script_path);
-        if let Some(tag) = version {
-            command.env("LIBREFANG_VERSION", tag);
+        if let Some((key, value)) = installer_version_env(version, pinned) {
+            command.env(key, value);
         }
 
         let status = command.status().map_err(|e| {
@@ -1422,5 +1438,38 @@ pub(crate) fn remove_self_binary(exe_path: &std::path::Path) {
             "uninstall-removed",
             &[("path", &exe_path.display().to_string())],
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn installer_version_env_hard_pins_explicit_version() {
+        // --version maps to LIBREFANG_VERSION (hard pin: must install exactly this tag or fail).
+        assert_eq!(
+            installer_version_env(Some("v2026.6.22-beta.21"), true),
+            Some(("LIBREFANG_VERSION", "v2026.6.22-beta.21".to_string()))
+        );
+    }
+
+    #[test]
+    fn installer_version_env_soft_prefers_resolved_latest() {
+        // Auto-resolved latest maps to LIBREFANG_PREFERRED_VERSION (soft hint: falls back on stuck releases).
+        assert_eq!(
+            installer_version_env(Some("v2026.6.22-beta.21"), false),
+            Some((
+                "LIBREFANG_PREFERRED_VERSION",
+                "v2026.6.22-beta.21".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn installer_version_env_none_sets_nothing() {
+        // No version → no env var; installer resolves the newest installable release.
+        assert_eq!(installer_version_env(None, true), None);
+        assert_eq!(installer_version_env(None, false), None);
     }
 }

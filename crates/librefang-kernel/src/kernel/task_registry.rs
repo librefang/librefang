@@ -334,6 +334,44 @@ impl LibreFangKernel {
                 session_id = %entry.session_id,
                 "Async task completion injected (mid-turn path)"
             );
+            // Belt-and-suspenders: also forward the completion text
+            // directly to the agent's home channel so the operator
+            // sees the delegation result immediately, rather than
+            // waiting for the agent's next turn to surface it. The
+            // mid-turn signal injects into the loop so the agent can
+            // read and continue, but the NL response may not reach
+            // the channel until the turn ends — this forward fires
+            // instantly.
+            if let Some(ref chat_id) = entry.chat_id {
+                if !chat_id.is_empty() {
+                    let kernel_arc = match self.self_handle.get().and_then(|w| w.upgrade()) {
+                        Some(arc) => arc,
+                        None => return Ok(true),
+                    };
+                    let body = format_task_completion_text(&event);
+                    if let Some(ctx) = kernel_arc.resolve_agent_home_channel(entry.agent_id) {
+                        use librefang_runtime::kernel_handle::ChannelSender;
+                        let _ = kernel_arc
+                            .send_channel_message(
+                                &ctx.channel,
+                                chat_id,
+                                &body,
+                                None,
+                                ctx.account_id.as_deref(),
+                            )
+                            .await
+                            .map_err(|e| {
+                                tracing::warn!(
+                                    task_id = %task_id,
+                                    channel = %ctx.channel,
+                                    chat_id = %chat_id,
+                                    error = %e,
+                                    "Async task: failed to forward completion to home channel (mid-turn path)"
+                                );
+                            });
+                    }
+                }
+            }
             return Ok(true);
         }
 

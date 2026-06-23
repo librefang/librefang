@@ -209,6 +209,7 @@ export function SkillInstallCommand({
   slug: string;
   onCopied?: () => void;
 }) {
+  const { t } = useTranslation();
   const cmd = getSkillHub(hub).cli(slug);
   return (
     <div
@@ -231,8 +232,8 @@ export function SkillInstallCommand({
           onCopied?.();
         }}
         className="text-text-dim/70 hover:text-text-main transition-colors p-0.5"
-        title="Copy command"
-        aria-label="Copy install command"
+        title={t("skills.copy_command", { defaultValue: "Copy command" })}
+        aria-label={t("skills.copy_install_command", { defaultValue: "Copy install command" })}
       >
         <svg
           className="w-3.5 h-3.5"

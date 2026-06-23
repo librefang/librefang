@@ -99,7 +99,7 @@ export function NotificationCenter() {
         "success"
       );
     } catch {
-      addToast(t("common.error", "Action failed"), "error");
+      addToast(t("approvals.action_failed", "Action failed"), "error");
     }
   }, [totpEnforced, approveMutation, rejectMutation, addToast, navigate, t]);
 
@@ -241,14 +241,14 @@ export function NotificationCenter() {
         onClick={onTriggerClick}
         onKeyDown={onTriggerKeyDown}
         className="relative flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-colors duration-200"
-        aria-label={pendingCount > 0 ? `${t("approvals.pending_review", "Notifications")} (${pendingCount})` : t("approvals.pending_review", "Notifications")}
+        aria-label={pendingCount > 0 ? `${t("approvals.notifications", "Notifications")} (${pendingCount})` : t("approvals.notifications", "Notifications")}
         aria-expanded={open}
         aria-haspopup="menu"
         aria-controls={menuId}
       >
         <Bell className="h-4 w-4" />
         {countQuery.isError ? (
-          <span className="absolute -top-0.5 -right-0.5 h-2.5 w-2.5 rounded-full bg-error/60 ring-2 ring-surface" title={t("common.error", "Connection error")} />
+          <span className="absolute -top-0.5 -right-0.5 h-2.5 w-2.5 rounded-full bg-error/60 ring-2 ring-surface" title={t("approvals.connection_error", "Connection error")} />
         ) : pendingCount > 0 ? (
           <span className="absolute -top-0.5 -right-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-error px-1 text-[10px] font-bold text-white">
             {pendingCount > MAX_BADGE_COUNT ? `${MAX_BADGE_COUNT}+` : pendingCount}

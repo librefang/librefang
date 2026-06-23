@@ -239,7 +239,7 @@ export function SystemPromptSection({
         <div className="mt-2 rounded-lg border border-border-subtle bg-main/40 p-2 space-y-1">
           {versionsQuery.isLoading ? (
             <p className="text-xs text-text-dim px-1 py-2">
-              {t("common.loading", { defaultValue: "Loading…" })}
+              {t("common.loading", { defaultValue: "Loading..." })}
             </p>
           ) : versionsQuery.isError ? (
             <p className="text-xs text-red-500 px-1 py-2">
@@ -1245,12 +1245,15 @@ export function AgentsPage() {
     if (isCrashed && agentTab === "conversation") {
       return (
         <EmptyState
-          title={t("agents.detail.crashed_title", { defaultValue: `${agent.name} is in error state` })}
+          title={t("agents.detail.crashed_title", {
+            defaultValue: "{{name}} is in error state",
+            name: agent.name,
+          })}
           icon={<X className="h-6 w-6 text-error" />}
           action={
             <Button variant="primary" size="sm" leftIcon={<RotateCcw className="h-3.5 w-3.5" />} onClick={async () => {
               try { await resumeMutation.mutateAsync(agent.id); } catch (e) {
-                addToast(toastErr(e, t("agents.resume_failed", { defaultValue: "Failed to resume" })), "error");
+                addToast(toastErr(e, t("agents.resume_failed", { defaultValue: "Failed to resume agent" })), "error");
               }
             }}>
               {t("agents.resume", { defaultValue: "Resume" })}
@@ -1294,7 +1297,7 @@ export function AgentsPage() {
           {t("agents.detail.live_conversation", { defaultValue: "Live conversation" })}
         </div>
         {sessionDetailQuery.isLoading && latestSessionForAgent ? (
-          <div className="text-[12px] text-text-dim italic">{t("common.loading", { defaultValue: "Loading…" })}</div>
+          <div className="text-[12px] text-text-dim italic">{t("common.loading", { defaultValue: "Loading..." })}</div>
         ) : visibleMessages.length === 0 ? (
           <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
             {t("agents.detail.no_conversation", {
@@ -1397,7 +1400,7 @@ export function AgentsPage() {
           </Button>
         </div>
         {agentKvMemoryQuery.isLoading ? (
-          <div className="text-[12px] text-text-dim italic">{t("common.loading", { defaultValue: "Loading…" })}</div>
+          <div className="text-[12px] text-text-dim italic">{t("common.loading", { defaultValue: "Loading..." })}</div>
         ) : rows.length === 0 ? (
           <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
             {t("agents.detail.no_memory", { defaultValue: "No memory entries yet for this agent." })}
@@ -1810,7 +1813,7 @@ export function AgentsPage() {
           },
           onError: (e) => {
             addToast(
-              toastErr(e, t("agents.tools_save_failed", { defaultValue: "Failed to save tool configuration" })),
+              toastErr(e, t("agents.tools_save_failed", { defaultValue: "Failed to update tools" })),
               "error",
             );
           },
@@ -2092,7 +2095,7 @@ export function AgentsPage() {
           </Button>
         </div>
         {agentEventsQuery.isLoading ? (
-          <div className="text-[12px] text-text-dim italic">{t("common.loading", { defaultValue: "Loading…" })}</div>
+          <div className="text-[12px] text-text-dim italic">{t("common.loading", { defaultValue: "Loading..." })}</div>
         ) : events.length === 0 ? (
           <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
             {t("agents.detail.no_logs", { defaultValue: "No turns recorded yet for this agent." })}
@@ -2191,7 +2194,7 @@ export function AgentsPage() {
                     : "border-border-subtle bg-surface text-text-dim hover:border-brand/20 hover:text-brand"
                 }`}
               >
-                {t("agents.show_hand_agents", { defaultValue: "Hand" })}
+                {t("agents.show_hand_agents_short", { defaultValue: "Hand" })}
               </button>
               <select
                 value={sortBy}
@@ -2303,7 +2306,17 @@ export function AgentsPage() {
                 <div className="flex items-start gap-3 min-w-0 flex-1">
                   <div className="relative shrink-0">
                     <Avatar fallback={detailAgent.name} size="lg" />
-                    <span className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full ${drawerStatusColor} border-2 border-surface ${!isDetailDrawerSuspended && !isDetailDrawerCrashed ? "animate-pulse" : ""}`} role="img" aria-label={isDetailDrawerSuspended ? "Agent suspended" : isDetailDrawerCrashed ? "Agent crashed" : "Agent active"} />
+                    <span
+                      className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full ${drawerStatusColor} border-2 border-surface ${!isDetailDrawerSuspended && !isDetailDrawerCrashed ? "animate-pulse" : ""}`}
+                      role="img"
+                      aria-label={
+                        isDetailDrawerSuspended
+                          ? t("agents.status_suspended", { defaultValue: "Agent suspended" })
+                          : isDetailDrawerCrashed
+                          ? t("agents.status_crashed", { defaultValue: "Agent crashed" })
+                          : t("agents.status_active", { defaultValue: "Agent active" })
+                      }
+                    />
                   </div>
                   <div className="min-w-0 flex-1">
                     {editingName ? (
@@ -2410,9 +2423,9 @@ export function AgentsPage() {
                             className="w-44 px-2 py-1 rounded-md border border-border-subtle bg-surface text-sm font-mono outline-none focus:border-brand text-right"
                             disabled={providersQuery.isLoading}
                           >
-                            {providersQuery.isLoading && <option value="">Loading...</option>}
-                            {providersQuery.error && <option value="">Error loading</option>}
-                            {!providersQuery.isLoading && configuredProviders.length === 0 && <option value="">No providers</option>}
+                            {providersQuery.isLoading && <option value="">{t("common.loading", { defaultValue: "Loading..." })}</option>}
+                            {providersQuery.error && <option value="">{t("agents.providers_error_loading", { defaultValue: "Error loading" })}</option>}
+                            {!providersQuery.isLoading && configuredProviders.length === 0 && <option value="">{t("agents.no_providers", { defaultValue: "No providers" })}</option>}
                             {modelDraft.provider && !configuredProviders.some(p => p.id === modelDraft.provider) && (
                               <option value={modelDraft.provider}>{modelDraft.provider}</option>
                             )}
@@ -2428,9 +2441,9 @@ export function AgentsPage() {
                             className="w-44 px-2 py-1 rounded-md border border-border-subtle bg-surface text-sm font-mono outline-none focus:border-brand text-right"
                             disabled={modelsQuery.isLoading || !modelDraft.provider.trim()}
                           >
-                            {!modelDraft.provider.trim() && <option value="">Select provider first</option>}
-                            {modelDraft.provider.trim() && modelsQuery.isLoading && <option value="">Loading...</option>}
-                            {modelDraft.provider.trim() && !modelsQuery.isLoading && visibleModels.length === 0 && <option value="">No models</option>}
+                            {!modelDraft.provider.trim() && <option value="">{t("agents.select_provider_first", { defaultValue: "Select provider first" })}</option>}
+                            {modelDraft.provider.trim() && modelsQuery.isLoading && <option value="">{t("common.loading", { defaultValue: "Loading..." })}</option>}
+                            {modelDraft.provider.trim() && !modelsQuery.isLoading && visibleModels.length === 0 && <option value="">{t("agents.no_models", { defaultValue: "No models" })}</option>}
                             {modelDraft.model && !visibleModels.some(m => m.id === modelDraft.model) && (
                               <option value={modelDraft.model}>{modelDraft.model}</option>
                             )}
@@ -3196,4 +3209,3 @@ export function AgentsPage() {
     </div>
   );
 }
-

@@ -2232,6 +2232,123 @@ fn test_skills_config_extra_dirs_loaded_as_overlay() {
 }
 
 #[test]
+fn test_set_agent_skills_persists_allowlist_to_agent_toml() {
+    // Regression: set_agent_skills wrote only the SQLite blob, never
+    // agent.toml. Boot reconciliation re-syncs each agent from its on-disk
+    // manifest and overwrites DB-only fields, so a skill assigned via the
+    // dashboard was silently wiped on the next daemon restart. Assert the
+    // allowlist is now persisted through to agent.toml (mirrors the sibling
+    // set_agent_tool_filters / set_agent_channels behaviour).
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("skills")).unwrap();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    install_test_skill(&home_dir.join("skills"), "persist-skill", &[]);
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
+
+    let toml_path = home_dir
+        .join("agent-manifests")
+        .join("skill-persist-agent")
+        .join("agent.toml");
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "skill-persist-agent".to_string(),
+                description: "skill persistence regression".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                ..Default::default()
+            },
+            None,
+            Some(toml_path.clone()),
+            None,
+        )
+        .expect("spawn");
+
+    kernel
+        .set_agent_skills(agent_id, vec!["persist-skill".to_string()])
+        .expect("set_agent_skills should succeed");
+
+    let written = std::fs::read_to_string(&toml_path)
+        .expect("agent.toml must exist on disk after set_agent_skills");
+    assert!(
+        written.contains("persist-skill"),
+        "agent.toml must contain the assigned skill so it survives a restart, got:\n{written}"
+    );
+
+    kernel.shutdown();
+}
+
+#[test]
+fn test_set_agent_mcp_servers_persists_allowlist_to_agent_toml() {
+    // Regression: mirror of test_set_agent_skills_persists_allowlist_to_agent_toml
+    // for set_agent_mcp_servers — the same boot-reconciliation wipe applies.
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
+
+    let toml_path = home_dir
+        .join("agent-manifests")
+        .join("mcp-persist-agent")
+        .join("agent.toml");
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "mcp-persist-agent".to_string(),
+                description: "MCP persistence regression".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                ..Default::default()
+            },
+            None,
+            Some(toml_path.clone()),
+            None,
+        )
+        .expect("spawn");
+
+    register_mcp_server(&kernel, "test-mcp-server");
+    kernel
+        .tools_ref()
+        .lock()
+        .unwrap()
+        .push(librefang_types::tool::ToolDefinition {
+            name: "mcp_test_mcp_server_dummy".to_string(),
+            description: String::new(),
+            input_schema: serde_json::json!({}),
+        });
+    kernel
+        .mcp
+        .mcp_generation
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    kernel
+        .set_agent_mcp_servers(agent_id, vec!["test-mcp-server".to_string()])
+        .expect("set_agent_mcp_servers should succeed");
+
+    let written = std::fs::read_to_string(&toml_path)
+        .expect("agent.toml must exist on disk after set_agent_mcp_servers");
+    assert!(
+        written.contains("test-mcp-server"),
+        "agent.toml must contain the assigned MCP server so it survives a restart, got:\n{written}"
+    );
+
+    kernel.shutdown();
+}
+
+#[test]
 fn test_reload_skills_preserves_disabled_and_extra_dirs() {
     // Hot-reload used to instantiate a fresh `SkillRegistry` without
     // re-applying policy, so the disabled list and extra_dirs overlay

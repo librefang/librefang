@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useState, type ComponentType } from "react";
 import { Link, Navigate, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
 import { App } from "./App";
+import i18n from "./lib/i18n";
 
 // Matches chunk load failures across browsers:
 // Chrome:  "Failed to fetch dynamically imported module: ..."
@@ -488,7 +489,7 @@ function ChunkErrorBoundary({ error }: { error: Error }) {
             onClick={() => window.location.reload()}
             className="rounded-xl bg-sky-500 px-6 py-2.5 text-sm font-bold text-white hover:bg-sky-600 transition-colors"
           >
-            Reload
+            {i18n.t("common.reload", "Reload")}
           </button>
           <button
             onClick={() => {
@@ -496,16 +497,16 @@ function ChunkErrorBoundary({ error }: { error: Error }) {
               window.location.reload();
             }}
             className="rounded-xl bg-red-500 px-6 py-2.5 text-sm font-bold text-white hover:bg-red-600 transition-colors"
-            title="Clears the auto-reload cooldown and forces a fresh load"
+            title={i18n.t("errors.force_reload_title", "Clears the auto-reload cooldown and forces a fresh load")}
           >
-            Force reload
+            {i18n.t("errors.force_reload", "Force reload")}
           </button>
           {error.stack && (
             <button
               onClick={() => setShowStack(v => !v)}
               className="rounded-xl border border-gray-300 px-6 py-2.5 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
             >
-              {showStack ? "Hide" : "Show"} stack
+              {showStack ? i18n.t("common.hide", "Hide") : i18n.t("common.show", "Show")} {i18n.t("errors.stack", "stack")}
             </button>
           )}
         </div>
@@ -523,12 +524,12 @@ function NotFound() {
   return (
     <div className="flex h-[60vh] items-center justify-center">
       <div className="max-w-xl text-center space-y-4 px-4">
-        <p className="text-lg font-semibold">Page not found</p>
+        <p className="text-lg font-semibold">{i18n.t("errors.page_not_found", "Page not found")}</p>
         <Link
           to="/overview"
           className="inline-block rounded-xl bg-sky-500 px-6 py-2.5 text-sm font-bold text-white hover:bg-sky-600 transition-colors"
         >
-          Go to Overview
+          {i18n.t("errors.go_to_overview", "Go to Overview")}
         </Link>
       </div>
     </div>

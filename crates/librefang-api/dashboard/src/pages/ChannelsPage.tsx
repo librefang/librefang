@@ -171,7 +171,7 @@ const ChannelCard = memo(function ChannelCard({ channel: c, isSelected, viewMode
 // `configureChannel` with the captured `bot_token` to restore the
 // pre-migration "scan once, never again" UX (writes `secrets.env` so
 // the next sidecar restart skips QR).
-function ChannelQrSection({ channelName, t }: { channelName: string; t: (key: string) => string }) {
+function ChannelQrSection({ channelName, t }: { channelName: string; t: (key: string, opts?: Record<string, unknown>) => string }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const renderedQrRef = useRef<string | null>(null);
   // Two-phase polling: keep refetching at the default 2s cadence
@@ -234,12 +234,12 @@ function ChannelQrSection({ channelName, t }: { channelName: string; t: (key: st
   return (
     <div className="space-y-3">
       <h3 className="text-xs font-black uppercase tracking-wider text-text-dim">
-        {t("channels.qr_login") || "QR Login"}
+        {t("channels.qr_login", { defaultValue: "QR Login" })}
       </h3>
       <div className="p-4 rounded-xl bg-main/30 flex flex-col items-center gap-3">
         {(qr.status === "pending" || qr.status === "scanning") && (
           <div className="bg-white rounded-xl p-2">
-            <canvas ref={canvasRef} aria-label={t("mobile_pairing.qr_aria_label") || "QR code"} />
+            <canvas ref={canvasRef} aria-label={t("mobile_pairing.qr_aria_label", { defaultValue: "QR code" })} />
           </div>
         )}
         {qr.status === "confirmed" && (
@@ -255,12 +255,17 @@ function ChannelQrSection({ channelName, t }: { channelName: string; t: (key: st
         <p className="text-xs text-text-dim text-center max-w-xs">
           {qr.message ||
             (qr.status === "confirmed"
-              ? t("channels.login_success") || "Login successful"
+              ? t("channels.login_success", { defaultValue: "Login successful" })
               : qr.status === "expired"
-              ? "QR code expired — restart the sidecar to try again"
+              ? t("channels.qr_expired_restart", {
+                  defaultValue: "QR code expired — restart the sidecar to try again",
+                })
               : qr.status === "failed"
-              ? t("channels.qr_failed") || "QR login failed"
-              : `Scan with your ${channelName} app`)}
+              ? t("channels.qr_failed", { defaultValue: "QR login failed" })
+              : t("channels.qr_scan_with_app", {
+                  defaultValue: "Scan with your {{channel}} app",
+                  channel: channelName,
+                }))}
         </p>
         {terminal && qr.status !== "confirmed" && (
           <Button
@@ -379,7 +384,7 @@ function DetailsModal({ channel, onClose, t }: {
               opens for already-configured channels. */}
           <div className="p-4 rounded-xl bg-brand/5 border border-brand/20">
             <p className="text-xs text-text-dim">
-              Runs as an out-of-process sidecar adapter. Manage it in <code className="font-mono">config.toml</code> (<code className="font-mono">[[sidecar_channels]]</code>) — Config → Sidecar Channels, or use the gear on the channel card to open the configure drawer.
+              {t("channels.sidecar_details")}
             </p>
           </div>
         </div>
@@ -584,7 +589,7 @@ function SidecarForm({
           disabled={saveMut.isPending || schemaUnavailable}
         >
           {saveMut.isPending
-            ? t("common.saving", { defaultValue: "Saving…" })
+            ? t("common.saving", { defaultValue: "Saving..." })
             : t("common.save", { defaultValue: "Save" })}
         </Button>
       </div>
@@ -738,7 +743,7 @@ export function ChannelsPage() {
               disabled={unconfiguredCount === 0}
               title={unconfiguredCount === 0
                 ? t("channels.all_configured", { defaultValue: "All channels configured" })
-                : t("channels.add", { defaultValue: "Add channel" })}
+                : t("channels.add_channel", { defaultValue: "Add channel" })}
             >
               {t("channels.add", { defaultValue: "Add" })}
             </Button>
@@ -927,7 +932,7 @@ export function ChannelsPage() {
             <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
               {pickerSearch
                 ? t("channels.no_results")
-                : t("channels.all_configured", { defaultValue: "All available channel types are already configured." })}
+                : t("channels.all_configured_desc", { defaultValue: "All available channel types are already configured." })}
             </div>
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">

@@ -5,6 +5,19 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.6.22] - 2026-06-22
+
+_1 PR from 1 contributor since v2026.6.22-beta.21._
+
+### Highlights
+
+- **Safer upgrades** — the installer now falls back to the last known-good release and automatically rolls back a failed upgrade instead of leaving the app in a broken state.
+
+### Fixed
+
+- Fall back to installable release, roll back bad upgrades (#6272) (@houko)
+
+
 ## [2026.6.17] - 2026-06-17
 
 _22 PRs from 3 contributors since v2026.6.16-beta.19._
@@ -834,6 +847,27 @@ _308 PRs from 7 contributors since v2026.5.17-beta.12._
 
 ## [Unreleased]
 
+### Changed
+
+- **chore(secrets): replace the detect-secrets baseline with gitleaks** (#6262) (@houko).
+  The 4296-line `.secrets.baseline` pinned 534 unaudited high-entropy findings and forced every fixture-adding PR to append to it, which made it the repo's most merge-conflict-prone file.
+  gitleaks scans against a fixed rule set plus rule-based path/regex allowlists in `.gitleaks.toml`, which do not churn the way a per-finding snapshot does; CI runs `gitleaks dir .` and the pre-commit hook runs `gitleaks protect --staged`.
+
+### Fixed
+
+- **fix(runtime): `channel_send` without a `recipient` now replies to the group, not the speaker** (#6261) (@neo-wanderer).
+  In a group conversation a no-recipient `channel_send` auto-filled the recipient from `sender_id` (the individual who spoke) instead of `sender_chat_id` (the room / group).
+  The send then targeted the speaker's user id as if it were a conversation — e.g. a Matrix file send routed to `@user:hs` rather than the room `!room:hs`, which the homeserver rejected with `403 not in room` (visible only on the sidecar's stderr, so the tool still reported success).
+  The auto-fill now resolves the same canonical target the #6117 cross-chat guard validates against — the conversation id first, falling back to `sender_id` only for DMs — via a shared `resolve_send_target` helper, so the send target and the guard's `expected_chat` can no longer disagree.
+- **fix(installer): fall back to the newest installable release and roll back broken upgrades** (#6272) (@houko).
+  A release can become GitHub's "latest" tag before its per-platform assets finish uploading, or a build job can fail so a platform's package never lands; in that window `curl … | sh`, the PowerShell installer, and `librefang update` all 404 and exit, and `librefang update` hard-pinned the stuck tag so the installer could not self-recover.
+  The in-place replace also kept no backup, so a package that downloaded and verified but was a broken build overwrote the working binary with no way back.
+  The installers now resolve to the newest release that actually ships a downloadable package (archive plus its `.sha256`) for the platform, walking back past stuck releases; `librefang update` treats an explicit `--version` as a hard pin (`LIBREFANG_VERSION`) and its auto-resolved tag as a soft preference (`LIBREFANG_PREFERRED_VERSION`) the installer may fall back from; and the swap is atomic with a backup that rolls back when the new binary fails to run.
+- **fix(channels): the streaming final answer now fires a push notification** (#6248) (@houko) — reported and diagnosed by @neo-wanderer.
+  On streaming channels (Telegram, Matrix) the agent's final answer was delivered as an *edit* of the `"…"` streaming placeholder, and edits do not generate a client push notification — so the push fired on the empty placeholder and the actual answer landed silently (unless it overflowed the per-message length limit, whose tail chunk is a fresh, notifying message).
+  Both adapters now finalize the answer as a *fresh* message — Telegram sends the answer and deletes the placeholder; Matrix sends a new `m.room.message` and redacts the placeholder — so the notification fires on the answer regardless of length.
+  The overflow path already sent a notifying tail, so finalize-as-new is skipped there to avoid a duplicate ping.
+
 ### Added
 
 - **feat(runtime): add the `agent` dimension to `librefang_tool_execution_seconds`** (#6244) (@houko).
@@ -1094,6 +1128,11 @@ In-crate only; no cross-crate error-shape changes.
 - **fix(dashboard/agents): stage agent Skills-tab edits behind a Save button instead of persisting on every click** (#6041) (@DaBlitzStein).
   The Skills tab fired `PUT /api/agents/{id}/skills` immediately on every add / remove / Customize / Reset-to-all, with no Save button and no way to back out — unlike the Tools tab, which stages a draft and only writes on Save.
   Skills now mirrors Tools: edits stage into a local `skillsDraft`, a Save button (disabled until dirty) issues the single PUT, and switching tabs discards the draft.
+- **fix(kernel): persist per-agent skill & MCP-server assignments to `agent.toml` so they survive a restart** (#6045) (@DaBlitzStein).
+  `set_agent_skills` and `set_agent_mcp_servers` wrote only the SQLite blob, never calling `persist_manifest_to_disk` unlike the sibling setters (`set_agent_model` / `set_agent_channels` / `set_agent_schedule` / `set_agent_tool_filters`).
+  Boot reconciliation re-syncs each agent from its on-disk `agent.toml` and overwrites DB-only fields, so a skill/MCP assigned via the dashboard returned `200`, showed as assigned in the API, then was silently wiped on the next daemon restart.
+  Both setters now persist to disk.
+  Regression tests: `test_set_agent_skills_persists_allowlist_to_agent_toml`, `test_set_agent_mcp_servers_persists_allowlist_to_agent_toml`.
 
 - **channels: stop silently swallowing an upgraded operator's channel config, and explain why the WeChat/etc. configure form is empty** (@houko).
   After the channel → sidecar migration (#5317–#5459) the in-process `[channels.<vendor>]` config blocks were removed from `ChannelsConfig`, so an operator upgrading from a pre-migration build lost every configured channel on first boot: the old block deserialised into nothing, the dashboard channels page (which only renders `configured` rows) showed the WeChat card vanishing, and the only signal was a generic "Unknown config field (ignored)" log that never mentioned sidecars.

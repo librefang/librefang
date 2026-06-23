@@ -460,6 +460,16 @@ impl LibreFangKernel {
         // Invalidate cached tool list — skill allowlist change affects available tools
         self.prompt_metadata_cache.tools.remove(&agent_id);
 
+        // Persist to agent.toml so the change survives a daemon restart. The DB
+        // blob alone is NOT enough: boot reconciliation re-syncs each agent from
+        // its on-disk agent.toml and, when the projection differs, overwrites the
+        // DB with the disk manifest (see boot.rs "Agent TOML on disk differs from
+        // DB, updating"). Without this a skill assigned via the dashboard lives
+        // only in SQLite and is wiped on the next restart. Mirrors
+        // set_agent_tool_filters / set_agent_channels / set_agent_schedule /
+        // set_agent_model, which all persist to disk.
+        self.persist_manifest_to_disk(agent_id);
+
         info!(agent_id = %agent_id, skills = ?skills, "Agent skills updated");
         Ok(())
     }
@@ -523,6 +533,12 @@ impl LibreFangKernel {
 
         // Invalidate cached tool list — MCP server allowlist change affects available tools
         self.prompt_metadata_cache.tools.remove(&agent_id);
+
+        // Persist to agent.toml so the change survives a daemon restart — same
+        // reason as set_agent_skills: boot reconciliation overwrites DB-only
+        // fields from the on-disk manifest, so an MCP allowlist set via the
+        // dashboard would otherwise be wiped on the next restart.
+        self.persist_manifest_to_disk(agent_id);
 
         info!(agent_id = %agent_id, servers = ?servers, "Agent MCP servers updated");
         Ok(())

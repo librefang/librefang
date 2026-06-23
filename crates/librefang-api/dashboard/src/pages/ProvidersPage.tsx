@@ -911,10 +911,10 @@ const EMPTY_MODEL: ModelEntry = {
 // it was rejected by the catalog TOML parser and made the provider silently
 // vanish (#5822); "frontier" is the real top-capability tier.
 const TIER_OPTIONS = [
-  { value: "fast", label: "Fast" },
-  { value: "balanced", label: "Balanced" },
-  { value: "smart", label: "Smart" },
-  { value: "frontier", label: "Frontier" },
+  { value: "fast", labelKey: "providers.tier_fast", defaultLabel: "Fast" },
+  { value: "balanced", labelKey: "providers.tier_balanced", defaultLabel: "Balanced" },
+  { value: "smart", labelKey: "providers.tier_smart", defaultLabel: "Smart" },
+  { value: "frontier", labelKey: "providers.tier_frontier", defaultLabel: "Frontier" },
 ];
 
 function CreateProviderWizard({
@@ -1117,7 +1117,15 @@ function CreateProviderWizard({
                   <Input label={t("providers.wizard_model_name")} value={m.display_name} onChange={(e) => updateModel(idx, "display_name", e.target.value)} placeholder="GPT-4o" />
                 </div>
                 <div className="grid grid-cols-3 gap-3">
-                  <Select label={t("providers.wizard_model_tier")} options={TIER_OPTIONS} value={m.tier} onChange={(e) => updateModel(idx, "tier", e.target.value)} />
+                  <Select
+                    label={t("providers.wizard_model_tier")}
+                    options={TIER_OPTIONS.map((option) => ({
+                      value: option.value,
+                      label: t(option.labelKey, { defaultValue: option.defaultLabel }),
+                    }))}
+                    value={m.tier}
+                    onChange={(e) => updateModel(idx, "tier", e.target.value)}
+                  />
                   <Input label={t("providers.wizard_model_context")} type="number" value={m.context_window === "" ? "" : String(m.context_window)}
                     onChange={(e) => updateModel(idx, "context_window", e.target.value === "" ? "" : Number(e.target.value))} placeholder="128000" />
                   <Input label={t("providers.wizard_model_max_output")} type="number" value={m.max_output_tokens === "" ? "" : String(m.max_output_tokens)}
@@ -1316,6 +1324,7 @@ function CredentialPoolCard({ pool }: { pool: CredentialPoolStatus }) {
 }
 
 function CredentialPoolsSection() {
+  const { t } = useTranslation();
   const { data, isLoading, error } = useCredentialPools();
 
   // Hide the section entirely when no pools are configured — it's a niche
@@ -1330,11 +1339,11 @@ function CredentialPoolsSection() {
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <Key className="w-4 h-4 text-blue-500" />
-          <h3 className="text-sm font-bold text-text-main">Credential pools</h3>
+          <h3 className="text-sm font-bold text-text-main">{t("providers.credential_pools", { defaultValue: "Credential pools" })}</h3>
           <Badge variant="info">{data.length}</Badge>
         </div>
         <span className="text-[10px] text-text-dim font-mono">
-          configure in config.toml `[[credential_pools]]`
+          {t("providers.credential_pools_hint", { defaultValue: "configure in config.toml `[[credential_pools]]`" })}
         </span>
       </div>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -1521,7 +1530,11 @@ export function ProvidersPage() {
       addToast(t("providers.batch_test_all_failed", { defaultValue: "All tests failed" }), "error");
     } else {
       addToast(
-        t("providers.batch_test_partial", { defaultValue: `${successCount} passed, ${failCount} failed` }),
+        t("providers.batch_test_partial", {
+          defaultValue: "{{success}} passed, {{failed}} failed",
+          success: successCount,
+          failed: failCount,
+        }),
         "error",
       );
     }
@@ -1795,7 +1808,7 @@ export function ProvidersPage() {
 
             {config.provider.key_required !== false && (
               <div>
-                <label htmlFor={`${cfgFieldId}-api-key`} className="text-[10px] font-bold text-text-dim uppercase">API Key</label>
+                <label htmlFor={`${cfgFieldId}-api-key`} className="text-[10px] font-bold text-text-dim uppercase">{t("providers.api_key", { defaultValue: "API Key" })}</label>
                 <input id={`${cfgFieldId}-api-key`} type="password" value={config.keyInput} onChange={e => config.setKeyInput(e.target.value)}
                   placeholder={config.hasStoredKey ? t("providers.key_placeholder_existing") : t("providers.key_placeholder")}
                   className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-brand focus:ring-1 focus:ring-brand/20" />
@@ -1803,7 +1816,7 @@ export function ProvidersPage() {
             )}
 
             <div>
-              <label htmlFor={`${cfgFieldId}-base-url`} className="text-[10px] font-bold text-text-dim uppercase">Base URL <span className="normal-case font-normal text-text-dim/50">({t("providers.optional")})</span></label>
+              <label htmlFor={`${cfgFieldId}-base-url`} className="text-[10px] font-bold text-text-dim uppercase">{t("providers.base_url", { defaultValue: "Base URL" })} <span className="normal-case font-normal text-text-dim/50">({t("providers.optional")})</span></label>
               <input id={`${cfgFieldId}-base-url`} type="text" value={config.urlInput} onChange={e => config.setUrlInput(e.target.value)}
                 placeholder="https://api.example.com/v1"
                 className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-brand focus:ring-1 focus:ring-brand/20" />

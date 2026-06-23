@@ -1,5 +1,6 @@
 import { formatDate } from "../lib/datetime";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
 import {
@@ -264,7 +265,7 @@ const RESERVED_VARS = new Set(["input"]);
  * for `{{var}}` placeholders.  Returns one `TemplateParameter` per unique
  * variable, excluding reserved names and step output variables (step names).
  */
-function extractWorkflowParams(steps: WorkflowStep[]): TemplateParameter[] {
+function extractWorkflowParams(steps: WorkflowStep[], t: TFunction): TemplateParameter[] {
   const re = /\{\{(\w+)\}\}/g;
   const stepNames = new Set(steps.map((s) => s.name));
   const seen = new Set<string>();
@@ -278,7 +279,11 @@ function extractWorkflowParams(steps: WorkflowStep[]): TemplateParameter[] {
       seen.add(name);
       params.push({
         name,
-        description: `Parameter '${name}' used in step '${step.name}'`,
+        description: t("workflows.detected_param_description", {
+          defaultValue: "Parameter '{{name}}' used in step '{{step}}'",
+          name,
+          step: step.name,
+        }),
         param_type: "string",
         required: true,
       });
@@ -411,8 +416,8 @@ export function WorkflowsPage() {
   const detectedParams = useMemo(() => {
     const detail = workflowDetailQuery.data;
     if (!detail || !Array.isArray(detail.steps)) return [];
-    return extractWorkflowParams(detail.steps as WorkflowStep[]);
-  }, [workflowDetailQuery.data]);
+    return extractWorkflowParams(detail.steps as WorkflowStep[], t);
+  }, [workflowDetailQuery.data, t]);
 
   // Seed parameter values once per workflow when its detected params
   // first become available. The `useWorkflowDetail` query is async, so
@@ -948,7 +953,7 @@ export function WorkflowsPage() {
                         {lastRun.state}
                       </span>
                     ) : (
-                      <span className="font-mono text-[10px] text-text-dim/40">no runs</span>
+                      <span className="font-mono text-[10px] text-text-dim/40">{t("workflows.no_runs", { defaultValue: "no runs" })}</span>
                     )}
                   </div>
 
@@ -960,7 +965,7 @@ export function WorkflowsPage() {
                         <span className="truncate">{schedule.cron}</span>
                       </span>
                     ) : (
-                      <span className="font-mono text-[10px] text-text-dim/40">no schedule</span>
+                      <span className="font-mono text-[10px] text-text-dim/40">{t("workflows.no_schedule", { defaultValue: "no schedule" })}</span>
                     )}
                   </div>
 

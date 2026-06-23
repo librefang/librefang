@@ -9,6 +9,8 @@ readme = "README.md"
 [dependencies]
 librefang-types = { path = "../librefang-types" }
 schemars = { version = "0.8", features = ["chrono", "uuid1"] }
+# webauthn-rs pulls in openssl-sys on every target; vendor unconditionally so cross-compiled release targets don't probe the host's incompatible system library (replaces the Windows-only gate from #6161).
+openssl = { version = "0.10", features = ["vendored"] }
 librefang-kernel = { path = "../librefang-kernel" }
 librefang-acp = { path = "../librefang-acp", features = ["kernel-adapter"] }
 agent-client-protocol = { workspace = true }
@@ -64,6 +66,7 @@ sha2 = { workspace = true }
 argon2 = "0.5"
 hex = { workspace = true }
 rand = { workspace = true }
+zeroize = { workspace = true }
 tracing-subscriber = { workspace = true }
 utoipa = { version = "5", features = ["axum_extras"] }
 include_dir = "0.7"
@@ -118,12 +121,6 @@ windows-sys = { version = "0.61", features = [
     "Win32_Security",
     "Win32_Security_Authorization",
 ] }
-# webauthn-rs (via webauthn-rs-core) links against system OpenSSL through openssl-sys.
-# The Windows MSVC CI runners have no discoverable system OpenSSL (openssl-sys fails its probe with "Could not find directory of OpenSSL installation").
-# Enable the vendored feature here so cargo feature-unification builds openssl-sys from source on Windows only; Unix keeps using the system library already present on those runners.
-# The vendored builder (openssl-src) auto-detects nasm and falls back to a no-asm build when it is absent, so the runners' bundled Perl is the only host prerequisite (both Windows images ship it).
-# Refs #6161.
-openssl = { version = "0.10", features = ["vendored"] }
 
 [build-dependencies]
 # `build.rs` uses `chrono::Utc::now()` to stamp `BUILD_DATE` instead of

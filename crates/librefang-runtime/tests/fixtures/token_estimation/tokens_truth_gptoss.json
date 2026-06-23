@@ -1,0 +1,91 @@
+{
+  "captured_with": {
+    "base_url": "https://openrouter.ai/api/v1",
+    "driver": "openai",
+    "model": "openai/gpt-oss-120b:free",
+    "prompt_caching": false,
+    "provider": "gptoss"
+  },
+  "samples": {
+    "cjk_01": {
+      "input_tokens": 305,
+      "model": "openai/gpt-oss-120b:free",
+      "provider": "gptoss"
+    },
+    "cjk_02": {
+      "input_tokens": 126,
+      "model": "openai/gpt-oss-120b:free",
+      "provider": "gptoss"
+    },
+    "cjk_03": {
+      "input_tokens": 361,
+      "model": "openai/gpt-oss-120b:free",
+      "provider": "gptoss"
+    },
+    "cjk_04": {
+      "input_tokens": 122,
+      "model": "openai/gpt-oss-120b:free",
+      "provider": "gptoss"
+    },
+    "english_prose_01": {
+      "input_tokens": 249,
+      "model": "openai/gpt-oss-120b:free",
+      "provider": "gptoss"
+    },
+    "english_prose_02": {
+      "input_tokens": 101,
+      "model": "openai/gpt-oss-120b:free",
+      "provider": "gptoss"
+    },
+    "english_prose_03": {
+      "input_tokens": 283,
+      "model": "openai/gpt-oss-120b:free",
+      "provider": "gptoss"
+    },
+    "english_prose_04": {
+      "input_tokens": 276,
+      "model": "openai/gpt-oss-120b:free",
+      "provider": "gptoss"
+    },
+    "mixed_01": {
+      "input_tokens": 117,
+      "model": "openai/gpt-oss-120b:free",
+      "provider": "gptoss"
+    },
+    "mixed_02": {
+      "input_tokens": 405,
+      "model": "openai/gpt-oss-120b:free",
+      "provider": "gptoss"
+    },
+    "mixed_03": {
+      "input_tokens": 137,
+      "model": "openai/gpt-oss-120b:free",
+      "provider": "gptoss"
+    },
+    "mixed_04": {
+      "input_tokens": 154,
+      "model": "openai/gpt-oss-120b:free",
+      "provider": "gptoss"
+    },
+    "tool_json_01": {
+      "input_tokens": 190,
+      "model": "openai/gpt-oss-120b:free",
+      "provider": "gptoss"
+    },
+    "tool_json_02": {
+      "input_tokens": 222,
+      "model": "openai/gpt-oss-120b:free",
+      "provider": "gptoss"
+    },
+    "tool_json_03": {
+      "input_tokens": 275,
+      "model": "openai/gpt-oss-120b:free",
+      "provider": "gptoss"
+    },
+    "tool_json_04": {
+      "input_tokens": 221,
+      "model": "openai/gpt-oss-120b:free",
+      "provider": "gptoss"
+    }
+  }
+}

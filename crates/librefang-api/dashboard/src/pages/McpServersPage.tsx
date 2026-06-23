@@ -2008,7 +2008,7 @@ export function McpServersPage() {
                         {(() => {
                           const safe = safeUrl(e.get_url);
                           return safe ? (
-                            <a href={safe} target="_blank" rel="noopener noreferrer" className="text-brand hover:underline shrink-0" aria-label="Get key">
+                            <a href={safe} target="_blank" rel="noopener noreferrer" className="text-brand hover:underline shrink-0" aria-label={t("mcp.get_key", { defaultValue: "Get key" })}>
                               <ExternalLink className="h-3 w-3" />
                             </a>
                           ) : null;

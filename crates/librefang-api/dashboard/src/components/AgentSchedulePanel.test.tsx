@@ -259,7 +259,7 @@ describe("AgentSchedulePanel — trigger pattern preset wire shape", () => {
     const here = dirname(fileURLToPath(import.meta.url));
     const src = readFileSync(join(here, "AgentSchedulePanel.tsx"), "utf8");
     const presetMatch = src.match(
-      /label:\s*"agent_spawned[^"]*",\s*\n?\s*value:\s*([^,\n]+)/,
+      /defaultLabel:\s*"agent_spawned[^"]*",\s*\n?\s*value:\s*([^,\n]+)/,
     );
     expect(presetMatch, "agent_spawned preset not found").toBeTruthy();
     const valueLiteral = presetMatch![1].trim();

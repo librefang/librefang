@@ -68,38 +68,38 @@ type RoleName = (typeof ROLES)[number];
 // shape so admins don't have to spelunk for the right format.
 const PLATFORM_TILES: Array<{
   key: string;
-  label: string;
-  hint: string;
+  defaultLabel: string;
+  defaultHint: string;
   example: string;
 }> = [
   {
     key: "telegram",
-    label: "Telegram",
-    hint: "Numeric Telegram user ID (visible via @userinfobot).",
+    defaultLabel: "Telegram",
+    defaultHint: "Numeric Telegram user ID (visible via @userinfobot).",
     example: "123456789",
   },
   {
     key: "discord",
-    label: "Discord",
-    hint: "Numeric Discord user ID (right-click → Copy User ID, dev mode).",
+    defaultLabel: "Discord",
+    defaultHint: "Numeric Discord user ID (right-click → Copy User ID, dev mode).",
     example: "987654321098765432",
   },
   {
     key: "slack",
-    label: "Slack",
-    hint: "Slack member ID (Profile → More → Copy member ID).",
+    defaultLabel: "Slack",
+    defaultHint: "Slack member ID (Profile → More → Copy member ID).",
     example: "U01ABCDEFGH",
   },
   {
     key: "email",
-    label: "Email",
-    hint: "Sender email address (used by IMAP / Mailgun channels).",
+    defaultLabel: "Email",
+    defaultHint: "Sender email address (used by IMAP / Mailgun channels).",
     example: "alice@example.com",
   },
   {
     key: "wechat",
-    label: "WeChat",
-    hint: "WeCom / WeChat OpenID for the configured corp.",
+    defaultLabel: "WeChat",
+    defaultHint: "WeCom / WeChat OpenID for the configured corp.",
     example: "abc123@im.wechat",
   },
 ];
@@ -899,7 +899,7 @@ function UserFormModal({
                     value={k}
                     options={PLATFORM_TILES.map(p => ({
                       value: p.key,
-                      label: t(`users.platforms.${p.key}.label`, p.label),
+                      label: t(`users.platforms.${p.key}.label`, p.defaultLabel),
                     }))}
                     onChange={e => {
                       const next = [...bindings];
@@ -1110,10 +1110,10 @@ function IdentityWizardModal({
                     }`}
                   >
                     <p className="text-sm font-bold">
-                      {t(`users.platforms.${p.key}.label`, p.label)}
+                      {t(`users.platforms.${p.key}.label`, p.defaultLabel)}
                     </p>
                     <p className="mt-1 text-[11px] text-text-dim">
-                      {t(`users.platforms.${p.key}.hint`, p.hint)}
+                      {t(`users.platforms.${p.key}.hint`, p.defaultHint)}
                     </p>
                   </button>
                 ))}
@@ -1127,10 +1127,10 @@ function IdentityWizardModal({
               {tile ? (
                 <Card padding="md">
                   <p className="text-sm font-bold">
-                    {t(`users.platforms.${tile.key}.label`, tile.label)}
+                    {t(`users.platforms.${tile.key}.label`, tile.defaultLabel)}
                   </p>
                   <p className="mt-1 text-[11px] text-text-dim">
-                    {t(`users.platforms.${tile.key}.hint`, tile.hint)}
+                    {t(`users.platforms.${tile.key}.hint`, tile.defaultHint)}
                   </p>
                   <p className="mt-2 text-[11px] font-mono text-text-dim">
                     {t("users.wizard_example", "Example")}:{" "}

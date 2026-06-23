@@ -1,0 +1,209 @@
+{
+  "_about": "Ground-truth corpus for the token-estimation accuracy benchmark. Each sample is bucketed by content shape so per-bucket estimator error can be measured against real provider usage. Keep samples non-trivial in size: per-request fixed overhead (role framing, BOS) dominates tiny inputs and inflates relative error. See README.md for how to regenerate tokens_truth.json.",
+  "samples": [
+    {
+      "id": "english_prose_01",
+      "bucket": "english_prose",
+      "system": "You are a concise, helpful software engineering assistant.",
+      "turns": [
+        { "role": "user", "text": "Explain the difference between a process and a thread, then describe when you would prefer multiprocessing over multithreading in a CPU-bound Python workload. Keep it to two short paragraphs and avoid bullet points." },
+        { "role": "assistant", "text": "A process owns an isolated address space while threads share one; that isolation is exactly why CPython's global interpreter lock makes multiprocessing the better fit for CPU-bound work. Each process gets its own interpreter and GIL, so several can saturate several cores in true parallel. Threads in CPython interleave on a single core for CPU-bound code because the GIL serializes bytecode execution, so they help only when the work is I/O-bound and releases the lock. Prefer multiprocessing when the bottleneck is computation and the per-task data is large enough to amortize the cost of pickling and inter-process communication." }
+      ]
+    },
+    {
+      "id": "english_prose_02",
+      "bucket": "english_prose",
+      "system": null,
+      "turns": [
+        { "role": "user", "text": "Summarize the tradeoffs of optimistic versus pessimistic locking in a high-write database, including how each behaves under contention and what failure mode the application code must handle." }
+      ]
+    },
+    {
+      "id": "english_prose_03",
+      "bucket": "english_prose",
+      "system": "You are a careful technical writer. Prefer precise language over hand-waving.",
+      "turns": [
+        { "role": "user", "text": "Walk me through how a TCP three-way handshake establishes a connection, and then explain what actually happens to in-flight data when one side sends a RST instead of a graceful FIN." },
+        { "role": "assistant", "text": "The handshake begins when the client sends a SYN carrying its initial sequence number; the server replies with a SYN-ACK that acknowledges the client's sequence number and supplies its own; the client then returns an ACK, and at that point both sides have agreed on starting sequence numbers and the connection is established. A graceful teardown uses FIN segments so that each direction is closed independently and any data already queued is delivered before the socket reaches the closed state. A RST is different in kind: it is an abrupt abort that tells the peer the connection no longer exists, so the kernel discards any unacknowledged in-flight data on both the send and receive queues, delivers an error such as connection reset to the application, and skips the TIME_WAIT bookkeeping that a normal close would observe." }
+      ]
+    },
+    {
+      "id": "english_prose_04",
+      "bucket": "english_prose",
+      "system": null,
+      "turns": [
+        { "role": "user", "text": "I keep seeing advice to make idempotent API endpoints. Explain what idempotency actually means for HTTP methods, why retries make it matter, and how an idempotency key on a POST is supposed to work end to end." },
+        { "role": "assistant", "text": "Idempotency means that performing the same operation more than once leaves the server in the same state as performing it once, so GET, PUT, and DELETE are idempotent by definition while a naive POST that creates a row is not. It matters because networks drop responses: a client that does not hear back cannot tell whether its request succeeded, so it retries, and without protection that retry can create a second charge or a duplicate order. An idempotency key fixes this by having the client generate a unique token, attach it to the POST, and resend the same token on every retry; the server records the token together with the result of the first successful execution, and when it sees the token again it returns the stored result instead of executing the side effect a second time." }
+      ]
+    },
+    {
+      "id": "cjk_01",
+      "bucket": "cjk",
+      "system": "你是一个严谨的中文技术写作助手。",
+      "turns": [
+        { "role": "user", "text": "请解释什么是数据库的乐观锁和悲观锁，并说明在高并发写入场景下二者各自的优劣，以及应用层需要分别处理哪些异常情况。请用两段话回答，不要使用列表。" },
+        { "role": "assistant", "text": "乐观锁假设冲突很少发生，因此读取时不加锁，只在提交时通过版本号或时间戳检查数据是否被他人修改；一旦检测到冲突就回滚并由应用层重试。它在读多写少、冲突概率低的场景下吞吐更高，但在高并发写入下会频繁触发重试，应用代码必须正确处理重试与幂等。悲观锁则在读取阶段就对记录加锁，阻止其他事务修改，避免了重试风暴，但锁的持有会显著降低并发度，并带来死锁与锁等待超时的风险，应用层需要为此设计超时与死锁恢复逻辑。" }
+      ]
+    },
+    {
+      "id": "cjk_02",
+      "bucket": "cjk",
+      "system": null,
+      "turns": [
+        { "role": "user", "text": "我们的服务最近在高峰期偶尔出现请求超时，但数据库和应用的 CPU 都不高。请从连接池、线程模型、慢查询、以及下游依赖四个角度，分析可能的原因，并给出排查的先后顺序。" }
+      ]
+    },
+    {
+      "id": "cjk_03",
+      "bucket": "cjk",
+      "system": "你是一位资深的分布式系统工程师，回答要兼顾原理与工程实践。",
+      "turns": [
+        { "role": "user", "text": "请通俗地解释 CAP 定理，并说明为什么在网络分区发生时只能在一致性和可用性之间二选一。再结合一个电商下单扣库存的例子，说明分别选择 CP 和 AP 会带来什么样的用户可见行为。" },
+        { "role": "assistant", "text": "CAP 定理说的是在一个会发生网络分区的分布式系统里，一致性、可用性和分区容忍性三者无法同时完全满足。由于现实网络一定会出现分区，分区容忍性几乎是必选项，于是真正的取舍发生在一致性和可用性之间：当节点之间无法通信时，系统要么拒绝服务以保证数据一致，要么继续响应但可能返回过期数据。以电商下单扣库存为例，选择 CP 时，分区期间无法确认库存的下单请求会直接失败或阻塞，用户看到的是下单暂时不可用，但绝不会超卖；选择 AP 时，系统在分区期间仍然接受下单，用户体验流畅，但两侧可能同时扣减同一批库存，分区恢复后需要对账和补偿，极端情况下会出现超卖需要取消订单。" }
+      ]
+    },
+    {
+      "id": "cjk_04",
+      "bucket": "cjk",
+      "system": null,
+      "turns": [
+        { "role": "user", "text": "请帮我审阅一段提交说明的措辞：本次改动修复了在会话压缩时聚合开发者循环导致出现连续用户消息的问题。我希望它更清晰地说明根因和影响范围，但不要太长。" }
+      ]
+    },
+    {
+      "id": "mixed_01",
+      "bucket": "mixed_cjk_latin",
+      "system": null,
+      "turns": [
+        { "role": "user", "text": "在 Rust 里，String 和 &str 的区别是什么？什么时候应该在函数签名里用 impl Into<String>，什么时候用 &str？请结合 ownership 和 borrow checker 简要说明，并给出一个 fn greet 的例子。" }
+      ]
+    },
+    {
+      "id": "mixed_02",
+      "bucket": "mixed_cjk_latin",
+      "system": "你是一个中英混合的代码评审助手，术语保留英文。",
+      "turns": [
+        { "role": "user", "text": "我们在用 tokio 写一个 async 服务，遇到一个 deadlock：一个 task 持有 Mutex 的 guard 时又 .await 了另一个会去抢同一把锁的 future。请解释为什么持锁 await 在 async 场景下特别危险，以及用 tokio::sync::Mutex 还是把临界区缩小到 drop(guard) 之后再 await 更合适。" },
+        { "role": "assistant", "text": "问题的根源在于 async 任务的 .await 是一个让出点，标准库的 std::sync::Mutex 的 guard 在跨越 .await 时仍然被持有，于是这把锁会在整个挂起期间一直被占用；如果被唤醒所依赖的 future 又需要同一把锁，就会形成自锁或与其他任务相互等待的 deadlock。更糟的是 std::sync::MutexGuard 不是 Send，跨 .await 持有它在多线程 runtime 上根本无法编译，逼你要么换锁要么改结构。通常更干净的做法是缩小临界区：在 .await 之前显式 drop(guard)，只在真正访问共享状态的那几行持锁；只有当你确实需要跨 await 持有锁时，才换成 tokio::sync::Mutex，它的 guard 是 Send 且为异步等待设计，但代价是更高的开销和仍然存在的逻辑 deadlock 风险。" }
+      ]
+    },
+    {
+      "id": "mixed_03",
+      "bucket": "mixed_cjk_latin",
+      "system": null,
+      "turns": [
+        { "role": "user", "text": "帮我理解一下 prompt caching：Anthropic 的 cache_control breakpoint 是怎么工作的？为什么 system prompt 和 tool definitions 适合放进 cached prefix，而每轮变化的 user message 不适合？如果 message 顺序里混入了一个 HashMap 迭代产生的非确定性 ordering，会对 cache hit 有什么影响？" }
+      ]
+    },
+    {
+      "id": "mixed_04",
+      "bucket": "mixed_cjk_latin",
+      "system": "你是一个 DevOps 助手。",
+      "turns": [
+        { "role": "user", "text": "我的 Dockerfile 用 multi-stage build，builder 阶段 cargo build --release 每次都全量重编，没有命中 layer cache。请说明 Cargo 的 dependency caching 在 Docker 里失效的常见原因，以及用 cargo-chef 或手动先 COPY Cargo.toml 再 build 一个 dummy main 的两种方案各自的取舍。" }
+      ]
+    },
+    {
+      "id": "tool_json_01",
+      "bucket": "tool_json",
+      "system": "You are an agent that edits files via tools.",
+      "turns": [
+        { "role": "user", "text": "Create a minimal Cargo.toml for a binary crate named widget." },
+        {
+          "role": "tool_use",
+          "tool_id": "call_a1",
+          "tool_name": "file_write",
+          "tool_input": {
+            "path": "Cargo.toml",
+            "content": "[package]\nname = \"widget\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n",
+            "create_dirs": true,
+            "mode": "overwrite"
+          }
+        },
+        {
+          "role": "tool_result",
+          "tool_id": "call_a1",
+          "tool_name": "file_write",
+          "content": "Wrote 7 lines (98 bytes) to Cargo.toml. File did not previously exist."
+        }
+      ]
+    },
+    {
+      "id": "tool_json_02",
+      "bucket": "tool_json",
+      "system": null,
+      "turns": [
+        { "role": "user", "text": "List the open TCP ports." },
+        {
+          "role": "tool_use",
+          "tool_id": "call_b2",
+          "tool_name": "shell_exec",
+          "tool_input": {
+            "command": "ss -tlnp",
+            "timeout_secs": 10,
+            "env": { "LANG": "C" }
+          }
+        },
+        {
+          "role": "tool_result",
+          "tool_id": "call_b2",
+          "tool_name": "shell_exec",
+          "content": "State  Recv-Q Send-Q Local Address:Port Peer Address:Port\nLISTEN 0      128    0.0.0.0:22        0.0.0.0:*\nLISTEN 0      128    127.0.0.1:4545    0.0.0.0:*\nLISTEN 0      511    0.0.0.0:80        0.0.0.0:*"
+        }
+      ]
+    },
+    {
+      "id": "tool_json_03",
+      "bucket": "tool_json",
+      "system": "You are a coding agent with grep, read_file, and apply_patch tools.",
+      "turns": [
+        { "role": "user", "text": "Find where the retry budget is configured and show me the struct." },
+        {
+          "role": "tool_use",
+          "tool_id": "call_c3",
+          "tool_name": "grep",
+          "tool_input": {
+            "pattern": "struct\\s+RetryBudget",
+            "path": "crates",
+            "glob": "*.rs",
+            "output_mode": "content",
+            "case_insensitive": false,
+            "max_results": 20
+          }
+        },
+        {
+          "role": "tool_result",
+          "tool_id": "call_c3",
+          "tool_name": "grep",
+          "content": "crates/librefang-rl-export/src/retry.rs:41:pub struct RetryBudget {\ncrates/librefang-rl-export/src/retry.rs:43:    pub max_attempts: u32,\ncrates/librefang-rl-export/src/retry.rs:45:    pub base_delay_ms: u64,\ncrates/librefang-rl-export/src/retry.rs:47:    pub max_delay_ms: u64,\ncrates/librefang-rl-export/src/retry.rs:49:    pub jitter: bool,\n}"
+        }
+      ]
+    },
+    {
+      "id": "tool_json_04",
+      "bucket": "tool_json",
+      "system": null,
+      "turns": [
+        { "role": "user", "text": "Fetch the current weather for Shanghai and Beijing." },
+        {
+          "role": "tool_use",
+          "tool_id": "call_d4",
+          "tool_name": "http_request",
+          "tool_input": {
+            "method": "GET",
+            "url": "https://api.example.com/v1/weather",
+            "query": { "cities": ["Shanghai", "Beijing"], "units": "metric" },
+            "headers": { "Accept": "application/json", "Authorization": "Bearer REDACTED" },
+            "timeout_ms": 5000
+          }
+        },
+        {
+          "role": "tool_result",
+          "tool_id": "call_d4",
+          "tool_name": "http_request",
+          "content": "{\"results\":[{\"city\":\"Shanghai\",\"temp_c\":24.6,\"humidity\":0.71,\"conditions\":\"partly cloudy\"},{\"city\":\"Beijing\",\"temp_c\":19.2,\"humidity\":0.38,\"conditions\":\"clear\"}],\"fetched_at\":\"2026-06-22T03:14:00Z\"}"
+        }
+      ]
+    }
+  ]
+}
