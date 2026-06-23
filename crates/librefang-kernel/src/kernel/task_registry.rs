@@ -351,8 +351,7 @@ impl LibreFangKernel {
             // neither is available the home channel has no well-defined
             // default destination — skip the forward rather than guess a
             // recipient.
-            if let Some(arc) = self.self_handle.get().and_then(|w| w.upgrade()) {
-                let kernel_arc = arc;
+            if let Some(kernel_arc) = self.self_handle.get().and_then(|w| w.upgrade()) {
                 let destination = entry
                     .chat_id
                     .clone()
