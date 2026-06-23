@@ -70,6 +70,7 @@ const MANUAL_NESTED_ALIASES: &[(&str, &str)] = &[
 /// section is missing here (or if a stale key no longer maps to anything).
 pub(super) const PER_AGENT_OVERRIDE_KEYS: &[&str] = &[
     "compaction",
+    "context_engine",
     "exec_policy",
     "max_history_messages",
     "proactive_memory",

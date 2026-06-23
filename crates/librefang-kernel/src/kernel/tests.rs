@@ -11217,3 +11217,179 @@ fn approve_create_leaves_all_skills_agent_unpinned() {
 
     kernel.shutdown();
 }
+
+// ----- #6264: per-agent context-engine selection -----
+
+/// Identity of the engine `context_engine_for_agent` resolves to, by data
+/// pointer. The kernel-global engine is one fixed allocation; a per-agent
+/// override builds (and leaks) a distinct one and dedups by config. Comparing
+/// the trait object's data address proves *which* engine an agent got without
+/// needing an LLM driver to observe behavioral differences.
+fn engine_addr(kernel: &LibreFangKernel, manifest: &AgentManifest) -> Option<*const ()> {
+    kernel
+        .context_engine_for_agent(manifest)
+        .map(|e| e as *const dyn librefang_runtime::context_engine::ContextEngine as *const ())
+}
+
+fn engine_manifest(
+    name: &str,
+    ce: Option<librefang_types::config::ContextEngineTomlConfig>,
+) -> AgentManifest {
+    AgentManifest {
+        name: name.to_string(),
+        description: "ctx engine resolution fixture".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        context_engine: ce,
+        ..Default::default()
+    }
+}
+
+/// Resolution order: agent manifest override > kernel config > compiled default.
+///
+/// Boots a kernel whose *global* `[context_engine]` is `"summary"`, then:
+/// - an agent with a manifest `[context_engine] engine = "no_compact"` gets a
+///   distinct per-agent engine (NOT the global one);
+/// - an agent without an override falls back to the kernel-global engine;
+/// - two agents sharing the same override config share one engine instance.
+#[test]
+fn context_engine_resolution_prefers_agent_override_then_kernel_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-ctx-engine-resolution-test");
+    std::fs::create_dir_all(&home_dir).unwrap();
+
+    // Kernel-global engine is explicitly NOT the compiled default ("default"),
+    // so a fallback to the global engine is observably distinct from a fallback
+    // to the compiled default.
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    config.context_engine = librefang_types::config::ContextEngineTomlConfig {
+        engine: "summary".to_string(),
+        ..Default::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    // The kernel-global engine's address — what an agent WITHOUT an override
+    // must resolve to.
+    let global_addr = kernel
+        .context_engine
+        .as_deref()
+        .map(|e| e as *const dyn librefang_runtime::context_engine::ContextEngine as *const ())
+        .expect("global context engine should be built at boot");
+
+    // (1) Agent WITH a manifest override that differs from the global config.
+    let override_cfg = librefang_types::config::ContextEngineTomlConfig {
+        engine: "no_compact".to_string(),
+        ..Default::default()
+    };
+    let m_override = engine_manifest("agent-override", Some(override_cfg.clone()));
+    let override_addr =
+        engine_addr(&kernel, &m_override).expect("agent with override must resolve to an engine");
+    assert_ne!(
+        override_addr, global_addr,
+        "agent manifest override must win over kernel config — got the global engine instead"
+    );
+
+    // (2) Agent WITHOUT an override falls back to the kernel-global engine.
+    let m_plain = engine_manifest("agent-plain", None);
+    let plain_addr =
+        engine_addr(&kernel, &m_plain).expect("agent without override must resolve to global");
+    assert_eq!(
+        plain_addr, global_addr,
+        "agent without a manifest override must inherit the kernel-global engine"
+    );
+
+    // (3) Dedup: a second agent with the SAME override config shares one engine.
+    let m_override_2 = engine_manifest("agent-override-2", Some(override_cfg));
+    let override_addr_2 = engine_addr(&kernel, &m_override_2)
+        .expect("second agent with override must resolve to an engine");
+    assert_eq!(
+        override_addr, override_addr_2,
+        "two agents selecting the same context-engine config must share one built engine"
+    );
+
+    kernel.shutdown();
+}
+
+/// Compiled-default fallback: when NEITHER the kernel config nor the agent
+/// manifest sets a non-default `[context_engine]`, every agent resolves to the
+/// single kernel-global engine, which was built from the compiled default
+/// (`ContextEngineTomlConfig::default()` → `engine = "default"`). Absent both
+/// override sources, there is no second engine — proving step 3 of the
+/// resolution order (compiled default) is reached through the global engine.
+#[test]
+fn context_engine_resolution_compiled_default_when_no_override_set() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-ctx-engine-default-test");
+    std::fs::create_dir_all(&home_dir).unwrap();
+
+    // No explicit `config.context_engine` → KernelConfig::default() leaves it at
+    // ContextEngineTomlConfig::default() (engine = "default").
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    assert_eq!(
+        config.context_engine.engine, "default",
+        "precondition: kernel config must use the compiled-default engine"
+    );
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let global_addr = kernel
+        .context_engine
+        .as_deref()
+        .map(|e| e as *const dyn librefang_runtime::context_engine::ContextEngine as *const ())
+        .expect("global (compiled-default) context engine should be built at boot");
+
+    let m_plain = engine_manifest("default-agent", None);
+    let plain_addr =
+        engine_addr(&kernel, &m_plain).expect("agent must resolve to the compiled-default engine");
+    assert_eq!(
+        plain_addr, global_addr,
+        "with no override anywhere, the agent must get the compiled-default kernel-global engine"
+    );
+
+    kernel.shutdown();
+}
+
+/// The new per-agent override parses from `agent.toml` `[context_engine]` and
+/// from `HAND.toml` `[agents.<name>.context_engine]` (parity with
+/// `compaction` / `skill_workshop` / `proactive_memory`, #5476 / #6264).
+#[test]
+fn context_engine_override_parses_from_agent_toml() {
+    let toml_str = r#"
+name = "ctx-agent"
+
+[model]
+provider = "anthropic"
+model = "claude-3-haiku-20240307"
+
+[context_engine]
+engine = "no_compact"
+"#;
+    let manifest: AgentManifest = toml::from_str(toml_str).unwrap();
+    let ce = manifest
+        .context_engine
+        .expect("[context_engine] section must be parsed onto the manifest");
+    assert_eq!(ce.engine, "no_compact");
+
+    // Absent section → None → resolve() inherits the kernel-global engine.
+    let plain: AgentManifest = toml::from_str(
+        r#"
+name = "plain-agent"
+
+[model]
+provider = "anthropic"
+model = "claude-3-haiku-20240307"
+"#,
+    )
+    .unwrap();
+    assert!(
+        plain.context_engine.is_none(),
+        "missing [context_engine] must deserialize to None, not Default::default()"
+    );
+}

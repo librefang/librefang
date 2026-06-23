@@ -271,6 +271,8 @@ In-crate only; no cross-crate error-shape changes.
 
 ### Added
 
+- **feat(kernel): per-agent context-engine selection via `agent.toml`** (#6264) (@houko) — proposed by @pavver.
+  The context engine was chosen by a single global `config.toml: context_engine`. An agent's manifest (`agent.toml`, or a `HAND.toml [agents.<name>.context_engine]` block) can now override it, resolved as agent override > kernel config > compiled default — mirroring the existing per-agent `proactive_memory` / `skill_workshop` / `compaction` overrides (#5476). Per-agent engines are built lazily and deduplicated by config, and a malformed override falls back to the global engine rather than disabling recall/compaction. (The proposal's separate `RequestLlmSummary` hook-protocol change is deferred pending design sign-off.)
 - **feat(runtime): add the `agent` dimension to `librefang_tool_execution_seconds`** (#6244) (@houko).
   The per-tool latency histogram carried only a `tool` label, so per-tool p95 was an unweighted blend across every calling agent — a slow agent and a fast agent sharing a tool were indistinguishable, even though the sibling `librefang_tool_call_total` counter already carried `agent` (#6226).
   The histogram now emits `{agent,tool}`, with `agent` sourced from the `agent_id` already in scope and sanitized + length-capped like `tool`, so tool latency is attributable per agent while cardinality stays bounded.

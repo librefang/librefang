@@ -1589,6 +1589,7 @@ impl LibreFangKernel {
             tool_policy_override: std::sync::RwLock::new(None),
             context_engine,
             context_engine_config,
+            context_engine_overrides: std::sync::Mutex::new(std::collections::HashMap::new()),
             self_handle: OnceLock::new(),
             acp_fs_clients: dashmap::DashMap::new(),
             acp_terminal_clients: dashmap::DashMap::new(),
