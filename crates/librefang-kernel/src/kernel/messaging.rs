@@ -434,15 +434,22 @@ fn sidecar_default_conversation(
     sidecar_channels: &[librefang_types::config::SidecarChannelConfig],
     agent_name: &str,
 ) -> Option<String> {
-    sidecar_channels.iter().find_map(|sc| {
-        if sc.agent.as_deref() != Some(agent_name) {
-            return None;
-        }
-        sc.default_conversation
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-    })
+    // Resolve the SAME channel `resolve_agent_home_channel` picks — the first
+    // entry whose agent matches — and read only THAT channel's
+    // `default_conversation`. Using `find().and_then()` (not `find_map`) is
+    // load-bearing: if the home channel has no default we must return `None`,
+    // never skip ahead to a *different* channel's default. Otherwise a forward
+    // could pair the home channel (e.g. telegram) with another channel's
+    // conversation id (e.g. a slack chat), delivering to the wrong place.
+    sidecar_channels
+        .iter()
+        .find(|sc| sc.agent.as_deref() == Some(agent_name))
+        .and_then(|sc| {
+            sc.default_conversation
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
 }
 
 impl LibreFangKernel {
@@ -3484,6 +3491,38 @@ mod tests {
         assert_eq!(
             sidecar_default_conversation(&chans, "coder").as_deref(),
             Some("first")
+        );
+    }
+
+    /// Regression: when the agent's FIRST home channel has no
+    /// `default_conversation`, the resolver must return `None` — it must NOT
+    /// skip ahead and borrow a *later* channel's conversation id. Otherwise
+    /// the forward would pair the home channel `resolve_agent_home_channel`
+    /// picks (the first match) with a different channel's chat id, delivering
+    /// to the wrong place.
+    #[test]
+    fn default_conversation_does_not_borrow_from_a_later_channel() {
+        let chans = vec![
+            // First match — the home channel — has NO default_conversation.
+            sc(serde_json::json!({
+                "name": "tg-home",
+                "command": "python3",
+                "channel_type": "telegram",
+                "default_agent": "coder",
+            })),
+            // A later channel for the same agent DOES define one.
+            sc(serde_json::json!({
+                "name": "slack-other",
+                "command": "python3",
+                "channel_type": "slack",
+                "default_agent": "coder",
+                "default_conversation": "C999",
+            })),
+        ];
+        assert_eq!(
+            sidecar_default_conversation(&chans, "coder"),
+            None,
+            "must not borrow the slack channel's conversation for the telegram home channel"
         );
     }
 
