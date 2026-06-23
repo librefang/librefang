@@ -874,7 +874,8 @@ mod tests {
     #[test]
     fn new_command_is_reachable_from_cli_and_channel() {
         let def = lookup("new").expect("/new must be registered");
-        assert!(def.scope.contains(Scope::CLI), "/new must be CLI-reachable");
-        assert!(def.scope.contains(Scope::CHANNEL), "/new must remain channel-reachable");
+        // Reachable from both the CLI/TUI slash gate and channels, not just one.
+        assert!(def.scope.contains(Scope::CLI));
+        assert!(def.scope.contains(Scope::CHANNEL));
     }
 }
