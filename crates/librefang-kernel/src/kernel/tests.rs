@@ -11217,3 +11217,276 @@ fn approve_create_leaves_all_skills_agent_unpinned() {
 
     kernel.shutdown();
 }
+
+// ---------------------------------------------------------------------------
+// #5980: per-provider hourly-budget gate — exhaustion store wiring + the
+// single-provider hard-block decision.
+//
+// These exercise the kernel→gate→store contract that PR #5988 was missing:
+//   (a) a single-provider agent over its hourly cap is BLOCKED on the next
+//       dispatch (the gate returns `true` and `provider_exhausted_blocks_call`
+//       agrees there is no slot to skip to), and the usage counter does NOT
+//       keep climbing because no further record is written;
+//   (b) a multi-provider agent over the cap is NOT hard-blocked — the
+//       decision defers to the store-aware `FallbackDriver`, which skips the
+//       exhausted slot (proven via the SAME store handle the gate flags);
+//   (c) with no provider budget configured the gate is a no-op (`false`).
+// ---------------------------------------------------------------------------
+mod provider_budget_gate_5980 {
+    use super::*;
+    use librefang_llm_driver::exhaustion::ExhaustionReason;
+    use librefang_memory::usage::UsageRecord;
+    use librefang_types::agent::FallbackModel;
+    use librefang_types::config::ProviderBudget;
+
+    /// Push a provider's rolling hourly token window above `cap` by
+    /// recording a single usage row.
+    fn record_over_token_cap(kernel: &LibreFangKernel, provider: &str, tokens: u64) {
+        kernel
+            .metering
+            .engine
+            .record(&UsageRecord {
+                agent_id: AgentId::new(),
+                provider: provider.to_string(),
+                model: "test-model".to_string(),
+                input_tokens: tokens,
+                output_tokens: 0,
+                cost_usd: 0.0,
+                tool_calls: 0,
+                latency_ms: 1,
+                ..Default::default()
+            })
+            .unwrap();
+    }
+
+    fn single_provider_manifest(provider: &str) -> librefang_types::agent::AgentManifest {
+        let mut m = test_manifest("budget-agent", "single-provider", vec![]);
+        m.model.provider = provider.to_string();
+        // Explicit opt-out so a global fallback chain can't accidentally
+        // turn this into a multi-provider agent.
+        m.fallback_models = Some(vec![]);
+        m
+    }
+
+    fn multi_provider_manifest(
+        provider: &str,
+        fallback_provider: &str,
+    ) -> librefang_types::agent::AgentManifest {
+        let mut m = test_manifest("budget-agent", "multi-provider", vec![]);
+        m.model.provider = provider.to_string();
+        m.fallback_models = Some(vec![FallbackModel {
+            provider: fallback_provider.to_string(),
+            model: "fallback-model".to_string(),
+            api_key_env: None,
+            base_url: None,
+            extra_params: std::collections::BTreeMap::new(),
+        }]);
+        m
+    }
+
+    // (a) Single-provider agent over the hourly token cap → gate flags
+    // exhausted AND the call-site decision blocks (no fallback slot). The
+    // usage counter must not keep climbing: the kernel records nothing more
+    // because the dispatch is refused before the LLM call.
+    #[test]
+    fn single_provider_over_cap_is_hard_blocked() {
+        let kernel = boot_kernel_for_display_tests();
+        kernel.update_budget_config(|b| {
+            b.providers.insert(
+                "moonshot".to_string(),
+                ProviderBudget {
+                    max_tokens_per_hour: 100,
+                    ..Default::default()
+                },
+            );
+        });
+        record_over_token_cap(&kernel, "moonshot", 1_000);
+
+        let exhausted = kernel.flag_provider_budget_if_exhausted("moonshot");
+        assert!(
+            exhausted,
+            "provider over its hourly token cap must flag true"
+        );
+
+        // Side effect: the shared store now reports moonshot exhausted.
+        let store = kernel
+            .metering
+            .engine
+            .exhaustion_store()
+            .expect("boot wires a shared exhaustion store");
+        assert_eq!(
+            store
+                .is_exhausted("moonshot")
+                .expect("moonshot must be flagged in the store")
+                .reason,
+            ExhaustionReason::BudgetExceeded
+        );
+
+        // Decision: single-provider agent (no fallback) → hard block.
+        let manifest = single_provider_manifest("moonshot");
+        let cfg = kernel.config.load_full();
+        assert!(
+            kernel.provider_exhausted_blocks_call(exhausted, &manifest, &cfg),
+            "single-provider agent over cap must hard-block the dispatch"
+        );
+
+        // The counter cannot keep climbing past the cap: the block fires
+        // BEFORE `resolve_driver`/dispatch, so no further usage row is
+        // written. Re-running the gate (no new usage recorded in between) is
+        // stable — still over cap, still blocking — proving the cap stays
+        // enforced rather than the dispatch leaking through.
+        let exhausted_again = kernel.flag_provider_budget_if_exhausted("moonshot");
+        assert!(
+            exhausted_again
+                && kernel.provider_exhausted_blocks_call(exhausted_again, &manifest, &cfg),
+            "the gate must keep blocking; the over-cap counter never drains via a leaked dispatch"
+        );
+
+        kernel.shutdown();
+    }
+
+    // (b) Multi-provider agent over the cap → NOT hard-blocked; the decision
+    // defers to the FallbackDriver. We then prove the FallbackDriver, wired
+    // with the SAME store handle the gate flags, pre-skips the exhausted slot
+    // and serves from the healthy provider.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn multi_provider_over_cap_defers_to_fallback_skip() {
+        use async_trait::async_trait;
+        use librefang_runtime::llm_driver::{
+            CompletionRequest, CompletionResponse, LlmDriver, LlmError,
+        };
+        use librefang_types::message::{ContentBlock, StopReason, TokenUsage};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let kernel = boot_kernel_for_display_tests();
+        kernel.update_budget_config(|b| {
+            b.providers.insert(
+                "moonshot".to_string(),
+                ProviderBudget {
+                    max_tokens_per_hour: 100,
+                    ..Default::default()
+                },
+            );
+        });
+        record_over_token_cap(&kernel, "moonshot", 1_000);
+
+        let exhausted = kernel.flag_provider_budget_if_exhausted("moonshot");
+        assert!(exhausted);
+
+        // Multi-provider agent → the call site must NOT hard-block.
+        let manifest = multi_provider_manifest("moonshot", "groq");
+        let cfg = kernel.config.load_full();
+        assert!(
+            !kernel.provider_exhausted_blocks_call(exhausted, &manifest, &cfg),
+            "multi-provider agent must defer to the FallbackDriver, not hard-block"
+        );
+
+        // Now prove the driver skips: build a FallbackDriver over the SAME
+        // store handle the gate flagged (mirrors resolve_driver wiring).
+        struct CountingFailDriver(AtomicUsize);
+        #[async_trait]
+        impl LlmDriver for CountingFailDriver {
+            async fn complete(
+                &self,
+                _req: CompletionRequest,
+            ) -> Result<CompletionResponse, LlmError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Err(LlmError::Api {
+                    status: 500,
+                    message: "exhausted slot must not be dispatched".to_string(),
+                    code: None,
+                })
+            }
+        }
+        struct OkDriver;
+        #[async_trait]
+        impl LlmDriver for OkDriver {
+            async fn complete(
+                &self,
+                _req: CompletionRequest,
+            ) -> Result<CompletionResponse, LlmError> {
+                Ok(CompletionResponse {
+                    content: vec![ContentBlock::Text {
+                        text: "served by healthy provider".to_string(),
+                        provider_metadata: None,
+                    }],
+                    stop_reason: StopReason::EndTurn,
+                    tool_calls: vec![],
+                    usage: TokenUsage::default(),
+                    actual_provider: None,
+                    actual_model: None,
+                })
+            }
+        }
+
+        let store = kernel
+            .metering
+            .engine
+            .exhaustion_store()
+            .expect("boot wires a shared exhaustion store");
+
+        let moonshot_driver = Arc::new(CountingFailDriver(AtomicUsize::new(0)));
+        let moonshot_calls = Arc::clone(&moonshot_driver);
+        let fb =
+            librefang_runtime::drivers::fallback::FallbackDriver::with_models_and_providers(vec![
+                (
+                    moonshot_driver as Arc<dyn LlmDriver>,
+                    "moonshot-model".to_string(),
+                    "moonshot".to_string(),
+                ),
+                (
+                    Arc::new(OkDriver) as Arc<dyn LlmDriver>,
+                    "groq-model".to_string(),
+                    "groq".to_string(),
+                ),
+            ])
+            .with_exhaustion_store(store);
+
+        let req = CompletionRequest {
+            model: "moonshot-model".to_string(),
+            ..Default::default()
+        };
+        let resp = fb.complete(req).await.expect("healthy provider serves");
+        assert_eq!(resp.actual_provider.as_deref(), Some("groq"));
+        assert_eq!(
+            moonshot_calls.0.load(Ordering::SeqCst),
+            0,
+            "exhausted moonshot slot must be pre-skipped, never dispatched"
+        );
+
+        kernel.shutdown();
+    }
+
+    // (c) No provider budget configured → the gate is a cheap no-op and never
+    // flags, so behavior is unchanged (the call dispatches normally).
+    #[test]
+    fn no_budget_configured_gate_is_noop() {
+        let kernel = boot_kernel_for_display_tests();
+        // Record plenty of usage, but configure NO provider budget.
+        record_over_token_cap(&kernel, "moonshot", 1_000_000);
+
+        let exhausted = kernel.flag_provider_budget_if_exhausted("moonshot");
+        assert!(!exhausted, "no configured budget must never flag exhausted");
+
+        let store = kernel
+            .metering
+            .engine
+            .exhaustion_store()
+            .expect("boot wires a shared exhaustion store");
+        assert!(
+            store.is_exhausted("moonshot").is_none(),
+            "no budget ⇒ provider is never flagged in the store"
+        );
+
+        // And the call-site decision never blocks even for a single-provider
+        // agent, because `exhausted` is false.
+        let manifest = single_provider_manifest("moonshot");
+        let cfg = kernel.config.load_full();
+        assert!(
+            !kernel.provider_exhausted_blocks_call(exhausted, &manifest, &cfg),
+            "an unconfigured-budget agent is never blocked"
+        );
+
+        kernel.shutdown();
+    }
+}
