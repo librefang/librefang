@@ -1678,19 +1678,17 @@ impl LibreFangKernel {
 /// Stable fingerprint of a per-agent `[context_engine]` override config
 /// (#6264), used as the cache key in [`LibreFangKernel::context_engine_overrides`].
 ///
-/// Two manifests with byte-identical engine configs hash to the same key and
-/// therefore share one built engine. The config is serialized to canonical
-/// JSON (`serde_json` orders struct fields by declaration, deterministically)
-/// and hashed with `DefaultHasher`. Returns `None` only if serialization
-/// fails, in which case the caller falls back to the kernel-global engine.
+/// Two manifests with byte-identical engine configs map to the same key and
+/// therefore share one built engine. The key is the config's canonical JSON
+/// itself (`serde_json` orders struct fields by declaration, deterministically)
+/// — used verbatim as the map key rather than a `u64` hash so distinct configs
+/// can never collide onto the same cached engine. Returns `None` only if
+/// serialization fails, in which case the caller falls back to the
+/// kernel-global engine.
 fn context_engine_config_fingerprint(
     cfg: &librefang_types::config::ContextEngineTomlConfig,
-) -> Option<u64> {
-    use std::hash::{Hash, Hasher};
-    let json = serde_json::to_string(cfg).ok()?;
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    json.hash(&mut hasher);
-    Some(hasher.finish())
+) -> Option<String> {
+    serde_json::to_string(cfg).ok()
 }
 
 #[cfg(test)]

@@ -746,7 +746,7 @@ pub struct LibreFangKernel {
     /// never touch this map.
     context_engine_overrides: std::sync::Mutex<
         std::collections::HashMap<
-            u64,
+            String,
             &'static dyn librefang_runtime::context_engine::ContextEngine,
         >,
     >,
