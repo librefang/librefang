@@ -1,4 +1,5 @@
 use super::*;
+use async_trait::async_trait;
 use librefang_memory::session::Session as MemSession;
 use librefang_memory::MemorySubstrate;
 use librefang_types::message::Message;
@@ -8,6 +9,81 @@ use tempfile::tempdir;
 
 fn make_memory() -> Arc<MemorySubstrate> {
     Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap())
+}
+
+struct TransformOnlyEngine {
+    calls: Arc<AtomicUsize>,
+    rewrite: Option<&'static str>,
+}
+
+#[async_trait]
+impl ContextEngine for TransformOnlyEngine {
+    async fn bootstrap(&self, _config: &ContextEngineConfig) -> LibreFangResult<()> {
+        Ok(())
+    }
+
+    async fn ingest(
+        &self,
+        _agent_id: AgentId,
+        _user_message: &str,
+        _peer_id: Option<&str>,
+    ) -> LibreFangResult<IngestResult> {
+        Ok(IngestResult {
+            recalled_memories: vec![],
+        })
+    }
+
+    async fn assemble(
+        &self,
+        _agent_id: AgentId,
+        _messages: &mut Vec<Message>,
+        _system_prompt: &str,
+        _tools: &[ToolDefinition],
+        _context_window_tokens: usize,
+    ) -> LibreFangResult<AssembleResult> {
+        Ok(AssembleResult {
+            recovery: RecoveryStage::None,
+        })
+    }
+
+    async fn compact(
+        &self,
+        _agent_id: AgentId,
+        messages: &[Message],
+        _driver: Arc<dyn LlmDriver>,
+        _model: &str,
+        _context_window_tokens: usize,
+    ) -> LibreFangResult<CompactionResult> {
+        Ok(CompactionResult {
+            summary: String::new(),
+            kept_messages: messages.to_vec(),
+            compacted_count: 0,
+            chunks_used: 1,
+            used_fallback: true,
+        })
+    }
+
+    async fn after_turn(&self, _agent_id: AgentId, _messages: &[Message]) -> LibreFangResult<()> {
+        Ok(())
+    }
+
+    fn truncate_tool_result(&self, content: &str, _context_window_tokens: usize) -> String {
+        content.to_string()
+    }
+
+    async fn transform_tool_result(
+        &self,
+        _agent_id: AgentId,
+        _tool_name: &str,
+        _tool_use_id: &str,
+        _input: &serde_json::Value,
+        _content: &str,
+        _is_error: bool,
+        _status: librefang_types::tool::ToolExecutionStatus,
+    ) -> LibreFangResult<Option<String>> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        Ok(self.rewrite.map(str::to_string))
+    }
 }
 
 #[tokio::test]
@@ -160,6 +236,72 @@ async fn test_subagent_hooks_noop() {
     let child = AgentId::new();
     assert!(engine.prepare_subagent_context(parent, child).await.is_ok());
     assert!(engine.merge_subagent_context(parent, child).await.is_ok());
+}
+
+#[tokio::test]
+async fn test_stacked_transform_tool_result_uses_first_rewrite() {
+    let first_calls = Arc::new(AtomicUsize::new(0));
+    let second_calls = Arc::new(AtomicUsize::new(0));
+    let engine = StackedContextEngine::new(vec![
+        Box::new(TransformOnlyEngine {
+            calls: first_calls.clone(),
+            rewrite: Some("first rewrite"),
+        }),
+        Box::new(TransformOnlyEngine {
+            calls: second_calls.clone(),
+            rewrite: Some("second rewrite"),
+        }),
+    ]);
+
+    let rewritten = engine
+        .transform_tool_result(
+            AgentId::from_name("rust-agent"),
+            "shell",
+            "toolu_1",
+            &serde_json::json!({"command": "cargo check"}),
+            "raw output",
+            false,
+            librefang_types::tool::ToolExecutionStatus::Completed,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(rewritten.as_deref(), Some("first rewrite"));
+    assert_eq!(first_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(second_calls.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn test_stacked_transform_tool_result_falls_through_noop_layers() {
+    let first_calls = Arc::new(AtomicUsize::new(0));
+    let second_calls = Arc::new(AtomicUsize::new(0));
+    let engine = StackedContextEngine::new(vec![
+        Box::new(TransformOnlyEngine {
+            calls: first_calls.clone(),
+            rewrite: None,
+        }),
+        Box::new(TransformOnlyEngine {
+            calls: second_calls.clone(),
+            rewrite: Some("second rewrite"),
+        }),
+    ]);
+
+    let rewritten = engine
+        .transform_tool_result(
+            AgentId::from_name("rust-agent"),
+            "shell",
+            "toolu_1",
+            &serde_json::json!({"command": "cargo check"}),
+            "raw output",
+            false,
+            librefang_types::tool::ToolExecutionStatus::Completed,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(rewritten.as_deref(), Some("second rewrite"));
+    assert_eq!(first_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(second_calls.load(Ordering::Relaxed), 1);
 }
 
 #[tokio::test]
@@ -337,6 +479,55 @@ fn test_build_context_engine_missing_plugin_falls_back() {
     // Should fall back to default engine, not panic
     let engine = build_context_engine(&toml_config, runtime_config, make_memory(), None, &|_| None);
     let _ = engine;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_build_context_engine_transform_tool_result_hook_is_active() {
+    let tmp = tempdir().unwrap();
+    let script = tmp.path().join("rewrite.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"content\":\"rewritten by factory hook\"}'\n",
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+    }
+
+    let toml_config = librefang_types::config::ContextEngineTomlConfig {
+        hooks: librefang_types::config::ContextEngineHooks {
+            transform_tool_result: Some(script.to_string_lossy().to_string()),
+            runtime: Some("native".to_string()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let engine = build_context_engine(
+        &toml_config,
+        ContextEngineConfig::default(),
+        make_memory(),
+        None,
+        &|_| None,
+    );
+
+    let rewritten = engine
+        .transform_tool_result(
+            AgentId::from_name("rust-agent"),
+            "shell",
+            "toolu_1",
+            &serde_json::json!({"command": "cargo check"}),
+            "raw cargo output",
+            false,
+            librefang_types::tool::ToolExecutionStatus::Completed,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(rewritten.as_deref(), Some("rewritten by factory hook"));
 }
 
 // -----------------------------------------------------------------------

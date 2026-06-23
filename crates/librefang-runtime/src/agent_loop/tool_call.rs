@@ -1117,7 +1117,7 @@ pub(super) async fn execute_single_tool_call_core(
     fire_hook_best_effort(ctx.hooks, &hook_ctx);
 
     // Allow plugins to rewrite the tool result before it enters the conversation context.
-    let result_content = if let Some(hook_reg) = ctx.hooks {
+    let mut result_content = if let Some(hook_reg) = ctx.hooks {
         let transform_ctx = crate::hooks::HookContext {
             agent_name: &ctx.manifest.name,
             agent_id: ctx.caller_id_str,
@@ -1135,6 +1135,33 @@ pub(super) async fn execute_single_tool_call_core(
     } else {
         result.content.clone()
     };
+
+    if let Some(engine) = ctx.context_engine {
+        match engine
+            .transform_tool_result(
+                ctx.session.agent_id,
+                &tool_call.name,
+                &tool_call.id,
+                &tool_call.input,
+                &result_content,
+                result.is_error,
+                result.status,
+            )
+            .await
+        {
+            Ok(Some(rewritten)) => {
+                result_content = rewritten;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                warn!(
+                    tool = %tool_call.name,
+                    error = %e,
+                    "Context engine transform_tool_result hook failed; keeping original tool result"
+                );
+            }
+        }
+    }
 
     // Spill the full raw result to the artifact store BEFORE
     // `sanitize_tool_result_content` truncates it. Web tools spill at

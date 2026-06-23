@@ -122,6 +122,7 @@ impl ContextEngine for ScriptableContextEngine {
             ("bootstrap", &self.bootstrap_script),
             ("assemble", &self.assemble_script),
             ("compact", &self.compact_script),
+            ("transform_tool_result", &self.transform_tool_result_script),
             ("prepare_subagent", &self.prepare_subagent_script),
             ("merge_subagent", &self.merge_subagent_script),
             ("on_event", &self.on_event_script),
@@ -838,6 +839,62 @@ impl ContextEngine for ScriptableContextEngine {
         }
     }
 
+    async fn transform_tool_result(
+        &self,
+        agent_id: AgentId,
+        tool_name: &str,
+        tool_use_id: &str,
+        input: &serde_json::Value,
+        content: &str,
+        is_error: bool,
+        status: librefang_types::tool::ToolExecutionStatus,
+    ) -> LibreFangResult<Option<String>> {
+        let Some(ref script) = self.transform_tool_result_script else {
+            return Ok(None);
+        };
+
+        if !self.agent_passes_filter(&agent_id) {
+            return Ok(None);
+        }
+
+        let input_json = serde_json::json!({
+            "type": "transform_tool_result",
+            "agent_id": agent_id.0.to_string(),
+            "tool_name": tool_name,
+            "tool_use_id": tool_use_id,
+            "input": input,
+            "content": content,
+            "is_error": is_error,
+            "status": status,
+        });
+
+        match self
+            .call_hook_dispatch(
+                "transform_tool_result",
+                script,
+                input_json,
+                self.hook_timeout_secs,
+                Some(&agent_id),
+            )
+            .await
+        {
+            Ok((output, ms)) => {
+                Self::record_hook(&self.metrics, "transform_tool_result", ms, true);
+                self.record_per_agent(&agent_id, ms, true);
+                Ok(output
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .map(ToOwned::to_owned))
+            }
+            Err(e) => {
+                Self::record_hook(&self.metrics, "transform_tool_result", 0, false);
+                self.record_per_agent(&agent_id, 0, false);
+                self.apply_failure_policy("transform_tool_result", &e)?;
+                Ok(None)
+            }
+        }
+    }
+
     async fn after_turn(&self, agent_id: AgentId, messages: &[Message]) -> LibreFangResult<()> {
         // Run default after_turn first
         self.inner.after_turn(agent_id, messages).await?;
@@ -1189,7 +1246,35 @@ mod request_llm_summary_tests {
     use super::*;
     use crate::llm_driver::{CompletionRequest, CompletionResponse, LlmError};
     use async_trait::async_trait;
+    use librefang_memory::MemorySubstrate;
     use librefang_types::message::{ContentBlock, StopReason, TokenUsage};
+    use librefang_types::tool::ToolExecutionStatus;
+    use std::sync::Arc;
+
+    fn make_transform_script(body: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("rewrite.sh");
+        std::fs::write(&script, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&script).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script, perms).unwrap();
+        }
+        (tmp, script)
+    }
+
+    fn make_transform_engine(
+        hooks: librefang_types::config::ContextEngineHooks,
+    ) -> ScriptableContextEngine {
+        let inner = DefaultContextEngine::new(
+            ContextEngineConfig::default(),
+            Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap()),
+            None,
+        );
+        ScriptableContextEngine::new(inner, &hooks)
+    }
 
     /// Stub driver that echoes a fixed summary, so the test asserts the host
     /// actually ran the LLM for a `request_llm_summary` directive.
@@ -1260,5 +1345,122 @@ mod request_llm_summary_tests {
             "request_llm_summary": { "summarize": [], "keep": [Message::user("k")] }
         });
         assert!(try_host_summary(&output, &driver("x"), "m").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn transform_tool_result_script_rewrites_content() {
+        let (_tmp, script) = make_transform_script(
+            "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"content\":\"cleaned cargo output\"}'\n",
+        );
+        let hooks = librefang_types::config::ContextEngineHooks {
+            transform_tool_result: Some(script.to_string_lossy().to_string()),
+            runtime: Some("native".to_string()),
+            ..Default::default()
+        };
+        let engine = make_transform_engine(hooks);
+
+        let rewritten = engine
+            .transform_tool_result(
+                AgentId::from_name("rust-agent"),
+                "shell",
+                "toolu_1",
+                &serde_json::json!({"command": "cargo check"}),
+                "Compiling noisy crate\nerror[E0308]: mismatched types",
+                true,
+                ToolExecutionStatus::Error,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(rewritten.as_deref(), Some("cleaned cargo output"));
+        assert_eq!(engine.metrics().transform_tool_result.calls, 1);
+        assert_eq!(engine.metrics().transform_tool_result.successes, 1);
+    }
+
+    #[tokio::test]
+    async fn transform_tool_result_missing_content_is_noop() {
+        let (_tmp, script) =
+            make_transform_script("#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{}'\n");
+        let hooks = librefang_types::config::ContextEngineHooks {
+            transform_tool_result: Some(script.to_string_lossy().to_string()),
+            runtime: Some("native".to_string()),
+            ..Default::default()
+        };
+        let engine = make_transform_engine(hooks);
+
+        let rewritten = engine
+            .transform_tool_result(
+                AgentId::from_name("rust-agent"),
+                "shell",
+                "toolu_1",
+                &serde_json::json!({"command": "cargo check"}),
+                "raw cargo output",
+                false,
+                ToolExecutionStatus::Completed,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(rewritten, None);
+        assert_eq!(engine.metrics().transform_tool_result.calls, 1);
+        assert_eq!(engine.metrics().transform_tool_result.successes, 1);
+    }
+
+    #[tokio::test]
+    async fn transform_tool_result_script_failure_is_noop_with_warn_policy() {
+        let (_tmp, script) = make_transform_script("#!/bin/sh\nexit 42\n");
+        let hooks = librefang_types::config::ContextEngineHooks {
+            transform_tool_result: Some(script.to_string_lossy().to_string()),
+            runtime: Some("native".to_string()),
+            ..Default::default()
+        };
+        let engine = make_transform_engine(hooks);
+
+        let rewritten = engine
+            .transform_tool_result(
+                AgentId::from_name("rust-agent"),
+                "shell",
+                "toolu_1",
+                &serde_json::json!({"command": "cargo check"}),
+                "raw cargo output",
+                true,
+                ToolExecutionStatus::Error,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(rewritten, None);
+        assert_eq!(engine.metrics().transform_tool_result.calls, 1);
+        assert_eq!(engine.metrics().transform_tool_result.failures, 1);
+    }
+
+    #[tokio::test]
+    async fn transform_tool_result_agent_filter_skips_hook() {
+        let (_tmp, script) = make_transform_script(
+            "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"content\":\"wrong\"}'\n",
+        );
+        let hooks = librefang_types::config::ContextEngineHooks {
+            transform_tool_result: Some(script.to_string_lossy().to_string()),
+            runtime: Some("native".to_string()),
+            only_for_agent_ids: vec!["android-agent".to_string()],
+            ..Default::default()
+        };
+        let engine = make_transform_engine(hooks);
+
+        let rewritten = engine
+            .transform_tool_result(
+                AgentId::from_name("rust-agent"),
+                "shell",
+                "toolu_1",
+                &serde_json::json!({"command": "cargo check"}),
+                "raw cargo output",
+                false,
+                ToolExecutionStatus::Completed,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(rewritten, None);
+        assert_eq!(engine.metrics().transform_tool_result.calls, 0);
     }
 }

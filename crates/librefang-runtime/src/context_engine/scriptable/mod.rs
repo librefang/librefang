@@ -1,6 +1,7 @@
 //! Scriptable context engine: hook-driven implementation that runs plugin
-//! scripts for `bootstrap`, `ingest`, `assemble`, `compact`, `after_turn`,
-//! `prepare_subagent`, `merge_subagent`, and `truncate_tool_result`.
+//! scripts for `bootstrap`, `ingest`, `assemble`, `compact`,
+//! `transform_tool_result`, `after_turn`, `prepare_subagent`, and
+//! `merge_subagent`.
 //!
 //! Includes the hook telemetry surface (`HookTrace`, `HookStats`,
 //! `HookMetrics`), the per-hook circuit breaker / rate limiter, and the
@@ -71,6 +72,7 @@ pub struct HookMetrics {
     pub bootstrap: HookStats,
     pub assemble: HookStats,
     pub compact: HookStats,
+    pub transform_tool_result: HookStats,
     pub prepare_subagent: HookStats,
     pub merge_subagent: HookStats,
 }
@@ -224,6 +226,7 @@ pub struct ScriptableContextEngine {
     bootstrap_script: Option<String>,
     assemble_script: Option<String>,
     compact_script: Option<String>,
+    transform_tool_result_script: Option<String>,
     prepare_subagent_script: Option<String>,
     merge_subagent_script: Option<String>,
     runtime: crate::plugin_runtime::PluginRuntime,
@@ -342,6 +345,7 @@ impl ScriptableContextEngine {
             ("bootstrap", &hooks.bootstrap),
             ("assemble", &hooks.assemble),
             ("compact", &hooks.compact),
+            ("transform_tool_result", &hooks.transform_tool_result),
             ("prepare_subagent", &hooks.prepare_subagent),
             ("merge_subagent", &hooks.merge_subagent),
             ("on_event", &hooks.on_event),
@@ -379,6 +383,7 @@ impl ScriptableContextEngine {
             bootstrap_script: hooks.bootstrap.clone(),
             assemble_script: hooks.assemble.clone(),
             compact_script: hooks.compact.clone(),
+            transform_tool_result_script: hooks.transform_tool_result.clone(),
             prepare_subagent_script: hooks.prepare_subagent.clone(),
             merge_subagent_script: hooks.merge_subagent.clone(),
             runtime: crate::plugin_runtime::PluginRuntime::from_tag(hooks.runtime.as_deref()),
@@ -937,6 +942,7 @@ impl ScriptableContextEngine {
             ("bootstrap", &self.bootstrap_script),
             ("assemble", &self.assemble_script),
             ("compact", &self.compact_script),
+            ("transform_tool_result", &self.transform_tool_result_script),
             ("on_event", &self.on_event_script),
         ];
         for (name, script_opt) in hooks {
@@ -972,6 +978,7 @@ impl ScriptableContextEngine {
             &self.bootstrap_script,
             &self.assemble_script,
             &self.compact_script,
+            &self.transform_tool_result_script,
             &self.on_event_script,
         ];
         for script in hooks.iter().filter_map(|opt| opt.as_deref()) {
@@ -1029,6 +1036,7 @@ impl ScriptableContextEngine {
                 "bootstrap" => &mut m.bootstrap,
                 "assemble" => &mut m.assemble,
                 "compact" => &mut m.compact,
+                "transform_tool_result" => &mut m.transform_tool_result,
                 "prepare_subagent" => &mut m.prepare_subagent,
                 "merge_subagent" => &mut m.merge_subagent,
                 _ => return,
@@ -1707,6 +1715,7 @@ impl ScriptableContextEngine {
             &self.bootstrap_script,
             &self.assemble_script,
             &self.compact_script,
+            &self.transform_tool_result_script,
             &self.prepare_subagent_script,
             &self.merge_subagent_script,
             &self.on_event_script,
@@ -1869,6 +1878,12 @@ pub(super) fn load_plugin(
             .as_ref()
             .map(|p| resolve_and_sandbox(p))
             .transpose()?,
+        transform_tool_result: manifest
+            .hooks
+            .transform_tool_result
+            .as_ref()
+            .map(|p| resolve_and_sandbox(p))
+            .transpose()?,
         prepare_subagent: manifest
             .hooks
             .prepare_subagent
@@ -1925,6 +1940,7 @@ pub(super) fn load_plugin(
         bootstrap = ?resolved_hooks.bootstrap,
         assemble = ?resolved_hooks.assemble,
         compact = ?resolved_hooks.compact,
+        transform_tool_result = ?resolved_hooks.transform_tool_result,
         prepare_subagent = ?resolved_hooks.prepare_subagent,
         merge_subagent = ?resolved_hooks.merge_subagent,
         "Loaded plugin manifest"

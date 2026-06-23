@@ -41,6 +41,7 @@ pub fn manifest_missing_integrity_hooks(manifest: &PluginManifest) -> Vec<String
         manifest.hooks.bootstrap.as_deref(),
         manifest.hooks.assemble.as_deref(),
         manifest.hooks.compact.as_deref(),
+        manifest.hooks.transform_tool_result.as_deref(),
         manifest.hooks.prepare_subagent.as_deref(),
         manifest.hooks.merge_subagent.as_deref(),
     ]
@@ -859,8 +860,8 @@ pub fn sign_plugin(name: &str) -> Result<std::collections::HashMap<String, Strin
 ///
 /// Returns a flat `Vec` of relative paths (e.g. `"hooks/ingest.py"`) in the
 /// canonical declaration order: ingest, after_turn, bootstrap, assemble,
-/// compact, prepare_subagent, merge_subagent.  Hooks that aren't declared
-/// produce no entry.
+/// compact, transform_tool_result, prepare_subagent, merge_subagent. Hooks
+/// that aren't declared produce no entry.
 fn declared_hook_paths(manifest: &PluginManifest) -> Vec<String> {
     [
         manifest.hooks.ingest.as_deref(),
@@ -868,6 +869,7 @@ fn declared_hook_paths(manifest: &PluginManifest) -> Vec<String> {
         manifest.hooks.bootstrap.as_deref(),
         manifest.hooks.assemble.as_deref(),
         manifest.hooks.compact.as_deref(),
+        manifest.hooks.transform_tool_result.as_deref(),
         manifest.hooks.prepare_subagent.as_deref(),
         manifest.hooks.merge_subagent.as_deref(),
     ]
@@ -1493,18 +1495,7 @@ fn check_hooks_exist(plugin_dir: &Path, manifest: &PluginManifest) -> bool {
         }
     };
 
-    let mut valid = true;
-    if let Some(ref p) = manifest.hooks.ingest {
-        if !check(p) {
-            valid = false;
-        }
-    }
-    if let Some(ref p) = manifest.hooks.after_turn {
-        if !check(p) {
-            valid = false;
-        }
-    }
-    valid
+    declared_hook_paths(manifest).iter().all(|p| check(p))
 }
 
 /// Calculate total size of a directory recursively.

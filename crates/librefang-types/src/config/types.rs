@@ -4208,6 +4208,11 @@ pub struct ContextEngineHooks {
     /// Returns: `{"type": "compact_result", "messages": [...]}` — compacted message list.
     /// Falls back to default LLM-based compaction if script fails.
     pub compact: Option<String>,
+    /// Script for rewriting a tool result before it is written into session history.
+    /// Receives: `{"type": "transform_tool_result", "agent_id": "...", "tool_name": "...", "tool_use_id": "...", "input": {...}, "content": "...", "is_error": bool, "status": "..."}`
+    /// Returns: `{"content": "rewritten tool output"}` to replace only the
+    /// model-visible content. Missing `content` leaves the original result unchanged.
+    pub transform_tool_result: Option<String>,
     /// Script for the `prepare_subagent` hook (called before sub-agent spawn).
     /// Receives: `{"type": "prepare_subagent", "parent_id": "...", "child_id": "..."}`
     /// Returns: `{"type": "ok"}`

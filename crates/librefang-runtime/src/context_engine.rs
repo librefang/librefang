@@ -371,6 +371,27 @@ pub trait ContextEngine: Send + Sync {
     /// indexes, or perform any post-turn bookkeeping.
     async fn after_turn(&self, agent_id: AgentId, messages: &[Message]) -> LibreFangResult<()>;
 
+    /// Called after a tool executes but before its result is written into
+    /// session history.
+    ///
+    /// Return `Ok(Some(content))` to replace only the model-visible
+    /// `tool_result.content`. Return `Ok(None)` to keep the original output.
+    /// Implementations must preserve tool-use pairing invariants by not
+    /// changing the tool result id, status, or error flag.
+    #[allow(clippy::too_many_arguments)]
+    async fn transform_tool_result(
+        &self,
+        _agent_id: AgentId,
+        _tool_name: &str,
+        _tool_use_id: &str,
+        _input: &serde_json::Value,
+        _content: &str,
+        _is_error: bool,
+        _status: librefang_types::tool::ToolExecutionStatus,
+    ) -> LibreFangResult<Option<String>> {
+        Ok(None)
+    }
+
     /// Called before a sub-agent is spawned.
     ///
     /// Use this to prepare isolated memory scopes or fork context for
@@ -1073,6 +1094,43 @@ impl ContextEngine for StackedContextEngine {
         Ok(())
     }
 
+    async fn transform_tool_result(
+        &self,
+        agent_id: AgentId,
+        tool_name: &str,
+        tool_use_id: &str,
+        input: &serde_json::Value,
+        content: &str,
+        is_error: bool,
+        status: librefang_types::tool::ToolExecutionStatus,
+    ) -> LibreFangResult<Option<String>> {
+        for (i, engine) in self.engines.iter().enumerate() {
+            match engine
+                .transform_tool_result(
+                    agent_id,
+                    tool_name,
+                    tool_use_id,
+                    input,
+                    content,
+                    is_error,
+                    status,
+                )
+                .await
+            {
+                Ok(Some(rewritten)) => return Ok(Some(rewritten)),
+                Ok(None) => {}
+                Err(e) => {
+                    warn!(
+                        index = i,
+                        error = %e,
+                        "StackedContextEngine: transform_tool_result error, trying next engine"
+                    );
+                }
+            }
+        }
+        Ok(None)
+    }
+
     async fn prepare_subagent_context(
         &self,
         parent_id: AgentId,
@@ -1134,6 +1192,7 @@ impl ContextEngine for StackedContextEngine {
                 add_stats!(bootstrap);
                 add_stats!(assemble);
                 add_stats!(compact);
+                add_stats!(transform_tool_result);
                 add_stats!(prepare_subagent);
                 add_stats!(merge_subagent);
             }
@@ -1237,13 +1296,7 @@ pub fn build_context_engine(
             let summary_engine: Box<dyn ContextEngine> =
                 Box::new(SummaryContextEngine::new(inner, 0.80));
             let hooks = &toml_config.hooks;
-            let has_hooks = hooks.ingest.is_some()
-                || hooks.after_turn.is_some()
-                || hooks.bootstrap.is_some()
-                || hooks.assemble.is_some()
-                || hooks.compact.is_some()
-                || hooks.prepare_subagent.is_some()
-                || hooks.merge_subagent.is_some();
+            let has_hooks = has_scriptable_hooks(hooks);
             if has_hooks {
                 // Build a fresh DefaultContextEngine for the hook layer so the
                 // SummaryContextEngine continues to own the original `inner`.
@@ -1278,13 +1331,7 @@ pub fn build_context_engine(
             let no_compact_engine: Box<dyn ContextEngine> =
                 Box::new(NoCompactContextEngine::new(inner));
             let hooks = &toml_config.hooks;
-            let has_hooks = hooks.ingest.is_some()
-                || hooks.after_turn.is_some()
-                || hooks.bootstrap.is_some()
-                || hooks.assemble.is_some()
-                || hooks.compact.is_some()
-                || hooks.prepare_subagent.is_some()
-                || hooks.merge_subagent.is_some();
+            let has_hooks = has_scriptable_hooks(hooks);
             if has_hooks {
                 // Build a fresh DefaultContextEngine for the hook layer so the
                 // NoCompactContextEngine continues to own the original `inner`.
@@ -1345,14 +1392,7 @@ pub fn build_context_engine(
                 let inner = DefaultContextEngine::new(runtime_config.clone(), eng_memory, eng_emb);
                 match load_plugin(plugin_name) {
                     Ok((manifest, hooks)) => {
-                        if hooks.ingest.is_some()
-                            || hooks.after_turn.is_some()
-                            || hooks.bootstrap.is_some()
-                            || hooks.assemble.is_some()
-                            || hooks.compact.is_some()
-                            || hooks.prepare_subagent.is_some()
-                            || hooks.merge_subagent.is_some()
-                        {
+                        if has_scriptable_hooks(&hooks) {
                             let config_schema = manifest.config.clone();
                             let mut env: Vec<(String, String)> = manifest.env.into_iter().collect();
                             let vault_env = resolve_vault_env_vars(&hooks, vault_lookup);
@@ -1397,7 +1437,7 @@ pub fn build_context_engine(
     if let Some(ref plugin_name) = toml_config.plugin {
         match load_plugin(plugin_name) {
             Ok((manifest, hooks)) => {
-                if hooks.ingest.is_some() || hooks.after_turn.is_some() {
+                if has_scriptable_hooks(&hooks) {
                     let config_schema = manifest.config.clone();
                     let mut env: Vec<(String, String)> = manifest.env.into_iter().collect();
                     let vault_env = resolve_vault_env_vars(&hooks, vault_lookup);
@@ -1427,7 +1467,7 @@ pub fn build_context_engine(
     }
 
     // Manual hooks
-    if toml_config.hooks.ingest.is_some() || toml_config.hooks.after_turn.is_some() {
+    if has_scriptable_hooks(&toml_config.hooks) {
         let vault_env = resolve_vault_env_vars(&toml_config.hooks, vault_lookup);
         let mut engine = ScriptableContextEngine::new(inner, &toml_config.hooks);
         if !vault_env.is_empty() {
@@ -1437,6 +1477,18 @@ pub fn build_context_engine(
     } else {
         Box::new(inner)
     }
+}
+
+fn has_scriptable_hooks(hooks: &librefang_types::config::ContextEngineHooks) -> bool {
+    hooks.ingest.is_some()
+        || hooks.after_turn.is_some()
+        || hooks.bootstrap.is_some()
+        || hooks.assemble.is_some()
+        || hooks.compact.is_some()
+        || hooks.transform_tool_result.is_some()
+        || hooks.prepare_subagent.is_some()
+        || hooks.merge_subagent.is_some()
+        || hooks.on_event.is_some()
 }
 
 // ---------------------------------------------------------------------------
