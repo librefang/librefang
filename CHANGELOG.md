@@ -95,6 +95,8 @@ In-crate only; no cross-crate error-shape changes.
 
 ### Fixed
 
+- **metering(budget): the pre-dispatch per-provider budget gate now actually enforces the hourly cap it was meant to (#5980) (@DaBlitzStein).**
+  The #5980 gate flagged an over-cap provider in the shared `ProviderExhaustionStore`, but in the reported single-Moonshot-agent scenario that flag was never read: the agent-fallback path built its `FallbackDriver` via `with_models(chain)`, which leaves the exhaustion store unset and every slot's provider name empty, so `is_slot_exhausted` short-circuited to `false` and the over-cap provider was dispatched again (the agent ran ~4x past its cap).
 - **fix(runtime): `channel_send` without a `recipient` now replies to the group, not the speaker** (#6261) (@neo-wanderer).
   In a group conversation a no-recipient `channel_send` auto-filled the recipient from `sender_id` (the individual who spoke) instead of `sender_chat_id` (the room / group).
   The send then targeted the speaker's user id as if it were a conversation — e.g. a Matrix file send routed to `@user:hs` rather than the room `!room:hs`, which the homeserver rejected with `403 not in room` (visible only on the sidecar's stderr, so the tool still reported success).

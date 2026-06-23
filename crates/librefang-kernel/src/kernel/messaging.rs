@@ -573,6 +573,21 @@ impl LibreFangKernel {
                 librefang_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
         }
 
+        // #5980: pre-dispatch per-provider budget gate on the ephemeral
+        // (`/btw`) path too. Flags the shared `ProviderExhaustionStore` when
+        // this provider's operator cap is already crossed so a multi-provider
+        // agent's `FallbackDriver` skips the exhausted slot; a single-provider
+        // agent has no slot to skip to, so we hard-return `QuotaExceeded`.
+        let provider = manifest.model.provider.clone();
+        let exhausted = self.flag_provider_budget_if_exhausted(&provider);
+        if self.provider_exhausted_blocks_call(exhausted, &manifest, &self.config.load_full()) {
+            return Err(KernelError::LibreFang(LibreFangError::QuotaExceeded(
+                format!(
+                    "Provider '{provider}' hourly budget exhausted and the agent has no fallback chain"
+                ),
+            )));
+        }
+
         let driver = self.resolve_driver(&manifest)?;
 
         let ctx_window = Some(self.llm.model_catalog.load()).and_then(|cat| {
@@ -2264,6 +2279,22 @@ impl LibreFangKernel {
         // `LoopOptions::allowed_tools` in agent_loop instead. Before the
         // forkedAgent migration this was filtered here by matching on
         // `sender_context.channel == AUTO_DREAM_CHANNEL`.
+        //
+        // #5980: pre-dispatch per-provider budget gate on the streaming path
+        // too. Flags the shared `ProviderExhaustionStore` when this provider's
+        // operator cap is already crossed so a multi-provider agent's
+        // `FallbackDriver` skips the exhausted slot; a single-provider agent
+        // has no slot to skip to, so we hard-return `QuotaExceeded`.
+        let provider = entry.manifest.model.provider.clone();
+        let exhausted = self.flag_provider_budget_if_exhausted(&provider);
+        if self.provider_exhausted_blocks_call(exhausted, &entry.manifest, &cfg) {
+            return Err(KernelError::LibreFang(LibreFangError::QuotaExceeded(
+                format!(
+                    "Provider '{provider}' hourly budget exhausted and the agent has no fallback chain"
+                ),
+            )));
+        }
+
         let driver = self.resolve_driver(&entry.manifest)?;
 
         // Look up model's actual context window from the catalog. Filter out
