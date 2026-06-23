@@ -1991,7 +1991,23 @@ impl WorkflowEngine {
         let mut workflows = self.workflows.write().await;
         if let std::collections::hash_map::Entry::Occupied(mut entry) = workflows.entry(id) {
             workflow.id = id; // ensure ID stays the same
-            entry.insert(workflow);
+            entry.insert(workflow.clone());
+            // Persist to disk so agent assignment, prompt changes, and
+            // parameter edits survive daemon restart (mirrors register()).
+            if let Some(ref dir) = self.workflows_dir {
+                let path = dir.join(format!("{id}.workflow.json"));
+                let tmp_path = dir.join(format!("{id}.workflow.json.tmp"));
+                if let Ok(json) = serde_json::to_string_pretty(&workflow) {
+                    if let Err(e) = tokio::fs::create_dir_all(dir).await {
+                        warn!(workflow_id = %id, error = %e, "update_workflow: failed to create dir");
+                    } else if let Err(e) = tokio::fs::write(&tmp_path, &json).await {
+                        warn!(workflow_id = %id, error = %e, "update_workflow: tmp write failed");
+                    } else if let Err(e) = tokio::fs::rename(&tmp_path, &path).await {
+                        warn!(workflow_id = %id, error = %e, "update_workflow: atomic rename failed");
+                        let _ = tokio::fs::remove_file(&tmp_path).await;
+                    }
+                }
+            }
             true
         } else {
             false
