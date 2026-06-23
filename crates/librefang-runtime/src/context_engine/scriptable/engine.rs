@@ -3,6 +3,115 @@
 
 use super::*;
 
+/// Host-side execution of a `compact` hook's `request_llm_summary` directive
+/// (#6264). When a `compact` script returns
+/// `{ "request_llm_summary": { prompt?, summarize: [..], keep: [..], max_tokens? } }`
+/// instead of final `messages`, the host runs the LLM summary itself: the
+/// script chooses WHAT to fold and HOW (prompt, budget), but the driver,
+/// credentials, and routing stay host-side. Returns `None` — so the caller
+/// falls through to the `messages` path / `inner.compact` fallback, never a
+/// panic — when there is no such directive, nothing to summarize, or the LLM
+/// call fails / returns empty.
+async fn try_host_summary(
+    output: &serde_json::Value,
+    driver: &std::sync::Arc<dyn LlmDriver>,
+    model: &str,
+) -> Option<CompactionResult> {
+    use librefang_types::message::{ContentBlock, MessageContent, Role};
+
+    let req = output.get("request_llm_summary")?.as_object()?;
+
+    let parse_msgs = |key: &str| -> Vec<Message> {
+        req.get(key)
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let summarize = parse_msgs("summarize");
+    if summarize.is_empty() {
+        return None; // nothing to fold — let the caller fall back
+    }
+    let keep = parse_msgs("keep");
+    let max_tokens = req
+        .get("max_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(2048) as u32;
+    let instruction = req
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(
+            "Summarize the following conversation preserving key facts, decisions, \
+             user preferences, and important context. Be concise but thorough. \
+             Output only the summary, no preamble.",
+        );
+
+    // Render the messages to plain role-labelled text so the summarization
+    // request never replays raw tool_use/tool_result blocks (which would risk
+    // provider role-ordering errors) — same approach as the built-in
+    // compactor's `summarize_messages`.
+    let convo = summarize
+        .iter()
+        .map(|m| {
+            let role = match m.role {
+                Role::User => "User",
+                Role::Assistant => "Assistant",
+                Role::System => "System",
+            };
+            format!("{role}: {}", m.content.text_content())
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let request = crate::llm_driver::CompletionRequest {
+        model: model.to_string(),
+        messages: std::sync::Arc::new(vec![Message {
+            role: Role::User,
+            content: MessageContent::Blocks(vec![ContentBlock::Text {
+                text: format!("{instruction}\n\n---\n{convo}\n---"),
+                provider_metadata: None,
+            }]),
+            pinned: false,
+            timestamp: None,
+        }]),
+        max_tokens,
+        temperature: 0.3,
+        system: Some(
+            "You are a conversation summarizer. Produce a concise summary that captures \
+             all key facts, decisions, and context from the conversation."
+                .to_string(),
+        ),
+        ..Default::default()
+    };
+
+    match driver.complete(request).await {
+        Ok(resp) => {
+            let text = resp.text();
+            if text.is_empty() {
+                warn!("request_llm_summary: host LLM returned an empty summary; falling back");
+                None
+            } else {
+                let compacted_count = summarize.len();
+                Some(CompactionResult {
+                    summary: text,
+                    kept_messages: keep,
+                    compacted_count,
+                    chunks_used: 1,
+                    used_fallback: false,
+                })
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, "request_llm_summary: host LLM call failed; falling back");
+            None
+        }
+    }
+}
+
 #[async_trait]
 impl ContextEngine for ScriptableContextEngine {
     async fn bootstrap(&self, config: &ContextEngineConfig) -> LibreFangResult<()> {
@@ -579,6 +688,9 @@ impl ContextEngine for ScriptableContextEngine {
             };
             if let Some(cached_output) = cached {
                 debug!("Compact hook cache hit (ttl={}s)", ttl_secs);
+                if let Some(result) = try_host_summary(&cached_output, &driver, model).await {
+                    return Ok(result);
+                }
                 if let Some(new_msgs) = cached_output.get("messages").and_then(|v| v.as_array()) {
                     let compacted: Vec<Message> = new_msgs
                         .iter()
@@ -626,6 +738,10 @@ impl ContextEngine for ScriptableContextEngine {
                                 inserted_at.elapsed().as_secs() < ttl_secs
                             });
                         }
+                    }
+                    if let Some(result) = try_host_summary(&output, &driver, model).await {
+                        Self::record_hook(&self.metrics, "compact", ms, true);
+                        return Ok(result);
                     }
                     if let Some(new_msgs) = output.get("messages").and_then(|v| v.as_array()) {
                         let compacted: Vec<Message> = new_msgs
@@ -677,6 +793,10 @@ impl ContextEngine for ScriptableContextEngine {
             .await
         {
             Ok((output, ms)) => {
+                if let Some(result) = try_host_summary(&output, &driver, model).await {
+                    Self::record_hook(&self.metrics, "compact", ms, true);
+                    return Ok(result);
+                }
                 if let Some(new_msgs) = output.get("messages").and_then(|v| v.as_array()) {
                     let compacted: Vec<Message> = new_msgs
                         .iter()
@@ -1061,5 +1181,84 @@ impl ContextEngine for ScriptableContextEngine {
 
     fn per_agent_metrics(&self) -> std::collections::HashMap<String, HookStats> {
         self.per_agent_metrics_snapshot()
+    }
+}
+
+#[cfg(test)]
+mod request_llm_summary_tests {
+    use super::*;
+    use crate::llm_driver::{CompletionRequest, CompletionResponse, LlmError};
+    use async_trait::async_trait;
+    use librefang_types::message::{ContentBlock, StopReason, TokenUsage};
+
+    /// Stub driver that echoes a fixed summary, so the test asserts the host
+    /// actually ran the LLM for a `request_llm_summary` directive.
+    struct StubDriver {
+        text: String,
+    }
+
+    #[async_trait]
+    impl LlmDriver for StubDriver {
+        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+            Ok(CompletionResponse {
+                content: vec![ContentBlock::Text {
+                    text: self.text.clone(),
+                    provider_metadata: None,
+                }],
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+                usage: TokenUsage {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    ..Default::default()
+                },
+                actual_provider: None,
+                actual_model: None,
+            })
+        }
+    }
+
+    fn driver(text: &str) -> std::sync::Arc<dyn LlmDriver> {
+        std::sync::Arc::new(StubDriver {
+            text: text.to_string(),
+        })
+    }
+
+    #[tokio::test]
+    async fn runs_host_llm_and_keeps_the_kept_messages() {
+        let output = serde_json::json!({
+            "request_llm_summary": {
+                "prompt": "Summarize tersely.",
+                "summarize": [Message::assistant("old turn to fold away")],
+                "keep": [Message::user("recent message to keep verbatim")],
+                "max_tokens": 256
+            }
+        });
+        let result = try_host_summary(&output, &driver("HOST SUMMARY"), "test-model")
+            .await
+            .expect("request_llm_summary should produce a CompactionResult");
+        assert_eq!(result.summary, "HOST SUMMARY");
+        assert_eq!(result.kept_messages.len(), 1);
+        assert_eq!(
+            result.kept_messages[0].content.text_content(),
+            "recent message to keep verbatim"
+        );
+        assert_eq!(result.compacted_count, 1);
+        assert!(!result.used_fallback);
+    }
+
+    #[tokio::test]
+    async fn no_directive_returns_none() {
+        // Output with the legacy `messages` shape carries no directive.
+        let output = serde_json::json!({ "messages": [] });
+        assert!(try_host_summary(&output, &driver("x"), "m").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn empty_summarize_falls_back() {
+        let output = serde_json::json!({
+            "request_llm_summary": { "summarize": [], "keep": [Message::user("k")] }
+        });
+        assert!(try_host_summary(&output, &driver("x"), "m").await.is_none());
     }
 }
