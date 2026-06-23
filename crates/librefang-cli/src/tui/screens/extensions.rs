@@ -265,7 +265,8 @@ impl ExtensionsState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut ExtensionsState) {
-    let inner = widgets::render_screen_block(f, area, "\u{29c9} Extensions");
+    let title = format!("⧉ {}", crate::i18n::t("tui-extensions-title-screen"));
+    let inner = widgets::render_screen_block(f, area, &title);
 
     let chunks = Layout::vertical([
         Constraint::Length(1), // sub-tab bar
@@ -287,40 +288,31 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut ExtensionsState) {
 
 fn draw_sub_tabs(f: &mut Frame, area: Rect, state: &ExtensionsState) {
     let tabs = [
-        (ExtSub::Browse, "1 Browse"),
-        (ExtSub::Installed, "2 Installed"),
-        (ExtSub::Health, "3 Health"),
+        (ExtSub::Browse, crate::i18n::t("tui-extensions-tab-browse")),
+        (
+            ExtSub::Installed,
+            crate::i18n::t("tui-extensions-tab-installed"),
+        ),
+        (ExtSub::Health, crate::i18n::t("tui-extensions-tab-health")),
     ];
     let mut spans = vec![Span::raw("  ")];
     for (i, (sub, label)) in tabs.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::styled(
-                " \u{2502} ",
-                Style::default().fg(theme::BORDER),
-            ));
+            spans.push(Span::styled(" │ ", Style::default().fg(theme::BORDER)));
         }
         if *sub == state.sub {
-            spans.push(Span::styled(
-                format!(" \u{25cf} {label} "),
-                theme::tab_active(),
-            ));
+            spans.push(Span::styled(format!(" ● {label} "), theme::tab_active()));
         } else {
-            spans.push(Span::styled(
-                format!(" \u{25cb} {label} "),
-                theme::tab_inactive(),
-            ));
+            spans.push(Span::styled(format!(" ○ {label} "), theme::tab_inactive()));
         }
     }
 
     // Show search query if active
     if state.searching {
         spans.push(Span::raw("   "));
+        spans.push(Span::styled("🔍 ", Style::default().fg(theme::YELLOW)));
         spans.push(Span::styled(
-            "\u{1f50d} ",
-            Style::default().fg(theme::YELLOW),
-        ));
-        spans.push(Span::styled(
-            format!("{}\u{2588}", state.search_query),
+            format!("{}█", state.search_query),
             theme::input_style(),
         ));
     }
@@ -332,23 +324,26 @@ fn status_badge(status: &str) -> (String, Style) {
     let lower = status.to_lowercase();
     if lower.contains("ready") || lower.contains("connected") {
         (
-            "\u{25cf} Ready".to_string(),
+            format!("● {}", crate::i18n::t("tui-extensions-status-ready")),
             Style::default().fg(theme::GREEN),
         )
     } else if lower.contains("setup") {
         (
-            "\u{25d4} Setup".to_string(),
+            format!("◑ {}", crate::i18n::t("tui-extensions-status-setup")),
             Style::default().fg(theme::YELLOW),
         )
     } else if lower.contains("error") {
         (
-            "\u{25cf} Error".to_string(),
+            format!("● {}", crate::i18n::t("tui-extensions-status-error")),
             Style::default().fg(theme::RED),
         )
     } else if lower.contains("disabled") {
-        ("\u{25cb} Off".to_string(), theme::dim_style())
+        (
+            format!("○ {}", crate::i18n::t("tui-extensions-status-off")),
+            theme::dim_style(),
+        )
     } else {
-        ("\u{25cb} ---".to_string(), theme::dim_style())
+        ("○ ---".to_string(), theme::dim_style())
     }
 }
 
@@ -364,7 +359,11 @@ fn draw_browse(f: &mut Frame, area: Rect, state: &mut ExtensionsState) {
         Paragraph::new(Line::from(vec![Span::styled(
             format!(
                 "  {:<3} {:<18} {:<12} {:<10} {}",
-                "", "Name", "Category", "Status", "Description"
+                "",
+                crate::i18n::t("tui-extensions-header-name"),
+                crate::i18n::t("tui-extensions-header-category"),
+                crate::i18n::t("tui-extensions-header-status"),
+                crate::i18n::t("tui-extensions-header-desc")
             ),
             theme::table_header(),
         )])),
@@ -373,12 +372,12 @@ fn draw_browse(f: &mut Frame, area: Rect, state: &mut ExtensionsState) {
 
     if state.loading {
         f.render_widget(
-            widgets::spinner(state.tick, "Loading MCP servers\u{2026}"),
+            widgets::spinner(state.tick, &crate::i18n::t("tui-extensions-loading")),
             chunks[1],
         );
     } else if state.all_extensions.is_empty() {
         f.render_widget(
-            widgets::empty_state("No extensions installed. Browse the marketplace with [b]."),
+            widgets::empty_state(&crate::i18n::t("tui-extensions-empty")),
             chunks[1],
         );
     } else {
@@ -389,11 +388,14 @@ fn draw_browse(f: &mut Frame, area: Rect, state: &mut ExtensionsState) {
             .map(|ext| {
                 let (badge, badge_style) = if ext.installed {
                     (
-                        "\u{25cf} Installed".to_string(),
+                        format!("● {}", crate::i18n::t("tui-extensions-status-installed")),
                         Style::default().fg(theme::GREEN),
                     )
                 } else {
-                    ("\u{25cb} Available".to_string(), theme::dim_style())
+                    (
+                        format!("○ {}", crate::i18n::t("tui-extensions-status-available")),
+                        theme::dim_style(),
+                    )
                 };
                 ListItem::new(Line::from(vec![
                     Span::raw("  "),
@@ -414,11 +416,11 @@ fn draw_browse(f: &mut Frame, area: Rect, state: &mut ExtensionsState) {
     }
 
     let hints = if state.searching {
-        "  Type to search \u{2022} Esc cancel \u{2022} Enter confirm"
+        crate::i18n::t("tui-extensions-hints-search")
     } else {
-        "  j/k navigate \u{2022} Enter install \u{2022} / search \u{2022} r refresh"
+        crate::i18n::t("tui-extensions-hints-browse")
     };
-    f.render_widget(widgets::hint_bar(hints), chunks[2]);
+    f.render_widget(widgets::hint_bar(&hints), chunks[2]);
 }
 
 fn draw_installed(f: &mut Frame, area: Rect, state: &mut ExtensionsState) {
@@ -433,7 +435,11 @@ fn draw_installed(f: &mut Frame, area: Rect, state: &mut ExtensionsState) {
         Paragraph::new(Line::from(vec![Span::styled(
             format!(
                 "  {:<3} {:<18} {:<12} {:<10} {}",
-                "", "Name", "Category", "Status", "ID"
+                "",
+                crate::i18n::t("tui-extensions-header-name"),
+                crate::i18n::t("tui-extensions-header-category"),
+                crate::i18n::t("tui-extensions-header-status"),
+                crate::i18n::t("tui-extensions-header-id")
             ),
             theme::table_header(),
         )])),
@@ -463,7 +469,7 @@ fn draw_installed(f: &mut Frame, area: Rect, state: &mut ExtensionsState) {
 
     if items.is_empty() {
         f.render_widget(
-            widgets::empty_state("No extensions installed. Browse the marketplace with [b]."),
+            widgets::empty_state(&crate::i18n::t("tui-extensions-empty")),
             chunks[1],
         );
     } else {
@@ -474,9 +480,9 @@ fn draw_installed(f: &mut Frame, area: Rect, state: &mut ExtensionsState) {
     f.render_widget(
         widgets::confirm_or_status_or_hint(
             state.confirm_remove,
-            "  Press y to confirm removal, any other key to cancel",
+            &crate::i18n::t("tui-extensions-remove-confirm"),
             &state.status_msg,
-            "  j/k navigate \u{2022} d remove \u{2022} r refresh",
+            &crate::i18n::t("tui-extensions-hints-installed"),
         ),
         chunks[2],
     );
@@ -494,7 +500,12 @@ fn draw_health(f: &mut Frame, area: Rect, state: &mut ExtensionsState) {
         Paragraph::new(Line::from(vec![Span::styled(
             format!(
                 "  {:<18} {:<10} {:<6} {:<12} {:<6} {}",
-                "Server", "Status", "Tools", "Connected", "Fails", "Last Error"
+                crate::i18n::t("tui-extensions-header-server"),
+                crate::i18n::t("tui-extensions-header-status"),
+                crate::i18n::t("tui-extensions-header-tools"),
+                crate::i18n::t("tui-extensions-header-connected"),
+                crate::i18n::t("tui-extensions-header-fails"),
+                crate::i18n::t("tui-extensions-header-last-error")
             ),
             theme::table_header(),
         )])),
@@ -503,7 +514,7 @@ fn draw_health(f: &mut Frame, area: Rect, state: &mut ExtensionsState) {
 
     if state.health_entries.is_empty() {
         f.render_widget(
-            widgets::empty_state("No extensions installed. Browse the marketplace with [b]."),
+            widgets::empty_state(&crate::i18n::t("tui-extensions-empty")),
             chunks[1],
         );
     } else {
@@ -513,16 +524,13 @@ fn draw_health(f: &mut Frame, area: Rect, state: &mut ExtensionsState) {
             .map(|h| {
                 let (badge, badge_style) = status_badge(&h.status);
                 let error_display = if h.last_error.is_empty() {
-                    "\u{2014}".to_string()
+                    "—".to_string()
                 } else if h.last_error.len() > 30 {
-                    format!(
-                        "{}\u{2026}",
-                        librefang_types::truncate_str(&h.last_error, 27)
-                    )
+                    format!("{}…", librefang_types::truncate_str(&h.last_error, 27))
                 } else {
                     h.last_error.clone()
                 };
-                let reconn = if h.reconnecting { " \u{21bb}" } else { "" };
+                let reconn = if h.reconnecting { " ↻" } else { "" };
                 ListItem::new(Line::from(vec![
                     Span::raw("  "),
                     Span::styled(
@@ -538,7 +546,7 @@ fn draw_health(f: &mut Frame, area: Rect, state: &mut ExtensionsState) {
                         format!(
                             "{:<12} ",
                             if h.connected_since.is_empty() {
-                                "\u{2014}"
+                                "—"
                             } else {
                                 &h.connected_since
                             }
@@ -563,9 +571,7 @@ fn draw_health(f: &mut Frame, area: Rect, state: &mut ExtensionsState) {
     }
 
     f.render_widget(
-        widgets::hint_bar(
-            "  j/k navigate \u{2022} r/Enter reconnect \u{2022} auto-reconnect active",
-        ),
+        widgets::hint_bar(&crate::i18n::t("tui-extensions-hints-health")),
         chunks[2],
     );
 }

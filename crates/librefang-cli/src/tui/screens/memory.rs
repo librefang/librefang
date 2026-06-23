@@ -251,7 +251,8 @@ impl MemoryState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut MemoryState) {
-    let inner = widgets::render_screen_block(f, area, "\u{25a1} Memory");
+    let title = format!("□ {}", crate::i18n::t("tui-memory-title-screen"));
+    let inner = widgets::render_screen_block(f, area, &title);
 
     match state.sub {
         MemorySub::AgentSelect => draw_agent_select(f, inner, state),
@@ -271,16 +272,22 @@ fn draw_agent_select(f: &mut Frame, area: Rect, state: &mut MemoryState) {
     f.render_widget(
         Paragraph::new(vec![
             Line::from(vec![Span::styled(
-                "  Select an agent to browse its memory:",
+                crate::i18n::t("tui-memory-label-select-agent"),
                 Style::default()
                     .fg(theme::CYAN)
                     .add_modifier(Modifier::BOLD),
             )]),
             Line::from(vec![
                 Span::styled("  ", theme::table_header()),
-                Span::styled(format!("{:<20}", "Agent Name"), theme::table_header()),
-                Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
-                Span::styled("ID", theme::table_header()),
+                Span::styled(
+                    format!("{:<20}", crate::i18n::t("tui-memory-header-agent-name")),
+                    theme::table_header(),
+                ),
+                Span::styled(" │ ", Style::default().fg(theme::BORDER)),
+                Span::styled(
+                    crate::i18n::t("tui-memory-header-id"),
+                    theme::table_header(),
+                ),
             ]),
         ]),
         chunks[0],
@@ -288,12 +295,12 @@ fn draw_agent_select(f: &mut Frame, area: Rect, state: &mut MemoryState) {
 
     if state.loading {
         f.render_widget(
-            widgets::spinner(state.tick, "Loading agents\u{2026}"),
+            widgets::spinner(state.tick, &crate::i18n::t("tui-memory-loading-agents")),
             chunks[1],
         );
     } else if state.agents.is_empty() {
         f.render_widget(
-            widgets::empty_state("No memory entries. Agents store data here automatically."),
+            widgets::empty_state(&crate::i18n::t("tui-memory-empty-agents")),
             chunks[1],
         );
     } else {
@@ -302,7 +309,7 @@ fn draw_agent_select(f: &mut Frame, area: Rect, state: &mut MemoryState) {
             .iter()
             .map(|a| {
                 let id_short = if a.id.len() > 12 {
-                    format!("{}\u{2026}", librefang_types::truncate_str(&a.id, 12))
+                    format!("{}…", librefang_types::truncate_str(&a.id, 12))
                 } else {
                     a.id.clone()
                 };
@@ -312,7 +319,7 @@ fn draw_agent_select(f: &mut Frame, area: Rect, state: &mut MemoryState) {
                         format!("{:<20}", widgets::truncate(&a.name, 19)),
                         Style::default().fg(theme::TEXT_PRIMARY),
                     ),
-                    Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
+                    Span::styled(" │ ", Style::default().fg(theme::BORDER)),
                     Span::styled(id_short, Style::default().fg(theme::TEXT_SECONDARY)),
                 ]))
             })
@@ -323,7 +330,7 @@ fn draw_agent_select(f: &mut Frame, area: Rect, state: &mut MemoryState) {
     }
 
     f.render_widget(
-        widgets::hint_bar("  \u{2191}\u{2193} Navigate  Enter Browse KV  r Refresh"),
+        widgets::hint_bar(&crate::i18n::t("tui-memory-hints-agent-select")),
         chunks[2],
     );
 }
@@ -342,6 +349,8 @@ fn draw_kv_browser(f: &mut Frame, area: Rect, state: &mut MemoryState) {
         .map(|a| a.name.as_str())
         .unwrap_or("?");
 
+    let count_str = state.kv_pairs.len().to_string();
+
     f.render_widget(
         Paragraph::new(vec![
             Line::from(vec![
@@ -352,25 +361,34 @@ fn draw_kv_browser(f: &mut Frame, area: Rect, state: &mut MemoryState) {
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    format!("  \u{2502} {} pairs", state.kv_pairs.len()),
+                    crate::i18n::t_args("tui-memory-pairs-count", &[("count", &count_str)]),
                     Style::default().fg(theme::TEXT_SECONDARY),
                 ),
             ]),
             Line::from(vec![
                 Span::styled("  ", theme::table_header()),
-                Span::styled(format!("{:<24}", "Key"), theme::table_header()),
-                Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
-                Span::styled("Value", theme::table_header()),
+                Span::styled(
+                    format!("{:<24}", crate::i18n::t("tui-memory-header-key")),
+                    theme::table_header(),
+                ),
+                Span::styled(" │ ", Style::default().fg(theme::BORDER)),
+                Span::styled(
+                    crate::i18n::t("tui-memory-header-value"),
+                    theme::table_header(),
+                ),
             ]),
         ]),
         chunks[0],
     );
 
     if state.loading {
-        f.render_widget(widgets::spinner(state.tick, "Loading\u{2026}"), chunks[1]);
+        f.render_widget(
+            widgets::spinner(state.tick, &crate::i18n::t("tui-memory-loading")),
+            chunks[1],
+        );
     } else if state.kv_pairs.is_empty() {
         f.render_widget(
-            widgets::empty_state("No key-value pairs. Press a to add one."),
+            widgets::empty_state(&crate::i18n::t("tui-memory-empty-kv")),
             chunks[1],
         );
     } else {
@@ -379,7 +397,7 @@ fn draw_kv_browser(f: &mut Frame, area: Rect, state: &mut MemoryState) {
             .iter()
             .map(|kv| {
                 let val_display = if kv.value.len() > 40 {
-                    format!("{}\u{2026}", librefang_types::truncate_str(&kv.value, 39))
+                    format!("{}…", librefang_types::truncate_str(&kv.value, 39))
                 } else {
                     kv.value.clone()
                 };
@@ -389,7 +407,7 @@ fn draw_kv_browser(f: &mut Frame, area: Rect, state: &mut MemoryState) {
                         format!("{:<24}", widgets::truncate(&kv.key, 23)),
                         Style::default().fg(theme::YELLOW),
                     ),
-                    Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
+                    Span::styled(" │ ", Style::default().fg(theme::BORDER)),
                     Span::styled(val_display, Style::default().fg(theme::TEXT_SECONDARY)),
                 ]))
             })
@@ -402,9 +420,9 @@ fn draw_kv_browser(f: &mut Frame, area: Rect, state: &mut MemoryState) {
     f.render_widget(
         widgets::confirm_or_status_or_hint(
             state.confirm_delete,
-            "  Delete this key? [y] Yes  [any] Cancel",
+            &crate::i18n::t("tui-memory-confirm-delete"),
             &state.status_msg,
-            "  \u{2191}\u{2193} Navigate  a Add  e Edit  d Delete  Esc Back  r Refresh",
+            &crate::i18n::t("tui-memory-hints-kv-browser"),
         ),
         chunks[2],
     );
@@ -423,9 +441,9 @@ fn draw_edit(f: &mut Frame, area: Rect, state: &MemoryState) {
     .split(area);
 
     let title = if state.sub == MemorySub::AddKey {
-        "\u{253c} Add Key-Value Pair"
+        crate::i18n::t("tui-memory-title-add")
     } else {
-        "\u{270e} Edit Value"
+        crate::i18n::t("tui-memory-title-edit")
     };
 
     f.render_widget(
@@ -445,18 +463,18 @@ fn draw_edit(f: &mut Frame, area: Rect, state: &MemoryState) {
     } else {
         theme::dim_style()
     };
-    let key_indicator = if key_active { "\u{25cf}" } else { "\u{25cb}" };
+    let key_indicator = if key_active { "●" } else { "○" };
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(format!("  {key_indicator} "), key_label_style),
-            Span::styled("Key:", key_label_style),
+            Span::styled(crate::i18n::t("tui-memory-field-key"), key_label_style),
         ])),
         chunks[2],
     );
     let key_display = if state.key_buf.is_empty() {
-        "enter key..."
+        crate::i18n::t("tui-memory-placeholder-key")
     } else {
-        &state.key_buf
+        state.key_buf.clone()
     };
     let key_style = if state.key_buf.is_empty() {
         theme::dim_style()
@@ -466,7 +484,7 @@ fn draw_edit(f: &mut Frame, area: Rect, state: &MemoryState) {
     let mut key_spans = vec![Span::raw("    "), Span::styled(key_display, key_style)];
     if key_active {
         key_spans.push(Span::styled(
-            "\u{2588}",
+            "█",
             Style::default()
                 .fg(theme::GREEN)
                 .add_modifier(Modifier::SLOW_BLINK),
@@ -481,18 +499,18 @@ fn draw_edit(f: &mut Frame, area: Rect, state: &MemoryState) {
     } else {
         theme::dim_style()
     };
-    let val_indicator = if val_active { "\u{25cf}" } else { "\u{25cb}" };
+    let val_indicator = if val_active { "●" } else { "○" };
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(format!("  {val_indicator} "), val_label_style),
-            Span::styled("Value:", val_label_style),
+            Span::styled(crate::i18n::t("tui-memory-field-value"), val_label_style),
         ])),
         chunks[4],
     );
     let val_display = if state.value_buf.is_empty() {
-        "enter value..."
+        crate::i18n::t("tui-memory-placeholder-value")
     } else {
-        &state.value_buf
+        state.value_buf.clone()
     };
     let val_style = if state.value_buf.is_empty() {
         theme::dim_style()
@@ -502,7 +520,7 @@ fn draw_edit(f: &mut Frame, area: Rect, state: &MemoryState) {
     let mut val_spans = vec![Span::raw("    "), Span::styled(val_display, val_style)];
     if val_active {
         val_spans.push(Span::styled(
-            "\u{2588}",
+            "█",
             Style::default()
                 .fg(theme::GREEN)
                 .add_modifier(Modifier::SLOW_BLINK),
@@ -511,7 +529,7 @@ fn draw_edit(f: &mut Frame, area: Rect, state: &MemoryState) {
     f.render_widget(Paragraph::new(Line::from(val_spans)), chunks[5]);
 
     f.render_widget(
-        widgets::hint_bar("  Tab Switch field  Enter Save  Esc Cancel"),
+        widgets::hint_bar(&crate::i18n::t("tui-memory-hints-edit")),
         chunks[6],
     );
 }

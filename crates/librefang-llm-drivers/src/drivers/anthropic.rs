@@ -1450,6 +1450,43 @@ mod tests {
         assert_eq!(api_msg.role, "user");
     }
 
+    /// Regression (#6251): the developer-loop aggregation notice the compactor
+    /// folds into the first `ToolResult`'s `content` must survive translation
+    /// into the Anthropic wire format. Folding into `content` (rather than a
+    /// separate `Text` block) is the shape that survives *both* the Anthropic
+    /// and OpenAI translation paths — see the matching test in `openai.rs` for
+    /// the OpenAI-side drop this guards against.
+    #[test]
+    fn convert_message_preserves_dev_loop_notice_in_tool_result_content() {
+        const NOTICE: &str =
+            "[DEVELOPER LOOP AGGREGATED] 3 intermediate developer-tool step(s) elided during compaction (tools: file_write). The first and last steps are retained for context.";
+
+        let msg = Message::user_with_blocks(vec![ContentBlock::ToolResult {
+            tool_use_id: "t0".to_string(),
+            tool_name: "file_write".to_string(),
+            content: format!("ok\n\n{NOTICE}"),
+            is_error: false,
+            status: Default::default(),
+            approval_request_id: None,
+        }]);
+        let api_msg = convert_message(&msg);
+        let blocks = match api_msg.content {
+            ApiContent::Blocks(b) => b,
+            ApiContent::Text(_) => panic!("expected Blocks content"),
+        };
+        let content = blocks
+            .into_iter()
+            .find_map(|b| match b {
+                ApiContentBlock::ToolResult { content, .. } => Some(content),
+                _ => None,
+            })
+            .expect("ApiContentBlock::ToolResult present");
+        assert!(
+            content.contains(NOTICE),
+            "aggregation notice must survive into the Anthropic ToolResult content, got: {content}"
+        );
+    }
+
     /// Regression: `ContentBlock::ImageFile` paths must be read via
     /// `tokio::task::block_in_place` so a multi-MB image read does not
     /// stall the tokio worker pool. The base64-encoded bytes in the

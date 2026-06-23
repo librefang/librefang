@@ -28,7 +28,7 @@ struct ProviderInfo {
     display: &'static str,
     env_var: &'static str,
     needs_key: bool,
-    hint: &'static str,
+    hint_key: &'static str,
 }
 
 const PROVIDERS: &[ProviderInfo] = &[
@@ -37,154 +37,154 @@ const PROVIDERS: &[ProviderInfo] = &[
         display: "Groq",
         env_var: "GROQ_API_KEY",
         needs_key: true,
-        hint: "free tier",
+        hint_key: "tui-init-hint-freetier",
     },
     ProviderInfo {
         name: "gemini",
         display: "Gemini",
         env_var: "GEMINI_API_KEY",
         needs_key: true,
-        hint: "free tier",
+        hint_key: "tui-init-hint-freetier",
     },
     ProviderInfo {
         name: "deepseek",
         display: "DeepSeek",
         env_var: "DEEPSEEK_API_KEY",
         needs_key: true,
-        hint: "cheap",
+        hint_key: "tui-init-hint-cheap",
     },
     ProviderInfo {
         name: "anthropic",
         display: "Anthropic",
         env_var: "ANTHROPIC_API_KEY",
         needs_key: true,
-        hint: "",
+        hint_key: "",
     },
     ProviderInfo {
         name: "openai",
         display: "OpenAI",
         env_var: "OPENAI_API_KEY",
         needs_key: true,
-        hint: "",
+        hint_key: "",
     },
     ProviderInfo {
         name: "openrouter",
         display: "OpenRouter",
         env_var: "OPENROUTER_API_KEY",
         needs_key: true,
-        hint: "",
+        hint_key: "",
     },
     ProviderInfo {
         name: "together",
         display: "Together",
         env_var: "TOGETHER_API_KEY",
         needs_key: true,
-        hint: "",
+        hint_key: "",
     },
     ProviderInfo {
         name: "mistral",
         display: "Mistral",
         env_var: "MISTRAL_API_KEY",
         needs_key: true,
-        hint: "",
+        hint_key: "",
     },
     ProviderInfo {
         name: "fireworks",
         display: "Fireworks",
         env_var: "FIREWORKS_API_KEY",
         needs_key: true,
-        hint: "",
+        hint_key: "",
     },
     ProviderInfo {
         name: "xai",
         display: "xAI (Grok)",
         env_var: "XAI_API_KEY",
         needs_key: true,
-        hint: "",
+        hint_key: "",
     },
     ProviderInfo {
         name: "perplexity",
         display: "Perplexity",
         env_var: "PERPLEXITY_API_KEY",
         needs_key: true,
-        hint: "",
+        hint_key: "",
     },
     ProviderInfo {
         name: "cohere",
         display: "Cohere",
         env_var: "COHERE_API_KEY",
         needs_key: true,
-        hint: "",
+        hint_key: "",
     },
     ProviderInfo {
         name: "cerebras",
         display: "Cerebras",
         env_var: "CEREBRAS_API_KEY",
         needs_key: true,
-        hint: "fast inference",
+        hint_key: "tui-init-hint-fast",
     },
     ProviderInfo {
         name: "sambanova",
         display: "SambaNova",
         env_var: "SAMBANOVA_API_KEY",
         needs_key: true,
-        hint: "fast inference",
+        hint_key: "tui-init-hint-fast",
     },
     ProviderInfo {
         name: "qwen",
         display: "Qwen (Alibaba)",
         env_var: "QWEN_API_KEY",
         needs_key: true,
-        hint: "",
+        hint_key: "",
     },
     ProviderInfo {
         name: "huggingface",
         display: "Hugging Face",
         env_var: "HUGGINGFACE_API_KEY",
         needs_key: true,
-        hint: "",
+        hint_key: "",
     },
     ProviderInfo {
         name: "github-copilot",
         display: "GitHub Copilot",
         env_var: "GITHUB_TOKEN",
         needs_key: true,
-        hint: "via PAT",
+        hint_key: "tui-init-hint-pat",
     },
     ProviderInfo {
         name: "replicate",
         display: "Replicate",
         env_var: "REPLICATE_API_KEY",
         needs_key: true,
-        hint: "",
+        hint_key: "",
     },
     ProviderInfo {
         name: "claude-code",
         display: "Claude Code",
         env_var: "",
         needs_key: false,
-        hint: "no API key",
+        hint_key: "tui-init-hint-nokey",
     },
     ProviderInfo {
         name: "ollama",
         display: "Ollama",
         env_var: "OLLAMA_API_KEY",
         needs_key: false,
-        hint: "local",
+        hint_key: "tui-init-hint-local",
     },
     ProviderInfo {
         name: "lmstudio",
         display: "LM Studio",
         env_var: "LMSTUDIO_API_KEY",
         needs_key: false,
-        hint: "local",
+        hint_key: "tui-init-hint-local",
     },
     ProviderInfo {
         name: "vllm",
         display: "vLLM",
         env_var: "VLLM_API_KEY",
         needs_key: false,
-        hint: "local",
+        hint_key: "tui-init-hint-local",
     },
 ];
 
@@ -256,13 +256,6 @@ struct ModelEntry {
     tier: &'static str,
     cost: String,
 }
-
-const ROUTING_TIER_NAMES: [&str; 3] = ["Fast", "Balanced", "Frontier"];
-const ROUTING_TIER_DESC: [&str; 3] = [
-    "quick lookups, greetings, simple Q&A",
-    "standard conversation, general tasks",
-    "multi-step reasoning, code generation",
-];
 
 struct State {
     step: Step,
@@ -392,16 +385,20 @@ impl State {
         self.selected_provider.map(|i| &PROVIDERS[i])
     }
 
-    fn step_label(&self) -> &'static str {
-        match self.step {
-            Step::Welcome => "1 of 7",
-            Step::Migration => "2 of 7",
-            Step::Provider => "3 of 7",
-            Step::ApiKey => "4 of 7",
-            Step::Model => "5 of 7",
-            Step::Routing => "6 of 7",
-            Step::Complete => "7 of 7",
-        }
+    fn step_label(&self) -> String {
+        let current = match self.step {
+            Step::Welcome => "1",
+            Step::Migration => "2",
+            Step::Provider => "3",
+            Step::ApiKey => "4",
+            Step::Model => "5",
+            Step::Routing => "6",
+            Step::Complete => "7",
+        };
+        crate::i18n::t_args(
+            "tui-init-step-label",
+            &[("current", current), ("total", "7")],
+        )
     }
 
     fn step_index(&self) -> usize {
@@ -1231,7 +1228,7 @@ fn save_config(state: &mut State) {
     let p = match state.provider() {
         Some(p) => p,
         None => {
-            state.save_error = "No provider selected".to_string();
+            state.save_error = crate::i18n::t("tui-init-complete-err-no-provider");
             return;
         }
     };
@@ -1242,7 +1239,7 @@ fn save_config(state: &mut State) {
         match dirs::home_dir() {
             Some(h) => h.join(".librefang"),
             None => {
-                state.save_error = "Could not determine home directory".to_string();
+                state.save_error = crate::i18n::t("tui-init-complete-err-home-dir");
                 return;
             }
         }
@@ -1270,7 +1267,10 @@ fn save_config(state: &mut State) {
             crate::restrict_file_permissions(&config_path);
         }
         Err(e) => {
-            state.save_error = format!("Failed to write config: {e}");
+            state.save_error = crate::i18n::t_args(
+                "tui-init-complete-err-write-config",
+                &[("error", &e.to_string())],
+            );
             return;
         }
     }
@@ -1290,7 +1290,10 @@ fn save_config(state: &mut State) {
             state.daemon_url = url;
         }
         Err(e) => {
-            state.daemon_error = format!("Daemon failed: {e}");
+            state.daemon_error = crate::i18n::t_args(
+                "tui-init-complete-err-daemon-failed",
+                &[("error", &e.to_string())],
+            );
         }
     }
 }
@@ -1431,7 +1434,7 @@ fn draw_welcome(f: &mut Frame, area: Rect) {
     f.render_widget(logo, chunks[1]);
 
     let tagline = Paragraph::new(Line::from(vec![Span::styled(
-        "Agent Operating System",
+        crate::i18n::t("tui-init-welcome-tagline"),
         theme::dim_style(),
     )]))
     .alignment(Alignment::Center);
@@ -1440,51 +1443,51 @@ fn draw_welcome(f: &mut Frame, area: Rect) {
     f.render_widget(widgets::separator(area.width.saturating_sub(2)), chunks[3]);
 
     let sec1 = Paragraph::new(Line::from(vec![
-        Span::styled("  \u{1f6e1} ", Style::default().fg(theme::GREEN)),
-        Span::raw("Sandboxed execution, WASM isolation, SSRF protection"),
+        Span::styled("  🛡  ", Style::default().fg(theme::GREEN)),
+        Span::raw(crate::i18n::t("tui-init-welcome-sec1")),
     ]));
     f.render_widget(sec1, chunks[5]);
 
     let sec2 = Paragraph::new(Line::from(vec![
-        Span::styled("  \u{1f512} ", Style::default().fg(theme::GREEN)),
-        Span::raw("Signed manifests, audit trail, taint tracking"),
+        Span::styled("  🔒  ", Style::default().fg(theme::GREEN)),
+        Span::raw(crate::i18n::t("tui-init-welcome-sec2")),
     ]));
     f.render_widget(sec2, chunks[6]);
 
     let sec3 = Paragraph::new(Line::from(vec![
-        Span::styled("  \u{1f50d} ", Style::default().fg(theme::GREEN)),
-        Span::raw("RBAC, capability checks, secret zeroization"),
+        Span::styled("  🔍  ", Style::default().fg(theme::GREEN)),
+        Span::raw(crate::i18n::t("tui-init-welcome-sec3")),
     ]));
     f.render_widget(sec3, chunks[7]);
 
     let sec4 = Paragraph::new(Line::from(vec![
-        Span::styled("  \u{2714} ", Style::default().fg(theme::GREEN)),
-        Span::raw("API keys never logged, 0600 file permissions"),
+        Span::styled("  ✔  ", Style::default().fg(theme::GREEN)),
+        Span::raw(crate::i18n::t("tui-init-welcome-sec4")),
     ]));
     f.render_widget(sec4, chunks[8]);
 
     f.render_widget(widgets::separator(area.width.saturating_sub(2)), chunks[10]);
 
     let resp1 = Paragraph::new(Line::from(vec![Span::styled(
-        "  Agents can execute code, access the network, and act",
+        format!("  {}", crate::i18n::t("tui-init-welcome-resp1")),
         Style::default().fg(theme::TEXT_SECONDARY),
     )]));
     f.render_widget(resp1, chunks[12]);
 
     let resp2 = Paragraph::new(Line::from(vec![
         Span::styled(
-            "  on your behalf. ",
+            format!("  {}", crate::i18n::t("tui-init-welcome-resp2")),
             Style::default().fg(theme::TEXT_SECONDARY),
         ),
         Span::styled(
-            "You are responsible for what they do.",
+            crate::i18n::t("tui-init-welcome-resp-warn"),
             Style::default().fg(theme::YELLOW),
         ),
     ]));
     f.render_widget(resp2, chunks[13]);
 
     f.render_widget(
-        widgets::hint_bar("  [Enter] I understand    [Esc] Cancel"),
+        widgets::hint_bar(&format!("  {}", crate::i18n::t("tui-init-welcome-hints"))),
         chunks[15],
     );
 }
@@ -1511,7 +1514,7 @@ fn draw_migration_detecting(f: &mut Frame, area: Rect, state: &State) {
         Paragraph::new(Line::from(vec![
             Span::raw("  "),
             Span::styled(spinner, Style::default().fg(theme::ACCENT)),
-            Span::raw(" Checking for existing installations..."),
+            Span::raw(format!(" {}", crate::i18n::t("tui-init-migrate-checking"))),
         ])),
         chunks[1],
     );
@@ -1548,65 +1551,95 @@ fn draw_migration_offer(f: &mut Frame, area: Rect, state: &mut State) {
     if is_openfang {
         // OpenFang uses the same format — just show a simple summary
         content_lines.push(Line::from(vec![
-            Span::styled("  \u{2714} ", Style::default().fg(theme::GREEN)),
-            Span::raw("OpenFang configuration and data"),
+            Span::styled("  ✔ ", Style::default().fg(theme::GREEN)),
+            Span::raw(crate::i18n::t("tui-init-migrate-openfang-summary")),
         ]));
     } else if let Some(scan) = &state.openclaw_scan {
         if !scan.agents.is_empty() {
             let names: Vec<&str> = scan.agents.iter().map(|a| a.name.as_str()).collect();
             let names_str = names.join(", ");
+            let txt = crate::i18n::t_args(
+                "tui-init-migrate-openclaw-agents",
+                &[
+                    ("count", &scan.agents.len().to_string()),
+                    ("names", &names_str),
+                ],
+            );
             content_lines.push(Line::from(vec![
-                Span::styled("  \u{2714} ", Style::default().fg(theme::GREEN)),
-                Span::raw(format!("{} agents ({})", scan.agents.len(), names_str)),
+                Span::styled("  ✔ ", Style::default().fg(theme::GREEN)),
+                Span::raw(txt),
             ]));
         } else {
             content_lines.push(Line::from(vec![
-                Span::styled("  \u{2500} ", theme::dim_style()),
-                Span::styled("No agents", theme::dim_style()),
+                Span::styled("  ─ ", theme::dim_style()),
+                Span::styled(
+                    crate::i18n::t("tui-init-migrate-openclaw-no-agents"),
+                    theme::dim_style(),
+                ),
             ]));
         }
 
         if !scan.channels.is_empty() {
             let chan_str = scan.channels.join(", ");
+            let txt = crate::i18n::t_args(
+                "tui-init-migrate-openclaw-channels",
+                &[
+                    ("count", &scan.channels.len().to_string()),
+                    ("names", &chan_str),
+                ],
+            );
             content_lines.push(Line::from(vec![
-                Span::styled("  \u{2714} ", Style::default().fg(theme::GREEN)),
-                Span::raw(format!("{} channels ({})", scan.channels.len(), chan_str)),
+                Span::styled("  ✔ ", Style::default().fg(theme::GREEN)),
+                Span::raw(txt),
             ]));
         } else {
             content_lines.push(Line::from(vec![
-                Span::styled("  \u{2500} ", theme::dim_style()),
-                Span::styled("No channels", theme::dim_style()),
+                Span::styled("  ─ ", theme::dim_style()),
+                Span::styled(
+                    crate::i18n::t("tui-init-migrate-openclaw-no-channels"),
+                    theme::dim_style(),
+                ),
             ]));
         }
 
         if !scan.skills.is_empty() {
+            let txt = crate::i18n::t_args(
+                "tui-init-migrate-openclaw-skills",
+                &[("count", &scan.skills.len().to_string())],
+            );
             content_lines.push(Line::from(vec![
-                Span::styled("  \u{2714} ", Style::default().fg(theme::GREEN)),
-                Span::raw(format!("{} skills", scan.skills.len())),
+                Span::styled("  ✔ ", Style::default().fg(theme::GREEN)),
+                Span::raw(txt),
             ]));
         } else {
             content_lines.push(Line::from(vec![
-                Span::styled("  \u{2500} ", theme::dim_style()),
-                Span::styled("No skills", theme::dim_style()),
+                Span::styled("  ─ ", theme::dim_style()),
+                Span::styled(
+                    crate::i18n::t("tui-init-migrate-openclaw-no-skills"),
+                    theme::dim_style(),
+                ),
             ]));
         }
 
         if scan.has_memory {
             content_lines.push(Line::from(vec![
-                Span::styled("  \u{2714} ", Style::default().fg(theme::GREEN)),
-                Span::raw("Memory files"),
+                Span::styled("  ✔ ", Style::default().fg(theme::GREEN)),
+                Span::raw(crate::i18n::t("tui-init-migrate-openclaw-memory")),
             ]));
         } else {
             content_lines.push(Line::from(vec![
-                Span::styled("  \u{2500} ", theme::dim_style()),
-                Span::styled("No memory files", theme::dim_style()),
+                Span::styled("  ─ ", theme::dim_style()),
+                Span::styled(
+                    crate::i18n::t("tui-init-migrate-openclaw-no-memory"),
+                    theme::dim_style(),
+                ),
             ]));
         }
 
         if scan.has_config {
             content_lines.push(Line::from(vec![
-                Span::styled("  \u{2714} ", Style::default().fg(theme::GREEN)),
-                Span::raw("Configuration"),
+                Span::styled("  ✔ ", Style::default().fg(theme::GREEN)),
+                Span::raw(crate::i18n::t("tui-init-migrate-openclaw-config")),
             ]));
         }
     }
@@ -1625,14 +1658,16 @@ fn draw_migration_offer(f: &mut Frame, area: Rect, state: &mut State) {
     ])
     .split(area);
 
+    let title_text = match state.migrate_source {
+        Some(librefang_import::MigrateSource::OpenFang) => {
+            crate::i18n::t("tui-init-migrate-openfang-detected")
+        }
+        _ => crate::i18n::t("tui-init-migrate-openclaw-detected"),
+    };
+
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
-            match state.migrate_source {
-                Some(librefang_import::MigrateSource::OpenFang) => {
-                    "  OpenFang Installation Detected"
-                }
-                _ => "  OpenClaw Installation Detected",
-            },
+            title_text,
             Style::default()
                 .fg(theme::ACCENT)
                 .add_modifier(Modifier::BOLD),
@@ -1650,7 +1685,7 @@ fn draw_migration_offer(f: &mut Frame, area: Rect, state: &mut State) {
 
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
-            "  ".to_string() + &"\u{2500}".repeat(area.width.saturating_sub(6) as usize),
+            "  ".to_string() + &"─".repeat(area.width.saturating_sub(6) as usize),
             Style::default().fg(theme::BORDER),
         )])),
         chunks[2],
@@ -1671,19 +1706,26 @@ fn draw_migration_offer(f: &mut Frame, area: Rect, state: &mut State) {
 
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
-            "  ".to_string() + &"\u{2500}".repeat(area.width.saturating_sub(6) as usize),
+            "  ".to_string() + &"─".repeat(area.width.saturating_sub(6) as usize),
             Style::default().fg(theme::BORDER),
         )])),
         chunks[4],
     );
 
     // Yes / No options
-    let options = [("Yes", "migrate settings and data"), ("No", "start fresh")];
+    let yes_label = crate::i18n::t("tui-init-migrate-opt-yes");
+    let yes_desc = crate::i18n::t("tui-init-migrate-opt-yes-desc");
+    let no_label = crate::i18n::t("tui-init-migrate-opt-no");
+    let no_desc = crate::i18n::t("tui-init-migrate-opt-no-desc");
+    let options = [
+        (yes_label.as_str(), yes_desc.as_str()),
+        (no_label.as_str(), no_desc.as_str()),
+    ];
 
     for (i, (label, desc)) in options.iter().enumerate() {
         let selected = state.migration_choice_list.selected() == Some(i);
         let arrow = if selected {
-            Span::styled("  \u{25b8} ", Style::default().fg(theme::ACCENT))
+            Span::styled("  ▸ ", Style::default().fg(theme::ACCENT))
         } else {
             Span::raw("    ")
         };
@@ -1705,7 +1747,7 @@ fn draw_migration_offer(f: &mut Frame, area: Rect, state: &mut State) {
     }
 
     f.render_widget(
-        widgets::hint_bar("  [\u{2191}\u{2193}] Navigate  [Enter] Select  [Esc] Skip"),
+        widgets::hint_bar(&format!("  {}", crate::i18n::t("tui-init-migrate-hints"))),
         chunks[9],
     );
 }
@@ -1719,14 +1761,17 @@ fn draw_migration_running(f: &mut Frame, area: Rect, state: &State) {
     .split(area);
 
     let spinner = theme::SPINNER_FRAMES[state.tick % theme::SPINNER_FRAMES.len()];
+    let msg = match state.migrate_source {
+        Some(librefang_import::MigrateSource::OpenFang) => {
+            crate::i18n::t("tui-init-migrate-running-openfang")
+        }
+        _ => crate::i18n::t("tui-init-migrate-running-openclaw"),
+    };
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::raw("  "),
             Span::styled(spinner, Style::default().fg(theme::ACCENT)),
-            Span::raw(match state.migrate_source {
-                Some(librefang_import::MigrateSource::OpenFang) => " Migrating from OpenFang...",
-                _ => " Migrating from OpenClaw...",
-            }),
+            Span::raw(msg),
         ])),
         chunks[1],
     );
@@ -1736,9 +1781,10 @@ fn draw_migration_done(f: &mut Frame, area: Rect, state: &State) {
     let mut lines: Vec<Line> = Vec::new();
 
     if let Some(ref error) = state.migration_error {
+        let err_msg = crate::i18n::t_args("tui-init-migrate-done-failed", &[("error", error)]);
         lines.push(Line::from(vec![
-            Span::styled("  \u{2718} ", Style::default().fg(theme::RED)),
-            Span::raw(format!("Migration failed: {}", error)),
+            Span::styled("  ✘ ", Style::default().fg(theme::RED)),
+            Span::raw(err_msg),
         ]));
     } else if let Some(ref report) = state.migration_report {
         // Group imported items by kind
@@ -1778,73 +1824,99 @@ fn draw_migration_done(f: &mut Frame, area: Rect, state: &State) {
 
         if config_count > 0 {
             lines.push(Line::from(vec![
-                Span::styled("  \u{2714} ", Style::default().fg(theme::GREEN)),
-                Span::raw("Config migrated"),
+                Span::styled("  ✔ ", Style::default().fg(theme::GREEN)),
+                Span::raw(crate::i18n::t("tui-init-migrate-done-config")),
             ]));
         }
 
         if !agent_items.is_empty() {
             let names = agent_items.join(", ");
+            let txt = crate::i18n::t_args(
+                "tui-init-migrate-done-agents",
+                &[("count", &agent_items.len().to_string()), ("names", &names)],
+            );
             lines.push(Line::from(vec![
-                Span::styled("  \u{2714} ", Style::default().fg(theme::GREEN)),
-                Span::raw(format!("{} agents imported ({})", agent_items.len(), names)),
+                Span::styled("  ✔ ", Style::default().fg(theme::GREEN)),
+                Span::raw(txt),
             ]));
         }
 
         if !channel_items.is_empty() {
             let names = channel_items.join(", ");
+            let txt = crate::i18n::t_args(
+                "tui-init-migrate-done-channels",
+                &[
+                    ("count", &channel_items.len().to_string()),
+                    ("names", &names),
+                ],
+            );
             lines.push(Line::from(vec![
-                Span::styled("  \u{2714} ", Style::default().fg(theme::GREEN)),
-                Span::raw(format!("{} channels ({})", channel_items.len(), names)),
+                Span::styled("  ✔ ", Style::default().fg(theme::GREEN)),
+                Span::raw(txt),
             ]));
         }
 
         if memory_count > 0 {
             lines.push(Line::from(vec![
-                Span::styled("  \u{2714} ", Style::default().fg(theme::GREEN)),
-                Span::raw("Memory files copied"),
+                Span::styled("  ✔ ", Style::default().fg(theme::GREEN)),
+                Span::raw(crate::i18n::t("tui-init-migrate-done-memory")),
             ]));
         }
 
         if skill_count > 0 {
+            let txt = crate::i18n::t_args(
+                "tui-init-migrate-done-skills",
+                &[("count", &skill_count.to_string())],
+            );
             lines.push(Line::from(vec![
-                Span::styled("  \u{2714} ", Style::default().fg(theme::GREEN)),
-                Span::raw(format!("{} skills imported", skill_count)),
+                Span::styled("  ✔ ", Style::default().fg(theme::GREEN)),
+                Span::raw(txt),
             ]));
         }
 
         if session_count > 0 {
+            let txt = crate::i18n::t_args(
+                "tui-init-migrate-done-sessions",
+                &[("count", &session_count.to_string())],
+            );
             lines.push(Line::from(vec![
-                Span::styled("  \u{2714} ", Style::default().fg(theme::GREEN)),
-                Span::raw(format!("{} sessions imported", session_count)),
+                Span::styled("  ✔ ", Style::default().fg(theme::GREEN)),
+                Span::raw(txt),
             ]));
         }
 
         for skipped in &report.skipped {
+            let txt = crate::i18n::t_args(
+                "tui-init-migrate-done-skipped",
+                &[("name", &skipped.name), ("reason", &skipped.reason)],
+            );
             lines.push(Line::from(vec![
-                Span::styled("  \u{26a0} ", Style::default().fg(theme::YELLOW)),
-                Span::raw(format!("{} skipped ({})", skipped.name, skipped.reason)),
+                Span::styled("  ⚠ ", Style::default().fg(theme::YELLOW)),
+                Span::raw(txt),
             ]));
         }
 
         for warning in &report.warnings {
             lines.push(Line::from(vec![
-                Span::styled("  \u{26a0} ", Style::default().fg(theme::YELLOW)),
+                Span::styled("  ⚠ ", Style::default().fg(theme::YELLOW)),
                 Span::raw(warning.clone()),
             ]));
         }
 
         // Summary line
         lines.push(Line::from(vec![Span::styled(
-            "  ".to_string() + &"\u{2500}".repeat(area.width.saturating_sub(6) as usize),
+            "  ".to_string() + &"─".repeat(area.width.saturating_sub(6) as usize),
             Style::default().fg(theme::BORDER),
         )]));
-        lines.push(Line::from(vec![Span::raw(format!(
-            "  {} imported, {} skipped, {} warnings",
-            report.imported.len(),
-            report.skipped.len(),
-            report.warnings.len(),
-        ))]));
+        let summary_txt = crate::i18n::t_args(
+            "tui-init-migrate-done-summary",
+            &[
+                ("imported", &report.imported.len().to_string()),
+                ("skipped", &report.skipped.len().to_string()),
+                ("warnings", &report.warnings.len().to_string()),
+            ],
+        );
+        lines.push(Line::from(vec![Span::raw(summary_txt)]));
     }
 
     let content_height = lines.len() as u16;
@@ -1873,8 +1945,14 @@ fn draw_migration_done(f: &mut Frame, area: Rect, state: &State) {
 
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("  [Enter] Continue  ", theme::hint_style()),
-            Span::styled("(auto-advancing...)", theme::dim_style()),
+            Span::styled(
+                crate::i18n::t("tui-init-migrate-done-continue"),
+                theme::hint_style(),
+            ),
+            Span::styled(
+                crate::i18n::t("tui-init-migrate-done-autoadvancing"),
+                theme::dim_style(),
+            ),
         ])),
         chunks[4],
     );
@@ -1888,7 +1966,10 @@ fn draw_provider(f: &mut Frame, area: Rect, state: &mut State) {
     ])
     .split(area);
 
-    let prompt = Paragraph::new(Line::from(vec![Span::raw("  Choose your LLM provider:")]));
+    let prompt = Paragraph::new(Line::from(vec![Span::raw(format!(
+        "  {}",
+        crate::i18n::t("tui-init-provider-prompt")
+    ))]));
     f.render_widget(prompt, chunks[0]);
 
     let items: Vec<ListItem> = state
@@ -1898,27 +1979,31 @@ fn draw_provider(f: &mut Frame, area: Rect, state: &mut State) {
             let p = &PROVIDERS[idx];
             let detected = state.is_provider_detected(idx);
             let icon = if detected {
-                Span::styled("\u{25cf} ", Style::default().fg(theme::GREEN))
+                Span::styled("● ", Style::default().fg(theme::GREEN))
             } else if !p.needs_key {
-                Span::styled("\u{25cb} ", Style::default().fg(theme::BLUE))
+                Span::styled("○ ", Style::default().fg(theme::BLUE))
             } else {
                 Span::styled("  ", Style::default())
             };
             let name_span = Span::raw(format!("{:<14}", p.display));
             let hint_text = if p.name == "claude-code" {
                 if detected {
-                    "CLI detected".to_string()
+                    crate::i18n::t("tui-init-provider-cli-detected")
                 } else {
-                    "no API key needed".to_string()
+                    crate::i18n::t("tui-init-provider-no-key-needed")
                 }
             } else if detected {
                 format!("{} detected", p.env_var)
             } else if !p.needs_key {
-                "local, no key needed".to_string()
-            } else if !p.hint.is_empty() {
-                format!("requires {} ({})", p.env_var, p.hint)
+                crate::i18n::t("tui-init-provider-local-no-key")
+            } else if !p.hint_key.is_empty() {
+                let hint = crate::i18n::t(p.hint_key);
+                crate::i18n::t_args(
+                    "tui-init-provider-requires-with-hint",
+                    &[("env_var", p.env_var), ("hint", &hint)],
+                )
             } else {
-                format!("requires {}", p.env_var)
+                crate::i18n::t_args("tui-init-provider-requires", &[("env_var", p.env_var)])
             };
             ListItem::new(Line::from(vec![
                 icon,
@@ -1930,11 +2015,11 @@ fn draw_provider(f: &mut Frame, area: Rect, state: &mut State) {
 
     let list = List::new(items)
         .highlight_style(theme::selected_style())
-        .highlight_symbol("\u{25b8} ");
+        .highlight_symbol("▸ ");
     f.render_stateful_widget(list, chunks[1], &mut state.provider_list);
 
     f.render_widget(
-        widgets::hint_bar("  [\u{2191}\u{2193}/jk] Navigate  [Enter] Select  [Esc] Cancel"),
+        widgets::hint_bar(&format!("  {}", crate::i18n::t("tui-init-provider-hints"))),
         chunks[2],
     );
 }
@@ -1955,28 +2040,28 @@ fn draw_api_key(f: &mut Frame, area: Rect, state: &mut State) {
     ])
     .split(area);
 
-    let prompt = Paragraph::new(Line::from(vec![Span::raw(format!(
-        "  Enter your {} API key:",
-        p.display
-    ))]));
+    let prompt_txt = crate::i18n::t_args("tui-init-apikey-prompt", &[("provider", p.display)]);
+    let prompt = Paragraph::new(Line::from(vec![Span::raw(prompt_txt)]));
     f.render_widget(prompt, chunks[0]);
 
     match &state.key_test {
         KeyTestState::Idle => {
-            let masked: String = "\u{2022}".repeat(state.api_key_input.len());
+            let masked: String = "•".repeat(state.api_key_input.len());
             let input = Paragraph::new(Line::from(vec![
-                Span::raw("  \u{25b8} "),
+                Span::raw("  ▸ "),
                 Span::styled(&masked, theme::input_style()),
                 Span::styled(
-                    "\u{2588}",
+                    "█",
                     Style::default()
                         .fg(theme::GREEN)
                         .add_modifier(Modifier::SLOW_BLINK),
                 ),
             ]));
             f.render_widget(input, chunks[1]);
+            let env_hint_txt =
+                crate::i18n::t_args("tui-init-apikey-env-hint", &[("env_var", p.env_var)]);
             let env_hint = Paragraph::new(Line::from(vec![Span::styled(
-                format!("    Or set {} environment variable", p.env_var),
+                env_hint_txt,
                 theme::dim_style(),
             )]));
             f.render_widget(env_hint, chunks[3]);
@@ -1986,21 +2071,21 @@ fn draw_api_key(f: &mut Frame, area: Rect, state: &mut State) {
             let input = Paragraph::new(Line::from(vec![
                 Span::raw("  "),
                 Span::styled(spinner, Style::default().fg(theme::ACCENT)),
-                Span::raw(" Testing API key..."),
+                Span::raw(format!(" {}", crate::i18n::t("tui-init-apikey-testing"))),
             ]));
             f.render_widget(input, chunks[1]);
         }
         KeyTestState::Ok => {
             f.render_widget(
                 Paragraph::new(Line::from(vec![
-                    Span::styled("  \u{2714} ", Style::default().fg(theme::GREEN)),
-                    Span::raw("API key verified"),
+                    Span::styled("  ✔ ", Style::default().fg(theme::GREEN)),
+                    Span::raw(crate::i18n::t("tui-init-apikey-verified")),
                 ])),
                 chunks[1],
             );
             f.render_widget(
                 Paragraph::new(Line::from(vec![Span::styled(
-                    "    Saved to ~/.librefang/.env",
+                    crate::i18n::t("tui-init-apikey-saved"),
                     theme::dim_style(),
                 )])),
                 chunks[3],
@@ -2009,14 +2094,14 @@ fn draw_api_key(f: &mut Frame, area: Rect, state: &mut State) {
         KeyTestState::Warn => {
             f.render_widget(
                 Paragraph::new(Line::from(vec![
-                    Span::styled("  \u{26a0} ", Style::default().fg(theme::YELLOW)),
-                    Span::raw("Could not verify (may still work)"),
+                    Span::styled("  ⚠ ", Style::default().fg(theme::YELLOW)),
+                    Span::raw(crate::i18n::t("tui-init-apikey-verify-failed")),
                 ])),
                 chunks[1],
             );
             f.render_widget(
                 Paragraph::new(Line::from(vec![Span::styled(
-                    "    Saved to ~/.librefang/.env",
+                    crate::i18n::t("tui-init-apikey-saved"),
                     theme::dim_style(),
                 )])),
                 chunks[3],
@@ -2025,8 +2110,8 @@ fn draw_api_key(f: &mut Frame, area: Rect, state: &mut State) {
         KeyTestState::SaveFailed(err) => {
             f.render_widget(
                 Paragraph::new(Line::from(vec![
-                    Span::styled("  \u{2716} ", Style::default().fg(theme::YELLOW)),
-                    Span::raw("Verified, but saving to .env failed"),
+                    Span::styled("  ✘ ", Style::default().fg(theme::YELLOW)),
+                    Span::raw(crate::i18n::t("tui-init-apikey-save-failed")),
                 ])),
                 chunks[1],
             );
@@ -2039,7 +2124,7 @@ fn draw_api_key(f: &mut Frame, area: Rect, state: &mut State) {
             );
             f.render_widget(
                 Paragraph::new(Line::from(vec![Span::styled(
-                    "    [Enter] retry save  ·  [Esc] edit key  (key already verified — nothing on disk)",
+                    crate::i18n::t("tui-init-apikey-save-failed-hints"),
                     theme::dim_style(),
                 )])),
                 chunks[4],
@@ -2048,7 +2133,7 @@ fn draw_api_key(f: &mut Frame, area: Rect, state: &mut State) {
     }
 
     f.render_widget(
-        widgets::hint_bar("  [Enter] Confirm  [Esc] Back"),
+        widgets::hint_bar(&format!("  {}", crate::i18n::t("tui-init-apikey-hints"))),
         chunks[5],
     );
 }
@@ -2066,11 +2151,9 @@ fn draw_model(f: &mut Frame, area: Rect, state: &mut State) {
     ])
     .split(area);
 
+    let prompt_txt = crate::i18n::t_args("tui-init-model-prompt", &[("provider", p.display)]);
     f.render_widget(
-        Paragraph::new(Line::from(vec![Span::raw(format!(
-            "  Choose default model for {}:",
-            p.display
-        ))])),
+        Paragraph::new(Line::from(vec![Span::raw(prompt_txt)])),
         chunks[0],
     );
 
@@ -2078,13 +2161,11 @@ fn draw_model(f: &mut Frame, area: Rect, state: &mut State) {
     let items = build_model_list_items(&state.model_entries, Some(default_model.as_str()));
     let list = List::new(items)
         .highlight_style(theme::selected_style())
-        .highlight_symbol("\u{25b8} ");
+        .highlight_symbol("▸ ");
     f.render_stateful_widget(list, chunks[1], &mut state.model_list);
 
     f.render_widget(
-        widgets::hint_bar(
-            "  [\u{2191}\u{2193}/jk] Navigate  [Enter] Select  [Esc] Back    * = default",
-        ),
+        widgets::hint_bar(&format!("  {}", crate::i18n::t("tui-init-model-hints"))),
         chunks[2],
     );
 }
@@ -2114,7 +2195,7 @@ fn draw_routing_choice(f: &mut Frame, area: Rect, state: &mut State) {
 
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
-            "  Smart Model Routing",
+            format!("  {}", crate::i18n::t("tui-init-routing-title")),
             Style::default()
                 .fg(theme::ACCENT)
                 .add_modifier(Modifier::BOLD),
@@ -2124,7 +2205,7 @@ fn draw_routing_choice(f: &mut Frame, area: Rect, state: &mut State) {
 
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
-            "  Automatically picks the right model per task complexity.",
+            format!("  {}", crate::i18n::t("tui-init-routing-desc1")),
             theme::dim_style(),
         )])),
         chunks[1],
@@ -2132,7 +2213,7 @@ fn draw_routing_choice(f: &mut Frame, area: Rect, state: &mut State) {
 
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
-            "  Simple tasks use cheap/fast models, complex tasks use",
+            format!("  {}", crate::i18n::t("tui-init-routing-desc2")),
             theme::dim_style(),
         )])),
         chunks[2],
@@ -2140,7 +2221,7 @@ fn draw_routing_choice(f: &mut Frame, area: Rect, state: &mut State) {
 
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
-            "  frontier models. Saves cost without sacrificing quality.",
+            format!("  {}", crate::i18n::t("tui-init-routing-desc3")),
             theme::dim_style(),
         )])),
         chunks[3],
@@ -2148,15 +2229,19 @@ fn draw_routing_choice(f: &mut Frame, area: Rect, state: &mut State) {
 
     f.render_widget(widgets::separator(area.width.saturating_sub(2)), chunks[5]);
 
+    let yes_label = crate::i18n::t("tui-init-routing-opt-yes");
+    let yes_desc = crate::i18n::t("tui-init-routing-opt-yes-desc");
+    let no_label = crate::i18n::t("tui-init-routing-opt-no");
+    let no_desc = crate::i18n::t("tui-init-routing-opt-no-desc");
     let options = [
-        ("Yes", "pick 3 models (fast / balanced / frontier)"),
-        ("No", "use one model for everything"),
+        (yes_label.as_str(), yes_desc.as_str()),
+        (no_label.as_str(), no_desc.as_str()),
     ];
 
     for (i, (label, desc)) in options.iter().enumerate() {
         let selected = state.routing_choice_list.selected() == Some(i);
         let arrow = if selected {
-            Span::styled("  \u{25b8} ", Style::default().fg(theme::ACCENT))
+            Span::styled("  ▸ ", Style::default().fg(theme::ACCENT))
         } else {
             Span::raw("    ")
         };
@@ -2178,7 +2263,7 @@ fn draw_routing_choice(f: &mut Frame, area: Rect, state: &mut State) {
     }
 
     f.render_widget(
-        widgets::hint_bar("  [\u{2191}\u{2193}] Navigate  [Enter] Select  [Esc] Back"),
+        widgets::hint_bar(&format!("  {}", crate::i18n::t("tui-init-routing-hints"))),
         chunks[10],
     );
 }
@@ -2193,6 +2278,17 @@ fn draw_routing_pick(f: &mut Frame, area: Rect, state: &mut State, tier: usize) 
     ])
     .split(area);
 
+    let routing_tier_keys = [
+        "tui-init-routing-tier-fast",
+        "tui-init-routing-tier-balanced",
+        "tui-init-routing-tier-frontier",
+    ];
+    let routing_tier_desc_keys = [
+        "tui-init-routing-tier-fast-desc",
+        "tui-init-routing-tier-balanced-desc",
+        "tui-init-routing-tier-frontier-desc",
+    ];
+
     // Tier header with colored label
     let tier_color = match tier {
         0 => theme::GREEN,
@@ -2200,21 +2296,28 @@ fn draw_routing_pick(f: &mut Frame, area: Rect, state: &mut State, tier: usize) 
         _ => theme::PURPLE,
     };
 
+    let tier_name = crate::i18n::t(routing_tier_keys[tier]);
+    let prefix = crate::i18n::t("tui-init-routing-pick-prefix");
+    let suffix = crate::i18n::t_args(
+        "tui-init-routing-pick-suffix",
+        &[("step", &(tier + 1).to_string())],
+    );
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::raw("  Pick "),
+            Span::raw(format!("  {prefix} ")),
             Span::styled(
-                ROUTING_TIER_NAMES[tier],
+                tier_name,
                 Style::default().fg(tier_color).add_modifier(Modifier::BOLD),
             ),
-            Span::raw(format!(" model ({}/3):", tier + 1)),
+            Span::raw(format!(" {suffix}")),
         ])),
         chunks[0],
     );
 
+    let desc_txt = crate::i18n::t(routing_tier_desc_keys[tier]);
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
-            format!("  {}", ROUTING_TIER_DESC[tier]),
+            format!("  {}", desc_txt),
             theme::dim_style(),
         )])),
         chunks[1],
@@ -2223,15 +2326,13 @@ fn draw_routing_pick(f: &mut Frame, area: Rect, state: &mut State, tier: usize) 
     // Show already-picked tiers as summary
     let tier_colors = [theme::GREEN, theme::YELLOW, theme::PURPLE];
     let mut summary_spans: Vec<Span> = vec![Span::raw("  ")];
-    for (t, (name, c)) in ROUTING_TIER_NAMES
-        .iter()
-        .zip(tier_colors.iter())
-        .enumerate()
-    {
+    for t in 0..3 {
+        let name = crate::i18n::t(routing_tier_keys[t]);
+        let c = tier_colors[t];
         if t == tier {
             summary_spans.push(Span::styled(
                 format!("[{name}]"),
-                Style::default().fg(*c).add_modifier(Modifier::BOLD),
+                Style::default().fg(c).add_modifier(Modifier::BOLD),
             ));
         } else if t < tier {
             // Already picked — show short model name
@@ -2242,10 +2343,10 @@ fn draw_routing_pick(f: &mut Frame, area: Rect, state: &mut State, tier: usize) 
             let display = librefang_types::truncate_str(short, 14);
             summary_spans.push(Span::styled(
                 format!("{name}:{display}"),
-                Style::default().fg(*c),
+                Style::default().fg(c),
             ));
         } else {
-            summary_spans.push(Span::styled(*name, theme::dim_style()));
+            summary_spans.push(Span::styled(name, theme::dim_style()));
         }
         if t < 2 {
             summary_spans.push(Span::raw("  "));
@@ -2257,11 +2358,14 @@ fn draw_routing_pick(f: &mut Frame, area: Rect, state: &mut State, tier: usize) 
     let items = build_model_list_items(&state.model_entries, None);
     let list = List::new(items)
         .highlight_style(theme::selected_style())
-        .highlight_symbol("\u{25b8} ");
+        .highlight_symbol("▸ ");
     f.render_stateful_widget(list, chunks[3], &mut state.routing_tier_list);
 
     f.render_widget(
-        widgets::hint_bar("  [\u{2191}\u{2193}/jk] Navigate  [Enter] Select  [Esc] Back"),
+        widgets::hint_bar(&format!(
+            "  {}",
+            crate::i18n::t("tui-init-routing-pick-hints")
+        )),
         chunks[4],
     );
 }
@@ -2345,7 +2449,7 @@ fn draw_complete(f: &mut Frame, area: Rect, state: &mut State) {
     if !state.save_error.is_empty() {
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled("  \u{2718} ", Style::default().fg(theme::RED)),
+                Span::styled("  ✘ ", Style::default().fg(theme::RED)),
                 Span::raw(&state.save_error),
             ])),
             chunks[1],
@@ -2353,9 +2457,9 @@ fn draw_complete(f: &mut Frame, area: Rect, state: &mut State) {
     } else if state.daemon_started {
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled("  \u{2714} ", Style::default().fg(theme::GREEN)),
+                Span::styled("  ✔ ", Style::default().fg(theme::GREEN)),
                 Span::styled(
-                    "Setup complete \u{2014} daemon running",
+                    crate::i18n::t("tui-init-complete-success-daemon"),
                     Style::default()
                         .fg(theme::GREEN)
                         .add_modifier(Modifier::BOLD),
@@ -2366,9 +2470,9 @@ fn draw_complete(f: &mut Frame, area: Rect, state: &mut State) {
     } else if !state.daemon_error.is_empty() {
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled("  \u{26a0} ", Style::default().fg(theme::YELLOW)),
+                Span::styled("  ⚠ ", Style::default().fg(theme::YELLOW)),
                 Span::styled(
-                    "Setup complete \u{2014} ",
+                    crate::i18n::t("tui-init-complete-setup-prefix"),
                     Style::default()
                         .fg(theme::GREEN)
                         .add_modifier(Modifier::BOLD),
@@ -2380,9 +2484,9 @@ fn draw_complete(f: &mut Frame, area: Rect, state: &mut State) {
     } else {
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled("  \u{2714} ", Style::default().fg(theme::GREEN)),
+                Span::styled("  ✔ ", Style::default().fg(theme::GREEN)),
                 Span::styled(
-                    "Setup complete!",
+                    crate::i18n::t("tui-init-complete-success"),
                     Style::default()
                         .fg(theme::GREEN)
                         .add_modifier(Modifier::BOLD),
@@ -2398,7 +2502,7 @@ fn draw_complete(f: &mut Frame, area: Rect, state: &mut State) {
 
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("  Provider:    ", kv_style),
+            Span::styled(crate::i18n::t("tui-init-complete-label-provider"), kv_style),
             Span::styled(p.display, val_style),
         ])),
         chunks[3],
@@ -2406,18 +2510,21 @@ fn draw_complete(f: &mut Frame, area: Rect, state: &mut State) {
 
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("  Model:       ", kv_style),
+            Span::styled(crate::i18n::t("tui-init-complete-label-model"), kv_style),
             Span::styled(model, val_style),
         ])),
         chunks[4],
     );
 
     let daemon_text = if state.daemon_started {
-        format!("running at {}", state.daemon_url)
+        crate::i18n::t_args(
+            "tui-init-complete-daemon-running",
+            &[("url", &state.daemon_url)],
+        )
     } else if !state.daemon_error.is_empty() {
-        "not running".to_string()
+        crate::i18n::t("tui-init-complete-daemon-not-running")
     } else {
-        "pending".to_string()
+        crate::i18n::t("tui-init-complete-daemon-pending")
     };
     let daemon_color = if state.daemon_started {
         theme::GREEN
@@ -2426,7 +2533,7 @@ fn draw_complete(f: &mut Frame, area: Rect, state: &mut State) {
     };
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("  Daemon:      ", kv_style),
+            Span::styled(crate::i18n::t("tui-init-complete-label-daemon"), kv_style),
             Span::styled(daemon_text, Style::default().fg(daemon_color)),
         ])),
         chunks[5],
@@ -2435,7 +2542,7 @@ fn draw_complete(f: &mut Frame, area: Rect, state: &mut State) {
     // ── Separator ──
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
-            "  ".to_string() + &"\u{2500}".repeat(area.width.saturating_sub(6) as usize),
+            "  ".to_string() + &"─".repeat(area.width.saturating_sub(6) as usize),
             Style::default().fg(theme::BORDER),
         )])),
         chunks[7],
@@ -2444,7 +2551,7 @@ fn draw_complete(f: &mut Frame, area: Rect, state: &mut State) {
     // ── Question ──
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
-            "  How do you want to use LibreFang?",
+            crate::i18n::t("tui-init-complete-question"),
             Style::default()
                 .fg(theme::ACCENT)
                 .add_modifier(Modifier::BOLD),
@@ -2454,15 +2561,30 @@ fn draw_complete(f: &mut Frame, area: Rect, state: &mut State) {
 
     // ── Options ──
     let desktop_hint = if has_desktop {
-        "native window with system tray"
+        crate::i18n::t("tui-init-complete-desktop-desc-installed")
     } else {
-        "not installed"
+        crate::i18n::t("tui-init-complete-desktop-desc-not-installed")
     };
 
-    let options: [(&str, &str, &str); 3] = [
-        ("Desktop app", "(recommended)", desktop_hint),
-        ("Web dashboard", "", "opens in your default browser"),
-        ("Terminal chat", "", "interactive chat right here"),
+    let opt_desktop_label = crate::i18n::t("tui-init-complete-opt-desktop");
+    let opt_desktop_badge = crate::i18n::t("tui-init-complete-opt-desktop-badge");
+    let opt_dashboard_label = crate::i18n::t("tui-init-complete-opt-dashboard");
+    let opt_dashboard_desc = crate::i18n::t("tui-init-complete-opt-dashboard-desc");
+    let opt_chat_label = crate::i18n::t("tui-init-complete-opt-chat");
+    let opt_chat_desc = crate::i18n::t("tui-init-complete-opt-chat-desc");
+
+    let options = [
+        (
+            opt_desktop_label.as_str(),
+            opt_desktop_badge.as_str(),
+            desktop_hint.as_str(),
+        ),
+        (
+            opt_dashboard_label.as_str(),
+            "",
+            opt_dashboard_desc.as_str(),
+        ),
+        (opt_chat_label.as_str(), "", opt_chat_desc.as_str()),
     ];
 
     for (i, (label, badge, desc)) in options.iter().enumerate() {
@@ -2470,7 +2592,7 @@ fn draw_complete(f: &mut Frame, area: Rect, state: &mut State) {
         let num = format!("[{}]", i + 1);
 
         let arrow = if selected {
-            Span::styled("  \u{25b8} ", Style::default().fg(theme::ACCENT))
+            Span::styled("  ▸ ", Style::default().fg(theme::ACCENT))
         } else {
             Span::raw("    ")
         };
@@ -2521,7 +2643,7 @@ fn draw_complete(f: &mut Frame, area: Rect, state: &mut State) {
 
     // ── Bottom hints ──
     f.render_widget(
-        widgets::hint_bar("  [\u{2191}\u{2193}/jk] Navigate  [Enter] Launch  [1/2/3] Quick select"),
+        widgets::hint_bar(&format!("  {}", crate::i18n::t("tui-init-complete-hints"))),
         chunks[15],
     );
 }
@@ -2833,13 +2955,5 @@ mod tests {
             assert_eq!(s.step_label(), label, "label drift for {name}");
             assert_eq!(s.step_index(), idx, "index drift for {name}");
         }
-    }
-
-    #[test]
-    fn routing_tier_constants_are_three_wide() {
-        // The PickTier sub-state is indexed 0..=2; the parallel display
-        // arrays must match that or `draw_routing_pick` panics on indexing.
-        assert_eq!(ROUTING_TIER_NAMES.len(), 3);
-        assert_eq!(ROUTING_TIER_DESC.len(), 3);
     }
 }

@@ -102,7 +102,7 @@ export function PromptsExperimentsModal({
           <button
             onClick={onClose}
             className="p-2 rounded-xl hover:bg-main"
-            aria-label={t("common.close", { defaultValue: "Close dialog" })}
+            aria-label={t("common.close", { defaultValue: "Close" })}
           >
             <X className="w-4 h-4" />
           </button>

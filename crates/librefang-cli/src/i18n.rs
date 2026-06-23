@@ -17,6 +17,7 @@ thread_local! {
 
 pub struct I18n {
     bundle: FluentBundle<FluentResource>,
+    fallback_bundle: FluentBundle<FluentResource>,
 }
 
 impl I18n {
@@ -26,12 +27,21 @@ impl I18n {
         } else {
             DEFAULT_LANGUAGE
         };
-        let lang_id: LanguageIdentifier = selected
+        let bundle = Self::bundle_for(selected)?;
+        let fallback_bundle = Self::bundle_for(DEFAULT_LANGUAGE)?;
+        Ok(Self {
+            bundle,
+            fallback_bundle,
+        })
+    }
+
+    fn bundle_for(language: &str) -> Result<FluentBundle<FluentResource>, String> {
+        let lang_id: LanguageIdentifier = language
             .parse()
             .map_err(|e| format!("invalid language identifier: {e}"))?;
         let mut bundle = FluentBundle::new(vec![lang_id]);
         bundle.set_use_isolating(false);
-        let source = match selected {
+        let source = match language {
             "zh-CN" => ZH_CN_FTL,
             "uk" => UK_FTL,
             _ => EN_FTL,
@@ -41,23 +51,29 @@ impl I18n {
         bundle
             .add_resource(resource)
             .map_err(|errors| format!("failed to add Fluent resource: {errors:?}"))?;
-        Ok(Self { bundle })
+        Ok(bundle)
     }
 
     fn get(&self, key: &str, args: Option<&FluentArgs>) -> String {
-        let Some(message) = self.bundle.get_message(key) else {
-            return format!("[{key}]");
-        };
-        let Some(pattern) = message.value() else {
-            return format!("[{key}]");
-        };
+        Self::get_from_bundle(&self.bundle, key, args)
+            .or_else(|| Self::get_from_bundle(&self.fallback_bundle, key, args))
+            .unwrap_or_else(|| format!("[{key}]"))
+    }
+
+    fn get_from_bundle(
+        bundle: &FluentBundle<FluentResource>,
+        key: &str,
+        args: Option<&FluentArgs>,
+    ) -> Option<String> {
+        let message = bundle.get_message(key)?;
+        let pattern = message.value()?;
 
         let mut errors = vec![];
-        let result = self.bundle.format_pattern(pattern, args, &mut errors);
+        let result = bundle.format_pattern(pattern, args, &mut errors);
         if !errors.is_empty() {
             tracing::warn!(key = %key, errors = ?errors, "Fluent formatting errors");
         }
-        result.to_string()
+        Some(result.to_string())
     }
 }
 
@@ -194,6 +210,34 @@ mod tests {
             t_args("models-available", &[("count", "12")]),
             "12 models available"
         );
+    }
+
+    #[test]
+    fn falls_back_to_english_for_missing_locale_key() {
+        let lang_id: LanguageIdentifier = "zh-CN".parse().expect("language id must parse");
+        let mut localized_bundle = FluentBundle::new(vec![lang_id]);
+        localized_bundle.set_use_isolating(false);
+        let resource =
+            FluentResource::try_new("label-dashboard = 本地化控制台".to_string()).unwrap();
+        localized_bundle.add_resource(resource).unwrap();
+        let fallback_bundle = I18n::bundle_for("en").expect("English bundle must be valid");
+        let i18n = I18n {
+            bundle: localized_bundle,
+            fallback_bundle,
+        };
+
+        assert_eq!(
+            i18n.get(
+                "tui-init-migrate-openclaw-skills",
+                Some(&{
+                    let mut args = FluentArgs::new();
+                    args.set("count", FluentValue::from("3"));
+                    args
+                }),
+            ),
+            "3 skills"
+        );
+        assert_eq!(i18n.get("missing-test-key", None), "[missing-test-key]");
     }
 
     #[test]

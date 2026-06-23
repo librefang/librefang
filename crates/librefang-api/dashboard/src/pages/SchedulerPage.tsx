@@ -32,11 +32,11 @@ import {
 import { StaggerList } from "../components/ui/StaggerList";
 
 const TRIGGER_PATTERN_PRESETS = [
-  { label: "lifecycle (spawned + terminated)", value: '"lifecycle"' },
-  { label: "agent_spawned", value: '"agent_spawned"' },
-  { label: "agent_terminated", value: '"agent_terminated"' },
-  { label: "all events", value: '"all"' },
-  { label: "custom JSON…", value: "custom" },
+  { labelKey: "scheduler.trigger_preset_lifecycle", defaultLabel: "lifecycle (spawned + terminated)", value: '"lifecycle"' },
+  { labelKey: "scheduler.trigger_preset_agent_spawned", defaultLabel: "agent_spawned", value: '"agent_spawned"' },
+  { labelKey: "scheduler.trigger_preset_agent_terminated", defaultLabel: "agent_terminated", value: '"agent_terminated"' },
+  { labelKey: "scheduler.trigger_preset_all_events", defaultLabel: "all events", value: '"all"' },
+  { labelKey: "scheduler.trigger_preset_custom_json", defaultLabel: "custom JSON…", value: "custom" },
 ] as const;
 
 const INPUT_CLASS = "w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand";
@@ -423,10 +423,10 @@ export function SchedulerPage() {
                   )}
                   <div className="flex items-center gap-3 pl-9 sm:pl-11 text-[9px] sm:text-[10px] text-text-dim/40 flex-wrap">
                     {tr.fire_count != null && (
-                      <span>Fired: {tr.fire_count}{tr.max_fires ? `/${tr.max_fires}` : ""}</span>
+                      <span>{t("scheduler.fired", { defaultValue: "Fired" })}: {tr.fire_count}{tr.max_fires ? `/${tr.max_fires}` : ""}</span>
                     )}
                     {tr.cooldown_secs != null && (
-                      <span>Cooldown: {tr.cooldown_secs}s</span>
+                      <span>{t("scheduler.cooldown", { defaultValue: "Cooldown" })}: {tr.cooldown_secs}s</span>
                     )}
                     {tr.session_mode && (
                       <span className="font-mono">session: {tr.session_mode}</span>
@@ -547,10 +547,10 @@ export function SchedulerPage() {
               </select>
             </div>
             <div>
-              <label className="text-[10px] font-bold text-text-dim uppercase">Event pattern</label>
+              <label className="text-[10px] font-bold text-text-dim uppercase">{t("scheduler.event_pattern", { defaultValue: "Event pattern" })}</label>
               <select value={triggerPatternPreset} onChange={e => setTriggerPatternPreset(e.target.value)} className={INPUT_CLASS}>
                 {TRIGGER_PATTERN_PRESETS.map(p => (
-                  <option key={p.value} value={p.value}>{p.label}</option>
+                  <option key={p.value} value={p.value}>{t(p.labelKey, { defaultValue: p.defaultLabel })}</option>
                 ))}
               </select>
               {triggerPatternPreset === "custom" && (
@@ -568,13 +568,13 @@ export function SchedulerPage() {
                 value={triggerPrompt}
                 onChange={e => setTriggerPrompt(e.target.value)}
                 rows={3}
-                placeholder="Prompt template sent to the agent when the event fires…"
+                placeholder={t("scheduler.trigger_prompt_placeholder", { defaultValue: "Prompt template sent to the agent when the event fires…" })}
                 className={`${INPUT_CLASS} resize-none`}
               />
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="text-[10px] font-bold text-text-dim uppercase">Max fires (0 = unlimited)</label>
+                <label className="text-[10px] font-bold text-text-dim uppercase">{t("scheduler.max_fires", { defaultValue: "Max fires (0 = unlimited)" })}</label>
                 <input
                   type="number" min={0} value={triggerMaxFires}
                   onChange={e => setTriggerMaxFires(Number(e.target.value))}
@@ -582,9 +582,9 @@ export function SchedulerPage() {
                 />
               </div>
               <div>
-                <label className="text-[10px] font-bold text-text-dim uppercase">Target agent (optional)</label>
+                <label className="text-[10px] font-bold text-text-dim uppercase">{t("scheduler.target_agent_optional", { defaultValue: "Target agent (optional)" })}</label>
                 <select value={triggerTargetAgent} onChange={e => setTriggerTargetAgent(e.target.value)} className={INPUT_CLASS}>
-                  <option value="">Same agent</option>
+                  <option value="">{t("scheduler.same_agent", { defaultValue: "Same agent" })}</option>
                   {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
                 </select>
               </div>
@@ -595,7 +595,7 @@ export function SchedulerPage() {
             <div className="flex gap-2 pt-2">
               <Button type="submit" variant="primary" className="flex-1" disabled={createTriggerMut.isPending || !triggerAgentId}>
                 {createTriggerMut.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Zap className="w-4 h-4 mr-1" />}
-                Create trigger
+                {t("scheduler.create_trigger", { defaultValue: "Create trigger" })}
               </Button>
               <Button type="button" variant="secondary" onClick={() => setShowCreate(false)}>{t("common.cancel")}</Button>
             </div>
@@ -618,7 +618,7 @@ export function SchedulerPage() {
           {editTargetsSchedule && (
             <div className="rounded-xl bg-brand/5 border border-brand/20 px-3 py-2 text-[10px] text-text-dim/70">
               <span className="font-bold text-brand/80">
-                {t("scheduler.job_name", { defaultValue: "Job" })}:{" "}
+                {t("scheduler.job", { defaultValue: "Job" })}:{" "}
               </span>
               {editTargetsSchedule.name || truncateId(editTargetsSchedule.id)}
               <span className="ml-2 font-mono text-text-dim/40">{editTargetsSchedule.cron}</span>
@@ -668,27 +668,27 @@ export function SchedulerPage() {
       </DrawerPanel>
 
       {/* Edit Trigger Modal */}
-      <DrawerPanel isOpen={!!triggerEdit.trigger} onClose={() => setTriggerEdit(prev => ({ ...prev, trigger: null }))} title="Edit trigger" size="md">
+      <DrawerPanel isOpen={!!triggerEdit.trigger} onClose={() => setTriggerEdit(prev => ({ ...prev, trigger: null }))} title={t("scheduler.edit_trigger", { defaultValue: "Edit trigger" })} size="md">
         <form onSubmit={handleEditTrigger} className="p-5 space-y-4">
           {triggerEdit.trigger && (
             <div className="rounded-xl bg-warning/5 border border-warning/20 px-3 py-2 text-[10px] text-text-dim/60">
-              <span className="font-bold text-warning/80">Pattern: </span>
+              <span className="font-bold text-warning/80">{t("scheduler.pattern", { defaultValue: "Pattern" })}: </span>
               {formatTriggerPattern(triggerEdit.trigger.pattern) || String(triggerEdit.trigger.pattern)}
             </div>
           )}
           <div>
-            <label className="text-[10px] font-bold text-text-dim uppercase">Prompt template</label>
+            <label className="text-[10px] font-bold text-text-dim uppercase">{t("scheduler.prompt_template", { defaultValue: "Prompt template" })}</label>
             <textarea
               value={triggerEdit.prompt}
               onChange={e => setTriggerEdit(prev => ({ ...prev, prompt: e.target.value }))}
               rows={3}
-              placeholder="Prompt sent to the agent when the event fires…"
+              placeholder={t("scheduler.prompt_sent_placeholder", { defaultValue: "Prompt sent to the agent when the event fires…" })}
               className={`${INPUT_CLASS} resize-none`}
             />
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="text-[10px] font-bold text-text-dim uppercase">Max fires (0 = unlimited)</label>
+              <label className="text-[10px] font-bold text-text-dim uppercase">{t("scheduler.max_fires", { defaultValue: "Max fires (0 = unlimited)" })}</label>
               <input
                 type="number" min={0} value={triggerEdit.maxFires}
                 onChange={e => setTriggerEdit(prev => ({ ...prev, maxFires: Number(e.target.value) }))}
@@ -696,7 +696,7 @@ export function SchedulerPage() {
               />
             </div>
             <div>
-              <label className="text-[10px] font-bold text-text-dim uppercase">Cooldown (seconds, blank = none)</label>
+              <label className="text-[10px] font-bold text-text-dim uppercase">{t("scheduler.cooldown_seconds", { defaultValue: "Cooldown (seconds, blank = none)" })}</label>
               <input
                 type="number" min={0} value={triggerEdit.cooldown}
                 onChange={e => setTriggerEdit(prev => ({ ...prev, cooldown: e.target.value }))}
@@ -706,17 +706,17 @@ export function SchedulerPage() {
             </div>
           </div>
           <div>
-            <label className="text-[10px] font-bold text-text-dim uppercase">Session mode (blank = agent default)</label>
+            <label className="text-[10px] font-bold text-text-dim uppercase">{t("scheduler.session_mode_default", { defaultValue: "Session mode (blank = agent default)" })}</label>
             <select value={triggerEdit.sessionMode} onChange={e => setTriggerEdit(prev => ({ ...prev, sessionMode: e.target.value }))} className={INPUT_CLASS}>
-              <option value="">agent default</option>
+              <option value="">{t("scheduler.agent_default", { defaultValue: "agent default" })}</option>
               <option value="persistent">persistent</option>
               <option value="new">new</option>
             </select>
           </div>
           <div>
-            <label className="text-[10px] font-bold text-text-dim uppercase">Target agent (blank = owner)</label>
+            <label className="text-[10px] font-bold text-text-dim uppercase">{t("scheduler.target_agent_owner", { defaultValue: "Target agent (blank = owner)" })}</label>
             <select value={triggerEdit.targetAgent} onChange={e => setTriggerEdit(prev => ({ ...prev, targetAgent: e.target.value }))} className={INPUT_CLASS}>
-              <option value="">owner (default)</option>
+              <option value="">{t("scheduler.owner_default", { defaultValue: "owner (default)" })}</option>
               {agents.map(a => (
                 <option key={a.id} value={a.id}>{a.name}</option>
               ))}
@@ -728,7 +728,7 @@ export function SchedulerPage() {
           <div className="flex gap-2 pt-2">
             <Button type="submit" variant="primary" className="flex-1" disabled={updateTriggerMut.isPending}>
               {updateTriggerMut.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Pencil className="w-4 h-4 mr-1" />}
-              Save changes
+              {t("common.save_changes", { defaultValue: "Save changes" })}
             </Button>
             <Button type="button" variant="secondary" onClick={() => setTriggerEdit(prev => ({ ...prev, trigger: null }))}>{t("common.cancel")}</Button>
           </div>

@@ -2687,7 +2687,7 @@ function CanvasPageInner() {
           >
             <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
               <h3 id="canvas-shortcuts-dialog-title" className="text-sm font-bold">{t("canvas.shortcuts_title")}</h3>
-              <button onClick={() => setShowHelp(false)} aria-label={t("common.close", { defaultValue: "Close dialog" })} className="p-1 rounded hover:bg-main"><X className="w-4 h-4" /></button>
+              <button onClick={() => setShowHelp(false)} aria-label={t("common.close", { defaultValue: "Close" })} className="p-1 rounded hover:bg-main"><X className="w-4 h-4" /></button>
             </div>
             <div className="p-5 space-y-1 text-xs">
               {[

@@ -12,6 +12,7 @@
 // inline `fetch()` / `api.*` calls per the dashboard rule.
 
 import { AlertCircle, ChevronRight, Loader2 } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { Badge } from "./ui/Badge";
 import { usePendingOperatorRuns } from "../lib/queries/workflows";
 
@@ -23,6 +24,7 @@ interface Props {
 }
 
 export function PendingOperatorReviewsBanner({ onSelectRun }: Props) {
+  const { t } = useTranslation();
   const query = usePendingOperatorRuns();
 
   // Quiet when there's nothing to surface — don't push other content
@@ -40,9 +42,10 @@ export function PendingOperatorReviewsBanner({ onSelectRun }: Props) {
       <div className="flex items-center gap-2">
         <AlertCircle className="h-3.5 w-3.5 text-warning" />
         <span className="text-xs font-bold text-warning">
-          {rows.length === 1
-            ? "1 workflow run awaiting operator review"
-            : `${rows.length} workflow runs awaiting operator review`}
+          {t("workflows.operator.pending_review", {
+            defaultValue: "{{count}} workflow runs awaiting operator review",
+            count: rows.length,
+          })}
         </span>
         {query.isFetching && <Loader2 className="h-3 w-3 animate-spin text-warning/60" />}
       </div>
@@ -64,7 +67,10 @@ export function PendingOperatorReviewsBanner({ onSelectRun }: Props) {
                     </span>
                   </p>
                   <p className="text-[9px] text-text-dim/60 truncate">
-                    {row.artifact || "(empty artifact)"}
+                    {row.artifact ||
+                      t("workflows.operator.empty_artifact", {
+                        defaultValue: "(empty artifact)",
+                      })}
                   </p>
                 </div>
                 <Badge variant="default" className="text-[9px]">

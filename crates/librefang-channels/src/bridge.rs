@@ -3213,6 +3213,30 @@ async fn resolve_addressed_agent(
         .await
 }
 
+/// Build the [`BindingContext`](crate::router::BindingContext) for an inbound
+/// message: channel + `account_id`/`guild_id` metadata + the sender's
+/// `platform_id` as the peer (for a group this is the chat/room id; see the
+/// `binding_keys` note in [`resolve_or_fallback`]). Shared by the per-peer
+/// binding check and the legacy router-chain resolution so the two evaluate the
+/// exact same context.
+fn binding_context(message: &ChannelMessage) -> crate::router::BindingContext<'_> {
+    crate::router::BindingContext {
+        channel: std::borrow::Cow::Borrowed(crate::router::channel_type_to_str(&message.channel)),
+        account_id: message
+            .metadata
+            .get("account_id")
+            .and_then(|v| v.as_str())
+            .map(std::borrow::Cow::Borrowed),
+        peer_id: std::borrow::Cow::Borrowed(&message.sender.platform_id),
+        guild_id: message
+            .metadata
+            .get("guild_id")
+            .and_then(|v| v.as_str())
+            .map(std::borrow::Cow::Borrowed),
+        roles: smallvec::SmallVec::new(),
+    }
+}
+
 /// Resolve the target agent for an incoming message.
 ///
 /// Routing precedence (highest first):
@@ -3220,8 +3244,9 @@ async fn resolve_addressed_agent(
 ///   2. Explicit group addressing (#5323) — an `@`-mention or a non-default agent's alias. The strongest user signal; overrides every binding so a user can address agentB even while agentA is otherwise routed.
 ///   3. Explicit per-conversation `/agent` override (#5671 Model A, upper binding level) — a deliberate user command; outranks the sticky holder so a fresh `/agent` can re-point a conversation that already has a claim.
 ///   4. Sticky conversation-ownership holder (#5323) — keeps an already-claimed group conversation on its holder without a fresh mention.
-///   5. Instance-default binding (#5671 Model A, lower binding level) — seeded from `[[sidecar_channels]] agent`; the operator's standing default for otherwise-unaddressed traffic.
-///   6. Legacy fallback (transitional) — the `AgentRouter` binding chain, the attention scorer, the `"assistant"` agent, then the non-deterministic `list_agents().first()`. Reached only when nothing above resolves; it emits a deprecation WARN at the non-deterministic tail so operators can see they should set `agent` on the instance.
+///   5. Explicit per-peer binding — a config `[[bindings]]` whose `match_rule` pins a `peer_id` matching this conversation. The operator's deliberate per-room/per-DM route; strictly more specific than the channel-wide instance default, so it outranks it.
+///   6. Instance-default binding (#5671 Model A, lower binding level) — seeded from `[[sidecar_channels]] agent`; the operator's standing default for otherwise-unaddressed traffic.
+///   7. Legacy fallback (transitional) — the `AgentRouter` binding chain (channel-only bindings, channel/system defaults), the attention scorer, the `"assistant"` agent, then the non-deterministic `list_agents().first()`. Reached only when nothing above resolves; it emits a deprecation WARN at the non-deterministic tail so operators can see they should set `agent` on the instance.
 ///
 /// Returns a [`RouteResolution`] whose `agent_id` is `None` only when no eligible agent exists at all.
 ///
@@ -3320,6 +3345,25 @@ async fn resolve_or_fallback(
         }
     }
 
+    // Explicit per-peer binding: a config `[[bindings]]` whose `match_rule`
+    // pins a `peer_id` matching THIS conversation is the operator's deliberate
+    // per-room/per-DM route, and is strictly more specific than the
+    // channel-wide instance default below — so it must outrank it. Without this
+    // a sidecar `default_agent` (seeded as the instance default) shadows every
+    // per-room binding: the channel-wide default resolves first and the
+    // peer-specific `[[bindings]]` entry never gets a turn, collapsing all
+    // inbound traffic onto the default agent. Channel-only bindings (no
+    // `peer_id`) intentionally stay in the lower-precedence router chain below,
+    // under the instance default, preserving the #5671 ordering.
+    if thread_route_agent_id.is_none() {
+        let ctx = binding_context(message);
+        if let Some(id) = router.resolve_specific_binding(&ctx) {
+            if agent_allows_channel(handle, id, ct).await {
+                return RouteResolution::plain(id);
+            }
+        }
+    }
+
     // Instance default (#5671, lower binding level) seeded from
     // `[[sidecar_channels]] agent`. The operator's standing default for
     // otherwise-unaddressed traffic; wins over the router/assistant/
@@ -3334,23 +3378,7 @@ async fn resolve_or_fallback(
     let agent_id = if let Some(id) = thread_route_agent_id {
         Some(id)
     } else {
-        let ctx = crate::router::BindingContext {
-            channel: std::borrow::Cow::Borrowed(crate::router::channel_type_to_str(
-                &message.channel,
-            )),
-            account_id: message
-                .metadata
-                .get("account_id")
-                .and_then(|v| v.as_str())
-                .map(std::borrow::Cow::Borrowed),
-            peer_id: std::borrow::Cow::Borrowed(&message.sender.platform_id),
-            guild_id: message
-                .metadata
-                .get("guild_id")
-                .and_then(|v| v.as_str())
-                .map(std::borrow::Cow::Borrowed),
-            roles: smallvec::SmallVec::new(),
-        };
+        let ctx = binding_context(message);
         router.resolve_with_context(
             &message.channel,
             &message.sender.platform_id,
@@ -7551,6 +7579,47 @@ mod tests {
             resolved.agent_id,
             Some(sticky),
             "the sticky holder must outrank the instance default"
+        );
+    }
+
+    #[tokio::test]
+    async fn peer_binding_outranks_instance_default() {
+        // A config `[[bindings]]` pinned to a specific peer/room is strictly more
+        // specific than the channel-wide instance default, so it must win.
+        // Regression: a sidecar `default_agent` (seeded as the instance default)
+        // used to shadow every per-room binding, collapsing all inbound traffic
+        // onto the default agent (the real-world symptom that motivated this).
+        let bound = AgentId::new();
+        let default_agent = AgentId::new();
+        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(BindingMockHandle {
+            agents: vec![
+                (bound, "room-agent".into()),
+                (default_agent, "operator".into()),
+            ],
+            conversation_override: None,
+            instance_default: Some(("tg-bot".into(), default_agent)),
+        });
+        let router = Arc::new(AgentRouter::new());
+        // The bound agent need not be spawned — only present in the name cache
+        // (see `seed_router_agent_names`); register it directly here.
+        router.register_agent("room-agent".into(), bound);
+        router.load_bindings(&[librefang_types::config::AgentBinding {
+            agent: "room-agent".into(),
+            match_rule: librefang_types::config::BindingMatchRule {
+                channel: Some("telegram".into()),
+                peer_id: Some("group-chat-9".into()),
+                ..Default::default()
+            },
+        }]);
+        let thread_ownership = Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new());
+        // No sticky claim seeded: a fresh conversation, first message after boot.
+        let msg = inbound_message("group-chat-9", "tg-bot", true);
+
+        let resolved = resolve_or_fallback(&msg, &handle, &router, &thread_ownership).await;
+        assert_eq!(
+            resolved.agent_id,
+            Some(bound),
+            "an explicit per-peer binding must outrank the channel-wide instance default"
         );
     }
 

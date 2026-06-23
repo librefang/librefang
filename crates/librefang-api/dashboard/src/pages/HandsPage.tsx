@@ -193,7 +193,7 @@ function HandDetailPanel({
             <button
               onClick={onClose}
               className="p-2 rounded-xl text-text-dim/60 hover:text-text hover:bg-main transition-colors shrink-0"
-              aria-label="Close"
+              aria-label={t("common.close", { defaultValue: "Close" })}
             >
               <X className="w-4 h-4" />
             </button>
@@ -276,7 +276,7 @@ function HandDetailPanel({
                       className="flex items-center gap-1.5 px-3 py-2.5 rounded-xl text-sm font-bold text-error bg-error/10 hover:bg-error/20 transition-colors disabled:opacity-40"
                     >
                       {isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <X className="w-4 h-4" />}
-                      {t("hands.uninstall", { defaultValue: "Uninstall" })}
+                      {t("hands.uninstall_action", { defaultValue: "Uninstall" })}
                     </button>
                   )}
                 </>
@@ -647,7 +647,7 @@ function HandAgentEditor({
                   <button
                     type="button"
                     onClick={() => removeTool(tool)}
-                    aria-label={`${t("common.delete", { defaultValue: "Remove" })} ${tool}`}
+                    aria-label={`${t("common.remove", { defaultValue: "Remove" })} ${tool}`}
                     className="text-text-dim/40 hover:text-error transition-colors"
                   >
                     <X className="w-3 h-3" />
@@ -728,7 +728,7 @@ function DetailTabs({ hand, instance, isActive, settings, settingsQuery }: {
   return (
     <div>
       {/* Tab bar — all children are text-only so height is determined purely by padding + line-height */}
-      <div role="tablist" aria-label="Hand details" className="flex border-b border-border-subtle mb-4 overflow-x-auto scrollbar-thin">
+      <div role="tablist" aria-label={t("hands.details", { defaultValue: "Hand details" })} className="flex border-b border-border-subtle mb-4 overflow-x-auto scrollbar-thin">
         {visibleTabs.map(tab => {
           const isActive = activeTab === tab.id;
           return (
@@ -1118,7 +1118,7 @@ function HandSchedulesTab({ cronJobs, isLoading, onRefresh, agentId, handName }:
           className="rounded-xl border border-brand/30 bg-brand/[0.02] p-3 space-y-2.5"
         >
           <div>
-            <label className="text-[10px] font-bold text-text-dim uppercase">{t("scheduler.job_name", { defaultValue: "Name" })}</label>
+            <label className="text-[10px] font-bold text-text-dim uppercase">{t("common.name", { defaultValue: "Name" })}</label>
             <input
               value={name}
               onChange={(e) => setName(e.target.value)}
@@ -1222,7 +1222,7 @@ function HandSchedulesTab({ cronJobs, isLoading, onRefresh, agentId, handName }:
                   <button onClick={() => setConfirmDeleteId(null)} className="px-2 py-1 rounded-md bg-main text-text-dim text-[10px] font-bold">{t("common.cancel")}</button>
                 </div>
               ) : (
-                <button onClick={() => handleDelete(job.id!)} className="p-1.5 rounded-lg text-text-dim/40 hover:text-error hover:bg-error/10 transition-colors" title="Delete schedule">
+                <button onClick={() => handleDelete(job.id!)} className="p-1.5 rounded-lg text-text-dim/40 hover:text-error hover:bg-error/10 transition-colors" title={t("hands.delete_schedule", { defaultValue: "Delete schedule" })}>
                   <XCircle className="w-3.5 h-3.5" />
                 </button>
               )}
@@ -1789,7 +1789,7 @@ export function HandsPage() {
 
   function handleUninstall(handId: string) {
     setConfirmDialog({
-      title: t("hands.uninstall", { defaultValue: "Uninstall" }),
+      title: t("hands.uninstall_action", { defaultValue: "Uninstall" }),
       message: t("hands.uninstall_confirm", {
         defaultValue: "Uninstall this hand? Its HAND.toml and workspace files will be deleted. This cannot be undone.",
       }),

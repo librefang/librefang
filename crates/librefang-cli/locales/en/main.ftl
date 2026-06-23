@@ -11,7 +11,6 @@ daemon-stopped-forced = Daemon stopped (forced)
 daemon-error = Daemon error: { $error }
 daemon-already-running = Daemon already running at { $url }
 daemon-already-running-fix = Use `librefang status` to check it, or stop it first
-daemon-not-running = Daemon is not running.
 daemon-not-running-start = Daemon is not running. Start it with: librefang start
 daemon-no-running-found = No running daemon found
 daemon-no-running-found-fix = Is it running? Check with: librefang status
@@ -100,23 +99,15 @@ guide-help-select = ↑↓ navigate  Enter select  s/Esc skip
 guide-help-paste = Paste key + Enter  Esc back
 guide-help-wait = Please wait...
 guide-paste-key-hint = Copy the API key from the browser and paste it below.
-hint-could-not-open-browser = Could not open a browser automatically.
 hint-could-not-open-browser-visit = Could not open browser. Visit: { $url }
-hint-dashboard-url = Dashboard: { $url }
-hint-try-dashboard = Try: librefang dashboard
-hint-install-desktop = Install it with: cargo install librefang-desktop
-hint-fallback-web-dashboard = Falling back to web dashboard...
-hint-then-open-dashboard = Then open: http://127.0.0.1:4545
 hint-chat-with-agent = Chat: librefang chat { $name }
 hint-agent-lost-on-exit = Note: Agent will be lost when this process exits
 hint-persistent-agents = For persistent agents, use `librefang start` first
 hint-url-copied = URL copied to clipboard
 hint-doctor-repair = Run `librefang doctor --repair` to attempt auto-fix
-hint-run-init = Run `librefang init` to set up the agents directory
 hint-run-start = Run `librefang start` to launch the daemon
 hint-config-edit = Fix with: librefang config edit
 hint-set-key = Or run: librefang config set-key groq
-hint-set-key-provider = Set later: librefang config set-key email (or export EMAIL_PASSWORD=...)
 
 # --- Init ---
 init-quick-success = LibreFang initialized (quick mode)
@@ -159,14 +150,9 @@ error-require-daemon-fix = Start the daemon: librefang start
 
 # --- Provider detection ---
 detected-provider = Detected { $display } ({ $env_var })
-detected-gemini = Detected Gemini (GOOGLE_API_KEY)
 detected-ollama = Detected Ollama running locally (no API key needed)
 
 # --- Desktop app ---
-desktop-launching = Launching LibreFang Desktop...
-desktop-started = Desktop app started.
-desktop-launch-fail = Failed to launch desktop app: { $error }
-desktop-not-found = Desktop app not found.
 
 # --- Dashboard ---
 dashboard-opening = Opening dashboard at { $url }
@@ -176,19 +162,9 @@ agent-spawned = Agent '{ $name }' spawned
 agent-spawned-inprocess = Agent '{ $name }' spawned (in-process)
 agent-spawn-failed = Failed to spawn: { $error }
 agent-spawn-agent-failed = Failed to spawn agent: { $error }
-agent-template-not-found = Template '{ $name }' not found
-agent-template-not-found-fix = Run `librefang agent new` to see available templates
-agent-no-templates = No agent templates found
-agent-no-templates-fix = Run `librefang init` to set up the agents directory
-agent-template-parse-fail = Failed to parse template '{ $name }': { $error }
-agent-template-parse-fail-fix = The template manifest may be corrupted
 agent-killed = Agent { $id } killed.
 agent-kill-failed = Failed to kill agent: { $error }
 agent-invalid-id = Invalid agent ID: { $id }
-agent-model-set = Agent { $id } model set to { $value }.
-agent-set-model-failed = Failed to set model: { $error }
-agent-no-daemon-for-set = No running daemon found. Start one with: librefang start
-agent-unknown-field = Unknown field: { $field }. Supported fields: model
 agent-no-agents = No agents running.
 agent-spawn-success = Agent spawned successfully!
 agent-spawn-inprocess-mode = Agent spawned (in-process mode).
@@ -200,7 +176,6 @@ section-agent-templates = Available Agent Templates
 manifest-not-found = Manifest file not found: { $path }
 manifest-not-found-fix = Use `librefang agent new` to spawn from a template instead
 error-reading-manifest = Error reading manifest: { $error }
-error-parsing-manifest = Error parsing manifest: { $error }
 
 # --- Status ---
 section-daemon-status = LibreFang Daemon Status
@@ -212,7 +187,6 @@ label-home = Home
 label-platform = Platform
 label-sessions = Sessions
 label-memory = Memory
-label-started = Started
 label-running = running
 label-response = Response
 label-checks = Checks
@@ -232,7 +206,6 @@ label-config-warnings = Config warnings
 auth-none = none (anonymous)
 auth-api-key = API key
 auth-dashboard-login = dashboard login
-auth-user-keys = { $count } user key(s)
 
 # --- Doctor ---
 doctor-title = LibreFang Doctor
@@ -264,20 +237,6 @@ health-ok = Daemon is healthy
 health-not-running = Daemon is not running.
 
 # --- Channel setup ---
-section-channel-setup = Channel Setup
-channel-configured = { $name } configured
-channel-no-token = No token provided. Setup cancelled.
-channel-no-email = No email provided. Setup cancelled.
-channel-token-saved = Token saved to ~/.librefang/.env
-channel-app-token-saved = App token saved to ~/.librefang/.env
-channel-bot-token-saved = Bot token saved to ~/.librefang/.env
-channel-password-saved = Password saved to ~/.librefang/.env
-channel-phone-saved = Phone saved to ~/.librefang/.env
-channel-key-saved = { $key } saved to ~/.librefang/.env
-channel-unknown = Unknown channel: { $name }
-channel-unknown-fix = Available: discord, slack, whatsapp, email, signal, matrix
-channel-test-ok = Channel test passed
-channel-test-fail = Channel test failed
 channel-none-configured = No channels configured.
 channel-use-setup-hint = Use `librefang channel setup` to add one.
 channel-reloaded = Channels reloaded ({ $started } sidecar(s) started).
@@ -316,13 +275,6 @@ channel-hot-reloaded-daemon =   Hot-reloaded daemon.
 channel-reload-status-warn =   Reload returned { $status }: change will apply on next daemon restart.
 channel-reload-contact-fail-warn =   Could not contact daemon for reload ({ $error }); change will apply on next start.
 channel-reload-daemon-offline =   Daemon not running; change will apply on next start.
-section-setup-discord = Setting up Discord
-section-setup-slack = Setting up Slack
-section-setup-whatsapp = Setting up WhatsApp
-section-setup-email = Setting up Email
-section-setup-signal = Setting up Signal
-section-setup-matrix = Setting up Matrix
-
 # --- Vault ---
 vault-initialized = Credential vault initialized.
 vault-not-initialized = Vault not initialized.
@@ -405,7 +357,6 @@ label-header-prompt = PROMPT
 # --- Approvals ---
 approval-responded = Approval { $id } { $action }d.
 approval-failed = Failed to { $action } approval: { $error }
-approval-no-pending = No pending approvals.
 
 # --- Memory ---
 memory-set = Set { $key } for agent '{ $agent }'.
@@ -438,8 +389,6 @@ model-prompt-selection =   Enter number or model ID:
 
 
 # --- Config ---
-config-set-success = Config value set.
-config-unset-success = Config key removed.
 config-no-file = No config file found
 config-no-file-fix = Run `librefang init` first
 config-read-failed = Failed to read config: { $error }
@@ -486,7 +435,6 @@ hand-paused = Hand instance '{ $label } (instance: { $instance_id })' paused.
 hand-resumed = Hand instance '{ $label } (instance: { $instance_id })' resumed.
 
 # --- Daemon notify ---
-daemon-restart-notify = Restart the daemon to apply: librefang restart
 
 # --- System info ---
 section-system-info = LibreFang System Info
@@ -522,7 +470,6 @@ reset-fail = Failed to remove { $path }: { $error }
 
 # --- Logs ---
 log-following = --- Following { $path } (Ctrl+C to stop) ---
-log-path-hint = Log file: { $path }
 
 # --- Extracted from Rust sources ---
 init-error-create-data-dir = Error creating data dir: { $error }
@@ -708,8 +655,10 @@ hand-no-settings = Hand '{ $id }' has no configurable settings.
 hand-settings-title = Settings for '{ $id }'
 hand-set-setting-success = Set { $key }={ $value } for hand '{ $id }'.
 hand-reloaded-summary = Reloaded hands: { $added } added, { $updated } updated, { $total } total.
-hand-chat-welcome = Chat with { $name } (type /quit to exit)
-
+label-chat-with = Chat with
+hand-chat-quit-hint = (type /quit to exit)
+hand-chat-prompt-you = you >
+label-no-response = [no response]
 # mcp_cmds.rs
 mcp-catalog-unknown-entry = Unknown MCP catalog entry: '{ $name }'
 mcp-catalog-available-header =
@@ -752,10 +701,6 @@ monitoring-daemon-running-error = daemon is running at { $url }; refusing to tou
 monitoring-daemon-running-error-fix = stop the daemon first: `librefang stop`
 monitoring-anchor-remove-failed = failed to remove anchor { $path }: { $error }
 monitoring-audit-reset-seed-fresh = The next daemon boot will seed a fresh Merkle chain from the current tip.
-monitoring-memory-no-entries = No memory entries for agent '{ $agent }'.
-monitoring-devices-none-paired = No paired devices.
-monitoring-webhooks-none-configured = No webhooks configured.
-
 # skill.rs
 skill-install-progress = Installing { $source }
 
@@ -925,7 +870,6 @@ doctor-section-config-val =
 doctor-section-skills = 
 
   Skills:
-doctor-check-skills-injection-critical-warn = Skill '{ $name }' has { $count } critical warning(s):
 doctor-check-skills-injection-warn = Prompt injection warning in skill: { $name }
 doctor-section-mcp-servers =
   MCP servers:
@@ -1042,6 +986,12 @@ label-header-alias = ALIAS
 label-header-provider = PROVIDER
 label-header-id = ID
 label-header-agent = AGENT
+label-header-category = CATEGORY
+label-header-description = DESCRIPTION
+label-header-hand = HAND
+label-header-instance = INSTANCE
+label-header-model = MODEL
+label-header-status = STATUS
 label-header-type = TYPE
 label-header-timestamp = TIMESTAMP
 label-header-event = EVENT
@@ -1310,6 +1260,8 @@ chat-runner-status-mode-inprocess = Mode: in-process
 chat-runner-status-agents-count = Agents: { $count }
 chat-runner-status-mode-disconnected = Mode: disconnected
 chat-runner-chat-history-cleared = Chat history cleared.
+chat-runner-session-reset = Session reset — starting fresh.
+chat-runner-session-reset-failed = Could not reset the session.
 chat-runner-agent-killed = Agent "{ $name }" killed.
 chat-runner-failed-kill-agent = Failed to kill agent "{ $name }".
 chat-runner-kill-failed = Kill failed: { $error }
@@ -1405,7 +1357,6 @@ tui-mod-extension-reconnected = Reconnected { $id }: { $tools } tools
 tui-mod-no-agents-running = No agents running.
 tui-mod-agent-killed = Agent "{ $name }" killed.
 tui-mod-failed-kill-agent = Failed to kill agent "{ $name }".
-tui-mod-missing-api-key = Missing API key
 tui-mod-invalid-manifest = Invalid manifest: { $error }
 tui-mod-spawn-failed = Spawn failed: { $error }
 tui-mod-help-help = /help         — show this help
@@ -1414,6 +1365,7 @@ tui-mod-help-model-arg = /model <name> — switch to model directly
 tui-mod-help-status = /status       — connection & agent info
 tui-mod-help-agents = /agents       — list running agents
 tui-mod-help-clear = /clear        — clear chat history
+tui-mod-help-new = /new          — reset session (start fresh)
 tui-mod-help-kill = /kill         — kill the current agent
 tui-mod-help-exit = /exit         — end chat session
 tui-mod-status-mode-daemon = Mode: daemon ({ $url })
@@ -1422,6 +1374,8 @@ tui-mod-status-mode-inprocess = Mode: in-process
 tui-mod-status-agents-count = Agents: { $count }
 tui-mod-status-mode-disconnected = Mode: disconnected
 tui-mod-chat-history-cleared = Chat history cleared.
+tui-mod-session-reset = Session reset — starting fresh.
+tui-mod-session-reset-failed = Could not reset the session.
 tui-mod-available-hands = Available hands ({ $count }):
 tui-mod-active-hands = Active hands ({ $count }):
 tui-mod-hands-info-requires-inprocess = Hands info requires in-process mode. Use the Hands tab instead.
@@ -1802,3 +1756,390 @@ tui-guide-hint-gemini = free tier, generous quota (Google account)
 tui-guide-hint-deepseek = 5M free tokens for new accounts
 tui-guide-label-apikey =  API Key 
 tui-guide-warn-env = .env: { $error }
+
+# init_wizard.rs
+tui-init-welcome-tagline = Agent Operating System
+tui-init-welcome-sec1 = Sandboxed execution, WASM isolation, SSRF protection
+tui-init-welcome-sec2 = Signed manifests, audit trail, taint tracking
+tui-init-welcome-sec3 = RBAC, capability checks, secret zeroization
+tui-init-welcome-sec4 = API keys never logged, 0600 file permissions
+tui-init-welcome-resp1 = Agents can execute code, access the network, and act
+tui-init-welcome-resp2 = on your behalf.
+tui-init-welcome-resp-warn = You are responsible for what they do.
+tui-init-welcome-hints =   [Enter] I understand    [Esc] Cancel
+tui-init-migrate-checking =   Checking for existing installations...
+tui-init-migrate-openfang-detected =   OpenFang Installation Detected
+tui-init-migrate-openclaw-detected =   OpenClaw Installation Detected
+tui-init-migrate-openfang-summary = OpenFang configuration and data
+tui-init-migrate-openclaw-agents = { $count } agents ({ $names })
+tui-init-migrate-openclaw-no-agents = No agents
+tui-init-migrate-openclaw-channels = { $count } channels ({ $names })
+tui-init-migrate-openclaw-no-channels = No channels
+tui-init-migrate-openclaw-skills = { $count } skills
+tui-init-migrate-openclaw-no-skills = No skills
+tui-init-migrate-openclaw-memory = Memory files
+tui-init-migrate-openclaw-no-memory = No memory files
+tui-init-migrate-openclaw-config = Configuration
+tui-init-migrate-opt-yes = Yes
+tui-init-migrate-opt-yes-desc = migrate settings and data
+tui-init-migrate-opt-no = No
+tui-init-migrate-opt-no-desc = start fresh
+tui-init-migrate-hints =   [↑↓] Navigate  [Enter] Select  [Esc] Skip
+tui-init-migrate-running-openfang =  Migrating from OpenFang...
+tui-init-migrate-running-openclaw =  Migrating from OpenClaw...
+tui-init-migrate-done-failed = Migration failed: { $error }
+tui-init-migrate-done-config = Config migrated
+tui-init-migrate-done-agents = { $count } agents imported ({ $names })
+tui-init-migrate-done-channels = { $count } channels ({ $names })
+tui-init-migrate-done-memory = Memory files copied
+tui-init-migrate-done-skills = { $count } skills imported
+tui-init-migrate-done-sessions = { $count } sessions imported
+tui-init-migrate-done-skipped = { $name} skipped ({ $reason })
+tui-init-migrate-done-summary =   { $imported } imported, { $skipped } skipped, { $warnings } warnings
+tui-init-migrate-done-continue =   [Enter] Continue  
+tui-init-migrate-done-autoadvancing = (auto-advancing...)
+tui-init-provider-prompt =   Choose your LLM provider:
+tui-init-provider-cli-detected = CLI detected
+tui-init-provider-no-key-needed = no API key needed
+tui-init-provider-local-no-key = local, no key needed
+tui-init-provider-requires-with-hint = requires { $env_var } ({ $hint })
+tui-init-provider-requires = requires { $env_var }
+tui-init-provider-hints =   [↑↓/jk] Navigate  [Enter] Select  [Esc] Cancel
+tui-init-hint-freetier = free tier
+tui-init-hint-cheap = cheap
+tui-init-hint-fast = fast inference
+tui-init-hint-pat = via PAT
+tui-init-hint-nokey = no API key
+tui-init-hint-local = local
+tui-init-apikey-prompt =   Enter your { $provider } API key:
+tui-init-apikey-env-hint =     Or set { $env_var } environment variable
+tui-init-apikey-testing =  Testing API key...
+tui-init-apikey-verified = API key verified
+tui-init-apikey-saved =     Saved to ~/.librefang/.env
+tui-init-apikey-verify-failed = Could not verify (may still work)
+tui-init-apikey-save-failed = Verified, but saving to .env failed
+tui-init-apikey-save-failed-hints =     [Enter] retry save  ·  [Esc] edit key  (key already verified — nothing on disk)
+tui-init-apikey-hints =   [Enter] Confirm  [Esc] Back
+tui-init-model-prompt =   Choose default model for { $provider }:
+tui-init-model-hints =   [↑↓/jk] Navigate  [Enter] Select  [Esc] Back    * = default
+tui-init-routing-title =   Smart Model Routing
+tui-init-routing-desc1 =   Automatically picks the right model per task complexity.
+tui-init-routing-desc2 =   Simple tasks use cheap/fast models, complex tasks use
+tui-init-routing-desc3 =   frontier models. Saves cost without sacrificing quality.
+tui-init-routing-opt-yes = Yes
+tui-init-routing-opt-yes-desc = pick 3 models (fast / balanced / frontier)
+tui-init-routing-opt-no = No
+tui-init-routing-opt-no-desc = use one model for everything
+tui-init-routing-hints =   [↑↓] Navigate  [Enter] Select  [Esc] Back
+tui-init-routing-pick-hints =   [↑↓/jk] Navigate  [Enter] Select  [Esc] Back
+tui-init-routing-tier-fast = Fast
+tui-init-routing-tier-balanced = Balanced
+tui-init-routing-tier-frontier = Frontier
+tui-init-routing-tier-fast-desc = quick lookups, greetings, simple Q&A
+tui-init-routing-tier-balanced-desc = standard conversation, general tasks
+tui-init-routing-tier-frontier-desc = multi-step reasoning, code generation
+tui-init-complete-success-daemon = Setup complete — daemon running
+tui-init-complete-success = Setup complete!
+tui-init-complete-label-provider =   Provider:    
+tui-init-complete-label-model =   Model:       
+tui-init-complete-label-daemon =   Daemon:      
+tui-init-complete-daemon-running = running at { $url }
+tui-init-complete-daemon-not-running = not running
+tui-init-complete-daemon-pending = pending
+tui-init-complete-question =   How do you want to use LibreFang?
+tui-init-complete-desktop-desc-installed = native window with system tray
+tui-init-complete-desktop-desc-not-installed = not installed
+tui-init-complete-opt-desktop = Desktop app
+tui-init-complete-opt-desktop-badge = (recommended)
+tui-init-complete-opt-dashboard = Web dashboard
+tui-init-complete-opt-dashboard-desc = opens in your default browser
+tui-init-complete-opt-chat = Terminal chat
+tui-init-complete-opt-chat-desc = interactive chat right here
+tui-init-complete-hints =   [↑↓/jk] Navigate  [Enter] Launch  [1/2/3] Quick select
+tui-init-step-label = { $current } of { $total }
+tui-init-complete-err-no-provider = No provider selected
+tui-init-complete-err-home-dir = Could not determine home directory
+tui-init-complete-err-write-config = Failed to write config: { $error }
+tui-init-complete-err-daemon-failed = Daemon failed: { $error }
+tui-init-routing-pick-prefix = Pick
+tui-init-routing-pick-suffix = model ({ $step }/3):
+tui-init-complete-setup-prefix = Setup complete — 
+
+# agents.rs
+tui-agents-tool-file-read-desc = Read files
+tui-agents-tool-file-write-desc = Write files
+tui-agents-tool-file-list-desc = List directory contents
+tui-agents-tool-memory-store-desc = Store data in agent memory
+tui-agents-tool-memory-recall-desc = Recall data from memory
+tui-agents-tool-memory-list-desc = List all stored memory keys
+tui-agents-tool-web-fetch-desc = Fetch web pages
+tui-agents-tool-shell-exec-desc = Execute shell commands
+tui-agents-tool-agent-send-desc = Send messages to other agents
+tui-agents-tool-agent-list-desc = List running agents
+
+tui-agents-title-create-method = Create Agent
+tui-agents-title-templates = Templates
+tui-agents-title-custom-name = Custom — Name
+tui-agents-title-custom-desc = Custom — Description
+tui-agents-title-custom-prompt = Custom — System Prompt
+tui-agents-title-custom-tools = Custom — Tools
+tui-agents-title-custom-skills = Custom — Skills
+tui-agents-title-custom-mcp = Custom — MCP Servers
+tui-agents-title-spawning = Spawning...
+tui-agents-title-screen = Agents
+tui-agents-title-detail = Agent Detail
+
+tui-agents-prompt-create-method =   How would you like to create your agent?
+tui-agents-prompt-name = Agent name:
+tui-agents-prompt-desc = Description:
+tui-agents-prompt-prompt = System prompt:
+tui-agents-prompt-tools =   Select tools (Space to toggle):
+tui-agents-prompt-skills =   Select skills (none checked = all skills):
+tui-agents-prompt-mcp =   Select MCP servers (none checked = all servers):
+tui-agents-prompt-edit-skills =   Space to toggle, Enter to save (none checked = all):
+tui-agents-prompt-spawning =   Spawning agent...
+tui-agents-label-no-agent-selected = No agent selected.
+tui-agents-label-none-available = (none available)
+
+tui-agents-opt-templates =   Choose from templates
+tui-agents-opt-templates-desc =   (pre-built agents)
+tui-agents-opt-custom =   Build custom agent
+tui-agents-opt-custom-desc =   (pick name, tools, prompt)
+
+tui-agents-header-state = State
+tui-agents-header-name = Name
+tui-agents-header-model = Model
+tui-agents-header-id = ID
+tui-agents-opt-create-new = Create new agent
+
+tui-agents-hints-filter =   [Type] Filter  [Enter] Accept  [Esc] Cancel search
+tui-agents-hints-list =   [↑↓] Navigate  [Enter] Detail  [/] Search  [Esc] Back
+tui-agents-hints-detail =   [s] Edit skills  [m] Edit MCP  [c] Chat  [k] Kill  [Esc] Back
+tui-agents-hints-navigate =     [↑↓] Navigate  [Enter] Select  [Esc] Back
+tui-agents-hints-input =     [Enter] Next  [Esc] Back
+tui-agents-hints-tools =     [↑↓] Navigate  [Space] Toggle  [Enter] Create  [Esc] Back
+tui-agents-hints-skills =     [↑↓] Navigate  [Space] Toggle  [Enter] Next  [Esc] Back
+tui-agents-hints-mcp =     [↑↓] Navigate  [Space] Toggle  [Enter] Create  [Esc] Back
+tui-agents-hints-save =     [↑↓] Navigate  [Space] Toggle  [Enter] Save  [Esc] Cancel
+
+tui-agents-placeholder-name = my-agent
+tui-agents-placeholder-desc = A custom agent
+tui-agents-placeholder-prompt = You are a helpful agent.
+tui-agents-label-placeholder =     placeholder: { $placeholder }
+
+tui-agents-detail-id =   ID:       
+tui-agents-detail-name =   Name:     
+tui-agents-detail-state =   State:    
+tui-agents-detail-provider =   Provider: 
+tui-agents-detail-model =   Model:    
+tui-agents-detail-created =   Created:  
+tui-agents-detail-active =   Active:   
+tui-agents-detail-tags =   Tags:     
+tui-agents-detail-caps =   Caps:     
+tui-agents-detail-parent =   Parent:   
+tui-agents-detail-children =   Children: 
+tui-agents-detail-skills =   Skills:   
+tui-agents-detail-mcp =   MCP:      
+tui-agents-detail-all-skills = [All skills]
+tui-agents-detail-all-servers = [All servers]
+tui-agents-detail-none = [None]
+tui-agents-default-desc = A custom { $name } agent
+tui-agents-default-prompt = You are { $name }, a helpful agent.
+
+# --- Workflows screen ---
+tui-workflows-title-screen = Workflows
+tui-workflows-header-id = ID
+tui-workflows-header-name = Name
+tui-workflows-header-steps = Steps
+tui-workflows-header-created = Created
+tui-workflows-loading = Loading workflows...
+tui-workflows-empty-state = No workflows defined. Create one with [n].
+tui-workflows-create-new-option =   + Create new workflow
+tui-workflows-hints-list =   [↑↓] Navigate  [Enter] View runs  [x] Run  [n] New  [r] Refresh
+tui-workflows-title-runs = Runs for: { $name }
+tui-workflows-header-run-id = Run ID
+tui-workflows-header-state = State
+tui-workflows-header-duration = Duration
+tui-workflows-header-output = Output
+tui-workflows-runs-empty = No runs yet. Press [x] from the list to run.
+tui-workflows-hints-runs =   [↑↓] Navigate  [r] Refresh  [Esc] Back
+tui-workflows-title-create = Create New Workflow
+tui-workflows-create-step =   Step { $current } of { $total }
+tui-workflows-label-name = Workflow name:
+tui-workflows-placeholder-name = my-workflow
+tui-workflows-label-desc = Description:
+tui-workflows-placeholder-desc = What this workflow does
+tui-workflows-label-steps = Steps (JSON array):
+tui-workflows-placeholder-steps = {"[{\"action\":\"...\"}]"}
+tui-workflows-label-review = Review — press Enter to create
+tui-workflows-review-name =   Name:  
+tui-workflows-review-desc =   Desc:  
+tui-workflows-hints-create-submit =   [Enter] Create  [Esc] Back
+tui-workflows-hints-create-next =   [Enter] Next  [Esc] Back
+tui-workflows-title-run-input = Run: { $name }
+tui-workflows-label-run-input =   Input (JSON or text):
+tui-workflows-placeholder-run-input = enter workflow input...
+tui-workflows-hints-run-input =   [Enter] Run  [Esc] Cancel
+tui-workflows-title-run-result = Workflow Run Result
+tui-workflows-running = Running workflow...
+tui-workflows-result-complete = Complete
+tui-workflows-result-empty = No result.
+tui-workflows-hints-run-result =   [Enter/Esc] Back
+
+# --- Triggers screen ---
+tui-triggers-title-screen = Triggers
+tui-triggers-header-agent = Agent
+tui-triggers-header-pattern = Pattern
+tui-triggers-header-fires = Fires
+tui-triggers-header-status = Status
+tui-triggers-loading = Loading triggers...
+tui-triggers-empty-state = No triggers configured. Create one with [n].
+tui-triggers-status-active = ● Active
+tui-triggers-status-off = ○ Off
+tui-triggers-create-new-option =   + Create new trigger
+tui-triggers-hints-list =   [↑↓] Navigate  [Enter] Create  [d] Delete  [r] Refresh
+tui-triggers-title-create = Create New Trigger
+tui-triggers-create-step =   Step { $current } of { $total }
+tui-triggers-label-agent-id = Agent ID:
+tui-triggers-placeholder-agent-id = agent-uuid
+tui-triggers-label-pattern-picker =   Select pattern type:
+tui-triggers-prompt-param = Pattern param for { $type }:
+tui-triggers-placeholder-pattern-param = e.g. .*error.*
+tui-triggers-label-prompt = Prompt template:
+tui-triggers-placeholder-prompt = Handle this: {"{"}event{"}"}
+tui-triggers-label-max-fires = Max fires (0 = unlimited):
+tui-triggers-placeholder-max-fires = 0
+tui-triggers-review-agent =   Agent:   
+tui-triggers-review-pattern =   Pattern: 
+tui-triggers-review-prompt =   Prompt:  
+tui-triggers-review-max =   Max:     
+tui-triggers-review-unlimited = unlimited
+tui-triggers-review-confirm = Press Enter to create this trigger.
+tui-triggers-hints-create-submit =   [Enter] Create  [Esc] Back
+tui-triggers-hints-create-select =   [↑↓] Navigate  [Enter] Select  [Esc] Back
+tui-triggers-hints-create-next =   [Enter] Next  [Esc] Back
+
+tui-triggers-type-lifecycle-name = Lifecycle
+tui-triggers-type-lifecycle-desc = Agent lifecycle events (start, stop, error)
+tui-triggers-type-agentspawned-name = AgentSpawned
+tui-triggers-type-agentspawned-desc = Fires when a new agent is spawned
+tui-triggers-type-contentmatch-name = ContentMatch
+tui-triggers-type-contentmatch-desc = Match on message content (regex)
+tui-triggers-type-schedule-name = Schedule
+tui-triggers-type-schedule-desc = Cron-like schedule trigger
+tui-triggers-type-webhook-name = Webhook
+tui-triggers-type-webhook-desc = HTTP webhook trigger
+tui-triggers-type-channelmessage-name = ChannelMessage
+tui-triggers-type-channelmessage-desc = Message received on a channel
+
+# --- Memory screen ---
+tui-memory-title-screen = Memory
+tui-memory-label-select-agent =   Select an agent to browse its memory:
+tui-memory-header-agent-name = Agent Name
+tui-memory-header-id = ID
+tui-memory-loading-agents = Loading agents...
+tui-memory-empty-agents = No memory entries. Agents store data here automatically.
+tui-memory-hints-agent-select =   ↑↓ Navigate  Enter Browse KV  r Refresh
+tui-memory-pairs-count =   │ { $count } pairs
+tui-memory-header-key = Key
+tui-memory-header-value = Value
+tui-memory-loading = Loading...
+tui-memory-empty-kv = No key-value pairs. Press a to add one.
+tui-memory-confirm-delete =   Delete this key? [y] Yes  [any] Cancel
+tui-memory-hints-kv-browser =   ↑↓ Navigate  a Add  e Edit  d Delete  Esc Back  r Refresh
+tui-memory-title-add = ┼ Add Key-Value Pair
+tui-memory-title-edit = ✎ Edit Value
+tui-memory-field-key = Key:
+tui-memory-placeholder-key = enter key...
+tui-memory-field-value = Value:
+tui-memory-placeholder-value = enter value...
+tui-memory-hints-edit =   Tab Switch field  Enter Save  Esc Cancel
+
+# --- Extensions screen ---
+tui-extensions-title-screen = Extensions
+tui-extensions-tab-browse = 1 Browse
+tui-extensions-tab-installed = 2 Installed
+tui-extensions-tab-health = 3 Health
+tui-extensions-status-ready = Ready
+tui-extensions-status-setup = Setup
+tui-extensions-status-error = Error
+tui-extensions-status-off = Off
+tui-extensions-status-installed = Installed
+tui-extensions-status-available = Available
+tui-extensions-header-name = Name
+tui-extensions-header-category = Category
+tui-extensions-header-status = Status
+tui-extensions-header-desc = Description
+tui-extensions-header-id = ID
+tui-extensions-header-server = Server
+tui-extensions-header-tools = Tools
+tui-extensions-header-connected = Connected
+tui-extensions-header-fails = Fails
+tui-extensions-header-last-error = Last Error
+tui-extensions-loading = Loading MCP servers...
+tui-extensions-empty = No extensions installed. Browse the marketplace with [b].
+tui-extensions-remove-confirm =   Press y to confirm removal, any other key to cancel
+tui-extensions-hints-search =   Type to search • Esc cancel • Enter confirm
+tui-extensions-hints-browse =   j/k navigate • Enter install • / search • r refresh
+tui-extensions-hints-installed =   j/k navigate • d remove • r refresh
+tui-extensions-hints-health =   j/k navigate • r/Enter reconnect • auto-reconnect active
+
+# --- Skills screen ---
+tui-skills-title-screen = Skills
+tui-skills-tab-installed = 1 Installed
+tui-skills-tab-clawhub = 2 ClawHub
+tui-skills-tab-mcp = 3 MCP Servers
+tui-skills-header-name = Name
+tui-skills-header-runtime = Runtime
+tui-skills-header-source = Source
+tui-skills-header-desc = Description
+tui-skills-header-downloads = Downloads
+tui-skills-header-server = Server
+tui-skills-header-status = Status
+tui-skills-header-tools = Tools
+tui-skills-loading = Loading skills...
+tui-skills-empty = No skills installed. Browse ClawHub to find skills.
+tui-skills-uninstall-confirm =   Uninstall this skill? [y] Yes  [any] Cancel
+tui-skills-hints-installed =   [↑↓] Navigate  [u] Uninstall  [r] Refresh
+tui-skills-sort =   Sort: { $sort }
+tui-skills-sort-trending = trending
+tui-skills-sort-popular = popular
+tui-skills-sort-recent = recent
+tui-skills-searching = Searching ClawHub...
+tui-skills-empty-clawhub = No results. Press [/] to search or [s] to change sort.
+tui-skills-hints-clawhub =   [↑↓] Navigate  [i] Install  [/] Search  [s] Sort  [r] Refresh
+tui-skills-loading-mcp = Loading MCP servers...
+tui-skills-empty-mcp = No MCP servers configured. Add servers in config.toml.
+tui-skills-hints-mcp =   [↑↓] Navigate  [r] Refresh
+tui-skills-mcp-status-connected = Connected
+tui-skills-mcp-status-disconnected = Disconnected
+tui-skills-mcp-tools-count = { $count } tools
+
+# --- Setup Wizard screen ---
+tui-wizard-title = Setup
+tui-wizard-step-1 = Step 1 of 3
+tui-wizard-step-2 = Step 2 of 3
+tui-wizard-step-3 = Step 3 of 3
+tui-wizard-step-saving = Saving...
+tui-wizard-step-complete = Complete
+tui-wizard-prompt-provider = Choose your LLM provider:
+tui-wizard-hint-cli-detected = CLI detected
+tui-wizard-hint-no-key-needed = no API key needed
+tui-wizard-hint-local-no-key = local, no key needed
+tui-wizard-hint-env-detected = { $env } detected
+tui-wizard-hint-env-required = requires { $env }
+tui-wizard-hints-provider =     [↑↓] Navigate  [Enter] Select  [Esc] Cancel
+tui-wizard-prompt-api-key = Enter your { $provider } API key:
+tui-wizard-hint-env-alternative = Or set { $env } environment variable
+tui-wizard-hints-confirm-back =     [Enter] Confirm  [Esc] Back
+tui-wizard-prompt-model-name = Model name:
+tui-wizard-hint-model-default = default: { $model }
+tui-wizard-status-no-provider = No provider selected
+tui-wizard-status-no-home = Could not determine home directory
+tui-wizard-status-saved = Config saved — { $provider } / { $model }
+tui-wizard-status-save-fail = Failed to save config: { $error }
+tui-wizard-status-continuing = Continuing...
+
+
+
+

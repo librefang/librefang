@@ -12,6 +12,7 @@
 // the dashboard data-layer rule.
 
 import { useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Card } from "./ui/Card";
 import { Button } from "./ui/Button";
 import { Badge } from "./ui/Badge";
@@ -30,18 +31,18 @@ import { formatDate } from "../lib/datetime";
 import { unifiedLineDiff, hasChanges } from "../lib/unifiedDiff";
 import type { PendingCandidate, PendingCaptureSource } from "../api";
 
-function sourceLabel(source: PendingCaptureSource): {
+function sourceLabel(source: PendingCaptureSource, t: (key: string, fallback: string) => string): {
   label: string;
   detail: string;
 } {
   switch (source.kind) {
     case "explicit_instruction":
-      return { label: "Explicit instruction", detail: source.trigger };
+      return { label: t("skills.pending_source_explicit", "Explicit instruction"), detail: source.trigger };
     case "user_correction":
-      return { label: "User correction", detail: source.trigger };
+      return { label: t("skills.pending_source_correction", "User correction"), detail: source.trigger };
     case "repeated_tool_pattern":
       return {
-        label: "Repeated tool pattern",
+        label: t("skills.pending_source_repeated_tool", "Repeated tool pattern"),
         detail: `${source.tools} ×${source.repeat_count}`,
       };
   }
@@ -55,6 +56,7 @@ function UpdateDiffView({
 }: {
   candidate: PendingCandidate;
 }) {
+  const { t } = useTranslation();
   // `useSkillDetail` is gated on a non-empty name (queries/skills.ts), so for
   // a create candidate (no target) this is a no-op disabled query.
   const targetName = candidate.target_skill_id ?? "";
@@ -76,19 +78,19 @@ function UpdateDiffView({
   return (
     <div className="mt-2 rounded border border-border/40 bg-muted/40 p-2 text-xs">
       <div className="mb-1 flex items-center gap-2 font-medium">
-        <span>Proposed changes</span>
+        <span>{t("skills.pending_proposed_changes", "Proposed changes")}</span>
         {versionLabel}
       </div>
       {detail.isLoading ? (
-        <p className="text-muted-foreground">Loading current skill body…</p>
+        <p className="text-muted-foreground">{t("skills.pending_loading_current_body", "Loading current skill body…")}</p>
       ) : detail.isError ? (
         <p className="text-destructive">
-          Could not load current skill body to diff:{" "}
-          {(detail.error as Error)?.message ?? "unknown"}
+          {t("skills.pending_current_body_failed", "Could not load current skill body to diff:")}{" "}
+          {(detail.error as Error)?.message ?? t("skills.pending_unknown", "unknown")}
         </p>
       ) : !hasChanges(diff) ? (
         <p className="text-muted-foreground">
-          No differences between the current and proposed body.
+          {t("skills.pending_no_diff", "No differences between the current and proposed body.")}
         </p>
       ) : (
         <pre className="overflow-x-auto whitespace-pre font-mono leading-snug">
@@ -125,13 +127,14 @@ function isUpdateCandidate(candidate: PendingCandidate): boolean {
 }
 
 function CandidateRow({ candidate }: { candidate: PendingCandidate }) {
+  const { t } = useTranslation();
   const approve = useApprovePendingCandidate();
   const reject = useRejectPendingCandidate();
   const propose = useProposePendingToRegistry();
   const [expanded, setExpanded] = useState(false);
   const [confirmReject, setConfirmReject] = useState(false);
 
-  const src = sourceLabel(candidate.source);
+  const src = sourceLabel(candidate.source, t);
   const isUpdate = isUpdateCandidate(candidate);
   const busy = approve.isPending || reject.isPending || propose.isPending;
   const proposedPrUrl =
@@ -150,7 +153,7 @@ function CandidateRow({ candidate }: { candidate: PendingCandidate }) {
             </Badge>
             {isUpdate ? (
               <Badge variant="brand" className="text-xs">
-                Update
+                {t("skills.pending_update", "Update")}
                 {candidate.current_version || candidate.proposed_version
                   ? ` ${candidate.current_version ?? "?"} → ${
                       candidate.proposed_version ?? "?"
@@ -169,7 +172,7 @@ function CandidateRow({ candidate }: { candidate: PendingCandidate }) {
             {candidate.description}
           </p>
           <p className="mt-1 text-xs text-muted-foreground">
-            Captured {formatDate(candidate.captured_at)} · agent{" "}
+            {t("skills.pending_captured", "Captured")} {formatDate(candidate.captured_at)} · {t("skills.pending_agent", "agent")}{" "}
             <span className="font-mono">
               {candidate.agent_id.slice(0, 8)}…
             </span>
@@ -177,21 +180,21 @@ function CandidateRow({ candidate }: { candidate: PendingCandidate }) {
           {isUpdate ? <UpdateDiffView candidate={candidate} /> : null}
           {expanded ? (
             <div className="mt-2 rounded border border-border/40 bg-muted/40 p-2 text-xs">
-              <div className="mb-1 font-medium">User message excerpt</div>
+              <div className="mb-1 font-medium">{t("skills.pending_user_message_excerpt", "User message excerpt")}</div>
               <pre className="whitespace-pre-wrap break-words font-mono">
                 {candidate.provenance.user_message_excerpt}
               </pre>
               {candidate.provenance.assistant_response_excerpt ? (
                 <>
                   <div className="mb-1 mt-3 font-medium">
-                    Assistant response excerpt
+                    {t("skills.pending_assistant_response_excerpt", "Assistant response excerpt")}
                   </div>
                   <pre className="whitespace-pre-wrap break-words font-mono">
                     {candidate.provenance.assistant_response_excerpt}
                   </pre>
                 </>
               ) : null}
-              <div className="mb-1 mt-3 font-medium">Body draft</div>
+              <div className="mb-1 mt-3 font-medium">{t("skills.pending_body_draft", "Body draft")}</div>
               <pre className="whitespace-pre-wrap break-words font-mono">
                 {candidate.prompt_context}
               </pre>
@@ -205,7 +208,7 @@ function CandidateRow({ candidate }: { candidate: PendingCandidate }) {
             onClick={() => setExpanded((v) => !v)}
             disabled={busy}
           >
-            {expanded ? "Hide" : "Details"}
+            {expanded ? t("common.hide", "Hide") : t("common.details", "Details")}
           </Button>
           <Button
             size="sm"
@@ -213,16 +216,16 @@ function CandidateRow({ candidate }: { candidate: PendingCandidate }) {
             onClick={() => approve.mutate({ id: candidate.id })}
             disabled={busy}
           >
-            {approve.isPending ? "Approving…" : "Approve"}
+            {approve.isPending ? t("skills.pending_approving", "Approving…") : t("approvals.approve", "Approve")}
           </Button>
           <Button
             size="sm"
             variant="secondary"
             onClick={() => propose.mutate({ id: candidate.id })}
             disabled={busy}
-            title="Open a PR contributing this draft to the public skill registry"
+            title={t("skills.pending_propose_registry_title", "Open a PR contributing this draft to the public skill registry")}
           >
-            {propose.isPending ? "Proposing…" : "Propose to Registry"}
+            {propose.isPending ? t("skills.pending_proposing", "Proposing…") : t("skills.propose_registry", "Propose to Registry")}
           </Button>
           <Button
             size="sm"
@@ -230,7 +233,7 @@ function CandidateRow({ candidate }: { candidate: PendingCandidate }) {
             onClick={() => setConfirmReject(true)}
             disabled={busy}
           >
-            Reject
+            {t("approvals.reject", "Reject")}
           </Button>
         </div>
       </div>
@@ -239,7 +242,7 @@ function CandidateRow({ candidate }: { candidate: PendingCandidate }) {
           className="mt-2 rounded border border-destructive/30 bg-destructive/10 p-2 text-xs text-destructive"
           role="alert"
         >
-          Approve failed: {(approve.error as Error)?.message ?? "unknown"}
+          {t("skills.pending_approve_failed", "Approve failed:")} {(approve.error as Error)?.message ?? t("skills.pending_unknown", "unknown")}
         </div>
       ) : null}
       {propose.isError ? (
@@ -247,13 +250,13 @@ function CandidateRow({ candidate }: { candidate: PendingCandidate }) {
           className="mt-2 rounded border border-destructive/30 bg-destructive/10 p-2 text-xs text-destructive"
           role="alert"
         >
-          Propose to registry failed:{" "}
-          {(propose.error as Error)?.message ?? "unknown"}
+          {t("skills.pending_propose_failed", "Propose to registry failed:")}{" "}
+          {(propose.error as Error)?.message ?? t("skills.pending_unknown", "unknown")}
         </div>
       ) : null}
       {proposedPrUrl ? (
         <div className="mt-2 rounded border border-success/30 bg-success/10 p-2 text-xs">
-          Pull request opened:{" "}
+          {t("skills.pending_pr_opened", "Pull request opened:")}{" "}
           <a
             href={proposedPrUrl}
             target="_blank"
@@ -273,9 +276,9 @@ function CandidateRow({ candidate }: { candidate: PendingCandidate }) {
             { onSuccess: () => setConfirmReject(false) },
           );
         }}
-        title="Reject candidate?"
+        title={t("skills.pending_reject_title", "Reject candidate?")}
         message={`The pending candidate '${candidate.name}' will be deleted. This cannot be undone.`}
-        confirmLabel={reject.isPending ? "Rejecting…" : "Reject"}
+        confirmLabel={reject.isPending ? t("skills.pending_rejecting", "Rejecting…") : t("approvals.reject", "Reject")}
         tone="destructive"
       />
     </li>
@@ -283,6 +286,7 @@ function CandidateRow({ candidate }: { candidate: PendingCandidate }) {
 }
 
 export function PendingSkillsSection() {
+  const { t } = useTranslation();
   const query = usePendingSkillCandidates();
   const candidates = query.data ?? [];
 
@@ -292,10 +296,10 @@ export function PendingSkillsSection() {
   if (query.isError) {
     return (
       <Card className="p-4">
-        <h2 className="text-base font-semibold">Skill workshop pending</h2>
+        <h2 className="text-base font-semibold">{t("skills.pending_title", "Skill workshop pending")}</h2>
         <p className="mt-2 text-sm text-destructive">
-          Failed to load pending candidates:{" "}
-          {(query.error as Error)?.message ?? "unknown error"}
+          {t("skills.pending_load_failed", "Failed to load pending candidates:")}{" "}
+          {(query.error as Error)?.message ?? t("skills.pending_unknown_error", "unknown error")}
         </p>
       </Card>
     );
@@ -315,13 +319,13 @@ export function PendingSkillsSection() {
     <Card className="p-4">
       <div className="flex items-center justify-between">
         <h2 className="text-base font-semibold">
-          Skill workshop pending
+          {t("skills.pending_title", "Skill workshop pending")}
           <Badge className="ml-2" variant="brand">
             {candidates.length}
           </Badge>
         </h2>
         <p className="text-xs text-muted-foreground">
-          Drafts captured from agent conversations awaiting your review (#3328).
+          {t("skills.pending_desc", "Drafts captured from agent conversations awaiting your review (#3328).")}
         </p>
       </div>
       <ul className="mt-3">
