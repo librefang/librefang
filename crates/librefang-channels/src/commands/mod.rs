@@ -153,8 +153,7 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         name: "new",
         aliases: &[],
         category: Category::Session,
-        // Also reachable from the CLI/TUI chat surfaces, which reset the
-        // agent's session the same way channels do (#6265).
+        // Also reachable from CLI/TUI chat surfaces; both reset the agent session the same way.
         scope: Scope::CHANNEL.union(Scope::CLI),
         description: "Reset session (clear messages)",
         args_hint: "",
@@ -872,20 +871,10 @@ mod tests {
         assert!(!menu.is_empty());
     }
 
-    /// `/new` must be reachable from the CLI/TUI chat surfaces, not just
-    /// channels — the TUI slash dispatcher gates on `Scope::CLI`, and a
-    /// `Scope::CHANNEL`-only registration made `/new` an "unknown command"
-    /// there (#6265).
     #[test]
     fn new_command_is_reachable_from_cli_and_channel() {
         let def = lookup("new").expect("/new must be registered");
-        assert!(
-            def.scope.contains(Scope::CLI),
-            "/new must be CLI-reachable (#6265)"
-        );
-        assert!(
-            def.scope.contains(Scope::CHANNEL),
-            "/new must remain channel-reachable"
-        );
+        assert!(def.scope.contains(Scope::CLI), "/new must be CLI-reachable");
+        assert!(def.scope.contains(Scope::CHANNEL), "/new must remain channel-reachable");
     }
 }

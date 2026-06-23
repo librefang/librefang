@@ -2170,8 +2170,7 @@ impl App {
                 );
             }
             "/new" => {
-                // Reset the agent's backend session, then clear the local
-                // view. Distinct from `/clear` (on-screen transcript only).
+                // Resets backend session, not just on-screen transcript (unlike `/clear`).
                 let ok = match (&self.backend, self.chat_target.as_ref()) {
                     (Backend::Daemon { base_url, .. }, Some(target)) => {
                         match target.agent_id_daemon.as_ref() {
@@ -2187,8 +2186,7 @@ impl App {
                     }
                     (Backend::InProcess { kernel }, Some(target)) => {
                         match target.agent_id_inprocess {
-                            // `tui::run` is not on a tokio runtime (async paths
-                            // spawn their own), so a scoped `block_on` is safe.
+                            // Not on a tokio runtime here; async paths spawn their own, so `block_on` is safe.
                             Some(id) => tokio::runtime::Runtime::new().is_ok_and(|rt| {
                                 rt.block_on(kernel.reset_session(id, ResetScope::Agent))
                                     .is_ok()

@@ -362,9 +362,7 @@ impl StandaloneChat {
                 );
             }
             "new" => {
-                // Reset the agent's session on the backend, then clear the
-                // local view. Distinct from `/clear`, which only wipes the
-                // on-screen transcript without touching the backend session.
+                // Resets backend session, not just on-screen transcript (unlike `/clear`).
                 let ok = match &self.backend {
                     Backend::Daemon { base_url } => match self.agent_id_daemon.as_ref() {
                         Some(id) => {
@@ -377,9 +375,7 @@ impl StandaloneChat {
                         None => false,
                     },
                     Backend::InProcess { kernel } => match self.agent_id_inprocess {
-                        // `run_chat_tui` is not itself on a tokio runtime (the
-                        // async streaming paths spawn their own), so a scoped
-                        // `block_on` here is safe and avoids extra plumbing.
+                        // Not on a tokio runtime here; async paths spawn their own, so `block_on` is safe.
                         Some(id) => tokio::runtime::Runtime::new().is_ok_and(|rt| {
                             rt.block_on(kernel.reset_session(id, ResetScope::Agent))
                                 .is_ok()
