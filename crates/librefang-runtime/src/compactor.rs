@@ -174,6 +174,48 @@ fn estimate_str_tokens(s: &str) -> usize {
     total.ceil() as usize
 }
 
+/// Per-character weight for JSON structural punctuation (`{}[]":,` and the
+/// escape `\`). In prose these would count at the flat 0.25 (they rarely form
+/// their own token because BPE merges them with neighbours), but in serialized
+/// JSON they are dense and high-entropy: every brace, quote, colon, comma, and
+/// escape sequence tends to tokenize as its own token (often ~1 each, and
+/// `\"` / `\n` as a pair). The flat 0.25 therefore systematically *under*counts
+/// JSON-heavy content. This is the cross-provider signal measured by the
+/// token-estimation accuracy benchmark (`tests/token_estimation_accuracy.rs`):
+/// both the GLM and o200k baselines undercount the `tool_json` bucket, and the
+/// sign agrees, so raising the weight of just these structural characters is a
+/// language-independent correction that does not touch prose estimation.
+///
+/// 0.5 is calibrated against both committed baselines: it is the value that
+/// improves (or holds) the `tool_json` error of *both* tokenizers without
+/// regressing any other bucket. GLM tokenizes JSON structure more efficiently
+/// than o200k, so a single global weight is a deliberate compromise — 0.5 cuts
+/// GLM's systematic undercount (−14% → −3%) and reduces o200k's (−46% → −39%);
+/// a higher weight would over-count GLM. The residual o200k undercount is a
+/// known limit of a tokenizer-independent heuristic, not a missed tuning.
+const JSON_STRUCT_TOKEN_WEIGHT: f64 = 0.5;
+
+/// Estimate tokens for serialized-JSON content (tool-call inputs and tool
+/// results), which is denser in structural punctuation than prose.
+///
+/// Identical to [`estimate_str_tokens`] except JSON structural characters are
+/// weighted at [`JSON_STRUCT_TOKEN_WEIGHT`] instead of the flat 0.25. CJK and
+/// alphanumeric runs (string values inside the JSON) keep their normal weights,
+/// so a tool result carrying Chinese text is still counted CJK-aware.
+fn estimate_json_str_tokens(s: &str) -> usize {
+    let total: f64 = s
+        .chars()
+        .map(|c| {
+            if matches!(c, '{' | '}' | '[' | ']' | '"' | ':' | ',' | '\\') {
+                JSON_STRUCT_TOKEN_WEIGHT
+            } else {
+                char_token_weight(c)
+            }
+        })
+        .sum();
+    total.ceil() as usize
+}
+
 /// Estimate token count for a set of messages, optional system prompt, and tool definitions.
 ///
 /// Uses a CJK-aware heuristic: CJK chars ~1.5 tokens, ASCII/Latin chars/4.
@@ -203,7 +245,9 @@ pub fn estimate_token_count(
             tokens += estimate_str_tokens(&tool.name);
             tokens += estimate_str_tokens(&tool.description);
             if let Ok(schema_str) = serde_json::to_string(&tool.input_schema) {
-                tokens += estimate_str_tokens(&schema_str);
+                // The JSON schema is the largest contributor and is structural
+                // JSON, so count it with the JSON-aware estimator.
+                tokens += estimate_json_str_tokens(&schema_str);
             }
         }
     }
@@ -219,14 +263,18 @@ fn estimate_message_tokens(msg: &Message) -> usize {
             .iter()
             .map(|b| match b {
                 ContentBlock::Text { text, .. } => estimate_str_tokens(text),
-                ContentBlock::ToolResult { content, .. } => estimate_str_tokens(content),
+                // Tool results are usually serialized JSON; count their
+                // structural punctuation at the JSON-aware weight.
+                ContentBlock::ToolResult { content, .. } => estimate_json_str_tokens(content),
                 ContentBlock::Thinking { thinking, .. } => estimate_str_tokens(thinking),
                 ContentBlock::ToolUse {
                     name, id, input, ..
                 } => {
                     estimate_str_tokens(name)
                         + estimate_str_tokens(id)
-                        + estimate_str_tokens(&serde_json::to_string(input).unwrap_or_default())
+                        + estimate_json_str_tokens(
+                            &serde_json::to_string(input).unwrap_or_default(),
+                        )
                 }
                 // Base64 images consume significant tokens.  A rough
                 // estimate: each base64 char ≈ 0.25 tokens (same as ASCII),
@@ -2162,6 +2210,50 @@ mod tests {
         assert!(
             mixed_est > ascii_est,
             "Mixed content should have more tokens than pure ASCII of same length"
+        );
+    }
+
+    #[test]
+    fn test_estimate_json_str_tokens_weights_structure_above_prose() {
+        // Structural JSON punctuation is counted heavier than the flat prose
+        // 0.25, so JSON-aware estimation exceeds plain estimation for the same
+        // bytes. The gap must come only from the structural chars.
+        let json = r#"{"name":"web_search","args":["a","b"],"n":3}"#;
+        let json_aware = estimate_json_str_tokens(json);
+        let prose = estimate_str_tokens(json);
+        assert!(
+            json_aware > prose,
+            "JSON-aware estimate ({json_aware}) should exceed prose estimate ({prose}) for JSON"
+        );
+        // Plain prose has no structural chars, so the two agree.
+        let text = "the quick brown fox";
+        assert_eq!(estimate_json_str_tokens(text), estimate_str_tokens(text));
+        // CJK string values inside JSON keep CJK weighting (not flattened).
+        let cjk_json = "{\"text\":\"\u{4f60}\u{597d}\"}";
+        assert!(estimate_json_str_tokens(cjk_json) > estimate_json_str_tokens("{\"text\":\"ab\"}"));
+    }
+
+    #[test]
+    fn test_tool_use_estimated_above_equivalent_prose() {
+        // A tool-call message routes through the JSON-aware path, so it must
+        // estimate higher than the same characters carried as plain text.
+        let input = serde_json::json!({"query": "rust async", "limit": 10});
+        let serialized = serde_json::to_string(&input).unwrap();
+        let tool_msg = Message {
+            role: Role::Assistant,
+            content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                id: "call_1".into(),
+                name: "search".into(),
+                input,
+                provider_metadata: None,
+            }]),
+            pinned: false,
+            timestamp: None,
+        };
+        let prose_msg = Message::assistant(format!("searchcall_1{serialized}"));
+        assert!(
+            estimate_message_tokens(&tool_msg) > estimate_message_tokens(&prose_msg),
+            "tool-call JSON should estimate higher than the same chars as prose"
         );
     }
 

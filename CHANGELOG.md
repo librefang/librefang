@@ -5,6 +5,13 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [Unreleased]
+
+### Changed
+
+- Token estimation now counts JSON structural punctuation on tool paths (tool-call inputs, tool results, tool-definition schemas) at a heavier weight, correcting the systematic undercount of JSON-heavy tool steps measured by the token-estimation accuracy benchmark from #6269; prose estimation is unchanged (#6281) (@maoxin1234)
+
+
 ## [2026.6.22] - 2026-06-22
 
 _1 PR from 1 contributor since v2026.6.22-beta.21._

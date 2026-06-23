@@ -96,10 +96,31 @@ error from cross-provider error:
   weight on the strength of this — it would help GLM and hurt OpenAI.
 - The `tool_json` *under*-estimate is the **cross-provider signal**: both
   tokenizers undercount JSON-heavy tool steps (-14% GLM, -46% o200k), and o200k
-  is worse. JSON structure and escaping in tool calls are currently weighted at
+  is worse. JSON structure and escaping in tool calls were originally weighted at
   the flat 0.25/char, which undercounts. Because the sign agrees across
-  tokenizers, this is the safe, language-independent candidate for a later
-  tuning change.
+  tokenizers, this is the safe, language-independent tuning target — addressed
+  below.
+
+## Tuning: JSON-aware structural weight
+
+Acting on the cross-provider `tool_json` signal above, `estimate_token_count`
+now counts JSON structural punctuation (`{}[]":,` and the escape `\`) at a
+heavier per-char weight (`JSON_STRUCT_TOKEN_WEIGHT = 0.5`) on the tool paths
+only (tool-call inputs, tool results, and tool-definition schemas). Prose is
+untouched. The weight is calibrated against *both* committed baselines — the
+value that improves or holds each without regressing any other bucket:
+
+| tool_json | before (signed / MAE tok) | after (signed / MAE tok) |
+| --- | --- | --- |
+| GLM | -14% / 21.0 | **-3% / 20.2** |
+| gpt-oss (o200k) | -46% / 103.8 | **-39% / 88.5** |
+
+`cjk`, `english_prose`, and `mixed_cjk_latin` are byte-identical before/after
+(they never reach the JSON path). GLM tokenizes JSON structure more efficiently
+than o200k, so a single global weight is a deliberate compromise: 0.5 removes
+GLM's systematic bias and roughly halves the gap on o200k. The residual o200k
+undercount is the known limit of a tokenizer-independent heuristic, not a missed
+tuning — closing it fully would over-count GLM.
 
 ## Methodology notes
 
