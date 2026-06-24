@@ -1635,7 +1635,10 @@
       "pending_review_one": "1 个工作流运行正在等待操作员审查",
       "pending_review_other": "{{count}} 个工作流运行正在等待操作员审查",
       "empty_artifact": "（空产物）"
-    }
+    },
+    "rerun_hint": "使用这些参数重新运行",
+    "step_executing": "步骤 {{current}}/{{total}} 执行中…",
+    "starting": "启动中…"
   },
   "scheduler": {
     "title": "调度器",
