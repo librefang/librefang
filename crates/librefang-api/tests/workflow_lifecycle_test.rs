@@ -798,3 +798,59 @@ async fn run_detail_exposes_per_step_error_for_failed_step() {
         "failed step must expose a non-empty error in the API payload: {failed:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// GET /api/workflows/{id}/runs scoping (regression)
+// ---------------------------------------------------------------------------
+
+/// `GET /api/workflows/{id}/runs` must return only the runs of the workflow named in the path, not every workflow's runs.
+/// Regression: the handler previously ignored the path id and returned `list_runs(None)` wholesale, leaking other workflows' runs (and their `input`) into the response.
+#[tokio::test(flavor = "multi_thread")]
+async fn list_workflow_runs_is_scoped_to_path_workflow() {
+    use librefang_kernel::workflow::WorkflowId;
+
+    let h = boot().await;
+    let wf_a = create_workflow(&h).await;
+    let wf_b = create_workflow(&h).await;
+    assert_ne!(wf_a, wf_b, "two distinct workflows expected");
+    let id_a = WorkflowId(wf_a.parse().unwrap());
+    let id_b = WorkflowId(wf_b.parse().unwrap());
+
+    let engine = h.state.kernel.workflow_engine();
+    let run_a = engine
+        .create_run(id_a, "input-a".to_string())
+        .await
+        .expect("create run a");
+    engine
+        .create_run(id_b, "input-b1".to_string())
+        .await
+        .expect("create run b1");
+    engine
+        .create_run(id_b, "input-b2".to_string())
+        .await
+        .expect("create run b2");
+
+    // A's endpoint must return exactly A's single run.
+    let (status, body) = get(&h, &format!("/api/workflows/{wf_a}/runs")).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    let arr = body.as_array().expect("array body");
+    assert_eq!(arr.len(), 1, "expected only workflow A's run: {body:?}");
+    assert_eq!(
+        arr[0]["id"].as_str(),
+        Some(run_a.to_string().as_str()),
+        "wrong run returned for A: {body:?}"
+    );
+
+    // B's endpoint must return exactly B's two runs.
+    let (status, body) = get(&h, &format!("/api/workflows/{wf_b}/runs")).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(
+        body.as_array().expect("array body").len(),
+        2,
+        "expected workflow B's two runs: {body:?}"
+    );
+
+    // Invalid id must be rejected with 400, not silently treated as "all runs".
+    let (status, _body) = get(&h, "/api/workflows/not-a-uuid/runs").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}

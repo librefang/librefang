@@ -1456,15 +1456,28 @@ pub async fn list_pending_operator_workflow_runs(
     Json(body)
 }
 
-/// GET /api/workflows/:id/runs — List runs for a workflow.
-#[utoipa::path(get, path = "/api/workflows/{id}/runs", tag = "workflows", params(("id" = String, Path, description = "Workflow ID")), responses((status = 200, description = "List workflow runs", body = Vec<serde_json::Value>)))]
+/// GET /api/workflows/:id/runs — List runs for the workflow named in the path.
+#[utoipa::path(get, path = "/api/workflows/{id}/runs", tag = "workflows", params(("id" = String, Path, description = "Workflow ID")), responses((status = 200, description = "List workflow runs", body = Vec<serde_json::Value>), (status = 400, description = "Invalid workflow ID")))]
 pub async fn list_workflow_runs(
     State(state): State<Arc<AppState>>,
-    Path(_id): Path<String>,
+    Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let runs = state.kernel.workflow_engine().list_runs(None).await;
-    let list: Vec<serde_json::Value> = runs
+    let workflow_id = WorkflowId(match id.parse() {
+        Ok(u) => u,
+        Err(_) => {
+            return ApiErrorResponse::bad_request("Invalid workflow ID").into_json_tuple();
+        }
+    });
+    // Scope to the workflow named in the path. `list_runs(None)` returns every
+    // workflow's runs, so without this filter `GET /api/workflows/A/runs` would
+    // leak the runs (and their inputs) of unrelated workflows B, C, ….
+    let list: Vec<serde_json::Value> = state
+        .kernel
+        .workflow_engine()
+        .list_runs(None)
+        .await
         .iter()
+        .filter(|r| r.workflow_id == workflow_id)
         .map(|r| {
             serde_json::json!({
                 "id": r.id.to_string(),
@@ -1476,7 +1489,7 @@ pub async fn list_workflow_runs(
             })
         })
         .collect();
-    Json(list)
+    (StatusCode::OK, Json(serde_json::Value::Array(list)))
 }
 
 // ---------------------------------------------------------------------------

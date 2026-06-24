@@ -104,6 +104,10 @@ In-crate only; no cross-crate error-shape changes.
   It is now backed by a process-global `PROVIDER_COOLDOWN` (shared across all agent loops, mirroring the existing `LLM_CONCURRENCY` static) and passed into both call sites.
   Separately, `check()` never recorded the probe it granted (`last_probe` was only ever set by `record_probe_result`, which no production path calls), so during an open cooldown every request was let through as a probe and the breaker never actually rejected anything; `check()` now marks the probe attempt, so requests are throttled to one probe per `probe_interval_secs` (default 30s) until a probe succeeds and closes the circuit.
   Behavior change: a genuinely failing / out-of-credit provider now fails fast with a "Provider in cooldown" error (except the periodic probe) instead of doing the full retry-then-defer dance on every call; a healthy provider is never affected (the circuit only opens after a real failure, and the first post-failure call is a probe that closes it on success).
+- **fix(api): scope `GET /api/workflows/{id}/runs` to the workflow named in the path** (@houko).
+  The handler ignored its `{id}` path parameter and called `list_runs(None)`, so it returned every workflow's runs instead of the requested one.
+  Each run carries its initial `input`, so the unscoped list also exposed unrelated workflows' run inputs to any caller of one workflow's runs endpoint.
+  An invalid id now returns `400` instead of being silently treated as a request for all runs.
 - **fix(kernel): forward web-UI-initiated delegation results to the agent's home channel** (#6266) (@houko) — reported by @DaBlitzStein.
   A delegation kicked off from a web-UI turn carries no inbound `chat_id`, so the mid-turn completion forward added in #6267 was skipped and the result surfaced only in the web-UI session, never on the agent's channel.
   The forward now falls back to the home channel's configured `default_conversation` (new optional `[[sidecar_channels]].default_conversation`); with no default configured it stays a no-op rather than guessing a recipient.
