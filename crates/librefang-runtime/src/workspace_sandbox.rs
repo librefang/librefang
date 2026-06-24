@@ -415,10 +415,41 @@ mod tests {
         std::os::unix::fs::symlink(&real, &link).unwrap();
 
         let result = resolve_sandbox_path("link/newdir/file.txt", dir.path());
-        assert!(result.is_ok(), "inside symlink should resolve, got: {result:?}");
+        assert!(
+            result.is_ok(),
+            "inside symlink should resolve, got: {result:?}"
+        );
         let resolved = result.unwrap();
         // Resolves to the canonical real location, still inside the workspace.
         assert!(resolved.starts_with(dir.path().canonicalize().unwrap()));
+        assert!(resolved.ends_with("file.txt"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_new_nested_file_under_additional_root_resolves() {
+        // POSITIVE: creating a new file in a not-yet-existing subdir UNDER a named-workspace (additional) root must still resolve.
+        // The fix replaced the literal additional-root rebase with canonicalizing the deepest existing ancestor, so this pins that a legitimate deep-mkdir write addressed through an additional root is not over-blocked by the new branch.
+        let primary = TempDir::new().unwrap();
+        let extra = TempDir::new().unwrap();
+        let extra_canon = extra.path().canonicalize().unwrap();
+
+        // `newdir` does not exist yet -> the non-existent-parent branch, reached through the additional root rather than the primary workspace.
+        let abs = extra_canon.join("newdir").join("file.txt");
+        let result = resolve_sandbox_path_ext(
+            abs.to_str().unwrap(),
+            primary.path(),
+            &[extra_canon.as_path()],
+        );
+        assert!(
+            result.is_ok(),
+            "new nested file under an additional root should resolve, got: {result:?}"
+        );
+        let resolved = result.unwrap();
+        assert!(
+            resolved.starts_with(&extra_canon),
+            "must resolve inside the additional root: {resolved:?}"
+        );
         assert!(resolved.ends_with("file.txt"));
     }
 
