@@ -5,6 +5,61 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.6.24] - 2026-06-24
+
+_33 PRs from 5 contributors since v2026.6.22-beta.22._
+
+### Added
+
+- Localize TUI Onboarding Wizard and Agents screen (#6253) (@pavver)
+- Pluggable context-rewrite modules — per-agent engine + host-run request_llm_summary (closes #6264) (#6287) (@houko)
+- Add scriptable tool result transform hook (#6291) (@pavver)
+- Per-step errors and re-run with same parameters (#6292) (#6302) (@houko)
+- Code_search workspace regex search tool (#6295) (#6307) (@houko)
+
+### Fixed
+
+- Gate provider hourly token budget pre-call so exhaustion flags the fallback chain (#5980) (#5988) (@DaBlitzStein)
+- Persist agent skill & MCP-server assignments to agent.toml (#6046) (@DaBlitzStein)
+- Embed developer-loop placeholder in first result delivery (closes #6251) (#6254) (@maoxin1234)
+- Kill sidecar child on shutdown + forward async delegation result to channel (#6267) (@DaBlitzStein)
+- Complete dashboard i18n coverage (#6271) (@pavver)
+- Vendor OpenSSL unconditionally so cross-compiled release targets link (#6279) (@houko)
+- Merge updater plugin config into base tauri.conf.json (closes #6270) (#6283) (@houko)
+- Handle /new in the TUI chat surfaces (closes #6265) (#6284) (@houko)
+- Merge the dual [Unreleased] sections into one at the top (#6285) (@houko)
+- Forward web-UI-initiated delegation results to the home channel (refs #6266) (#6286) (@houko)
+- AUTH PLAIN fallback for SMTP + expose input/error in workflow runs list (#6293) (@DaBlitzStein)
+- Scope GET /api/workflows/{id}/runs to the path workflow (#6298) (@houko)
+- Block sandbox escape via intermediate-ancestor symlink on writes to non-existent dirs (#6299) (@houko)
+- Reject newline/CR/NUL in secret key to prevent secrets.env line injection (#6300) (@houko)
+- Graceful 400 for non-table [memory]/[proactive_memory] in PATCH /api/memory/config (#6301) (@houko)
+- Apply api_key_env/base_url in PATCH /api/agents/{id}/config instead of dropping them (#6303) (@houko)
+- Wire provider cooldown breaker into the LLM retry path and fix its probe gate (#6305) (@houko)
+- Gate scriptable transform-hook tests behind cfg(unix) to unbreak Windows CI (#6306) (@houko)
+- Gate use std::sync::Arc behind cfg(unix) to complete the Windows-red fix (#6308) (@houko)
+- Install libdbus-1-dev in the release Bump Version job (#6309) (@houko)
+
+### Performance
+
+- JSON-aware token estimation for tool paths (#6281) (@maoxin1234)
+
+<details>
+<summary>Documentation, maintenance, and other internal changes</summary>
+
+### Maintenance
+
+- Token-estimation accuracy benchmark with multi-tokenizer baselines (#6269) (@maoxin1234)
+- Bump the cargo-minor-patch group across 1 directory with 8 updates (#6276) (@app/dependabot)
+- Bump wasmtime from 45.0.2 to 46.0.0 (#6277) (@app/dependabot)
+- Bump cron from 0.16.0 to 0.17.0 (#6278) (@app/dependabot)
+- Bump vulnerable/yanked lockfile deps to clear global CI failures (#6280) (@houko)
+- Bump actions/checkout from 6 to 7 (#6296) (@app/dependabot)
+- Bump actions/cache from 5.0.5 to 6.0.0 (#6297) (@app/dependabot)
+
+</details>
+
+
 ## [Unreleased]
 
 ### Changed

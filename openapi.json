@@ -7,7 +7,7 @@
       "name": "MIT",
       "url": "https://opensource.org/licenses/MIT"
     },
-    "version": "2026.6.22-beta.22"
+    "version": "2026.6.24-beta.23"
   },
   "paths": {
     "/.well-known/agent.json": {
