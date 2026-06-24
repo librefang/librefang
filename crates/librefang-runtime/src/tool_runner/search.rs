@@ -34,12 +34,13 @@ pub(super) async fn tool_code_search(
         });
     }
     let raw_path = input["path"].as_str().unwrap_or(".");
-    let root = resolve_file_path_ext(raw_path, workspace_root, additional_roots).map_err(
-        |reason| ToolError::InvalidParameter {
-            name: "path",
-            reason,
-        },
-    )?;
+    let root =
+        resolve_file_path_ext(raw_path, workspace_root, additional_roots).map_err(|reason| {
+            ToolError::InvalidParameter {
+                name: "path",
+                reason,
+            }
+        })?;
     let case_sensitive = input["case_sensitive"].as_bool().unwrap_or(false);
     let max_results = (input["max_results"]
         .as_u64()
@@ -170,7 +171,10 @@ mod tests {
     #[tokio::test]
     async fn missing_query_is_missing_parameter() {
         let r = tool_code_search(&json!({}), None, &[]).await;
-        assert!(matches!(r, Err(ToolError::MissingParameter("query"))), "{r:?}");
+        assert!(
+            matches!(r, Err(ToolError::MissingParameter("query"))),
+            "{r:?}"
+        );
     }
 
     #[tokio::test]
@@ -204,7 +208,10 @@ mod tests {
         let ci = tool_code_search(&json!({"query": "needle"}), Some(tmp.path()), &[])
             .await
             .unwrap();
-        assert!(ci.contains("a.txt:1:"), "default should be case-insensitive: {ci}");
+        assert!(
+            ci.contains("a.txt:1:"),
+            "default should be case-insensitive: {ci}"
+        );
         let cs = tool_code_search(
             &json!({"query": "needle", "case_sensitive": true}),
             Some(tmp.path()),
@@ -212,7 +219,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(cs.contains("No matches"), "case_sensitive should miss: {cs}");
+        assert!(
+            cs.contains("No matches"),
+            "case_sensitive should miss: {cs}"
+        );
     }
 
     #[tokio::test]
