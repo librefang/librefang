@@ -771,6 +771,59 @@ pub async fn patch_agent_config(
         }
     }
 
+    // Apply per-agent api_key_env / base_url overrides. The OpenAPI schema for
+    // this endpoint advertises both fields, but before this they were read only
+    // by the hand-runtime-config endpoint and silently dropped here — switching
+    // a non-hand agent to a custom provider plus its credential env var / base
+    // URL in one `PATCH /config` call returned `200` while the two fields were
+    // discarded (the #2380 class of failure). `set_agent_model` above clears
+    // any stale api_key_env / base_url on a provider change, so the override is
+    // re-applied AFTER it has run.
+    //
+    // Tri-state per field: `Some(non-empty)` sets it, `Some(empty/whitespace)`
+    // clears it, `None` leaves it unchanged — merged against the current value
+    // so sending only one field does not wipe the other.
+    if req.api_key_env.is_some() || req.base_url.is_some() {
+        let entry = match state.kernel.agent_registry().get(agent_id) {
+            Some(e) => e,
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+                );
+            }
+        };
+        let resolve = |incoming: Option<&String>, current: Option<String>| -> Option<String> {
+            match incoming {
+                Some(s) if s.trim().is_empty() => None,
+                Some(s) => Some(s.trim().to_string()),
+                None => current,
+            }
+        };
+        let new_api_key_env = resolve(
+            req.api_key_env.as_ref(),
+            entry.manifest.model.api_key_env.clone(),
+        );
+        let new_base_url = resolve(req.base_url.as_ref(), entry.manifest.model.base_url.clone());
+        if state
+            .kernel
+            .agent_registry()
+            .update_model_provider_config(
+                agent_id,
+                entry.manifest.model.model.clone(),
+                entry.manifest.model.provider.clone(),
+                new_api_key_env,
+                new_base_url,
+            )
+            .is_err()
+        {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+            );
+        }
+    }
+
     // Validate and update temperature (sampling randomness)
     if let Some(temperature) = req.temperature {
         if !(0.0..=2.0).contains(&temperature) {
