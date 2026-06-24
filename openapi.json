@@ -12958,7 +12958,7 @@
         "tags": [
           "workflows"
         ],
-        "summary": "GET /api/workflows/:id/runs — List runs for a workflow.",
+        "summary": "GET /api/workflows/:id/runs — List runs for the workflow named in the path.",
         "operationId": "list_workflow_runs",
         "parameters": [
           {
@@ -12982,6 +12982,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Invalid workflow ID"
           }
         }
       }
