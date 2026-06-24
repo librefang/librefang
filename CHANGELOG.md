@@ -299,6 +299,11 @@ In-crate only; no cross-crate error-shape changes.
 
 ### Added
 
+- **feat(runtime): `code_search` tool — workspace-wide regex code search for coding agents** (@houko) — proposed by @pavver (#6295).
+  Coding agents previously had to locate code by looping `file_list` + `file_read`, spending tool calls and context rediscovering structure.
+  `code_search` regex-searches every text file under a workspace-relative path in one call and returns `relpath:line: content` rows, skipping `.git` / `target` / `node_modules`, hidden, binary, and oversized (> 2 MB) files; results are sorted by path then line for deterministic output (#3298), and `max_results` (default 100, hard cap 1000) bounds the response.
+  It is a read-only, always-native tool — no approval gate, like `file_list` — and pulls in no new dependency (hand-rolled `tokio::fs` walk, existing `regex` crate).
+  This is the first, lexical-only slice of the #6295 workspace code-intelligence layer; structural symbol indexing, repo maps, and LSP / vector backends are out of scope here and tracked as later stages.
 - **feat(workflows): per-step errors and re-run with same parameters** (#6292) (@houko).
   `StepResult` gains an `error: Option<String>` field, exposed in `GET /api/workflows/runs/{run_id}` and the synchronous `POST /api/workflows/{id}/run` response.
   Operator-node steps that fail without an LLM call (gate / transform / branch) already recorded a synthetic `StepResult` with the cause stuffed into `output`; that cause is now also carried in the dedicated `error` field, so a client can distinguish a failed step from a successful one without parsing `output`.

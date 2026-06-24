@@ -1169,7 +1169,7 @@ const OPERATIONAL_GUIDELINES: &str = "\
 pub fn tool_category(name: &str) -> &'static str {
     match name {
         "file_read" | "file_write" | "file_list" | "file_delete" | "file_move" | "file_copy"
-        | "file_search" => "Files",
+        | "file_search" | "code_search" => "Files",
 
         "web_search" | "web_fetch" | "web_fetch_to_file" => "Web",
 
@@ -1212,6 +1212,7 @@ pub fn tool_hint(name: &str) -> &'static str {
         "file_move" => "move or rename a file",
         "file_copy" => "copy a file",
         "file_search" => "search files by name pattern",
+        "code_search" => "regex-search file contents across the workspace",
 
         // Web
         "web_search" => "search the web for information",

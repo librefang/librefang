@@ -30,6 +30,7 @@ mod process;
 #[cfg(feature = "docker-sandbox")]
 mod sandbox;
 mod schedule;
+mod search;
 mod shell;
 mod shell_safety;
 mod skill;
@@ -83,6 +84,7 @@ use self::sandbox::tool_docker_exec;
 use self::schedule::{
     tool_schedule_create, tool_schedule_delete, tool_schedule_list, tool_schedule_resume,
 };
+use self::search::tool_code_search;
 use self::shell::tool_shell_exec;
 use self::shell_safety::{classify_shell_exec_ro_safety, RoSafety};
 use self::skill::{
