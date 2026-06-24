@@ -41,6 +41,17 @@ pub fn upsert_secret(path: &Path, key: &str, value: &str) -> Result<(), String> 
             "secret value for `{key}` must not start with a quote character (dotenv reader would strip it)"
         ));
     }
+    // The key must never break the `KEY=VALUE\n` line framing. A key with an
+    // interior newline (e.g. `FOO\nBAR`) passes the `=` / trim / empty checks
+    // below — the newline is not at an edge — and would emit `FOO\nBAR=value`,
+    // injecting an extra `BAR=value` line into secrets.env (which is loaded
+    // into the process environment at boot and inherited by sidecar children).
+    // Mirror the hardened `routes::skills::write_secret_env` key check.
+    if key.contains('\n') || key.contains('\r') || key.contains('\0') {
+        return Err(format!(
+            "secret key `{key}` must not contain a newline, carriage return, or NUL byte"
+        ));
+    }
     if key.contains('=') || key.trim() != key || key.is_empty() {
         return Err(format!("invalid secret key `{key}`"));
     }
@@ -98,4 +109,41 @@ pub fn upsert_secret(path: &Path, key: &str, value: &str) -> Result<(), String> 
     }
     fs::rename(&tmp, path).map_err(|e| format!("rename {tmp:?} -> {path:?}: {e}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn read(path: &Path) -> String {
+        fs::read_to_string(path).unwrap_or_default()
+    }
+
+    #[test]
+    fn key_with_newline_is_rejected_and_does_not_inject_a_line() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("secrets.env");
+
+        let err = upsert_secret(&path, "FOO\nBAR", "value").unwrap_err();
+        assert!(err.contains("newline"), "got: {err}");
+        // Nothing must have been written.
+        assert!(!path.exists() || !read(&path).contains("BAR=value"));
+    }
+
+    #[test]
+    fn key_with_carriage_return_or_nul_is_rejected() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("secrets.env");
+        assert!(upsert_secret(&path, "FOO\rBAR", "v").is_err());
+        assert!(upsert_secret(&path, "FOO\0BAR", "v").is_err());
+    }
+
+    #[test]
+    fn well_formed_key_still_writes_a_single_line() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("secrets.env");
+        upsert_secret(&path, "OPENAI_API_KEY", "sk-123").unwrap();
+        assert_eq!(read(&path), "OPENAI_API_KEY=sk-123\n");
+    }
 }
