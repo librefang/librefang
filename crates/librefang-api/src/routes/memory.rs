@@ -1610,12 +1610,24 @@ pub async fn memory_config_patch(
 
     let root = table.as_table_mut().unwrap();
 
-    // Update [memory] section
-    let memory_tbl = root
+    // Update [memory] section. `entry(..).or_insert_with` only inserts the
+    // default table when the key is ABSENT; if config.toml already holds a
+    // scalar at `memory` (e.g. a hand-edited `memory = 5`), `as_table_mut`
+    // returns None. Fail gracefully instead of panicking (the pre-existing
+    // `.unwrap()` turned a malformed-config edit into a 500 with a panic log).
+    let memory_tbl = match root
         .entry("memory")
         .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
         .as_table_mut()
-        .unwrap();
+    {
+        Some(t) => t,
+        None => {
+            return ApiErrorResponse::bad_request(
+                "config.toml has a non-table `[memory]` entry; expected a table",
+            )
+            .into_json_tuple();
+        }
+    };
     if let Some(v) = req.get("embedding_provider").and_then(|v| v.as_str()) {
         memory_tbl.insert(
             "embedding_provider".into(),
@@ -1637,11 +1649,19 @@ pub async fn memory_config_patch(
 
     // Update [proactive_memory] section
     if let Some(pm) = req.get("proactive_memory") {
-        let pm_tbl = root
+        let pm_tbl = match root
             .entry("proactive_memory")
             .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
             .as_table_mut()
-            .unwrap();
+        {
+            Some(t) => t,
+            None => {
+                return ApiErrorResponse::bad_request(
+                    "config.toml has a non-table `[proactive_memory]` entry; expected a table",
+                )
+                .into_json_tuple();
+            }
+        };
         if let Some(v) = pm.get("enabled").and_then(|v| v.as_bool()) {
             pm_tbl.insert("enabled".into(), toml::Value::Boolean(v));
         }
