@@ -1246,11 +1246,20 @@ mod request_llm_summary_tests {
     use super::*;
     use crate::llm_driver::{CompletionRequest, CompletionResponse, LlmError};
     use async_trait::async_trait;
+    // Only used by the Unix-gated transform-hook tests below (see make_transform_script).
+    #[cfg(unix)]
     use librefang_memory::MemorySubstrate;
     use librefang_types::message::{ContentBlock, StopReason, TokenUsage};
+    #[cfg(unix)]
     use librefang_types::tool::ToolExecutionStatus;
     use std::sync::Arc;
 
+    // Unix-only: these tests run a real `#!/bin/sh` hook through the native
+    // script runtime. Windows has no `/bin/sh`, so the spawn fails and the
+    // metrics assertions (`successes`, rewritten content) don't hold —
+    // regression #6304, from the #6291 transform-hook tests. The transform-hook
+    // feature itself is not Unix-gated; only this shell-script test harness is.
+    #[cfg(unix)]
     fn make_transform_script(body: &str) -> (tempfile::TempDir, std::path::PathBuf) {
         let tmp = tempfile::tempdir().unwrap();
         let script = tmp.path().join("rewrite.sh");
@@ -1265,6 +1274,7 @@ mod request_llm_summary_tests {
         (tmp, script)
     }
 
+    #[cfg(unix)]
     fn make_transform_engine(
         hooks: librefang_types::config::ContextEngineHooks,
     ) -> ScriptableContextEngine {
@@ -1347,6 +1357,7 @@ mod request_llm_summary_tests {
         assert!(try_host_summary(&output, &driver("x"), "m").await.is_none());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn transform_tool_result_script_rewrites_content() {
         let (_tmp, script) = make_transform_script(
@@ -1377,6 +1388,7 @@ mod request_llm_summary_tests {
         assert_eq!(engine.metrics().transform_tool_result.successes, 1);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn transform_tool_result_missing_content_is_noop() {
         let (_tmp, script) =
@@ -1406,6 +1418,7 @@ mod request_llm_summary_tests {
         assert_eq!(engine.metrics().transform_tool_result.successes, 1);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn transform_tool_result_script_failure_is_noop_with_warn_policy() {
         let (_tmp, script) = make_transform_script("#!/bin/sh\nexit 42\n");
@@ -1434,6 +1447,7 @@ mod request_llm_summary_tests {
         assert_eq!(engine.metrics().transform_tool_result.failures, 1);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn transform_tool_result_agent_filter_skips_hook() {
         let (_tmp, script) = make_transform_script(

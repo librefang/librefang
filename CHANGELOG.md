@@ -95,6 +95,9 @@ In-crate only; no cross-crate error-shape changes.
 
 ### Fixed
 
+- **fix(test): gate the scriptable `transform_tool_result` hook tests behind `#[cfg(unix)]` so Windows CI stops failing** (@houko).
+  The #6291 transform-hook tests run a real `#!/bin/sh` script through the native script runtime; Windows has no `/bin/sh`, so the spawn failed and `transform_tool_result_script_rewrites_content` / `transform_tool_result_missing_content_is_noop` broke the metrics assertions on both Windows shards — turning `main` red (#6304) and making every open PR inherit the failure on its next run.
+  The four shell-script tests and their `make_transform_script` / `make_transform_engine` helpers (plus the now-test-only `MemorySubstrate` / `ToolExecutionStatus` imports) are now `#[cfg(unix)]`; the transform-hook feature itself is unchanged and still covered on Linux and macOS.
 - **fix(api): scope `GET /api/workflows/{id}/runs` to the workflow named in the path** (@houko).
   The handler ignored its `{id}` path parameter and called `list_runs(None)`, so it returned every workflow's runs instead of the requested one.
   Each run carries its initial `input`, so the unscoped list also exposed unrelated workflows' run inputs to any caller of one workflow's runs endpoint.
