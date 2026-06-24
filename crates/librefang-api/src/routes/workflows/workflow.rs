@@ -498,8 +498,7 @@ pub struct RunWorkflowQuery {
 /// Shared by the `run_workflow` async path and `rerun_workflow_run` so both drive `execute_run` with identical agent-resolver and message-sender wiring.
 /// The caller creates the `Pending` run and returns its id immediately; this drives it to completion, observable via `GET /api/workflows/runs/{run_id}`.
 fn spawn_background_run(state: Arc<AppState>, run_id: WorkflowRunId) {
-    // Separate Arc clones for the resolver closure (Fn) and the sender
-    // closure (Fn) so neither moves out of the other.
+    // Separate Arc clones for the resolver closure (Fn) and the sender closure (Fn) so neither moves out of the other.
     let state_for_resolver = state.clone();
     let state_for_sender = state.clone();
     tokio::spawn(async move {
@@ -652,8 +651,7 @@ pub async fn run_workflow(
         // Create the run first so we have the run_id to return immediately,
         // then spawn execute_run in the background.
         let engine = state.kernel.workflow_engine();
-        // Create the run synchronously so we can return its id in the 202,
-        // then drive it to completion in the background.
+        // Create the run synchronously so we can return its id in the 202, then drive it to completion in the background.
         // Progress is observable via GET /api/workflows/runs/{run_id}.
         let run_id = match engine.create_run(workflow_id, input.clone()).await {
             Some(rid) => rid,
@@ -804,8 +802,7 @@ pub async fn rerun_workflow_run(
     });
 
     let engine = state.kernel.workflow_engine();
-    // Read the workflow + input off the stored run rather than trusting the
-    // caller, so a re-run is always a faithful repeat of what executed.
+    // Read the workflow + input off the stored run rather than trusting the caller, so a re-run is always a faithful repeat of what executed.
     let (workflow_id, input) = match engine.get_run(run_id).await {
         Some(run) => (run.workflow_id, run.input),
         None => {
@@ -814,8 +811,7 @@ pub async fn rerun_workflow_run(
         }
     };
 
-    // `create_run` returns None when the workflow definition is gone (e.g. it
-    // was deleted after the original run); surface that as a 404.
+    // `create_run` returns None when the workflow definition is gone (e.g. it was deleted after the original run); surface that as a 404.
     let new_run_id = match engine.create_run(workflow_id, input).await {
         Some(rid) => rid,
         None => {
