@@ -1182,6 +1182,12 @@ pub struct StepResult {
     pub output_tokens: u64,
     /// Duration in milliseconds.
     pub duration_ms: u64,
+    /// Error message when this step failed.
+    ///
+    /// Populated for operator-node steps that record a synthetic failed `StepResult` (gate / transform / branch); `None` for steps that succeeded.
+    /// `#[serde(default)]` keeps runs persisted before this field was added deserializable, and `skip_serializing_if` omits it from the JSON of successful steps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Preview of a single step produced by a dry-run (no LLM calls made).
@@ -2350,6 +2356,7 @@ impl WorkflowEngine {
             input_tokens: 0,
             output_tokens: 0,
             duration_ms: 0,
+            error: None,
         };
         if let Some(mut r) = runs.get_mut(&run_id) {
             r.step_results.push(step_result);
@@ -3947,6 +3954,7 @@ impl WorkflowEngine {
                                 input_tokens,
                                 output_tokens,
                                 duration_ms,
+                                error: None,
                             };
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.step_results.push(step_result);
@@ -4061,6 +4069,7 @@ impl WorkflowEngine {
                                     input_tokens,
                                     output_tokens,
                                     duration_ms,
+                                    error: None,
                                 };
                                 if let Some(mut r) = self.runs.get_mut(&run_id) {
                                     r.step_results.push(step_result);
@@ -4210,6 +4219,7 @@ impl WorkflowEngine {
                                 input_tokens,
                                 output_tokens,
                                 duration_ms,
+                                error: None,
                             };
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.step_results.push(step_result);
@@ -4288,6 +4298,7 @@ impl WorkflowEngine {
                                     input_tokens,
                                     output_tokens,
                                     duration_ms,
+                                    error: None,
                                 };
                                 if let Some(mut r) = self.runs.get_mut(&run_id) {
                                     r.step_results.push(step_result);
@@ -4415,6 +4426,7 @@ impl WorkflowEngine {
                         input_tokens: 0,
                         output_tokens: 0,
                         duration_ms,
+                        error: None,
                     };
                     if let Some(mut r) = self.runs.get_mut(&run_id) {
                         r.step_results.push(step_result);
@@ -4465,6 +4477,7 @@ impl WorkflowEngine {
                                 input_tokens: 0,
                                 output_tokens: 0,
                                 duration_ms,
+                                error: None,
                             };
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.step_results.push(step_result);
@@ -4505,6 +4518,7 @@ impl WorkflowEngine {
                                 input_tokens: 0,
                                 output_tokens: 0,
                                 duration_ms,
+                                error: Some(reason.clone()),
                             };
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.step_results.push(step_result);
@@ -4625,6 +4639,7 @@ impl WorkflowEngine {
                                 input_tokens: 0,
                                 output_tokens: 0,
                                 duration_ms,
+                                error: None,
                             };
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.step_results.push(step_result);
@@ -4666,6 +4681,7 @@ impl WorkflowEngine {
                                 input_tokens: 0,
                                 output_tokens: 0,
                                 duration_ms,
+                                error: Some(reason.clone()),
                             };
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.step_results.push(step_result);
@@ -4783,6 +4799,7 @@ impl WorkflowEngine {
                                         input_tokens: 0,
                                         output_tokens: 0,
                                         duration_ms,
+                                        error: None,
                                     };
                                     if let Some(mut r) = self.runs.get_mut(&run_id) {
                                         r.step_results.push(step_result);
@@ -4865,6 +4882,7 @@ impl WorkflowEngine {
                                 input_tokens: 0,
                                 output_tokens: 0,
                                 duration_ms,
+                                error: Some(reason.clone()),
                             };
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.step_results.push(step_result);
@@ -4937,6 +4955,7 @@ impl WorkflowEngine {
                         input_tokens: 0,
                         output_tokens: 0,
                         duration_ms: 0,
+                        error: None,
                     };
                     if let Some(mut r) = self.runs.get_mut(&run_id) {
                         r.step_results.push(step_result);
@@ -5229,6 +5248,7 @@ impl WorkflowEngine {
                             input_tokens,
                             output_tokens,
                             duration_ms,
+                            error: None,
                         };
                         if let Some(mut r) = self.runs.get_mut(&run_id) {
                             r.step_results.push(step_result);
@@ -5374,6 +5394,7 @@ impl WorkflowEngine {
                                 input_tokens,
                                 output_tokens,
                                 duration_ms: step_duration_ms,
+                                error: None,
                             };
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.step_results.push(step_result);
@@ -6795,6 +6816,90 @@ mod tests {
         assert!(matches!(run.state, WorkflowRunState::Completed));
         assert_eq!(run.step_results.len(), 2);
         assert!(run.output.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_failed_operator_step_records_per_step_error() {
+        // A Transform step with an invalid Tera template fails without any LLM
+        // call, so the engine records a synthetic failed StepResult.
+        // That step must now carry a populated per-step `error`, not only the
+        // run-level error (refs #6292 need 4).
+        let engine = WorkflowEngine::new();
+        let wf = Workflow {
+            id: WorkflowId::new(),
+            name: "transform-fail".to_string(),
+            description: String::new(),
+            steps: vec![WorkflowStep {
+                name: "bad-transform".to_string(),
+                agent: StepAgent::ByName {
+                    name: "unused".to_string(),
+                },
+                prompt_template: String::new(),
+                mode: StepMode::Transform {
+                    code: "{{ this is not a valid template".to_string(),
+                },
+                timeout_secs: 10,
+                error_mode: ErrorMode::Fail,
+                output_var: None,
+                inherit_context: None,
+                depends_on: vec![],
+                session_mode: None,
+            }],
+            created_at: Utc::now(),
+            layout: None,
+            total_timeout_secs: None,
+            input_schema: None,
+        };
+        let wf_id = engine.register(wf).await;
+        let run_id = engine.create_run(wf_id, "input".to_string()).await.unwrap();
+
+        let sender = |_id: AgentId, msg: String, _sm: Option<SessionMode>| async move {
+            Ok((msg, 0u64, 0u64))
+        };
+        let result = engine.execute_run(run_id, mock_resolver, sender).await;
+        assert!(
+            result.is_err(),
+            "invalid transform template must fail the run"
+        );
+
+        let run = engine.get_run(run_id).await.unwrap();
+        assert!(matches!(run.state, WorkflowRunState::Failed));
+        assert!(run.error.is_some(), "run-level error must still be set");
+        let failed = run
+            .step_results
+            .iter()
+            .find(|s| s.step_name == "bad-transform")
+            .expect("failed transform step must be recorded in step_results");
+        let step_err = failed.error.as_deref().unwrap_or("");
+        assert!(
+            !step_err.is_empty(),
+            "failed step must carry a per-step error, got: {:?}",
+            failed.error
+        );
+    }
+
+    #[tokio::test]
+    async fn test_successful_steps_carry_no_error() {
+        // A run that completes leaves every step's `error` as None, so it is
+        // omitted from the serialized payload via skip_serializing_if.
+        let engine = WorkflowEngine::new();
+        let wf = test_workflow();
+        let wf_id = engine.register(wf).await;
+        let run_id = engine
+            .create_run(wf_id, "raw data".to_string())
+            .await
+            .unwrap();
+        let sender = |_id: AgentId, msg: String, _sm: Option<SessionMode>| async move {
+            Ok((format!("Processed: {msg}"), 1u64, 1u64))
+        };
+        let result = engine.execute_run(run_id, mock_resolver, sender).await;
+        assert!(result.is_ok());
+        let run = engine.get_run(run_id).await.unwrap();
+        assert!(matches!(run.state, WorkflowRunState::Completed));
+        assert!(
+            run.step_results.iter().all(|s| s.error.is_none()),
+            "successful steps must not carry an error"
+        );
     }
 
     #[tokio::test]
@@ -8884,6 +8989,7 @@ prompt_template = "do {{x}}"
             input_tokens: 10,
             output_tokens: 5,
             duration_ms: 100,
+            error: None,
         }];
         let prompt = WorkflowEngine::build_context_prompt(
             "summarize",
@@ -8924,6 +9030,7 @@ prompt_template = "do {{x}}"
             input_tokens: 10,
             output_tokens: 5,
             duration_ms: 100,
+            error: None,
         }];
         let prompt = WorkflowEngine::build_context_prompt("next", &step, 1, "wf", &results, true);
         assert!(prompt.contains("..."));
@@ -9194,6 +9301,7 @@ prompt_template = "do {{x}}"
                 input_tokens: 10,
                 output_tokens: 20,
                 duration_ms: 100,
+                error: None,
             }],
             output: Some("final output".to_string()),
             error: None,

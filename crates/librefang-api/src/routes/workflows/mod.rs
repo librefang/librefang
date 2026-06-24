@@ -114,6 +114,10 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             axum::routing::get(get_workflow_run),
         )
         .route(
+            "/workflows/runs/{run_id}/rerun",
+            axum::routing::post(rerun_workflow_run),
+        )
+        .route(
             "/workflows/runs/{run_id}/cancel",
             axum::routing::post(cancel_workflow_run),
         )

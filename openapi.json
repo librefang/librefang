@@ -12669,6 +12669,45 @@
         }
       }
     },
+    "/api/workflows/runs/{run_id}/rerun": {
+      "post": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "POST /api/workflows/runs/:run_id/rerun — Re-run a previous run with the same parameters.",
+        "description": "Looks up the original run and starts a fresh run of the same workflow with the original run's `input`, returning the new run's id.\nThe original run is left untouched, so this is a non-destructive repeat of what actually executed rather than a re-submission of caller-supplied params.\nReturns 202 with `{\"run_id\": ...}` on success, 400 for a malformed run id, and 404 if the original run (or the workflow it referenced) no longer exists.",
+        "operationId": "rerun_workflow_run",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "description": "Workflow run ID to re-run",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "New run started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed run ID"
+          },
+          "404": {
+            "description": "Original run or its workflow not found"
+          }
+        }
+      }
+    },
     "/api/workflows/runs/{run_id}/resume": {
       "post": {
         "tags": [

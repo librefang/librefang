@@ -660,3 +660,141 @@ async fn list_workflows_success_rate_excludes_cancelled() {
         "success_rate must be 1.0 (cancelled excluded from denominator), got {rate}: {wf_item:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Re-run with same params (#6292 need 2)
+// ---------------------------------------------------------------------------
+
+/// `POST /api/workflows/runs/{run_id}/rerun` starts a fresh run of the same workflow with the original run's input, and leaves the original untouched.
+#[tokio::test(flavor = "multi_thread")]
+async fn rerun_workflow_run_starts_new_run_with_same_input() {
+    use librefang_kernel::workflow::WorkflowId;
+
+    let h = boot().await;
+    let wf_id_str = create_workflow(&h).await;
+    let wf_id = WorkflowId(wf_id_str.parse().unwrap());
+    let engine = h.state.kernel.workflow_engine();
+    let original = engine
+        .create_run(wf_id, "original params".to_string())
+        .await
+        .expect("create original run");
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/workflows/runs/{original}/rerun"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body:?}");
+    let new_id = body["run_id"].as_str().expect("run_id in body").to_string();
+    assert_ne!(
+        new_id,
+        original.to_string(),
+        "re-run must create a distinct run: {body:?}"
+    );
+
+    // The new run carries the same workflow + input as the original.
+    let (status, detail) = get(&h, &format!("/api/workflows/runs/{new_id}")).await;
+    assert_eq!(status, StatusCode::OK, "{detail:?}");
+    assert_eq!(detail["input"].as_str(), Some("original params"));
+    assert_eq!(detail["workflow_id"].as_str(), Some(wf_id_str.as_str()));
+}
+
+/// Re-running a run id that does not exist is a 404.
+#[tokio::test(flavor = "multi_thread")]
+async fn rerun_unknown_run_returns_404() {
+    let h = boot().await;
+    let (status, _body) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/workflows/runs/{}/rerun", uuid::Uuid::new_v4()),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// A malformed run id is rejected with 400, not treated as a missing run.
+#[tokio::test(flavor = "multi_thread")]
+async fn rerun_invalid_run_id_returns_400() {
+    let h = boot().await;
+    let (status, _body) = json_request(
+        &h,
+        Method::POST,
+        "/api/workflows/runs/not-a-uuid/rerun",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+// ---------------------------------------------------------------------------
+// Per-step error exposed in the run-detail endpoint (#6292 need 4)
+// ---------------------------------------------------------------------------
+
+/// `GET /api/workflows/runs/{run_id}` surfaces a failed operator step's `error` field; successful steps omit it.
+#[tokio::test(flavor = "multi_thread")]
+async fn run_detail_exposes_per_step_error_for_failed_step() {
+    use librefang_kernel::workflow::{
+        ErrorMode, StepAgent, StepMode, Workflow, WorkflowId, WorkflowStep,
+    };
+
+    let h = boot().await;
+    let engine = h.state.kernel.workflow_engine();
+
+    // A Transform step with an invalid Tera template fails without any agent
+    // call, recording a failed StepResult with a populated `error`.
+    let wf = Workflow {
+        id: WorkflowId::new(),
+        name: "transform-fail".to_string(),
+        description: String::new(),
+        steps: vec![WorkflowStep {
+            name: "bad-transform".to_string(),
+            agent: StepAgent::ByName {
+                name: "unused".to_string(),
+            },
+            prompt_template: String::new(),
+            mode: StepMode::Transform {
+                code: "{{ this is not a valid template".to_string(),
+            },
+            timeout_secs: 10,
+            error_mode: ErrorMode::Fail,
+            output_var: None,
+            inherit_context: None,
+            depends_on: vec![],
+            session_mode: None,
+        }],
+        created_at: chrono::Utc::now(),
+        layout: None,
+        total_timeout_secs: None,
+        input_schema: None,
+    };
+    let wf_id = engine.register(wf).await;
+    let run_id = engine
+        .create_run(wf_id, "input".to_string())
+        .await
+        .expect("create run");
+
+    let resolver =
+        |_a: &StepAgent| -> Option<(librefang_types::agent::AgentId, String, bool)> { None };
+    let sender =
+        |_id: librefang_types::agent::AgentId,
+         msg: String,
+         _sm: Option<librefang_types::agent::SessionMode>| async move { Ok((msg, 0u64, 0u64)) };
+    let _ = engine.execute_run(run_id, resolver, sender).await;
+
+    let (status, detail) = get(&h, &format!("/api/workflows/runs/{run_id}")).await;
+    assert_eq!(status, StatusCode::OK, "{detail:?}");
+    let steps = detail["step_results"]
+        .as_array()
+        .expect("step_results array");
+    let failed = steps
+        .iter()
+        .find(|s| s["step_name"] == "bad-transform")
+        .expect("failed step present in detail");
+    assert!(
+        failed["error"].as_str().is_some_and(|e| !e.is_empty()),
+        "failed step must expose a non-empty error in the API payload: {failed:?}"
+    );
+}

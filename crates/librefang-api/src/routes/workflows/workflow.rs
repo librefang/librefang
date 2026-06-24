@@ -493,6 +493,68 @@ pub struct RunWorkflowQuery {
     pub timeout_ms: Option<u64>,
 }
 
+/// Spawn the background execution of an already-created workflow run.
+///
+/// Shared by the `run_workflow` async path and `rerun_workflow_run` so both drive `execute_run` with identical agent-resolver and message-sender wiring.
+/// The caller creates the `Pending` run and returns its id immediately; this drives it to completion, observable via `GET /api/workflows/runs/{run_id}`.
+fn spawn_background_run(state: Arc<AppState>, run_id: WorkflowRunId) {
+    // Separate Arc clones for the resolver closure (Fn) and the sender
+    // closure (Fn) so neither moves out of the other.
+    let state_for_resolver = state.clone();
+    let state_for_sender = state.clone();
+    tokio::spawn(async move {
+        let result = state
+            .kernel
+            .workflow_engine()
+            .execute_run(
+                run_id,
+                move |agent_ref| {
+                    use librefang_kernel::workflow::StepAgent;
+                    match agent_ref {
+                        StepAgent::ById { id } => {
+                            let agent_id: librefang_types::agent::AgentId = id.parse().ok()?;
+                            let entry = state_for_resolver.kernel.agent_registry().get(agent_id)?;
+                            let inherit = entry.manifest.inherit_parent_context;
+                            Some((agent_id, entry.name.clone(), inherit))
+                        }
+                        StepAgent::ByName { name } => {
+                            let entry =
+                                state_for_resolver.kernel.agent_registry().find_by_name(name)?;
+                            let inherit = entry.manifest.inherit_parent_context;
+                            Some((entry.id, entry.name.clone(), inherit))
+                        }
+                    }
+                },
+                move |agent_id: librefang_types::agent::AgentId,
+                      message: String,
+                      session_mode_override: Option<librefang_types::agent::SessionMode>| {
+                    let sc = state_for_sender.clone();
+                    async move {
+                        sc.kernel
+                            .send_message_with_session_mode(
+                                agent_id,
+                                &message,
+                                session_mode_override,
+                            )
+                            .await
+                            .map(|r| {
+                                (
+                                    r.response,
+                                    r.total_usage.input_tokens,
+                                    r.total_usage.output_tokens,
+                                )
+                            })
+                            .map_err(|e| format!("{e}"))
+                    }
+                },
+            )
+            .await;
+        if let Err(e) = result {
+            tracing::warn!(run_id = %run_id, error = %e, "Background workflow run failed");
+        }
+    });
+}
+
 /// POST /api/workflows/:id/run — Execute a workflow.
 ///
 /// By default (no query params) this is **asynchronous**: the run is spawned
@@ -545,6 +607,7 @@ pub async fn run_workflow(
                                 "input_tokens": s.input_tokens,
                                 "output_tokens": s.output_tokens,
                                 "duration_ms": s.duration_ms,
+                                "error": s.error,
                             })
                         })
                         .collect::<Vec<_>>()
@@ -589,91 +652,18 @@ pub async fn run_workflow(
         // Create the run first so we have the run_id to return immediately,
         // then spawn execute_run in the background.
         let engine = state.kernel.workflow_engine();
-        let wf_id_parsed = workflow_id;
-        // run_workflow_typed creates the run + executes synchronously.
-        // For the async path we replicate the same logic but via tokio::spawn.
-        // We call run_workflow_typed inside a spawn so the caller gets 202
-        // immediately without waiting for the workflow to complete.
-        let state_clone = state.clone();
-        let run_id_holder = {
-            // Create the run synchronously so we can return the run_id in 202.
-            match engine.create_run(wf_id_parsed, input.clone()).await {
-                Some(rid) => rid,
-                None => {
-                    return ApiErrorResponse::not_found(format!("Workflow '{id}' not found"))
-                        .into_json_tuple();
-                }
+        // Create the run synchronously so we can return its id in the 202,
+        // then drive it to completion in the background.
+        // Progress is observable via GET /api/workflows/runs/{run_id}.
+        let run_id = match engine.create_run(workflow_id, input.clone()).await {
+            Some(rid) => rid,
+            None => {
+                return ApiErrorResponse::not_found(format!("Workflow '{id}' not found"))
+                    .into_json_tuple();
             }
         };
-        let run_id_str = run_id_holder.to_string();
-        // Spawn execution in the background. The result is observable via
-        // GET /api/workflows/runs/{run_id}.
-        // Separate Arc clones for the resolver closure (Fn) and the sender
-        // closure (Fn) so neither moves out of the other.
-        let state_for_resolver = state_clone.clone();
-        let state_for_sender = state_clone.clone();
-        tokio::spawn(async move {
-            let result =
-                state_clone
-                    .kernel
-                    .workflow_engine()
-                    .execute_run(
-                        run_id_holder,
-                        move |agent_ref| {
-                            use librefang_kernel::workflow::StepAgent;
-                            match agent_ref {
-                                StepAgent::ById { id } => {
-                                    let agent_id: librefang_types::agent::AgentId =
-                                        id.parse().ok()?;
-                                    let entry =
-                                        state_for_resolver.kernel.agent_registry().get(agent_id)?;
-                                    let inherit = entry.manifest.inherit_parent_context;
-                                    Some((agent_id, entry.name.clone(), inherit))
-                                }
-                                StepAgent::ByName { name } => {
-                                    let entry = state_for_resolver
-                                        .kernel
-                                        .agent_registry()
-                                        .find_by_name(name)?;
-                                    let inherit = entry.manifest.inherit_parent_context;
-                                    Some((entry.id, entry.name.clone(), inherit))
-                                }
-                            }
-                        },
-                        move |agent_id: librefang_types::agent::AgentId,
-                              message: String,
-                              session_mode_override: Option<
-                            librefang_types::agent::SessionMode,
-                        >| {
-                            let sc = state_for_sender.clone();
-                            async move {
-                                sc.kernel
-                                    .send_message_with_session_mode(
-                                        agent_id,
-                                        &message,
-                                        session_mode_override,
-                                    )
-                                    .await
-                                    .map(|r| {
-                                        (
-                                            r.response,
-                                            r.total_usage.input_tokens,
-                                            r.total_usage.output_tokens,
-                                        )
-                                    })
-                                    .map_err(|e| format!("{e}"))
-                            }
-                        },
-                    )
-                    .await;
-            if let Err(e) = result {
-                tracing::warn!(
-                    run_id = %run_id_holder,
-                    error = %e,
-                    "Background workflow run failed"
-                );
-            }
-        });
+        let run_id_str = run_id.to_string();
+        spawn_background_run(state.clone(), run_id);
         (
             StatusCode::ACCEPTED,
             Json(serde_json::json!({
@@ -778,11 +768,69 @@ pub async fn get_workflow_run(
                     "input_tokens": s.input_tokens,
                     "output_tokens": s.output_tokens,
                     "duration_ms": s.duration_ms,
+                    "error": s.error,
                 })).collect::<Vec<_>>(),
             })),
         ),
         None => ApiErrorResponse::not_found(format!("Run '{run_id}' not found")).into_json_tuple(),
     }
+}
+
+/// POST /api/workflows/runs/:run_id/rerun — Re-run a previous run with the same parameters.
+///
+/// Looks up the original run and starts a fresh run of the same workflow with the original run's `input`, returning the new run's id.
+/// The original run is left untouched, so this is a non-destructive repeat of what actually executed rather than a re-submission of caller-supplied params.
+/// Returns 202 with `{"run_id": ...}` on success, 400 for a malformed run id, and 404 if the original run (or the workflow it referenced) no longer exists.
+#[utoipa::path(
+    post,
+    path = "/api/workflows/runs/{run_id}/rerun",
+    tag = "workflows",
+    params(("run_id" = String, Path, description = "Workflow run ID to re-run")),
+    responses(
+        (status = 202, description = "New run started", body = crate::types::JsonObject),
+        (status = 400, description = "Malformed run ID"),
+        (status = 404, description = "Original run or its workflow not found")
+    )
+)]
+pub async fn rerun_workflow_run(
+    State(state): State<Arc<AppState>>,
+    Path(run_id): Path<String>,
+) -> impl IntoResponse {
+    let run_id = WorkflowRunId(match run_id.parse() {
+        Ok(u) => u,
+        Err(_) => {
+            return ApiErrorResponse::bad_request("Invalid run ID").into_json_tuple();
+        }
+    });
+
+    let engine = state.kernel.workflow_engine();
+    // Read the workflow + input off the stored run rather than trusting the
+    // caller, so a re-run is always a faithful repeat of what executed.
+    let (workflow_id, input) = match engine.get_run(run_id).await {
+        Some(run) => (run.workflow_id, run.input),
+        None => {
+            return ApiErrorResponse::not_found(format!("Run '{run_id}' not found"))
+                .into_json_tuple();
+        }
+    };
+
+    // `create_run` returns None when the workflow definition is gone (e.g. it
+    // was deleted after the original run); surface that as a 404.
+    let new_run_id = match engine.create_run(workflow_id, input).await {
+        Some(rid) => rid,
+        None => {
+            return ApiErrorResponse::not_found(format!(
+                "Workflow '{workflow_id}' for run '{run_id}' no longer exists"
+            ))
+            .into_json_tuple();
+        }
+    };
+    let new_run_id_str = new_run_id.to_string();
+    spawn_background_run(state.clone(), new_run_id);
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({ "run_id": new_run_id_str })),
+    )
 }
 
 /// POST /api/workflows/runs/:run_id/cancel — Cancel a workflow run.
