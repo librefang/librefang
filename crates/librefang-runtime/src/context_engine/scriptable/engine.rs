@@ -1251,6 +1251,8 @@ mod request_llm_summary_tests {
     use librefang_types::message::{ContentBlock, StopReason, TokenUsage};
     #[cfg(unix)]
     use librefang_types::tool::ToolExecutionStatus;
+    // Short `Arc` only used by Unix-gated make_transform_engine; rest of module uses std::sync::Arc fully-qualified.
+    #[cfg(unix)]
     use std::sync::Arc;
 
     // Windows has no /bin/sh — only this shell-script test harness is gated, not the feature.

@@ -95,6 +95,9 @@ In-crate only; no cross-crate error-shape changes.
 
 ### Fixed
 
+- **fix(test): also gate the now-Unix-only `use std::sync::Arc` in the scriptable-hook tests so Windows compiles** (@houko).
+  Follow-up to #6306: gating `make_transform_engine` left `use std::sync::Arc` referenced only by Unix-gated code, so Windows failed `-D warnings` with an `unused_imports` error (the rest of the test module uses the fully-qualified `std::sync::Arc`).
+  The import is now `#[cfg(unix)]` as well, completing the #6304 Windows-red fix.
 - **fix(test): gate the scriptable `transform_tool_result` hook tests behind `#[cfg(unix)]` so Windows CI stops failing** (@houko).
   The #6291 transform-hook tests run a real `#!/bin/sh` script through the native script runtime; Windows has no `/bin/sh`, so the spawn failed and `transform_tool_result_script_rewrites_content` / `transform_tool_result_missing_content_is_noop` broke the metrics assertions on both Windows shards — turning `main` red (#6304) and making every open PR inherit the failure on its next run.
   The four shell-script tests and their `make_transform_script` / `make_transform_engine` helpers (plus the now-test-only `MemorySubstrate` / `ToolExecutionStatus` imports) are now `#[cfg(unix)]`; the transform-hook feature itself is unchanged and still covered on Linux and macOS.
