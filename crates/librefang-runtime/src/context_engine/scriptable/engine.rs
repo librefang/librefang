@@ -1251,8 +1251,7 @@ mod request_llm_summary_tests {
     use librefang_types::message::{ContentBlock, StopReason, TokenUsage};
     #[cfg(unix)]
     use librefang_types::tool::ToolExecutionStatus;
-    // Only the Unix-gated make_transform_engine uses the short `Arc` name; the
-    // rest of the module (StubDriver) uses the fully-qualified `std::sync::Arc`.
+    // Short `Arc` only used by Unix-gated make_transform_engine; rest of module uses std::sync::Arc fully-qualified.
     #[cfg(unix)]
     use std::sync::Arc;
 
