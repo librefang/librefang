@@ -1468,9 +1468,7 @@ pub async fn list_workflow_runs(
             return ApiErrorResponse::bad_request("Invalid workflow ID").into_json_tuple();
         }
     });
-    // Scope to the workflow named in the path. `list_runs(None)` returns every
-    // workflow's runs, so without this filter `GET /api/workflows/A/runs` would
-    // leak the runs (and their inputs) of unrelated workflows B, C, ….
+    // `list_runs(None)` returns all workflows' runs; filter to this workflow to prevent cross-workflow data leak.
     let list: Vec<serde_json::Value> = state
         .kernel
         .workflow_engine()

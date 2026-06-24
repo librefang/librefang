@@ -803,8 +803,7 @@ async fn run_detail_exposes_per_step_error_for_failed_step() {
 // GET /api/workflows/{id}/runs scoping (regression)
 // ---------------------------------------------------------------------------
 
-/// `GET /api/workflows/{id}/runs` must return only the runs of the workflow named in the path, not every workflow's runs.
-/// Regression: the handler previously ignored the path id and returned `list_runs(None)` wholesale, leaking other workflows' runs (and their `input`) into the response.
+/// Regression: `GET /api/workflows/{id}/runs` must scope to the path workflow — previously `list_runs(None)` returned all workflows' runs.
 #[tokio::test(flavor = "multi_thread")]
 async fn list_workflow_runs_is_scoped_to_path_workflow() {
     use librefang_kernel::workflow::WorkflowId;
