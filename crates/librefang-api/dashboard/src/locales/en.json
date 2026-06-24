@@ -1636,7 +1636,10 @@
       "pending_review_one": "1 workflow run awaiting operator review",
       "pending_review_other": "{{count}} workflow runs awaiting operator review",
       "empty_artifact": "(empty artifact)"
-    }
+    },
+    "rerun_hint": "Re-run with these parameters",
+    "step_executing": "Step {{current}}/{{total}} executing…",
+    "starting": "Starting…"
   },
   "scheduler": {
     "title": "Scheduler",
