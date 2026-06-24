@@ -850,7 +850,7 @@ async fn run_agent_loop_streaming_inner(
             request,
             stream_tx.clone(),
             Some(provider_name),
-            None,
+            Some(&*super::retry::PROVIDER_COOLDOWN),
         )
         .await
         {
