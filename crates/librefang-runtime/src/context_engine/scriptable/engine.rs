@@ -1251,6 +1251,9 @@ mod request_llm_summary_tests {
     use librefang_types::message::{ContentBlock, StopReason, TokenUsage};
     #[cfg(unix)]
     use librefang_types::tool::ToolExecutionStatus;
+    // Only the Unix-gated make_transform_engine uses the short `Arc` name; the
+    // rest of the module (StubDriver) uses the fully-qualified `std::sync::Arc`.
+    #[cfg(unix)]
     use std::sync::Arc;
 
     // Windows has no /bin/sh — only this shell-script test harness is gated, not the feature.
