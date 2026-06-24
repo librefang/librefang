@@ -1816,6 +1816,10 @@ func (r *WorkflowsResource) PauseWorkflowRun(run_id string, data map[string]inte
 	return r.client.request("POST", fmt.Sprintf("/api/workflows/runs/%s/pause", run_id), data, nil)
 }
 
+func (r *WorkflowsResource) RerunWorkflowRun(run_id string) (interface{}, error) {
+	return r.client.request("POST", fmt.Sprintf("/api/workflows/runs/%s/rerun", run_id), nil, nil)
+}
+
 func (r *WorkflowsResource) ResumeWorkflowRun(run_id string, data map[string]interface{}) (interface{}, error) {
 	return r.client.request("POST", fmt.Sprintf("/api/workflows/runs/%s/resume", run_id), data, nil)
 }

@@ -1349,6 +1349,9 @@ class _WorkflowsResource(_Resource):
     def pause_workflow_run(self, run_id: str, **data):
         return self._c._request("POST", f"/api/workflows/runs/{run_id}/pause", data)
 
+    def rerun_workflow_run(self, run_id: str):
+        return self._c._request("POST", f"/api/workflows/runs/{run_id}/rerun")
+
     def resume_workflow_run(self, run_id: str, **data):
         return self._c._request("POST", f"/api/workflows/runs/{run_id}/resume", data)
 
