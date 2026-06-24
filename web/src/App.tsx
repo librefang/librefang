@@ -10,7 +10,7 @@ import {
 import type { LucideIcon } from 'lucide-react'
 import { Github } from './components/BrandIcons'
 import { useQuery } from '@tanstack/react-query'
-import { translations } from './i18n'
+import { getTranslation } from './i18n'
 import type { Translation } from './i18n'
 import { useRegistry, getLocalizedDesc } from './useRegistry'
 import { useAppStore } from './store'
@@ -40,6 +40,7 @@ function getCurrentLang(): string {
   if (path.startsWith('/ko')) return 'ko'
   if (path.startsWith('/es')) return 'es'
   if (path.startsWith('/pl')) return 'pl'
+  if (path.startsWith('/uk')) return 'uk'
   return 'en'
 }
 
@@ -1292,7 +1293,7 @@ function BackToTop() {
 const REGISTRY_ROUTES: RegistryCategory[] = [
   'skills', 'mcp', 'plugins', 'hands', 'agents', 'providers', 'workflows', 'channels',
 ]
-const LOCALES = ['zh-TW', 'zh', 'ja', 'ko', 'de', 'es', 'pl']
+const LOCALES = ['zh-TW', 'zh', 'ja', 'ko', 'de', 'es', 'pl', 'uk']
 
 type RegistryMatch =
   | { kind: 'list'; category: RegistryCategory }
@@ -1397,7 +1398,7 @@ export default function App() {
     }
   }, [lang, registryRoute])
 
-  const t = translations[lang] || translations['en']!
+  const t = getTranslation(lang)
   const { data: registry } = useRegistry()
 
   // JSON-LD structured data — lets Google show rich results. We rewrite a

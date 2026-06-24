@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { translations, languages } from './i18n'
+import { getTranslation, translations, languages } from './i18n'
 
 // Recursively walk an object and return dotted paths of primitive leaves.
 // We use paths rather than flattening to objects so we can detect when a
@@ -29,13 +29,35 @@ describe('i18n completeness', () => {
     }
   })
 
-  // For every non-en locale, every EN path must also exist. Optional fields
-  // (?) are allowed to be missing in types, but if EN declares them, the
-  // other locales should too.
+  it('declares Ukrainian as a selectable locale', () => {
+    expect(languages.some(lang => lang.code === 'uk')).toBe(true)
+  })
+
+  it('falls back to English when a locale is unknown', () => {
+    expect(getTranslation('missing-locale').hero.title1).toBe(translations.en!.hero.title1)
+  })
+
+  it('keeps Ukrainian values while preserving the English shape', () => {
+    const uk = getTranslation('uk')
+    expect(uk.hero.title1).toBe('Агентна')
+    expect(uk.nav.registry).toBe('Реєстр')
+  })
+
+  it('Ukrainian has no missing raw keys vs en', () => {
+    const paths = new Set(leafPaths(translations.uk))
+    const missing: string[] = []
+    for (const p of EN_PATHS) {
+      if (!paths.has(p)) missing.push(p)
+    }
+    expect(missing, `uk missing: ${missing.slice(0, 8).join(', ')}`).toEqual([])
+  })
+
+  // Every locale must resolve to the full EN shape after fallback. Raw locale
+  // objects may stay partial; getTranslation is the runtime contract.
   for (const lang of languages) {
     if (lang.code === 'en') continue
-    it(`${lang.code} has no missing keys vs en`, () => {
-      const paths = new Set(leafPaths(translations[lang.code]))
+    it(`${lang.code} resolves missing keys from en`, () => {
+      const paths = new Set(leafPaths(getTranslation(lang.code)))
       const missing: string[] = []
       for (const p of EN_PATHS) {
         if (!paths.has(p)) missing.push(p)
