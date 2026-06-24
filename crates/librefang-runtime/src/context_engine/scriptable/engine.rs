@@ -1246,7 +1246,6 @@ mod request_llm_summary_tests {
     use super::*;
     use crate::llm_driver::{CompletionRequest, CompletionResponse, LlmError};
     use async_trait::async_trait;
-    // Only used by the Unix-gated transform-hook tests below (see make_transform_script).
     #[cfg(unix)]
     use librefang_memory::MemorySubstrate;
     use librefang_types::message::{ContentBlock, StopReason, TokenUsage};
@@ -1254,11 +1253,7 @@ mod request_llm_summary_tests {
     use librefang_types::tool::ToolExecutionStatus;
     use std::sync::Arc;
 
-    // Unix-only: these tests run a real `#!/bin/sh` hook through the native
-    // script runtime. Windows has no `/bin/sh`, so the spawn fails and the
-    // metrics assertions (`successes`, rewritten content) don't hold —
-    // regression #6304, from the #6291 transform-hook tests. The transform-hook
-    // feature itself is not Unix-gated; only this shell-script test harness is.
+    // Windows has no /bin/sh — only this shell-script test harness is gated, not the feature.
     #[cfg(unix)]
     fn make_transform_script(body: &str) -> (tempfile::TempDir, std::path::PathBuf) {
         let tmp = tempfile::tempdir().unwrap();
