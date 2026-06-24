@@ -1,15 +1,4 @@
-//! `code_search` — workspace-wide lexical / regex code search.
-//!
-//! First slice of the workspace code-intelligence layer (#6295): give a coding
-//! agent one `grep`-style tool so it can locate a symbol or string across the
-//! whole workspace in a single call, instead of looping `file_list` +
-//! `file_read` and burning context rediscovering structure.
-//!
-//! Scope is deliberately lexical-only. Structural symbol indexing, repo maps,
-//! reference graphs, and LSP / vector backends are out of scope for this slice
-//! and tracked as later stages of #6295. No new dependency is pulled in: the
-//! walk is a hand-rolled iterative DFS over `tokio::fs::read_dir` and matching
-//! uses the already-vendored `regex` crate.
+//! Workspace-wide regex code search tool.
 
 use super::error::{ToolError, ToolResult};
 use super::fs::resolve_file_path_ext;
@@ -29,9 +18,7 @@ const MAX_FILES_SCANNED: usize = 20_000;
 /// Per-line character cap in output so one minified line can't blow the budget.
 const MAX_LINE_CHARS: usize = 400;
 
-/// `code_search` handler: regex-search every text file under `path` (relative
-/// to the agent workspace), returning `relpath:line: content` rows sorted by
-/// path then line for deterministic output (#3298).
+/// Returns `relpath:line: content` rows sorted by path then line (#3298).
 pub(super) async fn tool_code_search(
     input: &serde_json::Value,
     workspace_root: Option<&Path>,
@@ -68,9 +55,7 @@ pub(super) async fn tool_code_search(
             reason: format!("invalid regex: {e}"),
         })?;
 
-    // Iterative DFS — no recursion, no `walkdir` dependency. Each directory's
-    // entries are sorted before being visited so traversal order (and thus the
-    // truncation boundary) is deterministic regardless of `read_dir` order.
+    // Sort entries per directory so the truncation boundary is deterministic (#3298).
     let mut matches: Vec<(String, usize, String)> = Vec::new();
     let mut files_scanned: usize = 0;
     let mut truncated = false;

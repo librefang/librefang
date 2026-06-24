@@ -405,8 +405,7 @@ pub async fn execute_tool_raw(
             tool_file_list(input, *workspace_root, &extra_refs).await
         }
         "code_search" => {
-            // Read-only, like file_list: allow searching named workspaces and
-            // the bridge download dir in addition to the agent's own workspace.
+            // Same read access as file_list: named workspaces and bridge download dir.
             let mut extra = named_ws_prefixes(*kernel, *caller_agent_id);
             if let Some(dl) = kernel.and_then(|k| k.channel_file_download_dir()) {
                 extra.push(dl);
