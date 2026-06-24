@@ -828,7 +828,8 @@
     "tools_declared_desc": "Tools this agent can use. Leave empty for unrestricted access to all tools.",
     "providers_error_loading": "Error loading",
     "no_providers": "No providers",
-    "select_provider_first": "Select provider first"
+    "select_provider_first": "Select provider first",
+    "no_models": "No models"
   },
   "providers": {
     "title": "Providers",
@@ -975,7 +976,7 @@
     "results": "results",
     "saved": "Saved",
     "saved_restart_required": "Saved — restart daemon to apply",
-    "schema_unavailable_hint": "This channel runs as an out-of-process sidecar and its setup form could not be loaded. Review the error below. If the SDK is missing, install it; otherwise fix the reported problem. Restart the daemon to retry schema discovery.",
+    "schema_unavailable_hint": "This channel now runs as an out-of-process sidecar and its setup form could not be loaded. Install the sidecar SDK, then reload channels (or restart the daemon) and reopen this dialog.",
     "schema_unavailable_title": "Setup form unavailable",
     "secret_set_placeholder": "•••• (set — leave blank to keep)",
     "select_all": "Select All",
@@ -1593,9 +1594,6 @@
     "delete_failed": "Delete failed",
     "run_failed": "Run failed",
     "run_started": "Run started",
-    "rerun": "Re-run with same parameters",
-    "rerun_started": "Re-run started with the same parameters",
-    "rerun_failed": "Re-run failed",
     "runs_label": "runs",
     "schedule_failed": "Schedule creation failed",
     "skip": "skip",
@@ -1639,7 +1637,10 @@
     },
     "rerun_hint": "Re-run with these parameters",
     "step_executing": "Step {{current}}/{{total}} executing…",
-    "starting": "Starting…"
+    "starting": "Starting…",
+    "variables": "Variables",
+    "step_output": "Output",
+    "step_pending": "Pending…"
   },
   "scheduler": {
     "title": "Scheduler",
