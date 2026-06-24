@@ -264,6 +264,15 @@ jobs:
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
 
+      - name: Install build deps
+        # `cargo xtask release` runs `cargo xtask codegen --openapi`, which
+        # compiles the workspace to regenerate openapi.json. libdbus-1-dev is
+        # required by libdbus-sys, pulled in transitively on glibc Linux (keyring
+        # secret-service / notify-rust). Every other Linux release job already
+        # installs it; this job was missing it, so the bump step panicked in
+        # libdbus-sys build.rs ("system library dbus-1 not found").
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev libdbus-1-dev
+
       - name: Run xtask release
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

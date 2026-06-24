@@ -95,6 +95,9 @@ In-crate only; no cross-crate error-shape changes.
 
 ### Fixed
 
+- **fix(ci): install `libdbus-1-dev` in the release `Bump Version` job so dispatching a beta/stable release no longer panics** (@houko).
+  `cargo xtask release` (run for `channel != current`) compiles the workspace via `cargo xtask codegen --openapi` to regenerate `openapi.json`; that pulls in `libdbus-sys` transitively (keyring / notify-rust) and panicked with `system library 'dbus-1' not found` because — unlike every other Linux release job — the `Bump Version` job never installed `libdbus-1-dev`.
+  So `release.yml` dispatched with `channel=beta` failed at the bump step before it could open the version PR; the job now installs the dep, matching the other release jobs.
 - **fix(test): also gate the now-Unix-only `use std::sync::Arc` in the scriptable-hook tests so Windows compiles** (@houko).
   Follow-up to #6306: gating `make_transform_engine` left `use std::sync::Arc` referenced only by Unix-gated code, so Windows failed `-D warnings` with an `unused_imports` error (the rest of the test module uses the fully-qualified `std::sync::Arc`).
   The import is now `#[cfg(unix)]` as well, completing the #6304 Windows-red fix.
