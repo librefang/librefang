@@ -1087,6 +1087,14 @@ pub struct WorkflowRun {
     pub state: WorkflowRunState,
     /// Results from each completed step.
     pub step_results: Vec<StepResult>,
+    /// Index of the currently executing step (0-based), if running.
+    /// Set at the top of each step iteration, cleared on terminal state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_step_index: Option<usize>,
+    /// Total number of steps in the workflow (copied at creation so the
+    /// UI can show "Step 2/4" without loading the definition separately).
+    #[serde(default)]
+    pub total_steps: usize,
     /// Final output (set when workflow completes).
     pub output: Option<String>,
     /// Error message if failed.
@@ -2080,6 +2088,8 @@ impl WorkflowEngine {
             input,
             state: WorkflowRunState::Pending,
             step_results: Vec::new(),
+            current_step_index: None,
+            total_steps: workflow.steps.len(),
             output: None,
             error: None,
             started_at: Utc::now(),
@@ -2222,6 +2232,7 @@ impl WorkflowEngine {
             run.state = WorkflowRunState::Failed;
             run.error = Some("Interrupted by daemon restart".to_string());
             run.completed_at = Some(now);
+            run.current_step_index = None;
             run.clear_pause_state();
             // Persist the recovered Failed state immediately. Without
             // this, the run lives in the DashMap as Failed but the
@@ -3768,6 +3779,7 @@ impl WorkflowEngine {
                             run.state = WorkflowRunState::Failed;
                             run.error = Some(msg.clone());
                             run.completed_at = Some(Utc::now());
+                            run.current_step_index = None;
                         }
                     }
                     Err(msg)
@@ -3869,6 +3881,12 @@ impl WorkflowEngine {
         let mut all_outputs: Vec<String> = Vec::new();
 
         while i < workflow.steps.len() {
+            // Update the run's current_step_index so pollers (dashboard)
+            // can show live progress as each step begins executing.
+            if let Some(mut run) = self.runs.get_mut(&run_id) {
+                run.current_step_index = Some(i);
+            }
+
             // Pause-request gate. Honored at the top of every step
             // iteration so an in-flight step is allowed to finish before
             // the run pauses — partial-step rollback would be a much
@@ -3883,6 +3901,7 @@ impl WorkflowEngine {
             let pending_pause = if let Some(mut run) = self.runs.get_mut(&run_id) {
                 if let Some(pause) = run.pause_request.take() {
                     run.paused_step_index = Some(i);
+                    run.current_step_index = None;
                     run.paused_variables = variables
                         .iter()
                         .map(|(k, v)| (k.clone(), v.clone()))
@@ -5161,6 +5180,7 @@ impl WorkflowEngine {
             r.state = WorkflowRunState::Completed;
             r.output = Some(final_output.clone());
             r.completed_at = Some(Utc::now());
+            r.current_step_index = None;
             r.pause_request = None;
             r.paused_step_index = None;
             r.paused_variables.clear();
@@ -5215,6 +5235,7 @@ impl WorkflowEngine {
                      (#3335 follow-up)"
                 ));
                 run.completed_at = Some(Utc::now());
+                run.current_step_index = None;
             }
             return Err(format!(
                 "Pause requested ({reason}) but the workflow uses DAG dependencies; \
@@ -6706,6 +6727,8 @@ fn row_to_workflow_run(row: &WorkflowRunRow) -> Result<WorkflowRun, String> {
         input: row.input.clone(),
         state,
         step_results,
+        current_step_index: None,
+        total_steps: 0,
         output: row.output.clone(),
         error: row.error.clone(),
         started_at,
@@ -9443,6 +9466,8 @@ prompt_template = "do {{x}}"
                 duration_ms: 100,
                 error: None,
             }],
+            current_step_index: None,
+            total_steps: 1,
             output: Some("final output".to_string()),
             error: None,
             started_at: Utc::now(),
@@ -9509,6 +9534,8 @@ prompt_template = "do {{x}}"
             input: "data".to_string(),
             state: WorkflowRunState::Running,
             step_results: vec![],
+            current_step_index: None,
+            total_steps: 0,
             output: None,
             error: None,
             started_at: Utc::now(),
