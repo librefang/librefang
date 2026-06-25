@@ -172,6 +172,25 @@ pub fn proxied_client() -> reqwest::Client {
         .expect("HTTP client with proxy/TLS config should always build")
 }
 
+/// Proxy-aware [`reqwest::ClientBuilder`] that NEVER follows HTTP redirects, for OAuth machine-to-machine endpoints (metadata discovery, token exchange, dynamic client registration, token refresh).
+///
+/// OAuth endpoints return JSON directly and have no legitimate reason to emit a 3xx mid-flow.
+/// Following a redirect on these calls is a security hole the per-URL SSRF guard cannot catch, because that guard validates only the initial URL — never the redirect `Location`.
+/// A `307`/`308` on a credential-bearing POST replays the request body (`client_secret`, `code_verifier`, `refresh_token`) to an attacker-controlled redirect target; a `302` on discovery becomes a blind SSRF / cloud-metadata pivot.
+///
+/// This mirrors `librefang_runtime::web_fetch`'s pinned client, which disables reqwest's automatic redirect following for the same reason.
+/// Use this for every outbound OAuth request; do not reach for [`proxied_client_builder`] there, whose default policy follows up to 10 hops.
+pub fn oauth_client_builder() -> reqwest::ClientBuilder {
+    proxied_client_builder().redirect(reqwest::redirect::Policy::none())
+}
+
+/// Convenience: ready-to-use proxy-aware OAuth [`reqwest::Client`] with redirect following disabled. See [`oauth_client_builder`].
+pub fn oauth_client() -> reqwest::Client {
+    oauth_client_builder()
+        .build()
+        .expect("OAuth HTTP client with proxy/TLS config should always build")
+}
+
 /// Build a fallback [`reqwest::Client`] used when a per-provider proxy override
 /// is invalid. Identical to [`proxied_client`] but also enforces a total
 /// per-request timeout so a stuck upstream cannot wedge the agent loop
