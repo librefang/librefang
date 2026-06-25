@@ -1082,11 +1082,9 @@ fn flush_debounced(
                 );
             }
 
-            // Parity with the immediate (`dispatch_message`) path: describe
-            // each inbound image so text-only models receive a description next
-            // to the `ImageFile` block. Coalesced (debounced) images used to
-            // skip this step entirely — the #6321 bug — because only the
-            // immediate path called it. Self-gates on `[media] image_description`.
+            // Parity with the immediate (`dispatch_message`) path: describe each inbound image so text-only models receive a description next to the `ImageFile` block.
+            // Coalesced (debounced) images used to skip this step entirely — the #6321 bug — because only the immediate path called it.
+            // Self-gates on `[media] image_description`.
             let blocks = prepend_image_descriptions(&channel_handle, blocks).await;
 
             let ct_str = channel_type_str(&merged_msg.channel);
@@ -3942,14 +3940,10 @@ async fn dispatch_message(
                 ContentBlock::Image { .. } | ContentBlock::ImageFile { .. }
             )
         }) {
-            // We have actual image data. Optionally run `describe_inbound_image`
-            // for each inbound image so that text-only models receive a
-            // natural-language description next to the `ImageFile` block;
-            // vision-capable models ignore the text block and use the raw image
-            // bytes directly. Inline `Image` blocks (base64 fallback when the
-            // save failed) have no on-disk path and are left untouched. This is
-            // the same helper the debounced path uses, so the two cannot drift
-            // out of parity (refs #6321).
+            // We have actual image data.
+            // Optionally run `describe_inbound_image` for each inbound image so that text-only models receive a natural-language description next to the `ImageFile` block; vision-capable models ignore the text block and use the raw image bytes directly.
+            // Inline `Image` blocks (base64 fallback when the save failed) have no on-disk path and are left untouched.
+            // This is the same helper the debounced path uses, so the two cannot drift out of parity (refs #6321).
             let final_blocks = prepend_image_descriptions(handle, blocks).await;
             // Send as structured blocks for vision
             dispatch_with_blocks(
@@ -5505,25 +5499,15 @@ async fn maybe_describe_inbound_image_with_timeout(
     }
 }
 
-/// Prepend a vision-description text block immediately before every inbound
-/// `ImageFile` block in `blocks` (refs #6321).
+/// Prepend a vision-description text block immediately before every inbound `ImageFile` block in `blocks` (refs #6321).
 ///
-/// Text-only models (`supports_vision = false`) cannot read raw image bytes,
-/// so without a description they only ever see the `[image omitted: …]`
-/// placeholder from the #6010 vision gate and behave as if the photo never
-/// arrived. Vision-capable models ignore the text block and read the image
-/// directly.
+/// Text-only models (`supports_vision = false`) cannot read raw image bytes, so without a description they only ever see the `[image omitted: …]` placeholder from the #6010 vision gate and behave as if the photo never arrived.
+/// Vision-capable models ignore the text block and read the image directly.
 ///
-/// The per-image work self-gates on `[media] image_description` (the flag is
-/// checked inside `describe_inbound_image`), so this is a cheap no-op when the
-/// operator has not opted in; a failed or timed-out description degrades to an
-/// opaque `[Image description unavailable]` note rather than dropping the image.
+/// The per-image work self-gates on `[media] image_description` (the flag is checked inside `describe_inbound_image`), so this is a cheap no-op when the operator has not opted in; a failed or timed-out description degrades to an opaque `[Image description unavailable]` note rather than dropping the image.
 ///
-/// Both inbound paths funnel through this one helper so they cannot drift apart
-/// again: the original bug was that only the immediate (`dispatch_message`)
-/// path described images while the debounced (`flush_debounced`) path did not.
-/// Because the debounced path coalesces several messages it can carry multiple
-/// `ImageFile` blocks, so every image is described — not just the first.
+/// Both inbound paths funnel through this one helper so they cannot drift apart again: the original bug was that only the immediate (`dispatch_message`) path described images while the debounced (`flush_debounced`) path did not.
+/// Because the debounced path coalesces several messages it can carry multiple `ImageFile` blocks, so every image is described — not just the first.
 async fn prepend_image_descriptions(
     handle: &Arc<dyn ChannelBridgeHandle>,
     blocks: Vec<ContentBlock>,
