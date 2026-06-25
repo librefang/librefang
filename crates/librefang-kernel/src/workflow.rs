@@ -1196,6 +1196,11 @@ pub struct StepResult {
     /// `#[serde(default)]` keeps runs persisted before this field was added deserializable, and `skip_serializing_if` omits it from the JSON of successful steps.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Variable bindings at the time this step executed (`{{var}}` → resolved value).
+    /// Captured so the debug view can show what each placeholder resolved to.
+    /// `#[serde(default)]` keeps runs persisted before this field was added deserializable.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub variables: BTreeMap<String, String>,
 }
 
 /// Preview of a single step produced by a dry-run (no LLM calls made).
@@ -2384,6 +2389,7 @@ impl WorkflowEngine {
             output_tokens: 0,
             duration_ms: 0,
             error: None,
+            variables: BTreeMap::new(),
         };
         if let Some(mut r) = runs.get_mut(&run_id) {
             r.step_results.push(step_result);
@@ -3980,6 +3986,11 @@ impl WorkflowEngine {
 
                     match result {
                         Ok(Some((output, input_tokens, output_tokens))) => {
+                            // Snapshot current variable bindings for the debug view.
+                            let step_vars: BTreeMap<String, String> = variables
+                                .iter()
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect();
                             let step_result = StepResult {
                                 step_name: step.name.clone(),
                                 agent_id: agent_id.to_string(),
@@ -3990,6 +4001,7 @@ impl WorkflowEngine {
                                 output_tokens,
                                 duration_ms,
                                 error: None,
+                                variables: step_vars,
                             };
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.step_results.push(step_result);
@@ -4105,6 +4117,7 @@ impl WorkflowEngine {
                                     output_tokens,
                                     duration_ms,
                                     error: None,
+                                    variables: BTreeMap::new(),
                                 };
                                 if let Some(mut r) = self.runs.get_mut(&run_id) {
                                     r.step_results.push(step_result);
@@ -4245,6 +4258,11 @@ impl WorkflowEngine {
 
                     match result {
                         Ok(Some((output, input_tokens, output_tokens))) => {
+                            // Snapshot current variable bindings for the debug view.
+                            let step_vars: BTreeMap<String, String> = variables
+                                .iter()
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect();
                             let step_result = StepResult {
                                 step_name: step.name.clone(),
                                 agent_id: agent_id.to_string(),
@@ -4255,6 +4273,7 @@ impl WorkflowEngine {
                                 output_tokens,
                                 duration_ms,
                                 error: None,
+                                variables: step_vars,
                             };
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.step_results.push(step_result);
@@ -4334,6 +4353,7 @@ impl WorkflowEngine {
                                     output_tokens,
                                     duration_ms,
                                     error: None,
+                                    variables: BTreeMap::new(),
                                 };
                                 if let Some(mut r) = self.runs.get_mut(&run_id) {
                                     r.step_results.push(step_result);
@@ -4462,6 +4482,7 @@ impl WorkflowEngine {
                         output_tokens: 0,
                         duration_ms,
                         error: None,
+                        variables: BTreeMap::new(),
                     };
                     if let Some(mut r) = self.runs.get_mut(&run_id) {
                         r.step_results.push(step_result);
@@ -4513,6 +4534,7 @@ impl WorkflowEngine {
                                 output_tokens: 0,
                                 duration_ms,
                                 error: None,
+                                variables: BTreeMap::new(),
                             };
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.step_results.push(step_result);
@@ -4554,6 +4576,7 @@ impl WorkflowEngine {
                                 output_tokens: 0,
                                 duration_ms,
                                 error: Some(reason.clone()),
+                                variables: BTreeMap::new(),
                             };
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.step_results.push(step_result);
@@ -4675,6 +4698,7 @@ impl WorkflowEngine {
                                 output_tokens: 0,
                                 duration_ms,
                                 error: None,
+                                variables: BTreeMap::new(),
                             };
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.step_results.push(step_result);
@@ -4717,6 +4741,7 @@ impl WorkflowEngine {
                                 output_tokens: 0,
                                 duration_ms,
                                 error: Some(reason.clone()),
+                                variables: BTreeMap::new(),
                             };
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.step_results.push(step_result);
@@ -4835,6 +4860,7 @@ impl WorkflowEngine {
                                         output_tokens: 0,
                                         duration_ms,
                                         error: None,
+                                        variables: BTreeMap::new(),
                                     };
                                     if let Some(mut r) = self.runs.get_mut(&run_id) {
                                         r.step_results.push(step_result);
@@ -4918,6 +4944,7 @@ impl WorkflowEngine {
                                 output_tokens: 0,
                                 duration_ms,
                                 error: Some(reason.clone()),
+                                variables: BTreeMap::new(),
                             };
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.step_results.push(step_result);
@@ -4991,6 +5018,7 @@ impl WorkflowEngine {
                         output_tokens: 0,
                         duration_ms: 0,
                         error: None,
+                        variables: BTreeMap::new(),
                     };
                     if let Some(mut r) = self.runs.get_mut(&run_id) {
                         r.step_results.push(step_result);
@@ -5286,6 +5314,7 @@ impl WorkflowEngine {
                             output_tokens,
                             duration_ms,
                             error: None,
+                            variables: BTreeMap::new(),
                         };
                         if let Some(mut r) = self.runs.get_mut(&run_id) {
                             r.step_results.push(step_result);
@@ -5432,6 +5461,7 @@ impl WorkflowEngine {
                                 output_tokens,
                                 duration_ms: step_duration_ms,
                                 error: None,
+                                variables: BTreeMap::new(),
                             };
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.step_results.push(step_result);
@@ -9029,6 +9059,7 @@ prompt_template = "do {{x}}"
             output_tokens: 5,
             duration_ms: 100,
             error: None,
+            variables: BTreeMap::new(),
         }];
         let prompt = WorkflowEngine::build_context_prompt(
             "summarize",
@@ -9070,6 +9101,7 @@ prompt_template = "do {{x}}"
             output_tokens: 5,
             duration_ms: 100,
             error: None,
+            variables: BTreeMap::new(),
         }];
         let prompt = WorkflowEngine::build_context_prompt("next", &step, 1, "wf", &results, true);
         assert!(prompt.contains("..."));
@@ -9341,11 +9373,13 @@ prompt_template = "do {{x}}"
                 output_tokens: 20,
                 duration_ms: 100,
                 error: None,
+                variables: BTreeMap::new(),
             }],
             current_step_index: None,
             total_steps: 1,
             output: Some("final output".to_string()),
             error: None,
+            variables: BTreeMap::new(),
             started_at: Utc::now(),
             completed_at: Some(Utc::now()),
             pause_request: None,
@@ -9414,6 +9448,7 @@ prompt_template = "do {{x}}"
             total_steps: 0,
             output: None,
             error: None,
+            variables: BTreeMap::new(),
             started_at: Utc::now(),
             completed_at: None,
             pause_request: None,
