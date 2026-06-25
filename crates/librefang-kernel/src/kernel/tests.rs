@@ -4426,6 +4426,103 @@ async fn gc_sweep_aborts_orphaned_running_task_5142() {
     kernel.shutdown();
 }
 
+/// TOCTOU regression: the periodic GC sweep must NOT abort a *successor* turn that swapped into `running_tasks` after the sweep snapshotted a finished predecessor under the same `(agent, session)` key.
+/// Pre-fix the sweep collected the keys, then did a bare `running_tasks.remove(&key)`; a faster successor inserted between the collect and the remove was dropped and its in-flight `AbortHandle` fired, killing a live turn.
+/// The fix snapshots the observed `task_id` and removes via `remove_if(... v.task_id == observed)`, so a swapped-in successor (different task_id) is never touched.
+///
+/// The race is internal to one `gc_sweep` call, so this is a stress test: it is deterministically green with the fix (the sweep can never remove the live successor's entry) and turns red probabilistically without it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_sweep_does_not_abort_live_successor_turn() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-gc-successor-toctou");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let kernel = Arc::new(
+        LibreFangKernel::boot_with_config(KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        })
+        .expect("kernel should boot"),
+    );
+
+    // A LIVE agent: its running_tasks entries are collected by the sweep only
+    // when the task itself is finished (not via the dead-agent branch), which
+    // is exactly the path the successor race lives on.
+    let manifest = AgentManifest {
+        name: "gc-successor-victim".to_string(),
+        description: "agent for gc successor TOCTOU".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        ..Default::default()
+    };
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+    let session = SessionId::new();
+
+    let aborted_live = Arc::new(AtomicUsize::new(0));
+    let mut live_tasks = Vec::new();
+
+    for _ in 0..200 {
+        // (1) A finished predecessor — the entry the sweep will collect.
+        let pre = tokio::spawn(async {});
+        let pre_abort = pre.abort_handle();
+        let _ = pre.await;
+        let predecessor_task_id = uuid::Uuid::new_v4();
+        kernel.agents.running_tasks.insert(
+            (agent_id, session),
+            RunningTask {
+                abort: pre_abort,
+                started_at: chrono::Utc::now(),
+                task_id: predecessor_task_id,
+            },
+        );
+
+        // (2) Fire the sweep concurrently so it can snapshot the finished
+        //     predecessor.
+        let sweeper_kernel = Arc::clone(&kernel);
+        let sweeper = tokio::spawn(async move { sweeper_kernel.gc_sweep() });
+
+        // (3) Swap in a live successor under the same key, racing the sweep's
+        //     collect -> remove window.
+        tokio::task::yield_now().await;
+        let live =
+            tokio::spawn(async { tokio::time::sleep(std::time::Duration::from_secs(60)).await });
+        let live_abort = live.abort_handle();
+        live_tasks.push(live);
+        kernel.agents.running_tasks.insert(
+            (agent_id, session),
+            RunningTask {
+                abort: live_abort.clone(),
+                started_at: chrono::Utc::now(),
+                task_id: uuid::Uuid::new_v4(),
+            },
+        );
+
+        let _ = sweeper.await;
+
+        // The live successor must survive: a live agent's not-yet-finished
+        // task is never a legitimate sweep target, so an abort here means the
+        // sweep removed an entry whose task_id no longer matched what it saw.
+        if live_abort.is_finished() {
+            aborted_live.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    for t in live_tasks {
+        t.abort();
+    }
+
+    assert_eq!(
+        aborted_live.load(Ordering::Relaxed),
+        0,
+        "gc_sweep aborted a live successor turn — TOCTOU on running_tasks \
+         (bare remove instead of task_id-guarded remove_if)"
+    );
+
+    kernel.shutdown();
+}
+
 /// The GC sweep must NOT reclaim a dead agent's `agent_msg_locks` entry while
 /// an in-flight turn still holds the Arc (`Arc::strong_count > 1`). Pre-fix the
 /// sweep filtered on dead-agent membership alone and dropped the slot out from

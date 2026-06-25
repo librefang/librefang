@@ -1066,15 +1066,20 @@ impl LibreFangKernel {
         //    Map is keyed by `(agent, session)` post-#3172, so the sweep
         //    fans out across all sessions for each dead/finished agent.
         {
-            let finished: Vec<(AgentId, SessionId)> = self
+            // Snapshot each dead/finished entry's `task_id` alongside its key.
+            // Between this snapshot and the `remove` below a successor turn on the same `(agent, session)` can swap in a fresh, live `RunningTask` — the insert is not serialized against this sweep — so a bare `remove(&key)` would drop that successor and `abort()` its in-flight turn.
+            // Remove only when the entry is still the same task we observed, via the `#3445` task_id guard the streaming cleanup path already uses (messaging.rs `remove_if(... v.task_id == turn_task_id)`).
+            let finished: Vec<(AgentId, SessionId, uuid::Uuid)> = self
                 .agents
                 .running_tasks
                 .iter()
                 .filter(|e| !live_agents.contains(&e.key().0) || e.value().abort.is_finished())
-                .map(|e| *e.key())
+                .map(|e| {
+                    let (agent, session) = *e.key();
+                    (agent, session, e.value().task_id)
+                })
                 .collect();
-            total_removed += finished.len();
-            for key in finished {
+            for (agent, session, task_id) in finished {
                 // Fire the abort handle before dropping the map entry (#5142).
                 // For a dead agent the loop may still be parked at an `.await`
                 // inside an LLM stream; merely removing the entry drops the
@@ -1082,8 +1087,14 @@ impl LibreFangKernel {
                 // agent's request keeps burning tokens until the provider
                 // returns. `abort()` on an already-finished task is a no-op,
                 // so the live-but-finished branch is unaffected.
-                if let Some((_, task)) = self.agents.running_tasks.remove(&key) {
+                // The task_id guard means a successor that swapped in after the snapshot is left untouched (a dead agent's successor self-ejects via its own post-insert recheck, so nothing leaks).
+                if let Some((_, task)) = self
+                    .agents
+                    .running_tasks
+                    .remove_if(&(agent, session), |_, v| v.task_id == task_id)
+                {
                     task.abort.abort();
+                    total_removed += 1;
                 }
             }
         }

@@ -370,7 +370,9 @@ impl KernelOAuthProvider {
         // on refresh; persisted at auth_start when client_secret_env was set.
         let client_secret = self.vault_get_or_warn(&Self::vault_key(server_url, "client_secret"));
 
-        let client = librefang_extensions::http_client::new_client();
+        // Proxy-aware OAuth client with redirects disabled: a 307/308 on the refresh POST would replay refresh_token / client_secret to the redirect target, and the SSRF guard above validates only the initial token_endpoint, not redirect hops.
+        // `oauth_client` also routes through [proxy] config (#3577), which the previous bundled-CA client skipped.
+        let client = librefang_runtime::http_client::oauth_client();
         let mut params = vec![
             ("grant_type", "refresh_token".to_string()),
             ("refresh_token", refresh_token.to_string()),
@@ -544,7 +546,8 @@ impl KernelOAuthProvider {
         {
             return Err(format!("SSRF: registration_endpoint rejected: {reason}"));
         }
-        let client = librefang_extensions::http_client::new_client();
+        // Proxy-aware OAuth client with redirects disabled — same rationale as try_refresh / token exchange: an OAuth endpoint emitting a 3xx is never legitimate, and following it would pivot the registration POST (and the client_secret the AS echoes back) to an attacker target.
+        let client = librefang_runtime::http_client::oauth_client();
 
         let body = serde_json::json!({
             "client_name": "LibreFang",

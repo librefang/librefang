@@ -797,9 +797,20 @@ fn is_blocked_env_var(name: &str) -> bool {
     // non-alphanumeric boundary on at least one side of the match
     // (start/end of string counts), so e.g. `AWS_API_KEY` and
     // `MY_PASSWORD_HASH` still match while `MONKEYHOUSE` does not.
+    //
+    // Plus a suffix rule: a separator-less secret name like `APIKEY`,
+    // `MYTOKEN`, `DBPASSWORD` or `ALGOLIA_APIKEY` glues the credential word
+    // to the end with no boundary, so the both-sides check above misses it
+    // and the real value would leak to a wildcard-`EnvRead` guest.  Treat
+    // any name *ending* in a blocked word as a secret.  This errs toward
+    // over-blocking (a benign `TURKEY` / `MONKEY` ending in `KEY` is also
+    // suppressed), which is the safe direction here — the guest receives
+    // `null`, never a credential.  A `starts_with` rule is deliberately NOT
+    // added: it would re-break `TOKENIZER_OPTS` / `PRIVATELABEL_NAME` /
+    // `PASSWORDLIST_FILE`, which legitimately begin with a blocked word.
     BLOCKED_ENV_SUBSTRINGS
         .iter()
-        .any(|sub| has_word_boundary_substring(&upper, sub))
+        .any(|sub| upper.ends_with(sub) || has_word_boundary_substring(&upper, sub))
 }
 
 /// `true` iff `needle` appears in `haystack` as its own word —
@@ -1127,6 +1138,25 @@ mod tests {
         // Boundary punctuation other than `_` is also a boundary.
         assert!(is_blocked_env_var("MY-API-KEY"));
         assert!(is_blocked_env_var("KEY.PRIVATE"));
+
+        // Separator-less secret names: the credential word is glued to the
+        // end with no boundary, so the both-sides rule above misses them.
+        // The suffix rule must suppress these (regression for the
+        // `APIKEY` / `MYTOKEN` / `DBPASSWORD` leak to wildcard-`EnvRead`
+        // guests).
+        for name in &[
+            "APIKEY",
+            "MYTOKEN",
+            "DBPASSWORD",
+            "GHTOKEN",
+            "STRIPEKEY",
+            "ALGOLIA_APIKEY",
+        ] {
+            assert!(
+                is_blocked_env_var(name),
+                "{name} must be blocked (separator-less secret suffix)"
+            );
+        }
     }
 
     #[tokio::test]

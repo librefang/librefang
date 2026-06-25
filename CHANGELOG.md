@@ -5,7 +5,67 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.6.24] - 2026-06-24
+
+_33 PRs from 5 contributors since v2026.6.22-beta.22._
+
+### Added
+
+- Localize TUI Onboarding Wizard and Agents screen (#6253) (@pavver)
+- Pluggable context-rewrite modules — per-agent engine + host-run request_llm_summary (closes #6264) (#6287) (@houko)
+- Add scriptable tool result transform hook (#6291) (@pavver)
+- Per-step errors and re-run with same parameters (#6292) (#6302) (@houko)
+- Code_search workspace regex search tool (#6295) (#6307) (@houko)
+
+### Fixed
+
+- Gate provider hourly token budget pre-call so exhaustion flags the fallback chain (#5980) (#5988) (@DaBlitzStein)
+- Persist agent skill & MCP-server assignments to agent.toml (#6046) (@DaBlitzStein)
+- Embed developer-loop placeholder in first result delivery (closes #6251) (#6254) (@maoxin1234)
+- Kill sidecar child on shutdown + forward async delegation result to channel (#6267) (@DaBlitzStein)
+- Complete dashboard i18n coverage (#6271) (@pavver)
+- Vendor OpenSSL unconditionally so cross-compiled release targets link (#6279) (@houko)
+- Merge updater plugin config into base tauri.conf.json (closes #6270) (#6283) (@houko)
+- Handle /new in the TUI chat surfaces (closes #6265) (#6284) (@houko)
+- Merge the dual [Unreleased] sections into one at the top (#6285) (@houko)
+- Forward web-UI-initiated delegation results to the home channel (refs #6266) (#6286) (@houko)
+- AUTH PLAIN fallback for SMTP + expose input/error in workflow runs list (#6293) (@DaBlitzStein)
+- Scope GET /api/workflows/{id}/runs to the path workflow (#6298) (@houko)
+- Block sandbox escape via intermediate-ancestor symlink on writes to non-existent dirs (#6299) (@houko)
+- Reject newline/CR/NUL in secret key to prevent secrets.env line injection (#6300) (@houko)
+- Graceful 400 for non-table [memory]/[proactive_memory] in PATCH /api/memory/config (#6301) (@houko)
+- Apply api_key_env/base_url in PATCH /api/agents/{id}/config instead of dropping them (#6303) (@houko)
+- Wire provider cooldown breaker into the LLM retry path and fix its probe gate (#6305) (@houko)
+- Gate scriptable transform-hook tests behind cfg(unix) to unbreak Windows CI (#6306) (@houko)
+- Gate use std::sync::Arc behind cfg(unix) to complete the Windows-red fix (#6308) (@houko)
+- Install libdbus-1-dev in the release Bump Version job (#6309) (@houko)
+
+### Performance
+
+- JSON-aware token estimation for tool paths (#6281) (@maoxin1234)
+
+<details>
+<summary>Documentation, maintenance, and other internal changes</summary>
+
+### Maintenance
+
+- Token-estimation accuracy benchmark with multi-tokenizer baselines (#6269) (@maoxin1234)
+- Bump the cargo-minor-patch group across 1 directory with 8 updates (#6276) (@app/dependabot)
+- Bump wasmtime from 45.0.2 to 46.0.0 (#6277) (@app/dependabot)
+- Bump cron from 0.16.0 to 0.17.0 (#6278) (@app/dependabot)
+- Bump vulnerable/yanked lockfile deps to clear global CI failures (#6280) (@houko)
+- Bump actions/checkout from 6 to 7 (#6296) (@app/dependabot)
+- Bump actions/cache from 5.0.5 to 6.0.0 (#6297) (@app/dependabot)
+
+</details>
+
+
 ## [Unreleased]
+
+### Security
+
+- Pin `redirect::Policy::none()` on all MCP OAuth outbound HTTP clients (metadata discovery, token exchange, dynamic client registration, refresh) so a malicious or compromised authorization server cannot use a 3xx redirect to replay `client_secret` / `code_verifier` / `refresh_token` to an attacker-controlled host or pivot the daemon at internal / cloud-metadata endpoints — the per-URL SSRF guard only validated the initial URL, never redirect hops (#6315) (@houko).
+- Close a WASM env-var secret-blocklist bypass: `host_env_read` suppressed names like `API_KEY` / `MY_TOKEN` via a both-sides word-boundary match, but a separator-less name such as `APIKEY`, `MYTOKEN`, `DBPASSWORD` or `ALGOLIA_APIKEY` glued the credential word to the end with no boundary and slipped through, leaking the real value to any plugin holding `EnvRead("*")`; a suffix rule now treats any name ending in a blocked secret word as a secret (@houko)
 
 ### Changed
 
@@ -96,6 +156,10 @@ In-crate only; no cross-crate error-shape changes.
 - Token estimation now counts JSON structural punctuation on tool paths (tool-call inputs, tool results, tool-definition schemas) at a heavier weight, correcting the systematic undercount of JSON-heavy tool steps measured by the token-estimation accuracy benchmark from #6269; prose estimation is unchanged (#6281) (@maoxin1234)
 
 ### Fixed
+
+- **fix(kernel): stop the GC sweep from aborting a successor turn (TOCTOU on `running_tasks`)** (#6317) (@houko).
+  The 5-minute sweep collected dead/finished `(agent, session)` keys and then did a bare `running_tasks.remove(&key)`; a faster successor turn that swapped a fresh, live `RunningTask` into the same key between the collect and the remove was dropped and had its in-flight `AbortHandle` fired, killing a live turn.
+  The sweep now snapshots the observed `task_id` and removes via `remove_if(... v.task_id == observed)` — the same `#3445` guard the streaming-cleanup path uses — so a swapped-in successor is never touched.
 
 - **fix(ci): install `libdbus-1-dev` in the release `Bump Version` job so dispatching a beta/stable release no longer panics** (@houko).
   `cargo xtask release` (run for `channel != current`) compiles the workspace via `cargo xtask codegen --openapi` to regenerate `openapi.json`; that pulls in `libdbus-sys` transitively (keyring / notify-rust) and panicked with `system library 'dbus-1' not found` because — unlike every other Linux release job — the `Bump Version` job never installed `libdbus-1-dev`.
