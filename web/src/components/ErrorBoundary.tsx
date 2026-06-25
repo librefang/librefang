@@ -1,9 +1,16 @@
 import { Component } from 'react'
 import type { ReactNode, ErrorInfo } from 'react'
-import { translations } from '../i18n'
+import { getTranslation, type Translation } from '../i18n'
+import { useAppStore } from '../store'
 
 interface Props {
   children: ReactNode
+}
+
+type ErrorBoundaryCopy = NonNullable<Translation['errorBoundary']>
+
+interface ErrorBoundaryImplProps extends Props {
+  copy: ErrorBoundaryCopy
 }
 
 interface State {
@@ -14,7 +21,7 @@ interface State {
 // routes failing to resolve), we render a minimal recovery card instead of
 // a blank white screen. Using a class component because React hooks still
 // have no equivalent API for error boundaries.
-export default class ErrorBoundary extends Component<Props, State> {
+class ErrorBoundaryImpl extends Component<ErrorBoundaryImplProps, State> {
   state: State = { error: null }
 
   static getDerivedStateFromError(error: Error): State {
@@ -53,7 +60,7 @@ export default class ErrorBoundary extends Component<Props, State> {
   render() {
     const err = this.state.error
     if (!err) return this.props.children
-    const copy = translations.en!.errorBoundary!
+    const copy = this.props.copy
     return (
       <div className="min-h-screen flex items-center justify-center p-6">
         <div className="max-w-md w-full border border-red-500/20 bg-red-500/5 p-6 rounded">
@@ -80,4 +87,10 @@ export default class ErrorBoundary extends Component<Props, State> {
       </div>
     )
   }
+}
+
+export default function ErrorBoundary({ children }: Props) {
+  const lang = useAppStore(s => s.lang)
+  const copy = getTranslation(lang).errorBoundary!
+  return <ErrorBoundaryImpl copy={copy}>{children}</ErrorBoundaryImpl>
 }

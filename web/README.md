@@ -57,11 +57,24 @@ Agent registry data is fetched at runtime from `stats.librefang.ai/api/registry`
 
 ### Internationalization
 
-The site supports 7 languages: en, zh, zh-TW, ja, ko, de, es. Translations live in `src/i18n.ts`. Language detection is path-prefix-based (e.g. `/ja/`, `/zh-TW/`).
+The site supports 9 languages: en, zh, zh-TW, ja, ko, de, es, pl, uk. Raw translations live in `src/i18n.ts` as `rawTranslations`. Runtime UI code should use `getTranslation(lang)` so missing keys fall back to English. Language detection is path-prefix-based (e.g. `/ja/`, `/zh-TW/`, `/uk/`).
 
 CJK locales (zh, zh-TW, ja, ko) trigger per-language font loading at runtime. The store in `src/store.ts` lazily injects the appropriate Google Fonts stylesheet (Noto Sans SC, TC, JP, or KR) only when the user switches to or lands on a CJK locale. Non-CJK locales use the base `Outfit` font and do not load extra font resources.
 
 The frontend is intentionally thin. Most dynamic behavior is read-only and based on remote fetches rather than local application state.
+
+### Translation audits
+
+Runtime translation lookup allows partial locale objects. `getTranslation(lang)` deep-merges the selected raw locale over English, so missing keys fall back to English.
+
+For locales that are intended to be complete, run the translator audit manually:
+
+```bash
+pnpm i18n:audit uk
+pnpm i18n:audit --all  # list every locale that is not raw-key complete
+```
+
+The audit compares `rawTranslations[locale]` against `rawTranslations.en` and reports untranslated keys before a translation PR is opened.
 
 ## Local Development
 
@@ -161,7 +174,7 @@ In local development, these requests still target the production external endpoi
 
 Most page copy lives in `src/i18n.ts`, including:
 
-- Translations for each language
+- Raw translations for each language
 - Navigation labels
 - FAQ content
 - GitHub/community section text
@@ -210,13 +223,17 @@ Current path prefixes:
 - `/ja/` -> Japanese
 - `/ko/` -> Korean
 - `/es/` -> Spanish
+- `/pl/` -> Polish
+- `/uk/` -> Ukrainian
 
 If you add a new language, update at least these locations:
 
 1. Add translations and a `languages` entry in `src/i18n.ts`
 2. Add path detection in `src/store.ts`
 3. Add path detection in the bootstrap script inside `index.html`
-4. Add the new URL to `public/sitemap.xml`
+4. Add paste-prefix handling in `src/components/SearchDialog.tsx`
+5. Add the new URL to `public/sitemap.xml`
+6. Run `pnpm i18n:audit <locale>` when the new locale is intended to be complete
 
 ## PWA and Build Notes
 

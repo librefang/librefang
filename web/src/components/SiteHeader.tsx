@@ -4,7 +4,7 @@ import {
   Search, Sun, X,
 } from 'lucide-react'
 import { Github } from './BrandIcons'
-import { getTranslation, languages, translations } from '../i18n'
+import { getTranslation, languages } from '../i18n'
 import type { Translation } from '../i18n'
 import { useAppStore } from '../store'
 import { cn } from '../lib/utils'
@@ -33,9 +33,8 @@ export default function SiteHeader({ onOpenSearch, isSubpage = false, sourceUrl,
   const theme = useAppStore((s) => s.theme)
   const toggleTheme = useAppStore((s) => s.toggleTheme)
   const t: Translation = getTranslation(lang)
-  const en = translations.en!
-  const headerCopy = t.header ?? en.header!
-  const searchCopy = t.search ?? en.search!
+  const headerCopy = t.header!
+  const searchCopy = t.search!
   const [open, setOpen] = useState(false)
   const [langOpen, setLangOpen] = useState(false)
   const [featuresOpen, setFeaturesOpen] = useState(false)
@@ -89,17 +88,17 @@ export default function SiteHeader({ onOpenSearch, isSubpage = false, sourceUrl,
 
   interface NavLink { label: string; href: string; external?: boolean }
 
-  const rc = t.registry?.categories
+  const rc = t.registry!.categories
   // All 8 marketplace categories — no per-item highlight, they're peers.
   const featureLinks: NavLink[] = [
-    { label: rc?.hands.title     || en.registry!.categories.hands.title,      href: `${langPrefix}/hands` },
-    { label: rc?.agents.title    || en.registry!.categories.agents.title,     href: `${langPrefix}/agents` },
-    { label: rc?.skills.title    || en.registry!.categories.skills.title,     href: `${langPrefix}/skills` },
-    { label: rc?.mcp.title       || en.registry!.categories.mcp.title,        href: `${langPrefix}/mcp` },
-    { label: rc?.plugins.title   || en.registry!.categories.plugins.title,    href: `${langPrefix}/plugins` },
-    { label: rc?.providers.title || en.registry!.categories.providers.title,  href: `${langPrefix}/providers` },
-    { label: rc?.workflows.title || en.registry!.categories.workflows.title,  href: `${langPrefix}/workflows` },
-    { label: rc?.channels.title  || en.registry!.categories.channels.title,   href: `${langPrefix}/channels` },
+    { label: rc.hands.title,     href: `${langPrefix}/hands` },
+    { label: rc.agents.title,    href: `${langPrefix}/agents` },
+    { label: rc.skills.title,    href: `${langPrefix}/skills` },
+    { label: rc.mcp.title,       href: `${langPrefix}/mcp` },
+    { label: rc.plugins.title,   href: `${langPrefix}/plugins` },
+    { label: rc.providers.title, href: `${langPrefix}/providers` },
+    { label: rc.workflows.title, href: `${langPrefix}/workflows` },
+    { label: rc.channels.title,  href: `${langPrefix}/channels` },
   ]
   // Features dropdown: one anchor per homepage module, in scroll order.
   // Cross-page nav when viewed from a subpage; smooth-scroll on the
@@ -111,13 +110,13 @@ export default function SiteHeader({ onOpenSearch, isSubpage = false, sourceUrl,
   const anchorLinks: NavLink[] = [
     { label: t.nav.architecture,                                   href: anchor('architecture') },
     { label: t.nav.hands,                                          href: anchor('hands') },
-    { label: t.nav.workflows || t.workflows?.label || en.nav.workflows!, href: anchor('workflows') },
-    { label: t.nav.evolution || t.evolution?.label || en.nav.evolution!, href: anchor('evolution') },
+    { label: t.nav.workflows ?? t.workflows!.label, href: anchor('workflows') },
+    { label: t.nav.evolution ?? t.evolution!.label, href: anchor('evolution') },
     { label: t.nav.performance,                                    href: anchor('performance') },
     { label: t.nav.install,                                        href: anchor('install') },
-    { label: t.nav.downloads  || en.nav.downloads!,                href: anchor('downloads') },
-    { label: t.faq?.label     || en.faq.label,                     href: anchor('faq') },
-    { label: t.githubStats?.label || en.githubStats!.label,        href: anchor('community') },
+    { label: t.nav.downloads!,                                     href: anchor('downloads') },
+    { label: t.faq.label,                                          href: anchor('faq') },
+    { label: t.githubStats!.label,                                 href: anchor('community') },
   ]
   // Only external "flat" link that remains.
   const flatLinks: NavLink[] = [
@@ -150,10 +149,10 @@ export default function SiteHeader({ onOpenSearch, isSubpage = false, sourceUrl,
                 isLearnActive || learnOpen ? 'text-cyan-600 dark:text-cyan-400' : 'text-gray-600 dark:text-gray-400 hover:text-cyan-600 dark:hover:text-cyan-400'
               )}
               onClick={() => { setLearnOpen(!learnOpen); setFeaturesOpen(false) }}
-              aria-label={t.nav.learnMore || en.nav.learnMore!}
+              aria-label={t.nav.learnMore!}
               aria-expanded={learnOpen}
             >
-              {t.nav.learnMore || en.nav.learnMore!}
+              {t.nav.learnMore!}
               <ChevronDown className={cn('w-3 h-3 transition-transform', learnOpen && 'rotate-180')} />
             </button>
             {learnOpen && (
@@ -190,10 +189,10 @@ export default function SiteHeader({ onOpenSearch, isSubpage = false, sourceUrl,
                 isFeatureActive || featuresOpen ? 'text-cyan-600 dark:text-cyan-400' : 'text-gray-600 dark:text-gray-400 hover:text-cyan-600 dark:hover:text-cyan-400'
               )}
               onClick={() => { setFeaturesOpen(!featuresOpen); setLearnOpen(false) }}
-              aria-label={t.nav.features || en.nav.features!}
+              aria-label={t.nav.features!}
               aria-expanded={featuresOpen}
             >
-              {t.nav.features || en.nav.features!}
+              {t.nav.features!}
               <ChevronDown className={cn('w-3 h-3 transition-transform', featuresOpen && 'rotate-180')} />
             </button>
             {featuresOpen && (
@@ -339,7 +338,7 @@ export default function SiteHeader({ onOpenSearch, isSubpage = false, sourceUrl,
         <div className="md:hidden bg-surface-100 border-t border-black/10 dark:border-white/5 px-6 py-4 space-y-1">
           <div className="pb-1">
             <div className="text-[10px] font-mono text-gray-400 dark:text-gray-600 uppercase tracking-widest py-1.5">
-              {t.nav.learnMore || en.nav.learnMore!}
+              {t.nav.learnMore!}
             </div>
             {anchorLinks.map(link => (
               <a
@@ -362,7 +361,7 @@ export default function SiteHeader({ onOpenSearch, isSubpage = false, sourceUrl,
               </a>
             ))}
             <div className="text-[10px] font-mono text-gray-400 dark:text-gray-600 uppercase tracking-widest py-1.5 mt-2">
-              {t.nav.features || en.nav.features!}
+              {t.nav.features!}
             </div>
             {featureLinks.map(link => (
               <a

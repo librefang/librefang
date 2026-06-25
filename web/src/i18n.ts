@@ -323,7 +323,7 @@ export const languages: Language[] = [
   { code: 'uk', name: 'Українська', url: '/uk' },
 ]
 
-export const translations: Record<string, Translation> = {
+export const rawTranslations: Record<string, Translation> = {
 
   pl: {
     nav: { architecture: 'Architektura', hands: 'Ręce', performance: 'Wydajność', install: 'Instalacja', downloads: 'Pobieranie', docs: 'Dokumentacja', features: 'Rynek', evolution: 'Samodoskonalenie Umiejętności', workflows: 'Przepływy Pracy', registry: 'Rejestr', learnMore: 'Funkcje' },
@@ -2529,8 +2529,7 @@ export const translations: Record<string, Translation> = {
   },
 }
 
-translations.uk = {
-  ...translations.en!,
+rawTranslations.uk = {
   nav: { architecture: 'Архітектура', hands: 'Hands', performance: 'Продуктивність', install: 'Встановлення', downloads: 'Завантаження', docs: 'Документація', features: 'Маркетплейс', evolution: 'Саморозвиток навичок', workflows: 'Робочі процеси', registry: 'Реєстр', learnMore: 'Можливості' },
   hero: {
     badge: 'Open Source',
@@ -2991,8 +2990,8 @@ function mergeObject(base: unknown, override: unknown): unknown {
 const translationCache = new Map<string, Translation>()
 
 export function getTranslation(lang: string): Translation {
-  const english = translations.en!
-  const selected = translations[lang]
+  const english = rawTranslations.en!
+  const selected = rawTranslations[lang]
   if (!selected || selected === english) return english
   const cached = translationCache.get(lang)
   if (cached) return cached
