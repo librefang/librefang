@@ -64,7 +64,7 @@ _33 PRs from 5 contributors since v2026.6.22-beta.22._
 
 ### Security
 
-- Pin `redirect::Policy::none()` on all MCP OAuth outbound HTTP clients (metadata discovery, token exchange, dynamic client registration, refresh) so a malicious or compromised authorization server cannot use a 3xx redirect to replay `client_secret` / `code_verifier` / `refresh_token` to an attacker-controlled host or pivot the daemon at internal / cloud-metadata endpoints — the per-URL SSRF guard only validated the initial URL, never redirect hops (#6315) (@houko)
+- Pin `redirect::Policy::none()` on all MCP OAuth outbound HTTP clients (metadata discovery, token exchange, dynamic client registration, refresh) so a malicious or compromised authorization server cannot use a 3xx redirect to replay `client_secret` / `code_verifier` / `refresh_token` to an attacker-controlled host or pivot the daemon at internal / cloud-metadata endpoints — the per-URL SSRF guard only validated the initial URL, never redirect hops (#6315) (@houko).
 
 ### Changed
 

@@ -936,10 +936,8 @@ pub async fn auth_callback(
     };
 
     // Exchange authorization code for tokens.
-    // Use the proxy-aware OAuth client so token endpoint requests respect proxy
-    // config and inherit default connect/read timeouts (prevents hung token
-    // exchanges). Redirects are disabled: a 307/308 here would replay the PKCE
-    // code_verifier and any client_secret to an attacker-controlled target.
+    // Use the proxy-aware OAuth client so token endpoint requests respect proxy config and inherit default connect/read timeouts (prevents hung token exchanges).
+    // Redirects are disabled: a 307/308 here would replay the PKCE code_verifier and any client_secret to an attacker-controlled target.
     let http_client = librefang_kernel::http_client::oauth_client();
     let mut form_params = vec![
         ("grant_type", "authorization_code".to_string()),
