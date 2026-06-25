@@ -1406,16 +1406,52 @@ export function WorkflowsPage() {
                                   </div>
                                 </div>
                               )}
-                              {/* Run-level error */}
+                              {/* Run-level error with input context */}
                               {rd.error && (
-                                <div className="flex items-start gap-1.5 p-2 rounded-lg bg-error/5 border border-error/20">
-                                  <XCircle className="w-3 h-3 text-error shrink-0 mt-0.5" />
-                                  <p className="text-[10px] text-error whitespace-pre-wrap">{rd.error}</p>
+                                <div className="p-2.5 rounded-lg bg-error/5 border border-error/20 space-y-2">
+                                  <div className="flex items-start gap-1.5">
+                                    <XCircle className="w-3 h-3 text-error shrink-0 mt-0.5" />
+                                    <div>
+                                      <p className="text-[10px] font-bold text-error">Run failed</p>
+                                      <p className="text-[10px] text-error/80 whitespace-pre-wrap mt-0.5">{rd.error}</p>
+                                    </div>
+                                  </div>
+                                  {/* Show input params on failure so user sees what was sent */}
+                                  {rd.input && (() => {
+                                    try {
+                                      const parsed = JSON.parse(rd.input);
+                                      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+                                        const entries = Object.entries(parsed).filter(([k]) => k !== "input");
+                                        if (entries.length > 0) return (
+                                          <div className="pt-1.5 border-t border-error/10">
+                                            <p className="text-[8px] font-semibold text-text-dim/40 uppercase tracking-wider mb-1">Input parameters</p>
+                                            <div className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 text-[9px]">
+                                              {entries.map(([k, v]) => (
+                                                <div key={k} className="contents">
+                                                  <span className="text-brand/70 font-mono">{k}</span>
+                                                  <span className="text-text-dim/60 truncate">{String(v).slice(0, 80)}</span>
+                                                </div>
+                                              ))}
+                                            </div>
+                                          </div>
+                                        );
+                                      }
+                                    } catch {}
+                                    return rd.input ? <p className="text-[9px] text-text-dim/40 truncate pt-1 border-t border-error/10">Input: {rd.input.slice(0, 120)}</p> : null;
+                                  })()}
                                 </div>
                               )}
                               {/* HITL operator-step action bar */}
                               {runId && isPausedRunState(rd.state) && (
                                 <OperatorActionBar runId={runId} />
+                              )}
+                              {/* No steps completed — show empty state */}
+                              {allSteps.length === 0 && !isActive && totalSteps > 0 && (
+                                <div className="px-2.5 py-2 rounded-lg bg-surface/30 border border-border-subtle/50 text-center">
+                                  <p className="text-[10px] text-text-dim/40">
+                                    {totalSteps} step{totalSteps !== 1 ? "s" : ""} defined, 0 executed
+                                  </p>
+                                </div>
                               )}
                               {/* Pending/future steps (not yet executed) */}
                               {isActive && totalSteps > allSteps.length && (
