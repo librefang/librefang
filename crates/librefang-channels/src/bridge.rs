@@ -1082,6 +1082,13 @@ fn flush_debounced(
                 );
             }
 
+            // Parity with the immediate (`dispatch_message`) path: describe
+            // each inbound image so text-only models receive a description next
+            // to the `ImageFile` block. Coalesced (debounced) images used to
+            // skip this step entirely — the #6321 bug — because only the
+            // immediate path called it. Self-gates on `[media] image_description`.
+            let blocks = prepend_image_descriptions(&channel_handle, blocks).await;
+
             let ct_str = channel_type_str(&merged_msg.channel);
 
             // --- Input sanitization (prompt injection detection) ---
@@ -3935,33 +3942,15 @@ async fn dispatch_message(
                 ContentBlock::Image { .. } | ContentBlock::ImageFile { .. }
             )
         }) {
-            // We have actual image data.
-            //
-            // Optionally run `describe_inbound_image` so that text-only
-            // models receive a natural-language description next to the
-            // `ImageFile` block.  Vision-capable models ignore the text
-            // block and use the raw image bytes directly.
-            //
-            // Extract the (path, media_type) from the first `ImageFile`
-            // block so `maybe_describe_inbound_image` can pass it to the
-            // kernel's `MediaEngine`.  Inline `Image` blocks (base64
-            // fallback when the save failed) have no on-disk path, so
-            // skip description for those.
-            let saved_image: Option<(std::path::PathBuf, String)> = blocks.iter().find_map(|b| {
-                if let ContentBlock::ImageFile { path, media_type } = b {
-                    Some((std::path::PathBuf::from(path), media_type.clone()))
-                } else {
-                    None
-                }
-            });
-            let mut final_blocks = blocks;
-            if let Some(ref saved) = saved_image {
-                if let Some(desc_block) = maybe_describe_inbound_image(handle, Some(saved)).await {
-                    // Prepend the description so the model reads context
-                    // before the raw image bytes.
-                    final_blocks.insert(0, desc_block);
-                }
-            }
+            // We have actual image data. Optionally run `describe_inbound_image`
+            // for each inbound image so that text-only models receive a
+            // natural-language description next to the `ImageFile` block;
+            // vision-capable models ignore the text block and use the raw image
+            // bytes directly. Inline `Image` blocks (base64 fallback when the
+            // save failed) have no on-disk path and are left untouched. This is
+            // the same helper the debounced path uses, so the two cannot drift
+            // out of parity (refs #6321).
+            let final_blocks = prepend_image_descriptions(handle, blocks).await;
             // Send as structured blocks for vision
             dispatch_with_blocks(
                 final_blocks,
@@ -5514,6 +5503,42 @@ async fn maybe_describe_inbound_image_with_timeout(
             })
         }
     }
+}
+
+/// Prepend a vision-description text block immediately before every inbound
+/// `ImageFile` block in `blocks` (refs #6321).
+///
+/// Text-only models (`supports_vision = false`) cannot read raw image bytes,
+/// so without a description they only ever see the `[image omitted: …]`
+/// placeholder from the #6010 vision gate and behave as if the photo never
+/// arrived. Vision-capable models ignore the text block and read the image
+/// directly.
+///
+/// The per-image work self-gates on `[media] image_description` (the flag is
+/// checked inside `describe_inbound_image`), so this is a cheap no-op when the
+/// operator has not opted in; a failed or timed-out description degrades to an
+/// opaque `[Image description unavailable]` note rather than dropping the image.
+///
+/// Both inbound paths funnel through this one helper so they cannot drift apart
+/// again: the original bug was that only the immediate (`dispatch_message`)
+/// path described images while the debounced (`flush_debounced`) path did not.
+/// Because the debounced path coalesces several messages it can carry multiple
+/// `ImageFile` blocks, so every image is described — not just the first.
+async fn prepend_image_descriptions(
+    handle: &Arc<dyn ChannelBridgeHandle>,
+    blocks: Vec<ContentBlock>,
+) -> Vec<ContentBlock> {
+    let mut out: Vec<ContentBlock> = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        if let ContentBlock::ImageFile { path, media_type } = &block {
+            let saved = (std::path::PathBuf::from(path), media_type.clone());
+            if let Some(desc) = maybe_describe_inbound_image(handle, Some(&saved)).await {
+                out.push(desc);
+            }
+        }
+        out.push(block);
+    }
+    out
 }
 
 /// Hard deadline for the vision round-trip during channel image dispatch.
@@ -10419,6 +10444,90 @@ mod tests {
             let s = saved("/tmp/photo.jpg", "image/jpeg");
             let block = maybe_describe_inbound_image(&h, s.as_ref()).await;
             assert!(block.is_none(), "empty description must be dropped");
+        }
+
+        #[tokio::test]
+        async fn prepend_describes_every_imagefile_before_its_block() {
+            // The debounced path coalesces several messages into one block list
+            // that can hold multiple `ImageFile`s. Every image must get its own
+            // description, inserted immediately before it — not just the first.
+            // Regression guard for #6321: the debounced path previously skipped
+            // description entirely, and the immediate path described only the
+            // first image.
+            let (h, rec) = handle_with(Ok(Some("a photo".into())));
+            let input = vec![
+                ContentBlock::Text {
+                    text: "caption".into(),
+                    provider_metadata: None,
+                },
+                ContentBlock::ImageFile {
+                    path: "/tmp/a.jpg".into(),
+                    media_type: "image/jpeg".into(),
+                },
+                ContentBlock::ImageFile {
+                    path: "/tmp/b.png".into(),
+                    media_type: "image/png".into(),
+                },
+            ];
+            let out = prepend_image_descriptions(&h, input).await;
+            // Expected: [Text(caption), desc, ImageFile(a), desc, ImageFile(b)]
+            assert_eq!(out.len(), 5, "two descriptions inserted, got {out:?}");
+            assert!(
+                matches!(&out[0], ContentBlock::Text { text, .. } if text == "caption"),
+                "original caption preserved at front"
+            );
+            assert!(
+                matches!(&out[1], ContentBlock::Text { text, .. } if text == "[Image description: a photo]"),
+                "description precedes first image"
+            );
+            assert!(
+                matches!(&out[2], ContentBlock::ImageFile { path, .. } if path == "/tmp/a.jpg"),
+            );
+            assert!(
+                matches!(&out[3], ContentBlock::Text { text, .. } if text == "[Image description: a photo]"),
+                "description precedes second image"
+            );
+            assert!(
+                matches!(&out[4], ContentBlock::ImageFile { path, .. } if path == "/tmp/b.png"),
+            );
+            assert_eq!(
+                rec.calls.lock().unwrap().len(),
+                2,
+                "both images sent to the vision path"
+            );
+        }
+
+        #[tokio::test]
+        async fn prepend_is_noop_when_description_disabled() {
+            // `[media] image_description = false` → kernel returns `Ok(None)`;
+            // the image block passes through unchanged with no sibling text.
+            let (h, _rec) = handle_with(Ok(None));
+            let input = vec![ContentBlock::ImageFile {
+                path: "/tmp/a.jpg".into(),
+                media_type: "image/jpeg".into(),
+            }];
+            let out = prepend_image_descriptions(&h, input).await;
+            assert_eq!(out.len(), 1, "disabled config must not add blocks");
+            assert!(
+                matches!(&out[0], ContentBlock::ImageFile { path, .. } if path == "/tmp/a.jpg")
+            );
+        }
+
+        #[tokio::test]
+        async fn prepend_leaves_non_image_blocks_untouched() {
+            // No `ImageFile` present → no vision call, identical block list.
+            let (h, rec) = handle_with(Ok(Some("unused".into())));
+            let input = vec![ContentBlock::Text {
+                text: "hello".into(),
+                provider_metadata: None,
+            }];
+            let out = prepend_image_descriptions(&h, input).await;
+            assert_eq!(out.len(), 1);
+            assert!(matches!(&out[0], ContentBlock::Text { text, .. } if text == "hello"));
+            assert!(
+                rec.calls.lock().unwrap().is_empty(),
+                "no image means no vision round-trip"
+            );
         }
 
         #[tokio::test]
