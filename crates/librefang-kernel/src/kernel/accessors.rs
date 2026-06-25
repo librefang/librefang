@@ -1067,14 +1067,8 @@ impl LibreFangKernel {
         //    fans out across all sessions for each dead/finished agent.
         {
             // Snapshot each dead/finished entry's `task_id` alongside its key.
-            // Between this snapshot and the `remove` below a successor turn on
-            // the same `(agent, session)` can swap in a fresh, live
-            // `RunningTask` — the insert is not serialized against this sweep —
-            // so a bare `remove(&key)` would drop that successor and `abort()`
-            // its in-flight turn. Remove only when the entry is still the same
-            // task we observed, via the `#3445` task_id guard the streaming
-            // cleanup path already uses (messaging.rs `remove_if(... v.task_id
-            // == turn_task_id)`).
+            // Between this snapshot and the `remove` below a successor turn on the same `(agent, session)` can swap in a fresh, live `RunningTask` — the insert is not serialized against this sweep — so a bare `remove(&key)` would drop that successor and `abort()` its in-flight turn.
+            // Remove only when the entry is still the same task we observed, via the `#3445` task_id guard the streaming cleanup path already uses (messaging.rs `remove_if(... v.task_id == turn_task_id)`).
             let finished: Vec<(AgentId, SessionId, uuid::Uuid)> = self
                 .agents
                 .running_tasks
@@ -1092,10 +1086,8 @@ impl LibreFangKernel {
                 // `AbortHandle` without cancelling the task, so the killed
                 // agent's request keeps burning tokens until the provider
                 // returns. `abort()` on an already-finished task is a no-op,
-                // so the live-but-finished branch is unaffected. The task_id
-                // guard means a successor that swapped in after the snapshot is
-                // left untouched (a dead agent's successor self-ejects via its
-                // own post-insert recheck, so nothing leaks).
+                // so the live-but-finished branch is unaffected.
+                // The task_id guard means a successor that swapped in after the snapshot is left untouched (a dead agent's successor self-ejects via its own post-insert recheck, so nothing leaks).
                 if let Some((_, task)) = self
                     .agents
                     .running_tasks

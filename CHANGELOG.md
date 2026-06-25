@@ -151,7 +151,8 @@ In-crate only; no cross-crate error-shape changes.
 ### Fixed
 
 - **fix(kernel): stop the GC sweep from aborting a successor turn (TOCTOU on `running_tasks`)** (@houko).
-  The 5-minute sweep collected dead/finished `(agent, session)` keys and then did a bare `running_tasks.remove(&key)`; a faster successor turn that swapped a fresh, live `RunningTask` into the same key between the collect and the remove was dropped and had its in-flight `AbortHandle` fired, killing a live turn. The sweep now snapshots the observed `task_id` and removes via `remove_if(... v.task_id == observed)` — the same `#3445` guard the streaming-cleanup path uses — so a swapped-in successor is never touched.
+  The 5-minute sweep collected dead/finished `(agent, session)` keys and then did a bare `running_tasks.remove(&key)`; a faster successor turn that swapped a fresh, live `RunningTask` into the same key between the collect and the remove was dropped and had its in-flight `AbortHandle` fired, killing a live turn.
+  The sweep now snapshots the observed `task_id` and removes via `remove_if(... v.task_id == observed)` — the same `#3445` guard the streaming-cleanup path uses — so a swapped-in successor is never touched.
 
 - **fix(ci): install `libdbus-1-dev` in the release `Bump Version` job so dispatching a beta/stable release no longer panics** (@houko).
   `cargo xtask release` (run for `channel != current`) compiles the workspace via `cargo xtask codegen --openapi` to regenerate `openapi.json`; that pulls in `libdbus-sys` transitively (keyring / notify-rust) and panicked with `system library 'dbus-1' not found` because — unlike every other Linux release job — the `Bump Version` job never installed `libdbus-1-dev`.

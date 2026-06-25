@@ -4426,18 +4426,11 @@ async fn gc_sweep_aborts_orphaned_running_task_5142() {
     kernel.shutdown();
 }
 
-/// TOCTOU regression: the periodic GC sweep must NOT abort a *successor* turn
-/// that swapped into `running_tasks` after the sweep snapshotted a finished
-/// predecessor under the same `(agent, session)` key. Pre-fix the sweep
-/// collected the keys, then did a bare `running_tasks.remove(&key)`; a faster
-/// successor inserted between the collect and the remove was dropped and its
-/// in-flight `AbortHandle` fired, killing a live turn. The fix snapshots the
-/// observed `task_id` and removes via `remove_if(... v.task_id == observed)`,
-/// so a swapped-in successor (different task_id) is never touched.
+/// TOCTOU regression: the periodic GC sweep must NOT abort a *successor* turn that swapped into `running_tasks` after the sweep snapshotted a finished predecessor under the same `(agent, session)` key.
+/// Pre-fix the sweep collected the keys, then did a bare `running_tasks.remove(&key)`; a faster successor inserted between the collect and the remove was dropped and its in-flight `AbortHandle` fired, killing a live turn.
+/// The fix snapshots the observed `task_id` and removes via `remove_if(... v.task_id == observed)`, so a swapped-in successor (different task_id) is never touched.
 ///
-/// The race is internal to one `gc_sweep` call, so this is a stress test: it
-/// is deterministically green with the fix (the sweep can never remove the
-/// live successor's entry) and turns red probabilistically without it.
+/// The race is internal to one `gc_sweep` call, so this is a stress test: it is deterministically green with the fix (the sweep can never remove the live successor's entry) and turns red probabilistically without it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn gc_sweep_does_not_abort_live_successor_turn() {
     use std::sync::atomic::{AtomicUsize, Ordering};
