@@ -1237,6 +1237,7 @@ export function WorkflowsPage() {
                         selectedRunId === runId &&
                         bannerSelectedRunOutsideFirstPage &&
                         runId === bannerSelectedRunOutsideFirstPage;
+                      const paramsPreview = formatRunParamsPreview(run.input);
                       return (
                         <div key={runId}>
                           <div className="flex items-stretch gap-1">
@@ -1261,10 +1262,10 @@ export function WorkflowsPage() {
                               {/* Parameters the run was launched with, so the
                                   history shows WHAT was passed without opening
                                   the detail panel (#6292). */}
-                              {formatRunParamsPreview(run.input) && (
+                              {paramsPreview && (
                                 <p className="text-[9px] text-text-dim/70 truncate" title={run.input}>
                                   <span className="text-text-dim/40">{t("workflows.parameters", { defaultValue: "Parameters" })}: </span>
-                                  {formatRunParamsPreview(run.input)}
+                                  {paramsPreview}
                                 </p>
                               )}
                               {/* Failure reason, surfaced inline so the list
