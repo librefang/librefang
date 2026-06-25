@@ -59,9 +59,9 @@ export default function MetricsPage({ onOpenSearch }: MetricsPageProps) {
             {copy.title}
           </h1>
           <p className="text-gray-600 dark:text-gray-400 text-base">
-            {copy.desc.replace('/api/registry/click', '')}
-            <code className="text-cyan-600 dark:text-cyan-400">/api/registry/click</code>
-            {copy.desc.split('/api/registry/click')[1]}
+            {copy.descPrefix}
+            <code className="text-cyan-600 dark:text-cyan-400">{copy.endpoint}</code>
+            {copy.descSuffix}
           </p>
         </div>
 

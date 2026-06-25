@@ -9,6 +9,8 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ### Changed
 
+- **web: add Ukrainian localization and move audited web copy into i18n** (#6312) (@pavver).
+
 - **chore(secrets): replace the detect-secrets baseline with gitleaks** (#6262) (@houko).
   The 4296-line `.secrets.baseline` pinned 534 unaudited high-entropy findings and forced every fixture-adding PR to append to it, which made it the repo's most merge-conflict-prone file.
   gitleaks scans against a fixed rule set plus rule-based path/regex allowlists in `.gitleaks.toml`, which do not churn the way a per-finding snapshot does; CI runs `gitleaks dir .` and the pre-commit hook runs `gitleaks protect --staged`.

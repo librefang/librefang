@@ -52,8 +52,8 @@ describe('i18n completeness', () => {
     expect(missing, `uk missing: ${missing.slice(0, 8).join(', ')}`).toEqual([])
   })
 
-  // Every locale must resolve to the full EN shape after fallback. Raw locale
-  // objects may stay partial; getTranslation is the runtime contract.
+  // Every locale must resolve to the full EN shape after fallback.
+  // Raw locale objects may stay partial; getTranslation is the runtime contract.
   for (const lang of languages) {
     if (lang.code === 'en') continue
     it(`${lang.code} resolves missing keys from en`, () => {

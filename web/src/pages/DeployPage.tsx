@@ -8,7 +8,7 @@ import {
 import { Github } from '../components/BrandIcons'
 import { cn } from '../lib/utils'
 import { getTranslation } from '../i18n'
-import type { Translation } from '../i18n'
+import type { RichTextPart, Translation } from '../i18n'
 import { useAppStore } from '../store'
 
 type DeployCopy = NonNullable<Translation['deploy']>
@@ -70,6 +70,26 @@ function CopyButton({ copyKey, text, copiedKey, onCopy, labels, className }: {
     >
       {isCopied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
     </button>
+  )
+}
+
+function RichTroubleshootingText({ lines }: { lines: RichTextPart[][] }) {
+  return (
+    <>
+      {lines.map((line, lineIndex) => (
+        <span key={lineIndex} className="block">
+          {line.map((part, partIndex) => {
+            if (part.code) {
+              return <code key={partIndex} className="text-green-400 bg-surface px-1.5 py-0.5 rounded text-xs">{part.code}</code>
+            }
+            if (part.em) {
+              return <em key={partIndex}>{part.em}</em>
+            }
+            return <span key={partIndex}>{part.text}</span>
+          })}
+        </span>
+      ))}
+    </>
   )
 }
 
@@ -708,7 +728,7 @@ function FlyDeployForm({ onBack, text }: { onBack: () => void; text: DeployCopy 
                 className="overflow-hidden"
               >
                 <div className="pl-5.5 pb-2 text-xs text-gray-500 leading-relaxed">
-                  {item.a}
+                  <RichTroubleshootingText lines={item.lines} />
                 </div>
               </motion.div>
             )}

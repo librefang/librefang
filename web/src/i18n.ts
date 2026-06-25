@@ -10,6 +10,17 @@ export interface PerformanceRow {
   librefang: string
 }
 
+export interface RichTextPart {
+  text?: string
+  code?: string
+  em?: string
+}
+
+export interface TroubleshootingItem {
+  q: string
+  lines: RichTextPart[][]
+}
+
 export interface Translation {
   nav: { architecture: string; hands: string; performance: string; install: string; downloads?: string; docs: string; features?: string; evolution?: string; workflows?: string; registry?: string; learnMore?: string }
   hero: {
@@ -227,6 +238,9 @@ export interface Translation {
     label: string
     title: string
     desc: string
+    descPrefix: string
+    endpoint: string
+    descSuffix: string
     loadError: string
     totalClicks: string
     uniqueItems: string
@@ -275,7 +289,7 @@ export interface Translation {
     platforms: Record<string, { desc: string; badge?: string; demo?: string; warning?: string }>
     localInstalls: Record<string, { name: string; desc: string }>
     steps: Record<string, string>
-    troubleshootingItems: Record<string, { q: string; a: string }>
+    troubleshootingItems: Record<string, TroubleshootingItem>
   }
   changelog?: {
     title: string
@@ -888,6 +902,9 @@ export const translations: Record<string, Translation> = {
       label: 'Registry Metrics',
       title: 'Click telemetry',
       desc: 'Aggregate counts of detail-page views across the registry, recorded via the /api/registry/click worker endpoint.',
+      descPrefix: 'Aggregate counts of detail-page views across the registry, recorded via the ',
+      endpoint: '/api/registry/click',
+      descSuffix: ' worker endpoint.',
       loadError: 'Could not load metrics',
       totalClicks: 'Total clicks',
       uniqueItems: 'Unique items',
@@ -955,15 +972,39 @@ export const translations: Record<string, Translation> = {
       troubleshootingItems: {
         sso: {
           q: 'Cannot create Personal Access Token (SSO error)',
-          a: 'If you see: "Access Tokens cannot be created because an organization requires SSO" Use a per-org token instead. Run in your terminal: flyctl tokens org <your-org-name> Then paste the generated token above.',
+          lines: [
+            [
+              { text: 'If you see: ' },
+              { em: '"Access Tokens cannot be created because an organization requires SSO"' },
+            ],
+            [{ text: 'Use a per-org token instead. Run in your terminal:' }],
+            [{ code: 'flyctl tokens org <your-org-name>' }],
+            [{ text: 'Then paste the generated token above.' }],
+          ],
         },
         image: {
           q: 'Deploy failed: image not found',
-          a: 'The Docker image ghcr.io/librefang/librefang:latest is built on each release. If no release has been published yet, use the terminal deploy script below — it builds from source.',
+          lines: [
+            [
+              { text: 'The Docker image ' },
+              { code: 'ghcr.io/librefang/librefang:latest' },
+              { text: ' is built on each release.' },
+            ],
+            [{ text: 'If no release has been published yet, use the terminal deploy script below — it builds from source.' }],
+          ],
         },
         llm: {
           q: 'How to add or change LLM provider after deploy?',
-          a: 'Run flyctl secrets set OPENAI_API_KEY=sk-... --app your-app-name. Then edit /data/config.toml via flyctl ssh console to update the default model.',
+          lines: [
+            [{ code: 'flyctl secrets set OPENAI_API_KEY=sk-... --app your-app-name' }],
+            [
+              { text: 'Then edit ' },
+              { code: '/data/config.toml' },
+              { text: ' via ' },
+              { code: 'flyctl ssh console' },
+              { text: ' to update the default model.' },
+            ],
+          ],
         },
       },
     },
@@ -2792,6 +2833,9 @@ translations.uk = {
     label: 'Метрики реєстру',
     title: 'Телеметрія кліків',
     desc: 'Агреговані лічильники переглядів сторінок деталей у реєстрі, записані через endpoint worker /api/registry/click.',
+    descPrefix: 'Агреговані лічильники переглядів сторінок деталей у реєстрі, записані через endpoint worker ',
+    endpoint: '/api/registry/click',
+    descSuffix: '.',
     loadError: 'Не вдалося завантажити метрики',
     totalClicks: 'Усього кліків',
     uniqueItems: 'Унікальні елементи',
@@ -2859,15 +2903,39 @@ translations.uk = {
     troubleshootingItems: {
       sso: {
         q: 'Не вдається створити Personal Access Token (помилка SSO)',
-        a: 'Якщо бачите: "Access Tokens cannot be created because an organization requires SSO", використайте токен організації. Запустіть у терміналі: flyctl tokens org <your-org-name>. Потім вставте згенерований токен вище.',
+        lines: [
+          [
+            { text: 'Якщо бачите: ' },
+            { em: '"Access Tokens cannot be created because an organization requires SSO"' },
+          ],
+          [{ text: 'Використайте токен організації. Запустіть у терміналі:' }],
+          [{ code: 'flyctl tokens org <your-org-name>' }],
+          [{ text: 'Потім вставте згенерований токен вище.' }],
+        ],
       },
       image: {
         q: 'Розгортання не вдалося: image not found',
-        a: 'Docker image ghcr.io/librefang/librefang:latest збирається для кожного релізу. Якщо реліз ще не опубліковано, використайте terminal deploy script нижче — він збирає з джерел.',
+        lines: [
+          [
+            { text: 'Docker image ' },
+            { code: 'ghcr.io/librefang/librefang:latest' },
+            { text: ' збирається для кожного релізу.' },
+          ],
+          [{ text: 'Якщо реліз ще не опубліковано, використайте terminal deploy script нижче — він збирає з джерел.' }],
+        ],
       },
       llm: {
         q: 'Як додати або змінити LLM-провайдера після розгортання?',
-        a: 'Запустіть flyctl secrets set OPENAI_API_KEY=sk-... --app your-app-name. Потім відредагуйте /data/config.toml через flyctl ssh console, щоб змінити модель за замовчуванням.',
+        lines: [
+          [{ code: 'flyctl secrets set OPENAI_API_KEY=sk-... --app your-app-name' }],
+          [
+            { text: 'Потім відредагуйте ' },
+            { code: '/data/config.toml' },
+            { text: ' через ' },
+            { code: 'flyctl ssh console' },
+            { text: ', щоб змінити модель за замовчуванням.' },
+          ],
+        ],
       },
     },
   },
@@ -2920,9 +2988,15 @@ function mergeObject(base: unknown, override: unknown): unknown {
   return override ?? base
 }
 
+const translationCache = new Map<string, Translation>()
+
 export function getTranslation(lang: string): Translation {
   const english = translations.en!
   const selected = translations[lang]
   if (!selected || selected === english) return english
-  return mergeTranslation(english, selected)
+  const cached = translationCache.get(lang)
+  if (cached) return cached
+  const merged = mergeTranslation(english, selected)
+  translationCache.set(lang, merged)
+  return merged
 }
