@@ -15,8 +15,8 @@ pkgbase = librefang-docker
 	source = librefang-docker.service
 	source = librefang-docker.env
 	sha256sums = d4330a3004bd990da1830124b1ccccb51129ebb8b5a70a0b79d5626b7c1226a0
-	sha256sums = 336a0cd12d80f6ad8d9101ba7c07ae30b1cd8751a8a646e83aec029c81a56c7d
+	sha256sums = d50c1a023955a462032a9a469225f3553279982acff154327df82059eaed75db
 	sha256sums = b49ff94ecd34a4b9a6edc5a7be614ecc31f9f93024434d24b771138dd4a8e0a4
-	sha256sums = e808d230d1a171b9e4798819673780501eb4690d259d133a5723857a2de92db1
+	sha256sums = a031632040d18af3a63a169a2ce5c5bb14f0533e96383a742cbb44d153bb5f58
 
 pkgname = librefang-docker

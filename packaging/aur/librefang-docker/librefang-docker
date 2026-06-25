@@ -15,7 +15,7 @@ PORT="${LIBREFANG_DOCKER_PORT:-4545}"
 
 docker_args=(
   --name "$CONTAINER_NAME"
-  --publish "${PORT}:4545"
+  --publish "127.0.0.1:${PORT}:4545"
   --volume "${DATA_VOLUME}:/data"
   --env "LIBREFANG_LISTEN=0.0.0.0:4545"
 )
@@ -35,7 +35,6 @@ append_known_provider_env() {
   append_env_if_set DISCORD_BOT_TOKEN
   append_env_if_set SLACK_BOT_TOKEN
   append_env_if_set SLACK_APP_TOKEN
-  append_env_if_set LIBREFANG_MODEL
   append_env_if_set LIBREFANG_ALLOW_NO_AUTH
 }
 
