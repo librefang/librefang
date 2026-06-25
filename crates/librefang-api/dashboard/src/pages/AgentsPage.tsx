@@ -2435,22 +2435,36 @@ export function AgentsPage() {
                           </select>
                         </DetailRow>
                         <DetailRow label={t("agents.model")}>
-                          <select
+                          {/* Combobox, not a plain <select>: the <datalist>
+                              suggests catalog models for the provider, but the
+                              field still accepts a typed-in id. Agent-type
+                              providers (codex-cli / claude-code / gemini-cli)
+                              carry no catalog models, and one pointed at a
+                              third-party base may run a model the catalog never
+                              lists — both must remain settable from the UI when
+                              editing an existing agent, matching the create
+                              form's free-text fallback (#6318). */}
+                          <input
+                            list="agent-detail-model-options"
                             value={modelDraft.model}
                             onChange={e => setModelDraft(d => ({ ...d, model: e.target.value }))}
                             className="w-44 px-2 py-1 rounded-md border border-border-subtle bg-surface text-sm font-mono outline-none focus:border-brand text-right"
                             disabled={modelsQuery.isLoading || !modelDraft.provider.trim()}
-                          >
-                            {!modelDraft.provider.trim() && <option value="">{t("agents.select_provider_first", { defaultValue: "Select provider first" })}</option>}
-                            {modelDraft.provider.trim() && modelsQuery.isLoading && <option value="">{t("common.loading", { defaultValue: "Loading..." })}</option>}
-                            {modelDraft.provider.trim() && !modelsQuery.isLoading && visibleModels.length === 0 && <option value="">{t("agents.no_models", { defaultValue: "No models" })}</option>}
-                            {modelDraft.model && !visibleModels.some(m => m.id === modelDraft.model) && (
-                              <option value={modelDraft.model}>{modelDraft.model}</option>
-                            )}
+                            autoComplete="off"
+                            spellCheck={false}
+                            placeholder={
+                              !modelDraft.provider.trim()
+                                ? t("agents.select_provider_first", { defaultValue: "Select provider first" })
+                                : modelsQuery.isLoading
+                                  ? t("common.loading", { defaultValue: "Loading..." })
+                                  : t("agents.form.model_id_placeholder", { defaultValue: "e.g. gpt-4o" })
+                            }
+                          />
+                          <datalist id="agent-detail-model-options">
                             {visibleModels.map(m => (
                               <option key={m.id} value={m.id}>{m.display_name || m.id}</option>
                             ))}
-                          </select>
+                          </datalist>
                         </DetailRow>
                         <DetailRow label={t("agents.max_tokens")}>
                           <input
