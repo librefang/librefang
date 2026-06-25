@@ -769,6 +769,7 @@ pub async fn get_workflow_run(
                     "output_tokens": s.output_tokens,
                     "duration_ms": s.duration_ms,
                     "error": s.error,
+                    "variables": s.variables,
                 })).collect::<Vec<_>>(),
             })),
         ),
