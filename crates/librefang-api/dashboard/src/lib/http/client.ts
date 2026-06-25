@@ -323,6 +323,7 @@ export {
   skillhubInstall,
   // workflows
   runWorkflow,
+  rerunWorkflowRun,
   dryRunWorkflow,
   deleteWorkflow,
   createWorkflow,

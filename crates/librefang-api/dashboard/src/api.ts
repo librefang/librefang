@@ -584,6 +584,10 @@ export interface WorkflowRunItem {
   workflow_name?: string;
   state?: unknown;
   steps_completed?: number;
+  /** Parameters the run was launched with (JSON object string or raw text). */
+  input?: string;
+  /** Run-level failure message, present on failed runs. */
+  error?: string;
   started_at?: string;
   completed_at?: string | null;
 }
@@ -2391,6 +2395,22 @@ export async function listWorkflowRuns(workflowId: string): Promise<WorkflowRunI
   return get<WorkflowRunItem[]>(`/api/workflows/${encodeURIComponent(workflowId)}/runs`);
 }
 
+/**
+ * Re-run a previous run with its original parameters.
+ *
+ * The backend reads the workflow + input off the stored run (not caller-supplied
+ * params), so this is a faithful, non-destructive repeat of what executed. The
+ * original run is left untouched; a fresh run is queued and `{ run_id }` of the
+ * new run is returned.
+ */
+export async function rerunWorkflowRun(runId: string): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>(
+    `/api/workflows/runs/${encodeURIComponent(runId)}/rerun`,
+    {},
+    LONG_RUNNING_TIMEOUT_MS, // queues a multi-step LLM run
+  );
+}
+
 /** Per-step execution result returned by run/detail endpoints. */
 export interface WorkflowStepResult {
   step_name: string;
@@ -2402,6 +2422,8 @@ export interface WorkflowStepResult {
   input_tokens: number;
   output_tokens: number;
   duration_ms: number;
+  /** Step-level failure message; present on the step that failed. */
+  error?: string;
 }
 
 /** Full detail for a single workflow run. */
