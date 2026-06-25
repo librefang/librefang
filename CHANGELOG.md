@@ -150,7 +150,7 @@ In-crate only; no cross-crate error-shape changes.
 
 ### Fixed
 
-- **fix(kernel): stop the GC sweep from aborting a successor turn (TOCTOU on `running_tasks`)** (@houko).
+- **fix(kernel): stop the GC sweep from aborting a successor turn (TOCTOU on `running_tasks`)** (#6317) (@houko).
   The 5-minute sweep collected dead/finished `(agent, session)` keys and then did a bare `running_tasks.remove(&key)`; a faster successor turn that swapped a fresh, live `RunningTask` into the same key between the collect and the remove was dropped and had its in-flight `AbortHandle` fired, killing a live turn.
   The sweep now snapshots the observed `task_id` and removes via `remove_if(... v.task_id == observed)` — the same `#3445` guard the streaming-cleanup path uses — so a swapped-in successor is never touched.
 
