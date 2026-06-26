@@ -62,7 +62,7 @@ toml = { workspace = true }
 url = { workspace = true }
 dirs = { workspace = true }
 tempfile = { workspace = true }
-pdf-extract = "0.10"
+pdf-extract = "0.12"
 # SSH transport for the optional remote-exec backend (#3332).
 # Locked behind the `ssh-backend` feature so the dependency tree stays
 # trim for users who only need the local / Docker backends.
