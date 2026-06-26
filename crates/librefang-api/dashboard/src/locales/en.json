@@ -828,8 +828,7 @@
     "tools_declared_desc": "Tools this agent can use. Leave empty for unrestricted access to all tools.",
     "providers_error_loading": "Error loading",
     "no_providers": "No providers",
-    "select_provider_first": "Select provider first",
-    "no_models": "No models"
+    "select_provider_first": "Select provider first"
   },
   "providers": {
     "title": "Providers",

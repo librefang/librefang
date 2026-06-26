@@ -828,8 +828,7 @@
     "tools_declared_desc": "此智能体可使用的工具。留空则可不受限制地访问所有工具。",
     "providers_error_loading": "加载错误",
     "no_providers": "没有供应商",
-    "select_provider_first": "请先选择供应商",
-    "no_models": "没有模型"
+    "select_provider_first": "请先选择供应商"
   },
   "providers": {
     "title": "供应商",
