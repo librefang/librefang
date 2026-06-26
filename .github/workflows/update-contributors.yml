@@ -41,13 +41,24 @@ jobs:
         id: cpr
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8
         with:
+          # Create the PR with a PAT, not the default GITHUB_TOKEN. Branch
+          # pushes made by GITHUB_TOKEN do not trigger `on: pull_request`
+          # workflows (GitHub's recursion guard), so CI — and the required
+          # "CI Gate" status check — would never run on this PR, leaving it
+          # permanently unmergeable.
+          token: ${{ secrets.WEBSITE_REPO_TOKEN }}
           branch: chore/update-contributors-star-history
           commit-message: "docs: update contributors and star history"
           title: "docs: update contributors and star history"
           delete-branch: true
 
-      - name: Auto-merge PR
+      - name: Enable auto-merge
         if: steps.diff.outputs.changed == 'true' && steps.cpr.outputs.pull-request-number
         env:
           GH_TOKEN: ${{ secrets.WEBSITE_REPO_TOKEN }}
-        run: gh pr merge ${{ steps.cpr.outputs.pull-request-number }} --squash --delete-branch --admin
+        # The `main` ruleset requires the "CI Gate" check and has an empty
+        # bypass_actors list, so `--admin` cannot force the merge — it fails
+        # with "Required status check 'CI Gate' is expected" while CI is still
+        # pending. Enable auto-merge instead; GitHub squash-merges the PR on
+        # its own once CI Gate passes (0 approvals are required).
+        run: gh pr merge ${{ steps.cpr.outputs.pull-request-number }} --squash --delete-branch --auto
