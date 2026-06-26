@@ -1730,6 +1730,20 @@ jobs:
         run: |
           echo "NDK_HOME=$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
 
+      # NDK r23+ ships only the llvm-prefixed binutils (llvm-ar, llvm-ranlib);
+      # the legacy `<target>-ranlib` wrappers were removed. openssl-src builds
+      # vendored OpenSSL with CROSS_COMPILE=<target>- and shells out to
+      # `<target>-ranlib`, so `make install_dev` dies with "ranlib: not found"
+      # (exit 127). Expose the legacy names (both Android ABIs this job builds)
+      # as symlinks to the llvm equivalents so the vendored build links.
+      - name: Symlink legacy NDK binutils for openssl-src cross-compile
+        run: |
+          NDK_BIN="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          for tool in ar ranlib nm strip; do
+            ln -sf "$NDK_BIN/llvm-$tool" "$NDK_BIN/aarch64-linux-android-$tool"
+            ln -sf "$NDK_BIN/llvm-$tool" "$NDK_BIN/arm-linux-androideabi-$tool"
+          done
+
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi
