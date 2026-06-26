@@ -2097,14 +2097,7 @@ mod tests {
 
     #[test]
     fn stream_json_init_event_carries_resolved_model() {
-        // The #6318 auto-detect path for the streaming agent loop: `claude -p
-        // --output-format stream-json` emits a `system`/`init` event up front
-        // whose `model` field is the model the CLI actually resolved for the run.
-        // `stream` captures it into `CompletionResponse.actual_model` so kernel
-        // metering attributes the real model rather than the requested id.
-        // This locks the deserialization contract — dropping the `#[serde] model`
-        // field (or renaming it) breaks this test rather than silently turning
-        // resolved-model detection back into a no-op.
+        // Locks the serde contract: stream-json init event carries a `model` field — dropping or renaming it silently disables the #6318 resolved-model detection path.
         let init_line = r#"{"type":"system","subtype":"init","cwd":"/repo","session_id":"s-1","tools":["Bash"],"model":"claude-sonnet-4-5-20250929","permissionMode":"bypassPermissions"}"#;
         let event: ClaudeStreamEvent =
             serde_json::from_str(init_line).expect("init event deserializes");
@@ -2114,11 +2107,7 @@ mod tests {
 
     #[test]
     fn json_output_surfaces_model_when_present_else_none() {
-        // `complete` reads the resolved model from the result JSON's `model`
-        // field. Today `claude -p --output-format json` does not emit it, so the
-        // field stays `None` and the kernel falls back to the requested id; when
-        // a future CLI version adds it, `complete` surfaces it with no code
-        // change. Both shapes are pinned here so neither regresses silently.
+        // Pins both ClaudeJsonOutput shapes: absent `model` (today's --output-format json) → None; present → surfaced (forward-compat for future CLI versions).
         let without_model = r#"{"type":"result","subtype":"success","is_error":false,"result":"hi","usage":{"input_tokens":10,"output_tokens":5}}"#;
         let parsed: ClaudeJsonOutput =
             serde_json::from_str(without_model).expect("result json deserializes");
