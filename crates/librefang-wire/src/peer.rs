@@ -728,11 +728,8 @@ impl PeerNode {
     /// embedded in the handshake HMAC so that a captured handshake cannot be
     /// replayed against a *different* federation node that shares the same
     /// `shared_secret` (see #3875). Pass an empty string only for bootstrap
-    /// connections where the remote node ID is genuinely unknown in advance —
-    /// `bootstrap_peers` lists addresses, not identities. The receiver accepts
-    /// the empty-recipient (bootstrap) binding in addition to the bound form
-    /// (see the inbound handshake path), so a bootstrap dial succeeds; the
-    /// nonce, Ed25519 TOFU, and ECDH layers still authenticate the peer.
+    /// connections where the remote node ID is genuinely unknown in advance — `bootstrap_peers` lists addresses, not identities.
+    /// The receiver accepts the empty-recipient (bootstrap) binding in addition to the bound form (see the inbound handshake path), so a bootstrap dial succeeds; the nonce, Ed25519 TOFU, and ECDH layers still authenticate the peer.
     pub async fn connect_to_peer(
         &self,
         addr: SocketAddr,
@@ -1154,27 +1151,15 @@ impl PeerNode {
                     });
                 }
 
-                // SECURITY (#3875 / #3920): Verify HMAC *before* recording the
-                // nonce. The connecting side binds the HMAC over
+                // SECURITY (#3875 / #3920): Verify HMAC *before* recording the nonce.
+                // The connecting side binds the HMAC over:
                 //   nonce | sender_node_id | recipient_node_id
-                // An established federation link (`send_to_peer`) already knows
-                // our node ID and binds the recipient to it, so a captured
-                // handshake cannot be replayed against a *different* node that
-                // shares the same shared_secret.
+                // An established federation link (`send_to_peer`) already knows our node ID and binds the recipient to it, so a captured handshake cannot be replayed against a *different* node that shares the same shared_secret.
                 //
-                // A *bootstrap* dial cannot know our node ID in advance — the
-                // `bootstrap_peers` config lists addresses only — so it leaves
-                // the recipient field empty (see `connect_to_peer`). Accept both
-                // bindings: the recipient-bound form first (the strong
-                // anti-replay path), then the empty bootstrap form. The
-                // remaining defenses still cover the bootstrap path — nonce
-                // dedup (#3880), Ed25519 TOFU identity pinning (#3873) below,
-                // and the per-handshake ECDH session key (#4269) — so accepting
-                // an unbound recipient here does not let an attacker who lacks
-                // the X25519 ephemeral private key actually communicate.
-                // Without this branch every bootstrap connection 403s, because
-                // the dialer signs `nonce|sender|` while we verify
-                // `nonce|sender|<our node id>`.
+                // A *bootstrap* dial cannot know our node ID in advance — the `bootstrap_peers` config lists addresses only — so it leaves the recipient field empty (see `connect_to_peer`).
+                // Accept both bindings: the recipient-bound form first (the strong anti-replay path), then the empty bootstrap form.
+                // The remaining defenses still cover the bootstrap path — nonce dedup (#3880), Ed25519 TOFU identity pinning (#3873) below, and the per-handshake ECDH session key (#4269) — so accepting an unbound recipient here does not let an attacker who lacks the X25519 ephemeral private key actually communicate.
+                // Without this branch every bootstrap connection 403s, because the dialer signs `nonce|sender|` while we verify `nonce|sender|<our node id>`.
                 //
                 // Checking HMAC first (order fix for #3880) means an attacker
                 // who does not know shared_secret cannot trigger nonce
@@ -1927,18 +1912,10 @@ mod tests {
         assert_eq!(registry1.connected_count(), 1);
     }
 
-    /// Regression (#3920): the production `bootstrap_peers` path dials via
-    /// `connect_to_peer`, which leaves `recipient_node_id` empty because the
-    /// remote node ID is unknown in advance — `bootstrap_peers` lists addresses,
-    /// not identities. After #3920 bound the recipient node ID into the
-    /// handshake HMAC, every bootstrap connection failed with
-    /// `403 HMAC authentication failed`: the receiver verified the HMAC against
-    /// its own real node ID while the dialer had signed an empty recipient, and
-    /// the inbound path had no fallback for the empty form. All existing tests
-    /// used `connect_to_peer_with_id` with a known recipient, so none exercised
-    /// the real bootstrap path. This test dials through `connect_to_peer` — the
-    /// exact call `background_lifecycle.rs` makes for each bootstrap entry — and
-    /// asserts the handshake completes in both directions.
+    /// Regression (#3920): the production `bootstrap_peers` path dials via `connect_to_peer`, which leaves `recipient_node_id` empty because the remote node ID is unknown in advance — `bootstrap_peers` lists addresses, not identities.
+    /// After #3920 bound the recipient node ID into the handshake HMAC, every bootstrap connection failed with `403 HMAC authentication failed`: the receiver verified the HMAC against its own real node ID while the dialer had signed an empty recipient, and the inbound path had no fallback for the empty form.
+    /// All existing tests used `connect_to_peer_with_id` with a known recipient, so none exercised the real bootstrap path.
+    /// This test dials through `connect_to_peer` — the exact call `background_lifecycle.rs` makes for each bootstrap entry — and asserts the handshake completes in both directions.
     #[tokio::test]
     async fn issue_3920_bootstrap_connect_without_recipient_id_succeeds() {
         let registry1 = PeerRegistry::new();
@@ -1988,10 +1965,8 @@ mod tests {
         assert!(registry1.get_peer("bootstrap-client").is_some());
     }
 
-    /// A handshake bound to a *wrong, non-empty* recipient node ID must still be
-    /// rejected — the #3920 fix only relaxes the empty (bootstrap) recipient, it
-    /// does NOT accept arbitrary recipients. This guards the cross-node replay
-    /// protection (#3875) that the bootstrap fallback must not undo.
+    /// A handshake bound to a *wrong, non-empty* recipient node ID must still be rejected — the #3920 fix only relaxes the empty (bootstrap) recipient, it does NOT accept arbitrary recipients.
+    /// This guards the cross-node replay protection (#3875) that the bootstrap fallback must not undo.
     #[tokio::test]
     async fn issue_3920_wrong_nonempty_recipient_still_rejected() {
         let registry1 = PeerRegistry::new();
