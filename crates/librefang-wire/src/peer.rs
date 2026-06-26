@@ -2010,6 +2010,72 @@ mod tests {
         assert_eq!(registry2.connected_count(), 0);
     }
 
+    /// Regression (#3920) for the *identity-bearing* bootstrap path — the real
+    /// production default, since every daemon node loads an Ed25519 keypair via
+    /// `load_or_generate`. The dialer signs its identity over the same
+    /// empty-recipient `auth_data` it HMACs, so the receiver MUST verify that
+    /// signature against the bootstrap form it accepted, not its own bound form.
+    /// Had the fix threaded the wrong `auth_data` into identity verification,
+    /// this test would fail with "Ed25519 identity signature invalid" — the
+    /// HMAC-only `issue_3920_bootstrap_connect_without_recipient_id_succeeds`
+    /// above cannot catch that because it uses identity-less nodes.
+    #[tokio::test]
+    async fn issue_3920_identity_bootstrap_connect_succeeds_and_pins() {
+        let kp_server = Ed25519KeyPair::generate().unwrap();
+        let kp_client = Ed25519KeyPair::generate().unwrap();
+        let server_pub = kp_server.public_key().to_string();
+        let client_pub = kp_client.public_key().to_string();
+
+        let r1 = PeerRegistry::new();
+        let h1 = Arc::new(TestHandle::new());
+        let (node1, _t1) = PeerNode::start_with_identity(
+            test_config("identity-server", "kernel-1"),
+            r1.clone(),
+            h1.clone(),
+            Some(kp_server),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let r2 = PeerRegistry::new();
+        let h2 = Arc::new(TestHandle::new());
+        let (node2, _t2) = PeerNode::start_with_identity(
+            test_config("identity-client", "kernel-2"),
+            r2.clone(),
+            h2.clone(),
+            Some(kp_client),
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Bootstrap dial (empty recipient) between two identity-bearing nodes —
+        // exactly what `background_lifecycle.rs` does, with the keypairs every
+        // real daemon carries.
+        node2
+            .connect_to_peer(node1.local_addr(), h2)
+            .await
+            .expect("identity-bearing bootstrap handshake must succeed");
+
+        // node2 pinned the server's pubkey (ack identity verified) and
+        // registered the peer.
+        assert_eq!(
+            node2.pinned_pubkeys_snapshot().get("identity-server"),
+            Some(&server_pub)
+        );
+        assert!(node2.registry().get_peer("identity-server").is_some());
+
+        // node1 pinned the client's pubkey — this is the assertion that proves
+        // the inbound side verified the Ed25519 signature against the
+        // empty-recipient `auth_data`. The pin happens before node1 writes the
+        // ack, so it is already present once `connect_to_peer` returns.
+        assert_eq!(
+            node1.pinned_pubkeys_snapshot().get("identity-client"),
+            Some(&client_pub)
+        );
+    }
+
     #[tokio::test]
     async fn test_unauthenticated_agent_message_rejected() {
         let registry = PeerRegistry::new();
