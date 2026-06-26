@@ -5,6 +5,35 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.6.26] - 2026-06-26
+
+_10 PRs from 2 contributors since v2026.6.24-beta.23._
+
+### Added
+
+- Add Ukrainian localization and extract hardcoded copy (#6312) (@pavver)
+- Add AUR packaging for Arch Linux (#6314) (@pavver)
+- Surface run params, errors, and one-click re-run (#6292) (#6324) (@houko)
+- Allow a custom model id when editing an agent (#6318) (#6327) (@houko)
+
+### Fixed
+
+- Disable redirect following on OAuth HTTP clients (SSRF + credential leak) (#6315) (@houko)
+- Block separator-less secret env names from WASM guests (#6316) (@houko)
+- Guard gc_sweep running_tasks removal with task_id (TOCTOU) (#6317) (@houko)
+- Describe inbound images on the debounced channel path (#6321) (#6323) (@houko)
+- Accept empty-recipient HMAC so bootstrap_peers can connect (#6330) (@houko)
+
+<details>
+<summary>Documentation, maintenance, and other internal changes</summary>
+
+### Maintenance
+
+- Pin claude_code resolved-model parsing (#6318) (#6331) (@houko)
+
+</details>
+
+
 ## [2026.6.24] - 2026-06-24
 
 _33 PRs from 5 contributors since v2026.6.22-beta.22._
