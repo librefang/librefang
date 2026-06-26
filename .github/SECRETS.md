@@ -145,6 +145,41 @@ token only as a break-glass option.
 
 ---
 
+## AUR publishing (release.yml `sync_aur_bin` / `sync_aur_desktop` / `sync_aur_docker`)
+
+Push the release-pinned packages under `packaging/aur/` to the Arch User
+Repository on every tag. When `AUR_SSH_PRIVATE_KEY` is absent the three
+jobs no-op with a notice — nothing downstream depends on them, so forks and
+unconfigured repos are unaffected.
+
+| Secret | Purpose | Format | Rotation |
+|---|---|---|---|
+| `AUR_SSH_PRIVATE_KEY` | SSH private key whose public half is registered on the AUR account that owns `librefang-bin`, `librefang-desktop-bin`, `librefang-docker`. Authenticates `git push ssh://aur@aur.archlinux.org/…`. | OpenSSH private key incl. BEGIN/END lines (multi-line; no base64) | When personnel changes or the key is compromised |
+| `AUR_KNOWN_HOSTS` | Optional. `known_hosts` line(s) pinning `aur.archlinux.org`. When absent the workflow fetches them with `ssh-keyscan` at runtime (trust-on-first-use). Set it to remove the TOFU window. | `ssh-keyscan aur.archlinux.org` output | When AUR rotates its host key |
+| `AUR_GIT_NAME` | Optional. Commit author name for AUR pushes. Defaults to `LibreFang Release Bot`. | plain string | n/a |
+| `AUR_GIT_EMAIL` | Optional. Commit author email for AUR pushes. Defaults to `release-bot@librefang.ai`. | email | n/a |
+
+**Generation reference**
+
+```sh
+# 1. Dedicated keypair for CI (no passphrase — Actions cannot answer a prompt):
+ssh-keygen -t ed25519 -C "librefang-aur-ci" -f aur_ci -N ""
+
+# 2. Register the PUBLIC key on the AUR account that owns the packages:
+#    https://aur.archlinux.org/account → "SSH Public Key" (append aur_ci.pub).
+
+# 3. Paste the PRIVATE key (aur_ci, incl. BEGIN/END) into AUR_SSH_PRIVATE_KEY.
+
+# 4. (Optional) pin the host key instead of relying on ssh-keyscan:
+ssh-keyscan aur.archlinux.org   # paste into AUR_KNOWN_HOSTS
+```
+
+The AUR repositories (`ssh://aur@aur.archlinux.org/librefang-bin.git`, etc.)
+must exist and be owned by that account before the first push. See
+`packaging/aur/README.md` for the one-time bootstrap.
+
+---
+
 ## Operational rules
 
 - **Never echo a secret.** GitHub Actions masks known secret values, but

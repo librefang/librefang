@@ -2586,6 +2586,79 @@ jobs:
           git push
 
   # ═════════════════════════════════════════════════════════════════════════
+  # AUR (Arch User Repository) — publish the release-pinned packages from
+  # packaging/aur/. Each job mirrors the Homebrew sync above: it runs only on
+  # a real tag (or a channel=current re-publish), waits on the build job that
+  # produced its asset, and degrades to a no-op when AUR_SSH_PRIVATE_KEY is
+  # absent (forks / unconfigured repos). The composite action regenerates
+  # pkgver / sha256sums / .SRCINFO and pushes to ssh://aur@aur.archlinux.org.
+  # Split into three independent jobs (not a matrix) so a desktop build
+  # failure cannot block the librefang-bin publish, and vice versa.
+  # ═════════════════════════════════════════════════════════════════════════
+
+  sync_aur_bin:
+    name: Publish AUR / librefang-bin
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
+    runs-on: ubuntu-latest
+    needs: [cli_linux]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ env.RELEASE_REF }}
+      - uses: ./.github/actions/publish-aur
+        with:
+          package: librefang-bin
+          release-tag: ${{ env.RELEASE_TAG }}
+          ssh-private-key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          known-hosts: ${{ secrets.AUR_KNOWN_HOSTS }}
+          git-name: ${{ secrets.AUR_GIT_NAME }}
+          git-email: ${{ secrets.AUR_GIT_EMAIL }}
+
+  sync_aur_desktop:
+    name: Publish AUR / librefang-desktop-bin
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
+    runs-on: ubuntu-latest
+    needs: [desktop]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ env.RELEASE_REF }}
+      - uses: ./.github/actions/publish-aur
+        with:
+          package: librefang-desktop-bin
+          release-tag: ${{ env.RELEASE_TAG }}
+          ssh-private-key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          known-hosts: ${{ secrets.AUR_KNOWN_HOSTS }}
+          git-name: ${{ secrets.AUR_GIT_NAME }}
+          git-email: ${{ secrets.AUR_GIT_EMAIL }}
+
+  sync_aur_docker:
+    name: Publish AUR / librefang-docker
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
+    runs-on: ubuntu-latest
+    # Pin only after the multi-arch image + tag exist, so `librefang-docker
+    # pull` works the moment the package lands.
+    needs: [docker-manifest]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ env.RELEASE_REF }}
+      - uses: ./.github/actions/publish-aur
+        with:
+          package: librefang-docker
+          release-tag: ${{ env.RELEASE_TAG }}
+          ssh-private-key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          known-hosts: ${{ secrets.AUR_KNOWN_HOSTS }}
+          git-name: ${{ secrets.AUR_GIT_NAME }}
+          git-email: ${{ secrets.AUR_GIT_EMAIL }}
+
+  # ═════════════════════════════════════════════════════════════════════════
   # Docker — from release-docker.yml
   # ═════════════════════════════════════════════════════════════════════════
 
