@@ -61,14 +61,17 @@ jobs:
       # the legacy `<target>-ranlib` wrappers were removed. openssl-src builds
       # vendored OpenSSL with CROSS_COMPILE=aarch64-linux-android- and shells out
       # to `aarch64-linux-android-ranlib`, so `make install_dev` dies with
-      # "ranlib: not found" (exit 127). Expose the legacy names as symlinks to
-      # the llvm equivalents so the vendored build links.
+      # "ranlib: not found" (exit 127). Symlink the legacy names to the llvm
+      # equivalents AND put the NDK bin dir on PATH: openssl-src passes RANLIB
+      # to Configure as a bare command name (unlike AR, which it passes as an
+      # absolute path), so the symlink is only resolvable via a PATH lookup.
       - name: Symlink legacy NDK binutils for openssl-src cross-compile
         run: |
           NDK_BIN="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
           for tool in ar ranlib nm strip; do
             ln -sf "$NDK_BIN/llvm-$tool" "$NDK_BIN/aarch64-linux-android-$tool"
           done
+          echo "$NDK_BIN" >> "$GITHUB_PATH"
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
