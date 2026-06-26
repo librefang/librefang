@@ -2096,6 +2096,42 @@ mod tests {
     }
 
     #[test]
+    fn stream_json_init_event_carries_resolved_model() {
+        // The #6318 auto-detect path for the streaming agent loop: `claude -p
+        // --output-format stream-json` emits a `system`/`init` event up front
+        // whose `model` field is the model the CLI actually resolved for the run.
+        // `stream` captures it into `CompletionResponse.actual_model` so kernel
+        // metering attributes the real model rather than the requested id.
+        // This locks the deserialization contract — dropping the `#[serde] model`
+        // field (or renaming it) breaks this test rather than silently turning
+        // resolved-model detection back into a no-op.
+        let init_line = r#"{"type":"system","subtype":"init","cwd":"/repo","session_id":"s-1","tools":["Bash"],"model":"claude-sonnet-4-5-20250929","permissionMode":"bypassPermissions"}"#;
+        let event: ClaudeStreamEvent =
+            serde_json::from_str(init_line).expect("init event deserializes");
+        assert_eq!(event.r#type, "system");
+        assert_eq!(event.model.as_deref(), Some("claude-sonnet-4-5-20250929"));
+    }
+
+    #[test]
+    fn json_output_surfaces_model_when_present_else_none() {
+        // `complete` reads the resolved model from the result JSON's `model`
+        // field. Today `claude -p --output-format json` does not emit it, so the
+        // field stays `None` and the kernel falls back to the requested id; when
+        // a future CLI version adds it, `complete` surfaces it with no code
+        // change. Both shapes are pinned here so neither regresses silently.
+        let without_model = r#"{"type":"result","subtype":"success","is_error":false,"result":"hi","usage":{"input_tokens":10,"output_tokens":5}}"#;
+        let parsed: ClaudeJsonOutput =
+            serde_json::from_str(without_model).expect("result json deserializes");
+        assert_eq!(parsed.model, None);
+        assert_eq!(parsed.result.as_deref(), Some("hi"));
+
+        let with_model = r#"{"type":"result","is_error":false,"result":"hi","model":"claude-opus-4-1-20250805"}"#;
+        let parsed: ClaudeJsonOutput =
+            serde_json::from_str(with_model).expect("result json deserializes");
+        assert_eq!(parsed.model.as_deref(), Some("claude-opus-4-1-20250805"));
+    }
+
+    #[test]
     fn test_new_defaults_to_claude() {
         let driver = ClaudeCodeDriver::new(None, true);
         assert_eq!(driver.cli_path, "claude");
