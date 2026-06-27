@@ -29,6 +29,7 @@
         nativeBuildInputs = with pkgs; [
           pkg-config
           rustToolchain
+          perl
         ];
 
         buildInputs = with pkgs; [
