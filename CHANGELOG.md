@@ -93,6 +93,7 @@ _33 PRs from 5 contributors since v2026.6.22-beta.22._
 
 ### Fixed
 
+- Allow the Codex CLI provider to run from desktop and daemon processes outside a Git repository, and replace its deprecated `--full-auto` flag (@pavver)
 - Accept the empty-recipient handshake HMAC binding so `bootstrap_peers` connections succeed instead of failing with `403 HMAC authentication failed` (regression from #3920) (#6330) (@houko)
 - Bump `pdf-extract` 0.10→0.12 to pull the patched `lopdf` 0.42, fixing RUSTSEC-2026-0187 — a stack overflow on deeply nested PDF objects reachable via attacker-supplied PDF attachments (the existing `catch_unwind` guards do not mitigate it, since a stack overflow aborts rather than unwinds) (@houko)
 
