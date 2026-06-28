@@ -174,6 +174,48 @@ fn estimate_str_tokens(s: &str) -> usize {
     total.ceil() as usize
 }
 
+/// Per-character weight for JSON structural punctuation (`{}[]":,` and the
+/// escape `\`). In prose these would count at the flat 0.25 (they rarely form
+/// their own token because BPE merges them with neighbours), but in serialized
+/// JSON they are dense and high-entropy: every brace, quote, colon, comma, and
+/// escape sequence tends to tokenize as its own token (often ~1 each, and
+/// `\"` / `\n` as a pair). The flat 0.25 therefore systematically *under*counts
+/// JSON-heavy content. This is the cross-provider signal measured by the
+/// token-estimation accuracy benchmark (`tests/token_estimation_accuracy.rs`):
+/// both the GLM and o200k baselines undercount the `tool_json` bucket, and the
+/// sign agrees, so raising the weight of just these structural characters is a
+/// language-independent correction that does not touch prose estimation.
+///
+/// 0.5 is calibrated against both committed baselines: it is the value that
+/// improves (or holds) the `tool_json` error of *both* tokenizers without
+/// regressing any other bucket. GLM tokenizes JSON structure more efficiently
+/// than o200k, so a single global weight is a deliberate compromise — 0.5 cuts
+/// GLM's systematic undercount (−14% → −3%) and reduces o200k's (−46% → −39%);
+/// a higher weight would over-count GLM. The residual o200k undercount is a
+/// known limit of a tokenizer-independent heuristic, not a missed tuning.
+const JSON_STRUCT_TOKEN_WEIGHT: f64 = 0.5;
+
+/// Estimate tokens for serialized-JSON content (tool-call inputs and tool
+/// results), which is denser in structural punctuation than prose.
+///
+/// Identical to [`estimate_str_tokens`] except JSON structural characters are
+/// weighted at [`JSON_STRUCT_TOKEN_WEIGHT`] instead of the flat 0.25. CJK and
+/// alphanumeric runs (string values inside the JSON) keep their normal weights,
+/// so a tool result carrying Chinese text is still counted CJK-aware.
+fn estimate_json_str_tokens(s: &str) -> usize {
+    let total: f64 = s
+        .chars()
+        .map(|c| {
+            if matches!(c, '{' | '}' | '[' | ']' | '"' | ':' | ',' | '\\') {
+                JSON_STRUCT_TOKEN_WEIGHT
+            } else {
+                char_token_weight(c)
+            }
+        })
+        .sum();
+    total.ceil() as usize
+}
+
 /// Estimate token count for a set of messages, optional system prompt, and tool definitions.
 ///
 /// Uses a CJK-aware heuristic: CJK chars ~1.5 tokens, ASCII/Latin chars/4.
@@ -203,7 +245,9 @@ pub fn estimate_token_count(
             tokens += estimate_str_tokens(&tool.name);
             tokens += estimate_str_tokens(&tool.description);
             if let Ok(schema_str) = serde_json::to_string(&tool.input_schema) {
-                tokens += estimate_str_tokens(&schema_str);
+                // The JSON schema is the largest contributor and is structural
+                // JSON, so count it with the JSON-aware estimator.
+                tokens += estimate_json_str_tokens(&schema_str);
             }
         }
     }
@@ -219,14 +263,18 @@ fn estimate_message_tokens(msg: &Message) -> usize {
             .iter()
             .map(|b| match b {
                 ContentBlock::Text { text, .. } => estimate_str_tokens(text),
-                ContentBlock::ToolResult { content, .. } => estimate_str_tokens(content),
+                // Tool results are usually serialized JSON; count their
+                // structural punctuation at the JSON-aware weight.
+                ContentBlock::ToolResult { content, .. } => estimate_json_str_tokens(content),
                 ContentBlock::Thinking { thinking, .. } => estimate_str_tokens(thinking),
                 ContentBlock::ToolUse {
                     name, id, input, ..
                 } => {
                     estimate_str_tokens(name)
                         + estimate_str_tokens(id)
-                        + estimate_str_tokens(&serde_json::to_string(input).unwrap_or_default())
+                        + estimate_json_str_tokens(
+                            &serde_json::to_string(input).unwrap_or_default(),
+                        )
                 }
                 // Base64 images consume significant tokens.  A rough
                 // estimate: each base64 char ≈ 0.25 tokens (same as ASCII),
@@ -1188,11 +1236,32 @@ fn aggregate_developer_loops(messages: &mut Vec<Message>, max_steps: u32) {
         if steps.len() >= max_steps && steps.len() > 2 {
             let first = steps[0];
             let last = steps[steps.len() - 1];
-            result.push(messages[first.0].clone());
-            result.push(messages[first.1].clone());
             let elided = steps.len() - 2;
             let tools = collect_dev_tool_names(messages, &steps[1..steps.len() - 1]);
-            result.push(developer_loop_placeholder(elided, &tools));
+
+            // Keep the first assistant turn and its matching user result delivery.
+            result.push(messages[first.0].clone());
+            let mut first_user_msg = messages[first.1].clone();
+            // Embed the aggregation notice *inside the first ToolResult's content*
+            // rather than as a standalone User message or a separate trailing
+            // `Text` block. Two constraints force this:
+            //   1. A standalone placeholder would be consecutive with the result
+            //      delivery, and session_repair intentionally skips merging pure
+            //      tool-result deliveries, so Anthropic's API rejects the history
+            //      with "role User cannot follow role User" (#6251).
+            //   2. A trailing `Text` block in the same message survives the
+            //      Anthropic path but is silently dropped by the OpenAI-compatible
+            //      driver: that driver gates emission of accumulated text `parts`
+            //      on `!has_tool_results`, so any `Text` block sharing a message
+            //      with a `ToolResult` never reaches OpenAI / Groq / Moonshot.
+            // Folding the notice into the ToolResult `content` string is the only
+            // form that survives both translation paths (#6251).
+            append_notice_to_first_tool_result(
+                &mut first_user_msg,
+                &developer_loop_placeholder(elided, &tools),
+            );
+            result.push(first_user_msg);
+
             result.push(messages[last.0].clone());
             result.push(messages[last.1].clone());
             i = j;
@@ -1265,21 +1334,54 @@ fn collect_dev_tool_names(messages: &[Message], steps: &[(usize, usize)]) -> Vec
     names.into_iter().collect()
 }
 
-/// `timestamp: None` keeps output byte-stable across runs.
-fn developer_loop_placeholder(elided: usize, tools: &[String]) -> Message {
+/// Returns the notice text describing the elided intermediate developer-loop
+/// steps. The wording is independent of any timestamp so aggregation output is
+/// byte-stable across runs (deterministic-prompt rule, #3298).
+fn developer_loop_placeholder(elided: usize, tools: &[String]) -> String {
     let tool_list = if tools.is_empty() {
         String::new()
     } else {
         format!(" (tools: {})", tools.join(", "))
     };
-    let text = format!(
+    format!(
         "[DEVELOPER LOOP AGGREGATED] {elided} intermediate developer-tool step(s) elided during compaction{tool_list}. The first and last steps are retained for context."
-    );
-    Message {
-        role: Role::User,
-        content: MessageContent::Text(text),
-        pinned: false,
-        timestamp: None,
+    )
+}
+
+/// Fold the aggregation `notice` into the first `ToolResult` block's `content`
+/// string, separated by a blank line. This keeps the notice inside the tool
+/// result so it survives both the Anthropic and the OpenAI-compatible driver
+/// translation paths (a separate `Text` block is dropped by the latter — see
+/// the call site for the full rationale, #6251).
+///
+/// If the message somehow has no `ToolResult` block (it always should, given
+/// the caller only ever passes a tool-result delivery), the notice is appended
+/// as a trailing `Text` block as a best-effort fallback so it is not lost.
+fn append_notice_to_first_tool_result(msg: &mut Message, notice: &str) {
+    if let MessageContent::Blocks(blocks) = &mut msg.content {
+        for block in blocks.iter_mut() {
+            if let ContentBlock::ToolResult { content, .. } = block {
+                if content.is_empty() {
+                    *content = notice.to_string();
+                } else {
+                    content.push_str("\n\n");
+                    content.push_str(notice);
+                }
+                return;
+            }
+        }
+        // Fallback: no ToolResult present — append as a Text block.
+        blocks.push(ContentBlock::Text {
+            text: notice.to_string(),
+            provider_metadata: None,
+        });
+    } else if let MessageContent::Text(text) = &mut msg.content {
+        if text.is_empty() {
+            *text = notice.to_string();
+        } else {
+            text.push_str("\n\n");
+            text.push_str(notice);
+        }
     }
 }
 
@@ -1400,8 +1502,14 @@ mod tests {
     }
 
     fn has_loop_placeholder(msgs: &[Message]) -> bool {
+        // The notice is now folded into a ToolResult's `content` string, but
+        // accept a Text block / Text content too so the helper stays robust.
         msgs.iter().any(|m| {
             matches!(&m.content, MessageContent::Text(t) if t.contains("DEVELOPER LOOP AGGREGATED"))
+                || matches!(&m.content, MessageContent::Blocks(bs) if bs.iter().any(|b| {
+                    matches!(b, ContentBlock::Text { text, .. } if text.contains("DEVELOPER LOOP AGGREGATED"))
+                        || matches!(b, ContentBlock::ToolResult { content, .. } if content.contains("DEVELOPER LOOP AGGREGATED"))
+                }))
         })
     }
 
@@ -1496,8 +1604,9 @@ mod tests {
             msgs.push(tool_result(&format!("t{k}"), "file_write"));
         }
         aggregate_developer_loops(&mut msgs, 2);
-        // first step (2) + placeholder (1) + last step (2) = 5
-        assert_eq!(msgs.len(), 5);
+        // first step (2) + last step (2) = 4; placeholder is embedded in the
+        // first user result delivery to avoid consecutive User messages (#6251).
+        assert_eq!(msgs.len(), 4);
         assert!(has_loop_placeholder(&msgs));
         assert!(
             tool_pairing_intact(&msgs),
@@ -1526,8 +1635,8 @@ mod tests {
             msgs.push(tool_result(&format!("t{k}"), "file_write"));
         }
         aggregate_developer_loops(&mut msgs, 3);
-        // first + placeholder + last = 5
-        assert_eq!(msgs.len(), 5);
+        // first step (2) + last step (2) = 4; placeholder embedded in first result delivery.
+        assert_eq!(msgs.len(), 4);
         assert!(has_loop_placeholder(&msgs));
         assert!(tool_pairing_intact(&msgs));
     }
@@ -1542,6 +1651,41 @@ mod tests {
         aggregate_developer_loops(&mut msgs, 0);
         assert_eq!(msgs.len(), 20);
         assert!(!has_loop_placeholder(&msgs));
+    }
+
+    #[test]
+    fn aggregate_developer_loops_avoids_consecutive_user_messages() {
+        // After aggregation the remaining history must alternate roles.
+        // Embedding the placeholder in the first result delivery prevents the
+        // previous standalone User placeholder from sitting next to another
+        // User message (#6251).
+        let mut msgs = Vec::new();
+        for k in 0..4 {
+            msgs.push(dev_tool_use(&format!("t{k}"), "file_write"));
+            msgs.push(tool_result(&format!("t{k}"), "file_write"));
+        }
+        aggregate_developer_loops(&mut msgs, 2);
+
+        for window in msgs.windows(2) {
+            assert!(
+                !(window[0].role == Role::User && window[1].role == Role::User),
+                "aggregation must not produce consecutive User messages: {:?} -> {:?}",
+                window[0].role,
+                window[1].role
+            );
+        }
+
+        // The placeholder text should live inside the first result delivery,
+        // specifically folded into a ToolResult's `content` (not a separate Text
+        // block — that form is dropped by the OpenAI-compatible driver, #6251).
+        let first_user = &msgs[1];
+        let in_tool_result = matches!(&first_user.content, MessageContent::Blocks(bs) if bs.iter().any(|b| {
+            matches!(b, ContentBlock::ToolResult { content, .. } if content.contains("DEVELOPER LOOP AGGREGATED"))
+        }));
+        assert!(
+            in_tool_result,
+            "placeholder should be folded into the first result delivery's ToolResult content"
+        );
     }
 
     #[test]
@@ -2162,6 +2306,50 @@ mod tests {
         assert!(
             mixed_est > ascii_est,
             "Mixed content should have more tokens than pure ASCII of same length"
+        );
+    }
+
+    #[test]
+    fn test_estimate_json_str_tokens_weights_structure_above_prose() {
+        // Structural JSON punctuation is counted heavier than the flat prose
+        // 0.25, so JSON-aware estimation exceeds plain estimation for the same
+        // bytes. The gap must come only from the structural chars.
+        let json = r#"{"name":"web_search","args":["a","b"],"n":3}"#;
+        let json_aware = estimate_json_str_tokens(json);
+        let prose = estimate_str_tokens(json);
+        assert!(
+            json_aware > prose,
+            "JSON-aware estimate ({json_aware}) should exceed prose estimate ({prose}) for JSON"
+        );
+        // Plain prose has no structural chars, so the two agree.
+        let text = "the quick brown fox";
+        assert_eq!(estimate_json_str_tokens(text), estimate_str_tokens(text));
+        // CJK string values inside JSON keep CJK weighting (not flattened).
+        let cjk_json = "{\"text\":\"\u{4f60}\u{597d}\"}";
+        assert!(estimate_json_str_tokens(cjk_json) > estimate_json_str_tokens("{\"text\":\"ab\"}"));
+    }
+
+    #[test]
+    fn test_tool_use_estimated_above_equivalent_prose() {
+        // A tool-call message routes through the JSON-aware path, so it must
+        // estimate higher than the same characters carried as plain text.
+        let input = serde_json::json!({"query": "rust async", "limit": 10});
+        let serialized = serde_json::to_string(&input).unwrap();
+        let tool_msg = Message {
+            role: Role::Assistant,
+            content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                id: "call_1".into(),
+                name: "search".into(),
+                input,
+                provider_metadata: None,
+            }]),
+            pinned: false,
+            timestamp: None,
+        };
+        let prose_msg = Message::assistant(format!("searchcall_1{serialized}"));
+        assert!(
+            estimate_message_tokens(&tool_msg) > estimate_message_tokens(&prose_msg),
+            "tool-call JSON should estimate higher than the same chars as prose"
         );
     }
 

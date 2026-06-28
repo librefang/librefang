@@ -2096,6 +2096,31 @@ mod tests {
     }
 
     #[test]
+    fn stream_json_init_event_carries_resolved_model() {
+        // Locks the serde contract: stream-json init event carries a `model` field — dropping or renaming it silently disables the #6318 resolved-model detection path.
+        let init_line = r#"{"type":"system","subtype":"init","cwd":"/repo","session_id":"s-1","tools":["Bash"],"model":"claude-sonnet-4-5-20250929","permissionMode":"bypassPermissions"}"#;
+        let event: ClaudeStreamEvent =
+            serde_json::from_str(init_line).expect("init event deserializes");
+        assert_eq!(event.r#type, "system");
+        assert_eq!(event.model.as_deref(), Some("claude-sonnet-4-5-20250929"));
+    }
+
+    #[test]
+    fn json_output_surfaces_model_when_present_else_none() {
+        // Pins both ClaudeJsonOutput shapes: absent `model` (today's --output-format json) → None; present → surfaced (forward-compat for future CLI versions).
+        let without_model = r#"{"type":"result","subtype":"success","is_error":false,"result":"hi","usage":{"input_tokens":10,"output_tokens":5}}"#;
+        let parsed: ClaudeJsonOutput =
+            serde_json::from_str(without_model).expect("result json deserializes");
+        assert_eq!(parsed.model, None);
+        assert_eq!(parsed.result.as_deref(), Some("hi"));
+
+        let with_model = r#"{"type":"result","is_error":false,"result":"hi","model":"claude-opus-4-1-20250805"}"#;
+        let parsed: ClaudeJsonOutput =
+            serde_json::from_str(with_model).expect("result json deserializes");
+        assert_eq!(parsed.model.as_deref(), Some("claude-opus-4-1-20250805"));
+    }
+
+    #[test]
     fn test_new_defaults_to_claude() {
         let driver = ClaudeCodeDriver::new(None, true);
         assert_eq!(driver.cli_path, "claude");

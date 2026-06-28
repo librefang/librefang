@@ -11,6 +11,7 @@ function detectLang(): string {
   if (path.startsWith('/ko')) return 'ko'
   if (path.startsWith('/es')) return 'es'
   if (path.startsWith('/pl')) return 'pl'
+  if (path.startsWith('/uk')) return 'uk'
   return 'en'
 }
 
@@ -40,7 +41,7 @@ interface AppState {
   toggleTheme: () => void
 }
 
-const LOCALE_PREFIXES = ['zh-TW', 'zh', 'de', 'ja', 'ko', 'es', 'pl']
+const LOCALE_PREFIXES = ['zh-TW', 'zh', 'de', 'ja', 'ko', 'es', 'pl', 'uk']
 
 // Strip any locale prefix from a pathname so we can re-attach the new one.
 // `/zh/skills/foo` → `/skills/foo`, `/skills` → `/skills`, `/` → `/`.

@@ -608,7 +608,7 @@ function TotpSection() {
               </p>
               {setupData.qr_code && (
                 <div className="flex justify-center p-4 bg-white rounded-xl border border-border-subtle">
-                  <img src={setupData.qr_code} alt="TOTP QR Code" className="w-40 h-40 sm:w-48 sm:h-48" />
+                  <img src={setupData.qr_code} alt={t("settings.totp_qr_alt", "TOTP QR Code")} className="w-40 h-40 sm:w-48 sm:h-48" />
                 </div>
               )}
               <code className="block text-sm font-mono bg-main border border-border-subtle rounded-lg px-3 py-2 break-all select-all">

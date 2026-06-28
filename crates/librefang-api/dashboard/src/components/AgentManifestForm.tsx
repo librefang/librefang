@@ -563,7 +563,7 @@ export function AgentManifestForm({
                 type="button"
                 onClick={() => update({ fallback_models: value.fallback_models.filter((_, i) => i !== idx) })}
                 className="text-text-dim hover:text-error"
-                aria-label="remove fallback"
+                aria-label={t("agents.form.remove_fallback")}
               >
                 <Trash2 className="w-3.5 h-3.5" />
               </button>
@@ -801,7 +801,7 @@ export function AgentManifestForm({
                 type="button"
                 onClick={() => update({ context_injection: value.context_injection.filter((_, i) => i !== idx) })}
                 className="text-text-dim hover:text-error"
-                aria-label="remove context injection"
+                aria-label={t("agents.form.remove_context_injection")}
               >
                 <Trash2 className="w-3.5 h-3.5" />
               </button>

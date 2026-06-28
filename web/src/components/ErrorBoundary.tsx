@@ -1,8 +1,16 @@
 import { Component } from 'react'
 import type { ReactNode, ErrorInfo } from 'react'
+import { getTranslation, type Translation } from '../i18n'
+import { useAppStore } from '../store'
 
 interface Props {
   children: ReactNode
+}
+
+type ErrorBoundaryCopy = NonNullable<Translation['errorBoundary']>
+
+interface ErrorBoundaryImplProps extends Props {
+  copy: ErrorBoundaryCopy
 }
 
 interface State {
@@ -13,7 +21,7 @@ interface State {
 // routes failing to resolve), we render a minimal recovery card instead of
 // a blank white screen. Using a class component because React hooks still
 // have no equivalent API for error boundaries.
-export default class ErrorBoundary extends Component<Props, State> {
+class ErrorBoundaryImpl extends Component<ErrorBoundaryImplProps, State> {
   state: State = { error: null }
 
   static getDerivedStateFromError(error: Error): State {
@@ -52,11 +60,12 @@ export default class ErrorBoundary extends Component<Props, State> {
   render() {
     const err = this.state.error
     if (!err) return this.props.children
+    const copy = this.props.copy
     return (
       <div className="min-h-screen flex items-center justify-center p-6">
         <div className="max-w-md w-full border border-red-500/20 bg-red-500/5 p-6 rounded">
-          <div className="text-xs font-mono uppercase tracking-widest text-red-400 mb-2">Runtime error</div>
-          <h1 className="text-lg font-bold text-slate-900 dark:text-white mb-3">Something went wrong.</h1>
+          <div className="text-xs font-mono uppercase tracking-widest text-red-400 mb-2">{copy.label}</div>
+          <h1 className="text-lg font-bold text-slate-900 dark:text-white mb-3">{copy.title}</h1>
           <pre className="text-xs font-mono text-gray-500 mb-4 whitespace-pre-wrap break-words max-h-40 overflow-y-auto">
             {err.message}
           </pre>
@@ -65,17 +74,23 @@ export default class ErrorBoundary extends Component<Props, State> {
               onClick={this.handleReload}
               className="px-3 py-1.5 text-xs font-semibold bg-cyan-500 hover:bg-cyan-400 text-surface rounded"
             >
-              Reload
+              {copy.reload}
             </button>
             <a
               href="/"
               className="px-3 py-1.5 text-xs font-semibold border border-black/10 dark:border-white/10 hover:border-cyan-500/30 rounded text-gray-700 dark:text-gray-300"
             >
-              Home
+              {copy.home}
             </a>
           </div>
         </div>
       </div>
     )
   }
+}
+
+export default function ErrorBoundary({ children }: Props) {
+  const lang = useAppStore(s => s.lang)
+  const copy = getTranslation(lang).errorBoundary!
+  return <ErrorBoundaryImpl copy={copy}>{children}</ErrorBoundaryImpl>
 }

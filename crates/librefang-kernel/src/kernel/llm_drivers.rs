@@ -265,11 +265,21 @@ impl LibreFangKernel {
 
         // If fallback models are configured, wrap in FallbackDriver
         if !effective_fallbacks.is_empty() {
-            // Primary driver uses the agent's own model name (already set in request)
+            // Primary driver uses the agent's own model name (already set in
+            // request). Each slot carries its provider name so the
+            // store-aware `FallbackDriver` can pre-skip a budget-exhausted
+            // slot (#5980): the gate flags the provider in the shared
+            // `ProviderExhaustionStore`, and this driver reads that SAME
+            // store via `is_slot_exhausted`. Mirrors boot.rs:698-714.
             let mut chain: Vec<(
                 std::sync::Arc<dyn librefang_runtime::llm_driver::LlmDriver>,
                 String,
-            )> = vec![(primary.clone(), String::new())];
+                String,
+            )> = vec![(
+                primary.clone(),
+                agent_provider.clone(),
+                agent_provider.clone(),
+            )];
             for fb in &effective_fallbacks {
                 // Resolve "default" to the actual default provider, but if the
                 // model name implies a specific provider (e.g. "gemini-2.0-flash"
@@ -316,16 +326,31 @@ impl LibreFangKernel {
                         .unwrap_or_else(|| DriverConfig::default().max_retries),
                 };
                 match self.llm.driver_cache.get_or_create(&config) {
-                    Ok(d) => chain.push((d, strip_provider_prefix(&fb.model, &fb_provider))),
+                    Ok(d) => chain.push((
+                        d,
+                        strip_provider_prefix(&fb.model, &fb_provider),
+                        fb_provider.clone(),
+                    )),
                     Err(e) => {
                         warn!("Fallback driver '{}' failed to init: {e}", fb_provider);
                     }
                 }
             }
             if chain.len() > 1 {
-                return Ok(Arc::new(
-                    librefang_runtime::drivers::fallback::FallbackDriver::with_models(chain),
-                ));
+                // Attach the SAME exhaustion store the budget gate flags
+                // (`MeteringEngine::exhaustion_store()`), not a fresh one —
+                // otherwise the flag would be invisible to this driver
+                // (#5980). When the store is unwired, fall back to the
+                // provider-less builder (no regression).
+                let fb =
+                    librefang_runtime::drivers::fallback::FallbackDriver::with_models_and_providers(
+                        chain,
+                    );
+                let fb = match self.metering.engine.exhaustion_store() {
+                    Some(store) => fb.with_exhaustion_store(store),
+                    None => fb,
+                };
+                return Ok(Arc::new(fb));
             }
         }
 

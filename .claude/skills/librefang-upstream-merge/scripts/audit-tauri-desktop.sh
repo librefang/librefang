@@ -47,30 +47,32 @@ else
   fail "tauri.conf.json identifier = '$val' (expected 'ai.bossfang.desktop')"
 fi
 
-# 2a. tauri.desktop.conf.json — identifier
-val="$(json_field "$desktop/tauri.desktop.conf.json" identifier)"
-if [ "$val" = "ai.bossfang.desktop" ]; then
-  ok "tauri.desktop.conf.json identifier = ai.bossfang.desktop"
-else
-  fail "tauri.desktop.conf.json identifier = '$val' (expected 'ai.bossfang.desktop')"
+# Upstream #6283 consolidated the desktop updater plugin config INTO
+# tauri.conf.json and deleted the standalone tauri.desktop.conf.json. The
+# updater endpoint + pubkey now live under tauri.conf.json `plugins.updater`,
+# so checks 2b/2c read from there. (Identifier is already covered by 1b.)
+UPDATER_CONF="$desktop/tauri.conf.json"
+if [ -f "$desktop/tauri.desktop.conf.json" ]; then
+  # Legacy split layout still present — prefer it for back-compat.
+  UPDATER_CONF="$desktop/tauri.desktop.conf.json"
 fi
 
-# 2b. tauri.desktop.conf.json — updater endpoint host
+# 2b. updater endpoint host (consolidated into tauri.conf.json since #6283)
 endpoint="$(python3 -c "
 import json
-d=json.load(open('$desktop/tauri.desktop.conf.json'))
+d=json.load(open('$UPDATER_CONF'))
 print(d.get('plugins',{}).get('updater',{}).get('endpoints',[''])[0])
 " 2>/dev/null)"
 case "$endpoint" in
   https://github.com/GQAdonis/librefang/*) ok "updater endpoint → $endpoint" ;;
-  '') fail "updater endpoint missing or unreadable" ;;
+  '') fail "updater endpoint missing or unreadable in $(basename "$UPDATER_CONF")" ;;
   *) fail "updater endpoint → $endpoint (expected github.com/GQAdonis/librefang/...)" ;;
 esac
 
-# 2c. tauri.desktop.conf.json — pubkey key ID
+# 2c. updater pubkey key ID
 pubkey_b64="$(python3 -c "
 import json
-d=json.load(open('$desktop/tauri.desktop.conf.json'))
+d=json.load(open('$UPDATER_CONF'))
 print(d.get('plugins',{}).get('updater',{}).get('pubkey',''))
 " 2>/dev/null)"
 if [ -n "$pubkey_b64" ]; then

@@ -1242,7 +1242,13 @@ async fn run_agent_loop_inner(
 
         // Call LLM with retry, error classification, and circuit breaker
         let provider_name = manifest.model.provider.as_str();
-        let mut response = call_with_retry(&*driver, request, Some(provider_name), None).await?;
+        let mut response = call_with_retry(
+            &*driver,
+            request,
+            Some(provider_name),
+            Some(&*retry::PROVIDER_COOLDOWN),
+        )
+        .await?;
 
         accumulate_token_usage(&mut total_usage, &response.usage);
         // Track the actual-serving slot for billing attribution (#4807

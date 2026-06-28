@@ -3,7 +3,7 @@ import { Search, X, Sparkles, Hash } from 'lucide-react'
 import { useRegistry, getLocalizedDesc, getLocalizedName } from '../useRegistry'
 import RegistryIcon from './RegistryIcon'
 import type { RegistryCategory, Detail } from '../useRegistry'
-import { translations, type Translation } from '../i18n'
+import { getTranslation, type Translation } from '../i18n'
 import { useAppStore } from '../store'
 import { cn } from '../lib/utils'
 
@@ -87,7 +87,7 @@ function scoreHit(query: string, item: Detail, localizedDesc: string): number {
 
 export default function SearchDialog({ open, onClose }: SearchDialogProps) {
   const lang = useAppStore(s => s.lang)
-  const t: Translation = translations[lang] || translations['en']!
+  const t: Translation = getTranslation(lang)
   const { data } = useRegistry()
   const [query, setQuery] = useState('')
   // Debounced value used for actual scoring. Typing 'react-expert' no longer
@@ -107,12 +107,12 @@ export default function SearchDialog({ open, onClose }: SearchDialogProps) {
   const anchorHits = useMemo<Hit[]>(() => [
     { kind: 'anchor', id: 'architecture', label: t.nav.architecture, desc: t.architecture?.title || '' },
     { kind: 'anchor', id: 'hands', label: t.nav.hands, desc: t.hands?.title || '' },
-    { kind: 'anchor', id: 'workflows', label: t.nav.workflows || t.workflows?.label || 'Workflows', desc: t.workflows?.title || '' },
-    { kind: 'anchor', id: 'evolution', label: t.nav.evolution || 'Skills Self-Evolution', desc: t.evolution?.title || '' },
+    { kind: 'anchor', id: 'workflows', label: t.nav.workflows || t.workflows!.label, desc: t.workflows?.title || '' },
+    { kind: 'anchor', id: 'evolution', label: t.nav.evolution || t.evolution!.label, desc: t.evolution?.title || '' },
     { kind: 'anchor', id: 'performance', label: t.nav.performance, desc: t.performance?.title || '' },
     { kind: 'anchor', id: 'install', label: t.nav.install, desc: t.install?.title || '' },
-    { kind: 'anchor', id: 'downloads', label: t.nav.downloads || 'Downloads', desc: '' },
-    { kind: 'anchor', id: 'faq', label: t.faq?.title || 'FAQ', desc: '' },
+    { kind: 'anchor', id: 'downloads', label: t.nav.downloads!, desc: '' },
+    { kind: 'anchor', id: 'faq', label: t.faq!.title, desc: '' },
   ], [t])
 
   const itemHits = useMemo<Hit[]>(() => {
@@ -220,7 +220,7 @@ export default function SearchDialog({ open, onClose }: SearchDialogProps) {
     const path = raw.replace(/^https?:\/\/[^/]+/i, '').replace(/^\/+/, '').replace(/[?#].*$/, '')
     const segs = path.split('/').filter(Boolean)
     // Tolerate a leading lang prefix (zh/ja/...) when present.
-    const langs = new Set(['zh', 'zh-TW', 'ja', 'ko', 'de', 'es', 'pl'])
+    const langs = new Set(['zh', 'zh-TW', 'ja', 'ko', 'de', 'es', 'pl', 'uk'])
     const [first, ...rest] = segs
     const parts = first && langs.has(first) ? rest : segs
     if (parts.length >= 2 && CATEGORIES.includes(parts[0] as RegistryCategory)) {

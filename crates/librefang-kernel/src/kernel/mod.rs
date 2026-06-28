@@ -734,6 +734,22 @@ pub struct LibreFangKernel {
     pub(crate) context_engine: Option<Box<dyn librefang_runtime::context_engine::ContextEngine>>,
     /// Runtime config passed to context-engine lifecycle hooks.
     context_engine_config: librefang_runtime::context_engine::ContextEngineConfig,
+    /// Lazily-built per-agent context engines (#6264). Keyed by a stable
+    /// fingerprint of the agent manifest's `[context_engine]` override so
+    /// agents that select the same engine config share one instance. Each
+    /// distinct override is built at most once per process and stored as a
+    /// `'static` reference (the engine lives for the daemon's lifetime, like
+    /// the kernel-global `context_engine` above), so
+    /// [`Self::context_engine_for_agent`] can hand back a borrow that
+    /// outlives the lock and survives across the agent loop's `.await`.
+    /// Agents without an override are served the kernel-global engine and
+    /// never touch this map.
+    context_engine_overrides: std::sync::Mutex<
+        std::collections::HashMap<
+            String,
+            &'static dyn librefang_runtime::context_engine::ContextEngine,
+        >,
+    >,
     /// Weak self-reference for trigger dispatch (set after Arc wrapping).
     self_handle: OnceLock<Weak<LibreFangKernel>>,
     /// Whether we've already logged the "no provider" audit entry (prevents spam).

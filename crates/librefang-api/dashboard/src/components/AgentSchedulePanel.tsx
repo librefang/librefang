@@ -57,14 +57,15 @@ const INPUT_CLASS =
 // spawn events — users can edit the JSON via the `custom` preset if they
 // need a narrower glob.
 const TRIGGER_PATTERN_PRESETS = [
-  { label: "lifecycle (spawned + terminated)", value: '"lifecycle"' },
+  { labelKey: "scheduler.trigger_preset_lifecycle", defaultLabel: "lifecycle (spawned + terminated)", value: '"lifecycle"' },
   {
-    label: "agent_spawned (any)",
+    labelKey: "scheduler.trigger_preset_agent_spawned_any",
+    defaultLabel: "agent_spawned (any)",
     value: '{"agent_spawned":{"name_pattern":"*"}}',
   },
-  { label: "agent_terminated", value: '"agent_terminated"' },
-  { label: "all events", value: '"all"' },
-  { label: "custom JSON…", value: "custom" },
+  { labelKey: "scheduler.trigger_preset_agent_terminated", defaultLabel: "agent_terminated", value: '"agent_terminated"' },
+  { labelKey: "scheduler.trigger_preset_all_events", defaultLabel: "all events", value: '"all"' },
+  { labelKey: "scheduler.trigger_preset_custom_json", defaultLabel: "custom JSON…", value: "custom" },
 ] as const;
 
 /** Default continuous interval when the user first switches from manual. */
@@ -1055,7 +1056,7 @@ export function AgentSchedulePanel({ agent }: AgentSchedulePanelProps) {
             >
               {TRIGGER_PATTERN_PRESETS.map((p) => (
                 <option key={p.value} value={p.value}>
-                  {p.label}
+                  {t(p.labelKey, { defaultValue: p.defaultLabel })}
                 </option>
               ))}
             </select>
@@ -1145,7 +1146,7 @@ export function AgentSchedulePanel({ agent }: AgentSchedulePanelProps) {
               onChange={(e) => setTrigSessionMode(e.target.value)}
               className={INPUT_CLASS}
             >
-              <option value="">agent default</option>
+              <option value="">{t("scheduler.agent_default", { defaultValue: "agent default" })}</option>
               <option value="persistent">persistent</option>
               <option value="new">new</option>
             </select>

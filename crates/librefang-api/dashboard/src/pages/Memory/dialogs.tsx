@@ -62,9 +62,9 @@ export function AddMemoryDialog({ onClose }: { onClose: () => void }) {
           <div>
             <label className={labelCls}>{t("memory.level", { defaultValue: "Level" })}</label>
             <select value={level} onChange={(e) => setLevel(e.target.value)} className={inputCls}>
-              <option value="user">{t("memory.user", { defaultValue: "user" })}</option>
-              <option value="session">{t("memory.session", { defaultValue: "session" })}</option>
-              <option value="agent">{t("memory.agent", { defaultValue: "agent" })}</option>
+              <option value="user">{t("memory.level_user", { defaultValue: "user" })}</option>
+              <option value="session">{t("memory.level_session", { defaultValue: "session" })}</option>
+              <option value="agent">{t("memory.level_agent", { defaultValue: "agent" })}</option>
             </select>
           </div>
 

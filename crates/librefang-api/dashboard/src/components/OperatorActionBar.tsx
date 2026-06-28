@@ -11,6 +11,7 @@
 // dashboard rule.
 
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import { CheckCircle2, XCircle, Pencil, MessageSquare, AlertCircle, Loader2 } from "lucide-react";
 import { Button } from "./ui/Button";
 import { Badge } from "./ui/Badge";
@@ -28,7 +29,10 @@ interface Props {
  *  here so the action list, button labels, and resolve POST stay in
  *  lockstep — adding a verb in `OperatorAction` (Rust) requires updating
  *  exactly this function on the dashboard. */
-function describeAction(action: OperatorActionDescriptor): {
+function describeAction(
+  action: OperatorActionDescriptor,
+  t: (key: string, fallback: string, options?: Record<string, unknown>) => string,
+): {
   verb: OperatorActionVerb;
   label: string;
   needsPayload: boolean;
@@ -39,19 +43,19 @@ function describeAction(action: OperatorActionDescriptor): {
   if (typeof action === "string") {
     switch (action) {
       case "approve":
-        return { verb: "approve", label: "Approve", needsPayload: false, variant: "primary", icon: CheckCircle2 };
+        return { verb: "approve", label: t("approvals.approve", "Approve"), needsPayload: false, variant: "primary", icon: CheckCircle2 };
       case "reject":
-        return { verb: "reject", label: "Reject", needsPayload: false, variant: "danger", icon: XCircle };
+        return { verb: "reject", label: t("approvals.reject", "Reject"), needsPayload: false, variant: "danger", icon: XCircle };
       case "edit":
-        return { verb: "edit", label: "Edit", needsPayload: true, variant: "secondary", icon: Pencil };
+        return { verb: "edit", label: t("common.edit", "Edit"), needsPayload: true, variant: "secondary", icon: Pencil };
       case "freeform_input":
-        return { verb: "freeform_input", label: "Freeform input", needsPayload: true, variant: "secondary", icon: MessageSquare };
+        return { verb: "freeform_input", label: t("workflows.operator.freeform_input", "Freeform input"), needsPayload: true, variant: "secondary", icon: MessageSquare };
     }
   }
   // ProvideInput carries a `field` name — labelled on the button.
   return {
     verb: "provide_input",
-    label: `Provide '${action.provide_input.field}'`,
+    label: t("workflows.operator.provide_field", "Provide '{{field}}'", { field: action.provide_input.field }),
     needsPayload: true,
     field: action.provide_input.field,
     variant: "secondary",
@@ -60,6 +64,7 @@ function describeAction(action: OperatorActionDescriptor): {
 }
 
 export function OperatorActionBar({ runId }: Props) {
+  const { t } = useTranslation();
   const pauseQuery = useWorkflowOperatorPause(runId);
   const resolve = useResolveOperatorStep();
   // Per-action local state: when the user clicks a `needs_payload` button
@@ -73,7 +78,7 @@ export function OperatorActionBar({ runId }: Props) {
   if (pauseQuery.isLoading) {
     return (
       <div className="flex items-center gap-1.5 p-2 text-[10px] text-text-dim/50">
-        <Loader2 className="w-3 h-3 animate-spin" /> Loading operator review…
+        <Loader2 className="w-3 h-3 animate-spin" /> {t("workflows.operator.loading", "Loading operator review…")}
       </div>
     );
   }
@@ -88,7 +93,7 @@ export function OperatorActionBar({ runId }: Props) {
       <div className="flex items-start gap-1.5 p-2 rounded-lg bg-error/5 border border-error/20">
         <AlertCircle className="w-3 h-3 text-error shrink-0 mt-0.5" />
         <p className="text-[10px] text-error">
-          Operator pause unavailable: {pauseQuery.error.message}
+          {t("workflows.operator.unavailable", "Operator pause unavailable:")} {pauseQuery.error.message}
         </p>
       </div>
     );
@@ -103,7 +108,7 @@ export function OperatorActionBar({ runId }: Props) {
       setOpenVerb(null);
       setPayload("");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to resolve operator step");
+      setError(e instanceof Error ? e.message : t("workflows.operator.resolve_failed", "Failed to resolve operator step"));
     }
   };
 
@@ -113,19 +118,19 @@ export function OperatorActionBar({ runId }: Props) {
         <AlertCircle className="w-3 h-3 text-warning shrink-0 mt-0.5" />
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-[10px] font-bold text-warning">Operator review required</span>
+            <span className="text-[10px] font-bold text-warning">{t("workflows.operator.review_required", "Operator review required")}</span>
             <Badge variant="default" className="text-[9px]">{pause.step_name}</Badge>
           </div>
           <p className="mt-0.5 text-[9px] text-text-dim/70">
-            Paused {pause.paused_at ? new Date(pause.paused_at).toLocaleString() : "just now"} ·
-            step {pause.operator_step_index + 1}
+            {t("workflows.operator.paused", "Paused")} {pause.paused_at ? new Date(pause.paused_at).toLocaleString() : t("common.just_now", "just now")} ·
+            {t("workflows.operator.step", "step")} {pause.operator_step_index + 1}
           </p>
         </div>
       </div>
 
       {/* Artifact preview — what the operator must review. */}
       <div className="rounded-md bg-main border border-border-subtle p-2">
-        <p className="text-[9px] uppercase tracking-wide text-text-dim/60 mb-1">Artifact</p>
+        <p className="text-[9px] uppercase tracking-wide text-text-dim/60 mb-1">{t("workflows.operator.artifact", "Artifact")}</p>
         <pre className="text-[10px] whitespace-pre-wrap break-words font-mono leading-relaxed max-h-48 overflow-y-auto">
           {pause.artifact || "(empty)"}
         </pre>
@@ -135,7 +140,7 @@ export function OperatorActionBar({ runId }: Props) {
           verbs expand into an inline textarea on click. */}
       <div className="flex flex-wrap gap-1.5">
         {pause.actions.map((action, idx) => {
-          const desc = describeAction(action);
+          const desc = describeAction(action, t);
           const key = `${desc.verb}:${desc.field ?? ""}`;
           const Icon = desc.icon;
           const isOpen = openVerb === key;
@@ -148,7 +153,7 @@ export function OperatorActionBar({ runId }: Props) {
                   placeholder={
                     desc.field
                       ? `Value for '${desc.field}'`
-                      : "Your response (text)"
+                      : t("workflows.operator.response_placeholder", "Your response (text)")
                   }
                   className="w-full text-[10px] font-mono rounded-md border border-border-subtle bg-main p-2 min-h-[80px] focus:outline-none focus:border-brand"
                   autoFocus
@@ -166,11 +171,11 @@ export function OperatorActionBar({ runId }: Props) {
                   >
                     {resolve.isPending ? (
                       <>
-                        <Loader2 className="w-3 h-3 animate-spin" /> Submitting…
+                        <Loader2 className="w-3 h-3 animate-spin" /> {t("workflows.operator.submitting", "Submitting…")}
                       </>
                     ) : (
                       <>
-                        <Icon className="w-3 h-3" /> Submit {desc.label}
+                        <Icon className="w-3 h-3" /> {t("workflows.operator.submit_action", "Submit {{action}}", { action: desc.label })}
                       </>
                     )}
                   </Button>
@@ -182,7 +187,7 @@ export function OperatorActionBar({ runId }: Props) {
                     }}
                     disabled={resolve.isPending}
                   >
-                    Cancel
+                    {t("common.cancel", "Cancel")}
                   </Button>
                 </div>
               </div>

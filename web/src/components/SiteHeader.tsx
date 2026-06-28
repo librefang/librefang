@@ -4,7 +4,7 @@ import {
   Search, Sun, X,
 } from 'lucide-react'
 import { Github } from './BrandIcons'
-import { languages, translations } from '../i18n'
+import { getTranslation, languages } from '../i18n'
 import type { Translation } from '../i18n'
 import { useAppStore } from '../store'
 import { cn } from '../lib/utils'
@@ -32,7 +32,9 @@ export default function SiteHeader({ onOpenSearch, isSubpage = false, sourceUrl,
   const switchLang = useAppStore((s) => s.switchLang)
   const theme = useAppStore((s) => s.theme)
   const toggleTheme = useAppStore((s) => s.toggleTheme)
-  const t: Translation = translations[lang] || translations['en']!
+  const t: Translation = getTranslation(lang)
+  const headerCopy = t.header!
+  const searchCopy = t.search!
   const [open, setOpen] = useState(false)
   const [langOpen, setLangOpen] = useState(false)
   const [featuresOpen, setFeaturesOpen] = useState(false)
@@ -86,17 +88,17 @@ export default function SiteHeader({ onOpenSearch, isSubpage = false, sourceUrl,
 
   interface NavLink { label: string; href: string; external?: boolean }
 
-  const rc = t.registry?.categories
+  const rc = t.registry!.categories
   // All 8 marketplace categories — no per-item highlight, they're peers.
   const featureLinks: NavLink[] = [
-    { label: rc?.hands.title     || 'Hands',        href: `${langPrefix}/hands` },
-    { label: rc?.agents.title    || 'Agents',       href: `${langPrefix}/agents` },
-    { label: rc?.skills.title    || 'Skills',       href: `${langPrefix}/skills` },
-    { label: rc?.mcp.title       || 'MCP Servers',  href: `${langPrefix}/mcp` },
-    { label: rc?.plugins.title   || 'Plugins',      href: `${langPrefix}/plugins` },
-    { label: rc?.providers.title || 'Providers',    href: `${langPrefix}/providers` },
-    { label: rc?.workflows.title || 'Workflows',    href: `${langPrefix}/workflows` },
-    { label: rc?.channels.title  || 'Channels',     href: `${langPrefix}/channels` },
+    { label: rc.hands.title,     href: `${langPrefix}/hands` },
+    { label: rc.agents.title,    href: `${langPrefix}/agents` },
+    { label: rc.skills.title,    href: `${langPrefix}/skills` },
+    { label: rc.mcp.title,       href: `${langPrefix}/mcp` },
+    { label: rc.plugins.title,   href: `${langPrefix}/plugins` },
+    { label: rc.providers.title, href: `${langPrefix}/providers` },
+    { label: rc.workflows.title, href: `${langPrefix}/workflows` },
+    { label: rc.channels.title,  href: `${langPrefix}/channels` },
   ]
   // Features dropdown: one anchor per homepage module, in scroll order.
   // Cross-page nav when viewed from a subpage; smooth-scroll on the
@@ -108,13 +110,13 @@ export default function SiteHeader({ onOpenSearch, isSubpage = false, sourceUrl,
   const anchorLinks: NavLink[] = [
     { label: t.nav.architecture,                                   href: anchor('architecture') },
     { label: t.nav.hands,                                          href: anchor('hands') },
-    { label: t.nav.workflows || t.workflows?.label || 'Workflows', href: anchor('workflows') },
-    { label: t.nav.evolution || t.evolution?.label || 'Evolution', href: anchor('evolution') },
+    { label: t.nav.workflows ?? t.workflows!.label, href: anchor('workflows') },
+    { label: t.nav.evolution ?? t.evolution!.label, href: anchor('evolution') },
     { label: t.nav.performance,                                    href: anchor('performance') },
     { label: t.nav.install,                                        href: anchor('install') },
-    { label: t.nav.downloads  || 'Downloads',                      href: anchor('downloads') },
-    { label: t.faq?.label     || 'FAQ',                            href: anchor('faq') },
-    { label: t.githubStats?.label || 'Community',                  href: anchor('community') },
+    { label: t.nav.downloads!,                                     href: anchor('downloads') },
+    { label: t.faq.label,                                          href: anchor('faq') },
+    { label: t.githubStats!.label,                                 href: anchor('community') },
   ]
   // Only external "flat" link that remains.
   const flatLinks: NavLink[] = [
@@ -147,10 +149,10 @@ export default function SiteHeader({ onOpenSearch, isSubpage = false, sourceUrl,
                 isLearnActive || learnOpen ? 'text-cyan-600 dark:text-cyan-400' : 'text-gray-600 dark:text-gray-400 hover:text-cyan-600 dark:hover:text-cyan-400'
               )}
               onClick={() => { setLearnOpen(!learnOpen); setFeaturesOpen(false) }}
-              aria-label={t.nav.learnMore || 'Features'}
+              aria-label={t.nav.learnMore!}
               aria-expanded={learnOpen}
             >
-              {t.nav.learnMore || 'Features'}
+              {t.nav.learnMore!}
               <ChevronDown className={cn('w-3 h-3 transition-transform', learnOpen && 'rotate-180')} />
             </button>
             {learnOpen && (
@@ -187,10 +189,10 @@ export default function SiteHeader({ onOpenSearch, isSubpage = false, sourceUrl,
                 isFeatureActive || featuresOpen ? 'text-cyan-600 dark:text-cyan-400' : 'text-gray-600 dark:text-gray-400 hover:text-cyan-600 dark:hover:text-cyan-400'
               )}
               onClick={() => { setFeaturesOpen(!featuresOpen); setLearnOpen(false) }}
-              aria-label={t.nav.features || 'Marketplace'}
+              aria-label={t.nav.features!}
               aria-expanded={featuresOpen}
             >
-              {t.nav.features || 'Marketplace'}
+              {t.nav.features!}
               <ChevronDown className={cn('w-3 h-3 transition-transform', featuresOpen && 'rotate-180')} />
             </button>
             {featuresOpen && (
@@ -239,7 +241,7 @@ export default function SiteHeader({ onOpenSearch, isSubpage = false, sourceUrl,
             <button
               className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-600 dark:text-gray-400 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors font-medium"
               onClick={() => setLangOpen(!langOpen)}
-              aria-label={`Switch language (${currentLangName})`}
+              aria-label={headerCopy.switchLanguageNamed.replace('{name}', currentLangName)}
               aria-expanded={langOpen}
             >
               <Globe className="w-3.5 h-3.5" />
@@ -265,7 +267,7 @@ export default function SiteHeader({ onOpenSearch, isSubpage = false, sourceUrl,
             <button
               onClick={onOpenSearch}
               className="ml-1 flex items-center gap-1.5 px-2 py-1 text-xs text-gray-500 dark:text-gray-400 border border-black/10 dark:border-white/10 rounded hover:text-cyan-600 dark:hover:text-cyan-400 hover:border-cyan-500/30 transition-colors"
-              aria-label={`${t.search?.title || 'Search'} ⌘K`}
+              aria-label={`${searchCopy.title} ⌘K`}
             >
               <Search className="w-3.5 h-3.5" />
               <kbd className="font-mono text-[10px] px-1 py-0.5 bg-surface-200 rounded">⌘K</kbd>
@@ -275,7 +277,7 @@ export default function SiteHeader({ onOpenSearch, isSubpage = false, sourceUrl,
           <button
             onClick={toggleTheme}
             className="p-2 text-gray-600 dark:text-gray-400 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors"
-            aria-label="Toggle theme"
+            aria-label={headerCopy.toggleTheme}
           >
             {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
           </button>
@@ -285,11 +287,11 @@ export default function SiteHeader({ onOpenSearch, isSubpage = false, sourceUrl,
               href={sourceUrl}
               target="_blank"
               rel="noopener noreferrer"
-              aria-label="View source on GitHub"
+              aria-label={headerCopy.viewSource}
               className="ml-3 flex items-center gap-1 px-3 py-1.5 text-sm font-semibold text-cyan-600 dark:text-cyan-400 border border-cyan-500/30 rounded hover:bg-cyan-500/10 transition-all"
             >
               <Github className="w-3.5 h-3.5" />
-              <span className="hidden lg:inline">Source</span>
+              <span className="hidden lg:inline">{headerCopy.source}</span>
               <ExternalLink className="w-3 h-3" />
             </a>
           ) : (
@@ -307,15 +309,15 @@ export default function SiteHeader({ onOpenSearch, isSubpage = false, sourceUrl,
         {/* Mobile */}
         <div className="flex md:hidden items-center gap-1">
           {onOpenSearch && (
-            <button onClick={onOpenSearch} aria-label={t.search?.title || 'Search'} className="p-2 text-gray-600 dark:text-gray-400 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors">
+            <button onClick={onOpenSearch} aria-label={searchCopy.title} className="p-2 text-gray-600 dark:text-gray-400 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors">
               <Search className="w-4 h-4" />
             </button>
           )}
-          <button onClick={toggleTheme} className="p-2 text-gray-600 dark:text-gray-400 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors" aria-label="Toggle theme">
+          <button onClick={toggleTheme} className="p-2 text-gray-600 dark:text-gray-400 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors" aria-label={headerCopy.toggleTheme}>
             {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
           </button>
           <div className="relative" data-lang-menu>
-            <button className="p-2 text-gray-600 dark:text-gray-400 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors" onClick={() => setLangOpen(!langOpen)} aria-label="Switch language">
+            <button className="p-2 text-gray-600 dark:text-gray-400 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors" onClick={() => setLangOpen(!langOpen)} aria-label={headerCopy.switchLanguage}>
               <Globe className="w-4 h-4" />
             </button>
             {langOpen && (
@@ -326,7 +328,7 @@ export default function SiteHeader({ onOpenSearch, isSubpage = false, sourceUrl,
               </div>
             )}
           </div>
-          <button className="p-2 text-gray-600 dark:text-gray-400" onClick={() => setOpen(!open)} aria-label="Toggle menu">
+          <button className="p-2 text-gray-600 dark:text-gray-400" onClick={() => setOpen(!open)} aria-label={headerCopy.toggleMenu}>
             {open ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
           </button>
         </div>
@@ -336,7 +338,7 @@ export default function SiteHeader({ onOpenSearch, isSubpage = false, sourceUrl,
         <div className="md:hidden bg-surface-100 border-t border-black/10 dark:border-white/5 px-6 py-4 space-y-1">
           <div className="pb-1">
             <div className="text-[10px] font-mono text-gray-400 dark:text-gray-600 uppercase tracking-widest py-1.5">
-              {t.nav.learnMore || 'Features'}
+              {t.nav.learnMore!}
             </div>
             {anchorLinks.map(link => (
               <a
@@ -359,7 +361,7 @@ export default function SiteHeader({ onOpenSearch, isSubpage = false, sourceUrl,
               </a>
             ))}
             <div className="text-[10px] font-mono text-gray-400 dark:text-gray-600 uppercase tracking-widest py-1.5 mt-2">
-              {t.nav.features || 'Marketplace'}
+              {t.nav.features!}
             </div>
             {featureLinks.map(link => (
               <a

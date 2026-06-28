@@ -33,7 +33,7 @@ export function MemoryRecordCard({ memory, onEdit, onDelete }: Props) {
                 : "default"
             }
           >
-            {memory.level || t("memory.session", { defaultValue: "session" })}
+            {memory.level || t("memory.level_session", { defaultValue: "session" })}
           </Badge>
           {memory.source && <Badge variant="default">{memory.source}</Badge>}
           {memory.confidence != null && (

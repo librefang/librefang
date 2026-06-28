@@ -280,7 +280,11 @@ impl WorkflowState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut WorkflowState) {
-    let inner = widgets::render_screen_block(f, area, "\u{25b7} Workflows");
+    let inner = widgets::render_screen_block(
+        f,
+        area,
+        &format!("▷ {}", crate::i18n::t("tui-workflows-title-screen")),
+    );
 
     match state.sub {
         WorkflowSubScreen::List => draw_list(f, inner, state),
@@ -302,7 +306,13 @@ fn draw_list(f: &mut Frame, area: Rect, state: &mut WorkflowState) {
 
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
-            format!("  {:<12} {:<24} {:<8} {}", "ID", "Name", "Steps", "Created"),
+            format!(
+                "  {:<12} {:<24} {:<8} {}",
+                crate::i18n::t("tui-workflows-header-id"),
+                crate::i18n::t("tui-workflows-header-name"),
+                crate::i18n::t("tui-workflows-header-steps"),
+                crate::i18n::t("tui-workflows-header-created")
+            ),
             theme::table_header(),
         )])),
         chunks[0],
@@ -312,12 +322,12 @@ fn draw_list(f: &mut Frame, area: Rect, state: &mut WorkflowState) {
 
     if state.loading {
         f.render_widget(
-            widgets::spinner(state.tick, "Loading workflows\u{2026}"),
+            widgets::spinner(state.tick, &crate::i18n::t("tui-workflows-loading")),
             chunks[2],
         );
     } else if state.workflows.is_empty() {
         f.render_widget(
-            widgets::empty_state("No workflows defined. Create one with [n]."),
+            widgets::empty_state(&crate::i18n::t("tui-workflows-empty-state")),
             chunks[2],
         );
     } else {
@@ -336,7 +346,7 @@ fn draw_list(f: &mut Frame, area: Rect, state: &mut WorkflowState) {
                         Style::default().fg(theme::CYAN),
                     ),
                     Span::styled(
-                        format!(" {step_icon} {:<6}", wf.steps),
+                        format!(" {} {:<6}", step_icon, wf.steps),
                         Style::default().fg(theme::YELLOW),
                     ),
                     Span::styled(
@@ -348,7 +358,7 @@ fn draw_list(f: &mut Frame, area: Rect, state: &mut WorkflowState) {
             .collect();
 
         items.push(ListItem::new(Line::from(vec![Span::styled(
-            "  + Create new workflow",
+            crate::i18n::t("tui-workflows-create-new-option"),
             Style::default()
                 .fg(theme::GREEN)
                 .add_modifier(Modifier::BOLD),
@@ -359,9 +369,7 @@ fn draw_list(f: &mut Frame, area: Rect, state: &mut WorkflowState) {
     }
 
     f.render_widget(
-        widgets::hint_bar(
-            "  [\u{2191}\u{2193}] Navigate  [Enter] View runs  [x] Run  [n] New  [r] Refresh",
-        ),
+        widgets::hint_bar(&crate::i18n::t("tui-workflows-hints-list")),
         chunks[3],
     );
 }
@@ -386,7 +394,7 @@ fn draw_runs(f: &mut Frame, area: Rect, state: &mut WorkflowState) {
         Paragraph::new(Line::from(vec![
             Span::styled("  \u{25b7} ", Style::default().fg(theme::ACCENT)),
             Span::styled(
-                format!("Runs for: {wf_name}"),
+                crate::i18n::t_args("tui-workflows-title-runs", &[("name", wf_name)]),
                 Style::default()
                     .fg(theme::TEXT_PRIMARY)
                     .add_modifier(Modifier::BOLD),
@@ -399,7 +407,10 @@ fn draw_runs(f: &mut Frame, area: Rect, state: &mut WorkflowState) {
         Paragraph::new(Line::from(vec![Span::styled(
             format!(
                 "  {:<12} {:<12} {:<12} {}",
-                "Run ID", "State", "Duration", "Output"
+                crate::i18n::t("tui-workflows-header-run-id"),
+                crate::i18n::t("tui-workflows-header-state"),
+                crate::i18n::t("tui-workflows-header-duration"),
+                crate::i18n::t("tui-workflows-header-output")
             ),
             theme::table_header(),
         )])),
@@ -410,7 +421,7 @@ fn draw_runs(f: &mut Frame, area: Rect, state: &mut WorkflowState) {
 
     if state.runs.is_empty() {
         f.render_widget(
-            widgets::empty_state("No runs yet. Press [x] from the list to run."),
+            widgets::empty_state(&crate::i18n::t("tui-workflows-runs-empty")),
             chunks[3],
         );
     } else {
@@ -442,7 +453,7 @@ fn draw_runs(f: &mut Frame, area: Rect, state: &mut WorkflowState) {
     }
 
     f.render_widget(
-        widgets::hint_bar("  [\u{2191}\u{2193}] Navigate  [r] Refresh  [Esc] Back"),
+        widgets::hint_bar(&crate::i18n::t("tui-workflows-hints-runs")),
         chunks[4],
     );
 }
@@ -465,7 +476,7 @@ fn draw_create(f: &mut Frame, area: Rect, state: &WorkflowState) {
         Paragraph::new(Line::from(vec![
             Span::styled("  \u{25b7} ", Style::default().fg(theme::ACCENT)),
             Span::styled(
-                "Create New Workflow",
+                crate::i18n::t("tui-workflows-title-create"),
                 Style::default()
                     .fg(theme::TEXT_PRIMARY)
                     .add_modifier(Modifier::BOLD),
@@ -491,28 +502,42 @@ fn draw_create(f: &mut Frame, area: Rect, state: &WorkflowState) {
     let mut step_line = vec![Span::raw("  ")];
     step_line.extend(progress);
     step_line.push(Span::styled(
-        format!("  Step {} of 4", state.create_step + 1),
+        crate::i18n::t_args(
+            "tui-workflows-create-step",
+            &[
+                ("current", &(state.create_step + 1).to_string()),
+                ("total", "4"),
+            ],
+        ),
         Style::default().fg(theme::TEXT_SECONDARY),
     ));
     f.render_widget(Paragraph::new(Line::from(step_line)), chunks[2]);
 
+    let label_name = crate::i18n::t("tui-workflows-label-name");
+    let placeholder_name = crate::i18n::t("tui-workflows-placeholder-name");
+    let label_desc = crate::i18n::t("tui-workflows-label-desc");
+    let placeholder_desc = crate::i18n::t("tui-workflows-placeholder-desc");
+    let label_steps = crate::i18n::t("tui-workflows-label-steps");
+    let placeholder_steps = crate::i18n::t("tui-workflows-placeholder-steps");
+    let label_review = crate::i18n::t("tui-workflows-label-review");
+
     let (label, value, placeholder) = match state.create_step {
-        0 => ("Workflow name:", &state.create_name, "my-workflow"),
+        0 => (
+            label_name.as_str(),
+            &state.create_name,
+            placeholder_name.as_str(),
+        ),
         1 => (
-            "Description:",
+            label_desc.as_str(),
             &state.create_desc,
-            "What this workflow does",
+            placeholder_desc.as_str(),
         ),
         2 => (
-            "Steps (JSON array):",
+            label_steps.as_str(),
             &state.create_steps,
-            "[{\"action\":\"...\"}]",
+            placeholder_steps.as_str(),
         ),
-        _ => (
-            "Review \u{2014} press Enter to create",
-            &state.create_name,
-            "",
-        ),
+        _ => (label_review.as_str(), &state.create_name, ""),
     };
 
     f.render_widget(
@@ -552,11 +577,17 @@ fn draw_create(f: &mut Frame, area: Rect, state: &WorkflowState) {
         f.render_widget(
             Paragraph::new(vec![
                 Line::from(vec![
-                    Span::styled("  Name:  ", Style::default().fg(theme::TEXT_SECONDARY)),
+                    Span::styled(
+                        crate::i18n::t("tui-workflows-review-name"),
+                        Style::default().fg(theme::TEXT_SECONDARY),
+                    ),
                     Span::styled(&state.create_name, Style::default().fg(theme::CYAN)),
                 ]),
                 Line::from(vec![
-                    Span::styled("  Desc:  ", Style::default().fg(theme::TEXT_SECONDARY)),
+                    Span::styled(
+                        crate::i18n::t("tui-workflows-review-desc"),
+                        Style::default().fg(theme::TEXT_SECONDARY),
+                    ),
                     Span::styled(&state.create_desc, Style::default().fg(theme::TEXT_PRIMARY)),
                 ]),
             ]),
@@ -565,11 +596,11 @@ fn draw_create(f: &mut Frame, area: Rect, state: &WorkflowState) {
     }
 
     let hint_text = if state.create_step == 3 {
-        "  [Enter] Create  [Esc] Back"
+        crate::i18n::t("tui-workflows-hints-create-submit")
     } else {
-        "  [Enter] Next  [Esc] Back"
+        crate::i18n::t("tui-workflows-hints-create-next")
     };
-    f.render_widget(widgets::hint_bar(hint_text), chunks[8]);
+    f.render_widget(widgets::hint_bar(&hint_text), chunks[8]);
 }
 
 fn draw_run_input(f: &mut Frame, area: Rect, state: &WorkflowState) {
@@ -594,7 +625,7 @@ fn draw_run_input(f: &mut Frame, area: Rect, state: &WorkflowState) {
         Paragraph::new(Line::from(vec![
             Span::styled("  \u{25b7} ", Style::default().fg(theme::ACCENT)),
             Span::styled(
-                format!("Run: {wf_name}"),
+                crate::i18n::t_args("tui-workflows-title-run-input", &[("name", wf_name)]),
                 Style::default()
                     .fg(theme::TEXT_PRIMARY)
                     .add_modifier(Modifier::BOLD),
@@ -607,14 +638,15 @@ fn draw_run_input(f: &mut Frame, area: Rect, state: &WorkflowState) {
 
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
-            "  Input (JSON or text):",
+            crate::i18n::t("tui-workflows-label-run-input"),
             Style::default().fg(theme::TEXT_PRIMARY),
         )])),
         chunks[2],
     );
 
+    let placeholder = crate::i18n::t("tui-workflows-placeholder-run-input");
     let display = if state.run_input.is_empty() {
-        "enter workflow input..."
+        placeholder.as_str()
     } else {
         &state.run_input
     };
@@ -637,7 +669,10 @@ fn draw_run_input(f: &mut Frame, area: Rect, state: &WorkflowState) {
         chunks[4],
     );
 
-    f.render_widget(widgets::hint_bar("  [Enter] Run  [Esc] Cancel"), chunks[6]);
+    f.render_widget(
+        widgets::hint_bar(&crate::i18n::t("tui-workflows-hints-run-input")),
+        chunks[6],
+    );
 }
 
 fn draw_run_result(f: &mut Frame, area: Rect, state: &WorkflowState) {
@@ -653,7 +688,7 @@ fn draw_run_result(f: &mut Frame, area: Rect, state: &WorkflowState) {
         Paragraph::new(Line::from(vec![
             Span::styled("  \u{25b7} ", Style::default().fg(theme::ACCENT)),
             Span::styled(
-                "Workflow Run Result",
+                crate::i18n::t("tui-workflows-title-run-result"),
                 Style::default()
                     .fg(theme::TEXT_PRIMARY)
                     .add_modifier(Modifier::BOLD),
@@ -666,7 +701,7 @@ fn draw_run_result(f: &mut Frame, area: Rect, state: &WorkflowState) {
 
     if state.loading {
         f.render_widget(
-            widgets::spinner(state.tick, "Running workflow\u{2026}"),
+            widgets::spinner(state.tick, &crate::i18n::t("tui-workflows-running")),
             chunks[2],
         );
     } else if let Some(ref result) = state.run_result {
@@ -675,7 +710,7 @@ fn draw_run_result(f: &mut Frame, area: Rect, state: &WorkflowState) {
                 Line::from(vec![
                     Span::styled("  \u{25cf} ", Style::default().fg(theme::GREEN)),
                     Span::styled(
-                        "Complete",
+                        crate::i18n::t("tui-workflows-result-complete"),
                         Style::default()
                             .fg(theme::GREEN)
                             .add_modifier(Modifier::BOLD),
@@ -690,8 +725,14 @@ fn draw_run_result(f: &mut Frame, area: Rect, state: &WorkflowState) {
             chunks[2],
         );
     } else {
-        f.render_widget(widgets::empty_state("No result."), chunks[2]);
+        f.render_widget(
+            widgets::empty_state(&crate::i18n::t("tui-workflows-result-empty")),
+            chunks[2],
+        );
     }
 
-    f.render_widget(widgets::hint_bar("  [Enter/Esc] Back"), chunks[3]);
+    f.render_widget(
+        widgets::hint_bar(&crate::i18n::t("tui-workflows-hints-run-result")),
+        chunks[3],
+    );
 }

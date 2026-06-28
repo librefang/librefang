@@ -153,7 +153,8 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         name: "new",
         aliases: &[],
         category: Category::Session,
-        scope: Scope::CHANNEL,
+        // Also reachable from CLI/TUI chat surfaces; both reset the agent session the same way.
+        scope: Scope::CHANNEL.union(Scope::CLI),
         description: "Reset session (clear messages)",
         args_hint: "",
         subcommands: &[],
@@ -868,5 +869,13 @@ mod tests {
         );
         // Non-empty so this test catches accidental empty registry.
         assert!(!menu.is_empty());
+    }
+
+    #[test]
+    fn new_command_is_reachable_from_cli_and_channel() {
+        let def = lookup("new").expect("/new must be registered");
+        // Reachable from both the CLI/TUI slash gate and channels, not just one.
+        assert!(def.scope.contains(Scope::CLI));
+        assert!(def.scope.contains(Scope::CHANNEL));
     }
 }

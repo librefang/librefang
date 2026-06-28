@@ -363,3 +363,84 @@ fn test_needs_auth_serializes_differently_from_pending_auth() {
         "NeedsAuth and PendingAuth must serialize to different state values"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Regression: OAuth HTTP clients must NOT follow redirects.
+//
+// A 307/308 on a credential-bearing OAuth POST (token exchange, refresh, DCR)
+// would replay client_secret / code_verifier / refresh_token to the redirect
+// target, and a 302 on metadata discovery is a blind SSRF / cloud-metadata
+// pivot. The per-URL SSRF guard validates only the initial URL, so the client
+// built by `oauth_client()` must itself refuse to follow any redirect.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_oauth_client_does_not_follow_redirects() {
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    // Mock OAuth endpoint: 302 to /followed on the first request, 200 on any
+    // request to /followed. The client only reaches /followed if it followed
+    // the redirect — which `Policy::none()` must prevent.
+    let server = tokio::spawn(async move {
+        let mut followed = false;
+        // reqwest may reuse the keep-alive connection or open a new one to
+        // follow, so accept up to two connections.
+        for _ in 0..2 {
+            let Ok(Ok((mut stream, _))) =
+                tokio::time::timeout(Duration::from_millis(500), listener.accept()).await
+            else {
+                break;
+            };
+            loop {
+                let mut buf = [0u8; 1024];
+                let n =
+                    match tokio::time::timeout(Duration::from_millis(300), stream.read(&mut buf))
+                        .await
+                    {
+                        Ok(Ok(n)) if n > 0 => n,
+                        _ => break,
+                    };
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let path = req.split_whitespace().nth(1).unwrap_or("");
+                if path == "/followed" {
+                    followed = true;
+                    let _ = stream
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\nFOLLOWED")
+                        .await;
+                } else {
+                    let _ = stream
+                        .write_all(
+                            b"HTTP/1.1 302 Found\r\nLocation: /followed\r\nContent-Length: 0\r\n\r\n",
+                        )
+                        .await;
+                }
+            }
+        }
+        followed
+    });
+
+    let client = librefang_runtime::http_client::oauth_client();
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/token"))
+        .send()
+        .await
+        .expect("request to mock OAuth endpoint should succeed");
+
+    // Policy::none() returns the 302 verbatim instead of transparently
+    // following it to /followed and surfacing the 200.
+    assert_eq!(
+        resp.status().as_u16(),
+        302,
+        "OAuth client followed a redirect — credential-replay / SSRF guard bypass"
+    );
+
+    let followed = server.await.unwrap_or(false);
+    assert!(
+        !followed,
+        "OAuth client requested the redirect target — Policy::none() not applied"
+    );
+}

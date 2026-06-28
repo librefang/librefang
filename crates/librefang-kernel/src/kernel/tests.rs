@@ -2257,6 +2257,123 @@ fn test_skills_config_extra_dirs_loaded_as_overlay() {
 }
 
 #[test]
+fn test_set_agent_skills_persists_allowlist_to_agent_toml() {
+    // Regression: set_agent_skills wrote only the SQLite blob, never
+    // agent.toml. Boot reconciliation re-syncs each agent from its on-disk
+    // manifest and overwrites DB-only fields, so a skill assigned via the
+    // dashboard was silently wiped on the next daemon restart. Assert the
+    // allowlist is now persisted through to agent.toml (mirrors the sibling
+    // set_agent_tool_filters / set_agent_channels behaviour).
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("skills")).unwrap();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    install_test_skill(&home_dir.join("skills"), "persist-skill", &[]);
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
+
+    let toml_path = home_dir
+        .join("agent-manifests")
+        .join("skill-persist-agent")
+        .join("agent.toml");
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "skill-persist-agent".to_string(),
+                description: "skill persistence regression".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                ..Default::default()
+            },
+            None,
+            Some(toml_path.clone()),
+            None,
+        )
+        .expect("spawn");
+
+    kernel
+        .set_agent_skills(agent_id, vec!["persist-skill".to_string()])
+        .expect("set_agent_skills should succeed");
+
+    let written = std::fs::read_to_string(&toml_path)
+        .expect("agent.toml must exist on disk after set_agent_skills");
+    assert!(
+        written.contains("persist-skill"),
+        "agent.toml must contain the assigned skill so it survives a restart, got:\n{written}"
+    );
+
+    kernel.shutdown();
+}
+
+#[test]
+fn test_set_agent_mcp_servers_persists_allowlist_to_agent_toml() {
+    // Regression: mirror of test_set_agent_skills_persists_allowlist_to_agent_toml
+    // for set_agent_mcp_servers — the same boot-reconciliation wipe applies.
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
+
+    let toml_path = home_dir
+        .join("agent-manifests")
+        .join("mcp-persist-agent")
+        .join("agent.toml");
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "mcp-persist-agent".to_string(),
+                description: "MCP persistence regression".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                ..Default::default()
+            },
+            None,
+            Some(toml_path.clone()),
+            None,
+        )
+        .expect("spawn");
+
+    register_mcp_server(&kernel, "test-mcp-server");
+    kernel
+        .tools_ref()
+        .lock()
+        .unwrap()
+        .push(librefang_types::tool::ToolDefinition {
+            name: "mcp_test_mcp_server_dummy".to_string(),
+            description: String::new(),
+            input_schema: serde_json::json!({}),
+        });
+    kernel
+        .mcp
+        .mcp_generation
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    kernel
+        .set_agent_mcp_servers(agent_id, vec!["test-mcp-server".to_string()])
+        .expect("set_agent_mcp_servers should succeed");
+
+    let written = std::fs::read_to_string(&toml_path)
+        .expect("agent.toml must exist on disk after set_agent_mcp_servers");
+    assert!(
+        written.contains("test-mcp-server"),
+        "agent.toml must contain the assigned MCP server so it survives a restart, got:\n{written}"
+    );
+
+    kernel.shutdown();
+}
+
+#[test]
 fn test_reload_skills_preserves_disabled_and_extra_dirs() {
     // Hot-reload used to instantiate a fresh `SkillRegistry` without
     // re-applying policy, so the disabled list and extra_dirs overlay
@@ -4340,6 +4457,103 @@ async fn gc_sweep_aborts_orphaned_running_task_5142() {
         abort.is_finished(),
         "GC sweep must fire abort() on the orphaned task (#5142), not just \
          drop the AbortHandle"
+    );
+
+    kernel.shutdown();
+}
+
+/// TOCTOU regression: the periodic GC sweep must NOT abort a *successor* turn that swapped into `running_tasks` after the sweep snapshotted a finished predecessor under the same `(agent, session)` key.
+/// Pre-fix the sweep collected the keys, then did a bare `running_tasks.remove(&key)`; a faster successor inserted between the collect and the remove was dropped and its in-flight `AbortHandle` fired, killing a live turn.
+/// The fix snapshots the observed `task_id` and removes via `remove_if(... v.task_id == observed)`, so a swapped-in successor (different task_id) is never touched.
+///
+/// The race is internal to one `gc_sweep` call, so this is a stress test: it is deterministically green with the fix (the sweep can never remove the live successor's entry) and turns red probabilistically without it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_sweep_does_not_abort_live_successor_turn() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-gc-successor-toctou");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let kernel = Arc::new(
+        LibreFangKernel::boot_with_config(KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        })
+        .expect("kernel should boot"),
+    );
+
+    // A LIVE agent: its running_tasks entries are collected by the sweep only
+    // when the task itself is finished (not via the dead-agent branch), which
+    // is exactly the path the successor race lives on.
+    let manifest = AgentManifest {
+        name: "gc-successor-victim".to_string(),
+        description: "agent for gc successor TOCTOU".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        ..Default::default()
+    };
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+    let session = SessionId::new();
+
+    let aborted_live = Arc::new(AtomicUsize::new(0));
+    let mut live_tasks = Vec::new();
+
+    for _ in 0..200 {
+        // (1) A finished predecessor — the entry the sweep will collect.
+        let pre = tokio::spawn(async {});
+        let pre_abort = pre.abort_handle();
+        let _ = pre.await;
+        let predecessor_task_id = uuid::Uuid::new_v4();
+        kernel.agents.running_tasks.insert(
+            (agent_id, session),
+            RunningTask {
+                abort: pre_abort,
+                started_at: chrono::Utc::now(),
+                task_id: predecessor_task_id,
+            },
+        );
+
+        // (2) Fire the sweep concurrently so it can snapshot the finished
+        //     predecessor.
+        let sweeper_kernel = Arc::clone(&kernel);
+        let sweeper = tokio::spawn(async move { sweeper_kernel.gc_sweep() });
+
+        // (3) Swap in a live successor under the same key, racing the sweep's
+        //     collect -> remove window.
+        tokio::task::yield_now().await;
+        let live =
+            tokio::spawn(async { tokio::time::sleep(std::time::Duration::from_secs(60)).await });
+        let live_abort = live.abort_handle();
+        live_tasks.push(live);
+        kernel.agents.running_tasks.insert(
+            (agent_id, session),
+            RunningTask {
+                abort: live_abort.clone(),
+                started_at: chrono::Utc::now(),
+                task_id: uuid::Uuid::new_v4(),
+            },
+        );
+
+        let _ = sweeper.await;
+
+        // The live successor must survive: a live agent's not-yet-finished
+        // task is never a legitimate sweep target, so an abort here means the
+        // sweep removed an entry whose task_id no longer matched what it saw.
+        if live_abort.is_finished() {
+            aborted_live.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    for t in live_tasks {
+        t.abort();
+    }
+
+    assert_eq!(
+        aborted_live.load(Ordering::Relaxed),
+        0,
+        "gc_sweep aborted a live successor turn — TOCTOU on running_tasks \
+         (bare remove instead of task_id-guarded remove_if)"
     );
 
     kernel.shutdown();
@@ -11135,4 +11349,453 @@ fn approve_create_leaves_all_skills_agent_unpinned() {
     );
 
     kernel.shutdown();
+}
+
+// ----- #6264: per-agent context-engine selection -----
+
+/// Identity of the engine `context_engine_for_agent` resolves to, by data
+/// pointer. The kernel-global engine is one fixed allocation; a per-agent
+/// override builds (and leaks) a distinct one and dedups by config. Comparing
+/// the trait object's data address proves *which* engine an agent got without
+/// needing an LLM driver to observe behavioral differences.
+fn engine_addr(kernel: &LibreFangKernel, manifest: &AgentManifest) -> Option<*const ()> {
+    kernel
+        .context_engine_for_agent(manifest)
+        .map(|e| e as *const dyn librefang_runtime::context_engine::ContextEngine as *const ())
+}
+
+fn engine_manifest(
+    name: &str,
+    ce: Option<librefang_types::config::ContextEngineTomlConfig>,
+) -> AgentManifest {
+    AgentManifest {
+        name: name.to_string(),
+        description: "ctx engine resolution fixture".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        context_engine: ce,
+        ..Default::default()
+    }
+}
+
+/// Resolution order: agent manifest override > kernel config > compiled default.
+///
+/// Boots a kernel whose *global* `[context_engine]` is `"summary"`, then:
+/// - an agent with a manifest `[context_engine] engine = "no_compact"` gets a
+///   distinct per-agent engine (NOT the global one);
+/// - an agent without an override falls back to the kernel-global engine;
+/// - two agents sharing the same override config share one engine instance.
+#[test]
+fn context_engine_resolution_prefers_agent_override_then_kernel_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-ctx-engine-resolution-test");
+    std::fs::create_dir_all(&home_dir).unwrap();
+
+    // Kernel-global engine is explicitly NOT the compiled default ("default"),
+    // so a fallback to the global engine is observably distinct from a fallback
+    // to the compiled default.
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    config.context_engine = librefang_types::config::ContextEngineTomlConfig {
+        engine: "summary".to_string(),
+        ..Default::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    // The kernel-global engine's address — what an agent WITHOUT an override
+    // must resolve to.
+    let global_addr = kernel
+        .context_engine
+        .as_deref()
+        .map(|e| e as *const dyn librefang_runtime::context_engine::ContextEngine as *const ())
+        .expect("global context engine should be built at boot");
+
+    // (1) Agent WITH a manifest override that differs from the global config.
+    let override_cfg = librefang_types::config::ContextEngineTomlConfig {
+        engine: "no_compact".to_string(),
+        ..Default::default()
+    };
+    let m_override = engine_manifest("agent-override", Some(override_cfg.clone()));
+    let override_addr =
+        engine_addr(&kernel, &m_override).expect("agent with override must resolve to an engine");
+    assert_ne!(
+        override_addr, global_addr,
+        "agent manifest override must win over kernel config — got the global engine instead"
+    );
+
+    // (2) Agent WITHOUT an override falls back to the kernel-global engine.
+    let m_plain = engine_manifest("agent-plain", None);
+    let plain_addr =
+        engine_addr(&kernel, &m_plain).expect("agent without override must resolve to global");
+    assert_eq!(
+        plain_addr, global_addr,
+        "agent without a manifest override must inherit the kernel-global engine"
+    );
+
+    // (3) Dedup: a second agent with the SAME override config shares one engine.
+    let m_override_2 = engine_manifest("agent-override-2", Some(override_cfg));
+    let override_addr_2 = engine_addr(&kernel, &m_override_2)
+        .expect("second agent with override must resolve to an engine");
+    assert_eq!(
+        override_addr, override_addr_2,
+        "two agents selecting the same context-engine config must share one built engine"
+    );
+
+    kernel.shutdown();
+}
+
+/// Compiled-default fallback: when NEITHER the kernel config nor the agent
+/// manifest sets a non-default `[context_engine]`, every agent resolves to the
+/// single kernel-global engine, which was built from the compiled default
+/// (`ContextEngineTomlConfig::default()` → `engine = "default"`). Absent both
+/// override sources, there is no second engine — proving step 3 of the
+/// resolution order (compiled default) is reached through the global engine.
+#[test]
+fn context_engine_resolution_compiled_default_when_no_override_set() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-ctx-engine-default-test");
+    std::fs::create_dir_all(&home_dir).unwrap();
+
+    // No explicit `config.context_engine` → KernelConfig::default() leaves it at
+    // ContextEngineTomlConfig::default() (engine = "default").
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    assert_eq!(
+        config.context_engine.engine, "default",
+        "precondition: kernel config must use the compiled-default engine"
+    );
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let global_addr = kernel
+        .context_engine
+        .as_deref()
+        .map(|e| e as *const dyn librefang_runtime::context_engine::ContextEngine as *const ())
+        .expect("global (compiled-default) context engine should be built at boot");
+
+    let m_plain = engine_manifest("default-agent", None);
+    let plain_addr =
+        engine_addr(&kernel, &m_plain).expect("agent must resolve to the compiled-default engine");
+    assert_eq!(
+        plain_addr, global_addr,
+        "with no override anywhere, the agent must get the compiled-default kernel-global engine"
+    );
+
+    kernel.shutdown();
+}
+
+/// The new per-agent override parses from `agent.toml` `[context_engine]` and
+/// from `HAND.toml` `[agents.<name>.context_engine]` (parity with
+/// `compaction` / `skill_workshop` / `proactive_memory`, #5476 / #6264).
+#[test]
+fn context_engine_override_parses_from_agent_toml() {
+    let toml_str = r#"
+name = "ctx-agent"
+
+[model]
+provider = "anthropic"
+model = "claude-3-haiku-20240307"
+
+[context_engine]
+engine = "no_compact"
+"#;
+    let manifest: AgentManifest = toml::from_str(toml_str).unwrap();
+    let ce = manifest
+        .context_engine
+        .expect("[context_engine] section must be parsed onto the manifest");
+    assert_eq!(ce.engine, "no_compact");
+
+    // Absent section → None → resolve() inherits the kernel-global engine.
+    let plain: AgentManifest = toml::from_str(
+        r#"
+name = "plain-agent"
+
+[model]
+provider = "anthropic"
+model = "claude-3-haiku-20240307"
+"#,
+    )
+    .unwrap();
+    assert!(
+        plain.context_engine.is_none(),
+        "missing [context_engine] must deserialize to None, not Default::default()"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #5980: per-provider hourly-budget gate — exhaustion store wiring + the
+// single-provider hard-block decision.
+//
+// These exercise the kernel→gate→store contract that PR #5988 was missing:
+//   (a) a single-provider agent over its hourly cap is BLOCKED on the next
+//       dispatch (the gate returns `true` and `provider_exhausted_blocks_call`
+//       agrees there is no slot to skip to), and the usage counter does NOT
+//       keep climbing because no further record is written;
+//   (b) a multi-provider agent over the cap is NOT hard-blocked — the
+//       decision defers to the store-aware `FallbackDriver`, which skips the
+//       exhausted slot (proven via the SAME store handle the gate flags);
+//   (c) with no provider budget configured the gate is a no-op (`false`).
+// ---------------------------------------------------------------------------
+mod provider_budget_gate_5980 {
+    use super::*;
+    use librefang_llm_driver::exhaustion::ExhaustionReason;
+    use librefang_memory::usage::UsageRecord;
+    use librefang_types::agent::FallbackModel;
+    use librefang_types::config::ProviderBudget;
+
+    /// Push a provider's rolling hourly token window above `cap` by
+    /// recording a single usage row.
+    fn record_over_token_cap(kernel: &LibreFangKernel, provider: &str, tokens: u64) {
+        kernel
+            .metering
+            .engine
+            .record(&UsageRecord {
+                agent_id: AgentId::new(),
+                provider: provider.to_string(),
+                model: "test-model".to_string(),
+                input_tokens: tokens,
+                output_tokens: 0,
+                cost_usd: 0.0,
+                tool_calls: 0,
+                latency_ms: 1,
+                ..Default::default()
+            })
+            .unwrap();
+    }
+
+    fn single_provider_manifest(provider: &str) -> librefang_types::agent::AgentManifest {
+        let mut m = test_manifest("budget-agent", "single-provider", vec![]);
+        m.model.provider = provider.to_string();
+        // Explicit opt-out so a global fallback chain can't accidentally
+        // turn this into a multi-provider agent.
+        m.fallback_models = Some(vec![]);
+        m
+    }
+
+    fn multi_provider_manifest(
+        provider: &str,
+        fallback_provider: &str,
+    ) -> librefang_types::agent::AgentManifest {
+        let mut m = test_manifest("budget-agent", "multi-provider", vec![]);
+        m.model.provider = provider.to_string();
+        m.fallback_models = Some(vec![FallbackModel {
+            provider: fallback_provider.to_string(),
+            model: "fallback-model".to_string(),
+            api_key_env: None,
+            base_url: None,
+            extra_params: std::collections::BTreeMap::new(),
+        }]);
+        m
+    }
+
+    // (a) Single-provider agent over the hourly token cap → gate flags
+    // exhausted AND the call-site decision blocks (no fallback slot). The
+    // usage counter must not keep climbing: the kernel records nothing more
+    // because the dispatch is refused before the LLM call.
+    #[test]
+    fn single_provider_over_cap_is_hard_blocked() {
+        let kernel = boot_kernel_for_display_tests();
+        kernel.update_budget_config(|b| {
+            b.providers.insert(
+                "moonshot".to_string(),
+                ProviderBudget {
+                    max_tokens_per_hour: 100,
+                    ..Default::default()
+                },
+            );
+        });
+        record_over_token_cap(&kernel, "moonshot", 1_000);
+
+        let exhausted = kernel.flag_provider_budget_if_exhausted("moonshot");
+        assert!(
+            exhausted,
+            "provider over its hourly token cap must flag true"
+        );
+
+        // Side effect: the shared store now reports moonshot exhausted.
+        let store = kernel
+            .metering
+            .engine
+            .exhaustion_store()
+            .expect("boot wires a shared exhaustion store");
+        assert_eq!(
+            store
+                .is_exhausted("moonshot")
+                .expect("moonshot must be flagged in the store")
+                .reason,
+            ExhaustionReason::BudgetExceeded
+        );
+
+        // Decision: single-provider agent (no fallback) → hard block.
+        let manifest = single_provider_manifest("moonshot");
+        let cfg = kernel.config.load_full();
+        assert!(
+            kernel.provider_exhausted_blocks_call(exhausted, &manifest, &cfg),
+            "single-provider agent over cap must hard-block the dispatch"
+        );
+
+        // The counter cannot keep climbing past the cap: the block fires
+        // BEFORE `resolve_driver`/dispatch, so no further usage row is
+        // written. Re-running the gate (no new usage recorded in between) is
+        // stable — still over cap, still blocking — proving the cap stays
+        // enforced rather than the dispatch leaking through.
+        let exhausted_again = kernel.flag_provider_budget_if_exhausted("moonshot");
+        assert!(
+            exhausted_again
+                && kernel.provider_exhausted_blocks_call(exhausted_again, &manifest, &cfg),
+            "the gate must keep blocking; the over-cap counter never drains via a leaked dispatch"
+        );
+
+        kernel.shutdown();
+    }
+
+    // (b) Multi-provider agent over the cap → NOT hard-blocked; the decision
+    // defers to the FallbackDriver. We then prove the FallbackDriver, wired
+    // with the SAME store handle the gate flags, pre-skips the exhausted slot
+    // and serves from the healthy provider.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn multi_provider_over_cap_defers_to_fallback_skip() {
+        use async_trait::async_trait;
+        use librefang_runtime::llm_driver::{
+            CompletionRequest, CompletionResponse, LlmDriver, LlmError,
+        };
+        use librefang_types::message::{ContentBlock, StopReason, TokenUsage};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let kernel = boot_kernel_for_display_tests();
+        kernel.update_budget_config(|b| {
+            b.providers.insert(
+                "moonshot".to_string(),
+                ProviderBudget {
+                    max_tokens_per_hour: 100,
+                    ..Default::default()
+                },
+            );
+        });
+        record_over_token_cap(&kernel, "moonshot", 1_000);
+
+        let exhausted = kernel.flag_provider_budget_if_exhausted("moonshot");
+        assert!(exhausted);
+
+        // Multi-provider agent → the call site must NOT hard-block.
+        let manifest = multi_provider_manifest("moonshot", "groq");
+        let cfg = kernel.config.load_full();
+        assert!(
+            !kernel.provider_exhausted_blocks_call(exhausted, &manifest, &cfg),
+            "multi-provider agent must defer to the FallbackDriver, not hard-block"
+        );
+
+        // Now prove the driver skips: build a FallbackDriver over the SAME
+        // store handle the gate flagged (mirrors resolve_driver wiring).
+        struct CountingFailDriver(AtomicUsize);
+        #[async_trait]
+        impl LlmDriver for CountingFailDriver {
+            async fn complete(
+                &self,
+                _req: CompletionRequest,
+            ) -> Result<CompletionResponse, LlmError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Err(LlmError::Api {
+                    status: 500,
+                    message: "exhausted slot must not be dispatched".to_string(),
+                    code: None,
+                })
+            }
+        }
+        struct OkDriver;
+        #[async_trait]
+        impl LlmDriver for OkDriver {
+            async fn complete(
+                &self,
+                _req: CompletionRequest,
+            ) -> Result<CompletionResponse, LlmError> {
+                Ok(CompletionResponse {
+                    content: vec![ContentBlock::Text {
+                        text: "served by healthy provider".to_string(),
+                        provider_metadata: None,
+                    }],
+                    stop_reason: StopReason::EndTurn,
+                    tool_calls: vec![],
+                    usage: TokenUsage::default(),
+                    actual_provider: None,
+                    actual_model: None,
+                })
+            }
+        }
+
+        let store = kernel
+            .metering
+            .engine
+            .exhaustion_store()
+            .expect("boot wires a shared exhaustion store");
+
+        let moonshot_driver = Arc::new(CountingFailDriver(AtomicUsize::new(0)));
+        let moonshot_calls = Arc::clone(&moonshot_driver);
+        let fb =
+            librefang_runtime::drivers::fallback::FallbackDriver::with_models_and_providers(vec![
+                (
+                    moonshot_driver as Arc<dyn LlmDriver>,
+                    "moonshot-model".to_string(),
+                    "moonshot".to_string(),
+                ),
+                (
+                    Arc::new(OkDriver) as Arc<dyn LlmDriver>,
+                    "groq-model".to_string(),
+                    "groq".to_string(),
+                ),
+            ])
+            .with_exhaustion_store(store);
+
+        let req = CompletionRequest {
+            model: "moonshot-model".to_string(),
+            ..Default::default()
+        };
+        let resp = fb.complete(req).await.expect("healthy provider serves");
+        assert_eq!(resp.actual_provider.as_deref(), Some("groq"));
+        assert_eq!(
+            moonshot_calls.0.load(Ordering::SeqCst),
+            0,
+            "exhausted moonshot slot must be pre-skipped, never dispatched"
+        );
+
+        kernel.shutdown();
+    }
+
+    // (c) No provider budget configured → the gate is a cheap no-op and never
+    // flags, so behavior is unchanged (the call dispatches normally).
+    #[test]
+    fn no_budget_configured_gate_is_noop() {
+        let kernel = boot_kernel_for_display_tests();
+        // Record plenty of usage, but configure NO provider budget.
+        record_over_token_cap(&kernel, "moonshot", 1_000_000);
+
+        let exhausted = kernel.flag_provider_budget_if_exhausted("moonshot");
+        assert!(!exhausted, "no configured budget must never flag exhausted");
+
+        let store = kernel
+            .metering
+            .engine
+            .exhaustion_store()
+            .expect("boot wires a shared exhaustion store");
+        assert!(
+            store.is_exhausted("moonshot").is_none(),
+            "no budget ⇒ provider is never flagged in the store"
+        );
+
+        // And the call-site decision never blocks even for a single-provider
+        // agent, because `exhausted` is false.
+        let manifest = single_provider_manifest("moonshot");
+        let cfg = kernel.config.load_full();
+        assert!(
+            !kernel.provider_exhausted_blocks_call(exhausted, &manifest, &cfg),
+            "an unconfigured-budget agent is never blocked"
+        );
+
+        kernel.shutdown();
+    }
 }

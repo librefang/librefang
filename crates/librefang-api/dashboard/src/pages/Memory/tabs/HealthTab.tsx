@@ -105,7 +105,7 @@ export function HealthTab({ onOpenConfig }: Props) {
           value={
             (config?.proactive_memory?.auto_memorize ?? true)
               ? t("common.on", { defaultValue: "ON" })
-              : t("common.off", { defaultValue: "OFF" })
+              : t("common.off", { defaultValue: "Off" })
           }
         />
         <DefRow
@@ -113,7 +113,7 @@ export function HealthTab({ onOpenConfig }: Props) {
           value={
             (config?.proactive_memory?.auto_retrieve ?? true)
               ? t("common.on", { defaultValue: "ON" })
-              : t("common.off", { defaultValue: "OFF" })
+              : t("common.off", { defaultValue: "Off" })
           }
         />
         <DefRow

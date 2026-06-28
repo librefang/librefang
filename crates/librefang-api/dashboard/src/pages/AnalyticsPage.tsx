@@ -594,7 +594,7 @@ export function AnalyticsPage() {
               <div className="grid gap-6 md:grid-cols-2">
                 <Card padding="lg" hover>
                   <h2 className="text-sm font-bold mb-4 flex items-center gap-2">
-                    <Activity className="w-4 h-4 text-blue-500" /> {t("analytics.latency_by_model") || "Latency by Model"}
+                    <Activity className="w-4 h-4 text-blue-500" /> {t("analytics.latency_by_model", { defaultValue: "Latency by Model" })}
                   </h2>
                   <ResponsiveContainer width="100%" height={Math.max(modelPerformance.slice(0, 8).length * 40, 120)}>
                     <BarChart data={modelPerformance.slice(0, 8).map(m => ({ 
@@ -617,7 +617,7 @@ export function AnalyticsPage() {
 
                 <Card padding="lg" hover>
                   <h2 className="text-sm font-bold mb-4 flex items-center gap-2">
-                    <DollarSign className="w-4 h-4 text-purple-500" /> {t("analytics.cost_per_call") || "Cost per Call"}
+                    <DollarSign className="w-4 h-4 text-purple-500" /> {t("analytics.cost_per_call", { defaultValue: "Cost per Call" })}
                   </h2>
                   <ResponsiveContainer width="100%" height={Math.max(modelPerformance.slice(0, 8).length * 40, 120)}>
                     <BarChart data={modelPerformance.slice(0, 8).map(m => ({ 
@@ -646,9 +646,9 @@ export function AnalyticsPage() {
                         <th className="text-left py-2 px-3 font-bold text-text-dim/60">{t("analytics.model") || "Model"}</th>
                         <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.calls") || "Calls"}</th>
                         <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.total_cost") || "Total Cost"}</th>
-                        <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.cost_call") || "Cost/Call"}</th>
+                        <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.cost_call", { defaultValue: "Cost/Call" })}</th>
                         <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.avg_latency") || "Avg Latency"}</th>
-                        <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.min_max") || "Min/Max"}</th>
+                        <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.min_max", { defaultValue: "Min/Max" })}</th>
                         <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.tokens") || "Tokens"}</th>
                       </tr>
                     </thead>

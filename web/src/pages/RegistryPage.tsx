@@ -4,7 +4,7 @@ import { ArrowRight, Search, Loader2, AlertCircle, Sparkles, RotateCcw, External
 import { Github } from '../components/BrandIcons'
 import { useRegistry, getLocalizedDesc, getLocalizedName, getCategoryItems } from '../useRegistry'
 import type { RegistryCategory, Detail } from '../useRegistry'
-import { translations } from './../i18n'
+import { getTranslation } from './../i18n'
 import type { Translation } from './../i18n'
 import { useAppStore } from '../store'
 import { cn } from '../lib/utils'
@@ -95,7 +95,7 @@ async function fetchTrending(category: string): Promise<TrendingResp> {
 
 export default function RegistryPage({ category, onOpenSearch }: RegistryPageProps) {
   const lang = useAppStore(s => s.lang)
-  const t = translations[lang] || translations['en']!
+  const t = getTranslation(lang)
   const { data, isLoading, error, refetch, isFetching } = useRegistry()
   const queryClient = useQueryClient()
   const { isFavorite, toggle: toggleFavorite } = useFavorites()

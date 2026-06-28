@@ -120,34 +120,44 @@ pub fn resolve_sandbox_path_ext(
                 .map_err(|e| format!("Failed to resolve parent directory: {e}"))?;
             canon_parent.join(filename)
         } else {
-            // Parent doesn't exist yet. Build the path from the *canonical* root
-            // it lives under so the starts_with check below passes on platforms
-            // where the root itself is a symlink (e.g. macOS /tmp -> /private/tmp).
+            // Parent doesn't exist yet. We must NOT string-strip the workspace
+            // root and rejoin onto the canonical root: an EXISTING intermediate
+            // ancestor (between the root and the non-existent parent) may itself
+            // be a symlink pointing outside every allowed root. The leaf guard
+            // above only inspects the FINAL component, and the `parent.exists()`
+            // branch above only canonicalizes the immediate parent — so a path
+            // like `link/newdir/file.txt`, where `link` is a symlink to an
+            // outside directory and `newdir` does not exist, would be rebased to
+            // `<canon_root>/link/newdir/file.txt`, pass the `starts_with` check
+            // at the string level, and then have the caller's `create_dir_all` +
+            // write follow `link` straight out of the jail.
             //
-            // For an absolute candidate whose ancestor is one of the additional
-            // roots, rebase onto that canonical root. Otherwise rebase onto the
-            // canonical primary workspace root. This is safe because:
-            // 1. We already rejected `..` components.
-            // 2. The relative suffix is appended to a canonical root and no
-            //    symlinks can exist in the (non-existent) subtree.
-            let mut rebased: Option<PathBuf> = None;
-            if path.is_absolute() {
-                for root in additional_roots {
-                    if let Ok(rel) = candidate.strip_prefix(root) {
-                        rebased = Some(root.join(rel));
-                        break;
-                    }
+            // Resolve it safely instead: walk up to the deepest ancestor that
+            // actually exists and canonicalize THAT. Canonicalization resolves
+            // every ancestor symlink (including a symlinked workspace root such
+            // as macOS `/tmp -> /private/tmp`), so the `starts_with` check below
+            // sees the real on-disk location and rejects an escaping ancestor.
+            // The remaining suffix is symlink-free by construction — it does not
+            // exist on disk yet — so appending it cannot reintroduce an escape.
+            // `..` components were already rejected at the top of the function.
+            let mut existing = parent.parent();
+            let deepest_existing = loop {
+                match existing {
+                    Some(a) if a.exists() => break Some(a),
+                    Some(a) => existing = a.parent(),
+                    None => break None,
                 }
-            }
-            if let Some(p) = rebased {
-                p
-            } else {
-                let relative = candidate
-                    .strip_prefix(workspace_root)
-                    .map(|p| p.to_path_buf())
-                    .unwrap_or_else(|_| candidate.clone());
-                canon_root.join(relative)
-            }
+            };
+            let deepest_existing = deepest_existing.ok_or_else(|| {
+                format!("Failed to resolve path: no existing ancestor for '{user_path}'")
+            })?;
+            let canon_ancestor = deepest_existing
+                .canonicalize()
+                .map_err(|e| format!("Failed to resolve ancestor directory: {e}"))?;
+            let suffix = candidate
+                .strip_prefix(deepest_existing)
+                .map_err(|e| format!("Failed to resolve path suffix: {e}"))?;
+            canon_ancestor.join(suffix)
         }
     };
 
@@ -317,6 +327,130 @@ mod tests {
         let result = resolve_sandbox_path("link_to_real", dir.path());
         assert!(result.is_err());
         assert!(result.unwrap_err().contains(ERR_SYMLINK_LEAF));
+    }
+
+    // ---- intermediate-ancestor symlink escape (non-existent-parent branch) --
+
+    #[cfg(unix)]
+    #[test]
+    fn test_intermediate_ancestor_symlink_escape_blocked() {
+        // ATTACK: an EXISTING intermediate component is a symlink pointing
+        // outside the workspace, and the leaf's parent does NOT exist yet — so
+        // the resolver lands in the non-existent-parent branch. Before the fix
+        // that branch string-rebased onto the canonical root and passed the
+        // `starts_with` check, after which `tool_file_write`'s `create_dir_all`
+        // + write followed the symlink out of the jail. After the fix the
+        // deepest existing ancestor is canonicalized and the escape is caught.
+        let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+
+        // `link` lives inside the workspace and points at an existing dir outside it.
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+
+        // `link/newdir` does not exist yet -> non-existent-parent branch.
+        let result = resolve_sandbox_path("link/newdir/file.txt", dir.path());
+        assert!(
+            result.is_err(),
+            "intermediate ancestor symlink must be rejected, got: {result:?}"
+        );
+        assert!(result.unwrap_err().contains(ERR_SANDBOX_ESCAPE));
+        // The escape target dir must NOT have been created as a side effect.
+        assert!(!outside.path().join("newdir").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_intermediate_ancestor_symlink_escape_blocked_absolute() {
+        // Same escape via an absolute path through the symlinked ancestor.
+        let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+
+        let abs = dir.path().join("link").join("newdir").join("file.txt");
+        let result = resolve_sandbox_path(abs.to_str().unwrap(), dir.path());
+        assert!(result.is_err(), "got: {result:?}");
+        assert!(result.unwrap_err().contains(ERR_SANDBOX_ESCAPE));
+        assert!(!outside.path().join("newdir").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_intermediate_ancestor_symlink_escape_blocked_via_additional_root() {
+        // The escape is also caught when the path is addressed through an
+        // additional (named-workspace) root: the symlinked ancestor lives
+        // under the extra root but points to a third directory outside both.
+        let primary = TempDir::new().unwrap();
+        let extra = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+
+        let extra_canon = extra.path().canonicalize().unwrap();
+        let link = extra_canon.join("link");
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+        let abs = extra_canon.join("link").join("newdir").join("file.txt");
+
+        let result = resolve_sandbox_path_ext(
+            abs.to_str().unwrap(),
+            primary.path(),
+            &[extra_canon.as_path()],
+        );
+        assert!(result.is_err(), "got: {result:?}");
+        assert!(result.unwrap_err().contains(ERR_SANDBOX_ESCAPE));
+        assert!(!outside.path().join("newdir").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_intermediate_symlink_to_inside_workspace_still_resolves() {
+        // POSITIVE: a symlink that stays INSIDE the workspace must still allow
+        // creating new nested files under it, even when the leaf's parent does
+        // not exist yet — consistent with the existing-parent branch, which
+        // canonicalizes inside symlinks and allows them. The fix must not
+        // over-block this legitimate case.
+        let dir = TempDir::new().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let result = resolve_sandbox_path("link/newdir/file.txt", dir.path());
+        assert!(
+            result.is_ok(),
+            "inside symlink should resolve, got: {result:?}"
+        );
+        let resolved = result.unwrap();
+        // Resolves to the canonical real location, still inside the workspace.
+        assert!(resolved.starts_with(dir.path().canonicalize().unwrap()));
+        assert!(resolved.ends_with("file.txt"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_new_nested_file_under_additional_root_resolves() {
+        // POSITIVE: creating a new file in a not-yet-existing subdir UNDER a named-workspace (additional) root must still resolve.
+        // The fix replaced the literal additional-root rebase with canonicalizing the deepest existing ancestor, so this pins that a legitimate deep-mkdir write addressed through an additional root is not over-blocked by the new branch.
+        let primary = TempDir::new().unwrap();
+        let extra = TempDir::new().unwrap();
+        let extra_canon = extra.path().canonicalize().unwrap();
+
+        // `newdir` does not exist yet -> the non-existent-parent branch, reached through the additional root rather than the primary workspace.
+        let abs = extra_canon.join("newdir").join("file.txt");
+        let result = resolve_sandbox_path_ext(
+            abs.to_str().unwrap(),
+            primary.path(),
+            &[extra_canon.as_path()],
+        );
+        assert!(
+            result.is_ok(),
+            "new nested file under an additional root should resolve, got: {result:?}"
+        );
+        let resolved = result.unwrap();
+        assert!(
+            resolved.starts_with(&extra_canon),
+            "must resolve inside the additional root: {resolved:?}"
+        );
+        assert!(resolved.ends_with("file.txt"));
     }
 
     #[test]

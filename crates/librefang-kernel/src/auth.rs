@@ -1054,6 +1054,7 @@ fn guest_gate(tool_name: &str) -> UserToolGate {
     const READ_ONLY_TOOLS: &[&str] = &[
         "file_read",
         "file_list",
+        "code_search",
         "glob",
         "grep",
         "web_search",

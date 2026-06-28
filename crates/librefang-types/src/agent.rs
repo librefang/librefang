@@ -1351,6 +1351,27 @@ pub struct AgentManifest {
     /// fits-all once both agents share a daemon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction: Option<CompactionOverrides>,
+    /// Per-agent override for the kernel-global `[context_engine]`
+    /// selection (#6264). When `Some(_)`, this agent's context engine
+    /// (memory recall, prompt assembly, compaction wrapping) is built
+    /// from this manifest config instead of `KernelConfig.context_engine`.
+    /// `None` (the default) inherits the kernel-global engine.
+    ///
+    /// Resolution order — identical in shape to `compaction` /
+    /// `proactive_memory` / `skill_workshop` (#5476):
+    /// 1. this field (`agent.toml` `[context_engine]`, or `HAND.toml`
+    ///    `[agents.<name>.context_engine]`) — when `Some(_)`
+    /// 2. `config.toml` `[context_engine]` — kernel-global default
+    /// 3. compiled-in `ContextEngineTomlConfig::default()` ("default" engine)
+    ///
+    /// Use case: one agent runs a `sidecar` recall engine while the rest
+    /// of the daemon stays on the default in-process engine, without
+    /// forcing every agent onto the heavier path. Like
+    /// `tool_exec_backend`, a manifest change is picked up on respawn —
+    /// the engine is built lazily per resolved config and cached for the
+    /// process lifetime (#6264).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_engine: Option<crate::config::ContextEngineTomlConfig>,
     /// Per-agent override for the kernel-global `[rl_export]` toggle
     /// (#3331). When `enabled` is `Some`, it supersedes
     /// `KernelConfig.rl_export.enabled` for this agent only. `None`
@@ -1620,6 +1641,7 @@ impl Default for AgentManifest {
             proactive_memory: crate::memory::ProactiveMemoryOverrides::default(),
             rl_export: RlExportOverride::default(),
             compaction: None,
+            context_engine: None,
             triggers: Vec::new(),
             reconcile_orphans: OrphanPolicy::default(),
             async_tasks: AsyncTasksConfig::default(),

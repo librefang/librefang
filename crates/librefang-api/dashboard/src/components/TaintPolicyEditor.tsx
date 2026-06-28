@@ -368,8 +368,8 @@ function ToolPolicyRow({
           value={policy.default ?? "scan"}
           onChange={(e) => onChangeDefault(e.target.value as McpTaintToolAction)}
           options={[
-            { value: "scan", label: "scan (default)" },
-            { value: "skip", label: "skip (bypass scanning)" },
+            { value: "scan", label: t("mcp.taint_action_scan", "scan (default)") },
+            { value: "skip", label: t("mcp.taint_action_skip", "skip (bypass scanning)") },
           ]}
           className="text-xs"
         />

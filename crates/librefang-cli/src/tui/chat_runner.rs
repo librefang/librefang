@@ -11,7 +11,7 @@ use librefang_kernel::AgentSubsystemApi;
 use librefang_kernel::LibreFangKernel;
 use librefang_kernel::LlmSubsystemApi;
 use librefang_runtime::llm_driver::StreamEvent;
-use librefang_types::agent::{AgentEntry, AgentId};
+use librefang_types::agent::{AgentEntry, AgentId, ResetScope};
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -360,6 +360,46 @@ impl StandaloneChat {
                     Role::System,
                     crate::i18n::t("chat-runner-chat-history-cleared"),
                 );
+            }
+            "new" => {
+                // Resets backend session, not just on-screen transcript (unlike `/clear`).
+                let ok = match &self.backend {
+                    Backend::Daemon { base_url } => match self.agent_id_daemon.as_ref() {
+                        Some(id) => {
+                            let url = format!("{base_url}/api/agents/{id}/session/reset");
+                            matches!(
+                                crate::daemon_client().post(&url).send(),
+                                Ok(r) if r.status().is_success()
+                            )
+                        }
+                        None => false,
+                    },
+                    Backend::InProcess { kernel } => match self.agent_id_inprocess {
+                        // Not on a tokio runtime here; async paths spawn their own, so `block_on` is safe.
+                        Some(id) => tokio::runtime::Runtime::new().is_ok_and(|rt| {
+                            rt.block_on(kernel.reset_session(id, ResetScope::Agent))
+                                .is_ok()
+                        }),
+                        None => false,
+                    },
+                    Backend::None => false,
+                };
+                if ok {
+                    let name = self.chat.agent_name.clone();
+                    let model = self.chat.model_label.clone();
+                    let mode = self.chat.mode_label.clone();
+                    self.chat.reset();
+                    self.chat.agent_name = name;
+                    self.chat.model_label = model;
+                    self.chat.mode_label = mode;
+                    self.chat
+                        .push_message(Role::System, crate::i18n::t("chat-runner-session-reset"));
+                } else {
+                    self.chat.push_message(
+                        Role::System,
+                        crate::i18n::t("chat-runner-session-reset-failed"),
+                    );
+                }
             }
             "kill" => {
                 let name = self.agent_name.clone();

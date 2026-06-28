@@ -1,0 +1,10 @@
+post_install() {
+  echo "LibreFang installed."
+  echo "Edit /etc/librefang/env if you need provider API keys."
+  echo "Start the daemon with: systemctl enable --now librefang.service"
+}
+
+post_upgrade() {
+  echo "LibreFang upgraded."
+  echo "Restart the daemon with: systemctl restart librefang.service"
+}

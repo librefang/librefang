@@ -36,7 +36,7 @@ axum = { workspace = true }
 base64 = { workspace = true }
 subtle = { workspace = true }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
-pdf-extract = "0.10"
+pdf-extract = "0.12"
 regex = { workspace = true }
 regex-lite = { workspace = true }
 smallvec = { workspace = true }

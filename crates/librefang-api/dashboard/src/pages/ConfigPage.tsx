@@ -509,7 +509,7 @@ function ConfigFieldInput({
     return (
       <input id={inputId} type="text" value={arr.join(", ")}
         onChange={(e) => onChange(e.target.value.split(",").map((s) => s.trim()).filter(Boolean))}
-        placeholder="comma-separated values" className={inputClass} />
+        placeholder={t("config.comma_separated_values", "comma-separated values")} className={inputClass} />
     );
   }
 
@@ -1040,7 +1040,7 @@ export function ConfigPage({ category }: { category: string }) {
           <button
             onClick={() => setSearchQuery("")}
             className="absolute right-2.5 top-1/2 -translate-y-1/2 text-text-dim hover:text-text transition-colors"
-            aria-label="Clear search"
+            aria-label={t("common.clear_search", "Clear search")}
           >
             <X className="w-3.5 h-3.5" />
           </button>
