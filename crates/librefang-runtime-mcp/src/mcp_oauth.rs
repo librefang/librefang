@@ -780,7 +780,8 @@ pub async fn discover_oauth_metadata(
 ) -> Result<OAuthMetadata, String> {
     // OAuth metadata discovery must respect [proxy] config (#3577) — corporate
     // networks routinely require a proxy and OAuth was a primary failure case.
-    let client = librefang_http::proxied_client_builder()
+    // Redirects are disabled: a malicious/compromised MCP server returning a 302 would otherwise drive a blind SSRF / cloud-metadata pivot, since the SSRF guard validates only the initial URL, not redirect hops.
+    let client = librefang_http::oauth_client_builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {e}"))?;

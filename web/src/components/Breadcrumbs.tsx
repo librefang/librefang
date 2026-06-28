@@ -1,6 +1,6 @@
 import { cn } from '../lib/utils'
 import { useAppStore } from '../store'
-import { translations } from '../i18n'
+import { getTranslation } from '../i18n'
 import { ArrowLeft } from 'lucide-react'
 
 export interface Crumb {
@@ -19,13 +19,14 @@ interface BreadcrumbsProps {
 // landing page.
 export default function Breadcrumbs({ crumbs, className }: BreadcrumbsProps) {
   const lang = useAppStore(s => s.lang)
-  const t = translations[lang] || translations['en']!
+  const t = getTranslation(lang)
+  const common = t.common!
   const homeHref = lang === 'en' ? '/' : `/${lang}/`
   return (
-    <nav aria-label="Breadcrumb" className={cn('flex items-center gap-1.5 text-sm text-gray-500 dark:text-gray-400 min-w-0 overflow-x-auto whitespace-nowrap', className)}>
+    <nav aria-label={common.breadcrumb} className={cn('flex items-center gap-1.5 text-sm text-gray-500 dark:text-gray-400 min-w-0 overflow-x-auto whitespace-nowrap', className)}>
       <a href={homeHref} className="inline-flex items-center gap-1 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors shrink-0">
         <ArrowLeft className="w-3.5 h-3.5" />
-        {t.registry?.backHome || 'Home'}
+        {t.registry!.backHome}
       </a>
       {crumbs.map((c, i) => {
         const isLast = i === crumbs.length - 1

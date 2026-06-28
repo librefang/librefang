@@ -81,6 +81,23 @@ This project uses full-document translations rather than key-value translation f
 4. **Navigation check:** Click through the multi-language navigation bar to confirm all language links work.
 5. **Diff comparison:** Compare your translation against the English original section by section to ensure nothing is missing.
 
+## Website Translation Audit
+
+The marketing website has its own key-value translations in `web/src/i18n.ts`.
+Raw translator-authored locale objects live in `rawTranslations`.
+Runtime lookup allows partial locale objects: missing keys fall back to English through `getTranslation(lang)`.
+
+When a website locale is intended to be complete, run the raw-key audit before opening a PR:
+
+```bash
+cd web
+pnpm i18n:audit uk
+pnpm i18n:audit --all  # list every website locale that is not raw-key complete
+```
+
+The audit reports keys that exist in `rawTranslations.en` but are missing from the selected raw locale.
+Use it as a translator tool; CI still verifies the runtime fallback contract separately.
+
 ## Related Documentation
 
 - [CONTRIBUTING.md](../CONTRIBUTING.md) — General contribution guidelines

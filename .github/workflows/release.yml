@@ -73,6 +73,17 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Network resilience for crate downloads. A release that fails one
+  # CLI build job ships without that platform's asset and becomes a
+  # "stuck" release (see #6272). The dominant cause is a flaky
+  # `cargo fetch`: crates.io over HTTP/2 intermittently returns
+  # "[16] Error in the HTTP2 framing layer", which aborted the
+  # x86_64-apple-darwin job after 17s in v2026.6.22-beta.22. Bump
+  # cargo's network retry count and disable HTTP/2 multiplexing
+  # (the canonical workaround for that framing error) so a transient
+  # registry hiccup retries instead of dropping an asset.
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_MULTIPLEXING: "false"
   # Effective ref for source-using checkouts.
   # - tag push (normal release): use the pushed tag's frozen commit
   # - workflow_dispatch channel=current: use main HEAD so a hotfix
@@ -130,7 +141,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           ref: refs/heads/main
           fetch-depth: 0
@@ -185,7 +196,7 @@ jobs:
       startsWith(github.event.pull_request.head.ref, 'chore/bump-version-')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           ref: ${{ env.RELEASE_REF }}
           fetch-depth: 0
@@ -237,7 +248,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.channel != 'current'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           ref: ${{ env.RELEASE_REF }}
           fetch-depth: 0
@@ -252,6 +263,12 @@ jobs:
         run: |
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
+
+      - name: Install build deps
+        # `cargo xtask release` runs `cargo xtask codegen --openapi`, which compiles the workspace to regenerate openapi.json.
+        # libdbus-1-dev is required by libdbus-sys, pulled in transitively on glibc Linux (keyring secret-service / notify-rust).
+        # Every other Linux release job already installs it; this job was missing it, so the bump step panicked in libdbus-sys build.rs ("system library dbus-1 not found").
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev libdbus-1-dev
 
       - name: Run xtask release
         env:
@@ -274,7 +291,7 @@ jobs:
       || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           ref: ${{ env.RELEASE_REF }}
           fetch-depth: 0
@@ -407,7 +424,7 @@ jobs:
       && endsWith(github.ref, '-lts')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           ref: ${{ env.RELEASE_REF }}
           fetch-depth: 0
@@ -462,7 +479,7 @@ jobs:
       || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           ref: ${{ env.RELEASE_REF }}
       - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
@@ -503,7 +520,7 @@ jobs:
           - target: aarch64-apple-darwin
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           ref: ${{ env.RELEASE_REF }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -569,7 +586,7 @@ jobs:
             use_cross: true
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           ref: ${{ env.RELEASE_REF }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -641,7 +658,7 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           ref: ${{ env.RELEASE_REF }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -694,7 +711,7 @@ jobs:
           - target: x86_64-unknown-linux-gnu
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           ref: ${{ env.RELEASE_REF }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -750,7 +767,7 @@ jobs:
           - target: aarch64-unknown-linux-musl
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           ref: ${{ env.RELEASE_REF }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -826,7 +843,7 @@ jobs:
           - target: aarch64-pc-windows-msvc
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           ref: ${{ env.RELEASE_REF }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -885,7 +902,7 @@ jobs:
           - target: x86_64-apple-darwin
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           ref: ${{ env.RELEASE_REF }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -940,7 +957,7 @@ jobs:
           - target: x86_64-pc-windows-msvc
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           ref: ${{ env.RELEASE_REF }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -1019,7 +1036,7 @@ jobs:
       contents: write   # upload signed manifest as release asset
       id-token: write   # fetch OIDC token for cosign keyless signing
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           ref: ${{ env.RELEASE_REF }}
 
@@ -1127,7 +1144,7 @@ jobs:
     needs: [cli_mac, cli_linux, cli_musl, cli_windows]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           ref: ${{ env.RELEASE_REF }}
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -1157,7 +1174,7 @@ jobs:
       id-token: write  # OIDC trusted publishing to PyPI
       contents: read   # actions/checkout (job-level permissions block fully overrides top-level)
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           ref: ${{ env.RELEASE_REF }}
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -1194,7 +1211,7 @@ jobs:
     needs: [cli_mac, cli_linux]
     steps:
       - name: Check out tap repo
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           repository: librefang/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
@@ -1507,7 +1524,7 @@ jobs:
 
     runs-on: ${{ matrix.platform.os }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           ref: ${{ env.RELEASE_REF }}
       - name: Install system deps (Linux)
@@ -1694,7 +1711,7 @@ jobs:
       # though the SDK manager already installs the NDK below.
       NDK_VERSION: "27.0.12077973"
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           ref: ${{ env.RELEASE_REF }}
 
@@ -1712,6 +1729,24 @@ jobs:
       - name: Export NDK_HOME
         run: |
           echo "NDK_HOME=$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+
+      # NDK r23+ ships only the llvm-prefixed binutils (llvm-ar, llvm-ranlib);
+      # the legacy `<target>-ranlib` wrappers were removed. openssl-src builds
+      # vendored OpenSSL with CROSS_COMPILE=<target>- and shells out to
+      # `<target>-ranlib`, so `make install_dev` dies with "ranlib: not found"
+      # (exit 127). Symlink the legacy names (both Android ABIs this job builds)
+      # to the llvm equivalents AND put the NDK bin dir on PATH: openssl-src
+      # passes RANLIB to Configure as a bare command name (unlike AR, which it
+      # passes as an absolute path), so the symlink is only resolvable via a
+      # PATH lookup.
+      - name: Symlink legacy NDK binutils for openssl-src cross-compile
+        run: |
+          NDK_BIN="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          for tool in ar ranlib nm strip; do
+            ln -sf "$NDK_BIN/llvm-$tool" "$NDK_BIN/aarch64-linux-android-$tool"
+            ln -sf "$NDK_BIN/llvm-$tool" "$NDK_BIN/arm-linux-androideabi-$tool"
+          done
+          echo "$NDK_BIN" >> "$GITHUB_PATH"
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
@@ -1732,7 +1767,7 @@ jobs:
             mobile-android-
 
       - name: Cache Gradle
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
         with:
           path: |
             ~/.gradle/caches
@@ -1742,7 +1777,7 @@ jobs:
 
       # See mobile-smoke.yml for why this cache is paired with the install.
       - name: Cache tauri-cli binary
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
         with:
           path: ~/.cargo/bin/cargo-tauri
           key: tauri-cli-${{ runner.os }}-v2
@@ -1929,7 +1964,7 @@ jobs:
     # setup-xcode saves 1–2 min per run.
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           ref: ${{ env.RELEASE_REF }}
 
@@ -1958,7 +1993,7 @@ jobs:
             mobile-ios-
 
       - name: Cache tauri-cli binary
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
         with:
           path: ~/.cargo/bin/cargo-tauri
           key: tauri-cli-${{ runner.os }}-v2
@@ -2333,7 +2368,7 @@ jobs:
     needs: [desktop]
     steps:
       - name: Check out tap repo
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           repository: librefang/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
@@ -2576,7 +2611,7 @@ jobs:
             os: ubuntu-24.04-arm
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           ref: ${{ env.RELEASE_REF }}
       - name: Log in to GHCR
@@ -2666,7 +2701,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [docker-manifest]
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           ref: ${{ env.RELEASE_REF }}
       - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # v1
@@ -2708,7 +2743,7 @@ jobs:
       run:
         working-directory: sdk/javascript
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           ref: ${{ env.RELEASE_REF }}
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
@@ -2771,7 +2806,7 @@ jobs:
       run:
         working-directory: packages/cli-npm
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           ref: ${{ env.RELEASE_REF }}
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
@@ -2817,7 +2852,7 @@ jobs:
       run:
         working-directory: sdk/python
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           ref: ${{ env.RELEASE_REF }}
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
@@ -2866,7 +2901,7 @@ jobs:
       run:
         working-directory: sdk/rust
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           ref: ${{ env.RELEASE_REF }}
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -2922,7 +2957,7 @@ jobs:
     needs: [create_release]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           ref: ${{ env.RELEASE_REF }}
       - name: Create Go module tag

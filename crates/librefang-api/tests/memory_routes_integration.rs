@@ -717,3 +717,66 @@ async fn put_memory_update_unknown_id_returns_json_error() {
     let body = read_json(resp).await;
     assert!(body.get("error").is_some(), "missing error field: {body}");
 }
+
+/// A non-table `[memory]` entry in config.toml (e.g. an operator hand-edited
+/// `memory = 5`) must yield a graceful 400, not a panic/500. Before the fix,
+/// `root.entry("memory").or_insert_with(..).as_table_mut().unwrap()` panicked
+/// because `entry()` returns the existing scalar when the key is present, and
+/// `as_table_mut()` on it is `None`.
+#[tokio::test(flavor = "multi_thread")]
+async fn patch_memory_config_with_non_table_memory_entry_is_graceful() {
+    let harness = boot_router_with_api_key(TEST_KEY).await;
+    let config_path = harness.tmp.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!("api_key = \"{TEST_KEY}\"\nmemory = 5\n"),
+    )
+    .expect("seed config.toml");
+
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(authed_json(
+            Method::PATCH,
+            "/api/memory/config",
+            serde_json::json!({ "decay_rate": 0.5 }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "malformed [memory] must be a graceful 400, not a panic/500"
+    );
+    let body = read_json(resp).await;
+    assert!(body.get("error").is_some(), "missing error field: {body}");
+}
+
+/// Same graceful handling for a non-table `[proactive_memory]` entry, which is
+/// only touched when the request carries a `proactive_memory` object.
+#[tokio::test(flavor = "multi_thread")]
+async fn patch_memory_config_with_non_table_proactive_memory_entry_is_graceful() {
+    let harness = boot_router_with_api_key(TEST_KEY).await;
+    let config_path = harness.tmp.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!("api_key = \"{TEST_KEY}\"\nproactive_memory = \"oops\"\n"),
+    )
+    .expect("seed config.toml");
+
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(authed_json(
+            Method::PATCH,
+            "/api/memory/config",
+            serde_json::json!({ "proactive_memory": { "enabled": false } }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = read_json(resp).await;
+    assert!(body.get("error").is_some(), "missing error field: {body}");
+}

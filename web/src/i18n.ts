@@ -10,6 +10,17 @@ export interface PerformanceRow {
   librefang: string
 }
 
+export interface RichTextPart {
+  text?: string
+  code?: string
+  em?: string
+}
+
+export interface TroubleshootingItem {
+  q: string
+  lines: RichTextPart[][]
+}
+
 export interface Translation {
   nav: { architecture: string; hands: string; performance: string; install: string; downloads?: string; docs: string; features?: string; evolution?: string; workflows?: string; registry?: string; learnMore?: string }
   hero: {
@@ -196,6 +207,107 @@ export interface Translation {
     install: string
     dismiss: string
   }
+  common?: {
+    copy: string
+    copied: string
+    copyToClipboard: string
+    loadingReleases: string
+    skipToContent: string
+    backToTop: string
+    viewFull: string
+    contributors: string
+    agentOs: string
+    breadcrumb: string
+  }
+  header?: {
+    toggleTheme: string
+    viewSource: string
+    source: string
+    switchLanguage: string
+    switchLanguageNamed: string
+    toggleMenu: string
+  }
+  errorBoundary?: {
+    label: string
+    title: string
+    reload: string
+    home: string
+  }
+  metrics?: {
+    breadcrumb: string
+    label: string
+    title: string
+    desc: string
+    descPrefix: string
+    endpoint: string
+    descSuffix: string
+    loadError: string
+    totalClicks: string
+    uniqueItems: string
+    activeCategories: string
+    generated: string
+    perCategory: string
+    topItems: string
+    items: string
+    clicks: string
+  }
+  deploy?: {
+    title: string
+    subtitle: string
+    terminalIntro: string
+    installLocally: string
+    website: string
+    copyrightSuffix: string
+    backToPlatforms: string
+    badges: string[]
+    tokenRequired: string
+    deployFailed: string
+    deploying: string
+    deployToFly: string
+    deployed: string
+    deployedDesc: string
+    openDashboard: string
+    flyConsole: string
+    app: string
+    region: string
+    model: string
+    includedModel: string
+    upgradeModel: string
+    freeNote: string
+    stepOneTitle: string
+    stepOnePrefix: string
+    signUp: string
+    or: string
+    logIn: string
+    stepOneMiddle: string
+    personalAccessTokens: string
+    stepOneSuffix: string
+    stepTwoTitle: string
+    stepTwoDesc: string
+    tokenLabel: string
+    troubleshooting: string
+    platforms: Record<string, { desc: string; badge?: string; demo?: string; warning?: string }>
+    localInstalls: Record<string, { name: string; desc: string }>
+    steps: Record<string, string>
+    troubleshootingItems: Record<string, TroubleshootingItem>
+  }
+  changelog?: {
+    title: string
+    desc: string
+    backHome: string
+    releases: string
+    downloads: string
+    loading: string
+    loadError: string
+    unknownError: string
+    empty: string
+    noFilterMatches: string
+    fullNotes: string
+    viewOnGitHub: string
+    filters: Record<'all' | 'stable' | 'prerelease', string>
+    releaseTypes: Record<'stable' | 'rc' | 'beta', string>
+    changeTypes: Record<'feature' | 'fix' | 'breaking' | 'performance' | 'other', string>
+  }
   footer: { docs: string; license: string; privacy: string; changelog: string }
 }
 
@@ -208,9 +320,10 @@ export const languages: Language[] = [
   { code: 'de', name: 'Deutsch', url: '/de' },
   { code: 'es', name: 'Español', url: '/es' },
   { code: 'pl', name: 'Polski', url: '/pl' },
+  { code: 'uk', name: 'Українська', url: '/uk' },
 ]
 
-export const translations: Record<string, Translation> = {
+export const rawTranslations: Record<string, Translation> = {
 
   pl: {
     nav: { architecture: 'Architektura', hands: 'Ręce', performance: 'Wydajność', install: 'Instalacja', downloads: 'Pobieranie', docs: 'Dokumentacja', features: 'Rynek', evolution: 'Samodoskonalenie Umiejętności', workflows: 'Przepływy Pracy', registry: 'Rejestr', learnMore: 'Funkcje' },
@@ -757,6 +870,166 @@ export const translations: Record<string, Translation> = {
       desc: 'Add the site to your home screen or dock.',
       install: 'Install',
       dismiss: 'Dismiss',
+    },
+    common: {
+      copy: 'Copy',
+      copied: 'Copied!',
+      copyToClipboard: 'Copy to clipboard',
+      loadingReleases: 'Loading releases...',
+      skipToContent: 'Skip to content',
+      backToTop: 'Back to top',
+      viewFull: 'View Full',
+      contributors: 'Contributors',
+      agentOs: 'Agent OS',
+      breadcrumb: 'Breadcrumb',
+    },
+    header: {
+      toggleTheme: 'Toggle theme',
+      viewSource: 'View source on GitHub',
+      source: 'Source',
+      switchLanguage: 'Switch language',
+      switchLanguageNamed: 'Switch language ({name})',
+      toggleMenu: 'Toggle menu',
+    },
+    errorBoundary: {
+      label: 'Runtime error',
+      title: 'Something went wrong.',
+      reload: 'Reload',
+      home: 'Home',
+    },
+    metrics: {
+      breadcrumb: 'Metrics',
+      label: 'Registry Metrics',
+      title: 'Click telemetry',
+      desc: 'Aggregate counts of detail-page views across the registry, recorded via the /api/registry/click worker endpoint.',
+      descPrefix: 'Aggregate counts of detail-page views across the registry, recorded via the ',
+      endpoint: '/api/registry/click',
+      descSuffix: ' worker endpoint.',
+      loadError: 'Could not load metrics',
+      totalClicks: 'Total clicks',
+      uniqueItems: 'Unique items',
+      activeCategories: 'Active categories',
+      generated: 'Generated',
+      perCategory: 'Per category',
+      topItems: 'Top items overall',
+      items: 'items',
+      clicks: 'clicks',
+    },
+    deploy: {
+      title: 'Deploy LibreFang',
+      subtitle: 'Choose your platform',
+      terminalIntro: 'Or deploy from your terminal:',
+      installLocally: 'Install locally',
+      website: 'Website',
+      copyrightSuffix: 'Agent Operating System',
+      backToPlatforms: 'Back to platforms',
+      badges: ['Free LLM included', 'No API key needed', '1 GB storage'],
+      tokenRequired: 'Please enter your Fly.io API Token.',
+      deployFailed: 'Deployment failed',
+      deploying: 'Deploying...',
+      deployToFly: 'Deploy to Fly.io',
+      deployed: 'Deployed!',
+      deployedDesc: 'Your LibreFang instance is starting up (1-2 min). Free LLM (Step 3.5 Flash) is pre-configured and ready to use.',
+      openDashboard: 'Open Dashboard',
+      flyConsole: 'Fly.io Console',
+      app: 'App',
+      region: 'Region',
+      model: 'Model',
+      includedModel: 'Step 3.5 Flash (free)',
+      upgradeModel: 'Upgrade model',
+      freeNote: 'A free LLM (Step 3.5 Flash via OpenRouter) is pre-configured. Your instance works out of the box — no API keys required.',
+      stepOneTitle: 'Get a Fly.io API Token',
+      stepOnePrefix: '',
+      signUp: 'Sign up',
+      or: 'or',
+      logIn: 'log in',
+      stepOneMiddle: 'to Fly.io, then go to',
+      personalAccessTokens: 'Personal Access Tokens',
+      stepOneSuffix: 'and create a new token.',
+      stepTwoTitle: 'Paste and deploy',
+      stepTwoDesc: 'Your token is only sent to the Fly.io API and is never stored on our servers.',
+      tokenLabel: 'Fly.io API Token',
+      troubleshooting: 'Troubleshooting',
+      platforms: {
+        flyio: { desc: 'Free forever, persistent storage', badge: 'Recommended', demo: 'Live Demo' },
+        render: { desc: 'One-click OAuth deploy', badge: 'Easiest', demo: 'Live Demo', warning: 'Free tier: sleeps after 15 min, no persistent storage' },
+        railway: { desc: 'Simple deploy with $5 free credit' },
+        gcp: { desc: 'Free forever (e2-micro), 30GB storage', badge: 'Terraform' },
+        docker: { desc: 'One command, runs anywhere' },
+      },
+      localInstalls: {
+        macos: { name: 'macOS', desc: 'Homebrew or download binary' },
+        linux: { name: 'Linux', desc: 'Install script or download binary' },
+        windows: { name: 'Windows', desc: 'PowerShell installer or .msi' },
+      },
+      steps: {
+        auth: 'Verifying token...',
+        app: 'Creating app...',
+        net: 'Allocating IP addresses...',
+        vol: 'Creating persistent volume...',
+        machine: 'Launching machine with Step 3.5 Flash...',
+      },
+      troubleshootingItems: {
+        sso: {
+          q: 'Cannot create Personal Access Token (SSO error)',
+          lines: [
+            [
+              { text: 'If you see: ' },
+              { em: '"Access Tokens cannot be created because an organization requires SSO"' },
+            ],
+            [{ text: 'Use a per-org token instead. Run in your terminal:' }],
+            [{ code: 'flyctl tokens org <your-org-name>' }],
+            [{ text: 'Then paste the generated token above.' }],
+          ],
+        },
+        image: {
+          q: 'Deploy failed: image not found',
+          lines: [
+            [
+              { text: 'The Docker image ' },
+              { code: 'ghcr.io/librefang/librefang:latest' },
+              { text: ' is built on each release.' },
+            ],
+            [{ text: 'If no release has been published yet, use the terminal deploy script below — it builds from source.' }],
+          ],
+        },
+        llm: {
+          q: 'How to add or change LLM provider after deploy?',
+          lines: [
+            [{ code: 'flyctl secrets set OPENAI_API_KEY=sk-... --app your-app-name' }],
+            [
+              { text: 'Then edit ' },
+              { code: '/data/config.toml' },
+              { text: ' via ' },
+              { code: 'flyctl ssh console' },
+              { text: ' to update the default model.' },
+            ],
+          ],
+        },
+      },
+    },
+    changelog: {
+      title: 'Changelog',
+      desc: 'Track every update to LibreFang',
+      backHome: 'Back to home',
+      releases: 'releases',
+      downloads: 'downloads',
+      loading: 'Loading releases...',
+      loadError: 'Failed to load releases',
+      unknownError: 'Unknown error',
+      empty: 'No releases found.',
+      noFilterMatches: 'No releases match the current filter.',
+      fullNotes: 'See full release notes on GitHub.',
+      viewOnGitHub: 'View on GitHub',
+      filters: { all: 'All', stable: 'Stable', prerelease: 'Pre-release' },
+      releaseTypes: { stable: 'Stable', rc: 'RC', beta: 'Beta' },
+      changeTypes: {
+        feature: 'Added',
+        fix: 'Fixed',
+        breaking: 'Breaking',
+        performance: 'Performance',
+        other: 'Other',
+      },
     },
     footer: { docs: 'Docs', license: 'License', privacy: 'Privacy', changelog: 'Changelog' },
   },
@@ -2254,4 +2527,475 @@ export const translations: Record<string, Translation> = {
     },
     footer: { docs: 'Documentación', license: 'Licencia', privacy: 'Privacidad', changelog: 'Cambios' },
   },
+}
+
+rawTranslations.uk = {
+  nav: { architecture: 'Архітектура', hands: 'Hands', performance: 'Продуктивність', install: 'Встановлення', downloads: 'Завантаження', docs: 'Документація', features: 'Маркетплейс', evolution: 'Саморозвиток навичок', workflows: 'Робочі процеси', registry: 'Реєстр', learnMore: 'Можливості' },
+  hero: {
+    badge: 'Open Source',
+    title1: 'Агентна',
+    title2: 'операційна система',
+    typing: [
+      'запускайте автономних агентів 24/7',
+      'замінюйте цілі робочі процеси',
+      'розгортайте на будь-якому обладнанні',
+      'контролюйте через 16 рівнів безпеки',
+    ],
+    desc: 'LibreFang — production-grade runtime для автономних AI-агентів. Один binary, {handsCount} вбудованих одиниць можливостей, {channelsCount} адаптерів каналів. Написано на Rust для навантажень, які не можуть дозволити собі простій.',
+    getStarted: 'Почати',
+    viewGithub: 'Переглянути на GitHub',
+  },
+  stats: { coldStart: 'Холодний старт', memory: 'Памʼять', security: 'Рівнів безпеки', channels: 'Канали', hands: 'Hands', providers: 'Провайдери' },
+  architecture: {
+    label: 'Дизайн системи',
+    title: 'Пʼятирівнева архітектура',
+    desc: 'Від обладнання до каналів для користувачів. Кожен рівень ізольований, тестований і замінний.',
+    layers: [
+      { label: 'Канали', desc: '44 адаптери: Telegram, Slack, Discord, Feishu, DingTalk, WhatsApp...' },
+      { label: 'Hands', desc: '15 автономних одиниць можливостей із власними моделями та інструментами' },
+      { label: 'Ядро', desc: 'Життєвий цикл агентів, оркестрація робочих процесів, контроль бюджету, планування' },
+      { label: 'Runtime', desc: 'Асинхронний Tokio, WASM sandbox, Merkle audit chain, захист від SSRF' },
+      { label: 'Обладнання', desc: 'Один binary: ноутбук, VPS, Raspberry Pi, bare metal, хмара' },
+    ],
+    kernelDescs: [
+      'Створення, запуск, пауза, відновлення, зупинка, видалення',
+      '9 вбудованих шаблонів, DAG-оркестрація',
+      'Ліміти витрат на агента, глобальні обмеження, сповіщення',
+      'Cron-тригери, інтервальні задачі, event hooks',
+      'Короткострокова, довгострокова, епізодична, семантична памʼять, автоматична консолідація',
+      'Python і prompt-навички, hot-reload',
+      'Model Context Protocol, Agent-to-Agent',
+      'Open Fang Protocol для mesh-мереж',
+    ],
+    runtimeDescs: [
+      'Багатопотоковий асинхронний runtime',
+      'Ізольоване виконання недовіреного коду',
+      'Перевірка цілісності через hash-chain',
+      'Блокування доступу до внутрішньої мережі',
+      'Аналіз потоків даних на секрети',
+      'Token bucket для кожного агента/каналу',
+      'Багаторівнева санітизація введення',
+      'Рольовий контроль доступу + audit log',
+    ],
+    hardwareDescs: [
+      '32MB, без залежностей, просто скопіюйте й запустіть',
+      'Нативні збірки для x86_64 та ARM64',
+      'ARM64 — працює на Pi 4 із 64MB RAM',
+      'Середовище Termux, нативний ARM64',
+      'Будь-який VPS за $5/міс, Docker опційний',
+      'Пряме розгортання, оркестратор не потрібен',
+      'Нативний desktop app із системним треєм',
+    ],
+  },
+  hands: {
+    label: 'Одиниці можливостей',
+    title: '15 вбудованих Hands',
+    desc: 'Кожен Hand має власну модель, інструменти й робочий процес. Активуйте, а не збирайте вручну.',
+    items: [
+      { name: 'Clip', desc: 'YouTube у вертикальні shorts з AI-субтитрами. Автопублікація в Telegram.' },
+      { name: 'Lead', desc: 'Щоденний пошук лідів з ICP-оцінкою, дедуплікацією та CSV-експортом.' },
+      { name: 'Collector', desc: 'OSINT-рівень моніторингу розвідданих із виявленням змін.' },
+      { name: 'Predictor', desc: 'Каліброване ймовірнісне прогнозування для ринків і результатів.' },
+      { name: 'Researcher', desc: 'Глибоке дослідження з оцінкою надійності джерел.' },
+      { name: 'Trader', desc: 'Автономний рушій ринкової аналітики й торгівлі — багатосигнальний аналіз, adversarial reasoning, керування ризиками.' },
+    ],
+    more: '+ ще 9: Twitter, Browser, Analytics, DevOps, Creator, LinkedIn, Reddit, Strategist, API Tester',
+  },
+  performance: {
+    label: 'Бенчмарки',
+    title: 'Збудовано інакше',
+    desc: 'Rust, не TypeScript. Production, не прототип.',
+    metric: 'Метрика',
+    others: 'Інші',
+    rows: [
+      { metric: 'Холодний старт', others: '2.5 ~ 4s', librefang: '180ms' },
+      { metric: 'Памʼять у простої', others: '180 ~ 250MB', librefang: '40MB' },
+      { metric: 'Розмір binary', others: '100 ~ 200MB', librefang: '32MB' },
+      { metric: 'Рівні безпеки', others: '2 ~ 3', librefang: '16' },
+      { metric: 'Адаптери каналів', others: '8 ~ 15', librefang: '44' },
+      { metric: 'Вбудовані Hands', others: '0', librefang: '15' },
+    ],
+  },
+  install: {
+    label: 'Почати',
+    title: 'Одна команда',
+    desc: 'Один binary. Без Docker. 60 секунд до автономних агентів.',
+    terminal: 'термінал',
+    comment: '# агенти вже працюють автономно',
+    requires: 'Потрібно',
+    includes: 'Містить',
+    reqItems: ['Linux / macOS / Windows', 'Мінімум 64MB RAM', 'x86_64 або ARM64', 'LLM API-ключ'],
+    incItems: ['{handsCount} вбудованих Hands', '{channelsCount} адаптерів каналів', '{providersCount} LLM-провайдерів', 'Desktop app (Tauri 2.0)'],
+  },
+  faq: {
+    label: 'FAQ',
+    title: 'Поширені питання',
+    items: [
+      { q: 'Що таке LibreFang?', a: 'Production-grade Agent Operating System, написана на Rust. Вона запускає автономних AI-агентів за розкладом 24/7 без обовʼязкових user prompts. Runtime, безпека й інфраструктура каналів в одному binary.' },
+      { q: 'Що таке Hands?', a: 'Самодостатні автономні одиниці можливостей. Кожен Hand має власну модель, інструменти й робочий процес. 15 вбудованих: Clip (відео), Lead (пошук клієнтів), Collector (OSINT), Predictor (прогнозування), Researcher, Trader та інші.' },
+      { q: 'Які LLM-провайдери підтримуються?', a: '50 провайдерів: Anthropic, OpenAI, Gemini, Groq, DeepSeek, Mistral, Together, Ollama, vLLM та інші. Загалом 200+ моделей. Кожен Hand може використовувати окремого провайдера.' },
+      { q: 'Які канали підтримуються?', a: '44 адаптери каналів: Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Teams, Google Chat, Feishu, DingTalk, Mastodon, Bluesky, LinkedIn, Reddit, IRC та інші.' },
+      { q: 'Чи готово це до production?', a: '2100+ тестів, нуль Clippy warnings. 16 рівнів безпеки, включно з WASM sandbox, Merkle audit chain і SSRF protection. До v1.0 рекомендовано фіксувати версію для стабільності.' },
+    ],
+  },
+  community: {
+    label: 'Open Source',
+    title: 'Приєднуйтесь до спільноти',
+    desc: 'LibreFang розробляється відкрито. Надсилайте код, повідомляйте про проблеми або долучайтесь до обговорення.',
+    items: [
+      { label: 'Долучитися', desc: 'Надсилайте PR, виправляйте баги, покращуйте документацію' },
+      { label: 'Повідомити', desc: 'Знайшли баг? Відкрийте issue' },
+      { label: 'Обговорити', desc: 'Ставте питання, діліться ідеями' },
+      { label: 'Discord', desc: 'Приєднуйтесь до нашого Discord-сервера' },
+    ],
+    open: 'Відкрити',
+  },
+  meta: {
+    title: 'LibreFang - агентна операційна система',
+    description: 'LibreFang — production-grade Agent Operating System, написана на Rust. 180ms холодний старт, 40MB памʼяті, 16 рівнів безпеки, 44 адаптери каналів. Запускайте автономних AI-агентів 24/7.',
+  },
+  workflows: {
+    label: 'Робочі процеси',
+    title: 'Замінюйте цілі робочі процеси',
+    desc: 'LibreFang не просто допомагає — він бере роботу на себе. Це операції, для яких інакше довелось би наймати людей.',
+    items: [
+      { title: 'Контентний pipeline', desc: 'Clip + Twitter: моніторинг трендових відео, нарізання shorts, додавання субтитрів, публікація в соцмережі — усе поки ви offline.' },
+      { title: 'Пошук продажних лідів', desc: 'Lead запускається щоночі: знаходить потенційних клієнтів, оцінює ICP-fit, прибирає дублікати, експортує чистий CSV.' },
+      { title: 'Конкурентна розвідка', desc: 'Collector стежить за сайтами конкурентів, цінами, вакансіями й новинами. Сповіщає в момент, коли щось змінюється.' },
+      { title: 'Мультиагентна оркестрація', desc: 'Обʼєднуйте Hands у workflow: Researcher → Predictor → Clip → трансляція в 44 канали.' },
+      { title: 'Міграція', desc: 'Одна команда: librefang migrate --from openclaw. Агенти, памʼять і навички переносяться автоматично.' },
+      { title: 'Production-безпека', desc: 'WASM sandbox, Merkle audit chain, SSRF protection, prompt injection scanning, GCRA rate limiting — 16 рівнів.' },
+    ],
+  },
+  docs: {
+    label: 'Документація',
+    title: 'Документація',
+    desc: 'Комплексні гайди для LibreFang',
+    categories: [
+      { title: 'Огляд', desc: 'Вступ, швидкий старт, архітектура' },
+      { title: 'Автоматизація', desc: 'Cron-задачі, webhooks, інтеграції' },
+      { title: 'Інфраструктура', desc: 'Розгортання, моніторинг, масштабування' },
+    ],
+    viewAll: 'Переглянути всю документацію',
+  },
+  githubStats: {
+    label: 'Спільнота',
+    title: 'Приєднуйтесь до спільноти',
+    desc: 'Допоможіть нам будувати майбутнє автономних AI-агентів',
+    stars: 'Зірки', forks: 'Форки', issues: 'Issues', prs: 'PR',
+    downloads: 'Завантаження', docsVisits: 'Візити в документацію', lastUpdate: 'Останнє оновлення',
+    starHistory: 'Історія зірок', starUs: 'Поставити зірку', discuss: 'Обговорити',
+  },
+  contributing: {
+    label: 'Участь',
+    title: 'Як долучитися',
+    desc: 'LibreFang — open source проєкт і вітає будь-які внески.',
+    steps: [
+      { title: 'Fork і clone', desc: 'Зробіть fork репозиторію й склонуйте його локально, щоб почати.' },
+      { title: 'Оберіть issue', desc: 'Перегляньте відкриті issues з мітками "good first issue" або "help wanted".' },
+      { title: 'Надішліть PR', desc: 'Внесіть зміни, напишіть тести й надішліть pull request на review.' },
+    ],
+    cta: 'Прочитати гайд для контрибʼюторів',
+  },
+  evolution: {
+    label: 'Саморозвиток навичок',
+    title: 'Агенти, які навчаються самі',
+    desc: 'Після складного завдання фоновий LLM-review вирішує, чи варто зберегти підхід. Нові навички hot-reload-яться в runtime без перезапуску.',
+    tagline: 'Автономно. З версіями. Із security scan.',
+    toolsHeading: 'Інструменти еволюції',
+    howItWorks: [
+      { title: 'Автоматичне виявлення', desc: '5+ викликів інструментів запускають фоновий review підходу.' },
+      { title: 'Hot-reload', desc: 'Нові й оновлені навички доступні одразу — без перезапуску daemon.' },
+      { title: 'Сканування безпеки', desc: 'Кожна зміна проходить prompt injection detection з автоматичним rollback.' },
+      { title: 'Історія версій', desc: 'До 10 версій на навичку з timestamps, changelog і rollback snapshots.' },
+    ],
+    tools: [
+      { name: 'skill_evolve_create', desc: 'Збережіть успішний підхід як нову prompt-only навичку.' },
+      { name: 'skill_evolve_update', desc: 'Повністю перепишіть prompt context навички.' },
+      { name: 'skill_evolve_patch', desc: 'Точковий find-and-replace із 5-стратегійним fuzzy matching.' },
+      { name: 'skill_evolve_rollback', desc: 'Миттєво поверніться до попередньої версії.' },
+      { name: 'skill_evolve_write_file', desc: 'Додайте допоміжні файли: references, templates, scripts, assets.' },
+      { name: 'skill_evolve_delete', desc: 'Видаліть локально створену навичку.' },
+    ],
+    cta: 'Прочитати документацію з еволюції навичок',
+  },
+  registry: {
+    label: 'Реєстр',
+    total: 'усього',
+    matching: 'збігів',
+    all: 'Усі',
+    searchPlaceholder: 'Шукайте за назвою, id або тегом...',
+    loading: 'Завантаження реєстру…',
+    errorTitle: 'Не вдалося завантажити реєстр',
+    errorDesc: 'Спрацював GitHub rate limit або proxy недоступний. Спробуйте ще раз за кілька секунд.',
+    emptyTitle: 'Тут поки нічого немає',
+    emptyDesc: 'Цей розділ реєстру ще не заповнений. Перевірте пізніше або додайте власний запис.',
+    contribute: 'Долучитися на GitHub',
+    noMatches: 'Немає збігів для',
+    backHome: 'Головна',
+    sourceHint: 'Дані проксійовані з репозиторію librefang-registry на GitHub.',
+    readDocs: 'Читати документацію',
+    manifest: 'Маніфест',
+    copy: 'Копіювати',
+    manifestErrorTitle: 'Не вдалося завантажити маніфест',
+    allIn: 'Усі {category}',
+    useIt: 'Використати',
+    configOnly: 'Записи {category} налаштовуються через ~/.librefang/config.toml, а не через CLI install command. Скопіюйте маніфест нижче й вставте його у відповідний розділ config.',
+    relatedIn: 'Більше {category}',
+    retry: 'Повторити',
+    openInDashboard: 'Або встановіть через локальний dashboard',
+    lastUpdated: 'Оновлено',
+    copyLink: 'Копіювати посилання на цей розділ',
+    trending: 'У тренді',
+    downloads: 'завантажень',
+    stars: 'зірок',
+    thisWeek: 'цього тижня',
+    sort: { label: 'Сортувати', popular: 'Популярні', nameAsc: 'Назва A–Z', nameDesc: 'Назва Z–A', trending: 'Найбільше кліків', downloads: 'Найбільше завантажень', weekly: 'У тренді цього тижня' },
+    onThisPage: 'На цій сторінці',
+    previous: 'Попередній',
+    next: 'Наступний',
+    prevNext: 'Попередній / наступний у категорії',
+    readme: 'README',
+    viewHistory: 'Історія',
+    templateDiff: 'Diff шаблону',
+    subcategories: {
+      ai: 'AI', business: 'Бізнес', cloud: 'Хмара', communication: 'Комунікація',
+      content: 'Контент', creation: 'Створення', data: 'Дані', developer: 'Розробник',
+      development: 'Розробка', devtools: 'DevTools', email: 'Email',
+      engineering: 'Інженерія', enterprise: 'Enterprise', iot: 'IoT',
+      language: 'Мова', messaging: 'Повідомлення', productivity: 'Продуктивність',
+      research: 'Дослідження', skills: 'Навички', social: 'Соцмережі', thinking: 'Мислення',
+    },
+    categories: {
+      skills: { title: 'Навички', desc: 'Підключувані набори інструментів — Python, WASM, Node або prompt-only skills, які розширюють можливості агента.' },
+      mcp:    { title: 'MCP-сервери', desc: 'Model Context Protocol servers, які підключають зовнішні інструменти й джерела даних безпосередньо до будь-якого агента.' },
+      plugins:{ title: 'Плагіни', desc: 'Runtime extensions, які додають власні команди, канали або поведінку до LibreFang daemon.' },
+      hands:  { title: 'Hands', desc: 'Автономні одиниці можливостей. Кожен Hand має власну модель, інструменти й workflow — активуйте, не збирайте.' },
+      agents: { title: 'Агенти', desc: 'Готові шаблони агентів. Модель, system prompt, capabilities і schedule — усе в одному маніфесті.' },
+      providers: { title: 'Провайдери', desc: 'Адаптери LLM-провайдерів. Anthropic, OpenAI, Gemini, Groq, локальні моделі — і ще 40+ між ними.' },
+      workflows: { title: 'Робочі процеси', desc: 'Багатокрокова оркестрація агентів у TOML. Зʼєднуйте агентів, розгалужуйте за умовами, зберігайте стан.' },
+      channels:  { title: 'Канали', desc: 'Адаптери повідомлень. Telegram, Slack, Discord, WhatsApp, LINE і 40+ інших платформ.' },
+    },
+  },
+  search: {
+    title: 'Пошук у реєстрі',
+    placeholder: 'Шукайте навички, Hands, агентів, провайдерів…',
+    close: 'Закрити',
+    noResults: 'Немає збігів для "{query}"',
+    hint: 'Почніть вводити, щоб шукати серед усіх записів реєстру.',
+    kbd: '↑↓ навігація · ↵ відкрити · esc закрити',
+    open: 'Пошук',
+  },
+  browse: {
+    title: 'Огляд реєстру',
+    desc: 'Усі категорії одним поглядом — оберіть категорію, щоб побачити всі записи, відсортовані за популярністю.',
+  },
+  notFound: {
+    title: 'Сторінку не знайдено',
+    desc: 'Ми не знайшли те, що ви шукали.',
+    home: 'Повернутися на головну',
+  },
+  pwa: {
+    title: 'Встановити LibreFang',
+    desc: 'Додайте сайт на головний екран або в dock.',
+    install: 'Встановити',
+    dismiss: 'Закрити',
+  },
+  common: {
+    copy: 'Копіювати',
+    copied: 'Скопійовано!',
+    copyToClipboard: 'Копіювати в буфер',
+    loadingReleases: 'Завантаження релізів...',
+    skipToContent: 'Перейти до вмісту',
+    backToTop: 'Нагору',
+    viewFull: 'Переглянути повністю',
+    contributors: 'Учасники',
+    agentOs: 'ОС для агентів',
+    breadcrumb: 'Навігаційний ланцюжок',
+  },
+  header: {
+    toggleTheme: 'Перемкнути тему',
+    viewSource: 'Переглянути джерело на GitHub',
+    source: 'Джерело',
+    switchLanguage: 'Змінити мову',
+    switchLanguageNamed: 'Змінити мову ({name})',
+    toggleMenu: 'Перемкнути меню',
+  },
+  errorBoundary: {
+    label: 'Помилка виконання',
+    title: 'Щось пішло не так.',
+    reload: 'Перезавантажити',
+    home: 'На головну',
+  },
+  metrics: {
+    breadcrumb: 'Метрики',
+    label: 'Метрики реєстру',
+    title: 'Телеметрія кліків',
+    desc: 'Агреговані лічильники переглядів сторінок деталей у реєстрі, записані через endpoint worker /api/registry/click.',
+    descPrefix: 'Агреговані лічильники переглядів сторінок деталей у реєстрі, записані через endpoint worker ',
+    endpoint: '/api/registry/click',
+    descSuffix: '.',
+    loadError: 'Не вдалося завантажити метрики',
+    totalClicks: 'Усього кліків',
+    uniqueItems: 'Унікальні елементи',
+    activeCategories: 'Активні категорії',
+    generated: 'Згенеровано',
+    perCategory: 'За категоріями',
+    topItems: 'Найпопулярніші елементи',
+    items: 'елементів',
+    clicks: 'кліків',
+  },
+  deploy: {
+    title: 'Розгорнути LibreFang',
+    subtitle: 'Оберіть платформу',
+    terminalIntro: 'Або розгорніть із термінала:',
+    installLocally: 'Встановити локально',
+    website: 'Сайт',
+    copyrightSuffix: 'Операційна система для агентів',
+    backToPlatforms: 'Назад до платформ',
+    badges: ['Безкоштовна LLM включена', 'API-ключ не потрібен', '1 ГБ сховища'],
+    tokenRequired: 'Введіть API-токен Fly.io.',
+    deployFailed: 'Розгортання не вдалося',
+    deploying: 'Розгортання...',
+    deployToFly: 'Розгорнути на Fly.io',
+    deployed: 'Розгорнуто!',
+    deployedDesc: 'Ваш екземпляр LibreFang запускається (1-2 хв). Безкоштовна LLM (Step 3.5 Flash) уже налаштована й готова до використання.',
+    openDashboard: 'Відкрити панель',
+    flyConsole: 'Консоль Fly.io',
+    app: 'Застосунок',
+    region: 'Регіон',
+    model: 'Модель',
+    includedModel: 'Step 3.5 Flash (безкоштовно)',
+    upgradeModel: 'Оновити модель',
+    freeNote: 'Безкоштовна LLM (Step 3.5 Flash через OpenRouter) уже налаштована. Ваш екземпляр працює одразу — API-ключі не потрібні.',
+    stepOneTitle: 'Отримайте API-токен Fly.io',
+    stepOnePrefix: '',
+    signUp: 'Зареєструйтесь',
+    or: 'або',
+    logIn: 'увійдіть',
+    stepOneMiddle: 'у Fly.io, потім перейдіть до',
+    personalAccessTokens: 'Personal Access Tokens',
+    stepOneSuffix: 'і створіть новий токен.',
+    stepTwoTitle: 'Вставте токен і розгорніть',
+    stepTwoDesc: 'Ваш токен надсилається лише до API Fly.io і ніколи не зберігається на наших серверах.',
+    tokenLabel: 'API-токен Fly.io',
+    troubleshooting: 'Усунення проблем',
+    platforms: {
+      flyio: { desc: 'Безкоштовно назавжди, постійне сховище', badge: 'Рекомендовано', demo: 'Жива демоверсія' },
+      render: { desc: 'Розгортання OAuth в один клік', badge: 'Найпростіше', demo: 'Жива демоверсія', warning: 'Безкоштовний тариф: засинає після 15 хв, без постійного сховища' },
+      railway: { desc: 'Просте розгортання з $5 безкоштовного кредиту' },
+      gcp: { desc: 'Безкоштовно назавжди (e2-micro), 30 ГБ сховища', badge: 'Terraform' },
+      docker: { desc: 'Одна команда, працює будь-де' },
+    },
+    localInstalls: {
+      macos: { name: 'macOS', desc: 'Homebrew або завантаження binary' },
+      linux: { name: 'Linux', desc: 'Скрипт встановлення або завантаження binary' },
+      windows: { name: 'Windows', desc: 'Інсталятор PowerShell або .msi' },
+    },
+    steps: {
+      auth: 'Перевірка токена...',
+      app: 'Створення застосунку...',
+      net: 'Виділення IP-адрес...',
+      vol: 'Створення постійного тому...',
+      machine: 'Запуск машини зі Step 3.5 Flash...',
+    },
+    troubleshootingItems: {
+      sso: {
+        q: 'Не вдається створити Personal Access Token (помилка SSO)',
+        lines: [
+          [
+            { text: 'Якщо бачите: ' },
+            { em: '"Access Tokens cannot be created because an organization requires SSO"' },
+          ],
+          [{ text: 'Використайте токен організації. Запустіть у терміналі:' }],
+          [{ code: 'flyctl tokens org <your-org-name>' }],
+          [{ text: 'Потім вставте згенерований токен вище.' }],
+        ],
+      },
+      image: {
+        q: 'Розгортання не вдалося: image not found',
+        lines: [
+          [
+            { text: 'Docker image ' },
+            { code: 'ghcr.io/librefang/librefang:latest' },
+            { text: ' збирається для кожного релізу.' },
+          ],
+          [{ text: 'Якщо реліз ще не опубліковано, використайте terminal deploy script нижче — він збирає з джерел.' }],
+        ],
+      },
+      llm: {
+        q: 'Як додати або змінити LLM-провайдера після розгортання?',
+        lines: [
+          [{ code: 'flyctl secrets set OPENAI_API_KEY=sk-... --app your-app-name' }],
+          [
+            { text: 'Потім відредагуйте ' },
+            { code: '/data/config.toml' },
+            { text: ' через ' },
+            { code: 'flyctl ssh console' },
+            { text: ', щоб змінити модель за замовчуванням.' },
+          ],
+        ],
+      },
+    },
+  },
+  changelog: {
+    title: 'Журнал змін',
+    desc: 'Відстежуйте кожне оновлення LibreFang',
+    backHome: 'Назад на головну',
+    releases: 'релізів',
+    downloads: 'завантажень',
+    loading: 'Завантаження релізів...',
+    loadError: 'Не вдалося завантажити релізи',
+    unknownError: 'Невідома помилка',
+    empty: 'Релізів не знайдено.',
+    noFilterMatches: 'Жоден реліз не відповідає поточному фільтру.',
+    fullNotes: 'Повні нотатки до релізу дивіться на GitHub.',
+    viewOnGitHub: 'Переглянути на GitHub',
+    filters: { all: 'Усі', stable: 'Стабільні', prerelease: 'Передрелізи' },
+    releaseTypes: { stable: 'Стабільний', rc: 'RC', beta: 'Бета' },
+    changeTypes: {
+      feature: 'Додано',
+      fix: 'Виправлено',
+      breaking: 'Несумісні зміни',
+      performance: 'Продуктивність',
+      other: 'Інше',
+    },
+  },
+  footer: { docs: 'Документація', license: 'Ліцензія', privacy: 'Приватність', changelog: 'Журнал змін' },
+}
+
+function mergeTranslation(base: Translation, override: Translation): Translation {
+  return mergeObject(base, override) as Translation
+}
+
+function mergeObject(base: unknown, override: unknown): unknown {
+  if (Array.isArray(base) || Array.isArray(override)) {
+    return override ?? base
+  }
+  if (
+    base &&
+    override &&
+    typeof base === 'object' &&
+    typeof override === 'object'
+  ) {
+    const merged: Record<string, unknown> = { ...(base as Record<string, unknown>) }
+    for (const [key, value] of Object.entries(override as Record<string, unknown>)) {
+      merged[key] = mergeObject(merged[key], value)
+    }
+    return merged
+  }
+  return override ?? base
+}
+
+const translationCache = new Map<string, Translation>()
+
+export function getTranslation(lang: string): Translation {
+  const english = rawTranslations.en!
+  const selected = rawTranslations[lang]
+  if (!selected || selected === english) return english
+  const cached = translationCache.get(lang)
+  if (cached) return cached
+  const merged = mergeTranslation(english, selected)
+  translationCache.set(lang, merged)
+  return merged
 }

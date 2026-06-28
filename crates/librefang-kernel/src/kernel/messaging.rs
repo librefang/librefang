@@ -400,6 +400,59 @@ impl LibreFangKernel {
         })
     }
 
+    /// Resolve the **default outbound conversation id** for an agent's home
+    /// channel, if one is configured (#6266).
+    ///
+    /// Mirrors [`Self::resolve_agent_home_channel`]'s home-channel lookup but
+    /// surfaces the channel instance's `default_conversation`
+    /// (`[[sidecar_channels]].default_conversation`). Callers use this as a
+    /// fallback destination when a turn carries no inbound conversation —
+    /// e.g. the mid-turn delegation-completion forward for a web-UI-originated
+    /// turn, whose `chat_id` is `None`.
+    ///
+    /// Returns `None` when no channel's `default_agent` matches this agent, or
+    /// the matching channel defines no (non-empty) `default_conversation`. In
+    /// that ambiguous case callers MUST NOT invent a destination — skipping
+    /// the forward is correct; delivering to a guessed chat is not.
+    pub(crate) fn resolve_agent_default_conversation(&self, agent_id: AgentId) -> Option<String> {
+        let entry = self.agents.registry.get(agent_id)?;
+        let agent_name = entry.name.clone();
+        let cfg = self.config.load_full();
+        sidecar_default_conversation(&cfg.sidecar_channels, agent_name.as_str())
+    }
+}
+
+/// Pure resolver: the `default_conversation` of the first `sidecar_channels`
+/// entry whose `agent` (a.k.a. `default_agent`) names `agent_name`, filtered
+/// to non-empty values.
+///
+/// First-match wins, deterministic because `sidecar_channels` is an ordered
+/// `Vec` — same ordering contract `sidecar_default_agent` in
+/// `handles/channel_sender.rs` relies on. Factored out as a free function so
+/// it is unit-testable without standing up a kernel.
+fn sidecar_default_conversation(
+    sidecar_channels: &[librefang_types::config::SidecarChannelConfig],
+    agent_name: &str,
+) -> Option<String> {
+    // Resolve the SAME channel `resolve_agent_home_channel` picks — the first
+    // entry whose agent matches — and read only THAT channel's
+    // `default_conversation`. Using `find().and_then()` (not `find_map`) is
+    // load-bearing: if the home channel has no default we must return `None`,
+    // never skip ahead to a *different* channel's default. Otherwise a forward
+    // could pair the home channel (e.g. telegram) with another channel's
+    // conversation id (e.g. a slack chat), delivering to the wrong place.
+    sidecar_channels
+        .iter()
+        .find(|sc| sc.agent.as_deref() == Some(agent_name))
+        .and_then(|sc| {
+            sc.default_conversation
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
+}
+
+impl LibreFangKernel {
     /// Send an ephemeral "side question" to an agent (`/btw` command).
     ///
     /// The message is answered using the agent's system prompt and model, but in a
@@ -571,6 +624,21 @@ impl LibreFangKernel {
             };
             manifest.model.system_prompt =
                 librefang_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
+        }
+
+        // #5980: pre-dispatch per-provider budget gate on the ephemeral
+        // (`/btw`) path too. Flags the shared `ProviderExhaustionStore` when
+        // this provider's operator cap is already crossed so a multi-provider
+        // agent's `FallbackDriver` skips the exhausted slot; a single-provider
+        // agent has no slot to skip to, so we hard-return `QuotaExceeded`.
+        let provider = manifest.model.provider.clone();
+        let exhausted = self.flag_provider_budget_if_exhausted(&provider);
+        if self.provider_exhausted_blocks_call(exhausted, &manifest, &self.config.load_full()) {
+            return Err(KernelError::LibreFang(LibreFangError::QuotaExceeded(
+                format!(
+                    "Provider '{provider}' hourly budget exhausted and the agent has no fallback chain"
+                ),
+            )));
         }
 
         let driver = self.resolve_driver(&manifest)?;
@@ -2264,6 +2332,22 @@ impl LibreFangKernel {
         // `LoopOptions::allowed_tools` in agent_loop instead. Before the
         // forkedAgent migration this was filtered here by matching on
         // `sender_context.channel == AUTO_DREAM_CHANNEL`.
+        //
+        // #5980: pre-dispatch per-provider budget gate on the streaming path
+        // too. Flags the shared `ProviderExhaustionStore` when this provider's
+        // operator cap is already crossed so a multi-provider agent's
+        // `FallbackDriver` skips the exhausted slot; a single-provider agent
+        // has no slot to skip to, so we hard-return `QuotaExceeded`.
+        let provider = entry.manifest.model.provider.clone();
+        let exhausted = self.flag_provider_budget_if_exhausted(&provider);
+        if self.provider_exhausted_blocks_call(exhausted, &entry.manifest, &cfg) {
+            return Err(KernelError::LibreFang(LibreFangError::QuotaExceeded(
+                format!(
+                    "Provider '{provider}' hourly budget exhausted and the agent has no fallback chain"
+                ),
+            )));
+        }
+
         let driver = self.resolve_driver(&entry.manifest)?;
 
         // Look up model's actual context window from the catalog. Filter out
@@ -3311,5 +3395,145 @@ impl LibreFangKernel {
         }
 
         Ok((rx, handle))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sidecar_default_conversation;
+    use librefang_types::config::SidecarChannelConfig;
+
+    fn sc(json: serde_json::Value) -> SidecarChannelConfig {
+        serde_json::from_value(json).expect("valid SidecarChannelConfig")
+    }
+
+    /// #6266 — a home channel with a configured `default_conversation`
+    /// surfaces it as the fallback destination for an agent whose turn
+    /// carries no inbound `chat_id` (e.g. a web-UI-originated delegation).
+    #[test]
+    fn default_conversation_resolves_for_matching_agent() {
+        let chans = vec![sc(serde_json::json!({
+            "name": "tg",
+            "command": "python3",
+            "channel_type": "telegram",
+            "default_agent": "coder",
+            "default_conversation": "123456",
+        }))];
+        assert_eq!(
+            sidecar_default_conversation(&chans, "coder").as_deref(),
+            Some("123456")
+        );
+    }
+
+    /// Ambiguous case: the home channel matches the agent but defines no
+    /// `default_conversation` → `None`, so the forward stays a no-op
+    /// rather than guessing a recipient.
+    #[test]
+    fn default_conversation_is_none_when_unset() {
+        let chans = vec![sc(serde_json::json!({
+            "name": "tg",
+            "command": "python3",
+            "channel_type": "telegram",
+            "default_agent": "coder",
+        }))];
+        assert_eq!(sidecar_default_conversation(&chans, "coder"), None);
+    }
+
+    /// An empty-string `default_conversation` is treated as unset — never
+    /// delivered to.
+    #[test]
+    fn default_conversation_empty_string_is_none() {
+        let chans = vec![sc(serde_json::json!({
+            "name": "tg",
+            "command": "python3",
+            "channel_type": "telegram",
+            "default_agent": "coder",
+            "default_conversation": "",
+        }))];
+        assert_eq!(sidecar_default_conversation(&chans, "coder"), None);
+    }
+
+    /// A channel whose `default_agent` names a different agent does not
+    /// leak its `default_conversation` to this agent.
+    #[test]
+    fn default_conversation_ignores_non_matching_agent() {
+        let chans = vec![sc(serde_json::json!({
+            "name": "tg",
+            "command": "python3",
+            "channel_type": "telegram",
+            "default_agent": "someone-else",
+            "default_conversation": "999",
+        }))];
+        assert_eq!(sidecar_default_conversation(&chans, "coder"), None);
+    }
+
+    /// First-match wins, deterministic over the ordered `Vec`: when two
+    /// channels both name the agent, the first entry's
+    /// `default_conversation` is used.
+    #[test]
+    fn default_conversation_first_match_wins() {
+        let chans = vec![
+            sc(serde_json::json!({
+                "name": "tg-primary",
+                "command": "python3",
+                "channel_type": "telegram",
+                "default_agent": "coder",
+                "default_conversation": "first",
+            })),
+            sc(serde_json::json!({
+                "name": "tg-secondary",
+                "command": "python3",
+                "channel_type": "telegram",
+                "default_agent": "coder",
+                "default_conversation": "second",
+            })),
+        ];
+        assert_eq!(
+            sidecar_default_conversation(&chans, "coder").as_deref(),
+            Some("first")
+        );
+    }
+
+    /// Regression: when the agent's FIRST home channel has no
+    /// `default_conversation`, the resolver must return `None` — it must NOT
+    /// skip ahead and borrow a *later* channel's conversation id. Otherwise
+    /// the forward would pair the home channel `resolve_agent_home_channel`
+    /// picks (the first match) with a different channel's chat id, delivering
+    /// to the wrong place.
+    #[test]
+    fn default_conversation_does_not_borrow_from_a_later_channel() {
+        let chans = vec![
+            // First match — the home channel — has NO default_conversation.
+            sc(serde_json::json!({
+                "name": "tg-home",
+                "command": "python3",
+                "channel_type": "telegram",
+                "default_agent": "coder",
+            })),
+            // A later channel for the same agent DOES define one.
+            sc(serde_json::json!({
+                "name": "slack-other",
+                "command": "python3",
+                "channel_type": "slack",
+                "default_agent": "coder",
+                "default_conversation": "C999",
+            })),
+        ];
+        assert_eq!(
+            sidecar_default_conversation(&chans, "coder"),
+            None,
+            "must not borrow the slack channel's conversation for the telegram home channel"
+        );
+    }
+
+    /// `default_conversation` round-trips through serde and is absent by
+    /// default (additive field, existing configs keep deserializing).
+    #[test]
+    fn default_conversation_serde_default_absent() {
+        let c = sc(serde_json::json!({
+            "name": "tg",
+            "command": "python3",
+        }));
+        assert!(c.default_conversation.is_none());
     }
 }

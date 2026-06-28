@@ -186,6 +186,9 @@ pub fn artifact_to_manifest(artifact: &AgentArtifact) -> Result<AgentManifest> {
         proactive_memory: librefang_types::memory::ProactiveMemoryOverrides::default(),
         mcp_disabled: false,
         compaction: None,
+        // UAR-translated agents take the kernel-global [context_engine]; no
+        // per-agent override is expressed in the UAR-AGENT-MD spec (#6287).
+        context_engine: None,
         triggers: Vec::new(),
         reconcile_orphans: librefang_types::agent::OrphanPolicy::default(),
         async_tasks: librefang_types::agent::AsyncTasksConfig::default(),

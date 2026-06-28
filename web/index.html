@@ -51,6 +51,8 @@
         else if (path.startsWith('/ja')) lang = 'ja';
         else if (path.startsWith('/ko')) lang = 'ko';
         else if (path.startsWith('/es')) lang = 'es';
+        else if (path.startsWith('/pl')) lang = 'pl';
+        else if (path.startsWith('/uk')) lang = 'uk';
         document.documentElement.lang = lang;
         window.__INITIAL_LANG__ = lang;
 
@@ -63,6 +65,8 @@
           'ko':    'LibreFang — Agent 운영체제. Rust로 만든 프로덕션급 런타임으로 자율 AI 에이전트 24시간 운영.',
           'de':    'LibreFang — Das Agent-Betriebssystem. Produktionsreife Rust-Laufzeit für autonome KI-Agenten rund um die Uhr.',
           'es':    'LibreFang — El sistema operativo para Agents. Runtime Rust de grado de producción para agentes IA autónomos 24/7.',
+          'pl':    'LibreFang — Agentowy system operacyjny. Produkcyjne środowisko Rust dla autonomicznych agentów AI działających 24/7.',
+          'uk':    'LibreFang — агентна операційна система. Production-grade runtime на Rust для автономних AI-агентів 24/7.',
         };
         if (metaDesc[lang]) {
           var d = document.querySelector('meta[name="description"]');

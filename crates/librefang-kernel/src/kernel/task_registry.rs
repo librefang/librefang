@@ -334,6 +334,54 @@ impl LibreFangKernel {
                 session_id = %entry.session_id,
                 "Async task completion injected (mid-turn path)"
             );
+            // Belt-and-suspenders: also forward the completion text
+            // directly to the agent's home channel so the operator
+            // sees the delegation result immediately, rather than
+            // waiting for the agent's next turn to surface it. The
+            // mid-turn signal injects into the loop so the agent can
+            // read and continue, but the NL response may not reach
+            // the channel until the turn ends — this forward fires
+            // instantly.
+            //
+            // Destination resolution (#6266): prefer the originating
+            // turn's inbound conversation (`entry.chat_id`). A turn that
+            // came in from the web UI carries no `chat_id` (the WS sender
+            // sets none and uses the canonical session), so fall back to
+            // the home channel's configured `default_conversation`. If
+            // neither is available the home channel has no well-defined
+            // default destination — skip the forward rather than guess a
+            // recipient.
+            if let Some(kernel_arc) = self.self_handle.get().and_then(|w| w.upgrade()) {
+                let destination = entry
+                    .chat_id
+                    .clone()
+                    .filter(|c| !c.is_empty())
+                    .or_else(|| kernel_arc.resolve_agent_default_conversation(entry.agent_id));
+                if let Some(chat_id) = destination {
+                    let body = format_task_completion_text(&event);
+                    if let Some(ctx) = kernel_arc.resolve_agent_home_channel(entry.agent_id) {
+                        use librefang_runtime::kernel_handle::ChannelSender;
+                        let _ = kernel_arc
+                            .send_channel_message(
+                                &ctx.channel,
+                                &chat_id,
+                                &body,
+                                None,
+                                ctx.account_id.as_deref(),
+                            )
+                            .await
+                            .map_err(|e| {
+                                tracing::warn!(
+                                    task_id = %task_id,
+                                    channel = %ctx.channel,
+                                    chat_id = %chat_id,
+                                    error = %e,
+                                    "Async task: failed to forward completion to home channel (mid-turn path)"
+                                );
+                            });
+                    }
+                }
+            }
             return Ok(true);
         }
 

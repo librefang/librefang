@@ -179,8 +179,16 @@ impl ProviderCooldown {
     }
 
     /// Check if a request to this provider should proceed.
+    ///
+    /// Takes a mutable entry handle because granting a probe records the probe
+    /// attempt (`last_probe`) so the next check within `probe_interval_secs` is
+    /// throttled. Without that, `last_probe` stayed `None` on every real path
+    /// (only `record_probe_result` set it, and no production caller invokes it),
+    /// so the probe gate was permanently open and `check()` returned
+    /// `AllowProbe` on every call during cooldown — the `Reject` arm was
+    /// unreachable and the breaker never actually held a request back.
     pub fn check(&self, provider: &str) -> CooldownVerdict {
-        let state = match self.states.get(provider) {
+        let mut state = match self.states.get_mut(provider) {
             Some(s) => s,
             None => return CooldownVerdict::Allow,
         };
@@ -205,6 +213,11 @@ impl ProviderCooldown {
                     None => true,
                 };
                 if probe_ok {
+                    // Record the probe attempt so the next check within
+                    // `probe_interval_secs` falls through to `Reject` instead of
+                    // granting another probe — this is what makes the cooldown
+                    // actually throttle requests while Open.
+                    state.last_probe = Some(Instant::now());
                     debug!(provider, "circuit breaker: allowing probe request");
                     return CooldownVerdict::AllowProbe;
                 }
@@ -604,6 +617,33 @@ mod tests {
         match v2 {
             CooldownVerdict::Reject { .. } => {} // expected
             other => panic!("expected Reject after probe throttle, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn check_marks_probe_so_gate_throttles_without_manual_record() {
+        // Regression for the permanently-open probe gate: before the fix
+        // `check()` never set `last_probe`, so during an Open cooldown EVERY
+        // call returned `AllowProbe` (the gate was open forever) and the breaker
+        // never rejected a request — the `Reject` arm was unreachable on every
+        // production path. Now `check()` records the probe it grants, so the
+        // next check within `probe_interval_secs` must be throttled to `Reject`,
+        // WITHOUT any caller invoking `record_probe_result`.
+        let mut config = fast_config();
+        config.base_cooldown_secs = 100; // long cooldown -> stay Open
+        config.probe_interval_secs = 9999; // long throttle window
+        config.probe_enabled = true;
+        let cb = ProviderCooldown::new(config);
+
+        cb.record_failure("openai", false);
+
+        // First check grants (and records) a probe.
+        assert_eq!(cb.check("openai"), CooldownVerdict::AllowProbe);
+
+        // Second check, with no record_probe_result in between, must be throttled.
+        match cb.check("openai") {
+            CooldownVerdict::Reject { .. } => {}
+            other => panic!("expected Reject after probe granted, got {other:?}"),
         }
     }
 

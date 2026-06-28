@@ -38,10 +38,10 @@ class RootErrorBoundary extends React.Component<
         <div style={{ display: "flex", height: "100vh", alignItems: "center", justifyContent: "center" }}>
           <div style={{ textAlign: "center", padding: "2rem", maxWidth: "32rem" }}>
             <p style={{ fontSize: "1.125rem", fontWeight: 600, marginBottom: "0.5rem" }}>
-              Something went wrong
+              {i18n.t("errors.something_went_wrong", "Something went wrong")}
             </p>
             <p style={{ fontSize: "0.875rem", color: "#6b7280", wordBreak: "break-word" }}>
-              {this.state.error?.message ?? "An unexpected error occurred."}
+              {this.state.error?.message ?? i18n.t("errors.unexpected", "An unexpected error occurred.")}
             </p>
             <button
               onClick={() => window.location.reload()}
@@ -57,7 +57,7 @@ class RootErrorBoundary extends React.Component<
                 cursor: "pointer",
               }}
             >
-              Reload
+              {i18n.t("common.reload", "Reload")}
             </button>
           </div>
         </div>

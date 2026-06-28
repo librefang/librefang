@@ -107,12 +107,14 @@ fn test_check_hooks_exist() {
     let plugin_dir = tmp.path().to_path_buf();
     std::fs::create_dir_all(plugin_dir.join("hooks")).unwrap();
     std::fs::write(plugin_dir.join("hooks/ingest.py"), "").unwrap();
+    std::fs::write(plugin_dir.join("hooks/transform_tool_result.py"), "").unwrap();
 
     let manifest = PluginManifest {
         name: "test".to_string(),
         version: "0.1.0".to_string(),
         hooks: librefang_types::config::ContextEngineHooks {
             ingest: Some("hooks/ingest.py".to_string()),
+            transform_tool_result: Some("hooks/transform_tool_result.py".to_string()),
             after_turn: Some("hooks/after_turn.py".to_string()), // missing
             ..Default::default()
         },
@@ -136,6 +138,27 @@ fn test_check_hooks_exist() {
         ..Default::default()
     };
     assert!(!check_hooks_exist(&plugin_dir, &manifest_escape));
+}
+
+#[test]
+fn test_check_hooks_exist_requires_transform_tool_result_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let plugin_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(plugin_dir.join("hooks")).unwrap();
+
+    let manifest = PluginManifest {
+        name: "test".to_string(),
+        version: "0.1.0".to_string(),
+        hooks: librefang_types::config::ContextEngineHooks {
+            transform_tool_result: Some("hooks/transform_tool_result.py".to_string()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    assert!(!check_hooks_exist(&plugin_dir, &manifest));
+    std::fs::write(plugin_dir.join("hooks/transform_tool_result.py"), "").unwrap();
+    assert!(check_hooks_exist(&plugin_dir, &manifest));
 }
 
 /// Live listing smoke test — ensures the enriched listing populates
@@ -493,6 +516,7 @@ fn make_manifest_with_hooks(
             "bootstrap" => m.hooks.bootstrap = Some(path.to_string()),
             "assemble" => m.hooks.assemble = Some(path.to_string()),
             "compact" => m.hooks.compact = Some(path.to_string()),
+            "transform_tool_result" => m.hooks.transform_tool_result = Some(path.to_string()),
             "prepare_subagent" => m.hooks.prepare_subagent = Some(path.to_string()),
             "merge_subagent" => m.hooks.merge_subagent = Some(path.to_string()),
             _ => {}
@@ -558,7 +582,7 @@ fn hook_integrity_all_covered_passes() {
     );
 }
 
-/// All seven hook fields are checked, not just ingest/after_turn.
+/// All eight hook fields are checked, not just ingest/after_turn.
 #[test]
 fn hook_integrity_all_hook_fields_checked() {
     let all_hooks = [
@@ -567,10 +591,11 @@ fn hook_integrity_all_hook_fields_checked() {
         ("bootstrap", "hooks/bootstrap.py"),
         ("assemble", "hooks/assemble.py"),
         ("compact", "hooks/compact.py"),
+        ("transform_tool_result", "hooks/transform_tool_result.py"),
         ("prepare_subagent", "hooks/prepare_subagent.py"),
         ("merge_subagent", "hooks/merge_subagent.py"),
     ];
-    // Provide integrity for all but compact and merge_subagent.
+    // Provide integrity for all but compact, transform_tool_result, and merge_subagent.
     let integrity_provided = [
         ("hooks/ingest.py", "h1"),
         ("hooks/after_turn.py", "h2"),
@@ -583,8 +608,12 @@ fn hook_integrity_all_hook_fields_checked() {
     missing.sort();
     assert_eq!(
         missing,
-        vec!["hooks/compact.py", "hooks/merge_subagent.py"],
-        "compact and merge_subagent must be flagged"
+        vec![
+            "hooks/compact.py",
+            "hooks/merge_subagent.py",
+            "hooks/transform_tool_result.py"
+        ],
+        "compact, transform_tool_result, and merge_subagent must be flagged"
     );
 }
 

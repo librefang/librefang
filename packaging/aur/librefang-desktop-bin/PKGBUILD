@@ -1,0 +1,31 @@
+pkgname=librefang-desktop-bin
+pkgver=2026.6.24_beta.23
+_upstream_ver=${pkgver/_/-}
+_desktop_ver=26.6.32263
+pkgrel=1
+pkgdesc="Native LibreFang desktop app"
+arch=('x86_64')
+url="https://librefang.ai"
+license=('MIT')
+depends=('gtk3' 'webkit2gtk-4.1')
+optdepends=(
+  'python: first-party channel sidecar adapters when running a local daemon'
+  'docker: Docker-backed tools and sandbox workflows when running a local daemon'
+)
+provides=('librefang-desktop')
+conflicts=('librefang-desktop')
+options=('!debug')
+source=(
+  "https://github.com/librefang/librefang/releases/download/v${_upstream_ver}/LibreFang_${_desktop_ver}_amd64.deb"
+  "LICENSE::https://raw.githubusercontent.com/librefang/librefang/v${_upstream_ver}/LICENSE"
+)
+sha256sums=(
+  'ab1afa66dc38c9e019aa17f0f70c612505b513d33b99182084f5a181b8ea0f38'
+  'd4330a3004bd990da1830124b1ccccb51129ebb8b5a70a0b79d5626b7c1226a0'
+)
+
+package() {
+  local data_archive=("$srcdir"/data.tar.*)
+  bsdtar --no-same-owner -xf "${data_archive[0]}" -C "$pkgdir"
+  install -Dm644 "$srcdir/LICENSE" "$pkgdir/usr/share/licenses/${pkgname}/LICENSE"
+}

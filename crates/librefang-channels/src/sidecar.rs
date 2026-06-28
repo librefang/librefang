@@ -1614,9 +1614,21 @@ impl ChannelAdapter for SidecarAdapter {
                         }
                         let exit = handle.await.unwrap_or(ReaderExit::ChildClosed);
                         match exit {
-                            ReaderExit::Shutdown | ReaderExit::ReceiverGone => break,
+                            ReaderExit::Shutdown | ReaderExit::ReceiverGone => {
+                                // ponytail: kill orphaned child on shutdown, else it survives daemon restart
+                                let mut g = ctx.child.lock().await;
+                                if let Some(mut c) = g.take() {
+                                    let _ = c.kill().await;
+                                }
+                                break;
+                            }
                             ReaderExit::ChildClosed => {
                                 if *shutdown_rx.borrow() || ctx.tx.is_closed() || !ctx.sup.restart {
+                                    // ponytail: same kill on child-closed + shutdown
+                                    let mut g = ctx.child.lock().await;
+                                    if let Some(mut c) = g.take() {
+                                        let _ = c.kill().await;
+                                    }
                                     break;
                                 }
                                 // Stable uptime resets backoff so a

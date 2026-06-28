@@ -18,6 +18,7 @@ mod tool_name {
     pub const FILE_WRITE: &str = "file_write";
     pub const FILE_LIST: &str = "file_list";
     pub const APPLY_PATCH: &str = "apply_patch";
+    pub const CODE_SEARCH: &str = "code_search";
     pub const WEB_FETCH: &str = "web_fetch";
     pub const WEB_FETCH_TO_FILE: &str = "web_fetch_to_file";
     pub const WEB_SEARCH: &str = "web_search";
@@ -132,6 +133,7 @@ pub const ALWAYS_NATIVE_TOOLS: &[&str] = &[
     tool_name::FILE_READ,
     tool_name::FILE_WRITE,
     tool_name::FILE_LIST,
+    tool_name::CODE_SEARCH,
     tool_name::AGENT_SEND,
     tool_name::AGENT_LIST,
     tool_name::CHANNEL_SEND,
@@ -206,6 +208,20 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                         "path": { "type": "string", "description": "The directory path to list" }
                     },
                     "required": ["path"]
+                }),
+            },
+            ToolDefinition {
+                name: tool_name::CODE_SEARCH.to_string(),
+                description: "Regex-search the text of every file under a workspace path and return matching `relpath:line: content` rows. Prefer this over repeated file_list + file_read to locate a symbol, string, or pattern across the workspace in one call. Skips .git/target/node_modules, hidden, binary, and oversized files.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "Regular expression to search for (Rust regex syntax)" },
+                        "path": { "type": "string", "description": "Workspace-relative directory to search under (default: the workspace root)" },
+                        "case_sensitive": { "type": "boolean", "description": "Match case-sensitively (default: false)" },
+                        "max_results": { "type": "integer", "description": "Maximum matching lines to return (default: 100, max: 1000)" }
+                    },
+                    "required": ["query"]
                 }),
             },
             ToolDefinition {

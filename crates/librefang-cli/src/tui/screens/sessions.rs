@@ -171,7 +171,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SessionsState) {
     let inner = widgets::render_screen_block(
         f,
         area,
-        &format!("{} {}", "\u{25c7}", crate::i18n::t("tui-sessions-title")),
+        &format!("◇ {}", crate::i18n::t("tui-sessions-title")),
     );
 
     let (header, content, hints) = widgets::layout_hch(inner, 2);
@@ -212,17 +212,17 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SessionsState) {
                         format!("{:<20}", crate::i18n::t("tui-sessions-header-agent")),
                         theme::table_header(),
                     ),
-                    Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
+                    Span::styled(" │ ", Style::default().fg(theme::BORDER)),
                     Span::styled(
                         format!("{:<14}", crate::i18n::t("tui-sessions-header-id")),
                         theme::table_header(),
                     ),
-                    Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
+                    Span::styled(" │ ", Style::default().fg(theme::BORDER)),
                     Span::styled(
                         format!("{:<6}", crate::i18n::t("tui-sessions-header-msgs")),
                         theme::table_header(),
                     ),
-                    Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
+                    Span::styled(" │ ", Style::default().fg(theme::BORDER)),
                     Span::styled(
                         crate::i18n::t("tui-sessions-header-created"),
                         theme::table_header(),
@@ -251,7 +251,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SessionsState) {
             .map(|&idx| {
                 let s = &state.sessions[idx];
                 let id_short = if s.id.len() > 12 {
-                    format!("{}\u{2026}", librefang_types::truncate_str(&s.id, 12))
+                    format!("{}…", librefang_types::truncate_str(&s.id, 12))
                 } else {
                     s.id.clone()
                 };
@@ -269,14 +269,14 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SessionsState) {
                         format!("{:<20}", widgets::truncate(&s.agent_name, 19)),
                         Style::default().fg(theme::CYAN),
                     ),
-                    Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
+                    Span::styled(" │ ", Style::default().fg(theme::BORDER)),
                     Span::styled(
                         format!("{:<14}", id_short),
                         Style::default().fg(theme::TEXT_SECONDARY),
                     ),
-                    Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
+                    Span::styled(" │ ", Style::default().fg(theme::BORDER)),
                     msg_indicator,
-                    Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
+                    Span::styled(" │ ", Style::default().fg(theme::BORDER)),
                     Span::styled(s.created.clone(), Style::default().fg(theme::TEXT_TERTIARY)),
                 ]))
             })

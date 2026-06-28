@@ -1,6 +1,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   runWorkflow,
+  rerunWorkflowRun,
   dryRunWorkflow,
   deleteWorkflow,
   createWorkflow,
@@ -50,6 +51,26 @@ export function useRunWorkflow() {
 
       return Promise.all(invalidations);
     },
+  });
+}
+
+/**
+ * Re-run a previous run with its original parameters (#6292).
+ *
+ * The backend repeats the stored input faithfully, so callers only pass the
+ * `runId`; `workflowId` is supplied so we can invalidate that workflow's run
+ * list and surface the freshly-queued run.
+ */
+export function useRerunWorkflowRun() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ runId }: { runId: string; workflowId: string }) =>
+      rerunWorkflowRun(runId),
+    onSuccess: (_data, variables) =>
+      Promise.all([
+        invalidateWorkflowLists(qc),
+        qc.invalidateQueries({ queryKey: workflowKeys.runs(variables.workflowId) }),
+      ]),
   });
 }
 

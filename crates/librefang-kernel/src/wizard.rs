@@ -209,6 +209,7 @@ impl SetupWizard {
             proactive_memory: librefang_types::memory::ProactiveMemoryOverrides::default(),
             rl_export: librefang_types::agent::RlExportOverride::default(),
             compaction: None,
+            context_engine: None,
             triggers: vec![],
             reconcile_orphans: librefang_types::agent::OrphanPolicy::default(),
             async_tasks: librefang_types::agent::AsyncTasksConfig::default(),

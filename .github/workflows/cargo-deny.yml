@@ -45,7 +45,7 @@ jobs:
           - advisories
           - bans licenses sources
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       # Pin to a SHA after the first green run on main — see follow-up note
       # in the umbrella issue (#3305). Tag-pinning is acceptable for the
       # initial roll-out so the action's own auto-update path keeps working.

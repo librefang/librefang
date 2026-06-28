@@ -1916,3 +1916,91 @@ async fn context_endpoint_rejects_cross_agent_session() {
     assert_eq!(status, StatusCode::NOT_FOUND, "body: {body:?}");
     assert_eq!(body["code"], "session_agent_mismatch");
 }
+
+// ---------------------------------------------------------------------------
+// PATCH /api/agents/{id}/config — api_key_env / base_url are applied, not
+// silently dropped (the OpenAPI schema advertises both fields).
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_patch_config_applies_api_key_env_and_base_url() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "cred-agent");
+
+    let (status, _body) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{id}/config"),
+            serde_json::json!({
+                "api_key_env": "MY_CUSTOM_KEY",
+                "base_url": "https://api.example.com",
+            }),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let entry = h
+        .state
+        .kernel
+        .agent_registry()
+        .get(id)
+        .expect("agent exists");
+    assert_eq!(
+        entry.manifest.model.api_key_env.as_deref(),
+        Some("MY_CUSTOM_KEY"),
+        "api_key_env must be applied, not dropped"
+    );
+    assert_eq!(
+        entry.manifest.model.base_url.as_deref(),
+        Some("https://api.example.com"),
+        "base_url must be applied, not dropped"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_patch_config_empty_string_clears_api_key_env_but_preserves_base_url() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "cred-agent-2");
+
+    // Seed both.
+    let (status, _) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{id}/config"),
+            serde_json::json!({ "api_key_env": "SEED_KEY", "base_url": "https://seed.example" }),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Clear only api_key_env (empty string); base_url is absent -> unchanged.
+    let (status, _) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{id}/config"),
+            serde_json::json!({ "api_key_env": "" }),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let entry = h
+        .state
+        .kernel
+        .agent_registry()
+        .get(id)
+        .expect("agent exists");
+    assert_eq!(
+        entry.manifest.model.api_key_env, None,
+        "empty string must clear api_key_env"
+    );
+    assert_eq!(
+        entry.manifest.model.base_url.as_deref(),
+        Some("https://seed.example"),
+        "an absent base_url must be left unchanged"
+    );
+}

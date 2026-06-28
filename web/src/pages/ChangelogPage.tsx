@@ -5,6 +5,10 @@ import { Github } from '../components/BrandIcons'
 import { useQuery } from '@tanstack/react-query'
 import { useAppStore } from '../store'
 import { cn } from '../lib/utils'
+import { getTranslation } from '../i18n'
+import type { Translation } from '../i18n'
+
+type ChangelogCopy = NonNullable<Translation['changelog']>
 
 // ---- Types ----
 
@@ -44,45 +48,37 @@ type FilterType = 'all' | 'stable' | 'prerelease'
 
 // ---- Constants ----
 
-const TYPE_CONFIG: Record<ChangeType, { label: string; dotClass: string; badgeClass: string }> = {
+const TYPE_CONFIG: Record<ChangeType, { dotClass: string; badgeClass: string }> = {
   feature: {
-    label: 'Added',
     dotClass: 'bg-cyan-500',
     badgeClass: 'text-cyan-700 dark:text-cyan-300 bg-cyan-500/10 border-cyan-500/20',
   },
   fix: {
-    label: 'Fixed',
     dotClass: 'bg-amber-500',
     badgeClass: 'text-amber-700 dark:text-amber-300 bg-amber-500/10 border-amber-500/20',
   },
   breaking: {
-    label: 'Breaking',
     dotClass: 'bg-red-500',
     badgeClass: 'text-red-700 dark:text-red-300 bg-red-500/10 border-red-500/20',
   },
   performance: {
-    label: 'Performance',
     dotClass: 'bg-purple-500',
     badgeClass: 'text-purple-700 dark:text-purple-300 bg-purple-500/10 border-purple-500/20',
   },
   other: {
-    label: 'Other',
     dotClass: 'bg-gray-400 dark:bg-gray-500',
     badgeClass: 'text-gray-600 dark:text-gray-400 bg-gray-500/10 border-gray-500/20',
   },
 }
 
-const RELEASE_TYPE_BADGE: Record<string, { label: string; className: string }> = {
+const RELEASE_TYPE_BADGE: Record<string, { className: string }> = {
   stable: {
-    label: 'Stable',
     className: 'text-emerald-700 dark:text-emerald-300 bg-emerald-500/10 border-emerald-500/20',
   },
   rc: {
-    label: 'RC',
     className: 'text-amber-700 dark:text-amber-300 bg-amber-500/10 border-amber-500/20',
   },
   beta: {
-    label: 'Beta',
     className: 'text-violet-700 dark:text-violet-300 bg-violet-500/10 border-violet-500/20',
   },
 }
@@ -241,7 +237,7 @@ function linkify(text: string): string {
 async function fetchReleases(): Promise<GitHubRelease[]> {
   const res = await fetch('https://stats.librefang.ai/api/releases')
   if (!res.ok) {
-    throw new Error('Failed to load releases: ' + res.status)
+    throw new Error(String(res.status))
   }
   return res.json() as Promise<GitHubRelease[]>
 }
@@ -262,7 +258,7 @@ function TimelineDot({ isFirst }: { isFirst: boolean }) {
   )
 }
 
-function ReleaseBadge({ type }: { type: 'stable' | 'rc' | 'beta' }) {
+function ReleaseBadge({ type, copy }: { type: 'stable' | 'rc' | 'beta'; copy: ChangelogCopy }) {
   const config = RELEASE_TYPE_BADGE[type]!
   return (
     <span
@@ -272,7 +268,7 @@ function ReleaseBadge({ type }: { type: 'stable' | 'rc' | 'beta' }) {
       )}
     >
       <Tag className="w-3 h-3" />
-      {config.label}
+      {copy.releaseTypes[type]}
     </span>
   )
 }
@@ -280,9 +276,11 @@ function ReleaseBadge({ type }: { type: 'stable' | 'rc' | 'beta' }) {
 function ChangeCategory({
   type,
   changes,
+  copy,
 }: {
   type: ChangeType
   changes: ParsedChange[]
+  copy: ChangelogCopy
 }) {
   const config = TYPE_CONFIG[type]
   return (
@@ -295,7 +293,7 @@ function ChangeCategory({
             config.badgeClass,
           )}
         >
-          {config.label}
+          {copy.changeTypes[type]}
         </h4>
         <span className="text-xs text-gray-500">{changes.length}</span>
       </div>
@@ -314,10 +312,12 @@ function ReleaseCard({
   parsed,
   index,
   isFirst,
+  copy,
 }: {
   parsed: ParsedRelease
   index: number
   isFirst: boolean
+  copy: ChangelogCopy
 }) {
   const { release, changes, totalDownloads, releaseType } = parsed
   const orderedCategories = CATEGORY_ORDER.filter((t) => changes.has(t))
@@ -357,7 +357,7 @@ function ReleaseCard({
               >
                 {release.tag_name}
               </a>
-              <ReleaseBadge type={releaseType} />
+              <ReleaseBadge type={releaseType} copy={copy} />
               {release.published_at && (
                 <span className="text-xs sm:text-sm text-gray-500">
                   {formatDate(release.published_at)}
@@ -380,7 +380,7 @@ function ReleaseCard({
           {orderedCategories.length > 0 && (
             <div className="px-4 py-3 sm:px-5 sm:py-4 space-y-4">
               {orderedCategories.map((type) => (
-                <ChangeCategory key={type} type={type} changes={changes.get(type)!} />
+                <ChangeCategory key={type} type={type} changes={changes.get(type)!} copy={copy} />
               ))}
             </div>
           )}
@@ -389,7 +389,7 @@ function ReleaseCard({
           {orderedCategories.length === 0 && release.body && (
             <div className="px-4 py-3 sm:px-5 sm:py-4">
               <p className="text-sm text-gray-500 italic">
-                See full release notes on GitHub.
+                {copy.fullNotes}
               </p>
             </div>
           )}
@@ -402,7 +402,7 @@ function ReleaseCard({
               rel="noopener noreferrer"
               className="inline-flex items-center gap-1.5 text-xs sm:text-sm text-gray-500 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors"
             >
-              View on GitHub
+              {copy.viewOnGitHub}
               <ExternalLink className="w-3.5 h-3.5" />
             </a>
           </div>
@@ -418,15 +418,17 @@ function FilterTabs({
   active,
   onChange,
   counts,
+  copy,
 }: {
   active: FilterType
   onChange: (f: FilterType) => void
   counts: { all: number; stable: number; prerelease: number }
+  copy: ChangelogCopy
 }) {
   const tabs: { key: FilterType; label: string; count: number }[] = [
-    { key: 'all', label: 'All', count: counts.all },
-    { key: 'stable', label: 'Stable', count: counts.stable },
-    { key: 'prerelease', label: 'Pre-release', count: counts.prerelease },
+    { key: 'all', label: copy.filters.all, count: counts.all },
+    { key: 'stable', label: copy.filters.stable, count: counts.stable },
+    { key: 'prerelease', label: copy.filters.prerelease, count: counts.prerelease },
   ]
 
   return (
@@ -461,7 +463,10 @@ function FilterTabs({
 // ---- Main component ----
 
 export default function ChangelogPage() {
+  const lang = useAppStore((s) => s.lang)
   const theme = useAppStore((s) => s.theme)
+  const t = getTranslation(lang)
+  const copy = t.changelog!
   const [filter, setFilter] = useState<FilterType>('all')
 
   const {
@@ -517,7 +522,7 @@ export default function ChangelogPage() {
           className="inline-flex items-center gap-1.5 text-sm text-gray-500 hover:text-cyan-500 transition-colors mb-8"
         >
           <ArrowLeft className="w-4 h-4" />
-          Back to home
+          {copy.backHome}
         </a>
 
         {/* Header */}
@@ -529,11 +534,11 @@ export default function ChangelogPage() {
           >
             <h1 className="text-3xl sm:text-4xl font-black tracking-tight mb-2">
               <span className="bg-gradient-to-r from-slate-900 dark:from-white to-cyan-600 dark:to-cyan-400 bg-clip-text text-transparent">
-                Changelog
+                {copy.title}
               </span>
             </h1>
             <p className="text-gray-500 text-sm sm:text-base">
-              Track every update to LibreFang
+              {copy.desc}
             </p>
           </motion.div>
 
@@ -548,19 +553,19 @@ export default function ChangelogPage() {
               <div className="flex items-center gap-4 text-xs sm:text-sm text-gray-500">
                 <span className="inline-flex items-center gap-1.5">
                   <Tag className="w-3.5 h-3.5 text-cyan-500" />
-                  {parsedReleases.length} releases
+                  {parsedReleases.length} {copy.releases}
                 </span>
                 {totalDownloads > 0 && (
                   <span className="inline-flex items-center gap-1.5">
                     <Download className="w-3.5 h-3.5 text-cyan-500" />
-                    {totalDownloads.toLocaleString()} downloads
+                    {totalDownloads.toLocaleString()} {copy.downloads}
                   </span>
                 )}
               </div>
 
               <div className="flex items-center gap-2 ml-auto">
                 <Filter className="w-3.5 h-3.5 text-gray-400 hidden sm:block" />
-                <FilterTabs active={filter} onChange={setFilter} counts={counts} />
+                <FilterTabs active={filter} onChange={setFilter} counts={counts} copy={copy} />
               </div>
             </motion.div>
           )}
@@ -570,15 +575,15 @@ export default function ChangelogPage() {
         {isLoading && (
           <div className="flex items-center gap-3 py-16 justify-center text-gray-500 text-sm">
             <Loader2 className="w-5 h-5 animate-spin text-cyan-500" />
-            Loading releases...
+            {copy.loading}
           </div>
         )}
 
         {/* Error state */}
         {error && (
           <div className="bg-red-500/10 border border-red-500/20 rounded-xl px-5 py-4 text-sm text-red-600 dark:text-red-400">
-            Failed to load releases:{' '}
-            {error instanceof Error ? error.message : 'Unknown error'}
+            {copy.loadError}:{' '}
+            {error instanceof Error ? error.message : copy.unknownError}
           </div>
         )}
 
@@ -588,8 +593,8 @@ export default function ChangelogPage() {
             <Tag className="w-10 h-10 text-gray-300 dark:text-gray-600 mx-auto mb-3" />
             <p className="text-gray-500 text-sm">
               {releases.length === 0
-                ? 'No releases found.'
-                : 'No releases match the current filter.'}
+                ? copy.empty
+                : copy.noFilterMatches}
             </p>
           </div>
         )}
@@ -603,6 +608,7 @@ export default function ChangelogPage() {
                 parsed={parsed}
                 index={i}
                 isFirst={i === 0}
+                copy={copy}
               />
             ))}
 

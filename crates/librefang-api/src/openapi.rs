@@ -246,6 +246,7 @@ use crate::types;
         routes::dry_run_workflow,
         routes::list_workflow_runs,
         routes::get_workflow_run,
+        routes::rerun_workflow_run,
         routes::cancel_workflow_run,
         routes::pause_workflow_run,
         routes::resume_workflow_run,

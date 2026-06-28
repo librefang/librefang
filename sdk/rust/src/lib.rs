@@ -5118,6 +5118,18 @@ impl WorkflowsResource {
         .await
     }
 
+    pub async fn rerun_workflow_run(&self, run_id: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &format!("/api/workflows/runs/{}/rerun", run_id),
+            None,
+            &[],
+        )
+        .await
+    }
+
     pub async fn resume_workflow_run(&self, run_id: &str, data: Value) -> Result<Value> {
         do_req(
             &self.client,

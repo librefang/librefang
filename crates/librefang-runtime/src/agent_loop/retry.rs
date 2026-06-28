@@ -7,7 +7,7 @@
 //! (`MAX_RETRIES`, `BASE_RETRY_DELAY_MS`, `DEFAULT_DEFER_MS`,
 //! `MAX_CONCURRENT_LLM_CALLS`) live with the retry path that consumes them.
 
-use crate::auth_cooldown::{CooldownVerdict, ProviderCooldown};
+use crate::auth_cooldown::{CooldownConfig, CooldownVerdict, ProviderCooldown};
 use crate::llm_driver::{CompletionRequest, LlmDriver, LlmError, StreamEvent};
 use crate::llm_errors;
 use librefang_types::error::{LibreFangError, LibreFangResult};
@@ -35,6 +35,19 @@ const MAX_CONCURRENT_LLM_CALLS: usize = 5;
 /// Process-global semaphore that caps simultaneous LLM HTTP calls.
 static LLM_CONCURRENCY: std::sync::LazyLock<tokio::sync::Semaphore> =
     std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_LLM_CALLS));
+
+/// Process-global provider circuit breaker, shared across all agent loops.
+///
+/// Mirrors the `LLM_CONCURRENCY` static above: provider exhaustion (402
+/// billing / out-of-credit, sustained 429) is a process-wide condition, so a
+/// single shared breaker stops every agent from independently hammering a
+/// depleted provider. Before this it was never instantiated and both
+/// `call_with_retry` / `stream_with_retry` call sites passed `cooldown = None`,
+/// so the breaker — and the financial-DoS protection it exists for — did
+/// nothing. Uses the documented `CooldownConfig` defaults (18000s billing
+/// cooldown, 60–3600s general backoff, 30s half-open probe interval).
+pub(super) static PROVIDER_COOLDOWN: std::sync::LazyLock<ProviderCooldown> =
+    std::sync::LazyLock::new(|| ProviderCooldown::new(CooldownConfig::default()));
 
 /// Call an LLM driver with automatic retry on rate-limit and overload errors.
 ///

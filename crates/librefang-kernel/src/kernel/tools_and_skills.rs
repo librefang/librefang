@@ -1383,25 +1383,55 @@ impl LibreFangKernel {
         )
     }
 
-    /// Check whether the context engine plugin (if any) is allowed for an agent.
+    /// Resolve the effective context engine for an agent (#6264).
     ///
-    /// Returns the context engine reference if:
-    /// - The agent has no `allowed_plugins` restriction (empty = all plugins), OR
-    /// - The configured context engine plugin name appears in the agent's allowlist.
+    /// Resolution order — identical in shape to the other per-agent overrides
+    /// (`compaction` / `proactive_memory` / `skill_workshop`, #5476):
+    /// 1. `manifest.context_engine` (`agent.toml` / `HAND.toml`
+    ///    `[agents.<name>.context_engine]`) — when `Some(_)`, the agent runs
+    ///    its own engine built from that config.
+    /// 2. `KernelConfig.context_engine` — the kernel-global engine built once
+    ///    at boot (`self.context_engine`).
+    /// 3. Compiled default — no engine wired (the caller falls back to the
+    ///    built-in compactor); preserved by returning `None`.
     ///
-    /// Returns `None` if the agent's `allowed_plugins` is non-empty and the
-    /// context engine plugin is not in the list.
+    /// The per-agent engine is built lazily, deduplicated by a fingerprint of
+    /// the resolved override config so agents selecting the same engine share
+    /// one instance, and cached as a `'static` reference for the daemon's
+    /// lifetime (see [`Self::context_engine_overrides`]) — the kernel-global
+    /// engine has the same process lifetime, so handing back a borrow here is
+    /// sound across the agent loop's `.await`.
+    ///
+    /// Regardless of which engine is selected, the `allowed_plugins` allowlist
+    /// gate still applies: if the agent restricts plugins and the *resolved*
+    /// engine config names a plugin not in the allowlist, the agent gets no
+    /// context engine (`None`), exactly as before.
     pub(crate) fn context_engine_for_agent(
         &self,
         manifest: &librefang_types::agent::AgentManifest,
     ) -> Option<&dyn librefang_runtime::context_engine::ContextEngine> {
         let cfg = self.config.load();
-        let engine = self.context_engine.as_deref()?;
+        // Resolve which engine config governs this agent: manifest override
+        // wins, else the kernel-global config.
+        let (engine, engine_cfg): (
+            &dyn librefang_runtime::context_engine::ContextEngine,
+            &librefang_types::config::ContextEngineTomlConfig,
+        ) = match manifest.context_engine.as_ref() {
+            Some(override_cfg) => match self.per_agent_context_engine(override_cfg) {
+                Some(e) => (e, override_cfg),
+                // Build failure already logged; fall back to the global engine
+                // so a malformed per-agent override never silently disables
+                // recall/compaction for the agent.
+                None => (self.context_engine.as_deref()?, &cfg.context_engine),
+            },
+            None => (self.context_engine.as_deref()?, &cfg.context_engine),
+        };
+
         if manifest.allowed_plugins.is_empty() {
             return Some(engine);
         }
-        // Check if the configured context engine plugin is in the agent's allowlist
-        if let Some(ref plugin_name) = cfg.context_engine.plugin {
+        // Check if the resolved context engine plugin is in the agent's allowlist.
+        if let Some(ref plugin_name) = engine_cfg.plugin {
             if manifest.allowed_plugins.iter().any(|p| p == plugin_name) {
                 return Some(engine);
             }
@@ -1412,8 +1442,59 @@ impl LibreFangKernel {
             );
             return None;
         }
-        // No plugin configured (manual hooks or default engine) — always allow
+        // No plugin configured (manual hooks or default engine) — always allow.
         Some(engine)
+    }
+
+    /// Build-or-fetch the per-agent context engine for a manifest override
+    /// (#6264). Deduplicates by a stable fingerprint of the override config so
+    /// N agents sharing one `[context_engine]` block share one engine, built
+    /// at most once per distinct config per process. Returns a `'static`
+    /// reference (engine kept alive for the daemon's lifetime, matching the
+    /// kernel-global engine). Returns `None` only if the fingerprint cannot be
+    /// computed (serialization failure), which the caller treats as "fall back
+    /// to the kernel-global engine".
+    fn per_agent_context_engine(
+        &self,
+        override_cfg: &librefang_types::config::ContextEngineTomlConfig,
+    ) -> Option<&'static dyn librefang_runtime::context_engine::ContextEngine> {
+        let key = context_engine_config_fingerprint(override_cfg)?;
+        let mut cache = self
+            .context_engine_overrides
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(engine) = cache.get(&key) {
+            return Some(*engine);
+        }
+
+        // Build a fresh engine from the override config, reusing the same
+        // dependencies the boot path feeds `build_context_engine`.
+        let cfg = self.config.load();
+        let vault_path = cfg.home_dir.join("vault.enc");
+        let emb_arc = self.llm.embedding_driver.as_ref().map(Arc::clone);
+        let engine = librefang_runtime::context_engine::build_context_engine(
+            override_cfg,
+            self.context_engine_config.clone(),
+            self.memory.substrate.clone(),
+            self.memory.substrate.clone() as Arc<dyn librefang_memory::SemanticBackend>,
+            emb_arc,
+            &|secret_name| {
+                let mut vault =
+                    librefang_extensions::vault::CredentialVault::new(vault_path.clone());
+                if vault.unlock().is_err() {
+                    return None;
+                }
+                vault.get(secret_name).map(|v| v.as_str().to_string())
+            },
+            None,
+        );
+        // Leak the box so the engine reference is `'static`. Bounded: at most
+        // one leak per distinct override config per process (the cache below
+        // guarantees a single build per fingerprint).
+        let leaked: &'static dyn librefang_runtime::context_engine::ContextEngine =
+            Box::leak(engine);
+        cache.insert(key, leaked);
+        Some(leaked)
     }
 
     /// Resolve the [`EvolutionMode`] for an agent's background skill evolution.
@@ -1594,6 +1675,22 @@ impl LibreFangKernel {
             }
         }
     }
+}
+
+/// Stable fingerprint of a per-agent `[context_engine]` override config
+/// (#6264), used as the cache key in [`LibreFangKernel::context_engine_overrides`].
+///
+/// Two manifests with byte-identical engine configs map to the same key and
+/// therefore share one built engine. The key is the config's canonical JSON
+/// itself (`serde_json` orders struct fields by declaration, deterministically)
+/// — used verbatim as the map key rather than a `u64` hash so distinct configs
+/// can never collide onto the same cached engine. Returns `None` only if
+/// serialization fails, in which case the caller falls back to the
+/// kernel-global engine.
+fn context_engine_config_fingerprint(
+    cfg: &librefang_types::config::ContextEngineTomlConfig,
+) -> Option<String> {
+    serde_json::to_string(cfg).ok()
 }
 
 #[cfg(test)]

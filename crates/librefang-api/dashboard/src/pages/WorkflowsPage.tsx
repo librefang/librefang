@@ -1,5 +1,6 @@
 import { formatDate } from "../lib/datetime";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
 import {
@@ -25,7 +26,7 @@ import {
   Layers, Trash2, FilePlus, Play, Search,
   Calendar, FileText, Activity, Bot, Loader2, Clock, ChevronRight,
   ChevronDown, FlaskConical, AlertCircle, CheckCircle2, SkipForward,
-  GitBranch, Eye, SearchX,
+  GitBranch, Eye, SearchX, RotateCcw,
 } from "lucide-react";
 import {
   useWorkflows,
@@ -36,6 +37,7 @@ import {
 } from "../lib/queries/workflows";
 import {
   useRunWorkflow,
+  useRerunWorkflowRun,
   useDryRunWorkflow,
   useDeleteWorkflow,
   useInstantiateTemplate,
@@ -201,6 +203,12 @@ function StepResultContent({ step }: { step: WorkflowStepResult }) {
   const imageRefs = useMemo(() => extractImageRefs(step.output), [step.output]);
   return (
     <div className="px-3 pb-3 space-y-2 border-t border-border-subtle">
+      {step.error && (
+        <div className="flex items-start gap-1.5 p-2 mt-2 rounded-lg bg-error/5 border border-error/20">
+          <AlertCircle className="w-3 h-3 text-error shrink-0 mt-0.5" />
+          <p className="text-[10px] text-error whitespace-pre-wrap">{step.error}</p>
+        </div>
+      )}
       <div>
         <p className="text-[9px] font-bold text-text-dim/50 mt-2">{t("workflows.prompt_sent", { defaultValue: "Prompt sent:" })}</p>
         <pre className="text-[10px] text-text whitespace-pre-wrap max-h-24 overflow-y-auto bg-surface rounded-lg p-2 mt-1">
@@ -251,6 +259,27 @@ function StepAccordion<T>({
   );
 }
 
+/**
+ * Render a workflow run's stored `input` as a compact one-line preview for the
+ * run-history list. A JSON object becomes `k: v, k: v`; anything else (raw
+ * string, array, number) is shown verbatim. The caller truncates via CSS.
+ */
+function formatRunParamsPreview(input?: string): string {
+  const trimmed = input?.trim();
+  if (!trimmed) return "";
+  try {
+    const parsed: unknown = JSON.parse(trimmed);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return Object.entries(parsed as Record<string, unknown>)
+        .map(([k, v]) => `${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`)
+        .join(", ");
+    }
+  } catch {
+    // Not JSON — fall through and show the raw input string.
+  }
+  return trimmed;
+}
+
 // ---------------------------------------------------------------------------
 // Workflow parameter detection — mirrors the kernel's `to_template()` logic
 // that scans `prompt_template` fields for `{{var}}` placeholders.
@@ -264,7 +293,7 @@ const RESERVED_VARS = new Set(["input"]);
  * for `{{var}}` placeholders.  Returns one `TemplateParameter` per unique
  * variable, excluding reserved names and step output variables (step names).
  */
-function extractWorkflowParams(steps: WorkflowStep[]): TemplateParameter[] {
+function extractWorkflowParams(steps: WorkflowStep[], t: TFunction): TemplateParameter[] {
   const re = /\{\{(\w+)\}\}/g;
   const stepNames = new Set(steps.map((s) => s.name));
   const seen = new Set<string>();
@@ -278,7 +307,11 @@ function extractWorkflowParams(steps: WorkflowStep[]): TemplateParameter[] {
       seen.add(name);
       params.push({
         name,
-        description: `Parameter '${name}' used in step '${step.name}'`,
+        description: t("workflows.detected_param_description", {
+          defaultValue: "Parameter '{{name}}' used in step '{{step}}'",
+          name,
+          step: step.name,
+        }),
         param_type: "string",
         required: true,
       });
@@ -387,6 +420,7 @@ export function WorkflowsPage() {
   }, [runsQuery.data, selectedRunId]);
 
   const runMutation = useRunWorkflow();
+  const rerunMutation = useRerunWorkflowRun();
   const dryRunMutation = useDryRunWorkflow();
   const deleteMutation = useDeleteWorkflow();
   const instantiateMutation = useInstantiateTemplate();
@@ -411,8 +445,8 @@ export function WorkflowsPage() {
   const detectedParams = useMemo(() => {
     const detail = workflowDetailQuery.data;
     if (!detail || !Array.isArray(detail.steps)) return [];
-    return extractWorkflowParams(detail.steps as WorkflowStep[]);
-  }, [workflowDetailQuery.data]);
+    return extractWorkflowParams(detail.steps as WorkflowStep[], t);
+  }, [workflowDetailQuery.data, t]);
 
   // Seed parameter values once per workflow when its detected params
   // first become available. The `useWorkflowDetail` query is async, so
@@ -528,6 +562,25 @@ export function WorkflowsPage() {
     } catch (err) {
       addToast(
         err instanceof Error ? err.message : t("workflows.run_failed", { defaultValue: "Run failed" }),
+        "error",
+      );
+    }
+  };
+
+  const handleRerun = async (runId: string) => {
+    try {
+      await rerunMutation.mutateAsync({ runId, workflowId: selectedWorkflowId });
+      addToast(
+        t("workflows.rerun_started", {
+          defaultValue: "Re-run started with the same parameters",
+        }),
+        "success",
+      );
+    } catch (err) {
+      addToast(
+        err instanceof Error
+          ? err.message
+          : t("workflows.rerun_failed", { defaultValue: "Re-run failed" }),
         "error",
       );
     }
@@ -665,7 +718,9 @@ export function WorkflowsPage() {
     <button
       className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-surface transition-colors"
       onClick={toggle}>
-      <CheckCircle2 className="w-3 h-3 text-success shrink-0" />
+      {step.error
+        ? <AlertCircle className="w-3 h-3 text-error shrink-0" />
+        : <CheckCircle2 className="w-3 h-3 text-success shrink-0" />}
       <span className="text-[10px] font-bold truncate flex-1">{step.step_name}</span>
       <span className="text-[9px] text-text-dim/50 shrink-0">{step.duration_ms}ms</span>
       <ChevronDown className={`w-3 h-3 text-text-dim/30 shrink-0 transition-transform ${isExpanded ? "rotate-180" : ""}`} />
@@ -948,7 +1003,7 @@ export function WorkflowsPage() {
                         {lastRun.state}
                       </span>
                     ) : (
-                      <span className="font-mono text-[10px] text-text-dim/40">no runs</span>
+                      <span className="font-mono text-[10px] text-text-dim/40">{t("workflows.no_runs", { defaultValue: "no runs" })}</span>
                     )}
                   </div>
 
@@ -960,7 +1015,7 @@ export function WorkflowsPage() {
                         <span className="truncate">{schedule.cron}</span>
                       </span>
                     ) : (
-                      <span className="font-mono text-[10px] text-text-dim/40">no schedule</span>
+                      <span className="font-mono text-[10px] text-text-dim/40">{t("workflows.no_schedule", { defaultValue: "no schedule" })}</span>
                     )}
                   </div>
 
@@ -1182,10 +1237,12 @@ export function WorkflowsPage() {
                         selectedRunId === runId &&
                         bannerSelectedRunOutsideFirstPage &&
                         runId === bannerSelectedRunOutsideFirstPage;
+                      const paramsPreview = formatRunParamsPreview(run.input);
                       return (
                         <div key={runId}>
+                          <div className="flex items-stretch gap-1">
                           <button
-                            className={`w-full flex items-center gap-3 p-2.5 rounded-xl border text-left transition-colors ${
+                            className={`flex-1 min-w-0 flex items-center gap-3 p-2.5 rounded-xl border text-left transition-colors ${
                               isSelected
                                 ? "border-brand bg-brand/5"
                                 : "border-border-subtle bg-main hover:bg-surface"
@@ -1202,6 +1259,20 @@ export function WorkflowsPage() {
                             <div className="flex-1 min-w-0">
                               <p className="text-[10px] font-bold truncate">{run.workflow_name}</p>
                               <p className="text-[9px] text-text-dim/50">{formatDate(run.started_at)}</p>
+                              {/* Parameters the run was launched with, so the
+                                  history shows WHAT was passed without opening
+                                  the detail panel (#6292). */}
+                              {paramsPreview && (
+                                <p className="text-[9px] text-text-dim/70 truncate" title={run.input}>
+                                  <span className="text-text-dim/40">{t("workflows.parameters", { defaultValue: "Parameters" })}: </span>
+                                  {paramsPreview}
+                                </p>
+                              )}
+                              {/* Failure reason, surfaced inline so the list
+                                  shows WHY a run failed (#6292). */}
+                              {state === "failed" && run.error && (
+                                <p className="text-[9px] text-error/80 truncate" title={run.error}>{run.error}</p>
+                              )}
                             </div>
                             {/* "Selected from banner" pill — surfaces that
                                 this row was appended to the first-10 slice
@@ -1220,6 +1291,21 @@ export function WorkflowsPage() {
                               "bg-main text-text-dim"
                             }`}>{state ?? "unknown"}</span>
                           </button>
+                          {/* Re-run with the same parameters (#6292). A
+                              sibling of the row button, never nested inside
+                              it, so it stays a valid standalone control. */}
+                          {runId && (
+                            <button
+                              type="button"
+                              title={t("workflows.rerun", { defaultValue: "Re-run with same parameters" })}
+                              aria-label={t("workflows.rerun", { defaultValue: "Re-run with same parameters" })}
+                              disabled={rerunMutation.isPending}
+                              onClick={() => void handleRerun(runId)}
+                              className="shrink-0 px-2.5 flex items-center justify-center rounded-xl border border-border-subtle bg-main text-text-dim hover:bg-surface hover:text-text disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+                              <RotateCcw className={`w-3.5 h-3.5 ${rerunMutation.isPending && rerunMutation.variables?.runId === runId ? "animate-spin" : ""}`} />
+                            </button>
+                          )}
+                          </div>
                           {/* Inline run detail */}
                           {isSelected && runDetailQuery.data && (
                             <div className="ml-5 mt-1 space-y-1.5">

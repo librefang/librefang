@@ -1,0 +1,10 @@
+post_install() {
+  echo "LibreFang Docker runner installed."
+  echo "Edit /etc/librefang/docker.env if you need provider API keys or a custom port."
+  echo "Start the service with: systemctl enable --now librefang-docker.service"
+}
+
+post_upgrade() {
+  echo "LibreFang Docker runner upgraded."
+  echo "Restart the service with: systemctl restart librefang-docker.service"
+}

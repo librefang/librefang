@@ -7,6 +7,11 @@ import {
 } from 'lucide-react'
 import { Github } from '../components/BrandIcons'
 import { cn } from '../lib/utils'
+import { getTranslation } from '../i18n'
+import type { RichTextPart, Translation } from '../i18n'
+import { useAppStore } from '../store'
+
+type DeployCopy = NonNullable<Translation['deploy']>
 
 // ---- Types ----
 
@@ -23,7 +28,6 @@ type ProgressStepStatus = 'pending' | 'active' | 'done' | 'error'
 
 interface ProgressStep {
   id: string
-  label: string
   status: ProgressStepStatus
 }
 
@@ -43,11 +47,12 @@ function useCopy() {
 
 // ---- CopyButton component ----
 
-function CopyButton({ copyKey, text, copiedKey, onCopy, className }: {
+function CopyButton({ copyKey, text, copiedKey, onCopy, labels, className }: {
   copyKey: string
   text: string
   copiedKey: string | null
   onCopy: (key: string, text: string) => void
+  labels: { copied: string; copyToClipboard: string }
   className?: string
 }) {
   const isCopied = copiedKey === copyKey
@@ -61,10 +66,30 @@ function CopyButton({ copyKey, text, copiedKey, onCopy, className }: {
           : 'border-white/10 text-gray-500 hover:text-cyan-400 hover:border-cyan-500/30',
         className,
       )}
-      aria-label={isCopied ? 'Copied' : 'Copy to clipboard'}
+      aria-label={isCopied ? labels.copied : labels.copyToClipboard}
     >
       {isCopied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
     </button>
+  )
+}
+
+function RichTroubleshootingText({ lines }: { lines: RichTextPart[][] }) {
+  return (
+    <>
+      {lines.map((line, lineIndex) => (
+        <span key={lineIndex} className="block">
+          {line.map((part, partIndex) => {
+            if (part.code) {
+              return <code key={partIndex} className="text-green-400 bg-surface px-1.5 py-0.5 rounded text-xs">{part.code}</code>
+            }
+            if (part.em) {
+              return <em key={partIndex}>{part.em}</em>
+            }
+            return <span key={partIndex}>{part.text}</span>
+          })}
+        </span>
+      ))}
+    </>
   )
 }
 
@@ -74,32 +99,26 @@ const PLATFORMS = [
   {
     id: 'flyio',
     name: 'Fly.io',
-    desc: 'Free forever, persistent storage',
     icon: Zap,
-    badge: 'Recommended',
     badgeClass: 'bg-purple-500/20 text-purple-400',
     accentBorder: 'hover:border-purple-500/50',
     accentShadow: 'hover:shadow-purple-500/10',
-    demo: { label: 'Live Demo', url: 'https://flyio.librefang.ai' },
+    demoUrl: 'https://flyio.librefang.ai',
     action: 'flyio' as const,
   },
   {
     id: 'render',
     name: 'Render',
-    desc: 'One-click OAuth deploy',
     icon: Server,
-    badge: 'Easiest',
     badgeClass: 'bg-green-500/20 text-green-400',
     accentBorder: 'hover:border-green-500/50',
     accentShadow: 'hover:shadow-green-500/10',
-    demo: { label: 'Live Demo', url: 'https://render.librefang.ai' },
-    warning: 'Free tier: sleeps after 15 min, no persistent storage',
+    demoUrl: 'https://render.librefang.ai',
     url: 'https://dashboard.render.com/blueprint/new?repo=https://github.com/librefang/librefang',
   },
   {
     id: 'railway',
     name: 'Railway',
-    desc: 'Simple deploy with $5 free credit',
     icon: Layers,
     accentBorder: 'hover:border-blue-500/50',
     accentShadow: 'hover:shadow-blue-500/10',
@@ -108,9 +127,7 @@ const PLATFORMS = [
   {
     id: 'gcp',
     name: 'GCP',
-    desc: 'Free forever (e2-micro), 30GB storage',
     icon: Cloud,
-    badge: 'Terraform',
     badgeClass: 'bg-blue-500/20 text-blue-400',
     accentBorder: 'hover:border-blue-500/50',
     accentShadow: 'hover:shadow-blue-500/10',
@@ -119,7 +136,6 @@ const PLATFORMS = [
   {
     id: 'docker',
     name: 'Docker',
-    desc: 'One command, runs anywhere',
     icon: Container,
     accentBorder: 'hover:border-blue-500/50',
     accentShadow: 'hover:shadow-blue-500/10',
@@ -131,41 +147,33 @@ const PLATFORMS = [
 const LOCAL_INSTALLS = [
   {
     id: 'macos',
-    name: 'macOS',
-    desc: 'Homebrew or download binary',
     icon: Monitor,
     cmd: 'brew install librefang/tap/librefang',
   },
   {
     id: 'linux',
-    name: 'Linux',
-    desc: 'Install script or download binary',
     icon: Terminal,
     cmd: 'curl -fsSL https://librefang.ai/install.sh | sh',
   },
   {
     id: 'windows',
-    name: 'Windows',
-    desc: 'PowerShell installer or .msi',
     icon: Monitor,
     cmd: 'irm https://librefang.ai/install.ps1 | iex',
   },
 ] as const
 
-const DEPLOY_STEPS: Omit<ProgressStep, 'status'>[] = [
-  { id: 'auth', label: 'Verifying token...' },
-  { id: 'app', label: 'Creating app...' },
-  { id: 'net', label: 'Allocating IP addresses...' },
-  { id: 'vol', label: 'Creating persistent volume...' },
-  { id: 'machine', label: 'Launching machine with Step 3.5 Flash...' },
-]
+const DEPLOY_STEP_IDS = ['auth', 'app', 'net', 'vol', 'machine'] as const
 
 // ---- Main component ----
 
 export default function DeployPage() {
+  const lang = useAppStore((s) => s.lang)
+  const t = getTranslation(lang)
+  const deployCopy = t.deploy!
+  const commonCopy = t.common!
   const [view, setView] = useState<DeployView>('platforms')
   const [version, setVersion] = useState<string>('')
-  const { copiedKey, copy } = useCopy()
+  const { copiedKey, copy: copyToClipboard } = useCopy()
 
   // Read ?platform= from URL on mount
   useEffect(() => {
@@ -216,10 +224,10 @@ export default function DeployPage() {
           <img src="/logo.png" alt="LibreFang" className="w-16 h-16 rounded-2xl mx-auto mb-5" />
           <h1 className="text-3xl sm:text-4xl font-black tracking-tight mb-2">
             <span className="bg-gradient-to-r from-slate-900 dark:from-white to-cyan-600 dark:to-cyan-400 bg-clip-text text-transparent">
-              Deploy LibreFang
+              {deployCopy.title}
             </span>
           </h1>
-          <p className="text-gray-500 text-sm">Choose your platform</p>
+          <p className="text-gray-500 text-sm">{deployCopy.subtitle}</p>
           {version && (
             <div className="inline-flex items-center gap-2 mt-4 px-3 py-1 rounded-full border border-cyan-500/20 bg-cyan-500/5 text-xs font-mono text-cyan-600 dark:text-cyan-400">
               <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
@@ -238,11 +246,13 @@ export default function DeployPage() {
               exit={{ opacity: 0, y: -8 }}
               transition={{ duration: 0.25 }}
             >
-              <PlatformGrid
-                copiedKey={copiedKey}
-                onCopy={copy}
-                onFlyClick={showFlyDeploy}
-              />
+          <PlatformGrid
+            copiedKey={copiedKey}
+            onCopy={copyToClipboard}
+            onFlyClick={showFlyDeploy}
+            text={deployCopy}
+            labels={commonCopy}
+          />
             </motion.div>
           ) : (
             <motion.div
@@ -252,14 +262,14 @@ export default function DeployPage() {
               exit={{ opacity: 0, y: -8 }}
               transition={{ duration: 0.25 }}
             >
-              <FlyDeployForm onBack={showPlatforms} />
+              <FlyDeployForm onBack={showPlatforms} text={deployCopy} />
             </motion.div>
           )}
         </AnimatePresence>
 
         {/* Terminal deploy */}
         <div className="mt-4 bg-surface-100 border border-black/10 dark:border-white/5 rounded-xl p-5 text-center">
-          <p className="text-gray-500 text-sm mb-3">Or deploy from your terminal:</p>
+          <p className="text-gray-500 text-sm mb-3">{deployCopy.terminalIntro}</p>
           <div className="bg-surface rounded-lg border border-black/10 dark:border-white/5 px-4 py-3 flex items-center justify-between gap-3 overflow-x-auto">
             <code className="text-sm text-green-400 whitespace-nowrap font-mono">
               <span className="text-gray-600 select-none">$ </span>
@@ -269,7 +279,8 @@ export default function DeployPage() {
               copyKey="terminal-cmd"
               text="curl -sL https://raw.githubusercontent.com/librefang/librefang/main/deploy/fly/deploy.sh | bash"
               copiedKey={copiedKey}
-              onCopy={copy}
+              onCopy={copyToClipboard}
+              labels={commonCopy}
             />
           </div>
         </div>
@@ -282,11 +293,11 @@ export default function DeployPage() {
               GitHub
             </a>
             <span className="text-gray-700">&bull;</span>
-            <a href="/" className="hover:text-cyan-500 transition-colors">Website</a>
+            <a href="/" className="hover:text-cyan-500 transition-colors">{deployCopy.website}</a>
             <span className="text-gray-700">&bull;</span>
             <a href="https://discord.gg/DzTYqAZZmc" target="_blank" rel="noopener noreferrer" className="hover:text-cyan-500 transition-colors">Discord</a>
           </div>
-          <p className="text-gray-600">&copy; {new Date().getFullYear()} LibreFang &mdash; Agent Operating System</p>
+          <p className="text-gray-600">&copy; {new Date().getFullYear()} LibreFang &mdash; {deployCopy.copyrightSuffix}</p>
         </footer>
       </div>
     </div>
@@ -295,10 +306,12 @@ export default function DeployPage() {
 
 // ---- Platform Grid ----
 
-function PlatformGrid({ copiedKey, onCopy, onFlyClick }: {
+function PlatformGrid({ copiedKey, onCopy, onFlyClick, text, labels }: {
   copiedKey: string | null
   onCopy: (key: string, text: string) => void
   onFlyClick: () => void
+  text: DeployCopy
+  labels: { copied: string; copyToClipboard: string }
 }) {
   return (
     <>
@@ -306,6 +319,7 @@ function PlatformGrid({ copiedKey, onCopy, onFlyClick }: {
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 mb-4">
         {PLATFORMS.map((platform) => {
           const Icon = platform.icon
+          const platformText = text.platforms[platform.id]!
 
           // Fly.io uses onClick
           if (platform.id === 'flyio') {
@@ -322,10 +336,10 @@ function PlatformGrid({ copiedKey, onCopy, onFlyClick }: {
                 <PlatformCardContent
                   icon={<Icon className="w-7 h-7" />}
                   name={platform.name}
-                  desc={platform.desc}
-                  badge={platform.badge}
+                  desc={platformText.desc}
+                  badge={platformText.badge}
                   badgeClass={platform.badgeClass}
-                  demo={platform.demo}
+                  demo={platform.demoUrl ? { label: platformText.demo ?? '', url: platform.demoUrl } : undefined}
                 />
               </button>
             )
@@ -347,11 +361,11 @@ function PlatformGrid({ copiedKey, onCopy, onFlyClick }: {
               <PlatformCardContent
                 icon={<Icon className="w-7 h-7" />}
                 name={platform.name}
-                desc={platform.desc}
-                badge={'badge' in platform ? platform.badge : undefined}
+                desc={platformText.desc}
+                badge={platformText.badge}
                 badgeClass={'badgeClass' in platform ? platform.badgeClass : undefined}
-                demo={'demo' in platform ? platform.demo : undefined}
-                warning={'warning' in platform ? platform.warning : undefined}
+                demo={'demoUrl' in platform && platform.demoUrl ? { label: platformText.demo ?? '', url: platform.demoUrl } : undefined}
+                warning={platformText.warning}
               />
               {'cmd' in platform && platform.cmd && (
                 <div className="mt-2 flex items-center gap-2 bg-surface rounded px-2 py-1.5 font-mono text-xs text-green-400 overflow-hidden">
@@ -361,6 +375,7 @@ function PlatformGrid({ copiedKey, onCopy, onFlyClick }: {
                     text={platform.cmd}
                     copiedKey={copiedKey}
                     onCopy={onCopy}
+                    labels={labels}
                   />
                 </div>
               )}
@@ -371,10 +386,11 @@ function PlatformGrid({ copiedKey, onCopy, onFlyClick }: {
 
       {/* Install locally */}
       <div className="mt-8 mb-4">
-        <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">Install locally</h2>
+        <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">{text.installLocally}</h2>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
           {LOCAL_INSTALLS.map((item) => {
             const Icon = item.icon
+            const itemText = text.localInstalls[item.id]!
             return (
               <a
                 key={item.id}
@@ -387,8 +403,8 @@ function PlatformGrid({ copiedKey, onCopy, onFlyClick }: {
                 )}
               >
                 <Icon className="w-7 h-7 mb-2.5 text-gray-600 dark:text-gray-400" />
-                <div className="font-semibold text-slate-900 dark:text-white text-sm mb-1">{item.name}</div>
-                <div className="text-xs text-gray-500 mb-2">{item.desc}</div>
+                <div className="font-semibold text-slate-900 dark:text-white text-sm mb-1">{itemText.name}</div>
+                <div className="text-xs text-gray-500 mb-2">{itemText.desc}</div>
                 <div className="flex items-center gap-2 bg-surface rounded px-2 py-1.5 font-mono text-xs text-green-400 overflow-hidden">
                   <code className="overflow-x-auto whitespace-nowrap scrollbar-hide flex-1">{item.cmd}</code>
                   <CopyButton
@@ -396,6 +412,7 @@ function PlatformGrid({ copiedKey, onCopy, onFlyClick }: {
                     text={item.cmd}
                     copiedKey={copiedKey}
                     onCopy={onCopy}
+                    labels={labels}
                   />
                 </div>
               </a>
@@ -450,11 +467,11 @@ function PlatformCardContent({ icon, name, desc, badge, badgeClass, demo, warnin
 
 // ---- Fly.io Deploy Form ----
 
-function FlyDeployForm({ onBack }: { onBack: () => void }) {
+function FlyDeployForm({ onBack, text }: { onBack: () => void; text: DeployCopy }) {
   const [token, setToken] = useState('')
   const [deploying, setDeploying] = useState(false)
   const [steps, setSteps] = useState<ProgressStep[]>(
-    DEPLOY_STEPS.map(s => ({ ...s, status: 'pending' as ProgressStepStatus }))
+    DEPLOY_STEP_IDS.map(id => ({ id, status: 'pending' as ProgressStepStatus }))
   )
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<DeployResult | null>(null)
@@ -463,7 +480,7 @@ function FlyDeployForm({ onBack }: { onBack: () => void }) {
   const deploy = useCallback(async () => {
     const trimmed = token.trim()
     if (!trimmed) {
-      setError('Please enter your Fly.io API Token.')
+      setError(text.tokenRequired)
       return
     }
 
@@ -472,14 +489,14 @@ function FlyDeployForm({ onBack }: { onBack: () => void }) {
     setResult(null)
 
     // Reset steps
-    const initial = DEPLOY_STEPS.map(s => ({ ...s, status: 'pending' as ProgressStepStatus }))
+    const initial = DEPLOY_STEP_IDS.map(id => ({ id, status: 'pending' as ProgressStepStatus }))
     initial[0]!.status = 'active'
     setSteps([...initial])
 
     // Animate steps progressively
     let currentStep = 0
     const stepInterval = setInterval(() => {
-      if (currentStep < DEPLOY_STEPS.length - 1) {
+      if (currentStep < DEPLOY_STEP_IDS.length - 1) {
         setSteps(prev => {
           const next = [...prev]
           const cur = next[currentStep]
@@ -503,7 +520,7 @@ function FlyDeployForm({ onBack }: { onBack: () => void }) {
       const data = await res.json() as (DeployResult & { error?: string })
 
       if (!res.ok || data.error) {
-        throw new Error(data.error || 'Deployment failed')
+        throw new Error(data.error || text.deployFailed)
       }
 
       // Mark all steps done
@@ -511,11 +528,11 @@ function FlyDeployForm({ onBack }: { onBack: () => void }) {
       setResult(data)
     } catch (err) {
       clearInterval(stepInterval)
-      setError(err instanceof Error ? err.message : 'Deployment failed')
+      setError(err instanceof Error ? err.message : text.deployFailed)
       setDeploying(false)
-      setSteps(DEPLOY_STEPS.map(s => ({ ...s, status: 'pending' as ProgressStepStatus })))
+      setSteps(DEPLOY_STEP_IDS.map(id => ({ id, status: 'pending' as ProgressStepStatus })))
     }
-  }, [token])
+  }, [text.deployFailed, text.tokenRequired, token])
 
   return (
     <div>
@@ -525,19 +542,19 @@ function FlyDeployForm({ onBack }: { onBack: () => void }) {
         className="flex items-center gap-1.5 text-sm text-gray-500 hover:text-cyan-500 transition-colors mb-5 px-3 py-2 border border-black/10 dark:border-white/5 rounded-lg hover:border-cyan-500/30"
       >
         <ArrowLeft className="w-4 h-4" />
-        Back to platforms
+        {text.backToPlatforms}
       </button>
 
       {/* Badges */}
       <div className="flex flex-wrap justify-center gap-2 mb-6">
         {[
-          { label: 'Free LLM included', dotClass: 'bg-green-400' },
-          { label: 'No API key needed', dotClass: 'bg-purple-400' },
-          { label: '1 GB storage', dotClass: 'bg-amber-400' },
-        ].map(b => (
-          <span key={b.label} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-black/10 dark:border-white/5 bg-surface-100 text-xs font-medium text-gray-400">
+          { dotClass: 'bg-green-400' },
+          { dotClass: 'bg-purple-400' },
+          { dotClass: 'bg-amber-400' },
+        ].map((b, index) => (
+          <span key={text.badges[index]} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-black/10 dark:border-white/5 bg-surface-100 text-xs font-medium text-gray-400">
             <span className={cn('w-2 h-2 rounded-full', b.dotClass)} />
-            {b.label}
+            {text.badges[index]}
           </span>
         ))}
       </div>
@@ -550,10 +567,9 @@ function FlyDeployForm({ onBack }: { onBack: () => void }) {
           className="bg-green-500/5 border border-green-500/20 rounded-xl p-8 text-center"
         >
           <CheckCircle2 className="w-12 h-12 text-green-400 mx-auto mb-4" />
-          <h2 className="text-xl font-bold text-green-400 mb-3">Deployed!</h2>
+          <h2 className="text-xl font-bold text-green-400 mb-3">{text.deployed}</h2>
           <p className="text-gray-500 text-sm mb-6">
-            Your LibreFang instance is starting up (1-2 min).<br />
-            Free LLM (Step 3.5 Flash) is pre-configured and ready to use.
+            {text.deployedDesc}
           </p>
           <div className="flex flex-col sm:flex-row gap-3 justify-center mb-6">
             <a
@@ -562,7 +578,7 @@ function FlyDeployForm({ onBack }: { onBack: () => void }) {
               rel="noopener noreferrer"
               className="inline-flex items-center justify-center gap-2 px-6 py-3 bg-green-500 text-black font-semibold rounded-lg hover:bg-green-400 transition-colors"
             >
-              Open Dashboard
+              {text.openDashboard}
               <ExternalLink className="w-4 h-4" />
             </a>
             <a
@@ -571,21 +587,21 @@ function FlyDeployForm({ onBack }: { onBack: () => void }) {
               rel="noopener noreferrer"
               className="inline-flex items-center justify-center gap-2 px-6 py-3 bg-surface-100 border border-black/10 dark:border-white/5 text-gray-300 font-semibold rounded-lg hover:bg-surface-200 transition-colors"
             >
-              Fly.io Console
+              {text.flyConsole}
               <ExternalLink className="w-4 h-4" />
             </a>
           </div>
           <div className="text-sm text-gray-500 space-y-1">
-            <p>App: <code className="text-green-400 bg-surface px-1.5 py-0.5 rounded text-xs">{result.appName}</code> &bull; Region: <code className="text-green-400 bg-surface px-1.5 py-0.5 rounded text-xs">{result.region}</code></p>
-            <p>Model: <code className="text-green-400 bg-surface px-1.5 py-0.5 rounded text-xs">Step 3.5 Flash (free)</code></p>
-            <p>Upgrade model: <code className="text-green-400 bg-surface px-1.5 py-0.5 rounded text-xs">flyctl secrets set OPENAI_API_KEY=sk-... --app {result.appName}</code></p>
+            <p>{text.app}: <code className="text-green-400 bg-surface px-1.5 py-0.5 rounded text-xs">{result.appName}</code> &bull; {text.region}: <code className="text-green-400 bg-surface px-1.5 py-0.5 rounded text-xs">{result.region}</code></p>
+            <p>{text.model}: <code className="text-green-400 bg-surface px-1.5 py-0.5 rounded text-xs">{text.includedModel}</code></p>
+            <p>{text.upgradeModel}: <code className="text-green-400 bg-surface px-1.5 py-0.5 rounded text-xs">flyctl secrets set OPENAI_API_KEY=sk-... --app {result.appName}</code></p>
           </div>
         </motion.div>
       ) : (
         <>
           {/* Free note */}
           <div className="bg-green-500/5 border border-green-500/20 rounded-xl px-5 py-4 text-sm text-green-400 mb-4 leading-relaxed">
-            A free LLM (Step 3.5 Flash via OpenRouter) is pre-configured. Your instance works out of the box &mdash; no API keys required.
+            {text.freeNote}
           </div>
 
           {/* Steps card */}
@@ -593,19 +609,20 @@ function FlyDeployForm({ onBack }: { onBack: () => void }) {
             <div className="flex items-start gap-3 mb-5">
               <div className="w-7 h-7 rounded-full bg-purple-500/15 border border-purple-500/30 flex items-center justify-center text-xs font-bold text-purple-400 shrink-0 mt-0.5">1</div>
               <div>
-                <div className="font-semibold text-slate-900 dark:text-white text-sm mb-1">Get a Fly.io API Token</div>
+                <div className="font-semibold text-slate-900 dark:text-white text-sm mb-1">{text.stepOneTitle}</div>
                 <div className="text-xs text-gray-500 leading-relaxed">
-                  <a href="https://fly.io/app/sign-up" target="_blank" rel="noopener noreferrer" className="text-purple-400 hover:underline">Sign up</a> or{' '}
-                  <a href="https://fly.io/app/sign-in" target="_blank" rel="noopener noreferrer" className="text-purple-400 hover:underline">log in</a> to Fly.io, then go to{' '}
-                  <a href="https://fly.io/user/personal_access_tokens" target="_blank" rel="noopener noreferrer" className="text-purple-400 hover:underline">Personal Access Tokens</a> and create a new token.
+                  {text.stepOnePrefix}
+                  <a href="https://fly.io/app/sign-up" target="_blank" rel="noopener noreferrer" className="text-purple-400 hover:underline">{text.signUp}</a> {text.or}{' '}
+                  <a href="https://fly.io/app/sign-in" target="_blank" rel="noopener noreferrer" className="text-purple-400 hover:underline">{text.logIn}</a> {text.stepOneMiddle}{' '}
+                  <a href="https://fly.io/user/personal_access_tokens" target="_blank" rel="noopener noreferrer" className="text-purple-400 hover:underline">{text.personalAccessTokens}</a> {text.stepOneSuffix}
                 </div>
               </div>
             </div>
             <div className="flex items-start gap-3">
               <div className="w-7 h-7 rounded-full bg-purple-500/15 border border-purple-500/30 flex items-center justify-center text-xs font-bold text-purple-400 shrink-0 mt-0.5">2</div>
               <div>
-                <div className="font-semibold text-slate-900 dark:text-white text-sm mb-1">Paste and deploy</div>
-                <div className="text-xs text-gray-500">Your token is only sent to the Fly.io API and is never stored on our servers.</div>
+                <div className="font-semibold text-slate-900 dark:text-white text-sm mb-1">{text.stepTwoTitle}</div>
+                <div className="text-xs text-gray-500">{text.stepTwoDesc}</div>
               </div>
             </div>
           </div>
@@ -613,7 +630,7 @@ function FlyDeployForm({ onBack }: { onBack: () => void }) {
           {/* Token input and deploy */}
           <div className="bg-surface-100 border border-black/10 dark:border-white/5 rounded-xl p-6">
             <label htmlFor="fly-token" className="block text-sm font-medium text-gray-500 mb-2">
-              Fly.io API Token <span className="text-red-400">*</span>
+              {text.tokenLabel} <span className="text-red-400">*</span>
             </label>
             <input
               id="fly-token"
@@ -642,7 +659,7 @@ function FlyDeployForm({ onBack }: { onBack: () => void }) {
                   : 'bg-purple-600 hover:bg-purple-500 text-white',
               )}
             >
-              {deploying ? 'Deploying...' : 'Deploy to Fly.io'}
+              {deploying ? text.deploying : text.deployToFly}
             </button>
 
             {/* Progress steps */}
@@ -669,7 +686,7 @@ function FlyDeployForm({ onBack }: { onBack: () => void }) {
                       {step.status === 'done' && <CheckCircle2 className="w-4 h-4" />}
                       {step.status === 'error' && <XCircle className="w-4 h-4" />}
                     </span>
-                    {step.label}
+                    {text.steps[step.id]}
                   </div>
                 ))}
               </motion.div>
@@ -691,50 +708,19 @@ function FlyDeployForm({ onBack }: { onBack: () => void }) {
 
       {/* Troubleshooting */}
       <div className="bg-surface-100 border border-black/10 dark:border-white/5 rounded-xl p-6 mt-4">
-        <div className="font-semibold text-slate-900 dark:text-white text-sm mb-3">Troubleshooting</div>
-        {[
-          {
-            id: 'sso',
-            q: 'Cannot create Personal Access Token (SSO error)',
-            a: (
-              <>
-                If you see: <em>&quot;Access Tokens cannot be created because an organization requires SSO&quot;</em><br />
-                Use a per-org token instead. Run in your terminal:<br />
-                <code className="text-green-400 bg-surface px-1.5 py-0.5 rounded text-xs">flyctl tokens org &lt;your-org-name&gt;</code><br />
-                Then paste the generated token above.
-              </>
-            ),
-          },
-          {
-            id: 'image',
-            q: 'Deploy failed: image not found',
-            a: (
-              <>
-                The Docker image <code className="text-green-400 text-xs">ghcr.io/librefang/librefang:latest</code> is built on each release.
-                If no release has been published yet, use the terminal deploy script below &mdash; it builds from source.
-              </>
-            ),
-          },
-          {
-            id: 'llm',
-            q: 'How to add or change LLM provider after deploy?',
-            a: (
-              <>
-                <code className="text-green-400 bg-surface px-1.5 py-0.5 rounded text-xs">flyctl secrets set OPENAI_API_KEY=sk-... --app your-app-name</code><br />
-                Then edit <code className="text-green-400 text-xs">/data/config.toml</code> via <code className="text-green-400 text-xs">flyctl ssh console</code> to update the default model.
-              </>
-            ),
-          },
-        ].map(item => (
-          <div key={item.id} className="mb-2 last:mb-0">
+        <div className="font-semibold text-slate-900 dark:text-white text-sm mb-3">{text.troubleshooting}</div>
+        {(['sso', 'image', 'llm'] as const).map(id => {
+          const item = text.troubleshootingItems[id]!
+          return (
+          <div key={id} className="mb-2 last:mb-0">
             <button
-              onClick={() => setTroubleshootOpen(troubleshootOpen === item.id ? null : item.id)}
+              onClick={() => setTroubleshootOpen(troubleshootOpen === id ? null : id)}
               className="flex items-center gap-2 w-full text-left py-2 text-sm text-gray-500 hover:text-gray-300 transition-colors"
             >
-              <ChevronDown className={cn('w-3.5 h-3.5 transition-transform shrink-0', troubleshootOpen === item.id && 'rotate-180')} />
+              <ChevronDown className={cn('w-3.5 h-3.5 transition-transform shrink-0', troubleshootOpen === id && 'rotate-180')} />
               {item.q}
             </button>
-            {troubleshootOpen === item.id && (
+            {troubleshootOpen === id && (
               <motion.div
                 initial={{ height: 0, opacity: 0 }}
                 animate={{ height: 'auto', opacity: 1 }}
@@ -742,12 +728,12 @@ function FlyDeployForm({ onBack }: { onBack: () => void }) {
                 className="overflow-hidden"
               >
                 <div className="pl-5.5 pb-2 text-xs text-gray-500 leading-relaxed">
-                  {item.a}
+                  <RichTroubleshootingText lines={item.lines} />
                 </div>
               </motion.div>
             )}
           </div>
-        ))}
+        )})}
       </div>
     </div>
   )

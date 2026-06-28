@@ -1599,7 +1599,8 @@ pub async fn memory_config_patch(
     // edited when `config.toml` is a read-only ConfigMap. No secret VALUE enters
     // the store — `embedding_api_key_env` is an env-var pointer (a name), and the
     // actual key stays in the env var. The sqlite-only fallback below keeps the
-    // legacy `config.toml` write + `reload_config` path byte-for-byte.
+    // legacy `config.toml` write + `reload_config` path (with upstream #6301's
+    // graceful 400 on a non-table `[memory]` / `[proactive_memory]`).
     #[cfg(feature = "surreal-backend")]
     return memory_config_patch_surreal(&state, &req).await;
 
@@ -1622,12 +1623,24 @@ pub async fn memory_config_patch(
 
         let root = table.as_table_mut().unwrap();
 
-        // Update [memory] section
-        let memory_tbl = root
+        // Update [memory] section. `entry(..).or_insert_with` only inserts the
+        // default table when the key is ABSENT; if config.toml already holds a
+        // scalar at `memory` (e.g. a hand-edited `memory = 5`), `as_table_mut`
+        // returns None. Fail gracefully instead of panicking (the pre-existing
+        // `.unwrap()` turned a malformed-config edit into a 500 with a panic log).
+        let memory_tbl = match root
             .entry("memory")
             .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
             .as_table_mut()
-            .unwrap();
+        {
+            Some(t) => t,
+            None => {
+                return ApiErrorResponse::bad_request(
+                    "config.toml has a non-table `[memory]` entry; expected a table",
+                )
+                .into_json_tuple();
+            }
+        };
         if let Some(v) = req.get("embedding_provider").and_then(|v| v.as_str()) {
             memory_tbl.insert(
                 "embedding_provider".into(),
@@ -1649,11 +1662,19 @@ pub async fn memory_config_patch(
 
         // Update [proactive_memory] section
         if let Some(pm) = req.get("proactive_memory") {
-            let pm_tbl = root
+            let pm_tbl = match root
                 .entry("proactive_memory")
                 .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
                 .as_table_mut()
-                .unwrap();
+            {
+                Some(t) => t,
+                None => {
+                    return ApiErrorResponse::bad_request(
+                        "config.toml has a non-table `[proactive_memory]` entry; expected a table",
+                    )
+                    .into_json_tuple();
+                }
+            };
             if let Some(v) = pm.get("enabled").and_then(|v| v.as_bool()) {
                 pm_tbl.insert("enabled".into(), toml::Value::Boolean(v));
             }
@@ -1775,14 +1796,6 @@ pub async fn memory_config_patch(
     }
 }
 
-/// C-005d.2 — surreal-backend persistence path for `PATCH /api/memory/config`.
-///
-/// Merges the patch into the **live** effective config (`config.toml` ⊕ prior
-/// `config_overrides`) so successive PATCHes accumulate, stores the resulting
-/// `[memory]` and `[proactive_memory]` sections as two trusted-section overrides
-/// (C-005d.1 `TRUSTED_SECTION_KEYS`), then applies them via `replace_config`.
-/// `config.toml` is never written. No secret VALUE enters the store.
-#[cfg(feature = "surreal-backend")]
 async fn memory_config_patch_surreal(
     state: &Arc<AppState>,
     req: &serde_json::Value,

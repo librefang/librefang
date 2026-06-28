@@ -728,9 +728,8 @@ impl PeerNode {
     /// embedded in the handshake HMAC so that a captured handshake cannot be
     /// replayed against a *different* federation node that shares the same
     /// `shared_secret` (see #3875). Pass an empty string only for bootstrap
-    /// connections where the remote node ID is genuinely unknown in advance;
-    /// the remote peer will verify its own node ID and reject the connection
-    /// if the HMAC was computed for a different recipient.
+    /// connections where the remote node ID is genuinely unknown in advance — `bootstrap_peers` lists addresses, not identities.
+    /// The receiver accepts the empty-recipient (bootstrap) binding in addition to the bound form (see the inbound handshake path), so a bootstrap dial succeeds; the nonce, Ed25519 TOFU, and ECDH layers still authenticate the peer.
     pub async fn connect_to_peer(
         &self,
         addr: SocketAddr,
@@ -1152,35 +1151,43 @@ impl PeerNode {
                     });
                 }
 
-                // SECURITY (#3875, #3880): Verify HMAC *before* recording the
-                // nonce. The HMAC auth_data now covers:
+                // SECURITY (#3875 / #3920): Verify HMAC *before* recording the nonce.
+                // The connecting side binds the HMAC over:
                 //   nonce | sender_node_id | recipient_node_id
-                // where recipient_node_id is *our* local node ID. This binds
-                // the handshake to this specific server — a captured packet
-                // cannot be replayed against a different peer that shares the
-                // same shared_secret.
+                // An established federation link (`send_to_peer`) already knows our node ID and binds the recipient to it, so a captured handshake cannot be replayed against a *different* node that shares the same shared_secret.
+                //
+                // A *bootstrap* dial cannot know our node ID in advance — the `bootstrap_peers` config lists addresses only — so it leaves the recipient field empty (see `connect_to_peer`).
+                // Accept both bindings: the recipient-bound form first (the strong anti-replay path), then the empty bootstrap form.
+                // The remaining defenses still cover the bootstrap path — nonce dedup (#3880), Ed25519 TOFU identity pinning (#3873) below, and the per-handshake ECDH session key (#4269) — so accepting an unbound recipient here does not let an attacker who lacks the X25519 ephemeral private key actually communicate.
+                // Without this branch every bootstrap connection 403s, because the dialer signs `nonce|sender|` while we verify `nonce|sender|<our node id>`.
                 //
                 // Checking HMAC first (order fix for #3880) means an attacker
                 // who does not know shared_secret cannot trigger nonce
                 // insertion or the GC sweep inside check_and_record.
-                let expected_data = format!("{}|{}|{}", nonce, node_id, node.config.node_id);
-                if !hmac_verify(
-                    &node.config.shared_secret,
-                    expected_data.as_bytes(),
-                    auth_hmac,
-                ) {
-                    let err_resp = WireMessage {
-                        id: msg.id.clone(),
-                        kind: WireMessageKind::Response(WireResponse::Error {
-                            code: 403,
-                            message: "HMAC authentication failed".to_string(),
-                        }),
+                let bound_data = format!("{}|{}|{}", nonce, node_id, node.config.node_id);
+                let bootstrap_data = format!("{}|{}|", nonce, node_id);
+                let verified_auth_data =
+                    if hmac_verify(&node.config.shared_secret, bound_data.as_bytes(), auth_hmac) {
+                        bound_data
+                    } else if hmac_verify(
+                        &node.config.shared_secret,
+                        bootstrap_data.as_bytes(),
+                        auth_hmac,
+                    ) {
+                        bootstrap_data
+                    } else {
+                        let err_resp = WireMessage {
+                            id: msg.id.clone(),
+                            kind: WireMessageKind::Response(WireResponse::Error {
+                                code: 403,
+                                message: "HMAC authentication failed".to_string(),
+                            }),
+                        };
+                        write_message(&mut writer, &err_resp).await?;
+                        return Err(WireError::HandshakeFailed(
+                            "HMAC verification failed on incoming Handshake".into(),
+                        ));
                     };
-                    write_message(&mut writer, &err_resp).await?;
-                    return Err(WireError::HandshakeFailed(
-                        "HMAC verification failed on incoming Handshake".into(),
-                    ));
-                }
 
                 // SECURITY (#3873): Verify Ed25519 identity (if present) and
                 // enforce the in-memory TOFU pin. A leaked shared_secret no
@@ -1190,7 +1197,7 @@ impl PeerNode {
                     node_id,
                     peer_pubkey,
                     peer_identity_sig,
-                    expected_data.as_bytes(),
+                    verified_auth_data.as_bytes(),
                     peer_eph.as_deref(),
                 ) {
                     let err_resp = WireMessage {
@@ -1903,6 +1910,170 @@ mod tests {
         // Give the accept loop a moment to process
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         assert_eq!(registry1.connected_count(), 1);
+    }
+
+    /// Regression (#3920): the production `bootstrap_peers` path dials via `connect_to_peer`, which leaves `recipient_node_id` empty because the remote node ID is unknown in advance — `bootstrap_peers` lists addresses, not identities.
+    /// After #3920 bound the recipient node ID into the handshake HMAC, every bootstrap connection failed with `403 HMAC authentication failed`: the receiver verified the HMAC against its own real node ID while the dialer had signed an empty recipient, and the inbound path had no fallback for the empty form.
+    /// All existing tests used `connect_to_peer_with_id` with a known recipient, so none exercised the real bootstrap path.
+    /// This test dials through `connect_to_peer` — the exact call `background_lifecycle.rs` makes for each bootstrap entry — and asserts the handshake completes in both directions.
+    #[tokio::test]
+    async fn issue_3920_bootstrap_connect_without_recipient_id_succeeds() {
+        let registry1 = PeerRegistry::new();
+        let handle1 = Arc::new(TestHandle::new());
+        let config1 = PeerConfig {
+            listen_addr: "127.0.0.1:0".parse().unwrap(),
+            node_id: "bootstrap-server".to_string(),
+            node_name: "kernel-1".to_string(),
+            shared_secret: "test-secret-for-unit-tests".to_string(),
+            max_messages_per_peer_per_minute: 0, // unlimited for tests
+            max_llm_tokens_per_peer_per_hour: None,
+        };
+        let (node1, _task1) = PeerNode::start(config1, registry1.clone(), handle1.clone())
+            .await
+            .unwrap();
+
+        let registry2 = PeerRegistry::new();
+        let handle2 = Arc::new(TestHandle::new());
+        let config2 = PeerConfig {
+            listen_addr: "127.0.0.1:0".parse().unwrap(),
+            node_id: "bootstrap-client".to_string(),
+            node_name: "kernel-2".to_string(),
+            shared_secret: "test-secret-for-unit-tests".to_string(),
+            max_messages_per_peer_per_minute: 0, // unlimited for tests
+            max_llm_tokens_per_peer_per_hour: None,
+        };
+        let (node2, _task2) = PeerNode::start(config2, registry2.clone(), handle2.clone())
+            .await
+            .unwrap();
+
+        // Dial via the bootstrap entry point — `recipient_node_id` is empty
+        // because the dialer does not know the server's node ID in advance.
+        node2
+            .connect_to_peer(node1.local_addr(), handle2)
+            .await
+            .expect("bootstrap handshake must succeed without a known recipient node_id");
+
+        // The dialer registered the server.
+        assert_eq!(registry2.connected_count(), 1);
+        let peer = registry2.get_peer("bootstrap-server").unwrap();
+        assert_eq!(peer.node_name, "kernel-1");
+        assert_eq!(peer.agents.len(), 1);
+
+        // The receiver registered the dialer (inbound handshake processed).
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(registry1.connected_count(), 1);
+        assert!(registry1.get_peer("bootstrap-client").is_some());
+    }
+
+    /// A handshake bound to a *wrong, non-empty* recipient node ID must still be rejected — the #3920 fix only relaxes the empty (bootstrap) recipient, it does NOT accept arbitrary recipients.
+    /// This guards the cross-node replay protection (#3875) that the bootstrap fallback must not undo.
+    #[tokio::test]
+    async fn issue_3920_wrong_nonempty_recipient_still_rejected() {
+        let registry1 = PeerRegistry::new();
+        let handle1 = Arc::new(TestHandle::new());
+        let config1 = PeerConfig {
+            listen_addr: "127.0.0.1:0".parse().unwrap(),
+            node_id: "real-server".to_string(),
+            node_name: "kernel-1".to_string(),
+            shared_secret: "test-secret-for-unit-tests".to_string(),
+            max_messages_per_peer_per_minute: 0, // unlimited for tests
+            max_llm_tokens_per_peer_per_hour: None,
+        };
+        let (node1, _task1) = PeerNode::start(config1, registry1.clone(), handle1.clone())
+            .await
+            .unwrap();
+
+        let registry2 = PeerRegistry::new();
+        let handle2 = Arc::new(TestHandle::new());
+        let config2 = PeerConfig {
+            listen_addr: "127.0.0.1:0".parse().unwrap(),
+            node_id: "client".to_string(),
+            node_name: "kernel-2".to_string(),
+            shared_secret: "test-secret-for-unit-tests".to_string(),
+            max_messages_per_peer_per_minute: 0, // unlimited for tests
+            max_llm_tokens_per_peer_per_hour: None,
+        };
+        let (node2, _task2) = PeerNode::start(config2, registry2.clone(), handle2.clone())
+            .await
+            .unwrap();
+
+        // Bind the HMAC to a recipient that is neither empty nor the server's
+        // real node ID — a captured handshake replayed to the wrong node.
+        let err = node2
+            .connect_to_peer_with_id(node1.local_addr(), handle2, "some-other-node")
+            .await
+            .expect_err("handshake bound to a different non-empty recipient must be rejected");
+        assert!(
+            matches!(err, WireError::HandshakeFailed(_)),
+            "expected handshake failure, got {err:?}"
+        );
+        assert_eq!(registry2.connected_count(), 0);
+    }
+
+    /// Regression (#3920) for the *identity-bearing* bootstrap path — the real
+    /// production default, since every daemon node loads an Ed25519 keypair via
+    /// `load_or_generate`. The dialer signs its identity over the same
+    /// empty-recipient `auth_data` it HMACs, so the receiver MUST verify that
+    /// signature against the bootstrap form it accepted, not its own bound form.
+    /// Had the fix threaded the wrong `auth_data` into identity verification,
+    /// this test would fail with "Ed25519 identity signature invalid" — the
+    /// HMAC-only `issue_3920_bootstrap_connect_without_recipient_id_succeeds`
+    /// above cannot catch that because it uses identity-less nodes.
+    #[tokio::test]
+    async fn issue_3920_identity_bootstrap_connect_succeeds_and_pins() {
+        let kp_server = Ed25519KeyPair::generate().unwrap();
+        let kp_client = Ed25519KeyPair::generate().unwrap();
+        let server_pub = kp_server.public_key().to_string();
+        let client_pub = kp_client.public_key().to_string();
+
+        let r1 = PeerRegistry::new();
+        let h1 = Arc::new(TestHandle::new());
+        let (node1, _t1) = PeerNode::start_with_identity(
+            test_config("identity-server", "kernel-1"),
+            r1.clone(),
+            h1.clone(),
+            Some(kp_server),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let r2 = PeerRegistry::new();
+        let h2 = Arc::new(TestHandle::new());
+        let (node2, _t2) = PeerNode::start_with_identity(
+            test_config("identity-client", "kernel-2"),
+            r2.clone(),
+            h2.clone(),
+            Some(kp_client),
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Bootstrap dial (empty recipient) between two identity-bearing nodes —
+        // exactly what `background_lifecycle.rs` does, with the keypairs every
+        // real daemon carries.
+        node2
+            .connect_to_peer(node1.local_addr(), h2)
+            .await
+            .expect("identity-bearing bootstrap handshake must succeed");
+
+        // node2 pinned the server's pubkey (ack identity verified) and
+        // registered the peer.
+        assert_eq!(
+            node2.pinned_pubkeys_snapshot().get("identity-server"),
+            Some(&server_pub)
+        );
+        assert!(node2.registry().get_peer("identity-server").is_some());
+
+        // node1 pinned the client's pubkey — this is the assertion that proves
+        // the inbound side verified the Ed25519 signature against the
+        // empty-recipient `auth_data`. The pin happens before node1 writes the
+        // ack, so it is already present once `connect_to_peer` returns.
+        assert_eq!(
+            node1.pinned_pubkeys_snapshot().get("identity-client"),
+            Some(&client_pub)
+        );
     }
 
     #[tokio::test]

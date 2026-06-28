@@ -268,7 +268,8 @@ impl SkillsState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut SkillsState) {
-    let inner = widgets::render_screen_block(f, area, "\u{2605} Skills");
+    let title = format!("★ {}", crate::i18n::t("tui-skills-title-screen"));
+    let inner = widgets::render_screen_block(f, area, &title);
 
     let chunks = Layout::vertical([
         Constraint::Length(1), // sub-tab bar
@@ -291,9 +292,12 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SkillsState) {
 
 fn draw_sub_tabs(f: &mut Frame, area: Rect, active: SkillsSub) {
     let tabs = [
-        (SkillsSub::Installed, "1 Installed"),
-        (SkillsSub::ClawHub, "2 ClawHub"),
-        (SkillsSub::Mcp, "3 MCP Servers"),
+        (
+            SkillsSub::Installed,
+            crate::i18n::t("tui-skills-tab-installed"),
+        ),
+        (SkillsSub::ClawHub, crate::i18n::t("tui-skills-tab-clawhub")),
+        (SkillsSub::Mcp, crate::i18n::t("tui-skills-tab-mcp")),
     ];
     let mut spans = vec![Span::raw("  ")];
     for (sub, label) in &tabs {
@@ -320,7 +324,10 @@ fn draw_installed(f: &mut Frame, area: Rect, state: &mut SkillsState) {
         Paragraph::new(Line::from(vec![Span::styled(
             format!(
                 "  {:<22} {:<10} {:<12} {}",
-                "Name", "Runtime", "Source", "Description"
+                crate::i18n::t("tui-skills-header-name"),
+                crate::i18n::t("tui-skills-header-runtime"),
+                crate::i18n::t("tui-skills-header-source"),
+                crate::i18n::t("tui-skills-header-desc")
             ),
             theme::table_header(),
         )])),
@@ -329,12 +336,12 @@ fn draw_installed(f: &mut Frame, area: Rect, state: &mut SkillsState) {
 
     if state.loading {
         f.render_widget(
-            widgets::spinner(state.tick, "Loading skills\u{2026}"),
+            widgets::spinner(state.tick, &crate::i18n::t("tui-skills-loading")),
             chunks[1],
         );
     } else if state.installed.is_empty() {
         f.render_widget(
-            widgets::empty_state("No skills installed. Browse ClawHub to find skills."),
+            widgets::empty_state(&crate::i18n::t("tui-skills-empty")),
             chunks[1],
         );
     } else {
@@ -357,18 +364,18 @@ fn draw_installed(f: &mut Frame, area: Rect, state: &mut SkillsState) {
                 };
                 let (source_indicator, source_style) = match s.source.as_str() {
                     "clawhub" => (
-                        "\u{25cf}",
+                        "●",
                         Style::default()
                             .fg(theme::ACCENT)
                             .add_modifier(Modifier::BOLD),
                     ),
                     "builtin" | "built-in" => (
-                        "\u{25cf}",
+                        "●",
                         Style::default()
                             .fg(theme::GREEN)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    _ => ("\u{25cb}", theme::dim_style()),
+                    _ => ("○", theme::dim_style()),
                 };
                 ListItem::new(Line::from(vec![
                     Span::styled(format!("  {source_indicator} "), source_style),
@@ -395,9 +402,9 @@ fn draw_installed(f: &mut Frame, area: Rect, state: &mut SkillsState) {
     f.render_widget(
         widgets::confirm_or_status_or_hint(
             state.confirm_uninstall,
-            "  Uninstall this skill? [y] Yes  [any] Cancel",
+            &crate::i18n::t("tui-skills-uninstall-confirm"),
             &state.status_msg,
-            "  [\u{2191}\u{2193}] Navigate  [u] Uninstall  [r] Refresh",
+            &crate::i18n::t("tui-skills-hints-installed"),
         ),
         chunks[2],
     );
@@ -417,7 +424,7 @@ fn draw_clawhub(f: &mut Frame, area: Rect, state: &mut SkillsState) {
                 Span::styled("  / ", Style::default().fg(theme::ACCENT)),
                 Span::styled(&state.search_buf, theme::input_style()),
                 Span::styled(
-                    "\u{2588}",
+                    "█",
                     Style::default()
                         .fg(theme::GREEN)
                         .add_modifier(Modifier::SLOW_BLINK),
@@ -426,17 +433,21 @@ fn draw_clawhub(f: &mut Frame, area: Rect, state: &mut SkillsState) {
             chunks[0],
         );
     } else {
+        let sort_label = crate::i18n::t(&format!("tui-skills-sort-{}", state.sort.label()));
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(
                     format!(
                         "  {:<24} {:<10} {:<10} {}",
-                        "Name", "Downloads", "Runtime", "Description"
+                        crate::i18n::t("tui-skills-header-name"),
+                        crate::i18n::t("tui-skills-header-downloads"),
+                        crate::i18n::t("tui-skills-header-runtime"),
+                        crate::i18n::t("tui-skills-header-desc")
                     ),
                     theme::table_header(),
                 ),
                 Span::styled(
-                    format!("  Sort: {}", state.sort.label()),
+                    crate::i18n::t_args("tui-skills-sort", &[("sort", &sort_label)]),
                     Style::default().fg(theme::YELLOW),
                 ),
             ])),
@@ -446,12 +457,12 @@ fn draw_clawhub(f: &mut Frame, area: Rect, state: &mut SkillsState) {
 
     if state.loading {
         f.render_widget(
-            widgets::spinner(state.tick, "Searching ClawHub\u{2026}"),
+            widgets::spinner(state.tick, &crate::i18n::t("tui-skills-searching")),
             chunks[1],
         );
     } else if state.clawhub_results.is_empty() {
         f.render_widget(
-            widgets::empty_state("No results. Press [/] to search or [s] to change sort."),
+            widgets::empty_state(&crate::i18n::t("tui-skills-empty-clawhub")),
             chunks[1],
         );
     } else {
@@ -488,9 +499,7 @@ fn draw_clawhub(f: &mut Frame, area: Rect, state: &mut SkillsState) {
     }
 
     f.render_widget(
-        widgets::hint_bar(
-            "  [\u{2191}\u{2193}] Navigate  [i] Install  [/] Search  [s] Sort  [r] Refresh",
-        ),
+        widgets::hint_bar(&crate::i18n::t("tui-skills-hints-clawhub")),
         chunks[2],
     );
 }
@@ -505,7 +514,12 @@ fn draw_mcp(f: &mut Frame, area: Rect, state: &mut SkillsState) {
 
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
-            format!("  {:<22} {:<16} {}", "Server", "Status", "Tools"),
+            format!(
+                "  {:<22} {:<16} {}",
+                crate::i18n::t("tui-skills-header-server"),
+                crate::i18n::t("tui-skills-header-status"),
+                crate::i18n::t("tui-skills-header-tools")
+            ),
             theme::table_header(),
         )])),
         chunks[0],
@@ -513,12 +527,12 @@ fn draw_mcp(f: &mut Frame, area: Rect, state: &mut SkillsState) {
 
     if state.loading {
         f.render_widget(
-            widgets::spinner(state.tick, "Loading MCP servers\u{2026}"),
+            widgets::spinner(state.tick, &crate::i18n::t("tui-skills-loading-mcp")),
             chunks[1],
         );
     } else if state.mcp_servers.is_empty() {
         f.render_widget(
-            widgets::empty_state("No MCP servers configured. Add servers in config.toml."),
+            widgets::empty_state(&crate::i18n::t("tui-skills-empty-mcp")),
             chunks[1],
         );
     } else {
@@ -528,14 +542,18 @@ fn draw_mcp(f: &mut Frame, area: Rect, state: &mut SkillsState) {
             .map(|s| {
                 let (indicator, label, style) = if s.connected {
                     (
-                        "\u{25cf}",
-                        "Connected",
+                        "●",
+                        crate::i18n::t("tui-skills-mcp-status-connected"),
                         Style::default()
                             .fg(theme::GREEN)
                             .add_modifier(Modifier::BOLD),
                     )
                 } else {
-                    ("\u{25cb}", "Disconnected", Style::default().fg(theme::RED))
+                    (
+                        "○",
+                        crate::i18n::t("tui-skills-mcp-status-disconnected"),
+                        Style::default().fg(theme::RED),
+                    )
                 };
                 ListItem::new(Line::from(vec![
                     Span::styled(format!("  {indicator} "), style),
@@ -546,7 +564,13 @@ fn draw_mcp(f: &mut Frame, area: Rect, state: &mut SkillsState) {
                             .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(format!(" {:<16}", label), style),
-                    Span::styled(format!("{} tools", s.tool_count), theme::dim_style()),
+                    Span::styled(
+                        crate::i18n::t_args(
+                            "tui-skills-mcp-tools-count",
+                            &[("count", &s.tool_count.to_string())],
+                        ),
+                        theme::dim_style(),
+                    ),
                 ]))
             })
             .collect();
@@ -556,7 +580,7 @@ fn draw_mcp(f: &mut Frame, area: Rect, state: &mut SkillsState) {
     }
 
     f.render_widget(
-        widgets::hint_bar("  [\u{2191}\u{2193}] Navigate  [r] Refresh"),
+        widgets::hint_bar(&crate::i18n::t("tui-skills-hints-mcp")),
         chunks[2],
     );
 }

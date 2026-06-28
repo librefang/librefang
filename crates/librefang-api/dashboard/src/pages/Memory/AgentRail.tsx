@@ -69,7 +69,7 @@ export function AgentRail({
           <button
             onClick={() => setFilter("")}
             className="absolute right-2 top-1/2 -translate-y-1/2 text-text-dim hover:text-text-main"
-            aria-label={t("common.clear_search", { defaultValue: "Clear" })}
+          aria-label={t("common.clear_search", { defaultValue: "Clear search" })}
           >
             <X className="w-3 h-3" />
           </button>

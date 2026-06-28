@@ -10,7 +10,7 @@ import {
 import type { LucideIcon } from 'lucide-react'
 import { Github } from './components/BrandIcons'
 import { useQuery } from '@tanstack/react-query'
-import { translations } from './i18n'
+import { getTranslation } from './i18n'
 import type { Translation } from './i18n'
 import { useRegistry, getLocalizedDesc } from './useRegistry'
 import { useAppStore } from './store'
@@ -40,6 +40,7 @@ function getCurrentLang(): string {
   if (path.startsWith('/ko')) return 'ko'
   if (path.startsWith('/es')) return 'es'
   if (path.startsWith('/pl')) return 'pl'
+  if (path.startsWith('/uk')) return 'uk'
   return 'en'
 }
 
@@ -734,6 +735,7 @@ function categorizeAssets(assets: ReleaseAsset[]): DownloadItem[] {
 
 function Downloads(_props: SectionProps) {
   const lang = useAppStore((s) => s.lang)
+  const common = getTranslation(lang).common!
   const { data: release, isLoading } = useQuery({
     queryKey: ['latestRelease'],
     queryFn: async () => {
@@ -782,7 +784,7 @@ function Downloads(_props: SectionProps) {
 
         {/* Desktop & CLI */}
         {isLoading ? (
-          <div className="text-gray-400 dark:text-gray-600 text-center py-12">Loading releases...</div>
+          <div className="text-gray-400 dark:text-gray-600 text-center py-12">{common.loadingReleases}</div>
         ) : (
           <div className="grid md:grid-cols-3 gap-6 mb-6">
             {categories.map((cat) => (
@@ -859,7 +861,7 @@ function Downloads(_props: SectionProps) {
                     <div className="text-xs text-gray-500 mb-1">{pkg.label}</div>
                     <code className="text-[11px] text-gray-700 dark:text-gray-300 font-mono">{pkg.cmd}</code>
                     <Copy className="absolute top-2 right-2 w-3 h-3 text-gray-400 dark:text-gray-600 opacity-0 group-hover:opacity-100 transition-opacity" />
-                    <span className="copy-tip absolute top-1 right-1 text-[9px] text-cyan-600 dark:text-cyan-400 opacity-0 transition-opacity">Copied!</span>
+                    <span className="copy-tip absolute top-1 right-1 text-[9px] text-cyan-600 dark:text-cyan-400 opacity-0 transition-opacity">{common.copied}</span>
                   </button>
                 ))}
               </div>
@@ -878,6 +880,7 @@ function Downloads(_props: SectionProps) {
 
 // ─── Install ───
 function Install({ t }: SectionProps) {
+  const common = t.common!
   const { data: registry } = useRegistry()
   const substitute = (s: string) => s
     .replace('{handsCount}', String(registry?.handsCount ?? 15))
@@ -920,7 +923,7 @@ function Install({ t }: SectionProps) {
                 <div className="w-2.5 h-2.5 rounded-full bg-black/10 dark:bg-white/10" />
               </div>
               <span className="text-[10px] font-mono text-gray-600 uppercase tracking-widest">{t.install.terminal}</span>
-              <button onClick={() => { copy(); trackEvent('click', 'install_copy') }} className="text-gray-500 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors p-1" aria-label="Copy">
+              <button onClick={() => { copy(); trackEvent('click', 'install_copy') }} className="text-gray-500 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors p-1" aria-label={common.copy}>
                 {copied ? <Check className="w-3.5 h-3.5 text-cyan-600 dark:text-cyan-400" /> : <Copy className="w-3.5 h-3.5" />}
               </button>
             </div>
@@ -1076,6 +1079,7 @@ interface GitHubStatsData {
 function GitHubStats({ t }: SectionProps) {
   const gs = t.githubStats
   if (!gs) return null
+  const common = t.common!
 
   /* eslint-disable react-hooks/rules-of-hooks */
   const [data, setData] = useState<GitHubStatsData | null>(null)
@@ -1142,7 +1146,7 @@ function GitHubStats({ t }: SectionProps) {
             <div className="bg-surface-100 border border-black/10 dark:border-white/5 p-5">
               <div className="flex items-center justify-between mb-4">
                 <span className="text-sm font-bold text-slate-900 dark:text-white">{gs.starHistory}</span>
-                <a href="https://star-history.com/#librefang/librefang" target="_blank" rel="noopener noreferrer" className="text-xs text-gray-400 dark:text-gray-600 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors">View Full</a>
+                <a href="https://star-history.com/#librefang/librefang" target="_blank" rel="noopener noreferrer" className="text-xs text-gray-400 dark:text-gray-600 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors">{common.viewFull}</a>
               </div>
               <div className="h-32 flex items-end gap-0.5">
                 {starHistory.length >= 3 ? (
@@ -1160,8 +1164,8 @@ function GitHubStats({ t }: SectionProps) {
               </div>
             </div>
             <a href="https://github.com/librefang/librefang/graphs/contributors" target="_blank" rel="noopener noreferrer" className="block bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/20 p-5 transition-all">
-              <div className="text-xs font-mono text-gray-500 uppercase tracking-widest mb-3">Contributors</div>
-              <img src="https://contrib.rocks/image?repo=librefang/librefang&anon=0" alt="Contributors" className="w-full h-auto rounded" loading="lazy" />
+              <div className="text-xs font-mono text-gray-500 uppercase tracking-widest mb-3">{common.contributors}</div>
+              <img src="https://contrib.rocks/image?repo=librefang/librefang&anon=0" alt={common.contributors} className="w-full h-auto rounded" loading="lazy" />
             </a>
           </div>
         </FadeIn>
@@ -1240,13 +1244,14 @@ function Docs({ t }: SectionProps) {
 
 // ─── Footer ───
 function Footer({ t }: SectionProps) {
+  const common = t.common!
   return (
     <footer className="border-t border-black/10 dark:border-white/5 py-12 px-6">
       <div className="max-w-6xl mx-auto flex flex-col md:flex-row items-center justify-between gap-6">
         <div className="flex items-center gap-2.5">
           <img src="/logo.png" alt="LibreFang" width="24" height="24" decoding="async" loading="lazy" className="w-6 h-6 rounded" />
           <span className="text-sm font-semibold text-gray-600 dark:text-gray-400">LibreFang</span>
-          <span className="text-xs text-gray-400 dark:text-gray-600 font-mono">Agent OS</span>
+          <span className="text-xs text-gray-400 dark:text-gray-600 font-mono">{common.agentOs}</span>
         </div>
         <div className="flex flex-wrap items-center justify-center gap-x-6 gap-y-2 text-xs text-gray-500 dark:text-gray-600 font-medium">
           <a href="https://docs.librefang.ai" target="_blank" rel="noopener noreferrer" className="hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors">{t.footer.docs}</a>
@@ -1270,6 +1275,8 @@ function trackEvent(action: string, label: string) {
 
 // ─── Back to top ───
 function BackToTop() {
+  const lang = useAppStore((s) => s.lang)
+  const common = getTranslation(lang).common!
   const [show, setShow] = useState(false)
   useEffect(() => {
     const onScroll = () => setShow(window.scrollY > window.innerHeight)
@@ -1281,7 +1288,7 @@ function BackToTop() {
     <button
       onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
       className="fixed bottom-6 right-6 z-40 p-3 bg-surface-200 border border-black/10 dark:border-white/10 hover:border-cyan-500/30 hover:bg-cyan-500/10 text-gray-600 dark:text-gray-400 hover:text-cyan-600 dark:hover:text-cyan-400 transition-all rounded"
-      aria-label="Back to top"
+      aria-label={common.backToTop}
     >
       <ArrowRight className="w-4 h-4 -rotate-90" />
     </button>
@@ -1292,7 +1299,7 @@ function BackToTop() {
 const REGISTRY_ROUTES: RegistryCategory[] = [
   'skills', 'mcp', 'plugins', 'hands', 'agents', 'providers', 'workflows', 'channels',
 ]
-const LOCALES = ['zh-TW', 'zh', 'ja', 'ko', 'de', 'es', 'pl']
+const LOCALES = ['zh-TW', 'zh', 'ja', 'ko', 'de', 'es', 'pl', 'uk']
 
 type RegistryMatch =
   | { kind: 'list'; category: RegistryCategory }
@@ -1397,7 +1404,7 @@ export default function App() {
     }
   }, [lang, registryRoute])
 
-  const t = translations[lang] || translations['en']!
+  const t = getTranslation(lang)
   const { data: registry } = useRegistry()
 
   // JSON-LD structured data — lets Google show rich results. We rewrite a
@@ -1458,11 +1465,11 @@ export default function App() {
   // Update meta tags on language change
   useEffect(() => {
     if (isDeployPage) {
-      document.title = 'Deploy LibreFang'
+      document.title = t.deploy!.title
       return
     }
     if (isChangelogPage) {
-      document.title = 'Changelog | LibreFang'
+      document.title = `${t.changelog!.title} | LibreFang`
       return
     }
     if (registryRoute) {
@@ -1557,16 +1564,16 @@ export default function App() {
       <main className="min-h-screen flex flex-col items-center justify-center px-6 text-center">
         <div className="font-mono text-[10rem] leading-none text-cyan-500/30 select-none">404</div>
         <h1 className="text-2xl md:text-3xl font-black tracking-tight mb-2 text-slate-900 dark:text-white">
-          {t.notFound?.title || 'Page not found'}
+          {t.notFound!.title}
         </h1>
         <p className="text-gray-500 mb-6 max-w-sm">
-          {t.notFound?.desc || "We couldn't find what you were looking for."}
+          {t.notFound!.desc}
         </p>
         <a
           href={lang === 'en' ? '/' : `/${lang}/`}
           className="inline-flex items-center gap-2 px-5 py-2.5 text-sm font-bold text-surface bg-cyan-500 hover:bg-cyan-400 rounded transition-all"
         >
-          {t.notFound?.home || 'Back to home'}
+          {t.notFound!.home}
         </a>
       </main>
     )
@@ -1575,7 +1582,7 @@ export default function App() {
   return (
     <main className="min-h-screen">
       <a href="#architecture" className="sr-only focus:not-sr-only focus:absolute focus:top-4 focus:left-4 focus:z-[60] focus:px-4 focus:py-2 focus:bg-cyan-500 focus:text-surface focus:font-bold focus:rounded">
-        Skip to content
+        {t.common!.skipToContent}
       </a>
       <SiteHeader onOpenSearch={() => setSearchOpen(true)} onTrackEvent={trackEvent} />
       {searchOpen && (

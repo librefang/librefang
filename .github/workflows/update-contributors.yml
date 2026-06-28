@@ -19,7 +19,7 @@ jobs:
     if: github.repository == 'librefang/librefang'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - name: Generate contributors and star history SVGs
@@ -41,13 +41,24 @@ jobs:
         id: cpr
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8
         with:
+          # Create the PR with a PAT, not the default GITHUB_TOKEN. Branch
+          # pushes made by GITHUB_TOKEN do not trigger `on: pull_request`
+          # workflows (GitHub's recursion guard), so CI — and the required
+          # "CI Gate" status check — would never run on this PR, leaving it
+          # permanently unmergeable.
+          token: ${{ secrets.WEBSITE_REPO_TOKEN }}
           branch: chore/update-contributors-star-history
           commit-message: "docs: update contributors and star history"
           title: "docs: update contributors and star history"
           delete-branch: true
 
-      - name: Auto-merge PR
+      - name: Enable auto-merge
         if: steps.diff.outputs.changed == 'true' && steps.cpr.outputs.pull-request-number
         env:
           GH_TOKEN: ${{ secrets.WEBSITE_REPO_TOKEN }}
-        run: gh pr merge ${{ steps.cpr.outputs.pull-request-number }} --squash --delete-branch --admin
+        # The `main` ruleset requires the "CI Gate" check and has an empty
+        # bypass_actors list, so `--admin` cannot force the merge — it fails
+        # with "Required status check 'CI Gate' is expected" while CI is still
+        # pending. Enable auto-merge instead; GitHub squash-merges the PR on
+        # its own once CI Gate passes (0 approvals are required).
+        run: gh pr merge ${{ steps.cpr.outputs.pull-request-number }} --squash --delete-branch --auto

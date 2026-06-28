@@ -1726,6 +1726,10 @@ class WorkflowsResource {
     return this._c._request("POST", `/api/workflows/runs/${run_id}/pause`, data, undefined);
   }
 
+  async rerunWorkflowRun(run_id) {
+    return this._c._request("POST", `/api/workflows/runs/${run_id}/rerun`);
+  }
+
   async resumeWorkflowRun(run_id, data) {
     return this._c._request("POST", `/api/workflows/runs/${run_id}/resume`, data, undefined);
   }

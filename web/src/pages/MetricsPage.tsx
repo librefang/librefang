@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { Loader2, BarChart3 } from 'lucide-react'
 import { useAppStore } from '../store'
-import { translations } from '../i18n'
+import { getTranslation } from '../i18n'
 import SiteHeader from '../components/SiteHeader'
 import Breadcrumbs from '../components/Breadcrumbs'
 
@@ -34,9 +34,8 @@ interface MetricsPageProps {
 
 export default function MetricsPage({ onOpenSearch }: MetricsPageProps) {
   const lang = useAppStore(s => s.lang)
-  // `translations[lang]` kept for future copy; metrics page is currently
-  // English-first (content is numeric / CLI-style).
-  void translations[lang]
+  const t = getTranslation(lang)
+  const copy = t.metrics!
   const { data, isLoading, error } = useQuery<Metrics>({
     queryKey: ['registry-metrics'],
     queryFn: fetchMetrics,
@@ -50,18 +49,19 @@ export default function MetricsPage({ onOpenSearch }: MetricsPageProps) {
       <SiteHeader isSubpage onOpenSearch={onOpenSearch} />
 
       <section className="max-w-5xl mx-auto px-6 py-10">
-        <Breadcrumbs crumbs={[{ label: 'Metrics' }]} className="mb-6" />
+        <Breadcrumbs crumbs={[{ label: copy.breadcrumb }]} className="mb-6" />
         <div className="mb-8">
           <div className="text-xs font-mono text-cyan-600 dark:text-cyan-500 uppercase tracking-widest mb-3 flex items-center gap-2">
             <BarChart3 className="w-3.5 h-3.5" />
-            Registry Metrics
+            {copy.label}
           </div>
           <h1 className="text-3xl md:text-5xl font-black text-slate-900 dark:text-white tracking-tight mb-2">
-            Click telemetry
+            {copy.title}
           </h1>
           <p className="text-gray-600 dark:text-gray-400 text-base">
-            Aggregate counts of detail-page views across the registry, recorded via
-            the <code className="text-cyan-600 dark:text-cyan-400">/api/registry/click</code> worker endpoint.
+            {copy.descPrefix}
+            <code className="text-cyan-600 dark:text-cyan-400">{copy.endpoint}</code>
+            {copy.descSuffix}
           </p>
         </div>
 
@@ -73,7 +73,7 @@ export default function MetricsPage({ onOpenSearch }: MetricsPageProps) {
 
         {error && !isLoading && (
           <div className="text-sm text-red-400">
-            Could not load metrics: {(error as Error).message}
+            {copy.loadError}: {(error as Error).message}
           </div>
         )}
 
@@ -82,30 +82,30 @@ export default function MetricsPage({ onOpenSearch }: MetricsPageProps) {
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-10">
               <div className="bg-surface-100 border border-black/10 dark:border-white/5 p-5">
                 <div className="text-3xl font-black text-slate-900 dark:text-white font-mono">{data.totalClicks}</div>
-                <div className="text-xs text-gray-500 uppercase tracking-wider mt-1">Total clicks</div>
+                <div className="text-xs text-gray-500 uppercase tracking-wider mt-1">{copy.totalClicks}</div>
               </div>
               <div className="bg-surface-100 border border-black/10 dark:border-white/5 p-5">
                 <div className="text-3xl font-black text-slate-900 dark:text-white font-mono">
                   {Object.values(data.perCategory).reduce((s, c) => s + c.items, 0)}
                 </div>
-                <div className="text-xs text-gray-500 uppercase tracking-wider mt-1">Unique items</div>
+                <div className="text-xs text-gray-500 uppercase tracking-wider mt-1">{copy.uniqueItems}</div>
               </div>
               <div className="bg-surface-100 border border-black/10 dark:border-white/5 p-5">
                 <div className="text-3xl font-black text-slate-900 dark:text-white font-mono">
                   {Object.keys(data.perCategory).filter(k => data.perCategory[k]!.total > 0).length}
                 </div>
-                <div className="text-xs text-gray-500 uppercase tracking-wider mt-1">Active categories</div>
+                <div className="text-xs text-gray-500 uppercase tracking-wider mt-1">{copy.activeCategories}</div>
               </div>
               <div className="bg-surface-100 border border-black/10 dark:border-white/5 p-5">
                 <div className="text-sm font-mono text-slate-900 dark:text-white">
                   {new Date(data.generatedAt).toLocaleString()}
                 </div>
-                <div className="text-xs text-gray-500 uppercase tracking-wider mt-1">Generated</div>
+                <div className="text-xs text-gray-500 uppercase tracking-wider mt-1">{copy.generated}</div>
               </div>
             </div>
 
             <div className="mb-10">
-              <h2 className="text-xs font-mono text-gray-500 uppercase tracking-widest mb-4">Per category</h2>
+              <h2 className="text-xs font-mono text-gray-500 uppercase tracking-widest mb-4">{copy.perCategory}</h2>
               <div className="border border-black/10 dark:border-white/5 divide-y divide-black/10 dark:divide-white/5">
                 {Object.entries(data.perCategory)
                   .sort(([, a], [, b]) => b.total - a.total)
@@ -119,8 +119,8 @@ export default function MetricsPage({ onOpenSearch }: MetricsPageProps) {
                     const nameClass = 'font-mono text-sm font-semibold text-slate-900 dark:text-white'
                     const statsNode = (
                       <div className="flex items-center gap-4 text-xs font-mono text-gray-500">
-                        <span>{stats.items} items</span>
-                        <span className="text-amber-500">{stats.total} clicks</span>
+                        <span>{stats.items} {copy.items}</span>
+                        <span className="text-amber-500">{stats.total} {copy.clicks}</span>
                       </div>
                     )
                     return routed ? (
@@ -144,7 +144,7 @@ export default function MetricsPage({ onOpenSearch }: MetricsPageProps) {
 
             {data.topOverall.length > 0 && (
               <div>
-                <h2 className="text-xs font-mono text-gray-500 uppercase tracking-widest mb-4">Top items overall</h2>
+                <h2 className="text-xs font-mono text-gray-500 uppercase tracking-widest mb-4">{copy.topItems}</h2>
                 <div className="border border-black/10 dark:border-white/5 divide-y divide-black/10 dark:divide-white/5">
                   {data.topOverall.map(item => (
                     <a

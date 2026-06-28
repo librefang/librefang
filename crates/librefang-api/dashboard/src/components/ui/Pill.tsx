@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { useTranslation } from "react-i18next";
 
 export type PillKind =
   | "running"
@@ -20,16 +21,16 @@ interface PillProps {
   className?: string;
 }
 
-const PALETTE: Record<PillKind, { dot: string; text: string; bg: string; border: string; label: string; pulse: boolean; glow: boolean }> = {
-  running:   { dot: "bg-emerald-400", text: "text-emerald-400", bg: "bg-emerald-400/10", border: "border-emerald-400/20", label: "Running",   pulse: true,  glow: true  },
-  idle:      { dot: "bg-slate-400",   text: "text-slate-400",   bg: "bg-slate-400/10",   border: "border-slate-400/20",   label: "Idle",      pulse: false, glow: false },
-  error:     { dot: "bg-rose-400",    text: "text-rose-400",    bg: "bg-rose-400/10",    border: "border-rose-400/20",    label: "Error",     pulse: false, glow: false },
-  pending:   { dot: "bg-amber-400",   text: "text-amber-400",   bg: "bg-amber-400/10",   border: "border-amber-400/20",   label: "Pending",   pulse: true,  glow: false },
-  scheduled: { dot: "bg-violet-400",  text: "text-violet-400",  bg: "bg-violet-400/10",  border: "border-violet-400/20",  label: "Scheduled", pulse: false, glow: false },
-  paused:    { dot: "bg-slate-400",   text: "text-slate-400",   bg: "bg-slate-400/10",   border: "border-slate-400/20",   label: "Paused",    pulse: false, glow: false },
-  ok:        { dot: "bg-emerald-400", text: "text-emerald-400", bg: "bg-emerald-400/10", border: "border-emerald-400/20", label: "OK",        pulse: false, glow: false },
-  approved:  { dot: "bg-emerald-400", text: "text-emerald-400", bg: "bg-emerald-400/10", border: "border-emerald-400/20", label: "Approved",  pulse: false, glow: false },
-  denied:    { dot: "bg-rose-400",    text: "text-rose-400",    bg: "bg-rose-400/10",    border: "border-rose-400/20",    label: "Denied",    pulse: false, glow: false },
+const PALETTE: Record<PillKind, { dot: string; text: string; bg: string; border: string; labelKey: string; defaultLabel: string; pulse: boolean; glow: boolean }> = {
+  running:   { dot: "bg-emerald-400", text: "text-emerald-400", bg: "bg-emerald-400/10", border: "border-emerald-400/20", labelKey: "common.running", defaultLabel: "Running",   pulse: true,  glow: true  },
+  idle:      { dot: "bg-slate-400",   text: "text-slate-400",   bg: "bg-slate-400/10",   border: "border-slate-400/20",   labelKey: "common.idle", defaultLabel: "Idle",      pulse: false, glow: false },
+  error:     { dot: "bg-rose-400",    text: "text-rose-400",    bg: "bg-rose-400/10",    border: "border-rose-400/20",    labelKey: "common.error", defaultLabel: "Error",     pulse: false, glow: false },
+  pending:   { dot: "bg-amber-400",   text: "text-amber-400",   bg: "bg-amber-400/10",   border: "border-amber-400/20",   labelKey: "approvals.status.pending", defaultLabel: "Pending",   pulse: true,  glow: false },
+  scheduled: { dot: "bg-violet-400",  text: "text-violet-400",  bg: "bg-violet-400/10",  border: "border-violet-400/20",  labelKey: "tasks.status_scheduled", defaultLabel: "Scheduled", pulse: false, glow: false },
+  paused:    { dot: "bg-slate-400",   text: "text-slate-400",   bg: "bg-slate-400/10",   border: "border-slate-400/20",   labelKey: "hands.paused", defaultLabel: "Paused",    pulse: false, glow: false },
+  ok:        { dot: "bg-emerald-400", text: "text-emerald-400", bg: "bg-emerald-400/10", border: "border-emerald-400/20", labelKey: "common.ok", defaultLabel: "OK",        pulse: false, glow: false },
+  approved:  { dot: "bg-emerald-400", text: "text-emerald-400", bg: "bg-emerald-400/10", border: "border-emerald-400/20", labelKey: "approvals.status.approved", defaultLabel: "Approved",  pulse: false, glow: false },
+  denied:    { dot: "bg-rose-400",    text: "text-rose-400",    bg: "bg-rose-400/10",    border: "border-rose-400/20",    labelKey: "approvals.status.rejected", defaultLabel: "Denied",    pulse: false, glow: false },
 };
 
 const GLOW_SHADOW: Partial<Record<PillKind, string>> = {
@@ -37,6 +38,7 @@ const GLOW_SHADOW: Partial<Record<PillKind, string>> = {
 };
 
 export function Pill({ kind = "running", children, dot = true, size = "md", mono = false, className = "" }: PillProps) {
+  const { t: translate } = useTranslation();
   const t = PALETTE[kind];
   const sizing = size === "sm" ? "h-[18px] px-1.5 text-[10px]" : "h-[22px] px-2 text-[11px]";
   return (
@@ -59,7 +61,7 @@ export function Pill({ kind = "running", children, dot = true, size = "md", mono
           `.trim().replace(/\s+/g, " ")}
         />
       ) : null}
-      {children ?? t.label}
+      {children ?? translate(t.labelKey, { defaultValue: t.defaultLabel })}
     </span>
   );
 }

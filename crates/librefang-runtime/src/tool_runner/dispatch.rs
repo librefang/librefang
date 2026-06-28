@@ -404,6 +404,15 @@ pub async fn execute_tool_raw(
             let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
             tool_file_list(input, *workspace_root, &extra_refs).await
         }
+        "code_search" => {
+            // Same read access as file_list: named workspaces and bridge download dir.
+            let mut extra = named_ws_prefixes(*kernel, *caller_agent_id);
+            if let Some(dl) = kernel.and_then(|k| k.channel_file_download_dir()) {
+                extra.push(dl);
+            }
+            let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
+            tool_code_search(input, *workspace_root, &extra_refs).await
+        }
         "apply_patch" => {
             // SECURITY #3662: Enforce named workspace read-only restrictions
             // before applying the patch.  Mirrors the upfront check in the

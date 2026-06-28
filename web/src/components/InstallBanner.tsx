@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Download, X } from 'lucide-react'
-import { translations } from '../i18n'
+import { getTranslation } from '../i18n'
 import { useAppStore } from '../store'
 
 // BeforeInstallPromptEvent isn't in lib.dom.d.ts yet, define the shape we
@@ -15,7 +15,7 @@ const DISMISS_KEY = 'librefang.install.dismissed'
 
 export default function InstallBanner() {
   const lang = useAppStore(s => s.lang)
-  const t = translations[lang] || translations['en']!
+  const t = getTranslation(lang)
   const [event, setEvent] = useState<BIPEvent | null>(null)
   const [dismissed, setDismissed] = useState(false)
 

@@ -13,6 +13,7 @@ import {
 } from "../lib/queries/workflows";
 import {
   useRunWorkflow,
+  useRerunWorkflowRun,
   useDryRunWorkflow,
   useDeleteWorkflow,
   useInstantiateTemplate,
@@ -35,6 +36,7 @@ vi.mock("../lib/queries/workflows", () => ({
 
 vi.mock("../lib/mutations/workflows", () => ({
   useRunWorkflow: vi.fn(),
+  useRerunWorkflowRun: vi.fn(),
   useDryRunWorkflow: vi.fn(),
   useDeleteWorkflow: vi.fn(),
   useInstantiateTemplate: vi.fn(),
@@ -65,8 +67,21 @@ vi.mock("react-i18next", async () => {
   return {
     ...actual,
     useTranslation: () => ({
-      t: (key: string, opts?: { defaultValue?: string }) =>
-        opts?.defaultValue ?? key,
+      t: (key: string, opts?: Record<string, unknown>) => {
+        if (
+          key === "workflows.operator.pending_review" &&
+          opts?.count === 1
+        ) {
+          return "1 workflow run awaiting operator review";
+        }
+        let value = typeof opts?.defaultValue === "string" ? opts.defaultValue : key;
+        for (const [name, replacement] of Object.entries(opts ?? {})) {
+          if (name !== "defaultValue") {
+            value = value.split(`{{${name}}}`).join(String(replacement));
+          }
+        }
+        return value;
+      },
       i18n: { language: "en" },
     }),
   };
@@ -82,6 +97,7 @@ const usePendingOperatorRunsMock =
 const useWorkflowOperatorPauseMock =
   useWorkflowOperatorPause as unknown as ReturnType<typeof vi.fn>;
 const useRunWorkflowMock = useRunWorkflow as unknown as ReturnType<typeof vi.fn>;
+const useRerunWorkflowRunMock = useRerunWorkflowRun as unknown as ReturnType<typeof vi.fn>;
 const useDryRunWorkflowMock = useDryRunWorkflow as unknown as ReturnType<typeof vi.fn>;
 const useDeleteWorkflowMock = useDeleteWorkflow as unknown as ReturnType<typeof vi.fn>;
 const useInstantiateTemplateMock = useInstantiateTemplate as unknown as ReturnType<typeof vi.fn>;
@@ -131,22 +147,25 @@ function makeMutation(overrides: Partial<MutationShape> = {}): MutationShape {
 
 function setMutationDefaults(): {
   run: MutationShape;
+  rerun: MutationShape;
   dryRun: MutationShape;
   del: MutationShape;
   inst: MutationShape;
   sched: MutationShape;
 } {
   const run = makeMutation();
+  const rerun = makeMutation();
   const dryRun = makeMutation();
   const del = makeMutation();
   const inst = makeMutation();
   const sched = makeMutation();
   useRunWorkflowMock.mockReturnValue(run);
+  useRerunWorkflowRunMock.mockReturnValue(rerun);
   useDryRunWorkflowMock.mockReturnValue(dryRun);
   useDeleteWorkflowMock.mockReturnValue(del);
   useInstantiateTemplateMock.mockReturnValue(inst);
   useCreateScheduleMock.mockReturnValue(sched);
-  return { run, dryRun, del, inst, sched };
+  return { run, rerun, dryRun, del, inst, sched };
 }
 
 function renderPage(): void {
@@ -248,6 +267,39 @@ describe("WorkflowsPage", () => {
     expect(mutations.run.mutateAsync).toHaveBeenCalledWith({
       workflowId: "wf-1",
       input: "hello",
+    });
+  });
+
+  it("surfaces run parameters + error inline and re-runs with the same params (#6292)", async () => {
+    useWorkflowsMock.mockReturnValue(makeQuery([sampleWorkflow]));
+    const mutations = setMutationDefaults();
+    useWorkflowRunsMock.mockReturnValue(
+      makeQuery([
+        {
+          id: "run-1",
+          workflow_name: "alpha-flow",
+          state: "failed",
+          steps_completed: 1,
+          input: '{"sector":"fintech"}',
+          error: "step 'analyze' failed: provider 500",
+          started_at: "2026-01-02T00:00:00Z",
+          completed_at: "2026-01-02T00:01:00Z",
+        },
+      ]),
+    );
+    renderPage();
+
+    // The run-history row shows WHAT params were used and WHY it failed,
+    // without opening the detail panel.
+    expect(screen.getByText(/sector: fintech/)).toBeInTheDocument();
+    expect(screen.getByText("step 'analyze' failed: provider 500")).toBeInTheDocument();
+
+    // The per-row re-run control repeats that run with its stored params.
+    fireEvent.click(screen.getByLabelText("Re-run with same parameters"));
+    expect(mutations.rerun.mutateAsync).toHaveBeenCalledTimes(1);
+    expect(mutations.rerun.mutateAsync).toHaveBeenCalledWith({
+      runId: "run-1",
+      workflowId: "wf-1",
     });
   });
 
@@ -577,12 +629,12 @@ describe("WorkflowsPage", () => {
     // actually mounted. Before the round-2 fix this assertion failed —
     // the row was outside `slice(0, 10)` so the inline mount path was
     // unreachable from the banner click.
-    expect(screen.getByText(/Operator review required/i)).toBeInTheDocument();
+    expect(screen.getByText("workflows.operator.review_required")).toBeInTheDocument();
     // The "Approve" action button is unique to the action bar (the
     // banner row only renders an "N actions" count badge, not the
     // buttons themselves), so finding it proves the bar actually
     // rendered its action list, not just the wrapper.
-    expect(screen.getByRole("button", { name: /Approve/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "approvals.approve" })).toBeInTheDocument();
     // The artifact text appears in BOTH the banner row preview and the
     // bar's artifact panel — assert both render so the inline mount
     // path is exercised end-to-end.
@@ -643,7 +695,7 @@ describe("WorkflowsPage", () => {
     fireEvent.click(screen.getByText("paused-run-row"));
     // The bar's hallmark copy renders only when the mount guard passed
     // AND the inspect query produced a pause.
-    expect(screen.getByText(/Operator review required/i)).toBeInTheDocument();
+    expect(screen.getByText("workflows.operator.review_required")).toBeInTheDocument();
     expect(screen.getByText("the draft")).toBeInTheDocument();
   });
 });

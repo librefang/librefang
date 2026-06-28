@@ -4,7 +4,7 @@ import { ArrowLeft, ArrowRight, Loader2, AlertCircle, ExternalLink, Sparkles, Co
 import { useState } from 'react'
 import { useRegistry, getLocalizedDesc, getLocalizedName, getCategoryItems } from '../useRegistry'
 import type { RegistryCategory, Detail } from '../useRegistry'
-import { translations } from '../i18n'
+import { getTranslation } from '../i18n'
 import { useAppStore } from '../store'
 import { cn } from '../lib/utils'
 import { highlightToml } from '../lib/toml-highlight'
@@ -117,7 +117,7 @@ function CopyButton({ text, label }: { text: string; label: string }) {
 
 export default function RegistryDetailPage({ category, id, onOpenSearch }: RegistryDetailPageProps) {
   const lang = useAppStore(s => s.lang)
-  const t = translations[lang] || translations['en']!
+  const t = getTranslation(lang)
   const { data: registry } = useRegistry()
 
   const { items } = getCategoryItems(registry, category)
