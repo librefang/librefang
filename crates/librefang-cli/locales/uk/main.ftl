@@ -975,10 +975,10 @@ launcher-hint-re-run =   Запустіть 'Налаштування' для в
 launcher-hint-get-started =   Оберіть 'Налаштувати та запустити' для конфігурації
 launcher-migration-question = Переходите з { $source }? 
 launcher-migration-hint = 'Налаштувати та запустити' включає автоматичну міграцію.
-launcher-menu-hints = ↑↓/jk навігація  1-9 швидкий вибір  enter підтвердити  q вихід
+launcher-menu-hints = ↑↓/lh навігація  1-9 швидкий вибір  enter підтвердити  q вихід
 launcher-help-title = Усі команди
 launcher-help-subtitle =   — q/Esc для повернення
-launcher-help-hints = ↑↓/jk прокрутка  PgUp/PgDn  g/G вгору/вниз  q назад
+launcher-help-hints = ↑↓/lh прокрутка  PgUp/PgDn  g/G вгору/вниз  q назад
 
 # CLI shared UI strings
 common-warning-config-default = попередження: { $error }; використовуються стандартні значення конфігурації для цієї команди
@@ -1823,7 +1823,7 @@ tui-init-provider-no-key-needed = ключ API не потрібен
 tui-init-provider-local-no-key = локально, ключ не потрібен
 tui-init-provider-requires-with-hint = потрібен { $env_var } ({ $hint })
 tui-init-provider-requires = потрібен { $env_var }
-tui-init-provider-hints =   [↑↓/jk] Навігація  [Enter] Вибрати  [Esc] Скасувати
+tui-init-provider-hints =   [↑↓/lh] Навігація  [Enter] Вибрати  [Esc] Скасувати
 tui-init-hint-freetier = безкоштовний тариф
 tui-init-hint-cheap = дешево
 tui-init-hint-fast = швидка генерація
@@ -1840,7 +1840,7 @@ tui-init-apikey-save-failed = Підтверджено, але не вдалос
 tui-init-apikey-save-failed-hints =     [Enter] повторити збереження  ·  [Esc] редагувати ключ  (ключ підтверджено — на диску нічого немає)
 tui-init-apikey-hints =   [Enter] Підтвердити  [Esc] Назад
 tui-init-model-prompt =   Оберіть модель за замовчуванням для { $provider }:
-tui-init-model-hints =   [↑↓/jk] Навігація  [Enter] Вибрати  [Esc] Назад    * = за замовчуванням
+tui-init-model-hints =   [↑↓/lh] Навігація  [Enter] Вибрати  [Esc] Назад    * = за замовчуванням
 tui-init-routing-title =   Розумна маршрутизація моделей
 tui-init-routing-desc1 =   Автоматично обирає потрібну модель під складність завдання.
 tui-init-routing-desc2 =   Прості завдання використовують дешеві/швидкі моделі, складні —
@@ -1850,7 +1850,7 @@ tui-init-routing-opt-yes-desc = обрати 3 моделі (швидка / зб
 tui-init-routing-opt-no = Ні
 tui-init-routing-opt-no-desc = використовувати одну модель для всього
 tui-init-routing-hints =   [↑↓] Навігація  [Enter] Вибрати  [Esc] Назад
-tui-init-routing-pick-hints =   [↑↓/jk] Навігація  [Enter] Вибрати  [Esc] Назад
+tui-init-routing-pick-hints =   [↑↓/lh] Навігація  [Enter] Вибрати  [Esc] Назад
 tui-init-routing-tier-fast = Швидка
 tui-init-routing-tier-balanced = Збалансована
 tui-init-routing-tier-frontier = Передова
@@ -1874,7 +1874,7 @@ tui-init-complete-opt-dashboard = Веб-панель
 tui-init-complete-opt-dashboard-desc = відкривається у вашому браузері за замовчуванням
 tui-init-complete-opt-chat = Чат у терміналі
 tui-init-complete-opt-chat-desc = інтерактивний чат прямо тут
-tui-init-complete-hints =   [↑↓/jk] Навігація  [Enter] Запустити  [1/2/3] Швидкий вибір
+tui-init-complete-hints =   [↑↓/lh] Навігація  [Enter] Запустити  [1/2/3] Швидкий вибір
 tui-init-step-label = { $current } з { $total }
 tui-init-complete-err-no-provider = Провайдер не обраний
 tui-init-complete-err-home-dir = Не вдалося визначити домашню директорію
@@ -2104,9 +2104,9 @@ tui-extensions-loading = Завантаження MCP-серверів...
 tui-extensions-empty = Немає встановлених екстеншенів. Перегляньте маркетплейс за допомогою [b].
 tui-extensions-remove-confirm =   Натисніть y для підтвердження видалення, будь-яку іншу клавішу для скасування
 tui-extensions-hints-search =   Введіть запит для пошуку • Esc скасувати • Enter підтвердити
-tui-extensions-hints-browse =   j/k навігація • Enter встановити • / пошук • r оновити
-tui-extensions-hints-installed =   j/k навігація • d видалити • r оновити
-tui-extensions-hints-health =   j/k навігація • r/Enter перепідключити • автопідключення активне
+tui-extensions-hints-browse =   lh навігація • Enter встановити • / пошук • r оновити
+tui-extensions-hints-installed =   lh навігація • d видалити • r оновити
+tui-extensions-hints-health =   lh навігація • r/Enter перепідключити • автопідключення активне
 
 # --- Skills screen ---
 tui-skills-title-screen = Скіли

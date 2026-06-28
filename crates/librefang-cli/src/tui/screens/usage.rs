@@ -145,12 +145,12 @@ impl UsageState {
             UsageSub::ByModel => {
                 let total = self.by_model.len();
                 match key.code {
-                    KeyCode::Up | KeyCode::Char('k') if total > 0 => {
+                    KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('l') if total > 0 => {
                         let i = self.model_list.selected().unwrap_or(0);
                         let next = if i == 0 { total - 1 } else { i - 1 };
                         self.model_list.select(Some(next));
                     }
-                    KeyCode::Down | KeyCode::Char('j') if total > 0 => {
+                    KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('h') if total > 0 => {
                         let i = self.model_list.selected().unwrap_or(0);
                         let next = (i + 1) % total;
                         self.model_list.select(Some(next));
@@ -162,12 +162,12 @@ impl UsageState {
             UsageSub::ByAgent => {
                 let total = self.by_agent.len();
                 match key.code {
-                    KeyCode::Up | KeyCode::Char('k') if total > 0 => {
+                    KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('l') if total > 0 => {
                         let i = self.agent_list.selected().unwrap_or(0);
                         let next = if i == 0 { total - 1 } else { i - 1 };
                         self.agent_list.select(Some(next));
                     }
-                    KeyCode::Down | KeyCode::Char('j') if total > 0 => {
+                    KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('h') if total > 0 => {
                         let i = self.agent_list.selected().unwrap_or(0);
                         let next = (i + 1) % total;
                         self.agent_list.select(Some(next));

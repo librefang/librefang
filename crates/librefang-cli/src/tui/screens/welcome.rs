@@ -175,7 +175,7 @@ impl WelcomeState {
 
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => return Some(WelcomeAction::Exit),
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('l') => {
                 let i = self.menu.selected().unwrap_or(0);
                 let next = if i == 0 {
                     self.menu_items.len() - 1
@@ -184,7 +184,7 @@ impl WelcomeState {
                 };
                 self.menu.select(Some(next));
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('h') => {
                 let i = self.menu.selected().unwrap_or(0);
                 let next = (i + 1) % self.menu_items.len();
                 self.menu.select(Some(next));

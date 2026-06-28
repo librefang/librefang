@@ -115,12 +115,12 @@ impl WorkflowState {
     fn handle_list(&mut self, key: KeyEvent) -> WorkflowAction {
         let total = self.workflows.len() + 1; // +1 for "Create new"
         match key.code {
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('l') => {
                 let i = self.list_state.selected().unwrap_or(0);
                 let next = if i == 0 { total - 1 } else { i - 1 };
                 self.list_state.select(Some(next));
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('h') => {
                 let i = self.list_state.selected().unwrap_or(0);
                 let next = (i + 1) % total;
                 self.list_state.select(Some(next));
@@ -164,7 +164,7 @@ impl WorkflowState {
             KeyCode::Esc => {
                 self.sub = WorkflowSubScreen::List;
             }
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('l') => {
                 let i = self.runs_list_state.selected().unwrap_or(0);
                 let next = if i == 0 {
                     self.runs.len().saturating_sub(1)
@@ -173,7 +173,7 @@ impl WorkflowState {
                 };
                 self.runs_list_state.select(Some(next));
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('h') => {
                 let i = self.runs_list_state.selected().unwrap_or(0);
                 let total = self.runs.len().max(1);
                 let next = (i + 1) % total;

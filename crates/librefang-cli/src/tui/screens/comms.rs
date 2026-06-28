@@ -156,14 +156,14 @@ impl CommsState {
                 self.task_field = 0;
             }
             KeyCode::Char('r') => return CommsAction::Refresh,
-            KeyCode::Up | KeyCode::Char('k')
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('l')
                 if self.focus == CommsFocus::EventList && !self.events.is_empty() =>
             {
                 let i = self.event_list_state.selected().unwrap_or(0);
                 let next = if i == 0 { self.events.len() - 1 } else { i - 1 };
                 self.event_list_state.select(Some(next));
             }
-            KeyCode::Down | KeyCode::Char('j')
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('h')
                 if self.focus == CommsFocus::EventList && !self.events.is_empty() =>
             {
                 let i = self.event_list_state.selected().unwrap_or(0);

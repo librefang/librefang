@@ -234,8 +234,8 @@ fn handle_key(state: &mut State, code: KeyCode, test_tx: &std::sync::mpsc::Sende
     match state.phase {
         Phase::Select => match code {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('s') => return true,
-            KeyCode::Up | KeyCode::Char('k') => state.move_selection(-1),
-            KeyCode::Down | KeyCode::Char('j') => state.move_selection(1),
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('l') => state.move_selection(-1),
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('h') => state.move_selection(1),
             KeyCode::Enter => {
                 crate::open_in_browser(state.provider().register_url);
                 state.phase = Phase::PasteKey;

@@ -103,12 +103,12 @@ impl TriggerState {
     fn handle_list(&mut self, key: KeyEvent) -> TriggerAction {
         let total = self.triggers.len() + 1; // +1 for "Create new"
         match key.code {
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('l') => {
                 let i = self.list_state.selected().unwrap_or(0);
                 let next = if i == 0 { total - 1 } else { i - 1 };
                 self.list_state.select(Some(next));
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('h') => {
                 let i = self.list_state.selected().unwrap_or(0);
                 let next = (i + 1) % total;
                 self.list_state.select(Some(next));
@@ -194,7 +194,7 @@ impl TriggerState {
             KeyCode::Esc => {
                 self.create_step = 0;
             }
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('l') => {
                 let i = self.pattern_type_list.selected().unwrap_or(0);
                 let next = if i == 0 {
                     PATTERN_TYPES.len() - 1
@@ -203,7 +203,7 @@ impl TriggerState {
                 };
                 self.pattern_type_list.select(Some(next));
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('h') => {
                 let i = self.pattern_type_list.selected().unwrap_or(0);
                 let next = (i + 1) % PATTERN_TYPES.len();
                 self.pattern_type_list.select(Some(next));

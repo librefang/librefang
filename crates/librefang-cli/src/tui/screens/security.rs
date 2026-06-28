@@ -174,10 +174,10 @@ impl SecurityState {
             return SecurityAction::Continue;
         }
         match key.code {
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('l') => {
                 self.scroll = self.scroll.saturating_add(1);
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('h') => {
                 self.scroll = self.scroll.saturating_sub(1);
             }
             KeyCode::PageUp => {

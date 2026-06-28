@@ -961,10 +961,10 @@ launcher-hint-re-run =   Run 'Re-run setup' to configure a provider
 launcher-hint-get-started =   Select 'Get started' to configure
 launcher-migration-question = Coming from { $source }? 
 launcher-migration-hint = 'Get started' includes automatic migration.
-launcher-menu-hints = ↑↓/jk navigate  1-9 quick select  enter confirm  q quit
+launcher-menu-hints = ↑↓/lh navigate  1-9 quick select  enter confirm  q quit
 launcher-help-title = All commands
 launcher-help-subtitle =   — q/Esc to go back
-launcher-help-hints = ↑↓/jk scroll  PgUp/PgDn  g/G top/bottom  q back
+launcher-help-hints = ↑↓/lh scroll  PgUp/PgDn  g/G top/bottom  q back
 
 # CLI shared UI strings
 common-warning-config-default = warning: { $error }; using default config values for this command
@@ -1804,7 +1804,7 @@ tui-init-provider-no-key-needed = no API key needed
 tui-init-provider-local-no-key = local, no key needed
 tui-init-provider-requires-with-hint = requires { $env_var } ({ $hint })
 tui-init-provider-requires = requires { $env_var }
-tui-init-provider-hints =   [↑↓/jk] Navigate  [Enter] Select  [Esc] Cancel
+tui-init-provider-hints =   [↑↓/lh] Navigate  [Enter] Select  [Esc] Cancel
 tui-init-hint-freetier = free tier
 tui-init-hint-cheap = cheap
 tui-init-hint-fast = fast inference
@@ -1821,7 +1821,7 @@ tui-init-apikey-save-failed = Verified, but saving to .env failed
 tui-init-apikey-save-failed-hints =     [Enter] retry save  ·  [Esc] edit key  (key already verified — nothing on disk)
 tui-init-apikey-hints =   [Enter] Confirm  [Esc] Back
 tui-init-model-prompt =   Choose default model for { $provider }:
-tui-init-model-hints =   [↑↓/jk] Navigate  [Enter] Select  [Esc] Back    * = default
+tui-init-model-hints =   [↑↓/lh] Navigate  [Enter] Select  [Esc] Back    * = default
 tui-init-routing-title =   Smart Model Routing
 tui-init-routing-desc1 =   Automatically picks the right model per task complexity.
 tui-init-routing-desc2 =   Simple tasks use cheap/fast models, complex tasks use
@@ -1831,7 +1831,7 @@ tui-init-routing-opt-yes-desc = pick 3 models (fast / balanced / frontier)
 tui-init-routing-opt-no = No
 tui-init-routing-opt-no-desc = use one model for everything
 tui-init-routing-hints =   [↑↓] Navigate  [Enter] Select  [Esc] Back
-tui-init-routing-pick-hints =   [↑↓/jk] Navigate  [Enter] Select  [Esc] Back
+tui-init-routing-pick-hints =   [↑↓/lh] Navigate  [Enter] Select  [Esc] Back
 tui-init-routing-tier-fast = Fast
 tui-init-routing-tier-balanced = Balanced
 tui-init-routing-tier-frontier = Frontier
@@ -1855,7 +1855,7 @@ tui-init-complete-opt-dashboard = Web dashboard
 tui-init-complete-opt-dashboard-desc = opens in your default browser
 tui-init-complete-opt-chat = Terminal chat
 tui-init-complete-opt-chat-desc = interactive chat right here
-tui-init-complete-hints =   [↑↓/jk] Navigate  [Enter] Launch  [1/2/3] Quick select
+tui-init-complete-hints =   [↑↓/lh] Navigate  [Enter] Launch  [1/2/3] Quick select
 tui-init-step-label = { $current } of { $total }
 tui-init-complete-err-no-provider = No provider selected
 tui-init-complete-err-home-dir = Could not determine home directory
@@ -2080,9 +2080,9 @@ tui-extensions-loading = Loading MCP servers...
 tui-extensions-empty = No extensions installed. Browse the marketplace with [b].
 tui-extensions-remove-confirm =   Press y to confirm removal, any other key to cancel
 tui-extensions-hints-search =   Type to search • Esc cancel • Enter confirm
-tui-extensions-hints-browse =   j/k navigate • Enter install • / search • r refresh
-tui-extensions-hints-installed =   j/k navigate • d remove • r refresh
-tui-extensions-hints-health =   j/k navigate • r/Enter reconnect • auto-reconnect active
+tui-extensions-hints-browse =   lh navigate • Enter install • / search • r refresh
+tui-extensions-hints-installed =   lh navigate • d remove • r refresh
+tui-extensions-hints-health =   lh navigate • r/Enter reconnect • auto-reconnect active
 
 # --- Skills screen ---
 tui-skills-title-screen = Skills
