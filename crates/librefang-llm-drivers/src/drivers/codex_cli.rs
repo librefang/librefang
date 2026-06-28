@@ -53,12 +53,12 @@ impl CodexCliDriver {
     /// Create a new Codex CLI driver.
     ///
     /// `cli_path` overrides the CLI binary path; defaults to `"codex"` on PATH.
-    /// `skip_permissions` adds `--full-auto` to the spawned command so that the CLI
-    /// runs non-interactively (required for daemon mode).
+    /// `skip_permissions` adds `--sandbox workspace-write` to the spawned command
+    /// so that the CLI runs non-interactively (required for daemon mode).
     pub fn new(cli_path: Option<String>, skip_permissions: bool) -> Self {
         if skip_permissions {
             warn!(
-                "Codex CLI driver: --full-auto enabled. \
+                "Codex CLI driver: workspace-write sandbox enabled. \
                  The CLI will not prompt for tool approvals. \
                  LibreFang's own capability/RBAC system enforces access control."
             );
@@ -124,10 +124,14 @@ impl CodexCliDriver {
 
     /// Build the CLI arguments for a given request.
     pub fn build_args(&self, prompt: &str, model: &str) -> Vec<String> {
-        let mut args = vec!["exec".to_string()];
+        // LibreFang can run as a desktop app or daemon whose current directory
+        // is not a Git repository. Codex otherwise rejects non-interactive
+        // execution before processing the prompt.
+        let mut args = vec!["exec".to_string(), "--skip-git-repo-check".to_string()];
 
         if self.skip_permissions {
-            args.push("--full-auto".to_string());
+            args.push("--sandbox".to_string());
+            args.push("workspace-write".to_string());
         }
 
         let model_flag = Self::model_flag(model);
@@ -438,23 +442,37 @@ mod tests {
     }
 
     #[test]
-    fn test_build_args_with_full_auto() {
+    fn test_build_args_with_workspace_write_sandbox() {
         let driver = CodexCliDriver::new(None, true);
         let args = driver.build_args("test prompt", "codex-cli/o4-mini");
-        assert_eq!(args.first().map(String::as_str), Some("exec"));
-        assert!(args.contains(&"test prompt".to_string()));
-        assert!(args.contains(&"--full-auto".to_string()));
-        assert!(args.contains(&"--model".to_string()));
-        assert!(args.contains(&"o4-mini".to_string()));
+        assert_eq!(
+            args,
+            [
+                "exec",
+                "--skip-git-repo-check",
+                "--sandbox",
+                "workspace-write",
+                "--model",
+                "o4-mini",
+                "test prompt",
+            ]
+        );
     }
 
     #[test]
-    fn test_build_args_without_full_auto() {
+    fn test_build_args_without_workspace_write_sandbox() {
         let driver = CodexCliDriver::new(None, false);
         let args = driver.build_args("test prompt", "codex-cli/o3");
-        assert!(!args.contains(&"--full-auto".to_string()));
-        assert_eq!(args.first().map(String::as_str), Some("exec"));
-        assert!(!args.contains(&"-q".to_string()));
+        assert_eq!(
+            args,
+            [
+                "exec",
+                "--skip-git-repo-check",
+                "--model",
+                "o3",
+                "test prompt",
+            ]
+        );
     }
 
     #[test]
