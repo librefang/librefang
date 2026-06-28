@@ -424,12 +424,12 @@ impl AgentSelectState {
                 self.search_query.clear();
                 return AgentAction::Continue;
             }
-            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('l') => {
+            KeyCode::Up | KeyCode::Char('k') => {
                 let i = self.list.selected().unwrap_or(0);
                 let next = if i == 0 { total - 1 } else { i - 1 };
                 self.list.select(Some(next));
             }
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('h') => {
+            KeyCode::Down | KeyCode::Char('j') => {
                 let i = self.list.selected().unwrap_or(0);
                 let next = (i + 1) % total;
                 self.list.select(Some(next));
@@ -509,12 +509,12 @@ impl AgentSelectState {
             KeyCode::Esc => {
                 self.sub = AgentSubScreen::AgentList;
             }
-            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('l') => {
+            KeyCode::Up | KeyCode::Char('k') => {
                 let i = self.create_method_list.selected().unwrap_or(0);
                 self.create_method_list
                     .select(Some(if i == 0 { 1 } else { 0 }));
             }
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('h') => {
+            KeyCode::Down | KeyCode::Char('j') => {
                 let i = self.create_method_list.selected().unwrap_or(0);
                 self.create_method_list
                     .select(Some(if i == 0 { 1 } else { 0 }));
@@ -552,7 +552,7 @@ impl AgentSelectState {
             KeyCode::Esc => {
                 self.sub = AgentSubScreen::CreateMethod;
             }
-            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('l') => {
+            KeyCode::Up | KeyCode::Char('k') => {
                 let i = self.template_list.selected().unwrap_or(0);
                 let total = self.templates.len();
                 let next = if i == 0 {
@@ -562,7 +562,7 @@ impl AgentSelectState {
                 };
                 self.template_list.select(Some(next));
             }
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('h') => {
+            KeyCode::Down | KeyCode::Char('j') => {
                 let i = self.template_list.selected().unwrap_or(0);
                 let next = (i + 1) % self.templates.len().max(1);
                 self.template_list.select(Some(next));
@@ -654,10 +654,10 @@ impl AgentSelectState {
             KeyCode::Esc => {
                 self.sub = AgentSubScreen::CustomPrompt;
             }
-            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('l') if self.tool_cursor > 0 => {
+            KeyCode::Up | KeyCode::Char('k') if self.tool_cursor > 0 => {
                 self.tool_cursor -= 1;
             }
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('h') if self.tool_cursor < TOOL_OPTIONS.len() - 1 => {
+            KeyCode::Down | KeyCode::Char('j') if self.tool_cursor < TOOL_OPTIONS.len() - 1 => {
                 self.tool_cursor += 1;
             }
             KeyCode::Char(' ') => {
@@ -683,10 +683,10 @@ impl AgentSelectState {
             KeyCode::Esc => {
                 self.sub = AgentSubScreen::CustomTools;
             }
-            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('l') if self.skill_cursor > 0 => {
+            KeyCode::Up | KeyCode::Char('k') if self.skill_cursor > 0 => {
                 self.skill_cursor -= 1;
             }
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('h') if len > 0 && self.skill_cursor < len - 1 => {
+            KeyCode::Down | KeyCode::Char('j') if len > 0 && self.skill_cursor < len - 1 => {
                 self.skill_cursor += 1;
             }
             KeyCode::Char(' ') if len > 0 => {
@@ -709,10 +709,10 @@ impl AgentSelectState {
             KeyCode::Esc => {
                 self.sub = AgentSubScreen::CustomSkills;
             }
-            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('l') if self.mcp_cursor > 0 => {
+            KeyCode::Up | KeyCode::Char('k') if self.mcp_cursor > 0 => {
                 self.mcp_cursor -= 1;
             }
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('h') if len > 0 && self.mcp_cursor < len - 1 => {
+            KeyCode::Down | KeyCode::Char('j') if len > 0 && self.mcp_cursor < len - 1 => {
                 self.mcp_cursor += 1;
             }
             KeyCode::Char(' ') if len > 0 => {
@@ -734,10 +734,10 @@ impl AgentSelectState {
             KeyCode::Esc => {
                 self.sub = AgentSubScreen::AgentDetail;
             }
-            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('l') if self.skill_cursor > 0 => {
+            KeyCode::Up | KeyCode::Char('k') if self.skill_cursor > 0 => {
                 self.skill_cursor -= 1;
             }
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('h') if len > 0 && self.skill_cursor < len - 1 => {
+            KeyCode::Down | KeyCode::Char('j') if len > 0 && self.skill_cursor < len - 1 => {
                 self.skill_cursor += 1;
             }
             KeyCode::Char(' ') if len > 0 => {
@@ -771,10 +771,10 @@ impl AgentSelectState {
             KeyCode::Esc => {
                 self.sub = AgentSubScreen::AgentDetail;
             }
-            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('l') if self.mcp_cursor > 0 => {
+            KeyCode::Up | KeyCode::Char('k') if self.mcp_cursor > 0 => {
                 self.mcp_cursor -= 1;
             }
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('h') if len > 0 && self.mcp_cursor < len - 1 => {
+            KeyCode::Down | KeyCode::Char('j') if len > 0 && self.mcp_cursor < len - 1 => {
                 self.mcp_cursor += 1;
             }
             KeyCode::Char(' ') if len > 0 => {

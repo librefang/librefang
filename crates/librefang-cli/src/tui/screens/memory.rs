@@ -107,12 +107,12 @@ impl MemoryState {
     fn handle_agent_select(&mut self, key: KeyEvent) -> MemoryUIAction {
         let total = self.agents.len();
         match key.code {
-            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('l') if total > 0 => {
+            KeyCode::Up | KeyCode::Char('k') if total > 0 => {
                 let i = self.agent_list_state.selected().unwrap_or(0);
                 let next = if i == 0 { total - 1 } else { i - 1 };
                 self.agent_list_state.select(Some(next));
             }
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('h') if total > 0 => {
+            KeyCode::Down | KeyCode::Char('j') if total > 0 => {
                 let i = self.agent_list_state.selected().unwrap_or(0);
                 let next = (i + 1) % total;
                 self.agent_list_state.select(Some(next));
@@ -163,12 +163,12 @@ impl MemoryState {
                 self.kv_pairs.clear();
                 self.selected_agent = None;
             }
-            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('l') if total > 0 => {
+            KeyCode::Up | KeyCode::Char('k') if total > 0 => {
                 let i = self.kv_list_state.selected().unwrap_or(0);
                 let next = if i == 0 { total - 1 } else { i - 1 };
                 self.kv_list_state.select(Some(next));
             }
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('h') if total > 0 => {
+            KeyCode::Down | KeyCode::Char('j') if total > 0 => {
                 let i = self.kv_list_state.selected().unwrap_or(0);
                 let next = (i + 1) % total;
                 self.kv_list_state.select(Some(next));

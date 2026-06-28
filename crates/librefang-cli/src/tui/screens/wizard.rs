@@ -330,7 +330,7 @@ impl WizardState {
     fn handle_provider(&mut self, key: KeyEvent) -> WizardResult {
         match key.code {
             KeyCode::Esc => return WizardResult::Cancelled,
-            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('l') => {
+            KeyCode::Up | KeyCode::Char('k') => {
                 let i = self.provider_list.selected().unwrap_or(0);
                 let next = if i == 0 {
                     self.provider_order.len() - 1
@@ -339,7 +339,7 @@ impl WizardState {
                 };
                 self.provider_list.select(Some(next));
             }
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('h') => {
+            KeyCode::Down | KeyCode::Char('j') => {
                 let i = self.provider_list.selected().unwrap_or(0);
                 let next = (i + 1) % self.provider_order.len();
                 self.provider_list.select(Some(next));

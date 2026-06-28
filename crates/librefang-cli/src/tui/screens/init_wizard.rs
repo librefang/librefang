@@ -837,7 +837,7 @@ pub fn run() -> InitResult {
 
                     Step::Provider => match key.code {
                         KeyCode::Esc => break InitResult::Cancelled,
-                        KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('l') => {
+                        KeyCode::Up | KeyCode::Char('k') => {
                             let i = state.provider_list.selected().unwrap_or(0);
                             let next = if i == 0 {
                                 state.provider_order.len() - 1
@@ -846,7 +846,7 @@ pub fn run() -> InitResult {
                             };
                             state.provider_list.select(Some(next));
                         }
-                        KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('h') => {
+                        KeyCode::Down | KeyCode::Char('j') => {
                             let i = state.provider_list.selected().unwrap_or(0);
                             let next = (i + 1) % state.provider_order.len();
                             state.provider_list.select(Some(next));
@@ -973,13 +973,13 @@ pub fn run() -> InitResult {
                                 state.step = Step::Provider;
                             }
                         }
-                        KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('l') => {
+                        KeyCode::Up | KeyCode::Char('k') => {
                             let len = state.model_entries.len().max(1);
                             let i = state.model_list.selected().unwrap_or(0);
                             let next = if i == 0 { len - 1 } else { i - 1 };
                             state.model_list.select(Some(next));
                         }
-                        KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('h') => {
+                        KeyCode::Down | KeyCode::Char('j') => {
                             let len = state.model_entries.len().max(1);
                             let i = state.model_list.selected().unwrap_or(0);
                             let next = (i + 1) % len;
@@ -1006,12 +1006,12 @@ pub fn run() -> InitResult {
                     Step::Routing => handle_routing_key(&mut state, key.code),
 
                     Step::Complete => match key.code {
-                        KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('l') => {
+                        KeyCode::Up | KeyCode::Char('k') => {
                             let i = state.complete_list.selected().unwrap_or(0);
                             let next = if i == 0 { 2 } else { i - 1 };
                             state.complete_list.select(Some(next));
                         }
-                        KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('h') => {
+                        KeyCode::Down | KeyCode::Char('j') => {
                             let i = state.complete_list.selected().unwrap_or(0);
                             let next = (i + 1) % 3;
                             state.complete_list.select(Some(next));
@@ -1080,13 +1080,13 @@ fn handle_migration_key(
     match state.migration_phase {
         MigrationPhase::Detecting => {} // auto-resolves, no keys
         MigrationPhase::Offer => match code {
-            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('l') => {
+            KeyCode::Up | KeyCode::Char('k') => {
                 let i = state.migration_choice_list.selected().unwrap_or(0);
                 state
                     .migration_choice_list
                     .select(Some(if i == 0 { 1 } else { 0 }));
             }
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('h') => {
+            KeyCode::Down | KeyCode::Char('j') => {
                 let i = state.migration_choice_list.selected().unwrap_or(0);
                 state
                     .migration_choice_list
@@ -1150,13 +1150,13 @@ fn handle_routing_key(state: &mut State, code: KeyCode) {
             KeyCode::Esc => {
                 state.step = Step::Model;
             }
-            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('l') => {
+            KeyCode::Up | KeyCode::Char('k') => {
                 let i = state.routing_choice_list.selected().unwrap_or(0);
                 state
                     .routing_choice_list
                     .select(Some(if i == 0 { 1 } else { 0 }));
             }
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('h') => {
+            KeyCode::Down | KeyCode::Char('j') => {
                 let i = state.routing_choice_list.selected().unwrap_or(0);
                 state
                     .routing_choice_list
@@ -1186,13 +1186,13 @@ fn handle_routing_key(state: &mut State, code: KeyCode) {
                     state.select_routing_tier_model(tier - 1);
                 }
             }
-            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('l') => {
+            KeyCode::Up | KeyCode::Char('k') => {
                 let len = state.model_entries.len().max(1);
                 let i = state.routing_tier_list.selected().unwrap_or(0);
                 let next = if i == 0 { len - 1 } else { i - 1 };
                 state.routing_tier_list.select(Some(next));
             }
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('h') => {
+            KeyCode::Down | KeyCode::Char('j') => {
                 let len = state.model_entries.len().max(1);
                 let i = state.routing_tier_list.selected().unwrap_or(0);
                 let next = (i + 1) % len;

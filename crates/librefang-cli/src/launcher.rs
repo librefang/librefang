@@ -285,10 +285,10 @@ pub fn run(_config: Option<PathBuf>) -> LauncherChoice {
                             KeyCode::Char('q') | KeyCode::Esc | KeyCode::Backspace => {
                                 state.screen = Screen::Menu;
                             }
-                            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('h') if *scroll < max_scroll => {
+                            KeyCode::Down | KeyCode::Char('j') if *scroll < max_scroll => {
                                 *scroll += 1;
                             }
-                            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('l') if *scroll > 0 => {
+                            KeyCode::Up | KeyCode::Char('k') if *scroll > 0 => {
                                 *scroll -= 1;
                             }
                             KeyCode::PageDown => {
@@ -317,12 +317,12 @@ pub fn run(_config: Option<PathBuf>) -> LauncherChoice {
                                 choice = LauncherChoice::Quit;
                                 break;
                             }
-                            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('l') => {
+                            KeyCode::Up | KeyCode::Char('k') => {
                                 let i = state.list.selected().unwrap_or(0);
                                 let next = if i == 0 { menu.len() - 1 } else { i - 1 };
                                 state.list.select(Some(next));
                             }
-                            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('h') => {
+                            KeyCode::Down | KeyCode::Char('j') => {
                                 let i = state.list.selected().unwrap_or(0);
                                 let next = (i + 1) % menu.len();
                                 state.list.select(Some(next));

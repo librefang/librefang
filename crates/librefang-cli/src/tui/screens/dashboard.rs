@@ -82,11 +82,11 @@ impl DashboardState {
         match key.code {
             KeyCode::Char('r') => DashboardAction::Refresh,
             KeyCode::Char('a') => DashboardAction::GoToAgents,
-            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('l') => {
+            KeyCode::Up | KeyCode::Char('k') => {
                 self.audit_scroll = self.audit_scroll.saturating_add(1);
                 DashboardAction::Continue
             }
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('h') => {
+            KeyCode::Down | KeyCode::Char('j') => {
                 self.audit_scroll = self.audit_scroll.saturating_sub(1);
                 DashboardAction::Continue
             }

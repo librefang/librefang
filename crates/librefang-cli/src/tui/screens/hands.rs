@@ -108,12 +108,12 @@ impl HandsState {
     fn handle_marketplace(&mut self, key: KeyEvent) -> HandsAction {
         let total = self.definitions.len();
         match key.code {
-            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('l') if total > 0 => {
+            KeyCode::Up | KeyCode::Char('k') if total > 0 => {
                 let i = self.marketplace_list.selected().unwrap_or(0);
                 let next = if i == 0 { total - 1 } else { i - 1 };
                 self.marketplace_list.select(Some(next));
             }
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('h') if total > 0 => {
+            KeyCode::Down | KeyCode::Char('j') if total > 0 => {
                 let i = self.marketplace_list.selected().unwrap_or(0);
                 let next = (i + 1) % total;
                 self.marketplace_list.select(Some(next));
@@ -151,12 +151,12 @@ impl HandsState {
 
         let total = self.instances.len();
         match key.code {
-            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('l') if total > 0 => {
+            KeyCode::Up | KeyCode::Char('k') if total > 0 => {
                 let i = self.active_list.selected().unwrap_or(0);
                 let next = if i == 0 { total - 1 } else { i - 1 };
                 self.active_list.select(Some(next));
             }
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('h') if total > 0 => {
+            KeyCode::Down | KeyCode::Char('j') if total > 0 => {
                 let i = self.active_list.selected().unwrap_or(0);
                 let next = (i + 1) % total;
                 self.active_list.select(Some(next));
