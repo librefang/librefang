@@ -147,10 +147,8 @@ token only as a break-glass option.
 
 ## AUR publishing (release.yml `sync_aur_bin` / `sync_aur_desktop` / `sync_aur_docker`)
 
-Push the release-pinned packages under `packaging/aur/` to the Arch User
-Repository on every tag. When `AUR_SSH_PRIVATE_KEY` is absent the three
-jobs no-op with a notice — nothing downstream depends on them, so forks and
-unconfigured repos are unaffected.
+Push the release-pinned packages under `packaging/aur/` to the Arch User Repository on every tag.
+When `AUR_SSH_PRIVATE_KEY` is absent the three jobs no-op with a notice — nothing downstream depends on them, so forks and unconfigured repos are unaffected.
 
 | Secret | Purpose | Format | Rotation |
 |---|---|---|---|
@@ -174,9 +172,8 @@ ssh-keygen -t ed25519 -C "librefang-aur-ci" -f aur_ci -N ""
 ssh-keyscan aur.archlinux.org   # paste into AUR_KNOWN_HOSTS
 ```
 
-The AUR repositories (`ssh://aur@aur.archlinux.org/librefang-bin.git`, etc.)
-must exist and be owned by that account before the first push. See
-`packaging/aur/README.md` for the one-time bootstrap.
+The AUR repositories (`ssh://aur@aur.archlinux.org/librefang-bin.git`, etc.) must exist and be owned by that account before the first push.
+See `packaging/aur/README.md` for the one-time bootstrap.
 
 ---
 
