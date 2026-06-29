@@ -93,6 +93,7 @@ _33 PRs from 5 contributors since v2026.6.22-beta.22._
 
 ### Fixed
 
+- Enrich coalesced mixed-media batches on the debounced channel path: audio/voice attachments are transcribed and documents are extracted, not just images, so a photo+voice+pdf burst reaches the agent fully enriched instead of as bare `[Voice message …: url]` / `[File …: url]` placeholders — generalizing the image-only #6321 / #6323 fix via shared `download_media_blocks` + `enrich_media` helpers both inbound paths funnel through (#6348) (@houko)
 - Accept the empty-recipient handshake HMAC binding so `bootstrap_peers` connections succeed instead of failing with `403 HMAC authentication failed` (regression from #3920) (#6330) (@houko)
 - Bump `pdf-extract` 0.10→0.12 to pull the patched `lopdf` 0.42, fixing RUSTSEC-2026-0187 — a stack overflow on deeply nested PDF objects reachable via attacker-supplied PDF attachments (the existing `catch_unwind` guards do not mitigate it, since a stack overflow aborts rather than unwinds) (@houko)
 
