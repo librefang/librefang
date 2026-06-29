@@ -806,11 +806,13 @@ type DynRmcpClient = rmcp::service::RunningService<
 
 /// MCP client handler that declares the `roots` capability and responds to
 /// `roots/list` requests with a pre-configured list of root directories.
+#[allow(deprecated)]
 struct RootsClientHandler {
     client_info: rmcp::model::ClientInfo,
     roots: Arc<Vec<rmcp::model::Root>>,
 }
 
+#[allow(deprecated)]
 impl RootsClientHandler {
     fn new(roots: Vec<String>) -> Self {
         let mcp_roots: Vec<rmcp::model::Root> = roots
@@ -850,7 +852,7 @@ impl RootsClientHandler {
             .collect();
 
         let mut capabilities = rmcp::model::ClientCapabilities::default();
-        capabilities.roots = Some(rmcp::model::RootsCapabilities { list_changed: None });
+        capabilities.roots = Some(rmcp::model::RootsCapabilities::default());
 
         let client_info = rmcp::model::ClientInfo::new(
             capabilities,
@@ -864,6 +866,7 @@ impl RootsClientHandler {
     }
 }
 
+#[allow(deprecated)]
 impl rmcp::ClientHandler for RootsClientHandler {
     fn get_info(&self) -> rmcp::model::ClientInfo {
         self.client_info.clone()
@@ -2409,10 +2412,7 @@ impl McpConnection {
                 let texts: Vec<String> = result
                     .content
                     .iter()
-                    .filter_map(|item| match &item.raw {
-                        rmcp::model::RawContent::Text(text) => Some(text.text.clone()),
-                        _ => None,
-                    })
+                    .filter_map(|item| item.as_text().map(|t| t.text.clone()))
                     .collect();
 
                 let output = if texts.is_empty() {
