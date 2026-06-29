@@ -5251,8 +5251,8 @@ async fn maybe_describe_inbound_image_with_timeout(
 ///
 /// The per-image work self-gates on `[media] image_description` (the flag is checked inside `describe_inbound_image`), so this is a cheap no-op when the operator has not opted in; a failed or timed-out description degrades to an opaque `[Image description unavailable]` note rather than dropping the image.
 ///
-/// Both inbound paths funnel through this one helper so they cannot drift apart again: the original bug was that only the immediate (`dispatch_message`) path described images while the debounced (`flush_debounced`) path did not.
-/// Because the debounced path coalesces several messages it can carry multiple `ImageFile` blocks, so every image is described — not just the first.
+/// Both inbound paths reach this helper through [`enrich_media`]'s `DescribeImage` arm, so they cannot drift apart again: the original #6321 bug was that only the immediate (`dispatch_message`) path described images while the debounced (`flush_debounced`) path did not.
+/// Because the debounced path coalesces several messages a single `DownloadedMedia`'s blocks can in principle carry multiple `ImageFile`s, so every image is described — not just the first.
 async fn prepend_image_descriptions(
     handle: &Arc<dyn ChannelBridgeHandle>,
     blocks: Vec<ContentBlock>,
@@ -8991,6 +8991,97 @@ mod tests {
             let (drained_msg, media) = result.unwrap();
             assert_content_eq(&drained_msg.content, "hello");
             assert!(media.is_empty(), "a plain-text message carries no media");
+        }
+
+        #[tokio::test]
+        async fn test_debouncer_mixed_media_collects_each_payload() {
+            // Regression for #6348: an image coalesced with a voice note must surface BOTH media payloads to the flush task — each enriched on its own — not just the image, which was the pre-fix gap.
+            // The `content_to_text` placeholders for both still merge into `merged.content` so captions stay sanitizer-visible.
+            let (debouncer, _rx) = MessageDebouncer::new(100, 5000, 10);
+            let mut buffers: HashMap<String, SenderBuffer> = HashMap::new();
+
+            let mut image_msg = make_test_message("");
+            image_msg.content = ChannelContent::Image {
+                url: "https://example.com/photo.jpg".to_string(),
+                caption: None,
+                mime_type: None,
+            };
+            let image_media = DownloadedMedia {
+                blocks: vec![ContentBlock::ImageFile {
+                    path: "/tmp/photo.jpg".into(),
+                    media_type: "image/jpeg".into(),
+                }],
+                enrich: PendingEnrich::DescribeImage,
+            };
+
+            let mut voice_msg = make_test_message("");
+            voice_msg.content = ChannelContent::Voice {
+                url: "https://example.com/voice.ogg".to_string(),
+                duration_seconds: 5,
+                caption: None,
+            };
+            let voice_media = DownloadedMedia {
+                blocks: vec![
+                    ContentBlock::Text {
+                        text: "[Voice message (5s)]".into(),
+                        provider_metadata: None,
+                    },
+                    ContentBlock::Text {
+                        text: "[File: voice.ogg] saved to /tmp/voice.ogg".into(),
+                        provider_metadata: None,
+                    },
+                ],
+                enrich: PendingEnrich::TranscribeAudio {
+                    saved: (
+                        std::path::PathBuf::from("/tmp/voice.ogg"),
+                        "audio/ogg".into(),
+                    ),
+                },
+            };
+
+            debouncer.push(
+                "discord:user123",
+                PendingMessage {
+                    message: image_msg,
+                    media: Some(image_media),
+                },
+                &mut buffers,
+            );
+            debouncer.push(
+                "discord:user123",
+                PendingMessage {
+                    message: voice_msg,
+                    media: Some(voice_media),
+                },
+                &mut buffers,
+            );
+
+            let (merged, media) = debouncer.drain("discord:user123", &mut buffers).unwrap();
+
+            // Both payloads survive coalescing, in arrival order (image then voice).
+            assert_eq!(
+                media.len(),
+                2,
+                "both media payloads must survive coalescing"
+            );
+            assert!(
+                matches!(media[0].enrich, PendingEnrich::DescribeImage),
+                "first payload is the image (describe)"
+            );
+            assert!(
+                matches!(media[1].enrich, PendingEnrich::TranscribeAudio { .. }),
+                "second payload is the voice (transcribe)"
+            );
+            // The merged text still carries both placeholders so captions remain sanitizer-visible downstream.
+            let merged_text = content_to_text(&merged.content);
+            assert!(
+                merged_text.contains("[Photo:"),
+                "image placeholder retained: {merged_text}"
+            );
+            assert!(
+                merged_text.contains("[Voice message (5s):"),
+                "voice placeholder retained: {merged_text}"
+            );
         }
 
         #[tokio::test]
