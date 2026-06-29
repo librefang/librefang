@@ -28,24 +28,27 @@ sudo pacman -Syu
 sudo pacman -S librefang-bin librefang-desktop-bin
 ```
 
-`$arch` is pacman's own variable — leave it literal in `pacman.conf`; pacman expands it to `x86_64`.
+`$arch` is pacman's own variable — leave it literal in `pacman.conf`; pacman expands it to `x86_64` (or `aarch64` on Arch Linux ARM).
 Both the database and every package are GPG-signed, so the default `SigLevel` (inherited from `[options]`) verifies them once the key above is locally signed.
 Do **not** set `SigLevel = Never` — that disables the verification this repository exists to provide.
 
 Available packages:
 
-- `librefang-bin` — CLI, daemon, HTTP API, and dashboard on port 4545.
-- `librefang-desktop-bin` — native desktop launcher.
-- `librefang-docker` — Docker-backed systemd service pinned to the release tag.
+- `librefang-bin` — CLI, daemon, HTTP API, and dashboard on port 4545. x86_64 and aarch64.
+- `librefang-desktop-bin` — native desktop launcher. x86_64 only (upstream ships no ARM Linux desktop bundle).
+- `librefang-docker` — Docker-backed systemd service pinned to the release tag (`any`). x86_64 and aarch64.
+
+aarch64 serves Arch Linux ARM — the repo path is `arch/aarch64/`, selected automatically by pacman's `$arch`.
+On aarch64 only `librefang-bin` and `librefang-docker` are available (no ARM desktop bundle upstream); `pacman -S librefang-desktop-bin` there will report a target not found.
 
 ## How it works (CI)
 
 `release.yml`'s `publish_arch_repo` job runs `publish-arch-repo.sh` inside an `archlinux:base-devel` container on every `v*` tag (and on a `channel=current` re-publish).
-The script:
+It publishes one repo per architecture under `arch/<arch>/` (`x86_64` and `aarch64`). The script:
 
 1. Reuses the committed PKGBUILDs under `packaging/aur/<package>/` as the source of truth, deriving only the per-release values — `pkgver` (encoding the tag's first `-` as `_`), `pkgrel=1`, the desktop bundle version (read off the actual `LibreFang_<ver>_amd64.deb` asset name), the pinned `ghcr.io/librefang/librefang:<version>` tag — then regenerates `sha256sums` with `updpkgsums`.
-2. Builds and GPG-signs each package with `makepkg --sign` (no Rust compile — these repackage the prebuilt release artifacts).
-3. Folds every package into one shared, signed pacman database with `repo-add --sign`, pulling the existing database from R2 first so the update is incremental.
+2. Builds and GPG-signs each package with `makepkg --sign` (no Rust compile — these repackage the prebuilt release artifacts). aarch64 packages are repackaged on the x86_64 runner by repointing the source tarball to the `aarch64-unknown-linux-gnu` asset and setting `CARCH` (the arch field is metadata only); the host strip cannot process foreign binaries, so aarch64 sets `!strip` (the release tarball is already stripped upstream).
+3. Folds each arch's packages into that arch's shared, signed pacman database with `repo-add --sign`, pulling the existing database from R2 first so the update is incremental.
 4. Uploads the packages, signatures, database, and the public key to R2.
 5. Prunes old package files beyond the newest `RETAIN` (default 5) per package — best-effort, kept only for manual `pacman -U <url>` downgrades; the database always points at the latest build.
 
