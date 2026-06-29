@@ -194,7 +194,7 @@
     "setup_running": "초기화 중...",
     "setup_wizard": "마법사 사용",
     "recent_sessions": "최근 세션",
-    "agents_online": "에이전트 온라인",
+    "agents_online": "온라인 에이전트",
     "loading_runtime": "런타임 로드 중…",
     "no_agents": "아직 상담원 없음",
     "no_token_data": "아직 토큰 사용이 없습니다",
@@ -206,9 +206,9 @@
     "updated": "업데이트됨",
     "tokens_by_agent": "에이전트별 토큰 · 상시",
     "kpi": {
-      "active_agents": "활성 물질",
+      "active_agents": "가동중인 에이전트",
       "configured": "구성된",
-      "spend": "경비",
+      "spend": "비용",
       "prior": "이전의",
       "no_prior": "사전 지출 없음",
       "tokens_over_7d": "7일 이상의 토큰"
