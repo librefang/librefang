@@ -112,7 +112,7 @@ api-error-goal-title-empty = 제목은 비워 둘 수 없습니다
 api-error-goal-status-invalid = 유효하지 않은 상태입니다
 
 # Memory errors
-api-error-memory-not-enabled = 사전 메모리가 활성화되지 않았습니다
+api-error-memory-not-enabled = 능동적 메모리가 활성화되지 않았습니다
 api-error-memory-not-found = 메모리를 찾을 수 없습니다
 api-error-memory-operation-failed = 메모리 작업에 실패했습니다
 api-error-memory-export-failed = 메모리를 내보내는 데 실패했습니다
@@ -289,9 +289,9 @@ api-error-file-workspace-error = 작업 공간 경로 오류
 # Tool errors
 api-error-tool-provide-allowlist = 'tool_allowlist' 및/또는 'tool_blocklist'를 제공하십시오
 api-error-tool-not-found = 도구를 찾을 수 없습니다: { $name }
-api-error-tool-invoke-disabled = 직접 도구 호출이 비활성화되어 있습니다. '[tool_invoke] enabled = true'를 활성화하고 도구를 'allowlist'에 추가하세요.
+api-error-tool-invoke-disabled = 직접 도구 호출이 비활성화되어 있습니다. '[tool_invoke] enabled = true'를 활성화하고 도구를 'allowlist'에 추가하십시오.
 api-error-tool-invoke-denied = 도구 '{ $name }'이(가) '[tool_invoke] allowlist'에 없습니다
-api-error-tool-requires-agent = 도구 '{ $name }'은(는) 사람의 승인이 필요하며 에이전트 컨텍스트 없이는 호출할 수 없습니다. 대신 에이전트를 통해 호출하세요
+api-error-tool-requires-agent = 도구 '{ $name }'은(는) 사람의 승인이 필요하며 에이전트 컨텍스트 없이는 호출할 수 없습니다. 대신 에이전트를 통해 호출하십시오
 
 # Validation errors
 api-error-validation-content-empty = 콘텐츠는 비워 둘 수 없습니다
