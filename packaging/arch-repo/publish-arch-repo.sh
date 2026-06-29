@@ -210,13 +210,15 @@ rclone copy "$R2_DEST" "$STAGING" \
 # R2 and are pruned below by RETAIN.
 repo-add --sign --key "$GPG_KEY_ID" "$STAGING/${REPO_NAME}.db.tar.gz" "$STAGING"/*.pkg.tar.zst
 
-# R2 (object storage) has no symlinks. repo-add writes `librefang.db` and
-# `librefang.files` as symlinks to their .tar.gz; materialise them as real
-# objects so `Server = …/$arch` + `pacman -Sy` can fetch them by plain name.
-for ext in db files; do
-  if [[ -L "$STAGING/${REPO_NAME}.${ext}" ]]; then
-    cp --remove-destination "$STAGING/${REPO_NAME}.${ext}.tar.gz" "$STAGING/${REPO_NAME}.${ext}"
-  fi
+# R2 (object storage) has no symlinks. repo-add --sign writes FOUR symlinks —
+# `librefang.db`, `librefang.db.sig`, `librefang.files`, `librefang.files.sig`
+# — each pointing at its .tar.gz / .tar.gz.sig target. Materialise every one as
+# a real object so `Server = …/$arch` + `pacman -Sy` can fetch the db AND its
+# detached signature by plain name; rclone silently skips symlinks, and a
+# missing `.db.sig` breaks signed-db verification (SigLevel) on the client.
+for link in "${REPO_NAME}.db" "${REPO_NAME}.db.sig" "${REPO_NAME}.files" "${REPO_NAME}.files.sig"; do
+  f="$STAGING/$link"
+  [[ -L "$f" ]] && cp --remove-destination "$(readlink -f "$f")" "$f"
 done
 
 # Publish the signing public key alongside the repo so the install docs can
