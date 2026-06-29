@@ -178,7 +178,7 @@ psl = "2"
 # trees that we would have to babysit for security. Pin a single major
 # so a future bump is a deliberate review, not a transient dependabot
 # ping.
-tera = { version = "1", default-features = false }
+tera = { version = "2", default-features = false }
 
 # WASM sandbox
 wasmtime = "46"
