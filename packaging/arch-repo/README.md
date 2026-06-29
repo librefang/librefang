@@ -44,7 +44,8 @@ On aarch64 only `librefang-bin` and `librefang-docker` are available (no ARM des
 ## How it works (CI)
 
 `release.yml`'s `publish_arch_repo` job runs `publish-arch-repo.sh` inside an `archlinux:base-devel` container on every `v*` tag (and on a `channel=current` re-publish).
-It publishes one repo per architecture under `arch/<arch>/` (`x86_64` and `aarch64`). The script:
+It publishes one repo per architecture under `arch/<arch>/` (`x86_64` and `aarch64`).
+The script:
 
 1. Reuses the committed PKGBUILDs under `packaging/aur/<package>/` as the source of truth, deriving only the per-release values — `pkgver` (encoding the tag's first `-` as `_`), `pkgrel=1`, the desktop bundle version (read off the actual `LibreFang_<ver>_amd64.deb` asset name), the pinned `ghcr.io/librefang/librefang:<version>` tag — then regenerates `sha256sums` with `updpkgsums`.
 2. Builds and GPG-signs each package with `makepkg --sign` (no Rust compile — these repackage the prebuilt release artifacts). aarch64 packages are repackaged on the x86_64 runner by repointing the source tarball to the `aarch64-unknown-linux-gnu` asset and setting `CARCH` (the arch field is metadata only); the host strip cannot process foreign binaries, so aarch64 sets `!strip` (the release tarball is already stripped upstream).
