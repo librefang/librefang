@@ -11,8 +11,7 @@ upstream additions (e.g. new fields) manually if needed.
 
 | File | Why ours wins | What to keep |
 |---|---|---|
-| `crates/librefang-desktop/tauri.conf.json` | productName + identifier are BossFang | `productName: "BossFang"`, `identifier: "ai.bossfang.desktop"`, BossFang descriptions; merge upstream's new keys (CSP, etc.) by hand |
-| `crates/librefang-desktop/tauri.desktop.conf.json` | updater + pubkey are BossFang | `identifier: "ai.bossfang.desktop"`, endpoint `https://github.com/GQAdonis/librefang/releases/latest/download/latest.json`, pubkey key ID `E329A6B2863F1707` |
+| `crates/librefang-desktop/tauri.conf.json` | productName + identifier + updater config are BossFang | `productName: "BossFang"`, `identifier: "ai.bossfang.desktop"`, BossFang descriptions, and the `plugins.updater` block — endpoint `https://github.com/GQAdonis/librefang/releases/latest/download/latest.json`, pubkey key ID `E329A6B2863F1707`; merge upstream's new keys (CSP, etc.) by hand. Upstream #6283 folded the former `tauri.desktop.conf.json` updater config in here. |
 | `crates/librefang-desktop/tauri.ios.conf.json` | identifier is BossFang | `identifier: "ai.bossfang.app"` |
 | `crates/librefang-desktop/tauri.android.conf.json` | identifier is BossFang | `identifier: "ai.bossfang.app"` |
 | `crates/librefang-desktop/icons/*` | binary BossFang artwork | Never overwrite from upstream; regenerate from `docs/branding/boss-libre.png` with `cargo tauri icon` if a refresh is needed |

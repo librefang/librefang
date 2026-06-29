@@ -74,7 +74,9 @@ literal.
 
 ## 4. Tauri auto-updater endpoint
 
-**File**: `crates/librefang-desktop/tauri.desktop.conf.json`
+**File**: `crates/librefang-desktop/tauri.conf.json` (the `plugins.updater`
+block). Upstream #6283 deleted the standalone `tauri.desktop.conf.json` and
+consolidated its updater config into `tauri.conf.json`.
 
 **Fields**:
 - `identifier: "ai.bossfang.desktop"`

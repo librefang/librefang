@@ -84,8 +84,7 @@ authoritative table at [references/conflict-resolution.md](references/conflict-r
 The short version, in priority order:
 
 1. **Always-take-ours** (binary diffs, BossFang identity strings):
-   - `crates/librefang-desktop/tauri.conf.json` — `productName: "BossFang"`, `identifier: "ai.bossfang.desktop"`, BossFang descriptions
-   - `crates/librefang-desktop/tauri.desktop.conf.json` — `identifier: "ai.bossfang.desktop"`, updater endpoint pinned at `github.com/GQAdonis/librefang/releases/...`
+   - `crates/librefang-desktop/tauri.conf.json` — `productName: "BossFang"`, `identifier: "ai.bossfang.desktop"`, BossFang descriptions, and the `plugins.updater` block (endpoint pinned at `github.com/GQAdonis/librefang/releases/...`, pubkey key ID `E329A6B2863F1707`). Upstream #6283 consolidated the former `tauri.desktop.conf.json` updater config in here.
    - `crates/librefang-desktop/tauri.{ios,android}.conf.json` — `identifier: "ai.bossfang.app"`
    - `crates/librefang-desktop/icons/*` — never overwrite from upstream (binary files; regenerate locally from `docs/branding/boss-libre.png` if needed)
    - `crates/librefang-api/dashboard/src/index.css` `:root` / `:root.dark` blocks (ember palette)
@@ -133,7 +132,7 @@ the workflow files. Three knobs already exist for this — see
 - `[registry] base_url` → default `https://github.com/GQAdonis/librefang-registry` (`crates/librefang-types/src/config/types.rs`, plumbed through `crates/librefang-runtime/src/registry_sync.rs`)
 - Dashboard tarball URL → hardcoded at `crates/librefang-api/src/webchat.rs:378` (BossFang fork defaults to embedded-only mode so this is dead-code in the default path)
 - `[skills.marketplace] github_org` → default `"GQAdonis"` (`crates/librefang-skills/src/marketplace.rs`)
-- Tauri updater endpoint → `crates/librefang-desktop/tauri.desktop.conf.json:8`
+- Tauri updater endpoint → `crates/librefang-desktop/tauri.conf.json` (`plugins.updater.endpoints[0]`; consolidated here from the deleted `tauri.desktop.conf.json` by upstream #6283)
 
 Any new hardcoded URL upstream adds must either flow through the
 matching knob or be hardcoded to the GQAdonis equivalent.
