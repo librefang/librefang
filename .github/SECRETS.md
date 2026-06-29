@@ -136,6 +136,49 @@ token only as a break-glass option.
 
 ---
 
+## Arch pacman repository (release.yml `publish_arch_repo`)
+
+Build, GPG-sign, and publish the project-maintained pacman repository to Cloudflare R2 (`packages.librefang.ai`) on every tag.
+This is the official binary repo installable with `pacman -Syu`, distinct from the AUR packages under `packaging/aur/`.
+When the GPG key or any R2 credential is absent the job no-ops with a notice — nothing downstream depends on it, so forks and unconfigured repos are unaffected.
+
+pacman verifies packages with **GPG/PGP only** — it cannot consume the cosign keyless signatures the rest of the release uses, so this is the project's first long-lived signing key.
+Treat it accordingly: keep the **primary key offline**, register only a **passphrase-less signing subkey** in CI, and revoke the subkey (not the identity) if a runner is compromised.
+
+| Secret | Purpose | Format | Rotation |
+|---|---|---|---|
+| `ARCH_REPO_GPG_PRIVATE_KEY` | Ascii-armored, passphrase-less signing **subkey**. `makepkg --sign` and `repo-add --sign` produce the `.sig` files and sign the db with it. Its public half is what users import via `pacman-key`. | `gpg --armor --export-secret-subkeys <subkey-id>!` (incl. BEGIN/END) | Rotate the subkey on personnel change or runner compromise; the offline primary key and its fingerprint stay stable so users never re-import |
+| `ARCH_REPO_GPG_KEY_ID` | The signing subkey id (or its fingerprint) passed to `makepkg --sign --key` / `repo-add -k`. | hex key id / fingerprint | Matches the subkey above |
+| `R2_ACCESS_KEY_ID` | R2 S3 access key id for the bucket behind `packages.librefang.ai`. Scope it to that one bucket. | plain string | When personnel changes or the key is compromised |
+| `R2_SECRET_ACCESS_KEY` | R2 S3 secret access key paired with the id above. | plain string | With the id above |
+
+`CLOUDFLARE_ACCOUNT_ID` is reused from the Workers deploys (it forms the R2 S3 endpoint host); no new account secret is needed.
+The bucket name defaults to `librefang-packages` (the `r2-bucket` action input) — override it there if your bucket differs.
+
+**Generation reference**
+
+```sh
+# 1. Create the signing key once, OFFLINE. Use a primary key for identity and
+#    a separate signing subkey for CI so the subkey can be revoked alone:
+gpg --quick-generate-key "LibreFang Packaging <packaging@librefang.ai>" ed25519 sign never
+gpg --quick-add-key <PRIMARY_FPR> ed25519 sign 2y          # the CI subkey
+
+# 2. Export ONLY the subkey's secret half (note the trailing '!'), no passphrase:
+gpg --armor --export-secret-subkeys <SUBKEY_ID>! > arch_repo_signing.asc   # → ARCH_REPO_GPG_PRIVATE_KEY
+echo <SUBKEY_ID>                                                            # → ARCH_REPO_GPG_KEY_ID
+
+# 3. Create an R2 bucket + S3 access key in the Cloudflare dashboard,
+#    bind it to packages.librefang.ai, paste the two values into the R2_* secrets.
+
+# 4. Back up the OFFLINE primary key + its revocation certificate somewhere
+#    the CI runner can never reach. Losing it means users must re-import a new key.
+```
+
+The public key is published to `https://packages.librefang.ai/<repo>.gpg` by the job itself on each run; the install docs (`packaging/arch-repo/README.md`) point users there.
+Validate end-to-end with `workflow_dispatch` on `release.yml` (`channel=current`, `tag=<existing release>`) before the next real release.
+
+---
+
 ## Internal infrastructure
 
 | Secret | Purpose |

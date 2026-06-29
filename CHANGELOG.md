@@ -91,6 +91,10 @@ _33 PRs from 5 contributors since v2026.6.22-beta.22._
 
 ## [Unreleased]
 
+### Added
+
+- Publish an official project-maintained pacman repository for Arch Linux — GPG-signed packages on Cloudflare R2, installable via `pacman -Syu`, sidestepping the closed AUR registration that blocks #6341 (#6334) (@houko)
+
 ### Fixed
 
 - Allow the Codex CLI provider to run from desktop and daemon processes outside a Git repository, and replace its deprecated `--full-auto` flag (@pavver)
