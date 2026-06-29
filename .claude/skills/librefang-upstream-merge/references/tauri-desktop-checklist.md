@@ -10,8 +10,7 @@ SurrealDB layer — so storage conversion is a non-issue here.
 
 | File | Field(s) we own | Notes |
 |---|---|---|
-| `tauri.conf.json` | `productName`, `identifier`, `bundle.shortDescription`, `bundle.longDescription` | Take upstream's `version`, new `bundle` options, new security config keys; merge by hand |
-| `tauri.desktop.conf.json` | `identifier`, `plugins.updater.endpoints[0]`, `plugins.updater.pubkey` | Take upstream's other updater options (`windows.installMode`, etc.) |
+| `tauri.conf.json` | `productName`, `identifier`, `bundle.shortDescription`, `bundle.longDescription`, `plugins.updater.endpoints[0]`, `plugins.updater.pubkey` | Take upstream's `version`, new `bundle` options, new security config keys, and other updater options (`windows.installMode`, etc.); merge by hand. Upstream #6283 deleted the standalone `tauri.desktop.conf.json` and consolidated its updater config here. |
 | `tauri.ios.conf.json` | `identifier` | Take upstream's `bundle.iOS.*` and `app.windows` additions |
 | `tauri.android.conf.json` | `identifier` | Take upstream's `bundle.android.*` and `app.security` additions |
 | `icons/icon.ico` | binary BossFang artwork | Never overwrite from upstream |
@@ -39,14 +38,13 @@ The audit script checks four things after merge:
 
 2. **identifier**:
    - `tauri.conf.json`: `ai.bossfang.desktop`
-   - `tauri.desktop.conf.json`: `ai.bossfang.desktop`
    - `tauri.ios.conf.json`: `ai.bossfang.app`
    - `tauri.android.conf.json`: `ai.bossfang.app`
 
-3. **Updater endpoint** in `tauri.desktop.conf.json`:
+3. **Updater endpoint** in `tauri.conf.json` (`plugins.updater.endpoints[0]`, consolidated here by upstream #6283):
    - Host must be `github.com/GQAdonis/librefang/...` (NOT `github.com/librefang/librefang`)
 
-4. **Minisign pubkey** in `tauri.desktop.conf.json`:
+4. **Minisign pubkey** in `tauri.conf.json` (`plugins.updater.pubkey`):
    - Key ID must be `E329A6B2863F1707` (NOT upstream's `BC91908BD3F1520D`)
    - The key ID lives in the decoded comment line of the base64 pubkey blob. Decode with: `echo '<pubkey>' | base64 -d | head -1`
    - Expect: `untrusted comment: minisign public key E329A6B2863F1707`
