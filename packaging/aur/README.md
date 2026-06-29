@@ -61,8 +61,7 @@ Do not commit downloaded sources, `src/`, `pkg/`, or `*.pkg.tar.*` outputs.
 
 ## Automated publishing on release
 
-`release.yml` publishes these packages to AUR on every tag via three jobs
-(`sync_aur_bin`, `sync_aur_desktop`, `sync_aur_docker`).
+`release.yml` publishes these packages to AUR on every tag via three jobs (`sync_aur_bin`, `sync_aur_desktop`, `sync_aur_docker`).
 Each job runs `publish-to-aur.sh` inside an `archlinux:base-devel` container, which takes the committed files here as the source of truth and derives only the per-release values: it bumps `pkgver` (encoding the tag's first `-` as `_`), resets `pkgrel` to `1`, sets `_desktop_ver` from the actual `LibreFang_<bundle-ver>_amd64.deb` asset name for the desktop package, re-pins the `ghcr.io/librefang/librefang:<version>` tag inside the Docker helper and env, then regenerates `sha256sums` (`updpkgsums`) and `.SRCINFO` (`makepkg --printsrcinfo`) before pushing to `ssh://aur@aur.archlinux.org/<package>.git`.
 
 The committed `pkgver` / `sha256sums` / `.SRCINFO` here are not bumped per release; they are a working baseline for local `makepkg` runs.
