@@ -1937,7 +1937,7 @@
     "theme_light": "빛",
     "theme_dark": "어두운",
     "system_config": "시스템 구성",
-    "nav_layout": "탐색 레이아웃",
+      "nav_layout": "사이드바 레이아웃",
     "nav_grouped": "그룹화됨",
     "nav_collapsible": "접을 수 있는",
     "theme_desc": "밝은 모드와 어두운 모드 간 전환",
