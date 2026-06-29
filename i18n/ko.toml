@@ -1,0 +1,72 @@
+# LibreFang i18n — Korean (ko)
+#
+# 이 파일은 번역 가능한 모든 에러 메시지에 대한 TOML 키-값 참조를 제공합니다.
+# 런타임은 실제 번역 조회를 위해 crates/librefang-types/locales/ 아래의 Fluent (.ftl) 파일을 사용합니다.
+# 이 TOML 파일은 사람이 읽을 수 있는 카탈로그 역할을 하며, 외부 도구 또는 향후 TOML 기반 i18n 백엔드에서 사용할 수 있습니다.
+
+[agent]
+not-found        = "에이전트를 찾을 수 없습니다"
+spawn-failed     = "에이전트 생성에 실패했습니다"
+invalid-id       = "유효하지 않은 에이전트 ID입니다"
+already-exists   = "에이전트가 이미 존재합니다"
+
+[message]
+too-large        = "메시지가 너무 큽니다 (최대 64KB)"
+delivery-failed  = "메시지 전송에 실패했습니다: {reason}"
+
+[template]
+invalid-name     = "유효하지 않은 템플릿 이름입니다"
+not-found        = "템플릿 '{name}'을(를) 찾을 수 없습니다"
+parse-failed     = "템플릿 분석에 실패했습니다: {error}"
+required         = "'manifest_toml' 또는 'template' 중 하나가 필요합니다"
+
+[manifest]
+too-large            = "매니페스트가 너무 큽니다 (최대 1MB)"
+invalid-format       = "유효하지 않은 매니페스트 형식입니다"
+signature-mismatch   = "서명된 매니페스트 내용이 manifest_toml과 일치하지 않습니다"
+signature-failed     = "매니페스트 서명 검증에 실패했습니다"
+
+[auth]
+invalid-key      = "유효하지 않은 API 키입니다"
+missing-header   = "Authorization: Bearer <api_key> 헤더가 누락되었습니다"
+
+[session]
+load-failed      = "세션 로드에 실패했습니다"
+not-found        = "세션을 찾을 수 없습니다"
+
+[workflow]
+missing-steps       = "'steps' 배열이 누락되었습니다"
+step-needs-agent    = "단계 '{step}'에 'agent_id' 또는 'agent_name'이 필요합니다"
+invalid-id          = "유효하지 않은 워크플로 ID입니다"
+execution-failed    = "워크플로 실행에 실패했습니다"
+
+[trigger]
+missing-agent-id      = "'agent_id'가 누락되었습니다"
+invalid-agent-id      = "유효하지 않은 agent_id입니다"
+invalid-pattern       = "유효하지 않은 트리거 패턴입니다"
+missing-pattern       = "'pattern'이 누락되었습니다"
+registration-failed   = "트리거 등록에 실패했습니다 (에이전트를 찾을 수 없습니까?)"
+invalid-id            = "유효하지 않은 트리거 ID입니다"
+not-found             = "트리거를 찾을 수 없습니다"
+
+[budget]
+invalid-amount   = "유효하지 않은 예산 금액입니다"
+update-failed    = "예산 업데이트에 실패했습니다"
+
+[config]
+parse-failed     = "설정을 분석하는 데 실패했습니다: {error}"
+write-failed     = "설정을 저장하는 데 실패했습니다: {error}"
+
+[profile]
+not-found        = "프로필 '{name}'을(를) 찾을 수 없습니다"
+
+[cron]
+invalid-id       = "유효하지 않은 크론 작업 ID입니다"
+not-found        = "크론 작업을 찾을 수 없습니다"
+create-failed    = "크론 작업을 생성하는 데 실패했습니다: {error}"
+
+[general]
+not-found        = "리소스를 찾을 수 없습니다"
+internal         = "내부 서버 오류"
+bad-request      = "잘못된 요청: {reason}"
+rate-limited     = "요청 제한을 초과했습니다. 나중에 다시 시도하십시오."

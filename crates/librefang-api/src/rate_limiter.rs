@@ -523,6 +523,7 @@ mod tests {
         assert!(is_rate_limit_exempt("/locales/ja.json"));
         assert!(is_rate_limit_exempt("/locales/uk.json"));
         assert!(is_rate_limit_exempt("/locales/zh-CN.json"));
+        assert!(is_rate_limit_exempt("/locales/ko.json"));
     }
 
     #[test]

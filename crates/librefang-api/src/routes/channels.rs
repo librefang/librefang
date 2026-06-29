@@ -219,6 +219,39 @@ struct SidecarCatalogEntry {
 /// or release notes. `webhook` is deliberately omitted: it still has an
 /// in-process entry in `CHANNEL_REGISTRY` and we must not show two
 /// "webhook" cards on the page.
+/// Compile-time field descriptors for the Telegram adapter.
+///
+/// Telegram is the first adapter probed at daemon boot. On slow disks its
+/// cold Python import can exceed the five-second describe timeout even though
+/// the embedded SDK is healthy. Keep this fallback aligned with both the
+/// Python and Rust Telegram schemas so the configure form remains usable.
+const TELEGRAM_STATIC_FIELDS: &[StaticSidecarField] = &[
+    StaticSidecarField {
+        key: "TELEGRAM_BOT_TOKEN",
+        label: "Bot Token",
+        field_type: "secret",
+        required: true,
+        placeholder: "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11",
+        advanced: false,
+    },
+    StaticSidecarField {
+        key: "ALLOWED_USERS",
+        label: "Allowed User IDs",
+        field_type: "list",
+        required: false,
+        placeholder: "123456789, 987654321",
+        advanced: true,
+    },
+    StaticSidecarField {
+        key: "TELEGRAM_CLEAR_DONE_REACTION",
+        label: "Clear done reaction",
+        field_type: "bool",
+        required: false,
+        placeholder: "",
+        advanced: true,
+    },
+];
+
 /// Compile-time field descriptors for the Feishu / Lark adapter.
 ///
 /// Mirrors `FeishuAdapter.SCHEMA.fields` in
@@ -303,7 +336,7 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "Telegram Bot API adapter (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.telegram"],
-        static_fields: None,
+        static_fields: Some(TELEGRAM_STATIC_FIELDS),
     },
     SidecarCatalogEntry {
         name: "ntfy",
@@ -1326,8 +1359,40 @@ pub async fn list_channel_registry(State(state): State<Arc<AppState>>) -> impl I
 // handlers).
 
 #[cfg(test)]
-mod feishu_static_schema_tests {
-    use super::{FEISHU_STATIC_FIELDS, SIDECAR_CATALOG};
+mod static_schema_tests {
+    use super::{FEISHU_STATIC_FIELDS, SIDECAR_CATALOG, TELEGRAM_STATIC_FIELDS};
+
+    #[test]
+    fn telegram_catalog_entry_has_static_fields() {
+        let entry = SIDECAR_CATALOG
+            .iter()
+            .find(|e| e.name == "telegram")
+            .expect("telegram must be in SIDECAR_CATALOG");
+        assert_eq!(
+            entry
+                .static_fields
+                .expect("telegram catalog entry must have static_fields set")
+                .len(),
+            3,
+            "static fields must match TelegramAdapter.SCHEMA"
+        );
+    }
+
+    #[test]
+    fn telegram_static_fields_match_schema_contract() {
+        let fields: Vec<(&str, &str, bool, bool)> = TELEGRAM_STATIC_FIELDS
+            .iter()
+            .map(|f| (f.key, f.field_type, f.required, f.advanced))
+            .collect();
+        assert_eq!(
+            fields,
+            vec![
+                ("TELEGRAM_BOT_TOKEN", "secret", true, false),
+                ("ALLOWED_USERS", "list", false, true),
+                ("TELEGRAM_CLEAR_DONE_REACTION", "bool", false, true),
+            ]
+        );
+    }
 
     /// The Feishu catalog entry must declare FEISHU_APP_ID + FEISHU_APP_SECRET
     /// as required non-advanced fields and the remaining six as optional

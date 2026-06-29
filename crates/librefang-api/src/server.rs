@@ -1648,6 +1648,7 @@ pub async fn build_router(
             axum::routing::get(webchat::locale_zh_cn),
         )
         .route("/locales/uk.json", axum::routing::get(webchat::locale_uk))
+        .route("/locales/ko.json", axum::routing::get(webchat::locale_ko))
         // API version discovery endpoint (not versioned itself)
         .route("/api/versions", axum::routing::get(routes::api_versions))
         // Auto-generated OpenAPI specification

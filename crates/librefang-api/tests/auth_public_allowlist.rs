@@ -267,6 +267,7 @@ const REGISTERED_GET_ROUTES: &[RouteEntry] = &[
     re("/dashboard/manifest.json", Expect::AlwaysPublic),
     re("/dashboard/sw.js", Expect::AlwaysPublic),
     re("/locales/en.json", Expect::AlwaysPublic),
+    re("/locales/ko.json", Expect::AlwaysPublic),
     // GitHub Copilot OAuth must now require auth — pre-fix it was
     // an unauthenticated POST + GET prefix that allowed a hostile
     // pop-under to hijack GITHUB_TOKEN via localhost (audit:

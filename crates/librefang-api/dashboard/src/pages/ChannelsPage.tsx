@@ -508,7 +508,7 @@ function SidecarForm({
               <p className="text-[11px] text-text-dim leading-relaxed">
                 {t("channels.schema_unavailable_hint", {
                   defaultValue:
-                    "This channel now runs as an out-of-process sidecar and its setup form could not be loaded. Install the sidecar SDK, then reload channels (or restart the daemon) and reopen this dialog.",
+                    "This channel runs as an out-of-process sidecar and its setup form could not be loaded. Review the error below. If the SDK is missing, install it; otherwise fix the reported problem. Restart the daemon to retry schema discovery.",
                 })}
               </p>
               <p className="text-[11px] font-mono text-text-dim/90 leading-relaxed break-words">

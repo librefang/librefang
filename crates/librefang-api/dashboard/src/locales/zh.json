@@ -975,7 +975,7 @@
     "results": "结果",
     "saved": "已保存",
     "saved_restart_required": "已保存 — 需要重启 daemon 才能生效",
-    "schema_unavailable_hint": "该 channel 现以独立 sidecar 进程运行，其配置表单无法加载。请先安装 sidecar SDK，然后重新加载 channels（或重启 daemon）并重新打开此对话框。",
+    "schema_unavailable_hint": "该 channel 以独立 sidecar 进程运行，但其配置表单无法加载。请查看下方错误；若缺少 SDK，请先安装，否则请修复所报告的问题。重启 daemon 以重新加载 schema。",
     "schema_unavailable_title": "配置表单不可用",
     "secret_set_placeholder": "•••• (已设置 — 留空则保持不变)",
     "select_all": "全选",
