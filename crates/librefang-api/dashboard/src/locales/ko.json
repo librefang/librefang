@@ -602,7 +602,7 @@
         "description": "이메일 분류, 초안 작성, 일정 관리 및 받은 편지함 관리 에이전트."
       },
       "hello-world": {
-        "name": "안녕하세요 세계",
+        "name": "Hello World",
         "description": "파일 읽기, 웹 검색, 일상적인 질문에 답할 수 있는 친절한 인사말 에이전트입니다."
       },
       "home-automation": {
