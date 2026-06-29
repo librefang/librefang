@@ -5,6 +5,50 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.6.29] - 2026-06-29
+
+_14 PRs from 4 contributors since v2026.6.26-beta.24._
+
+### Highlights
+
+- **Korean language support** — full UI, CLI/TUI, and error message translations added (233 keys covered)
+- **ARM64 Linux packages** — aarch64 binaries now published alongside x86_64 via AUR and the project's pacman repo
+- **Telegram setup resilience** — the setup form stays available after a describe timeout instead of disappearing
+- **Codex CLI flexibility** — Codex CLI can now be used outside of Git repositories
+- **Mixed-media message enrichment** — coalesced batches with mixed content types are now correctly enriched on the debounced path
+
+### Added
+
+- UI Korean translation (#6349) (@seungjin)
+- Complete Korean error translations (43 → 233 keys) (#6353) (@houko)
+- Add Korean (ko) translation for the CLI/TUI (#6356) (@houko)
+- Publish aarch64 packages alongside x86_64 (#6334) (#6358) (@houko)
+
+### Fixed
+
+- Bump pdf-extract 0.10→0.12 to patch lopdf RUSTSEC-2026-0187 (#6339) (@houko)
+- Keep Telegram setup form available after describe timeout (#6345) (@pavver)
+- Allow Codex CLI outside Git repositories (#6347) (@pavver)
+- Enrich coalesced mixed-media batches on the debounced path (#6348) (#6351) (@houko)
+
+<details>
+<summary>Documentation, maintenance, and other internal changes</summary>
+
+### Maintenance
+
+- Symlink legacy NDK binutils so vendored OpenSSL cross-compiles for Android (#6335) (@houko)
+- Put NDK bin on PATH so openssl-src finds the legacy ranlib symlink (#6338) (@houko)
+- Enable auto-merge instead of forcing --admin (#6340) (@houko)
+- Publish AUR packages on release (#6334) (#6341) (@houko)
+- Publish project-maintained pacman repo to R2 (#6334) (#6352) (@houko)
+
+### Other
+
+- Fix[flake.nix]: Add perl to nativeBuildInputs (#6346) (@FrantaNautilus)
+
+</details>
+
+
 ## [2026.6.26] - 2026-06-26
 
 _10 PRs from 2 contributors since v2026.6.24-beta.23._
