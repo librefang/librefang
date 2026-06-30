@@ -168,15 +168,22 @@ impl CodexCliDriver {
         parts.join("\n\n")
     }
 
-    /// Map a model ID like "codex-cli/o4-mini" to CLI --model flag value.
+    /// Map a model ID like "codex-cli/o4-mini" to the CLI `--model` flag value.
+    ///
+    /// Returns `None` for a bare provider id (`"codex-cli"`) or an empty
+    /// string, which makes [`Self::build_args`] omit `--model` entirely so the
+    /// Codex CLI uses the model from its own `~/.codex/config.toml`. Without
+    /// this, LibreFang would force a placeholder `--model codex-cli` and
+    /// override a user who configured Codex against a custom provider (e.g.
+    /// DeepSeek). Any other value is the explicit per-agent model and is passed
+    /// straight through (the previous o4-mini / o3 / gpt-4.1 arms were no-ops
+    /// that returned the same string the catch-all already produces).
     fn model_flag(model: &str) -> Option<String> {
-        let stripped = model.strip_prefix("codex-cli/").unwrap_or(model);
-        match stripped {
-            "o4-mini" => Some("o4-mini".to_string()),
-            "o3" => Some("o3".to_string()),
-            "gpt-4.1" => Some("gpt-4.1".to_string()),
-            _ => Some(stripped.to_string()),
+        let stripped = model.strip_prefix("codex-cli/").unwrap_or(model).trim();
+        if stripped.is_empty() || stripped == "codex-cli" {
+            return None;
         }
+        Some(stripped.to_string())
     }
 
     /// Strip ANSI CSI escape sequences (e.g. `\x1b[1m` … `\x1b[0m`) from a
@@ -493,6 +500,34 @@ mod tests {
             CodexCliDriver::model_flag("custom-model"),
             Some("custom-model".to_string())
         );
+        // A user-configured custom model (e.g. DeepSeek via codex-cli) passes
+        // straight through so `--model deepseek-chat` reaches the CLI.
+        assert_eq!(
+            CodexCliDriver::model_flag("codex-cli/deepseek-chat"),
+            Some("deepseek-chat".to_string())
+        );
+    }
+
+    #[test]
+    fn test_model_flag_bare_provider_id_yields_none() {
+        // A bare provider id or empty string means "no explicit model" — the
+        // driver must omit `--model` so the Codex CLI uses the model from its
+        // own ~/.codex/config.toml instead of a forced placeholder.
+        assert_eq!(CodexCliDriver::model_flag("codex-cli"), None);
+        assert_eq!(CodexCliDriver::model_flag("codex-cli/"), None);
+        assert_eq!(CodexCliDriver::model_flag(""), None);
+        assert_eq!(CodexCliDriver::model_flag("  "), None);
+    }
+
+    #[test]
+    fn test_build_args_omits_model_for_bare_provider() {
+        // With no specific model, `--model` must be absent entirely so Codex
+        // honours its own configured model (regression guard for the override
+        // that forced a placeholder onto a DeepSeek-configured Codex CLI).
+        let driver = CodexCliDriver::new(None, false);
+        let args = driver.build_args("hello", "codex-cli");
+        assert_eq!(args, ["exec", "--skip-git-repo-check", "hello"]);
+        assert!(!args.iter().any(|a| a == "--model"));
     }
 
     #[test]

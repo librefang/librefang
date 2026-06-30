@@ -77,6 +77,93 @@ use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
 use crate::types::ApiErrorResponse;
+
+/// Parse the active model id out of a Codex CLI `config.toml` body.
+///
+/// Codex stores its active model as a top-level `model = "..."` key (an
+/// optional `model_provider = "..."` selects one of the
+/// `[model_providers.<id>]` blocks, but Codex resolves the provider itself —
+/// LibreFang only needs the model id). We read that one scalar and nothing
+/// else, so no `env_key` / credential value is ever touched. Returns `None`
+/// when the body is not valid TOML or carries no non-empty top-level `model`.
+pub(crate) fn parse_codex_configured_model(body: &str) -> Option<String> {
+    let value: toml::Value = toml::from_str(body).ok()?;
+    let model = value.get("model")?.as_str()?.trim();
+    (!model.is_empty()).then(|| model.to_string())
+}
+
+/// Read the Codex CLI's own `~/.codex/config.toml` and return the model it is
+/// configured to run, if any.
+///
+/// LibreFang's static catalog only knows Codex's default OpenAI models, so a
+/// user who points Codex at a custom OpenAI-compatible provider (e.g.
+/// DeepSeek) would otherwise never see that model under the `codex-cli`
+/// provider. Reading the live config here lets `GET /api/models` surface
+/// exactly what Codex will actually run. Degrades to `None` on any
+/// missing/unreadable/invalid file — never an error.
+pub(crate) fn detect_codex_configured_model() -> Option<String> {
+    // Honour `CODEX_HOME` exactly as the Codex CLI does (it overrides
+    // `~/.codex`), so LibreFang reads the same config the spawned CLI will.
+    let codex_dir = std::env::var_os("CODEX_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|h| h.join(".codex")))?;
+    parse_codex_configured_model(&std::fs::read_to_string(codex_dir.join("config.toml")).ok()?)
+}
+
+/// Build the synthesized `codex-cli` catalog row for the live-detected Codex
+/// model, or `None` when it must not be added.
+///
+/// Returns `None` when `existing` already lists the same `codex-cli/<model>`
+/// id (the user configured a standard Codex model the catalog already ships),
+/// or when `available_only` is requested but the `codex-cli` provider is not
+/// available. Pure — no FS / env access — so the dedup, filter, and JSON shape
+/// are unit-testable without controlling the host's Codex config.
+fn codex_synthesized_model_row(
+    configured: &str,
+    existing: &[serde_json::Value],
+    available: bool,
+    available_only: bool,
+) -> Option<serde_json::Value> {
+    let model_id = format!("codex-cli/{configured}");
+    let already_listed = existing.iter().any(|m| {
+        m.get("id")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| s.eq_ignore_ascii_case(&model_id))
+    });
+    if already_listed || (available_only && !available) {
+        return None;
+    }
+    Some(serde_json::json!({
+        "id": model_id,
+        "display_name": format!("{configured} (Codex CLI)"),
+        "provider": "codex-cli",
+        "tier": "custom",
+        "modality": "text",
+        // Unknown at config-read time; the agent loop resolves the real window
+        // from model_metadata when Codex runs. `0` is the catalog's documented
+        // "unknown" sentinel.
+        "context_window": 0,
+        "max_output_tokens": 0,
+        "input_cost_per_m": 0.0,
+        "output_cost_per_m": 0.0,
+        "supports_tools": true,
+        "supports_vision": false,
+        "supports_streaming": true,
+        "supports_thinking": false,
+        "capabilities_catalog": {
+            "supports_tools": true,
+            "supports_vision": false,
+            "supports_streaming": true,
+            "supports_thinking": false,
+        },
+        "aliases": [],
+        "available": available,
+        // Marks this row as derived from the live Codex config rather than the
+        // static catalog (UI/debug hint).
+        "source": "codex_config",
+    }))
+}
+
 #[utoipa::path(
     get,
     path = "/api/models",
@@ -139,7 +226,7 @@ pub async fn list_models(
         })
         .collect();
 
-    let models: Vec<serde_json::Value> = catalog
+    let mut models: Vec<serde_json::Value> = catalog
         .list_models()
         .iter()
         .filter(|m| {
@@ -209,6 +296,40 @@ pub async fn list_models(
         })
         .collect();
 
+    // Surface the model the Codex CLI is configured to run (read live from
+    // ~/.codex/config.toml). The static catalog only ships Codex's default
+    // OpenAI models under `codex-cli`; a user who points Codex at a custom
+    // provider such as DeepSeek would otherwise see the catalog defaults and
+    // never their actual model (librefang/librefang#6134 follow-up). Append
+    // it as a synthesized entry so both the Providers page and the agent
+    // model picker (both read this endpoint) reflect reality.
+    let codex_in_scope = provider_filter
+        .as_deref()
+        .map(|p| p == "codex-cli")
+        .unwrap_or(true);
+    // Synthesized entries are `custom` tier — honour an explicit tier filter.
+    let codex_tier_ok = tier_filter
+        .as_deref()
+        .map(|t| t == "custom")
+        .unwrap_or(true);
+    if codex_in_scope && codex_tier_ok {
+        if let Some(configured) = detect_codex_configured_model() {
+            let available = catalog
+                .get_provider("codex-cli")
+                .map(|p| p.auth_status.is_available())
+                .unwrap_or(false);
+            if let Some(row) =
+                codex_synthesized_model_row(&configured, &models, available, available_only)
+            {
+                models.push(row);
+            }
+        }
+    }
+
+    // `total` / `available` describe the static catalog as a whole (they are
+    // unrelated to this provider-filtered `models` array, which is already a
+    // subset). The live-detected Codex row is a per-response synthesis, not a
+    // catalog member, so it is intentionally not counted here.
     let total = catalog.list_models().len();
     let available_count = catalog.available_models().len();
 
@@ -2614,12 +2735,102 @@ pub async fn detect_ollama() -> impl IntoResponse {
 
 #[cfg(test)]
 mod tests {
+    use super::{codex_synthesized_model_row, parse_codex_configured_model};
     use crate::routes::agent_templates::{get_profile, list_profiles};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::routing::get;
     use axum::Router;
     use tower::ServiceExt;
+
+    #[test]
+    fn codex_config_extracts_top_level_model_past_provider_blocks() {
+        // Verbatim shape of a Codex config.toml pointed at DeepSeek: the
+        // top-level `model` precedes a `[model_providers.<id>]` block that also
+        // carries a `name`/`model`-shaped key. The parser must read the ROOT
+        // `model` and not be confused by nested table keys.
+        let body = r#"
+model = "deepseek-chat"
+model_provider = "deepseek"
+model_reasoning_effort = "medium"
+
+[model_providers.deepseek]
+name = "deepseek"
+base_url = "https://api.deepseek.com/v1"
+wire_api = "chat"
+env_key = "DEEPSEEK_API_KEY"
+"#;
+        assert_eq!(
+            parse_codex_configured_model(body).as_deref(),
+            Some("deepseek-chat")
+        );
+    }
+
+    #[test]
+    fn codex_config_trims_and_handles_provider_only() {
+        // Leading/trailing whitespace is trimmed; a lone provider block with no
+        // top-level model yields None (nothing to surface).
+        assert_eq!(
+            parse_codex_configured_model("model = \"  gpt-5.5  \"\n").as_deref(),
+            Some("gpt-5.5")
+        );
+        assert_eq!(
+            parse_codex_configured_model("[model_providers.x]\nname = \"x\"\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn codex_config_rejects_empty_and_invalid() {
+        // Empty model value, missing key, and non-TOML all degrade to None.
+        assert_eq!(parse_codex_configured_model("model = \"\"\n"), None);
+        assert_eq!(parse_codex_configured_model("model = \"   \"\n"), None);
+        assert_eq!(parse_codex_configured_model(""), None);
+        assert_eq!(
+            parse_codex_configured_model("model_provider = \"trc\"\n"),
+            None
+        );
+        assert_eq!(parse_codex_configured_model("this is not toml {{{"), None);
+        // A non-string `model` (wrong type) must not panic.
+        assert_eq!(parse_codex_configured_model("model = 42\n"), None);
+    }
+
+    #[test]
+    fn codex_row_synthesizes_with_expected_shape() {
+        // A configured DeepSeek model not already in the catalog yields a
+        // `codex-cli/<model>` row tagged as `codex_config`-sourced.
+        let row = codex_synthesized_model_row("deepseek-chat", &[], true, false)
+            .expect("a fresh model must synthesize a row");
+        assert_eq!(row["id"], "codex-cli/deepseek-chat");
+        assert_eq!(row["provider"], "codex-cli");
+        assert_eq!(row["display_name"], "deepseek-chat (Codex CLI)");
+        assert_eq!(row["source"], "codex_config");
+        assert_eq!(row["available"], true);
+        // Picking this row gives the agent `codex-cli/deepseek-chat`, which the
+        // driver strips to `--model deepseek-chat` — the end-to-end contract.
+        assert_eq!(row["tier"], "custom");
+    }
+
+    #[test]
+    fn codex_row_dedups_against_existing_catalog_entry() {
+        // When Codex is configured with a model the catalog already ships
+        // (e.g. gpt-5.5), no duplicate row is synthesized — case-insensitively.
+        let existing = vec![serde_json::json!({ "id": "codex-cli/gpt-5.5" })];
+        assert!(codex_synthesized_model_row("gpt-5.5", &existing, true, false).is_none());
+        assert!(codex_synthesized_model_row("GPT-5.5", &existing, true, false).is_none());
+        // A genuinely different model still synthesizes.
+        assert!(codex_synthesized_model_row("deepseek-chat", &existing, true, false).is_some());
+    }
+
+    #[test]
+    fn codex_row_respects_available_only_filter() {
+        // available=false + available_only=true → suppressed; without the
+        // filter it is still listed (marked unavailable) so the UI can show it.
+        assert!(codex_synthesized_model_row("deepseek-chat", &[], false, true).is_none());
+        let row = codex_synthesized_model_row("deepseek-chat", &[], false, false)
+            .expect("unavailable model still listed when not filtering");
+        assert_eq!(row["available"], false);
+    }
 
     fn profile_router() -> Router {
         Router::new()

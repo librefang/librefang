@@ -404,7 +404,14 @@ impl ClaudeCodeDriver {
 
     /// Map a model ID like "claude-code/opus" to CLI --model flag value.
     fn model_flag(model: &str) -> Option<String> {
-        let stripped = model.strip_prefix("claude-code/").unwrap_or(model);
+        let stripped = model.strip_prefix("claude-code/").unwrap_or(model).trim();
+        // A bare provider id or empty string carries no model selection — omit
+        // `--model` so the Claude Code CLI uses its own configured default
+        // instead of being handed a placeholder it would reject (mirrors
+        // codewhale).
+        if stripped.is_empty() || stripped == "claude-code" {
+            return None;
+        }
         match stripped {
             "opus" => Some("opus".to_string()),
             "sonnet" => Some("sonnet".to_string()),
@@ -2073,6 +2080,15 @@ mod tests {
         assert!(bridge_dir.exists(), "external dir preserved");
 
         let _ = std::fs::remove_dir_all(&bridge_dir);
+    }
+
+    #[test]
+    fn test_model_flag_bare_id_yields_none() {
+        // Bare provider id / empty → None so `--model` is omitted and the CLI
+        // uses its own configured default instead of a rejected placeholder.
+        assert_eq!(ClaudeCodeDriver::model_flag("claude-code"), None);
+        assert_eq!(ClaudeCodeDriver::model_flag("claude-code/"), None);
+        assert_eq!(ClaudeCodeDriver::model_flag("  "), None);
     }
 
     #[test]
