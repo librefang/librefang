@@ -211,21 +211,15 @@ const SALT_LEN: usize = 16;
 /// Nonce length for AES-256-GCM.
 const NONCE_LEN: usize = 12;
 
-/// The concrete nonce type for our AES-256-GCM cipher, named via the cipher's
-/// own `NonceSize` so it can never drift from [`Aes256Gcm`] (12 bytes).
+/// Nonce type tied to `Aes256Gcm`'s own `NonceSize` to prevent cipher drift.
 type VaultNonce = Nonce<<Aes256Gcm as aes_gcm::AeadCore>::NonceSize>;
 
-/// Build an AES-GCM nonce from a byte slice.
-///
-/// aes-gcm 0.11 moved `Nonce` onto `hybrid-array` and deprecated
-/// `Nonce::from_slice`; `TryFrom<&[u8]>` is the replacement. Every caller passes
-/// exactly `NONCE_LEN` bytes (a fixed-size array or a length-checked decode), so
-/// a wrong length is an internal invariant violation surfaced as a typed error
-/// rather than a panic.
+/// Replaces deprecated `Nonce::from_slice` (aes-gcm 0.11) with `TryFrom`, returning an error on wrong length.
 fn nonce_from_bytes(bytes: &[u8]) -> Result<VaultNonce, String> {
     VaultNonce::try_from(bytes)
         .map_err(|_| format!("nonce must be {NONCE_LEN} bytes, got {}", bytes.len()))
 }
+
 /// Magic bytes for vault file format versioning.
 const VAULT_MAGIC: &[u8; 4] = b"OFV1";
 
