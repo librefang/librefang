@@ -560,11 +560,7 @@ async fn transform_step_missing_variable_halts_workflow_with_recorded_reason() {
 async fn transform_step_oversize_output_halts_workflow_with_recorded_reason() {
     let test = boot();
     let engine = test.state.kernel.workflow_engine();
-    // Render roughly 2 * MAX_TRANSFORM_OUTPUT_BYTES bytes to trip our own
-    // output cap. Tera 2.0 caps the `range()` builtin at 100_000 elements, so
-    // we can no longer loop MAX_TRANSFORM_OUTPUT_BYTES (1 MiB) times; emit a
-    // wide chunk per iteration and keep the loop count well under tera's range
-    // cap instead.
+    // Trip the output cap; tera 2.0 limits range() to 100k iterations, so emit a wide chunk per loop.
     const CHUNK_BYTES: usize = 64;
     let iters = (2 * MAX_TRANSFORM_OUTPUT_BYTES).div_ceil(CHUNK_BYTES);
     assert!(
