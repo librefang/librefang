@@ -142,6 +142,8 @@ _33 PRs from 5 contributors since v2026.6.22-beta.22._
 
 ### Fixed
 
+- Surface the model the Codex CLI is configured to run under the `codex-cli` provider, so a custom provider such as DeepSeek (set in `~/.codex/config.toml`) is recognised on the Providers page and in the agent model picker instead of only the catalog's default Codex models (#6365) (@houko)
+- Stop CLI providers (`codex-cli`, `gemini-cli`, `claude-code`, `qwen-code`) from forcing a placeholder `--model <provider-id>` onto their CLI for a bare provider id, so each CLI defers to its own configured default model (#6365) (@houko)
 - Enrich coalesced mixed-media batches on the debounced channel path: audio/voice attachments are transcribed and documents are extracted, not just images, so a photo+voice+pdf burst reaches the agent fully enriched instead of as bare `[Voice message …: url]` / `[File …: url]` placeholders — generalizing the image-only #6321 / #6323 fix via shared `download_media_blocks` + `enrich_media` helpers both inbound paths funnel through (#6348) (@houko)
 - Keep the Telegram dashboard setup form available when its first cold Python `--describe` import exceeds the five-second boot timeout; the catalog now falls back to the adapter's compile-time schema, and the unavailable-form hint no longer claims that channel reload refreshes the boot-only schema cache (@pavver)
 - Allow the Codex CLI provider to run from desktop and daemon processes outside a Git repository, and replace its deprecated `--full-auto` flag (@pavver)
