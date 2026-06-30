@@ -388,12 +388,18 @@ pub fn codex_cli_available() -> bool {
 
 /// Check if Codex CLI credentials exist.
 fn codex_cli_credentials_exist() -> bool {
-    if let Some(home) = home_dir() {
-        let codex_dir = home.join(".codex");
-        codex_dir.join("auth.json").exists()
-    } else {
-        false
-    }
+    codex_config_dir().is_some_and(|dir| dir.join("auth.json").exists())
+}
+
+/// Resolve the Codex CLI config directory, honouring `CODEX_HOME` exactly as
+/// the Codex CLI does (it overrides `~/.codex`). Keeping this consistent with
+/// the API layer's model detector (which also honours `CODEX_HOME`) means
+/// availability detection and configured-model detection read the same
+/// directory when Codex is relocated via `CODEX_HOME`.
+fn codex_config_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("CODEX_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| home_dir().map(|h| h.join(".codex")))
 }
 
 /// Cross-platform home directory.
