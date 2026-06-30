@@ -61,6 +61,7 @@ ignore = [
     { id = "RUSTSEC-2025-0081", reason = "unic-* unmaintained (kuchikiki/selectors chain). https://rustsec.org/advisories/RUSTSEC-2025-0081" },
     { id = "RUSTSEC-2025-0098", reason = "unic-* unmaintained (kuchikiki/selectors chain). https://rustsec.org/advisories/RUSTSEC-2025-0098" },
     { id = "RUSTSEC-2025-0100", reason = "unic-* unmaintained (kuchikiki/selectors chain). https://rustsec.org/advisories/RUSTSEC-2025-0100" },
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser unmaintained; transitive via pdf-extract -> lopdf, no safe upgrade available. https://rustsec.org/advisories/RUSTSEC-2026-0192" },
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
