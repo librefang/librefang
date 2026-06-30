@@ -125,6 +125,32 @@ pub(crate) fn detect_claude_code_configured_model() -> Option<String> {
     )
 }
 
+/// Parse the active model name from a Gemini-CLI-style `settings.json` body (used by Gemini CLI and its Qwen Code fork): the nested `model.name` field.
+pub(crate) fn parse_gemini_style_settings_model(body: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let name = value.get("model")?.get("name")?.as_str()?.trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// Read the model Gemini CLI is configured to run: `GEMINI_MODEL` env first (its documented precedence), then `~/.gemini/settings.json` `model.name`; surfaces a Gemini model the catalog doesn't ship (e.g. a 3.x preview).
+pub(crate) fn detect_gemini_cli_configured_model() -> Option<String> {
+    if let Some(model) = std::env::var("GEMINI_MODEL")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(model);
+    }
+    let dir = dirs::home_dir()?.join(".gemini");
+    parse_gemini_style_settings_model(&std::fs::read_to_string(dir.join("settings.json")).ok()?)
+}
+
+/// Read the model Qwen Code is configured to run: `~/.qwen/settings.json` `model.name` (the documented active-model selector for the Gemini-CLI fork); surfaces an OpenAI-compatible id pointed at via its `modelProviders`.
+pub(crate) fn detect_qwen_code_configured_model() -> Option<String> {
+    let dir = dirs::home_dir()?.join(".qwen");
+    parse_gemini_style_settings_model(&std::fs::read_to_string(dir.join("settings.json")).ok()?)
+}
+
 /// Synthesized catalog row for a CLI provider's live-detected model, or `None` if already listed or filtered out by `available_only`. Pure (no FS/env) so dedup/filter/shape stay unit-testable.
 fn synthesized_cli_model_row(
     provider: &str,
@@ -314,13 +340,19 @@ pub async fn list_models(
     if cli_tier_ok {
         // (provider id, display label, detector). Function pointers keep the
         // out-of-scope detectors from touching the FS / env.
-        let cli_detectors: [CliModelDetector; 2] = [
+        let cli_detectors: [CliModelDetector; 4] = [
             ("codex-cli", "Codex CLI", detect_codex_configured_model),
             (
                 "claude-code",
                 "Claude Code",
                 detect_claude_code_configured_model,
             ),
+            (
+                "gemini-cli",
+                "Gemini CLI",
+                detect_gemini_cli_configured_model,
+            ),
+            ("qwen-code", "Qwen Code", detect_qwen_code_configured_model),
         ];
         for (provider, label, detect) in cli_detectors {
             let in_scope = provider_filter
@@ -2756,7 +2788,8 @@ pub async fn detect_ollama() -> impl IntoResponse {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_claude_code_settings_model, parse_codex_configured_model, synthesized_cli_model_row,
+        parse_claude_code_settings_model, parse_codex_configured_model,
+        parse_gemini_style_settings_model, synthesized_cli_model_row,
     };
     use crate::routes::agent_templates::{get_profile, list_profiles};
     use axum::body::Body;
@@ -2854,6 +2887,39 @@ env_key = "DEEPSEEK_API_KEY"
             parse_claude_code_settings_model(r#"{"env": {"ANTHROPIC_BASE_URL": "x"}}"#),
             None
         );
+    }
+
+    #[test]
+    fn gemini_style_settings_reads_nested_model_name() {
+        // Gemini CLI / Qwen Code store the active model as nested `model.name`.
+        assert_eq!(
+            parse_gemini_style_settings_model(r#"{"model": {"name": "gemini-3-pro-preview"}}"#)
+                .as_deref(),
+            Some("gemini-3-pro-preview")
+        );
+        assert_eq!(
+            parse_gemini_style_settings_model(
+                r#"{"model": {"name": "qwen3-coder-plus"}, "security": {}}"#
+            )
+            .as_deref(),
+            Some("qwen3-coder-plus")
+        );
+        // Missing/empty/wrong-shape/invalid all degrade to None — a settings
+        // file that pins no model (only general/ui/mcpServers keys) surfaces
+        // nothing rather than a bogus row.
+        assert_eq!(
+            parse_gemini_style_settings_model(r#"{"general": {}, "mcpServers": {}}"#),
+            None
+        );
+        assert_eq!(
+            parse_gemini_style_settings_model(r#"{"model": {"name": "  "}}"#),
+            None
+        );
+        assert_eq!(
+            parse_gemini_style_settings_model(r#"{"model": "flat"}"#),
+            None
+        );
+        assert_eq!(parse_gemini_style_settings_model("not json {{{"), None);
     }
 
     #[test]
