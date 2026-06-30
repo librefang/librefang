@@ -381,16 +381,12 @@ fn write_changelog(
 
 /// Insert (or replace) the `version` section into an existing CHANGELOG body.
 ///
-/// A leading `## [Unreleased]` section always stays at the top: a freshly cut
-/// dated release is inserted *below* it, before the first dated `## [YYYY...]`
-/// heading. This matches the contributor workflow documented in
-/// `CONTRIBUTING.md`, where `[Unreleased]` is the curated section humans append
-/// to. Inserting before the very first heading of any kind (the previous
-/// behaviour) buried `[Unreleased]` deeper under every release.
+/// A leading `## [Unreleased]` section always stays at the top: a freshly cut dated release is inserted *below* it, before the first dated `## [YYYY...]` heading.
+/// This matches the contributor workflow documented in `CONTRIBUTING.md`, where `[Unreleased]` is the curated section humans append to.
+/// Inserting before the very first heading of any kind (the previous behaviour) buried `[Unreleased]` deeper under every release.
 fn render_changelog(content: &str, version: &str, section: &str) -> String {
     let heading_re = Regex::new(r"(?m)^## \[").unwrap();
-    // A dated release heading is `## [` followed by a digit (e.g. `## [2026.6.29]`),
-    // never `## [Unreleased]`.
+    // A dated release heading is `## [` followed by a digit (e.g. `## [2026.6.29]`), never `## [Unreleased]`.
     let dated_heading_re = Regex::new(r"(?m)^## \[\d").unwrap();
     let version_re = Regex::new(&format!(r"(?m)^## \[{}\]", regex::escape(version))).unwrap();
 
@@ -428,9 +424,8 @@ fn render_changelog(content: &str, version: &str, section: &str) -> String {
         .find(content)
         .or_else(|| heading_re.find(content))
     {
-        // Insert before the first dated release heading so a leading
-        // `## [Unreleased]` section stays on top. Fall back to the first heading
-        // of any kind when no dated release exists yet.
+        // Insert before the first dated release heading so a leading `## [Unreleased]` section stays on top.
+        // Fall back to the first heading of any kind when no dated release exists yet.
         let pos = m.start();
         let mut result = String::new();
         result.push_str(&content[..pos]);
@@ -519,9 +514,8 @@ mod tests {
 
     #[test]
     fn keeps_unreleased_on_top_when_cutting_release() {
-        // Regression: a new dated release must land BELOW `## [Unreleased]`,
-        // not above it. The old behaviour inserted before the first heading of
-        // any kind, burying `[Unreleased]` deeper under every release.
+        // Regression: a new dated release must land BELOW `## [Unreleased]`, not above it.
+        // The old behaviour inserted before the first heading of any kind, burying `[Unreleased]` deeper under every release.
         let content = "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- pending (#9) (@me)\n\n## [2026.1.1] - 2026-01-01\n\n- old (#1) (@me)\n";
         let section = "## [2026.2.2] - 2026-02-02\n\n### Fixed\n\n- thing (#10) (@me)\n";
         let out = render_changelog(content, "2026.2.2", section);
