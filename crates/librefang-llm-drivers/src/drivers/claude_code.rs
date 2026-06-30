@@ -405,10 +405,7 @@ impl ClaudeCodeDriver {
     /// Map a model ID like "claude-code/opus" to CLI --model flag value.
     fn model_flag(model: &str) -> Option<String> {
         let stripped = model.strip_prefix("claude-code/").unwrap_or(model).trim();
-        // A bare provider id or empty string carries no model selection — omit
-        // `--model` so the Claude Code CLI uses its own configured default
-        // instead of being handed a placeholder it would reject (mirrors
-        // codewhale).
+        // Bare id → omit --model so the CLI uses its own configured default.
         if stripped.is_empty() || stripped == "claude-code" {
             return None;
         }

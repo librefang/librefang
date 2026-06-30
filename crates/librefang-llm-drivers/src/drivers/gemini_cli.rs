@@ -153,9 +153,7 @@ impl GeminiCliDriver {
     /// Map a model ID like "gemini-cli/gemini-2.5-pro" to CLI --model flag value.
     fn model_flag(model: &str) -> Option<String> {
         let stripped = model.strip_prefix("gemini-cli/").unwrap_or(model).trim();
-        // A bare provider id or empty string carries no model selection — omit
-        // `--model` so the Gemini CLI uses its own configured default instead
-        // of being handed a placeholder it would reject (mirrors codewhale).
+        // Bare id → omit --model so the CLI uses its own configured default.
         if stripped.is_empty() || stripped == "gemini-cli" {
             return None;
         }

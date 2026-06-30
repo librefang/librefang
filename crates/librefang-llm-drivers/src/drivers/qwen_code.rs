@@ -433,9 +433,7 @@ impl QwenCodeDriver {
     /// Map a model ID like "qwen-code/qwen3-coder" to CLI --model flag value.
     fn model_flag(model: &str) -> Option<String> {
         let stripped = model.strip_prefix("qwen-code/").unwrap_or(model).trim();
-        // A bare provider id or empty string carries no model selection — omit
-        // `--model` so the Qwen Code CLI uses its own configured default instead
-        // of being handed a placeholder it would reject (mirrors codewhale).
+        // Bare id → omit --model so the CLI uses its own configured default.
         if stripped.is_empty() || stripped == "qwen-code" {
             return None;
         }

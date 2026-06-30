@@ -78,46 +78,20 @@ use std::time::Instant;
 
 use crate::types::ApiErrorResponse;
 
-/// Parse the active model id out of a Codex CLI `config.toml` body.
-///
-/// Codex stores its active model as a top-level `model = "..."` key (an
-/// optional `model_provider = "..."` selects one of the
-/// `[model_providers.<id>]` blocks, but Codex resolves the provider itself —
-/// LibreFang only needs the model id). We read that one scalar and nothing
-/// else, so no `env_key` / credential value is ever touched. Returns `None`
-/// when the body is not valid TOML or carries no non-empty top-level `model`.
 pub(crate) fn parse_codex_configured_model(body: &str) -> Option<String> {
     let value: toml::Value = toml::from_str(body).ok()?;
     let model = value.get("model")?.as_str()?.trim();
     (!model.is_empty()).then(|| model.to_string())
 }
 
-/// Read the Codex CLI's own `~/.codex/config.toml` and return the model it is
-/// configured to run, if any.
-///
-/// LibreFang's static catalog only knows Codex's default OpenAI models, so a
-/// user who points Codex at a custom OpenAI-compatible provider (e.g.
-/// DeepSeek) would otherwise never see that model under the `codex-cli`
-/// provider. Reading the live config here lets `GET /api/models` surface
-/// exactly what Codex will actually run. Degrades to `None` on any
-/// missing/unreadable/invalid file — never an error.
 pub(crate) fn detect_codex_configured_model() -> Option<String> {
-    // Honour `CODEX_HOME` exactly as the Codex CLI does (it overrides
-    // `~/.codex`), so LibreFang reads the same config the spawned CLI will.
+    // Honour CODEX_HOME like the Codex CLI does so we read the same config file it will run with.
     let codex_dir = std::env::var_os("CODEX_HOME")
         .map(std::path::PathBuf::from)
         .or_else(|| dirs::home_dir().map(|h| h.join(".codex")))?;
     parse_codex_configured_model(&std::fs::read_to_string(codex_dir.join("config.toml")).ok()?)
 }
 
-/// Build the synthesized `codex-cli` catalog row for the live-detected Codex
-/// model, or `None` when it must not be added.
-///
-/// Returns `None` when `existing` already lists the same `codex-cli/<model>`
-/// id (the user configured a standard Codex model the catalog already ships),
-/// or when `available_only` is requested but the `codex-cli` provider is not
-/// available. Pure — no FS / env access — so the dedup, filter, and JSON shape
-/// are unit-testable without controlling the host's Codex config.
 fn codex_synthesized_model_row(
     configured: &str,
     existing: &[serde_json::Value],
@@ -296,13 +270,6 @@ pub async fn list_models(
         })
         .collect();
 
-    // Surface the model the Codex CLI is configured to run (read live from
-    // ~/.codex/config.toml). The static catalog only ships Codex's default
-    // OpenAI models under `codex-cli`; a user who points Codex at a custom
-    // provider such as DeepSeek would otherwise see the catalog defaults and
-    // never their actual model (librefang/librefang#6134 follow-up). Append
-    // it as a synthesized entry so both the Providers page and the agent
-    // model picker (both read this endpoint) reflect reality.
     let codex_in_scope = provider_filter
         .as_deref()
         .map(|p| p == "codex-cli")
@@ -326,10 +293,6 @@ pub async fn list_models(
         }
     }
 
-    // `total` / `available` describe the static catalog as a whole (they are
-    // unrelated to this provider-filtered `models` array, which is already a
-    // subset). The live-detected Codex row is a per-response synthesis, not a
-    // catalog member, so it is intentionally not counted here.
     let total = catalog.list_models().len();
     let available_count = catalog.available_models().len();
 

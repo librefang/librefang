@@ -168,16 +168,7 @@ impl CodexCliDriver {
         parts.join("\n\n")
     }
 
-    /// Map a model ID like "codex-cli/o4-mini" to the CLI `--model` flag value.
-    ///
-    /// Returns `None` for a bare provider id (`"codex-cli"`) or an empty
-    /// string, which makes [`Self::build_args`] omit `--model` entirely so the
-    /// Codex CLI uses the model from its own `~/.codex/config.toml`. Without
-    /// this, LibreFang would force a placeholder `--model codex-cli` and
-    /// override a user who configured Codex against a custom provider (e.g.
-    /// DeepSeek). Any other value is the explicit per-agent model and is passed
-    /// straight through (the previous o4-mini / o3 / gpt-4.1 arms were no-ops
-    /// that returned the same string the catch-all already produces).
+    /// Map a model ID like "codex-cli/o4-mini" to the CLI `--model` flag; returns `None` for a bare provider id so the CLI uses its own configured model.
     fn model_flag(model: &str) -> Option<String> {
         let stripped = model.strip_prefix("codex-cli/").unwrap_or(model).trim();
         if stripped.is_empty() || stripped == "codex-cli" {
