@@ -92,13 +92,49 @@ pub(crate) fn detect_codex_configured_model() -> Option<String> {
     parse_codex_configured_model(&std::fs::read_to_string(codex_dir.join("config.toml")).ok()?)
 }
 
-fn codex_synthesized_model_row(
+/// A CLI passthrough provider's live model detector: `(provider_id, label, detector_fn)`.
+type CliModelDetector = (&'static str, &'static str, fn() -> Option<String>);
+
+/// Parse Claude Code's configured model from a `settings.json` body — top-level `model`, else `env.ANTHROPIC_MODEL`; reads only the id, never the token beside it.
+pub(crate) fn parse_claude_code_settings_model(body: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let from = |v: Option<&serde_json::Value>| {
+        v.and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    from(value.get("model"))
+        .or_else(|| from(value.get("env").and_then(|e| e.get("ANTHROPIC_MODEL"))))
+}
+
+/// Read the model Claude Code is configured to run: `ANTHROPIC_MODEL` env first, then `settings.json` (honouring `CLAUDE_CONFIG_DIR`); surfaces e.g. a Kimi id pointed at via `ANTHROPIC_BASE_URL`.
+pub(crate) fn detect_claude_code_configured_model() -> Option<String> {
+    if let Some(model) = std::env::var("ANTHROPIC_MODEL")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(model);
+    }
+    let config_dir = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|h| h.join(".claude")))?;
+    parse_claude_code_settings_model(
+        &std::fs::read_to_string(config_dir.join("settings.json")).ok()?,
+    )
+}
+
+/// Synthesized catalog row for a CLI provider's live-detected model, or `None` if already listed or filtered out by `available_only`. Pure (no FS/env) so dedup/filter/shape stay unit-testable.
+fn synthesized_cli_model_row(
+    provider: &str,
+    label: &str,
     configured: &str,
     existing: &[serde_json::Value],
     available: bool,
     available_only: bool,
 ) -> Option<serde_json::Value> {
-    let model_id = format!("codex-cli/{configured}");
+    let model_id = format!("{provider}/{configured}");
     let already_listed = existing.iter().any(|m| {
         m.get("id")
             .and_then(|v| v.as_str())
@@ -109,12 +145,12 @@ fn codex_synthesized_model_row(
     }
     Some(serde_json::json!({
         "id": model_id,
-        "display_name": format!("{configured} (Codex CLI)"),
-        "provider": "codex-cli",
+        "display_name": format!("{configured} ({label})"),
+        "provider": provider,
         "tier": "custom",
         "modality": "text",
         // Unknown at config-read time; the agent loop resolves the real window
-        // from model_metadata when Codex runs. `0` is the catalog's documented
+        // from model_metadata when the CLI runs. `0` is the catalog's documented
         // "unknown" sentinel.
         "context_window": 0,
         "max_output_tokens": 0,
@@ -132,9 +168,9 @@ fn codex_synthesized_model_row(
         },
         "aliases": [],
         "available": available,
-        // Marks this row as derived from the live Codex config rather than the
+        // Marks this row as derived from the live CLI config rather than the
         // static catalog (UI/debug hint).
-        "source": "codex_config",
+        "source": "cli_config",
     }))
 }
 
@@ -270,29 +306,50 @@ pub async fn list_models(
         })
         .collect();
 
-    let codex_in_scope = provider_filter
-        .as_deref()
-        .map(|p| p == "codex-cli")
-        .unwrap_or(true);
-    // Synthesized entries are `custom` tier — honour an explicit tier filter.
-    let codex_tier_ok = tier_filter
+    // Surface the model each CLI passthrough provider is configured to run, read live from its own config (DeepSeek via Codex's config.toml, a Kimi id via Claude Code's ANTHROPIC_MODEL / settings.json) since the static catalog only ships the tool's defaults. Synthesized rows are `custom` tier, so honour an explicit tier filter.
+    let cli_tier_ok = tier_filter
         .as_deref()
         .map(|t| t == "custom")
         .unwrap_or(true);
-    if codex_in_scope && codex_tier_ok {
-        if let Some(configured) = detect_codex_configured_model() {
-            let available = catalog
-                .get_provider("codex-cli")
-                .map(|p| p.auth_status.is_available())
-                .unwrap_or(false);
-            if let Some(row) =
-                codex_synthesized_model_row(&configured, &models, available, available_only)
-            {
-                models.push(row);
+    if cli_tier_ok {
+        // (provider id, display label, detector). Function pointers keep the
+        // out-of-scope detectors from touching the FS / env.
+        let cli_detectors: [CliModelDetector; 2] = [
+            ("codex-cli", "Codex CLI", detect_codex_configured_model),
+            (
+                "claude-code",
+                "Claude Code",
+                detect_claude_code_configured_model,
+            ),
+        ];
+        for (provider, label, detect) in cli_detectors {
+            let in_scope = provider_filter
+                .as_deref()
+                .map(|p| p == provider)
+                .unwrap_or(true);
+            if !in_scope {
+                continue;
+            }
+            if let Some(configured) = detect() {
+                let available = catalog
+                    .get_provider(provider)
+                    .map(|p| p.auth_status.is_available())
+                    .unwrap_or(false);
+                if let Some(row) = synthesized_cli_model_row(
+                    provider,
+                    label,
+                    &configured,
+                    &models,
+                    available,
+                    available_only,
+                ) {
+                    models.push(row);
+                }
             }
         }
     }
 
+    // `total` / `available` count the static catalog only — the per-response synthesized CLI rows are deliberately not added.
     let total = catalog.list_models().len();
     let available_count = catalog.available_models().len();
 
@@ -2698,7 +2755,9 @@ pub async fn detect_ollama() -> impl IntoResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{codex_synthesized_model_row, parse_codex_configured_model};
+    use super::{
+        parse_claude_code_settings_model, parse_codex_configured_model, synthesized_cli_model_row,
+    };
     use crate::routes::agent_templates::{get_profile, list_profiles};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
@@ -2759,39 +2818,125 @@ env_key = "DEEPSEEK_API_KEY"
     }
 
     #[test]
-    fn codex_row_synthesizes_with_expected_shape() {
+    fn claude_code_settings_prefers_top_level_model_then_env() {
+        // Top-level `model` wins.
+        assert_eq!(
+            parse_claude_code_settings_model(r#"{"model": "kimi-k2-0905-preview"}"#).as_deref(),
+            Some("kimi-k2-0905-preview")
+        );
+        // Falls back to env.ANTHROPIC_MODEL when no top-level model — and never
+        // surfaces the auth token sitting beside it.
+        let body = r#"{"env": {"ANTHROPIC_BASE_URL": "https://api.moonshot.cn/anthropic", "ANTHROPIC_AUTH_TOKEN": "sk-secret", "ANTHROPIC_MODEL": "kimi-k2-turbo"}}"#;
+        assert_eq!(
+            parse_claude_code_settings_model(body).as_deref(),
+            Some("kimi-k2-turbo")
+        );
+        // Top-level wins over the env block when both are present.
+        let both = r#"{"model": "kimi-top", "env": {"ANTHROPIC_MODEL": "kimi-env"}}"#;
+        assert_eq!(
+            parse_claude_code_settings_model(both).as_deref(),
+            Some("kimi-top")
+        );
+    }
+
+    #[test]
+    fn claude_code_settings_rejects_empty_and_invalid() {
+        assert_eq!(parse_claude_code_settings_model(r#"{"model": ""}"#), None);
+        assert_eq!(
+            parse_claude_code_settings_model(r#"{"model": "   "}"#),
+            None
+        );
+        assert_eq!(parse_claude_code_settings_model("{}"), None);
+        assert_eq!(parse_claude_code_settings_model(r#"{"model": 42}"#), None);
+        assert_eq!(parse_claude_code_settings_model("not json {{{"), None);
+        // An env block without ANTHROPIC_MODEL yields nothing.
+        assert_eq!(
+            parse_claude_code_settings_model(r#"{"env": {"ANTHROPIC_BASE_URL": "x"}}"#),
+            None
+        );
+    }
+
+    #[test]
+    fn cli_row_synthesizes_with_expected_shape() {
         // A configured DeepSeek model not already in the catalog yields a
-        // `codex-cli/<model>` row tagged as `codex_config`-sourced.
-        let row = codex_synthesized_model_row("deepseek-chat", &[], true, false)
-            .expect("a fresh model must synthesize a row");
+        // `codex-cli/<model>` row tagged as `cli_config`-sourced.
+        let row =
+            synthesized_cli_model_row("codex-cli", "Codex CLI", "deepseek-chat", &[], true, false)
+                .expect("a fresh model must synthesize a row");
         assert_eq!(row["id"], "codex-cli/deepseek-chat");
         assert_eq!(row["provider"], "codex-cli");
         assert_eq!(row["display_name"], "deepseek-chat (Codex CLI)");
-        assert_eq!(row["source"], "codex_config");
+        assert_eq!(row["source"], "cli_config");
         assert_eq!(row["available"], true);
         // Picking this row gives the agent `codex-cli/deepseek-chat`, which the
         // driver strips to `--model deepseek-chat` — the end-to-end contract.
         assert_eq!(row["tier"], "custom");
+
+        // The same helper serves claude-code (e.g. a Kimi id via ANTHROPIC_BASE_URL).
+        let cc = synthesized_cli_model_row(
+            "claude-code",
+            "Claude Code",
+            "kimi-k2-0905-preview",
+            &[],
+            true,
+            false,
+        )
+        .expect("claude-code model must synthesize a row");
+        assert_eq!(cc["id"], "claude-code/kimi-k2-0905-preview");
+        assert_eq!(cc["display_name"], "kimi-k2-0905-preview (Claude Code)");
     }
 
     #[test]
-    fn codex_row_dedups_against_existing_catalog_entry() {
-        // When Codex is configured with a model the catalog already ships
+    fn cli_row_dedups_against_existing_catalog_entry() {
+        // When the CLI is configured with a model the catalog already ships
         // (e.g. gpt-5.5), no duplicate row is synthesized — case-insensitively.
         let existing = vec![serde_json::json!({ "id": "codex-cli/gpt-5.5" })];
-        assert!(codex_synthesized_model_row("gpt-5.5", &existing, true, false).is_none());
-        assert!(codex_synthesized_model_row("GPT-5.5", &existing, true, false).is_none());
+        assert!(synthesized_cli_model_row(
+            "codex-cli",
+            "Codex CLI",
+            "gpt-5.5",
+            &existing,
+            true,
+            false
+        )
+        .is_none());
+        assert!(synthesized_cli_model_row(
+            "codex-cli",
+            "Codex CLI",
+            "GPT-5.5",
+            &existing,
+            true,
+            false
+        )
+        .is_none());
         // A genuinely different model still synthesizes.
-        assert!(codex_synthesized_model_row("deepseek-chat", &existing, true, false).is_some());
+        assert!(synthesized_cli_model_row(
+            "codex-cli",
+            "Codex CLI",
+            "deepseek-chat",
+            &existing,
+            true,
+            false
+        )
+        .is_some());
     }
 
     #[test]
-    fn codex_row_respects_available_only_filter() {
+    fn cli_row_respects_available_only_filter() {
         // available=false + available_only=true → suppressed; without the
         // filter it is still listed (marked unavailable) so the UI can show it.
-        assert!(codex_synthesized_model_row("deepseek-chat", &[], false, true).is_none());
-        let row = codex_synthesized_model_row("deepseek-chat", &[], false, false)
-            .expect("unavailable model still listed when not filtering");
+        assert!(synthesized_cli_model_row(
+            "codex-cli",
+            "Codex CLI",
+            "deepseek-chat",
+            &[],
+            false,
+            true
+        )
+        .is_none());
+        let row =
+            synthesized_cli_model_row("codex-cli", "Codex CLI", "deepseek-chat", &[], false, false)
+                .expect("unavailable model still listed when not filtering");
         assert_eq!(row["available"], false);
     }
 
