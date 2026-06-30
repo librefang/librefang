@@ -245,7 +245,7 @@ ratatui = "0.30"
 colored = "3"
 
 # Encryption
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 argon2 = { version = "0.5", features = ["rand"] }
 
 # Lightweight regex

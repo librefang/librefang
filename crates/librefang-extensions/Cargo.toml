@@ -22,6 +22,11 @@ rustls-native-certs = { workspace = true }
 axum = { workspace = true }
 zeroize = { workspace = true }
 rand = { workspace = true }
+# OS-entropy RNG for vault key / salt / nonce generation. aes-gcm 0.11 no
+# longer re-exports `OsRng` from `aes_gcm::aead`, so source it from rand_core
+# directly — same crate + version the rest of the workspace's crypto uses
+# (librefang-wire keys/kex, librefang-api password_hash).
+rand_core = { version = "0.6", features = ["getrandom"] }
 sha2 = { workspace = true }
 hmac = { workspace = true }
 subtle = { workspace = true }
