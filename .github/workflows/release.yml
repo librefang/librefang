@@ -1660,7 +1660,7 @@ jobs:
           releaseName: "${{ env.RELEASE_TAG }}"
           releaseDraft: false
           prerelease: false
-          includeUpdaterJson: true
+          uploadUpdaterJson: true
           projectPath: crates/librefang-desktop
           args: ${{ matrix.platform.args }}
 
@@ -1680,7 +1680,7 @@ jobs:
           releaseName: "${{ env.RELEASE_TAG }}"
           releaseDraft: false
           prerelease: false
-          includeUpdaterJson: true
+          uploadUpdaterJson: true
           projectPath: crates/librefang-desktop
           args: ${{ matrix.platform.args }}
 
