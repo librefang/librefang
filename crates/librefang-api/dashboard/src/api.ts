@@ -584,10 +584,10 @@ export interface WorkflowRunItem {
   workflow_name?: string;
   state?: unknown;
   steps_completed?: number;
-  /** Parameters the run was launched with (JSON object string or raw text). */
+  current_step_index?: number | null;
+  total_steps?: number;
   input?: string;
-  /** Run-level failure message, present on failed runs. */
-  error?: string;
+  error?: string | null;
   started_at?: string;
   completed_at?: string | null;
 }
@@ -1666,10 +1666,6 @@ export interface ModelItem {
   };
   aliases?: string[];
   available?: boolean;
-  // Provenance hint. "cli_config" marks a row synthesized from a CLI tool's own
-  // live config (codex/claude-code/gemini/qwen) rather than a catalog entry — it
-  // is not a user-added custom model, so it must not show a delete control.
-  source?: string;
 }
 
 export async function listModels(params?: { provider?: string; tier?: string; available?: boolean }): Promise<{ models: ModelItem[]; total: number; available: number }> {
@@ -2376,6 +2372,11 @@ export async function runWorkflow(
   }, LONG_RUNNING_TIMEOUT_MS); // 5 min timeout — workflows run multiple LLM steps
 }
 
+/** Re-run a previous workflow run with the same input parameters. */
+export async function rerunWorkflowRun(runId: string): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>(`/api/workflows/runs/${encodeURIComponent(runId)}/rerun`, {}, DEFAULT_POST_TIMEOUT_MS);
+}
+
 export async function deleteWorkflow(workflowId: string): Promise<ApiActionResponse> {
   return del<ApiActionResponse>(`/api/workflows/${encodeURIComponent(workflowId)}`);
 }
@@ -2399,22 +2400,6 @@ export async function listWorkflowRuns(workflowId: string): Promise<WorkflowRunI
   return get<WorkflowRunItem[]>(`/api/workflows/${encodeURIComponent(workflowId)}/runs`);
 }
 
-/**
- * Re-run a previous run with its original parameters.
- *
- * The backend reads the workflow + input off the stored run (not caller-supplied
- * params), so this is a faithful, non-destructive repeat of what executed. The
- * original run is left untouched; a fresh run is queued and `{ run_id }` of the
- * new run is returned.
- */
-export async function rerunWorkflowRun(runId: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(
-    `/api/workflows/runs/${encodeURIComponent(runId)}/rerun`,
-    {},
-    LONG_RUNNING_TIMEOUT_MS, // queues a multi-step LLM run
-  );
-}
-
 /** Per-step execution result returned by run/detail endpoints. */
 export interface WorkflowStepResult {
   step_name: string;
@@ -2426,8 +2411,9 @@ export interface WorkflowStepResult {
   input_tokens: number;
   output_tokens: number;
   duration_ms: number;
-  /** Step-level failure message; present on the step that failed. */
-  error?: string;
+  error?: string | null;
+  /** Variable bindings at the time this step executed. */
+  variables?: Record<string, string>;
 }
 
 /** Full detail for a single workflow run. */
@@ -2437,6 +2423,8 @@ export interface WorkflowRunDetail {
   workflow_name: string;
   input: string;
   state: string;
+  current_step_index?: number | null;
+  total_steps?: number;
   output?: string;
   error?: string;
   started_at: string;

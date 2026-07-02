@@ -277,7 +277,7 @@ impl LibreFangKernel {
                 String,
             )> = vec![(
                 primary.clone(),
-                agent_provider.clone(),
+                manifest.model.model.clone(),
                 agent_provider.clone(),
             )];
             for fb in &effective_fallbacks {
