@@ -2372,6 +2372,11 @@ export async function runWorkflow(
   }, LONG_RUNNING_TIMEOUT_MS); // 5 min timeout — workflows run multiple LLM steps
 }
 
+/** Re-run a previous workflow run with the same input parameters. */
+export async function rerunWorkflowRun(runId: string): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>(`/api/workflows/runs/${encodeURIComponent(runId)}/rerun`, {}, DEFAULT_POST_TIMEOUT_MS);
+}
+
 export async function deleteWorkflow(workflowId: string): Promise<ApiActionResponse> {
   return del<ApiActionResponse>(`/api/workflows/${encodeURIComponent(workflowId)}`);
 }
