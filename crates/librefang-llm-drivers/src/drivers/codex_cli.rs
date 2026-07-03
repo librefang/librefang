@@ -168,15 +168,13 @@ impl CodexCliDriver {
         parts.join("\n\n")
     }
 
-    /// Map a model ID like "codex-cli/o4-mini" to CLI --model flag value.
+    /// Map a model ID like "codex-cli/o4-mini" to the CLI `--model` flag; returns `None` for a bare provider id so the CLI uses its own configured model.
     fn model_flag(model: &str) -> Option<String> {
-        let stripped = model.strip_prefix("codex-cli/").unwrap_or(model);
-        match stripped {
-            "o4-mini" => Some("o4-mini".to_string()),
-            "o3" => Some("o3".to_string()),
-            "gpt-4.1" => Some("gpt-4.1".to_string()),
-            _ => Some(stripped.to_string()),
+        let stripped = model.strip_prefix("codex-cli/").unwrap_or(model).trim();
+        if stripped.is_empty() || stripped == "codex-cli" {
+            return None;
         }
+        Some(stripped.to_string())
     }
 
     /// Strip ANSI CSI escape sequences (e.g. `\x1b[1m` … `\x1b[0m`) from a
@@ -390,12 +388,18 @@ pub fn codex_cli_available() -> bool {
 
 /// Check if Codex CLI credentials exist.
 fn codex_cli_credentials_exist() -> bool {
-    if let Some(home) = home_dir() {
-        let codex_dir = home.join(".codex");
-        codex_dir.join("auth.json").exists()
-    } else {
-        false
-    }
+    codex_config_dir().is_some_and(|dir| dir.join("auth.json").exists())
+}
+
+/// Resolve the Codex CLI config directory, honouring `CODEX_HOME` exactly as
+/// the Codex CLI does (it overrides `~/.codex`). Keeping this consistent with
+/// the API layer's model detector (which also honours `CODEX_HOME`) means
+/// availability detection and configured-model detection read the same
+/// directory when Codex is relocated via `CODEX_HOME`.
+fn codex_config_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("CODEX_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| home_dir().map(|h| h.join(".codex")))
 }
 
 /// Cross-platform home directory.
@@ -493,6 +497,34 @@ mod tests {
             CodexCliDriver::model_flag("custom-model"),
             Some("custom-model".to_string())
         );
+        // A user-configured custom model (e.g. DeepSeek via codex-cli) passes
+        // straight through so `--model deepseek-chat` reaches the CLI.
+        assert_eq!(
+            CodexCliDriver::model_flag("codex-cli/deepseek-chat"),
+            Some("deepseek-chat".to_string())
+        );
+    }
+
+    #[test]
+    fn test_model_flag_bare_provider_id_yields_none() {
+        // A bare provider id or empty string means "no explicit model" — the
+        // driver must omit `--model` so the Codex CLI uses the model from its
+        // own ~/.codex/config.toml instead of a forced placeholder.
+        assert_eq!(CodexCliDriver::model_flag("codex-cli"), None);
+        assert_eq!(CodexCliDriver::model_flag("codex-cli/"), None);
+        assert_eq!(CodexCliDriver::model_flag(""), None);
+        assert_eq!(CodexCliDriver::model_flag("  "), None);
+    }
+
+    #[test]
+    fn test_build_args_omits_model_for_bare_provider() {
+        // With no specific model, `--model` must be absent entirely so Codex
+        // honours its own configured model (regression guard for the override
+        // that forced a placeholder onto a DeepSeek-configured Codex CLI).
+        let driver = CodexCliDriver::new(None, false);
+        let args = driver.build_args("hello", "codex-cli");
+        assert_eq!(args, ["exec", "--skip-git-repo-check", "hello"]);
+        assert!(!args.iter().any(|a| a == "--model"));
     }
 
     #[test]

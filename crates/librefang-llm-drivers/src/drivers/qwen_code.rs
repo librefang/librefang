@@ -432,7 +432,11 @@ impl QwenCodeDriver {
 
     /// Map a model ID like "qwen-code/qwen3-coder" to CLI --model flag value.
     fn model_flag(model: &str) -> Option<String> {
-        let stripped = model.strip_prefix("qwen-code/").unwrap_or(model);
+        let stripped = model.strip_prefix("qwen-code/").unwrap_or(model).trim();
+        // Bare id → omit --model so the CLI uses its own configured default.
+        if stripped.is_empty() || stripped == "qwen-code" {
+            return None;
+        }
         match stripped {
             "qwen3-coder" | "coder" => Some("qwen3-coder".to_string()),
             "qwen-coder-plus" | "coder-plus" => Some("qwen-coder-plus".to_string()),
@@ -1491,6 +1495,15 @@ mod tests {
         );
         // No temp dir should be allocated for an unresolvable ImageFile.
         assert!(prepared.image_dir.is_none());
+    }
+
+    #[test]
+    fn test_model_flag_bare_id_yields_none() {
+        // Bare provider id / empty → None so `--model` is omitted and the CLI
+        // uses its own configured default instead of a rejected placeholder.
+        assert_eq!(QwenCodeDriver::model_flag("qwen-code"), None);
+        assert_eq!(QwenCodeDriver::model_flag("qwen-code/"), None);
+        assert_eq!(QwenCodeDriver::model_flag("  "), None);
     }
 
     #[test]

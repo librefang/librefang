@@ -406,7 +406,7 @@ export const rawTranslations: Record<string, Translation> = {
       rows: [
         { metric: 'Zimny Start', others: '2.5 ~ 4s', librefang: '180ms' },
         { metric: 'Pamięć w Spoczynku', others: '180 ~ 250MB', librefang: '40MB' },
-        { metric: 'Rozmiar Binarnego', others: '100 ~ 200MB', librefang: '32MB' },
+        { metric: 'Rozmiar Pliku Binarnego', others: '100 ~ 200MB', librefang: '32MB' },
         { metric: 'Warstwy Bezpieczeństwa', others: '2 ~ 3', librefang: '16' },
         { metric: 'Adaptery Kanałów', others: '8 ~ 15', librefang: '44' },
         { metric: 'Wbudowane Ręce', others: '0', librefang: '15' },
@@ -596,6 +596,239 @@ export const rawTranslations: Record<string, Translation> = {
       desc: 'Dodaj stronę do ekranu głównego lub paska zadań.',
       install: 'Zainstaluj',
       dismiss: 'Odrzuć',
+    },
+    common: {
+      copy: 'Kopiuj',
+      copied: 'Skopiowano!',
+      copyToClipboard: 'Kopiuj do schowka',
+      loadingReleases: 'Wczytywanie wydań...',
+      skipToContent: 'Przejdź do treści',
+      backToTop: 'Powrót do góry',
+      viewFull: 'Zobacz całość',
+      contributors: 'Współtwórcy',
+      agentOs: 'Agent OS',
+      breadcrumb: 'Ścieżka nawigacji',
+    },
+    header: {
+      toggleTheme: 'Przełącz motyw',
+      viewSource: 'Zobacz kod źródłowy na GitHub',
+      source: 'Kod źródłowy',
+      switchLanguage: 'Zmień język',
+      switchLanguageNamed: 'Zmień język ({name})',
+      toggleMenu: 'Przełącz menu',
+    },
+    errorBoundary: {
+      label: 'Błąd wykonania',
+      title: 'Coś poszło nie tak.',
+      reload: 'Odśwież',
+      home: 'Strona główna',
+    },
+    metrics: {
+      breadcrumb: 'Metryki',
+      label: 'Metryki rejestru',
+      title: 'Telemetria kliknięć',
+      desc: 'Zagregowane liczby wyświetleń stron szczegółów w całym rejestrze, rejestrowane przez endpoint workera /api/registry/click.',
+      descPrefix: 'Zagregowane liczby wyświetleń stron szczegółów w całym rejestrze, rejestrowane przez endpoint workera ',
+      endpoint: '/api/registry/click',
+      descSuffix: '.',
+      loadError: 'Nie udało się wczytać metryk',
+      totalClicks: 'Łączna liczba kliknięć',
+      uniqueItems: 'Unikalne pozycje',
+      activeCategories: 'Aktywne kategorie',
+      generated: 'Wygenerowano',
+      perCategory: 'Według kategorii',
+      topItems: 'Najpopularniejsze pozycje ogółem',
+      items: 'pozycji',
+      clicks: 'kliknięć',
+    },
+    deploy: {
+      title: 'Wdróż LibreFang',
+      subtitle: 'Wybierz swoją platformę',
+      terminalIntro: 'Albo wdróż z terminala:',
+      installLocally: 'Zainstaluj lokalnie',
+      website: 'Strona internetowa',
+      copyrightSuffix: 'Agent Operating System',
+      backToPlatforms: 'Powrót do platform',
+      badges: ['Darmowy LLM w zestawie', 'Nie wymaga klucza API', '1 GB przestrzeni dyskowej'],
+      tokenRequired: 'Podaj swój token API Fly.io.',
+      deployFailed: 'Wdrożenie nie powiodło się',
+      deploying: 'Wdrażanie...',
+      deployToFly: 'Wdróż na Fly.io',
+      deployed: 'Wdrożono!',
+      deployedDesc: 'Twoja instancja LibreFang uruchamia się (1-2 min). Darmowy LLM (Step 3.5 Flash) jest już skonfigurowany i gotowy do użycia.',
+      openDashboard: 'Otwórz panel',
+      flyConsole: 'Konsola Fly.io',
+      app: 'Aplikacja',
+      region: 'Region',
+      model: 'Model',
+      includedModel: 'Step 3.5 Flash (darmowy)',
+      upgradeModel: 'Ulepsz model',
+      freeNote: 'Darmowy LLM (Step 3.5 Flash przez OpenRouter) jest już skonfigurowany. Twoja instancja działa od razu — bez konieczności podawania kluczy API.',
+      stepOneTitle: 'Uzyskaj token API Fly.io',
+      stepOnePrefix: '',
+      signUp: 'Zarejestruj się',
+      or: 'lub',
+      logIn: 'zaloguj się',
+      stepOneMiddle: 'na Fly.io, następnie przejdź do',
+      personalAccessTokens: 'Personal Access Tokens',
+      stepOneSuffix: 'i utwórz nowy token.',
+      stepTwoTitle: 'Wklej i wdróż',
+      stepTwoDesc: 'Twój token jest wysyłany wyłącznie do API Fly.io i nigdy nie jest przechowywany na naszych serwerach.',
+      tokenLabel: 'Token API Fly.io',
+      troubleshooting: 'Rozwiązywanie problemów',
+      platforms: {
+        flyio: {
+          desc: 'Zawsze darmowe, trwałe przechowywanie danych',
+          badge: 'Polecane',
+          demo: 'Demo na żywo',
+        },
+        render: {
+          desc: 'Wdrożenie OAuth jednym kliknięciem',
+          badge: 'Najprościej',
+          demo: 'Demo na żywo',
+          warning: 'Darmowy plan: usypia po 15 min, brak trwałego przechowywania danych',
+        },
+        railway: {
+          desc: 'Proste wdrożenie z darmowym kredytem 5 USD',
+        },
+        gcp: {
+          desc: 'Zawsze darmowe (e2-micro), 30 GB przechowywania danych',
+          badge: 'Terraform',
+        },
+        docker: {
+          desc: 'Jedna komenda, działa wszędzie',
+        },
+      },
+      localInstalls: {
+        macos: {
+          name: 'macOS',
+          desc: 'Homebrew albo pobierz plik binarny',
+        },
+        linux: {
+          name: 'Linux',
+          desc: 'Skrypt instalacyjny albo pobierz plik binarny',
+        },
+        windows: {
+          name: 'Windows',
+          desc: 'Instalator PowerShell albo plik .msi',
+        },
+      },
+      steps: {
+        auth: 'Weryfikowanie tokenu...',
+        app: 'Tworzenie aplikacji...',
+        net: 'Przydzielanie adresów IP...',
+        vol: 'Tworzenie trwałego wolumenu...',
+        machine: 'Uruchamianie maszyny ze Step 3.5 Flash...',
+      },
+      troubleshootingItems: {
+        sso: {
+          q: 'Nie można utworzyć Personal Access Token (błąd SSO)',
+          lines: [
+            [
+              {
+                text: 'Jeśli widzisz: ',
+              },
+              {
+                em: '"Access Tokens cannot be created because an organization requires SSO"',
+              },
+            ],
+            [
+              {
+                text: 'Użyj tokenu przypisanego do organizacji. Uruchom w terminalu:',
+              },
+            ],
+            [
+              {
+                code: 'flyctl tokens org <your-org-name>',
+              },
+            ],
+            [
+              {
+                text: 'Następnie wklej wygenerowany token powyżej.',
+              },
+            ],
+          ],
+        },
+        image: {
+          q: 'Wdrożenie nie powiodło się: obraz nie znaleziony',
+          lines: [
+            [
+              {
+                text: 'Obraz Docker ',
+              },
+              {
+                code: 'ghcr.io/librefang/librefang:latest',
+              },
+              {
+                text: ' jest budowany przy każdym wydaniu.',
+              },
+            ],
+            [
+              {
+                text: 'Jeśli żadne wydanie nie zostało jeszcze opublikowane, użyj poniższego skryptu wdrożenia z terminala — buduje on obraz ze źródeł.',
+              },
+            ],
+          ],
+        },
+        llm: {
+          q: 'Jak dodać lub zmienić dostawcę LLM po wdrożeniu?',
+          lines: [
+            [
+              {
+                code: 'flyctl secrets set OPENAI_API_KEY=sk-... --app your-app-name',
+              },
+            ],
+            [
+              {
+                text: 'Następnie edytuj ',
+              },
+              {
+                code: '/data/config.toml',
+              },
+              {
+                text: ' za pomocą ',
+              },
+              {
+                code: 'flyctl ssh console',
+              },
+              {
+                text: ', aby zmienić domyślny model.',
+              },
+            ],
+          ],
+        },
+      },
+    },
+    changelog: {
+      title: 'Dziennik zmian',
+      desc: 'Śledź każdą aktualizację LibreFang',
+      backHome: 'Powrót do strony głównej',
+      releases: 'wydania',
+      downloads: 'pobrania',
+      loading: 'Wczytywanie wydań...',
+      loadError: 'Nie udało się wczytać wydań',
+      unknownError: 'Nieznany błąd',
+      empty: 'Nie znaleziono żadnych wydań.',
+      noFilterMatches: 'Brak wydań spełniających bieżący filtr.',
+      fullNotes: 'Zobacz pełne informacje o wydaniu na GitHub.',
+      viewOnGitHub: 'Zobacz na GitHub',
+      filters: {
+        all: 'Wszystkie',
+        stable: 'Stabilne',
+        prerelease: 'Wersje przedwydaniowe',
+      },
+      releaseTypes: {
+        stable: 'Stabilna',
+        rc: 'RC',
+        beta: 'Beta',
+      },
+      changeTypes: {
+        feature: 'Dodano',
+        fix: 'Naprawiono',
+        breaking: 'Zmiany łamiące kompatybilność',
+        performance: 'Wydajność',
+        other: 'Inne',
+      },
     },
     footer: { docs: 'Dokumentacja', license: 'Licencja', privacy: 'Prywatność', changelog: 'Dziennik zmian' },
   },
@@ -1212,7 +1445,7 @@ export const rawTranslations: Record<string, Translation> = {
       contribute: '到 GitHub 提交贡献',
       noMatches: '没有匹配结果：',
       backHome: '首页',
-      sourceHint: '数据通过 Cloudflare Worker 从 librefang-registry 仓库代理获取。',
+      sourceHint: '数据代理自 GitHub 上的 librefang-registry 仓库。',
       readDocs: '查看文档',
       manifest: '清单',
       copy: '复制',
@@ -1229,7 +1462,7 @@ export const rawTranslations: Record<string, Translation> = {
       downloads: '次下载',
       stars: '颗星',
       thisWeek: '本周新增',
-      sort: { label: '排序', popular: '热门优先', nameAsc: '名称 A–Z', nameDesc: '名称 Z–A', trending: '点击量', downloads: '下载量最多', weekly: '本周热门' },
+      sort: { label: '排序', popular: '热门优先', nameAsc: '名称 A–Z', nameDesc: '名称 Z–A', trending: '点击量最多', downloads: '下载量最多', weekly: '本周热门' },
       onThisPage: '本页导航',
       previous: '上一个',
       next: '下一个',
@@ -1248,12 +1481,12 @@ export const rawTranslations: Record<string, Translation> = {
       categories: {
         skills:   { title: '技能', desc: '可插拔的工具包 —— Python、WASM、Node 或 prompt-only 技能，扩展 Agent 的能力边界。' },
         mcp:      { title: 'MCP 服务器', desc: 'Model Context Protocol 服务器，把外部工具与数据直接挂接到任何 Agent。' },
-        plugins:  { title: '插件', desc: '运行时扩展 —— 为守护进程添加自定义命令、通道或行为。' },
+        plugins:  { title: '插件', desc: '运行时扩展 —— 为守护进程添加自定义命令、渠道或行为。' },
         hands:    { title: '能力单元', desc: '自主能力单元。每个 Hand 自带模型、工具与工作流 —— 直接启用，不必自己拼装。' },
         agents:   { title: 'Agent 模板', desc: '预置 Agent 模板。模型、系统提示词、能力与调度都写在同一份清单里。' },
         providers:{ title: '模型供应商', desc: 'LLM 供应商适配器：Anthropic、OpenAI、Gemini、Groq、本地模型，以及另外 40 多家。' },
         workflows:{ title: '工作流', desc: '以 TOML 描述的多步 Agent 编排：串联 Agent、条件分支、状态持久化。' },
-        channels: { title: '通道', desc: '消息平台适配器：Telegram、Slack、Discord、WhatsApp、LINE 等 44 个。' },
+        channels: { title: '渠道', desc: '消息平台适配器：Telegram、Slack、Discord、WhatsApp、LINE 等 44 个。' },
       },
     },
     search: {
@@ -1267,7 +1500,7 @@ export const rawTranslations: Record<string, Translation> = {
     },
     browse: {
       title: '浏览注册表',
-      desc: '9 个分类一览 —— 点击任一进入完整清单，按热度排序。',
+      desc: '每个分类一览 —— 点击任一进入完整清单，按热度排序。',
     },
     notFound: {
       title: '页面未找到',
@@ -1279,6 +1512,239 @@ export const rawTranslations: Record<string, Translation> = {
       desc: '把网站添加到主屏幕 / 程序坞。',
       install: '安装',
       dismiss: '关闭',
+    },
+    common: {
+      copy: '复制',
+      copied: '已复制！',
+      copyToClipboard: '复制到剪贴板',
+      loadingReleases: '正在加载版本...',
+      skipToContent: '跳转到主要内容',
+      backToTop: '返回顶部',
+      viewFull: '查看完整内容',
+      contributors: '贡献者',
+      agentOs: 'Agent OS',
+      breadcrumb: '面包屑导航',
+    },
+    header: {
+      toggleTheme: '切换主题',
+      viewSource: '在 GitHub 上查看源码',
+      source: '源码',
+      switchLanguage: '切换语言',
+      switchLanguageNamed: '切换语言（{name}）',
+      toggleMenu: '切换菜单',
+    },
+    errorBoundary: {
+      label: '运行时错误',
+      title: '出错了。',
+      reload: '重新加载',
+      home: '首页',
+    },
+    metrics: {
+      breadcrumb: '指标',
+      label: '注册表指标',
+      title: '点击遥测数据',
+      desc: '通过 /api/registry/click 工作端点记录的注册表详情页浏览量汇总统计。',
+      descPrefix: '通过 ',
+      endpoint: '/api/registry/click',
+      descSuffix: ' 工作端点记录的注册表详情页浏览量汇总统计。',
+      loadError: '无法加载指标',
+      totalClicks: '总点击数',
+      uniqueItems: '独立项目数',
+      activeCategories: '活跃分类数',
+      generated: '生成时间',
+      perCategory: '按分类统计',
+      topItems: '总体热门项目',
+      items: '项',
+      clicks: '次点击',
+    },
+    deploy: {
+      title: '部署 LibreFang',
+      subtitle: '选择你的平台',
+      terminalIntro: '或者从终端部署：',
+      installLocally: '本地安装',
+      website: '官网',
+      copyrightSuffix: 'Agent Operating System',
+      backToPlatforms: '返回平台列表',
+      badges: ['内置免费 LLM', '无需 API 密钥', '1 GB 存储空间'],
+      tokenRequired: '请输入你的 Fly.io API Token。',
+      deployFailed: '部署失败',
+      deploying: '正在部署...',
+      deployToFly: '部署到 Fly.io',
+      deployed: '部署成功！',
+      deployedDesc: '你的 LibreFang 实例正在启动（1-2 分钟）。免费 LLM（Step 3.5 Flash）已预先配置好，可直接使用。',
+      openDashboard: '打开仪表盘',
+      flyConsole: 'Fly.io 控制台',
+      app: '应用',
+      region: '区域',
+      model: '模型',
+      includedModel: 'Step 3.5 Flash（免费）',
+      upgradeModel: '升级模型',
+      freeNote: '已预先配置免费 LLM（通过 OpenRouter 提供的 Step 3.5 Flash）。你的实例开箱即用，无需任何 API 密钥。',
+      stepOneTitle: '获取 Fly.io API Token',
+      stepOnePrefix: '',
+      signUp: '注册',
+      or: '或',
+      logIn: '登录',
+      stepOneMiddle: 'Fly.io，然后前往',
+      personalAccessTokens: 'Personal Access Tokens',
+      stepOneSuffix: '创建一个新的 Token。',
+      stepTwoTitle: '粘贴并部署',
+      stepTwoDesc: '你的 Token 只会发送给 Fly.io API，绝不会存储在我们的服务器上。',
+      tokenLabel: 'Fly.io API Token',
+      troubleshooting: '故障排查',
+      platforms: {
+        flyio: {
+          desc: '永久免费，持久化存储',
+          badge: '推荐',
+          demo: '在线演示',
+        },
+        render: {
+          desc: '一键 OAuth 部署',
+          badge: '最简单',
+          demo: '在线演示',
+          warning: '免费套餐：15 分钟后休眠，无持久化存储',
+        },
+        railway: {
+          desc: '部署简单，附带 5 美元免费额度',
+        },
+        gcp: {
+          desc: '永久免费（e2-micro），30GB 存储空间',
+          badge: 'Terraform',
+        },
+        docker: {
+          desc: '一条命令，随处运行',
+        },
+      },
+      localInstalls: {
+        macos: {
+          name: 'macOS',
+          desc: '使用 Homebrew 或下载二进制文件',
+        },
+        linux: {
+          name: 'Linux',
+          desc: '使用安装脚本或下载二进制文件',
+        },
+        windows: {
+          name: 'Windows',
+          desc: 'PowerShell 安装程序或 .msi',
+        },
+      },
+      steps: {
+        auth: '正在验证 Token...',
+        app: '正在创建应用...',
+        net: '正在分配 IP 地址...',
+        vol: '正在创建持久化卷...',
+        machine: '正在启动搭载 Step 3.5 Flash 的机器...',
+      },
+      troubleshootingItems: {
+        sso: {
+          q: '无法创建 Personal Access Token（SSO 错误）',
+          lines: [
+            [
+              {
+                text: '如果你看到：',
+              },
+              {
+                em: '"Access Tokens cannot be created because an organization requires SSO"',
+              },
+            ],
+            [
+              {
+                text: '请改用按组织生成的 Token。在终端中运行：',
+              },
+            ],
+            [
+              {
+                code: 'flyctl tokens org <your-org-name>',
+              },
+            ],
+            [
+              {
+                text: '然后将生成的 Token 粘贴到上方。',
+              },
+            ],
+          ],
+        },
+        image: {
+          q: '部署失败：找不到镜像',
+          lines: [
+            [
+              {
+                text: 'Docker 镜像 ',
+              },
+              {
+                code: 'ghcr.io/librefang/librefang:latest',
+              },
+              {
+                text: ' 会在每次发布时构建。',
+              },
+            ],
+            [
+              {
+                text: '如果尚未发布任何版本，请使用下方的终端部署脚本——它会从源码构建。',
+              },
+            ],
+          ],
+        },
+        llm: {
+          q: '部署后如何添加或更改 LLM 提供商？',
+          lines: [
+            [
+              {
+                code: 'flyctl secrets set OPENAI_API_KEY=sk-... --app your-app-name',
+              },
+            ],
+            [
+              {
+                text: '然后通过 ',
+              },
+              {
+                code: 'flyctl ssh console',
+              },
+              {
+                text: ' 编辑 ',
+              },
+              {
+                code: '/data/config.toml',
+              },
+              {
+                text: ' 以更新默认模型。',
+              },
+            ],
+          ],
+        },
+      },
+    },
+    changelog: {
+      title: '更新日志',
+      desc: '跟踪 LibreFang 的每一次更新',
+      backHome: '返回首页',
+      releases: '个版本',
+      downloads: '次下载',
+      loading: '正在加载版本...',
+      loadError: '加载版本失败',
+      unknownError: '未知错误',
+      empty: '未找到任何版本。',
+      noFilterMatches: '没有符合当前筛选条件的版本。',
+      fullNotes: '查看 GitHub 上的完整发布说明。',
+      viewOnGitHub: '在 GitHub 上查看',
+      filters: {
+        all: '全部',
+        stable: '稳定版',
+        prerelease: '预发布版',
+      },
+      releaseTypes: {
+        stable: '稳定版',
+        rc: 'RC',
+        beta: 'Beta',
+      },
+      changeTypes: {
+        feature: '新增',
+        fix: '修复',
+        breaking: '破坏性变更',
+        performance: '性能',
+        other: '其他',
+      },
     },
     footer: { docs: '文档', license: '许可证', privacy: '隐私', changelog: '更新日志' },
   },
@@ -1471,14 +1937,14 @@ export const rawTranslations: Record<string, Translation> = {
       configOnly: '{category}透過 ~/.librefang/config.toml 設定，沒有 CLI 安裝指令。請複製下方清單，貼入設定檔中對應段落。',
       relatedIn: '更多{category}',
       retry: '重試',
-      openInDashboard: '或在本地儀表盤中安裝',
+      openInDashboard: '或在本地儀表板中安裝',
       lastUpdated: '更新於',
       copyLink: '複製此段連結',
       trending: '熱門',
       downloads: '次下載',
       stars: '顆星',
-      thisWeek: '本週新增',
-      sort: { label: '排序', popular: '熱門優先', nameAsc: '名稱 A–Z', nameDesc: '名稱 Z–A', trending: '點擊量', downloads: '下載量最多', weekly: '本週熱門' },
+      thisWeek: '本週',
+      sort: { label: '排序', popular: '熱門優先', nameAsc: '名稱 A–Z', nameDesc: '名稱 Z–A', trending: '點擊量最多', downloads: '下載量最多', weekly: '本週熱門' },
       onThisPage: '本頁導覽',
       previous: '上一個',
       next: '下一個',
@@ -1516,7 +1982,7 @@ export const rawTranslations: Record<string, Translation> = {
     },
     browse: {
       title: '瀏覽註冊表',
-      desc: '9 個分類一覽 —— 點擊任一進入完整清單，按熱度排序。',
+      desc: '各分類一覽 —— 點擊任一進入完整清單，按熱度排序。',
     },
     notFound: {
       title: '頁面未找到',
@@ -1528,6 +1994,239 @@ export const rawTranslations: Record<string, Translation> = {
       desc: '把網站加入主畫面 / 程式塢。',
       install: '安裝',
       dismiss: '關閉',
+    },
+    common: {
+      agentOs: 'Agent 作業系統',
+      backToTop: '回到頂部',
+      breadcrumb: '導覽路徑',
+      contributors: '貢獻者',
+      copied: '已複製！',
+      copy: '複製',
+      copyToClipboard: '複製到剪貼簿',
+      loadingReleases: '正在載入版本…',
+      skipToContent: '跳至主要內容',
+      viewFull: '查看完整內容',
+    },
+    header: {
+      source: '原始碼',
+      switchLanguage: '切換語言',
+      switchLanguageNamed: '切換語言（{name}）',
+      toggleMenu: '切換選單',
+      toggleTheme: '切換主題',
+      viewSource: '在 GitHub 上查看原始碼',
+    },
+    errorBoundary: {
+      home: '首頁',
+      label: '執行階段錯誤',
+      reload: '重新載入',
+      title: '發生錯誤。',
+    },
+    metrics: {
+      activeCategories: '活躍分類',
+      breadcrumb: '指標',
+      clicks: '次點擊',
+      desc: '透過 /api/registry/click worker 端點記錄的整個註冊表詳情頁面瀏覽次數統計。',
+      descPrefix: '透過 ',
+      descSuffix: ' worker 端點記錄的整個註冊表詳情頁面瀏覽次數統計。',
+      endpoint: '/api/registry/click',
+      generated: '產生時間',
+      items: '項',
+      label: '註冊表指標',
+      loadError: '無法載入指標',
+      perCategory: '依分類統計',
+      title: '點擊遙測',
+      topItems: '整體熱門項目',
+      totalClicks: '總點擊數',
+      uniqueItems: '不重複項目數',
+    },
+    deploy: {
+      app: '應用程式',
+      backToPlatforms: '返回平台選擇',
+      badges: ['內建免費 LLM', '無需 API 金鑰', '1 GB 儲存空間'],
+      copyrightSuffix: 'Agent 作業系統',
+      deployFailed: '部署失敗',
+      deployToFly: '部署至 Fly.io',
+      deployed: '部署完成！',
+      deployedDesc: '您的 LibreFang 執行個體正在啟動（約 1–2 分鐘）。免費 LLM（Step 3.5 Flash）已預先設定完成，可立即使用。',
+      deploying: '部署中…',
+      flyConsole: 'Fly.io 控制台',
+      freeNote: '系統已預先設定好免費 LLM（透過 OpenRouter 提供的 Step 3.5 Flash），您的執行個體開箱即用，無需 API 金鑰。',
+      includedModel: 'Step 3.5 Flash（免費）',
+      installLocally: '本機安裝',
+      localInstalls: {
+        linux: {
+          desc: '安裝腳本或下載執行檔',
+          name: 'Linux',
+        },
+        macos: {
+          desc: '使用 Homebrew 或下載執行檔',
+          name: 'macOS',
+        },
+        windows: {
+          desc: 'PowerShell 安裝程式或 .msi',
+          name: 'Windows',
+        },
+      },
+      logIn: '登入',
+      model: '模型',
+      openDashboard: '開啟儀表板',
+      or: '或',
+      personalAccessTokens: 'Personal Access Tokens',
+      platforms: {
+        docker: {
+          desc: '一個指令，隨處執行',
+        },
+        flyio: {
+          badge: '推薦',
+          demo: '線上示範',
+          desc: '永久免費，具持久性儲存',
+        },
+        gcp: {
+          badge: 'Terraform',
+          desc: '永久免費（e2-micro），30GB 儲存空間',
+        },
+        railway: {
+          desc: '部署簡單，贈送 5 美元免費額度',
+        },
+        render: {
+          badge: '最簡單',
+          demo: '線上示範',
+          desc: '一鍵 OAuth 部署',
+          warning: '免費方案：閒置 15 分鐘後會進入休眠，且無持久性儲存',
+        },
+      },
+      region: '地區',
+      signUp: '註冊',
+      stepOneMiddle: 'Fly.io 帳戶，然後前往',
+      stepOnePrefix: '',
+      stepOneSuffix: '並建立一個新權杖。',
+      stepOneTitle: '取得 Fly.io API 權杖',
+      stepTwoDesc: '您的權杖僅會傳送至 Fly.io API，絕不會儲存在我們的伺服器上。',
+      stepTwoTitle: '貼上並部署',
+      steps: {
+        app: '正在建立應用程式…',
+        auth: '正在驗證權杖…',
+        machine: '正在以 Step 3.5 Flash 啟動機器…',
+        net: '正在配置 IP 位址…',
+        vol: '正在建立持久性磁碟區…',
+      },
+      subtitle: '選擇您的平台',
+      terminalIntro: '或從終端機部署：',
+      title: '部署 LibreFang',
+      tokenLabel: 'Fly.io API 權杖',
+      tokenRequired: '請輸入您的 Fly.io API 權杖。',
+      troubleshooting: '疑難排解',
+      troubleshootingItems: {
+        image: {
+          lines: [
+            [
+              {
+                text: 'Docker 映像檔 ',
+              },
+              {
+                code: 'ghcr.io/librefang/librefang:latest',
+              },
+              {
+                text: ' 會在每次發行版本時建置。',
+              },
+            ],
+            [
+              {
+                text: '若尚未發布任何版本，請使用下方的終端機部署腳本，它會從原始碼建置。',
+              },
+            ],
+          ],
+          q: '部署失敗：找不到映像檔',
+        },
+        llm: {
+          lines: [
+            [
+              {
+                code: 'flyctl secrets set OPENAI_API_KEY=sk-... --app your-app-name',
+              },
+            ],
+            [
+              {
+                text: '然後透過 ',
+              },
+              {
+                code: 'flyctl ssh console',
+              },
+              {
+                text: ' 編輯 ',
+              },
+              {
+                code: '/data/config.toml',
+              },
+              {
+                text: ' 以更新預設模型。',
+              },
+            ],
+          ],
+          q: '部署後要如何新增或變更 LLM 供應商？',
+        },
+        sso: {
+          lines: [
+            [
+              {
+                text: '若您看到：',
+              },
+              {
+                em: '"Access Tokens cannot be created because an organization requires SSO"',
+              },
+            ],
+            [
+              {
+                text: '請改用組織專屬權杖，於終端機執行：',
+              },
+            ],
+            [
+              {
+                code: 'flyctl tokens org <your-org-name>',
+              },
+            ],
+            [
+              {
+                text: '然後將產生的權杖貼到上方欄位。',
+              },
+            ],
+          ],
+          q: '無法建立 Personal Access Token（SSO 錯誤）',
+        },
+      },
+      upgradeModel: '升級模型',
+      website: '網站',
+    },
+    changelog: {
+      backHome: '回到首頁',
+      changeTypes: {
+        breaking: '重大變更',
+        feature: '新增',
+        fix: '修復',
+        other: '其他',
+        performance: '效能',
+      },
+      desc: '追蹤 LibreFang 的每一次更新',
+      downloads: '次下載',
+      empty: '找不到任何版本。',
+      filters: {
+        all: '全部',
+        prerelease: '預發布版',
+        stable: '穩定版',
+      },
+      fullNotes: '完整發行說明請見 GitHub。',
+      loadError: '載入版本失敗',
+      loading: '正在載入版本…',
+      noFilterMatches: '沒有符合目前篩選條件的版本。',
+      releaseTypes: {
+        beta: 'Beta',
+        rc: 'RC',
+        stable: '穩定版',
+      },
+      releases: '個版本',
+      title: '更新日誌',
+      unknownError: '未知錯誤',
+      viewOnGitHub: '在 GitHub 上查看',
     },
     footer: { docs: '文件', license: '授權', privacy: '隱私', changelog: '更新日誌' },
   },
@@ -1542,7 +2241,7 @@ export const rawTranslations: Record<string, Translation> = {
         '自律エージェントを24時間365日稼働',
         'ワークフロー全体を置き換え',
         'あらゆるハードウェアにデプロイ',
-        '16層のセキュリティで保護',
+        '16層のセキュリティで監視',
       ],
       desc: 'LibreFang は自律型 AI エージェントのための本番グレードランタイムです。シングルバイナリ、{handsCount} の内蔵ケイパビリティユニット、{channelsCount} チャネルアダプタ。ダウンタイムが許されないワークロードのために Rust で構築。',
       getStarted: '始める',
@@ -1748,7 +2447,7 @@ export const rawTranslations: Record<string, Translation> = {
         mcp:      { title: 'MCP サーバー', desc: 'Model Context Protocol サーバーで、外部ツールとデータソースを任意の Agent に直接接続。' },
         plugins:  { title: 'プラグイン', desc: 'LibreFang デーモンにカスタムコマンド・チャネル・挙動を追加するランタイム拡張。' },
         hands:    { title: 'Hands', desc: '自律的な能力ユニット。各 Hand はモデル、ツール、ワークフローを同梱 —— 組み立てずに有効化。' },
-        agents:   { title: 'Agent', desc: 'プリビルトの Agent テンプレート。モデル・システムプロンプト・権限・スケジュールを1つのマニフェストに。' },
+        agents:   { title: 'Agent', desc: 'プリビルトの Agent テンプレート。モデル・システムプロンプト・能力・スケジュールを1つのマニフェストに。' },
         providers:{ title: 'プロバイダー', desc: 'LLM プロバイダーアダプター：Anthropic、OpenAI、Gemini、Groq、ローカル、その他 40+。' },
         workflows:{ title: 'ワークフロー', desc: 'TOML で書かれた多段 Agent オーケストレーション。Agent の連結、条件分岐、状態の永続化。' },
         channels: { title: 'チャネル', desc: 'メッセージングアダプター：Telegram、Slack、Discord、WhatsApp、LINE など 44 プラットフォーム。' },
@@ -1778,11 +2477,244 @@ export const rawTranslations: Record<string, Translation> = {
       install: 'インストール',
       dismiss: '閉じる',
     },
+    common: {
+      agentOs: 'Agent OS',
+      backToTop: 'トップに戻る',
+      breadcrumb: 'ブレッドクラム',
+      contributors: 'コントリビューター',
+      copied: 'コピーしました！',
+      copy: 'コピー',
+      copyToClipboard: 'クリップボードにコピー',
+      loadingReleases: 'リリースを読み込み中...',
+      skipToContent: 'コンテンツへスキップ',
+      viewFull: 'すべて表示',
+    },
+    header: {
+      source: 'ソース',
+      switchLanguage: '言語を切り替え',
+      switchLanguageNamed: '言語を切り替え（{name}）',
+      toggleMenu: 'メニューを切り替え',
+      toggleTheme: 'テーマを切り替え',
+      viewSource: 'GitHub でソースを見る',
+    },
+    errorBoundary: {
+      home: 'ホーム',
+      label: '実行時エラー',
+      reload: '再読み込み',
+      title: '問題が発生しました。',
+    },
+    metrics: {
+      activeCategories: '有効なカテゴリ数',
+      breadcrumb: 'メトリクス',
+      clicks: 'クリック',
+      desc: 'レジストリ全体の詳細ページビューの集計数。/api/registry/click ワーカーエンドポイント経由で記録されます。',
+      descPrefix: 'レジストリ全体の詳細ページビューの集計数。',
+      descSuffix: ' ワーカーエンドポイント経由で記録されます。',
+      endpoint: '/api/registry/click',
+      generated: '生成日時',
+      items: '件',
+      label: 'レジストリメトリクス',
+      loadError: 'メトリクスを読み込めませんでした',
+      perCategory: 'カテゴリ別',
+      title: 'クリックテレメトリー',
+      topItems: '全体のトップアイテム',
+      totalClicks: '総クリック数',
+      uniqueItems: 'ユニークアイテム数',
+    },
+    deploy: {
+      app: 'アプリ',
+      backToPlatforms: 'プラットフォーム一覧に戻る',
+      badges: ['無料 LLM 付属', 'API キー不要', '1 GB ストレージ'],
+      copyrightSuffix: 'Agent Operating System',
+      deployFailed: 'デプロイに失敗しました',
+      deployToFly: 'Fly.io にデプロイ',
+      deployed: 'デプロイ完了！',
+      deployedDesc: 'LibreFang インスタンスが起動中です（1〜2分）。無料 LLM（Step 3.5 Flash）は事前設定済みで、そのまま利用できます。',
+      deploying: 'デプロイ中...',
+      flyConsole: 'Fly.io コンソール',
+      freeNote: '無料 LLM（OpenRouter 経由の Step 3.5 Flash）が事前設定されています。API キーなしで、そのまますぐに使えます。',
+      includedModel: 'Step 3.5 Flash（無料）',
+      installLocally: 'ローカルにインストール',
+      localInstalls: {
+        linux: {
+          desc: 'インストールスクリプトまたはバイナリをダウンロード',
+          name: 'Linux',
+        },
+        macos: {
+          desc: 'Homebrew またはバイナリをダウンロード',
+          name: 'macOS',
+        },
+        windows: {
+          desc: 'PowerShell インストーラーまたは .msi',
+          name: 'Windows',
+        },
+      },
+      logIn: 'ログイン',
+      model: 'モデル',
+      openDashboard: 'ダッシュボードを開く',
+      or: 'または',
+      personalAccessTokens: 'Personal Access Tokens',
+      platforms: {
+        docker: {
+          desc: 'コマンド1つでどこでも実行',
+        },
+        flyio: {
+          badge: 'おすすめ',
+          demo: 'ライブデモ',
+          desc: '永久無料、永続ストレージ',
+        },
+        gcp: {
+          badge: 'Terraform',
+          desc: '永久無料（e2-micro）、30GB ストレージ',
+        },
+        railway: {
+          desc: '$5 分の無料クレジットで簡単にデプロイ',
+        },
+        render: {
+          badge: '最も簡単',
+          demo: 'ライブデモ',
+          desc: 'OAuth によるワンクリックデプロイ',
+          warning: '無料プラン：15分後にスリープ、永続ストレージなし',
+        },
+      },
+      region: 'リージョン',
+      signUp: 'サインアップ',
+      stepOneMiddle: 'して Fly.io にアクセスし、',
+      stepOnePrefix: '',
+      stepOneSuffix: 'に移動して新しいトークンを作成してください。',
+      stepOneTitle: 'Fly.io の API トークンを取得',
+      stepTwoDesc: 'トークンは Fly.io の API にのみ送信され、当サービスのサーバーには保存されません。',
+      stepTwoTitle: '貼り付けてデプロイ',
+      steps: {
+        app: 'アプリを作成中...',
+        auth: 'トークンを確認中...',
+        machine: 'Step 3.5 Flash でマシンを起動中...',
+        net: 'IP アドレスを割り当て中...',
+        vol: '永続ボリュームを作成中...',
+      },
+      subtitle: 'プラットフォームを選択してください',
+      terminalIntro: 'またはターミナルからデプロイ：',
+      title: 'LibreFang をデプロイ',
+      tokenLabel: 'Fly.io API トークン',
+      tokenRequired: 'Fly.io API トークンを入力してください。',
+      troubleshooting: 'トラブルシューティング',
+      troubleshootingItems: {
+        image: {
+          lines: [
+            [
+              {
+                text: 'Docker イメージ ',
+              },
+              {
+                code: 'ghcr.io/librefang/librefang:latest',
+              },
+              {
+                text: ' は各リリースごとにビルドされます。',
+              },
+            ],
+            [
+              {
+                text: 'まだリリースが公開されていない場合は、下記のターミナルデプロイスクリプトを使用してください。ソースからビルドされます。',
+              },
+            ],
+          ],
+          q: 'デプロイ失敗：イメージが見つかりません',
+        },
+        llm: {
+          lines: [
+            [
+              {
+                code: 'flyctl secrets set OPENAI_API_KEY=sk-... --app your-app-name',
+              },
+            ],
+            [
+              {
+                text: '次に ',
+              },
+              {
+                code: 'flyctl ssh console',
+              },
+              {
+                text: ' 経由で ',
+              },
+              {
+                code: '/data/config.toml',
+              },
+              {
+                text: ' を編集し、デフォルトモデルを更新してください。',
+              },
+            ],
+          ],
+          q: 'デプロイ後に LLM プロバイダーを追加・変更するには？',
+        },
+        sso: {
+          lines: [
+            [
+              {
+                text: '次のように表示される場合：',
+              },
+              {
+                em: '"Access Tokens cannot be created because an organization requires SSO"',
+              },
+            ],
+            [
+              {
+                text: '代わりに組織単位のトークンを使用してください。ターミナルで次を実行：',
+              },
+            ],
+            [
+              {
+                code: 'flyctl tokens org <your-org-name>',
+              },
+            ],
+            [
+              {
+                text: '生成されたトークンを上記の欄に貼り付けてください。',
+              },
+            ],
+          ],
+          q: 'Personal Access Token を作成できない（SSO エラー）',
+        },
+      },
+      upgradeModel: 'モデルをアップグレード',
+      website: 'ウェブサイト',
+    },
+    changelog: {
+      backHome: 'ホームに戻る',
+      changeTypes: {
+        breaking: '破壊的変更',
+        feature: '追加',
+        fix: '修正',
+        other: 'その他',
+        performance: 'パフォーマンス',
+      },
+      desc: 'LibreFang のすべての更新を追跡',
+      downloads: 'ダウンロード数',
+      empty: 'リリースが見つかりません。',
+      filters: {
+        all: 'すべて',
+        prerelease: 'プレリリース',
+        stable: '安定版',
+      },
+      fullNotes: 'GitHub で完全なリリースノートを確認してください。',
+      loadError: 'リリースの読み込みに失敗しました',
+      loading: 'リリースを読み込み中...',
+      noFilterMatches: '現在のフィルターに一致するリリースはありません。',
+      releaseTypes: {
+        beta: 'ベータ',
+        rc: 'RC',
+        stable: '安定版',
+      },
+      releases: 'リリース',
+      title: '変更履歴',
+      unknownError: '不明なエラー',
+      viewOnGitHub: 'GitHub で見る',
+    },
     footer: { docs: 'ドキュメント', license: 'ライセンス', privacy: 'プライバシー', changelog: '変更履歴' },
   },
 
   ko: {
-    nav: { architecture: '아키텍처', hands: 'Hands', performance: '성능', install: '설치', downloads: '다운로드', docs: '문서', features: '마켓플레이스', evolution: '스킬 자가 진화', workflows: '워크플로', registry: '레지스트리', learnMore: '기능' },
+    nav: { architecture: '아키텍처', hands: 'Hands', performance: '성능', install: '설치', downloads: '다운로드', docs: '문서', features: '마켓플레이스', evolution: '스킬 자가 진화', workflows: '워크플로우', registry: '레지스트리', learnMore: '기능' },
     hero: {
       badge: '오픈소스',
       title1: 'Agent',
@@ -1998,14 +2930,14 @@ export const rawTranslations: Record<string, Translation> = {
         plugins:  { title: '플러그인', desc: 'LibreFang 데몬에 커스텀 명령어, 채널, 동작을 추가하는 런타임 확장.' },
         hands:    { title: 'Hands', desc: '자율 능력 유닛. 각 Hand는 자체 모델, 도구, 워크플로를 포함 —— 조립 없이 활성화.' },
         agents:   { title: 'Agent 템플릿', desc: '사전 구축된 Agent 템플릿. 모델, 시스템 프롬프트, 권한, 스케줄을 하나의 매니페스트에.' },
-        providers:{ title: '프로바이더', desc: 'LLM 프로바이더 어댑터: Anthropic, OpenAI, Gemini, Groq, 로컬 등 40개 이상.' },
-        workflows:{ title: '워크플로', desc: 'TOML로 작성된 다단계 Agent 오케스트레이션. Agent 연결, 조건 분기, 상태 지속성.' },
+        providers:{ title: '제공자', desc: 'LLM 제공자 어댑터: Anthropic, OpenAI, Gemini, Groq, 로컬 등 40개 이상.' },
+        workflows:{ title: '워크플로우', desc: 'TOML로 작성된 다단계 Agent 오케스트레이션. Agent 연결, 조건 분기, 상태 지속성.' },
         channels: { title: '채널', desc: '메시징 어댑터: Telegram, Slack, Discord, WhatsApp, LINE 등 44개 플랫폼.' },
       },
     },
     search: {
       title: '레지스트리 검색',
-      placeholder: '스킬, Hand, Agent, 프로바이더 검색…',
+      placeholder: '스킬, Hand, Agent, 제공자 검색…',
       close: '닫기',
       noResults: '"{query}"와 일치하는 결과 없음',
       hint: '입력하여 모든 레지스트리 항목을 검색합니다.',
@@ -2027,6 +2959,239 @@ export const rawTranslations: Record<string, Translation> = {
       install: '설치',
       dismiss: '닫기',
     },
+    common: {
+      copy: '복사',
+      copied: '복사됨!',
+      copyToClipboard: '클립보드에 복사',
+      loadingReleases: '릴리스를 불러오는 중...',
+      skipToContent: '본문으로 건너뛰기',
+      backToTop: '맨 위로',
+      viewFull: '전체 보기',
+      contributors: '기여자',
+      agentOs: 'Agent OS',
+      breadcrumb: '이동 경로',
+    },
+    header: {
+      toggleTheme: '테마 전환',
+      viewSource: 'GitHub에서 소스 보기',
+      source: '소스',
+      switchLanguage: '언어 전환',
+      switchLanguageNamed: '언어 전환 ({name})',
+      toggleMenu: '메뉴 전환',
+    },
+    errorBoundary: {
+      label: '런타임 오류',
+      title: '문제가 발생했습니다.',
+      reload: '새로고침',
+      home: '홈',
+    },
+    metrics: {
+      breadcrumb: '메트릭',
+      label: '레지스트리 메트릭',
+      title: '클릭 텔레메트리',
+      desc: '레지스트리 전체의 상세 페이지 조회수 집계이며, /api/registry/click 워커 엔드포인트를 통해 기록됩니다.',
+      descPrefix: '레지스트리 전체의 상세 페이지 조회수 집계이며, ',
+      endpoint: '/api/registry/click',
+      descSuffix: ' 워커 엔드포인트를 통해 기록됩니다.',
+      loadError: '메트릭을 불러올 수 없습니다',
+      totalClicks: '총 클릭 수',
+      uniqueItems: '고유 항목 수',
+      activeCategories: '활성 카테고리',
+      generated: '생성 시각',
+      perCategory: '카테고리별',
+      topItems: '전체 상위 항목',
+      items: '개 항목',
+      clicks: '클릭',
+    },
+    deploy: {
+      title: 'LibreFang 배포하기',
+      subtitle: '플랫폼을 선택하세요',
+      terminalIntro: '또는 터미널에서 직접 배포하세요:',
+      installLocally: '로컬에 설치',
+      website: '웹사이트',
+      copyrightSuffix: 'Agent Operating System',
+      backToPlatforms: '플랫폼 목록으로 돌아가기',
+      badges: ['무료 LLM 포함', 'API 키 불필요', '1GB 스토리지'],
+      tokenRequired: 'Fly.io API 토큰을 입력해 주세요.',
+      deployFailed: '배포에 실패했습니다',
+      deploying: '배포 중...',
+      deployToFly: 'Fly.io에 배포',
+      deployed: '배포 완료!',
+      deployedDesc: 'LibreFang 인스턴스가 시작되고 있습니다 (1~2분 소요). 무료 LLM(Step 3.5 Flash)이 사전 설정되어 바로 사용할 수 있습니다.',
+      openDashboard: '대시보드 열기',
+      flyConsole: 'Fly.io 콘솔',
+      app: '앱',
+      region: '리전',
+      model: '모델',
+      includedModel: 'Step 3.5 Flash (무료)',
+      upgradeModel: '모델 업그레이드',
+      freeNote: '무료 LLM(OpenRouter를 통한 Step 3.5 Flash)이 사전 설정되어 있습니다. API 키 없이도 인스턴스가 바로 작동합니다.',
+      stepOneTitle: 'Fly.io API 토큰 발급받기',
+      stepOnePrefix: '',
+      signUp: 'Fly.io에 가입',
+      or: '또는',
+      logIn: '로그인',
+      stepOneMiddle: '한 뒤',
+      personalAccessTokens: 'Personal Access Tokens',
+      stepOneSuffix: '페이지로 이동해 새 토큰을 생성하세요.',
+      stepTwoTitle: '붙여넣고 배포하기',
+      stepTwoDesc: '입력한 토큰은 Fly.io API로만 전송되며, 저희 서버에는 저장되지 않습니다.',
+      tokenLabel: 'Fly.io API 토큰',
+      troubleshooting: '문제 해결',
+      platforms: {
+        flyio: {
+          desc: '영구 무료, 영속 스토리지 제공',
+          badge: '추천',
+          demo: '라이브 데모',
+        },
+        render: {
+          desc: '원클릭 OAuth 배포',
+          badge: '가장 쉬움',
+          demo: '라이브 데모',
+          warning: '무료 티어: 15분 후 슬립 모드, 영속 스토리지 없음',
+        },
+        railway: {
+          desc: '5달러 무료 크레딧으로 간단하게 배포',
+        },
+        gcp: {
+          desc: '영구 무료(e2-micro), 30GB 스토리지',
+          badge: 'Terraform',
+        },
+        docker: {
+          desc: '한 줄 명령으로 어디서든 실행',
+        },
+      },
+      localInstalls: {
+        macos: {
+          name: 'macOS',
+          desc: 'Homebrew 또는 바이너리 다운로드',
+        },
+        linux: {
+          name: 'Linux',
+          desc: '설치 스크립트 또는 바이너리 다운로드',
+        },
+        windows: {
+          name: 'Windows',
+          desc: 'PowerShell 설치 프로그램 또는 .msi',
+        },
+      },
+      steps: {
+        auth: '토큰 확인 중...',
+        app: '앱 생성 중...',
+        net: 'IP 주소 할당 중...',
+        vol: '영속 볼륨 생성 중...',
+        machine: 'Step 3.5 Flash로 머신 시작 중...',
+      },
+      troubleshootingItems: {
+        sso: {
+          q: 'Personal Access Token을 생성할 수 없음 (SSO 오류)',
+          lines: [
+            [
+              {
+                text: '다음과 같은 오류가 표시된다면: ',
+              },
+              {
+                em: '"Access Tokens cannot be created because an organization requires SSO"',
+              },
+            ],
+            [
+              {
+                text: '대신 조직별 토큰을 사용하세요. 터미널에서 다음을 실행하세요:',
+              },
+            ],
+            [
+              {
+                code: 'flyctl tokens org <your-org-name>',
+              },
+            ],
+            [
+              {
+                text: '생성된 토큰을 위 입력란에 붙여넣으세요.',
+              },
+            ],
+          ],
+        },
+        image: {
+          q: '배포 실패: 이미지를 찾을 수 없음',
+          lines: [
+            [
+              {
+                text: 'Docker 이미지 ',
+              },
+              {
+                code: 'ghcr.io/librefang/librefang:latest',
+              },
+              {
+                text: '는 릴리스마다 새로 빌드됩니다.',
+              },
+            ],
+            [
+              {
+                text: '아직 게시된 릴리스가 없다면 아래의 터미널 배포 스크립트를 사용하세요 — 소스에서 직접 빌드합니다.',
+              },
+            ],
+          ],
+        },
+        llm: {
+          q: '배포 후 LLM 제공자를 추가하거나 변경하는 방법은?',
+          lines: [
+            [
+              {
+                code: 'flyctl secrets set OPENAI_API_KEY=sk-... --app your-app-name',
+              },
+            ],
+            [
+              {
+                text: '그런 다음 ',
+              },
+              {
+                code: 'flyctl ssh console',
+              },
+              {
+                text: '로 ',
+              },
+              {
+                code: '/data/config.toml',
+              },
+              {
+                text: '을 열어 기본 모델을 업데이트하세요.',
+              },
+            ],
+          ],
+        },
+      },
+    },
+    changelog: {
+      title: '변경 이력',
+      desc: 'LibreFang의 모든 업데이트를 확인하세요',
+      backHome: '홈으로 돌아가기',
+      releases: '릴리스',
+      downloads: '다운로드',
+      loading: '릴리스를 불러오는 중...',
+      loadError: '릴리스를 불러오지 못했습니다',
+      unknownError: '알 수 없는 오류',
+      empty: '릴리스가 없습니다.',
+      noFilterMatches: '현재 필터와 일치하는 릴리스가 없습니다.',
+      fullNotes: 'GitHub에서 전체 릴리스 노트를 확인하세요.',
+      viewOnGitHub: 'GitHub에서 보기',
+      filters: {
+        all: '전체',
+        stable: '안정 버전',
+        prerelease: '사전 릴리스',
+      },
+      releaseTypes: {
+        stable: '안정 버전',
+        rc: 'RC',
+        beta: '베타',
+      },
+      changeTypes: {
+        feature: '추가됨',
+        fix: '수정됨',
+        breaking: '주요 변경',
+        performance: '성능',
+        other: '기타',
+      },
+    },
     footer: { docs: '문서', license: '라이선스', privacy: '개인정보', changelog: '변경 이력' },
   },
 
@@ -2040,7 +3205,7 @@ export const rawTranslations: Record<string, Translation> = {
         'autonome Agenten 24/7 betreiben',
         'ganze Workflows ersetzen',
         'auf jeder Hardware deployen',
-        '16 Sicherheitsschichten nutzen',
+        'mit 16 Sicherheitsschichten überwachen',
       ],
       desc: 'LibreFang ist eine produktionsreife Laufzeitumgebung für autonome KI-Agenten. Einzelne Binärdatei, {handsCount} eingebaute Fähigkeitseinheiten, {channelsCount} Kanaladapter. In Rust gebaut für Workloads, die nicht ausfallen dürfen.',
       getStarted: 'Loslegen',
@@ -2179,7 +3344,7 @@ export const rawTranslations: Record<string, Translation> = {
       tagline: 'Autonom · Versioniert · Sicherheitsgeprüft',
       toolsHeading: 'Evolution-Tools',
       howItWorks: [
-        { title: 'Automatische Erkennung', desc: '5+ Tool-Aufrufe lösen eine Hintergrundüberprüfung aus.' },
+        { title: 'Automatische Erkennung', desc: '5+ Tool-Aufrufe lösen eine Hintergrundüberprüfung des Ansatzes aus.' },
         { title: 'Hot-Reload', desc: 'Neue und aktualisierte Skills sind sofort verfügbar — kein Daemon-Neustart.' },
         { title: 'Sicherheitsscan', desc: 'Jede Änderung durchläuft Prompt-Injection-Erkennung mit Auto-Rollback.' },
         { title: 'Versionsverlauf', desc: 'Bis zu 10 Versionen pro Skill mit Zeitstempel, Changelog und Rollback-Snapshots.' },
@@ -2235,7 +3400,7 @@ export const rawTranslations: Record<string, Translation> = {
       templateDiff: 'Template-Diff',
       subcategories: {
         ai: 'KI', business: 'Business', cloud: 'Cloud', communication: 'Kommunikation',
-        content: 'Inhalt', creation: 'Gestaltung', data: 'Daten', developer: 'Entwickler',
+        content: 'Inhalt', creation: 'Erstellung', data: 'Daten', developer: 'Entwickler',
         development: 'Entwicklung', devtools: 'DevTools', email: 'E-Mail',
         engineering: 'Engineering', enterprise: 'Enterprise', iot: 'IoT',
         language: 'Sprache', messaging: 'Messaging', productivity: 'Produktivität',
@@ -2247,7 +3412,7 @@ export const rawTranslations: Record<string, Translation> = {
         plugins:  { title: 'Plugins', desc: 'Runtime-Erweiterungen, die dem LibreFang-Daemon benutzerdefinierte Befehle, Kanäle oder Verhalten hinzufügen.' },
         hands:    { title: 'Hands', desc: 'Autonome Fähigkeitseinheiten. Jede Hand bringt ihr eigenes Modell, Tools und Workflow mit — aktivieren statt zusammenbauen.' },
         agents:   { title: 'Agenten', desc: 'Vorgefertigte Agent-Vorlagen. Modell, System-Prompt, Berechtigungen und Zeitplan in einem Manifest.' },
-        providers:{ title: 'Provider', desc: 'LLM-Provider-Adapter: Anthropic, OpenAI, Gemini, Groq, lokal — und 40+ weitere.' },
+        providers:{ title: 'Anbieter', desc: 'LLM-Anbieter-Adapter: Anthropic, OpenAI, Gemini, Groq, lokal — und 40+ weitere.' },
         workflows:{ title: 'Workflows', desc: 'Mehrstufige Agent-Orchestrierungen in TOML. Agenten verketten, auf Bedingungen verzweigen, Zustand persistieren.' },
         channels: { title: 'Kanäle', desc: 'Messaging-Adapter: Telegram, Slack, Discord, WhatsApp, LINE und 40+ weitere Plattformen.' },
       },
@@ -2263,7 +3428,7 @@ export const rawTranslations: Record<string, Translation> = {
     },
     browse: {
       title: 'Registry durchsuchen',
-      desc: 'Alle 9 Kategorien auf einen Blick — wähle eine für die vollständige Liste, sortiert nach Beliebtheit.',
+      desc: 'Alle Kategorien auf einen Blick — wähle eine für die vollständige Liste, sortiert nach Beliebtheit.',
     },
     notFound: {
       title: 'Seite nicht gefunden',
@@ -2275,6 +3440,239 @@ export const rawTranslations: Record<string, Translation> = {
       desc: 'Auf Startbildschirm / Dock hinzufügen.',
       install: 'Installieren',
       dismiss: 'Schließen',
+    },
+    common: {
+      copy: 'Kopieren',
+      copied: 'Kopiert!',
+      copyToClipboard: 'In die Zwischenablage kopieren',
+      loadingReleases: 'Releases werden geladen...',
+      skipToContent: 'Zum Inhalt springen',
+      backToTop: 'Nach oben',
+      viewFull: 'Vollständig anzeigen',
+      contributors: 'Mitwirkende',
+      agentOs: 'Agent OS',
+      breadcrumb: 'Breadcrumb',
+    },
+    header: {
+      toggleTheme: 'Design umschalten',
+      viewSource: 'Quellcode auf GitHub ansehen',
+      source: 'Quelle',
+      switchLanguage: 'Sprache wechseln',
+      switchLanguageNamed: 'Sprache wechseln ({name})',
+      toggleMenu: 'Menü umschalten',
+    },
+    errorBoundary: {
+      label: 'Laufzeitfehler',
+      title: 'Etwas ist schiefgelaufen.',
+      reload: 'Neu laden',
+      home: 'Startseite',
+    },
+    metrics: {
+      breadcrumb: 'Metriken',
+      label: 'Registry-Metriken',
+      title: 'Klick-Telemetrie',
+      desc: 'Aggregierte Zählung der Detailseiten-Aufrufe in der Registry, erfasst über den /api/registry/click Worker-Endpunkt.',
+      descPrefix: 'Aggregierte Zählung der Detailseiten-Aufrufe in der Registry, erfasst über den ',
+      endpoint: '/api/registry/click',
+      descSuffix: ' Worker-Endpunkt.',
+      loadError: 'Metriken konnten nicht geladen werden',
+      totalClicks: 'Klicks insgesamt',
+      uniqueItems: 'Eindeutige Einträge',
+      activeCategories: 'Aktive Kategorien',
+      generated: 'Erstellt',
+      perCategory: 'Nach Kategorie',
+      topItems: 'Top-Einträge insgesamt',
+      items: 'Einträge',
+      clicks: 'Klicks',
+    },
+    deploy: {
+      title: 'LibreFang bereitstellen',
+      subtitle: 'Wähle deine Plattform',
+      terminalIntro: 'Oder direkt aus dem Terminal bereitstellen:',
+      installLocally: 'Lokal installieren',
+      website: 'Website',
+      copyrightSuffix: 'Agent Operating System',
+      backToPlatforms: 'Zurück zu den Plattformen',
+      badges: ['Kostenloses LLM inklusive', 'Kein API-Schlüssel nötig', '1 GB Speicher'],
+      tokenRequired: 'Bitte gib deinen Fly.io API-Token ein.',
+      deployFailed: 'Bereitstellung fehlgeschlagen',
+      deploying: 'Wird bereitgestellt...',
+      deployToFly: 'Auf Fly.io bereitstellen',
+      deployed: 'Bereitgestellt!',
+      deployedDesc: 'Deine LibreFang-Instanz startet gerade (1–2 Min.). Das kostenlose LLM (Step 3.5 Flash) ist bereits vorkonfiguriert und einsatzbereit.',
+      openDashboard: 'Dashboard öffnen',
+      flyConsole: 'Fly.io-Konsole',
+      app: 'App',
+      region: 'Region',
+      model: 'Modell',
+      includedModel: 'Step 3.5 Flash (kostenlos)',
+      upgradeModel: 'Modell upgraden',
+      freeNote: 'Ein kostenloses LLM (Step 3.5 Flash über OpenRouter) ist bereits vorkonfiguriert. Deine Instanz funktioniert sofort — kein API-Schlüssel erforderlich.',
+      stepOneTitle: 'Fly.io API-Token besorgen',
+      stepOnePrefix: '',
+      signUp: 'Registriere dich',
+      or: 'oder',
+      logIn: 'melde dich an',
+      stepOneMiddle: 'bei Fly.io, gehe dann zu',
+      personalAccessTokens: 'Personal Access Tokens',
+      stepOneSuffix: 'und erstelle einen neuen Token.',
+      stepTwoTitle: 'Einfügen und bereitstellen',
+      stepTwoDesc: 'Dein Token wird ausschließlich an die Fly.io-API gesendet und niemals auf unseren Servern gespeichert.',
+      tokenLabel: 'Fly.io API-Token',
+      troubleshooting: 'Fehlerbehebung',
+      platforms: {
+        flyio: {
+          desc: 'Dauerhaft kostenlos, persistenter Speicher',
+          badge: 'Empfohlen',
+          demo: 'Live-Demo',
+        },
+        render: {
+          desc: 'Bereitstellung per OAuth mit einem Klick',
+          badge: 'Am einfachsten',
+          demo: 'Live-Demo',
+          warning: 'Kostenlose Stufe: schläft nach 15 Min., kein persistenter Speicher',
+        },
+        railway: {
+          desc: 'Einfache Bereitstellung mit 5 $ Startguthaben',
+        },
+        gcp: {
+          desc: 'Dauerhaft kostenlos (e2-micro), 30 GB Speicher',
+          badge: 'Terraform',
+        },
+        docker: {
+          desc: 'Ein Befehl, läuft überall',
+        },
+      },
+      localInstalls: {
+        macos: {
+          name: 'macOS',
+          desc: 'Homebrew oder Binary herunterladen',
+        },
+        linux: {
+          name: 'Linux',
+          desc: 'Installationsskript oder Binary herunterladen',
+        },
+        windows: {
+          name: 'Windows',
+          desc: 'PowerShell-Installer oder .msi',
+        },
+      },
+      steps: {
+        auth: 'Token wird überprüft...',
+        app: 'App wird erstellt...',
+        net: 'IP-Adressen werden zugewiesen...',
+        vol: 'Persistentes Volume wird erstellt...',
+        machine: 'Maschine mit Step 3.5 Flash wird gestartet...',
+      },
+      troubleshootingItems: {
+        sso: {
+          q: 'Personal Access Token kann nicht erstellt werden (SSO-Fehler)',
+          lines: [
+            [
+              {
+                text: 'Wenn folgende Meldung erscheint: ',
+              },
+              {
+                em: '"Access Tokens cannot be created because an organization requires SSO"',
+              },
+            ],
+            [
+              {
+                text: 'Verwende stattdessen einen organisationsspezifischen Token. Führe im Terminal aus:',
+              },
+            ],
+            [
+              {
+                code: 'flyctl tokens org <your-org-name>',
+              },
+            ],
+            [
+              {
+                text: 'Füge dann den generierten Token oben ein.',
+              },
+            ],
+          ],
+        },
+        image: {
+          q: 'Bereitstellung fehlgeschlagen: Image nicht gefunden',
+          lines: [
+            [
+              {
+                text: 'Das Docker-Image ',
+              },
+              {
+                code: 'ghcr.io/librefang/librefang:latest',
+              },
+              {
+                text: ' wird bei jedem Release neu erstellt.',
+              },
+            ],
+            [
+              {
+                text: 'Falls noch kein Release veröffentlicht wurde, verwende das Terminal-Deploy-Skript unten — es baut direkt aus dem Quellcode.',
+              },
+            ],
+          ],
+        },
+        llm: {
+          q: 'Wie kann ich nach der Bereitstellung einen LLM-Anbieter hinzufügen oder wechseln?',
+          lines: [
+            [
+              {
+                code: 'flyctl secrets set OPENAI_API_KEY=sk-... --app your-app-name',
+              },
+            ],
+            [
+              {
+                text: 'Bearbeite anschließend ',
+              },
+              {
+                code: '/data/config.toml',
+              },
+              {
+                text: ' über ',
+              },
+              {
+                code: 'flyctl ssh console',
+              },
+              {
+                text: ', um das Standardmodell zu aktualisieren.',
+              },
+            ],
+          ],
+        },
+      },
+    },
+    changelog: {
+      title: 'Changelog',
+      desc: 'Verfolge jedes Update von LibreFang',
+      backHome: 'Zurück zur Startseite',
+      releases: 'Releases',
+      downloads: 'Downloads',
+      loading: 'Releases werden geladen...',
+      loadError: 'Releases konnten nicht geladen werden',
+      unknownError: 'Unbekannter Fehler',
+      empty: 'Keine Releases gefunden.',
+      noFilterMatches: 'Keine Releases entsprechen dem aktuellen Filter.',
+      fullNotes: 'Vollständige Release-Notes auf GitHub ansehen.',
+      viewOnGitHub: 'Auf GitHub ansehen',
+      filters: {
+        all: 'Alle',
+        stable: 'Stabil',
+        prerelease: 'Vorabversion',
+      },
+      releaseTypes: {
+        stable: 'Stabil',
+        rc: 'RC',
+        beta: 'Beta',
+      },
+      changeTypes: {
+        feature: 'Hinzugefügt',
+        fix: 'Behoben',
+        breaking: 'Breaking',
+        performance: 'Performance',
+        other: 'Sonstiges',
+      },
     },
     footer: { docs: 'Dokumentation', license: 'Lizenz', privacy: 'Datenschutz', changelog: 'Changelog' },
   },
@@ -2425,7 +3823,7 @@ export const rawTranslations: Record<string, Translation> = {
       label: 'Autoevolución de Skills',
       title: 'Agentes que se enseñan a sí mismos',
       desc: 'Tras una tarea compleja, una revisión LLM en segundo plano decide si el enfoque merece guardarse. Las nuevas skills se cargan en caliente en el runtime — sin reinicio.',
-      tagline: 'Autónomo · Versionado · Escaneado',
+      tagline: 'Autónomo · Versionado · Escaneado por seguridad',
       toolsHeading: 'Herramientas de evolución',
       howItWorks: [
         { title: 'Detección automática', desc: '5+ llamadas a herramientas disparan una revisión en segundo plano.' },
@@ -2495,7 +3893,7 @@ export const rawTranslations: Record<string, Translation> = {
         mcp:      { title: 'Servidores MCP', desc: 'Servidores Model Context Protocol que conectan herramientas y fuentes de datos externas directamente a cualquier agente.' },
         plugins:  { title: 'Plugins', desc: 'Extensiones en runtime que añaden comandos, canales o comportamientos al daemon LibreFang.' },
         hands:    { title: 'Hands', desc: 'Unidades autónomas de capacidad. Cada Hand trae su propio modelo, herramientas y workflow — actívalo, no lo montes.' },
-        agents:   { title: 'Agentes', desc: 'Plantillas de agente listas. Modelo, prompt del sistema, capacidades y schedule en un solo manifiesto.' },
+        agents:   { title: 'Agentes', desc: 'Plantillas de agente listas. Modelo, prompt del sistema, capacidades y programación en un solo manifiesto.' },
         providers:{ title: 'Proveedores', desc: 'Adaptadores de proveedores LLM: Anthropic, OpenAI, Gemini, Groq, local — y 40+ más.' },
         workflows:{ title: 'Workflows', desc: 'Orquestaciones multi-paso de agentes en TOML. Encadena agentes, bifurca por condiciones, persiste estado.' },
         channels: { title: 'Canales', desc: 'Adaptadores de mensajería: Telegram, Slack, Discord, WhatsApp, LINE y 40+ plataformas más.' },
@@ -2512,7 +3910,7 @@ export const rawTranslations: Record<string, Translation> = {
     },
     browse: {
       title: 'Explora el registry',
-      desc: 'Las 9 categorías de un vistazo — elige una para la lista completa, ordenada por popularidad.',
+      desc: 'Todas las categorías de un vistazo — elige una para la lista completa, ordenada por popularidad.',
     },
     notFound: {
       title: 'Página no encontrada',
@@ -2524,6 +3922,239 @@ export const rawTranslations: Record<string, Translation> = {
       desc: 'Añádelo a tu pantalla de inicio o dock.',
       install: 'Instalar',
       dismiss: 'Cerrar',
+    },
+    common: {
+      agentOs: 'Agent OS',
+      backToTop: 'Volver arriba',
+      breadcrumb: 'Ruta de navegación',
+      contributors: 'Colaboradores',
+      copied: '¡Copiado!',
+      copy: 'Copiar',
+      copyToClipboard: 'Copiar al portapapeles',
+      loadingReleases: 'Cargando versiones...',
+      skipToContent: 'Saltar al contenido',
+      viewFull: 'Ver completo',
+    },
+    header: {
+      source: 'Código fuente',
+      switchLanguage: 'Cambiar idioma',
+      switchLanguageNamed: 'Cambiar idioma ({name})',
+      toggleMenu: 'Alternar menú',
+      toggleTheme: 'Cambiar tema',
+      viewSource: 'Ver código fuente en GitHub',
+    },
+    errorBoundary: {
+      home: 'Inicio',
+      label: 'Error en tiempo de ejecución',
+      reload: 'Recargar',
+      title: 'Algo salió mal.',
+    },
+    metrics: {
+      activeCategories: 'Categorías activas',
+      breadcrumb: 'Métricas',
+      clicks: 'clics',
+      desc: 'Recuentos agregados de visitas a las páginas de detalle en todo el registry, registrados mediante el endpoint del worker /api/registry/click.',
+      descPrefix: 'Recuentos agregados de visitas a las páginas de detalle en todo el registry, registrados mediante el endpoint del worker ',
+      descSuffix: '.',
+      endpoint: '/api/registry/click',
+      generated: 'Generado',
+      items: 'elementos',
+      label: 'Métricas del Registry',
+      loadError: 'No se pudieron cargar las métricas',
+      perCategory: 'Por categoría',
+      title: 'Telemetría de clics',
+      topItems: 'Elementos más populares en total',
+      totalClicks: 'Clics totales',
+      uniqueItems: 'Elementos únicos',
+    },
+    deploy: {
+      app: 'Aplicación',
+      backToPlatforms: 'Volver a las plataformas',
+      badges: ['LLM gratuito incluido', 'No se necesita clave de API', '1 GB de almacenamiento'],
+      copyrightSuffix: 'Sistema Operativo de Agentes',
+      deployFailed: 'El despliegue falló',
+      deployToFly: 'Desplegar en Fly.io',
+      deployed: '¡Desplegado!',
+      deployedDesc: 'Tu instancia de LibreFang se está iniciando (1-2 min). El LLM gratuito (Step 3.5 Flash) ya está preconfigurado y listo para usar.',
+      deploying: 'Desplegando...',
+      flyConsole: 'Consola de Fly.io',
+      freeNote: 'Hay un LLM gratuito (Step 3.5 Flash a través de OpenRouter) preconfigurado. Tu instancia funciona desde el primer momento, sin necesidad de claves de API.',
+      includedModel: 'Step 3.5 Flash (gratis)',
+      installLocally: 'Instalar localmente',
+      localInstalls: {
+        linux: {
+          desc: 'Script de instalación o descarga del binario',
+          name: 'Linux',
+        },
+        macos: {
+          desc: 'Homebrew o descarga del binario',
+          name: 'macOS',
+        },
+        windows: {
+          desc: 'Instalador de PowerShell o .msi',
+          name: 'Windows',
+        },
+      },
+      logIn: 'inicia sesión',
+      model: 'Modelo',
+      openDashboard: 'Abrir panel',
+      or: 'o',
+      personalAccessTokens: 'Personal Access Tokens',
+      platforms: {
+        docker: {
+          desc: 'Un solo comando, funciona en cualquier lugar',
+        },
+        flyio: {
+          badge: 'Recomendado',
+          demo: 'Demo en vivo',
+          desc: 'Gratis para siempre, almacenamiento persistente',
+        },
+        gcp: {
+          badge: 'Terraform',
+          desc: 'Gratis para siempre (e2-micro), 30 GB de almacenamiento',
+        },
+        railway: {
+          desc: 'Despliegue sencillo con $5 de crédito gratis',
+        },
+        render: {
+          badge: 'Más fácil',
+          demo: 'Demo en vivo',
+          desc: 'Despliegue OAuth con un clic',
+          warning: 'Plan gratuito: se suspende tras 15 min de inactividad, sin almacenamiento persistente',
+        },
+      },
+      region: 'Región',
+      signUp: 'Regístrate',
+      stepOneMiddle: 'en Fly.io, luego ve a',
+      stepOnePrefix: '',
+      stepOneSuffix: 'y crea un nuevo token.',
+      stepOneTitle: 'Obtén un token de API de Fly.io',
+      stepTwoDesc: 'Tu token se envía únicamente a la API de Fly.io y nunca se almacena en nuestros servidores.',
+      stepTwoTitle: 'Pega y despliega',
+      steps: {
+        app: 'Creando aplicación...',
+        auth: 'Verificando token...',
+        machine: 'Iniciando máquina con Step 3.5 Flash...',
+        net: 'Asignando direcciones IP...',
+        vol: 'Creando volumen persistente...',
+      },
+      subtitle: 'Elige tu plataforma',
+      terminalIntro: 'O despliega desde tu terminal:',
+      title: 'Despliega LibreFang',
+      tokenLabel: 'Token de API de Fly.io',
+      tokenRequired: 'Introduce tu token de API de Fly.io.',
+      troubleshooting: 'Solución de problemas',
+      troubleshootingItems: {
+        image: {
+          lines: [
+            [
+              {
+                text: 'La imagen Docker ',
+              },
+              {
+                code: 'ghcr.io/librefang/librefang:latest',
+              },
+              {
+                text: ' se compila con cada versión.',
+              },
+            ],
+            [
+              {
+                text: 'Si aún no se ha publicado ninguna versión, usa el script de despliegue por terminal de abajo: compila desde el código fuente.',
+              },
+            ],
+          ],
+          q: 'El despliegue falló: imagen no encontrada',
+        },
+        llm: {
+          lines: [
+            [
+              {
+                code: 'flyctl secrets set OPENAI_API_KEY=sk-... --app your-app-name',
+              },
+            ],
+            [
+              {
+                text: 'Luego edita ',
+              },
+              {
+                code: '/data/config.toml',
+              },
+              {
+                text: ' mediante ',
+              },
+              {
+                code: 'flyctl ssh console',
+              },
+              {
+                text: ' para actualizar el modelo predeterminado.',
+              },
+            ],
+          ],
+          q: '¿Cómo añadir o cambiar el proveedor de LLM después del despliegue?',
+        },
+        sso: {
+          lines: [
+            [
+              {
+                text: 'Si ves: ',
+              },
+              {
+                em: '"Access Tokens cannot be created because an organization requires SSO"',
+              },
+            ],
+            [
+              {
+                text: 'Usa en su lugar un token por organización. Ejecuta en tu terminal:',
+              },
+            ],
+            [
+              {
+                code: 'flyctl tokens org <your-org-name>',
+              },
+            ],
+            [
+              {
+                text: 'Luego pega arriba el token generado.',
+              },
+            ],
+          ],
+          q: 'No se puede crear un Personal Access Token (error de SSO)',
+        },
+      },
+      upgradeModel: 'Mejorar modelo',
+      website: 'Sitio web',
+    },
+    changelog: {
+      backHome: 'Volver al inicio',
+      changeTypes: {
+        breaking: 'Cambios importantes',
+        feature: 'Añadido',
+        fix: 'Corregido',
+        other: 'Otros',
+        performance: 'Rendimiento',
+      },
+      desc: 'Sigue cada actualización de LibreFang',
+      downloads: 'descargas',
+      empty: 'No se encontraron versiones.',
+      filters: {
+        all: 'Todas',
+        prerelease: 'Preliminares',
+        stable: 'Estables',
+      },
+      fullNotes: 'Consulta las notas completas de la versión en GitHub.',
+      loadError: 'No se pudieron cargar las versiones',
+      loading: 'Cargando versiones...',
+      noFilterMatches: 'Ninguna versión coincide con el filtro actual.',
+      releaseTypes: {
+        beta: 'Beta',
+        rc: 'RC',
+        stable: 'Estable',
+      },
+      releases: 'versiones',
+      title: 'Cambios',
+      unknownError: 'Error desconocido',
+      viewOnGitHub: 'Ver en GitHub',
     },
     footer: { docs: 'Documentación', license: 'Licencia', privacy: 'Privacidad', changelog: 'Cambios' },
   },

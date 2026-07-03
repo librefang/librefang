@@ -1,0 +1,79 @@
+name: Publish AUR package
+description: >
+  Publish one release-pinned LibreFang package to the Arch User Repository.
+  No-ops (with a notice) when the AUR SSH key is not configured, so forks and
+  unconfigured repositories do not fail.
+
+inputs:
+  package:
+    description: Package directory under packaging/aur/ (e.g. librefang-bin).
+    required: true
+  release-tag:
+    description: Release tag to pin (e.g. v2026.6.26-beta.24).
+    required: true
+  ssh-private-key:
+    description: AUR SSH private key. When empty the publish is skipped.
+    required: true
+  known-hosts:
+    description: >
+      known_hosts entries for aur.archlinux.org. When empty they are fetched
+      with ssh-keyscan at runtime (trust-on-first-use).
+    required: false
+    default: ""
+  git-name:
+    description: Commit author name for the AUR push.
+    required: false
+    default: ""
+  git-email:
+    description: Commit author email for the AUR push.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Publish ${{ inputs.package }} to AUR
+      shell: bash
+      env:
+        AUR_SSH_PRIVATE_KEY: ${{ inputs.ssh-private-key }}
+        AUR_KNOWN_HOSTS: ${{ inputs.known-hosts }}
+        AUR_GIT_NAME: ${{ inputs.git-name }}
+        AUR_GIT_EMAIL: ${{ inputs.git-email }}
+        RELEASE_TAG: ${{ inputs.release-tag }}
+        PACKAGE: ${{ inputs.package }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+        GH_API_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+
+        if [[ -z "${AUR_SSH_PRIVATE_KEY//[[:space:]]/}" ]]; then
+          echo "::notice::AUR_SSH_PRIVATE_KEY not configured — skipping AUR publish for $PACKAGE."
+          exit 0
+        fi
+
+        # Materialise the SSH credentials to a temp dir wiped on step exit
+        # (success or failure) per the SECRETS.md operational rule.
+        WORKDIR="$(mktemp -d)"
+        trap 'rm -rf "$WORKDIR"' EXIT
+        KEY="$WORKDIR/aur_key"
+        KNOWN="$WORKDIR/known_hosts"
+
+        ( umask 077; printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > "$KEY" )
+
+        if [[ -n "${AUR_KNOWN_HOSTS//[[:space:]]/}" ]]; then
+          printf '%s\n' "$AUR_KNOWN_HOSTS" > "$KNOWN"
+        else
+          ssh-keyscan -t rsa,ecdsa,ed25519 aur.archlinux.org > "$KNOWN" 2>/dev/null
+        fi
+        [[ -s "$KNOWN" ]] || { echo "::error::empty known_hosts for aur.archlinux.org"; exit 1; }
+
+        docker run --rm \
+          -v "$GITHUB_WORKSPACE":/repo \
+          -v "$KEY":/keys/aur_key:ro \
+          -v "$KNOWN":/keys/known_hosts:ro \
+          -e RELEASE_TAG -e GITHUB_REPOSITORY -e GH_API_TOKEN \
+          -e AUR_GIT_NAME -e AUR_GIT_EMAIL \
+          -e AUR_KEY_FILE=/keys/aur_key \
+          -e AUR_KNOWN_HOSTS_FILE=/keys/known_hosts \
+          archlinux:base-devel \
+          bash /repo/packaging/aur/publish-to-aur.sh "$PACKAGE"

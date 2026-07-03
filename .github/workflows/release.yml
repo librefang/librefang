@@ -1650,7 +1650,7 @@ jobs:
 
       - name: Build and bundle Tauri desktop app
         if: runner.os != 'macOS' || env.APPLE_SIGNING_IDENTITY == ''
-        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -1660,13 +1660,13 @@ jobs:
           releaseName: "${{ env.RELEASE_TAG }}"
           releaseDraft: false
           prerelease: false
-          includeUpdaterJson: true
+          uploadUpdaterJson: true
           projectPath: crates/librefang-desktop
           args: ${{ matrix.platform.args }}
 
       - name: Build and bundle Tauri desktop app (signed macOS)
         if: runner.os == 'macOS' && env.APPLE_SIGNING_IDENTITY != ''
-        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -1680,7 +1680,7 @@ jobs:
           releaseName: "${{ env.RELEASE_TAG }}"
           releaseDraft: false
           prerelease: false
-          includeUpdaterJson: true
+          uploadUpdaterJson: true
           projectPath: crates/librefang-desktop
           args: ${{ matrix.platform.args }}
 
@@ -1716,7 +1716,7 @@ jobs:
           ref: ${{ env.RELEASE_REF }}
 
       - name: Set up JDK 17 (Temurin)
-        uses: actions/setup-java@ad2b38190b15e4d6bdf0c97fb4fca8412226d287 # v5.3.0
+        uses: actions/setup-java@1bcf9fb12cf4aa7d266a90ae39939e61372fe520 # v5.4.0
         with:
           distribution: temurin
           java-version: "17"
@@ -1767,7 +1767,7 @@ jobs:
             mobile-android-
 
       - name: Cache Gradle
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.gradle/caches
@@ -1777,7 +1777,7 @@ jobs:
 
       # See mobile-smoke.yml for why this cache is paired with the install.
       - name: Cache tauri-cli binary
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cargo/bin/cargo-tauri
           key: tauri-cli-${{ runner.os }}-v2
@@ -1993,7 +1993,7 @@ jobs:
             mobile-ios-
 
       - name: Cache tauri-cli binary
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cargo/bin/cargo-tauri
           key: tauri-cli-${{ runner.os }}-v2
@@ -2590,6 +2590,79 @@ jobs:
           git push
 
   # ═════════════════════════════════════════════════════════════════════════
+  # AUR (Arch User Repository) — publish the release-pinned packages from
+  # packaging/aur/. Each job mirrors the Homebrew sync above: it runs only on
+  # a real tag (or a channel=current re-publish), waits on the build job that
+  # produced its asset, and degrades to a no-op when AUR_SSH_PRIVATE_KEY is
+  # absent (forks / unconfigured repos). The composite action regenerates
+  # pkgver / sha256sums / .SRCINFO and pushes to ssh://aur@aur.archlinux.org.
+  # Split into three independent jobs (not a matrix) so a desktop build
+  # failure cannot block the librefang-bin publish, and vice versa.
+  # ═════════════════════════════════════════════════════════════════════════
+
+  sync_aur_bin:
+    name: Publish AUR / librefang-bin
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
+    runs-on: ubuntu-latest
+    needs: [cli_linux]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ env.RELEASE_REF }}
+      - uses: ./.github/actions/publish-aur
+        with:
+          package: librefang-bin
+          release-tag: ${{ env.RELEASE_TAG }}
+          ssh-private-key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          known-hosts: ${{ secrets.AUR_KNOWN_HOSTS }}
+          git-name: ${{ secrets.AUR_GIT_NAME }}
+          git-email: ${{ secrets.AUR_GIT_EMAIL }}
+
+  sync_aur_desktop:
+    name: Publish AUR / librefang-desktop-bin
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
+    runs-on: ubuntu-latest
+    needs: [desktop]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ env.RELEASE_REF }}
+      - uses: ./.github/actions/publish-aur
+        with:
+          package: librefang-desktop-bin
+          release-tag: ${{ env.RELEASE_TAG }}
+          ssh-private-key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          known-hosts: ${{ secrets.AUR_KNOWN_HOSTS }}
+          git-name: ${{ secrets.AUR_GIT_NAME }}
+          git-email: ${{ secrets.AUR_GIT_EMAIL }}
+
+  sync_aur_docker:
+    name: Publish AUR / librefang-docker
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
+    runs-on: ubuntu-latest
+    # Pin only after the multi-arch image + tag exist, so `librefang-docker
+    # pull` works the moment the package lands.
+    needs: [docker-manifest]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ env.RELEASE_REF }}
+      - uses: ./.github/actions/publish-aur
+        with:
+          package: librefang-docker
+          release-tag: ${{ env.RELEASE_TAG }}
+          ssh-private-key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          known-hosts: ${{ secrets.AUR_KNOWN_HOSTS }}
+          git-name: ${{ secrets.AUR_GIT_NAME }}
+          git-email: ${{ secrets.AUR_GIT_EMAIL }}
+
+  # ═════════════════════════════════════════════════════════════════════════
   # Docker — from release-docker.yml
   # ═════════════════════════════════════════════════════════════════════════
 
@@ -2691,6 +2764,40 @@ jobs:
           docker buildx imagetools create \
             $TAGS \
             $(printf "$IMAGE@sha256:%s " *)
+
+  # ═════════════════════════════════════════════════════════════════════════
+  # Arch pacman repository — the project-maintained binary repo published to
+  # Cloudflare R2 (packages.librefang.ai), distinct from the AUR packages
+  # under packaging/aur/. Exists because AUR account registration is closed
+  # (see #6334), so this ships the same release-pinned packages directly via
+  # `pacman -Syu`. Single job (not three): all packages fold into one shared
+  # pacman db, so they must be repo-add'd together. A fixed concurrency group
+  # serialises the read-modify-write on that db across releases. Degrades to a
+  # no-op when the GPG key / R2 secrets are absent (forks / unconfigured).
+  # ═════════════════════════════════════════════════════════════════════════
+
+  publish_arch_repo:
+    name: Publish pacman repo (Arch)
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
+    runs-on: ubuntu-latest
+    needs: [cli_linux, desktop, docker-manifest]
+    concurrency:
+      group: arch-pacman-repo
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ env.RELEASE_REF }}
+      - uses: ./.github/actions/publish-arch-repo
+        with:
+          release-tag: ${{ env.RELEASE_TAG }}
+          gpg-private-key: ${{ secrets.ARCH_REPO_GPG_PRIVATE_KEY }}
+          gpg-key-id: ${{ secrets.ARCH_REPO_GPG_KEY_ID }}
+          r2-account-id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          r2-access-key-id: ${{ secrets.R2_ACCESS_KEY_ID }}
+          r2-secret-access-key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
 
   deploy_fly:
     name: Deploy to Fly.io

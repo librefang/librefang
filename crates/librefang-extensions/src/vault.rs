@@ -5,10 +5,10 @@
 //! or the `LIBREFANG_VAULT_KEY` env var for headless/CI environments.
 
 use crate::{ExtensionError, ExtensionResult};
-use aes_gcm::aead::rand_core::RngCore;
-use aes_gcm::aead::{Aead, KeyInit, OsRng, Payload};
+use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
 use argon2::{Algorithm, Argon2, Params, Version};
+use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 // Sha256 is used only in non-test keyring code (v1 XOR migration + predictable fallback).
 // Sha512 is imported locally in mix_fingerprint_sources so it compiles in test builds too.
@@ -210,6 +210,16 @@ mod os_keyring {
 const SALT_LEN: usize = 16;
 /// Nonce length for AES-256-GCM.
 const NONCE_LEN: usize = 12;
+
+/// Nonce type tied to `Aes256Gcm`'s own `NonceSize` to prevent cipher drift.
+type VaultNonce = Nonce<<Aes256Gcm as aes_gcm::AeadCore>::NonceSize>;
+
+/// Replaces deprecated `Nonce::from_slice` (aes-gcm 0.11) with `TryFrom`, returning an error on wrong length.
+fn nonce_from_bytes(bytes: &[u8]) -> Result<VaultNonce, String> {
+    VaultNonce::try_from(bytes)
+        .map_err(|_| format!("nonce must be {NONCE_LEN} bytes, got {}", bytes.len()))
+}
+
 /// Magic bytes for vault file format versioning.
 const VAULT_MAGIC: &[u8; 4] = b"OFV1";
 
@@ -815,11 +825,11 @@ impl CredentialVault {
 
         let cipher = Aes256Gcm::new_from_slice(derived_key.as_ref())
             .map_err(|e| ExtensionError::Vault(format!("Cipher init failed: {e}")))?;
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce = nonce_from_bytes(&nonce_bytes).map_err(ExtensionError::Vault)?;
         let aad = Self::aad_bytes(&self.path, VAULT_SCHEMA_VERSION);
         let ciphertext = cipher
             .encrypt(
-                nonce,
+                &nonce,
                 Payload {
                     msg: plaintext.as_slice(),
                     aad: &aad,
@@ -944,7 +954,7 @@ impl CredentialVault {
         // schema_version=0 on disk means path-only AAD (legacy compat); save() rewrites at v1.
         let cipher = Aes256Gcm::new_from_slice(derived_key.as_ref())
             .map_err(|e| ExtensionError::Vault(format!("Cipher init failed: {e}")))?;
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce = nonce_from_bytes(&nonce_bytes).map_err(ExtensionError::Vault)?;
         let aad: Vec<u8> = match vault_file.schema_version {
             0 => self.path.to_string_lossy().as_bytes().to_vec(),
             v if v == VAULT_SCHEMA_VERSION => Self::aad_bytes(&self.path, v),
@@ -957,7 +967,7 @@ impl CredentialVault {
         let plaintext = Zeroizing::new(
             cipher
                 .decrypt(
-                    nonce,
+                    &nonce,
                     Payload {
                         msg: ciphertext.as_slice(),
                         aad: &aad,
@@ -1164,9 +1174,9 @@ fn store_keyring_key_to_file(key_b64: &str) -> Result<(), String> {
         .map_err(|e| format!("cipher init: {e}"))?;
     let mut nonce_bytes = [0u8; NONCE_LEN];
     OsRng.fill_bytes(&mut nonce_bytes);
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    let nonce = nonce_from_bytes(&nonce_bytes)?;
     let ciphertext = cipher
-        .encrypt(nonce, key_b64.as_bytes())
+        .encrypt(&nonce, key_b64.as_bytes())
         .map_err(|e| format!("encrypt: {e}"))?;
 
     let keyring_file = KeyringFile {
@@ -1335,9 +1345,9 @@ fn load_keyring_key_inner(migrate: bool) -> Result<Zeroizing<String>, String> {
 
                     let cipher = Aes256Gcm::new_from_slice(wrapping_key.as_ref())
                         .map_err(|e| format!("cipher init: {e}"))?;
-                    let nonce = Nonce::from_slice(&nonce_bytes);
+                    let nonce = nonce_from_bytes(&nonce_bytes)?;
                     let plaintext = cipher
-                        .decrypt(nonce, ciphertext.as_slice())
+                        .decrypt(&nonce, ciphertext.as_slice())
                         .map_err(|e| format!("decrypt: {e}"))?;
                     let key_str = String::from_utf8(plaintext).map_err(|e| format!("utf8: {e}"))?;
                     return Ok(Zeroizing::new(key_str));
@@ -1623,8 +1633,14 @@ fn try_decrypt_v2(
                 continue;
             }
         };
-        let nonce = Nonce::from_slice(nonce_bytes);
-        match cipher.decrypt(nonce, ciphertext) {
+        let nonce = match nonce_from_bytes(nonce_bytes) {
+            Ok(n) => n,
+            Err(e) => {
+                last_err = e;
+                continue;
+            }
+        };
+        match cipher.decrypt(&nonce, ciphertext) {
             Ok(plaintext) => {
                 return String::from_utf8(plaintext).map_err(|e| format!("utf8: {e}"));
             }
@@ -2290,7 +2306,7 @@ mod tests {
         let path_only_aad = path.to_string_lossy();
         let ct = cipher
             .encrypt(
-                Nonce::from_slice(&nonce_bytes),
+                &nonce_from_bytes(&nonce_bytes).unwrap(),
                 Payload {
                     msg: plain.as_slice(),
                     aad: path_only_aad.as_bytes(),
@@ -2512,12 +2528,12 @@ mod tests {
         let fake_master_key = b"fake-master-key-b64-encoded-aaaa";
         let mut nonce_bytes = [0u8; 12];
         OsRng.fill_bytes(&mut nonce_bytes);
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce = nonce_from_bytes(&nonce_bytes).unwrap();
         let cipher = Aes256Gcm::new_from_slice(old_wrapping_key.as_ref()).unwrap();
-        let ciphertext = cipher.encrypt(nonce, fake_master_key.as_ref()).unwrap();
+        let ciphertext = cipher.encrypt(&nonce, fake_master_key.as_ref()).unwrap();
 
         // Decrypt with old key — must succeed.
-        let decrypted = cipher.decrypt(nonce, ciphertext.as_slice()).unwrap();
+        let decrypted = cipher.decrypt(&nonce, ciphertext.as_slice()).unwrap();
         assert_eq!(decrypted, fake_master_key);
 
         // "Migration": re-derive with new fingerprint (random_id + OS material).
@@ -2528,13 +2544,15 @@ mod tests {
         // Re-encrypt with new wrapping key.
         let mut new_nonce_bytes = [0u8; 12];
         OsRng.fill_bytes(&mut new_nonce_bytes);
-        let new_nonce = Nonce::from_slice(&new_nonce_bytes);
+        let new_nonce = nonce_from_bytes(&new_nonce_bytes).unwrap();
         let new_cipher = Aes256Gcm::new_from_slice(new_wrapping_key.as_ref()).unwrap();
-        let new_ciphertext = new_cipher.encrypt(new_nonce, decrypted.as_slice()).unwrap();
+        let new_ciphertext = new_cipher
+            .encrypt(&new_nonce, decrypted.as_slice())
+            .unwrap();
 
         // Decrypt with new key — must recover original plaintext.
         let recovered = new_cipher
-            .decrypt(new_nonce, new_ciphertext.as_slice())
+            .decrypt(&new_nonce, new_ciphertext.as_slice())
             .unwrap();
         assert_eq!(
             recovered, fake_master_key,
@@ -2542,7 +2560,7 @@ mod tests {
         );
 
         // Old key must NOT decrypt new ciphertext.
-        let bad_result = cipher.decrypt(new_nonce, new_ciphertext.as_slice());
+        let bad_result = cipher.decrypt(&new_nonce, new_ciphertext.as_slice());
         assert!(
             bad_result.is_err(),
             "old wrapping key must not decrypt new ciphertext"
@@ -2566,9 +2584,9 @@ mod tests {
 
         let mut nonce_bytes = [0u8; NONCE_LEN];
         OsRng.fill_bytes(&mut nonce_bytes);
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce = nonce_from_bytes(&nonce_bytes).unwrap();
         let cipher = Aes256Gcm::new_from_slice(wrapping_key.as_ref()).unwrap();
-        let ciphertext = cipher.encrypt(nonce, master_key.as_bytes()).unwrap();
+        let ciphertext = cipher.encrypt(&nonce, master_key.as_bytes()).unwrap();
 
         // Serialize in the same format as the old store_keyring_key (version=2).
         serde_json::json!({
@@ -2645,8 +2663,8 @@ mod tests {
         let v2_fingerprint: Vec<u8> = random_id.to_vec(); // legacy_v2_fingerprint() behavior
         let v2_wrapping_key = derive_wrapping_key(&v2_fingerprint, &salt).unwrap();
         let v2_cipher = Aes256Gcm::new_from_slice(v2_wrapping_key.as_ref()).unwrap();
-        let v2_nonce = Nonce::from_slice(&nonce_bytes);
-        let plaintext = v2_cipher.decrypt(v2_nonce, ciphertext.as_slice()).unwrap();
+        let v2_nonce = nonce_from_bytes(&nonce_bytes).unwrap();
+        let plaintext = v2_cipher.decrypt(&v2_nonce, ciphertext.as_slice()).unwrap();
         let decrypted_key = String::from_utf8(plaintext).unwrap();
         assert_eq!(
             decrypted_key, master_key,
@@ -2660,10 +2678,10 @@ mod tests {
         let v3_wrapping_key = derive_wrapping_key(&v3_fingerprint, &new_salt).unwrap();
         let mut new_nonce_bytes = [0u8; NONCE_LEN];
         OsRng.fill_bytes(&mut new_nonce_bytes);
-        let v3_nonce = Nonce::from_slice(&new_nonce_bytes);
+        let v3_nonce = nonce_from_bytes(&new_nonce_bytes).unwrap();
         let v3_cipher = Aes256Gcm::new_from_slice(v3_wrapping_key.as_ref()).unwrap();
         let v3_ciphertext = v3_cipher
-            .encrypt(v3_nonce, decrypted_key.as_bytes())
+            .encrypt(&v3_nonce, decrypted_key.as_bytes())
             .unwrap();
 
         // Serialize as a v3 keyring file.
@@ -2703,7 +2721,10 @@ mod tests {
         let v3_wk2 = derive_wrapping_key(&v3_fingerprint, &v3_salt_dec).unwrap();
         let v3_c2 = Aes256Gcm::new_from_slice(v3_wk2.as_ref()).unwrap();
         let recovered = v3_c2
-            .decrypt(Nonce::from_slice(&v3_nonce_dec), v3_ct_dec.as_slice())
+            .decrypt(
+                &nonce_from_bytes(&v3_nonce_dec).unwrap(),
+                v3_ct_dec.as_slice(),
+            )
             .unwrap();
         assert_eq!(
             String::from_utf8(recovered).unwrap(),
@@ -2712,7 +2733,10 @@ mod tests {
         );
 
         // --- Step 5: v2 key must NOT decrypt v3 ciphertext ---
-        let bad = v2_cipher.decrypt(Nonce::from_slice(&v3_nonce_dec), v3_ct_dec.as_slice());
+        let bad = v2_cipher.decrypt(
+            &nonce_from_bytes(&v3_nonce_dec).unwrap(),
+            v3_ct_dec.as_slice(),
+        );
         assert!(
             bad.is_err(),
             "(isolation) v2 wrapping key must not decrypt v3 ciphertext"
@@ -2736,7 +2760,7 @@ mod tests {
         let cipher = Aes256Gcm::new_from_slice(wk.as_ref()).unwrap();
         let plaintext = b"super-secret-master-key";
         let ciphertext = cipher
-            .encrypt(Nonce::from_slice(&nonce_bytes), plaintext.as_ref())
+            .encrypt(&nonce_from_bytes(&nonce_bytes).unwrap(), plaintext.as_ref())
             .unwrap();
 
         // Correct fingerprint first → success.
@@ -2769,7 +2793,7 @@ mod tests {
         let cipher = Aes256Gcm::new_from_slice(wk.as_ref()).unwrap();
         let plaintext = b"vault-key-from-readonly-fs-host";
         let ciphertext = cipher
-            .encrypt(Nonce::from_slice(&nonce_bytes), plaintext.as_ref())
+            .encrypt(&nonce_from_bytes(&nonce_bytes).unwrap(), plaintext.as_ref())
             .unwrap();
 
         // Caller injects raw random_id first, predictable second — same
@@ -2801,7 +2825,10 @@ mod tests {
         let wk = derive_wrapping_key(&fp_correct, &salt).unwrap();
         let cipher = Aes256Gcm::new_from_slice(wk.as_ref()).unwrap();
         let ciphertext = cipher
-            .encrypt(Nonce::from_slice(&nonce_bytes), b"plaintext".as_ref())
+            .encrypt(
+                &nonce_from_bytes(&nonce_bytes).unwrap(),
+                b"plaintext".as_ref(),
+            )
             .unwrap();
 
         let bad_a = [0x01u8; 32];

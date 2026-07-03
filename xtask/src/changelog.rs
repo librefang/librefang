@@ -367,59 +367,80 @@ fn write_changelog(
         fs::write(changelog_path, content)?;
     } else {
         let content = fs::read_to_string(changelog_path)?;
-        let heading_re = Regex::new(r"(?m)^## \[")?;
-        let version_re = Regex::new(&format!(r"(?m)^## \[{}\]", regex::escape(version)))?;
-
-        if version_re.is_match(&content) {
-            // Replace existing section
+        if Regex::new(&format!(r"(?m)^## \[{}\]", regex::escape(version)))?.is_match(&content) {
             println!("Replacing existing changelog entry for {}", version);
-            let lines: Vec<&str> = content.lines().collect();
-            let mut start = None;
-            let mut end = None;
-            let version_heading = format!("## [{}]", version);
-            for (i, line) in lines.iter().enumerate() {
-                if line.starts_with(&version_heading) {
-                    start = Some(i);
-                } else if start.is_some() && end.is_none() && line.starts_with("## [") {
-                    end = Some(i);
-                }
-            }
-            if let Some(s) = start {
-                let mut result = String::new();
-                for line in &lines[..s] {
-                    result.push_str(line);
-                    result.push('\n');
-                }
-                result.push_str(&section);
-                result.push('\n');
-                if let Some(e) = end {
-                    for line in &lines[e..] {
-                        result.push_str(line);
-                        result.push('\n');
-                    }
-                }
-                fs::write(changelog_path, result)?;
-            }
-        } else if let Some(m) = heading_re.find(&content) {
-            // Insert before first ## [
-            let pos = m.start();
-            let mut result = String::new();
-            result.push_str(&content[..pos]);
-            result.push_str(&section);
-            result.push('\n');
-            result.push_str(&content[pos..]);
-            fs::write(changelog_path, result)?;
-        } else {
-            // Append
-            let mut result = content;
-            result.push('\n');
-            result.push_str(&section);
-            result.push('\n');
-            fs::write(changelog_path, result)?;
         }
+        fs::write(
+            changelog_path,
+            render_changelog(&content, version, &section),
+        )?;
     }
 
     Ok(())
+}
+
+/// Insert (or replace) the `version` section into an existing CHANGELOG body.
+///
+/// A leading `## [Unreleased]` section always stays at the top: a freshly cut dated release is inserted *below* it, before the first dated `## [YYYY...]` heading.
+/// This matches the contributor workflow documented in `CONTRIBUTING.md`, where `[Unreleased]` is the curated section humans append to.
+/// Inserting before the very first heading of any kind (the previous behaviour) buried `[Unreleased]` deeper under every release.
+fn render_changelog(content: &str, version: &str, section: &str) -> String {
+    let heading_re = Regex::new(r"(?m)^## \[").unwrap();
+    // A dated release heading is `## [` followed by a digit (e.g. `## [2026.6.29]`), never `## [Unreleased]`.
+    let dated_heading_re = Regex::new(r"(?m)^## \[\d").unwrap();
+    let version_re = Regex::new(&format!(r"(?m)^## \[{}\]", regex::escape(version))).unwrap();
+
+    if version_re.is_match(content) {
+        // Replace the existing section for this version in place.
+        let lines: Vec<&str> = content.lines().collect();
+        let mut start = None;
+        let mut end = None;
+        let version_heading = format!("## [{}]", version);
+        for (i, line) in lines.iter().enumerate() {
+            if line.starts_with(&version_heading) {
+                start = Some(i);
+            } else if start.is_some() && end.is_none() && line.starts_with("## [") {
+                end = Some(i);
+            }
+        }
+        if let Some(s) = start {
+            let mut result = String::new();
+            for line in &lines[..s] {
+                result.push_str(line);
+                result.push('\n');
+            }
+            result.push_str(section);
+            result.push('\n');
+            if let Some(e) = end {
+                for line in &lines[e..] {
+                    result.push_str(line);
+                    result.push('\n');
+                }
+            }
+            return result;
+        }
+        content.to_string()
+    } else if let Some(m) = dated_heading_re
+        .find(content)
+        .or_else(|| heading_re.find(content))
+    {
+        // Insert before the first dated release heading so a leading `## [Unreleased]` section stays on top.
+        // Fall back to the first heading of any kind when no dated release exists yet.
+        let pos = m.start();
+        let mut result = String::new();
+        result.push_str(&content[..pos]);
+        result.push_str(section);
+        result.push('\n');
+        result.push_str(&content[pos..]);
+        result
+    } else {
+        // No headings at all: append.
+        let mut result = content.to_string();
+        result.push('\n');
+        result.push_str(section);
+        result.push('\n');
+        result
+    }
 }
 
 pub fn run(args: ChangelogArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -485,7 +506,52 @@ pub fn run(args: ChangelogArgs) -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_pr_numbers;
+    use super::{parse_pr_numbers, render_changelog};
+
+    fn first_section_heading(s: &str) -> &str {
+        s.lines().find(|l| l.starts_with("## [")).unwrap()
+    }
+
+    #[test]
+    fn keeps_unreleased_on_top_when_cutting_release() {
+        // Regression: a new dated release must land BELOW `## [Unreleased]`, not above it.
+        // The old behaviour inserted before the first heading of any kind, burying `[Unreleased]` deeper under every release.
+        let content = "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- pending (#9) (@me)\n\n## [2026.1.1] - 2026-01-01\n\n- old (#1) (@me)\n";
+        let section = "## [2026.2.2] - 2026-02-02\n\n### Fixed\n\n- thing (#10) (@me)\n";
+        let out = render_changelog(content, "2026.2.2", section);
+
+        assert_eq!(first_section_heading(&out), "## [Unreleased]");
+        let unrel = out.find("## [Unreleased]").unwrap();
+        let new = out.find("## [2026.2.2]").unwrap();
+        let old = out.find("## [2026.1.1]").unwrap();
+        assert!(
+            unrel < new && new < old,
+            "order was unrel={unrel} new={new} old={old}"
+        );
+        // Existing content is preserved verbatim.
+        assert!(out.contains("- pending (#9) (@me)"));
+        assert!(out.contains("- old (#1) (@me)"));
+    }
+
+    #[test]
+    fn inserts_at_top_when_no_unreleased_section() {
+        let content = "# Changelog\n\n## [2026.1.1] - 2026-01-01\n\n- old (#1) (@me)\n";
+        let section = "## [2026.2.2] - 2026-02-02\n\n- new (#2) (@me)\n";
+        let out = render_changelog(content, "2026.2.2", section);
+        assert_eq!(first_section_heading(&out), "## [2026.2.2] - 2026-02-02");
+    }
+
+    #[test]
+    fn replaces_existing_version_section_in_place() {
+        let content = "# Changelog\n\n## [Unreleased]\n\n- pending (#9) (@me)\n\n## [2026.2.2] - 2026-02-02\n\n- stale (#5) (@me)\n\n## [2026.1.1] - 2026-01-01\n\n- old (#1) (@me)\n";
+        let section = "## [2026.2.2] - 2026-02-02\n\n- regenerated (#6) (@me)\n";
+        let out = render_changelog(content, "2026.2.2", section);
+        assert!(out.contains("- regenerated (#6) (@me)"));
+        assert!(!out.contains("- stale (#5) (@me)"));
+        // `[Unreleased]` stays on top and the older release is preserved.
+        assert_eq!(first_section_heading(&out), "## [Unreleased]");
+        assert!(out.contains("## [2026.1.1]"));
+    }
 
     #[test]
     fn takes_trailing_pr_number_per_line() {

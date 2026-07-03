@@ -295,6 +295,27 @@ describe("ModelsPage", () => {
     expect(muts.remove.mutateAsync).toHaveBeenCalledWith("my-custom");
   });
 
+  it("does not render a delete button for a cli_config-sourced model", () => {
+    // A live-detected CLI model is tier "custom" but source "cli_config": it has
+    // no persisted custom entry, so a delete would 404. The control must be hidden.
+    setLoaded([
+      {
+        id: "codex-cli/deepseek-chat",
+        display_name: "deepseek-chat (Codex CLI)",
+        provider: "codex-cli",
+        tier: "custom",
+        source: "cli_config",
+        context_window: 0,
+        input_cost_per_m: 0,
+        output_cost_per_m: 0,
+        available: true,
+      },
+    ]);
+    setMutationDefaults();
+    renderPage();
+    expect(screen.queryByTitle("models.delete_model")).toBeNull();
+  });
+
   it("invokes refetch when the header refresh button fires", () => {
     const refetch = vi.fn().mockResolvedValue(undefined);
     useModelsMock.mockReturnValue(

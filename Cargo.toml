@@ -34,7 +34,7 @@ members = [
 ]
 
 [workspace.package]
-version = "2026.6.26-beta.24"
+version = "2026.6.29"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/librefang/librefang"
@@ -140,7 +140,7 @@ bytes = "1"
 futures = "0.3"
 
 # MCP SDK
-rmcp = { version = "1.7", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest"] }
+rmcp = { version = "2.0", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest"] }
 
 # ACP (Agent Client Protocol) SDK — official Zed-maintained crates for IDE integration (#3313)
 # `unstable` enables session/{resume,close,fork,list-additional-directories}, message-id, session-usage,
@@ -178,7 +178,7 @@ psl = "2"
 # trees that we would have to babysit for security. Pin a single major
 # so a future bump is a deliberate review, not a transient dependabot
 # ping.
-tera = { version = "1", default-features = false }
+tera = { version = "2", default-features = false }
 
 # WASM sandbox
 wasmtime = "46"
@@ -245,7 +245,7 @@ ratatui = "0.30"
 colored = "3"
 
 # Encryption
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 argon2 = { version = "0.5", features = ["rand"] }
 
 # Lightweight regex

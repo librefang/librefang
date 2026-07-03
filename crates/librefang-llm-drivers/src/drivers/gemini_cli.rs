@@ -152,7 +152,11 @@ impl GeminiCliDriver {
 
     /// Map a model ID like "gemini-cli/gemini-2.5-pro" to CLI --model flag value.
     fn model_flag(model: &str) -> Option<String> {
-        let stripped = model.strip_prefix("gemini-cli/").unwrap_or(model);
+        let stripped = model.strip_prefix("gemini-cli/").unwrap_or(model).trim();
+        // Bare id → omit --model so the CLI uses its own configured default.
+        if stripped.is_empty() || stripped == "gemini-cli" {
+            return None;
+        }
         match stripped {
             "gemini-2.5-pro" | "pro" => Some("gemini-2.5-pro".to_string()),
             "gemini-2.5-flash" | "flash" => Some("gemini-2.5-flash".to_string()),
@@ -367,6 +371,15 @@ mod tests {
         assert!(args.contains(&"test prompt".to_string()));
         assert!(args.contains(&"--model".to_string()));
         assert!(args.contains(&"gemini-2.5-pro".to_string()));
+    }
+
+    #[test]
+    fn test_model_flag_bare_id_yields_none() {
+        // Bare provider id / empty → None so `--model` is omitted and the CLI
+        // uses its own configured default instead of a rejected placeholder.
+        assert_eq!(GeminiCliDriver::model_flag("gemini-cli"), None);
+        assert_eq!(GeminiCliDriver::model_flag("gemini-cli/"), None);
+        assert_eq!(GeminiCliDriver::model_flag("  "), None);
     }
 
     #[test]

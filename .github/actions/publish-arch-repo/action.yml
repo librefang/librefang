@@ -1,0 +1,90 @@
+name: Publish pacman repository
+description: >
+  Build, GPG-sign, and publish the project-maintained LibreFang pacman
+  repository to Cloudflare R2. No-ops (with a notice) when the GPG signing
+  key or the R2 credentials are not configured, so forks and unconfigured
+  repositories do not fail.
+
+inputs:
+  release-tag:
+    description: Release tag to pin (e.g. v2026.6.26-beta.24).
+    required: true
+  gpg-private-key:
+    description: >
+      Ascii-armored, passphrase-less GPG signing key. When empty the publish
+      is skipped.
+    required: true
+  gpg-key-id:
+    description: Signing key / subkey id used by makepkg --sign and repo-add.
+    required: false
+    default: ""
+  r2-account-id:
+    description: Cloudflare account id (R2 S3 endpoint host).
+    required: false
+    default: ""
+  r2-access-key-id:
+    description: R2 S3 access key id.
+    required: false
+    default: ""
+  r2-secret-access-key:
+    description: R2 S3 secret access key.
+    required: false
+    default: ""
+  r2-bucket:
+    description: R2 bucket name that backs packages.librefang.ai.
+    required: false
+    default: librefang-packages
+  retain:
+    description: Old package versions to keep per pkgname before pruning.
+    required: false
+    default: "5"
+
+runs:
+  using: composite
+  steps:
+    - name: Publish pacman repository to R2
+      shell: bash
+      env:
+        GPG_PRIVATE_KEY: ${{ inputs.gpg-private-key }}
+        GPG_KEY_ID: ${{ inputs.gpg-key-id }}
+        R2_ACCOUNT_ID: ${{ inputs.r2-account-id }}
+        R2_ACCESS_KEY_ID: ${{ inputs.r2-access-key-id }}
+        R2_SECRET_ACCESS_KEY: ${{ inputs.r2-secret-access-key }}
+        R2_BUCKET: ${{ inputs.r2-bucket }}
+        RETAIN: ${{ inputs.retain }}
+        RELEASE_TAG: ${{ inputs.release-tag }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+        GH_API_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+
+        # Degrade to a no-op unless every secret needed to sign AND upload is
+        # present. A half-configured repo (key but no R2, or vice versa) would
+        # build packages it cannot publish — treat that as "not configured".
+        missing=""
+        [[ -z "${GPG_PRIVATE_KEY//[[:space:]]/}" ]] && missing="$missing GPG_PRIVATE_KEY"
+        [[ -z "${GPG_KEY_ID//[[:space:]]/}" ]] && missing="$missing GPG_KEY_ID"
+        [[ -z "${R2_ACCOUNT_ID//[[:space:]]/}" ]] && missing="$missing R2_ACCOUNT_ID"
+        [[ -z "${R2_ACCESS_KEY_ID//[[:space:]]/}" ]] && missing="$missing R2_ACCESS_KEY_ID"
+        [[ -z "${R2_SECRET_ACCESS_KEY//[[:space:]]/}" ]] && missing="$missing R2_SECRET_ACCESS_KEY"
+        if [[ -n "$missing" ]]; then
+          echo "::notice::pacman repo publish skipped — unset secret(s):$missing"
+          exit 0
+        fi
+
+        # Materialise the signing key to a temp dir wiped on step exit
+        # (success or failure) per the SECRETS.md operational rule.
+        WORKDIR="$(mktemp -d)"
+        trap 'rm -rf "$WORKDIR"' EXIT
+        KEY="$WORKDIR/signing.asc"
+        ( umask 077; printf '%s\n' "$GPG_PRIVATE_KEY" > "$KEY" )
+
+        docker run --rm \
+          -v "$GITHUB_WORKSPACE":/repo \
+          -v "$KEY":/keys/signing.asc:ro \
+          -e RELEASE_TAG -e GITHUB_REPOSITORY -e GH_API_TOKEN \
+          -e GPG_KEY_ID -e RETAIN \
+          -e R2_ACCOUNT_ID -e R2_ACCESS_KEY_ID -e R2_SECRET_ACCESS_KEY -e R2_BUCKET \
+          -e GPG_KEY_FILE=/keys/signing.asc \
+          archlinux:base-devel \
+          bash /repo/packaging/arch-repo/publish-arch-repo.sh

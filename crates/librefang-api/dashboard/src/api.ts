@@ -1666,6 +1666,10 @@ export interface ModelItem {
   };
   aliases?: string[];
   available?: boolean;
+  // Provenance hint. "cli_config" marks a row synthesized from a CLI tool's own
+  // live config (codex/claude-code/gemini/qwen) rather than a catalog entry — it
+  // is not a user-added custom model, so it must not show a delete control.
+  source?: string;
 }
 
 export async function listModels(params?: { provider?: string; tier?: string; available?: boolean }): Promise<{ models: ModelItem[]; total: number; available: number }> {

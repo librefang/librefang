@@ -669,7 +669,10 @@ pub trait ChannelBridgeHandle: Send + Sync {
 
 struct PendingMessage {
     message: ChannelMessage,
-    image_blocks: Option<Vec<ContentBlock>>,
+    /// Media downloaded to disk at ingest time (image / file / voice / audio / video), awaiting LLM enrichment (description / transcription) in the flush task.
+    /// `None` when the message carries no downloadable media — the debouncer then represents it by its `content_to_text` placeholder.
+    /// Pre-#6348 this was image-only (`image_blocks`); generalizing it lets a coalesced voice/document burst be transcribed/extracted instead of surfacing as a bare `[Voice message …: url]` placeholder.
+    media: Option<DownloadedMedia>,
 }
 
 struct SenderBuffer {
@@ -836,7 +839,7 @@ impl MessageDebouncer {
         &self,
         key: &str,
         buffers: &mut HashMap<String, SenderBuffer>,
-    ) -> Option<(ChannelMessage, Option<Vec<ContentBlock>>)> {
+    ) -> Option<(ChannelMessage, Vec<DownloadedMedia>)> {
         // Guard against double-fire (#3742): if the manual-flush path in
         // `push()` and a max_timer task both enqueue the same key, the second
         // drain call will find the entry already gone and return `None` here.
@@ -855,15 +858,19 @@ impl MessageDebouncer {
         let mut messages = buf.messages;
         if messages.len() == 1 {
             let pm = messages.remove(0);
-            return Some((pm.message, pm.image_blocks));
+            // 0 or 1 media payload — a single message carries at most one attachment.
+            // A media single message routes through the media-blocks branch (parity with how a single image already does); a non-media single message yields an empty Vec and falls back to `dispatch_message`.
+            return Some((pm.message, pm.media.into_iter().collect()));
         }
 
         let first = messages.remove(0);
         let mut merged_msg = first.message;
-        let mut all_blocks: Vec<ContentBlock> = Vec::new();
+        // Per-message media payloads, in arrival order, enriched + concatenated by the flush task.
+        // Text placeholders for these same messages are still merged into `merged_msg` below (preserving the pre-#6348 behaviour where a coalesced media message also contributes its `content_to_text` line), so a failed download is never silently dropped — it survives as its placeholder.
+        let mut media: Vec<DownloadedMedia> = Vec::new();
 
-        if let Some(blocks) = first.image_blocks {
-            all_blocks.extend(blocks);
+        if let Some(m) = first.media {
+            media.push(m);
         }
 
         let first_content_type = std::mem::discriminant(&merged_msg.content);
@@ -904,8 +911,8 @@ impl MessageDebouncer {
                     if let ChannelContent::Command { args, .. } = pm.message.content {
                         cmd_args.extend(args);
                     }
-                    if let Some(blocks) = pm.image_blocks {
-                        all_blocks.extend(blocks);
+                    if let Some(m) = pm.media {
+                        media.push(m);
                     }
                 }
                 merged_msg.content = ChannelContent::Command {
@@ -916,8 +923,8 @@ impl MessageDebouncer {
                 let mut text_parts = vec![content_to_text(&merged_msg.content)];
                 for pm in messages {
                     text_parts.push(content_to_text(&pm.message.content));
-                    if let Some(blocks) = pm.image_blocks {
-                        all_blocks.extend(blocks);
+                    if let Some(m) = pm.media {
+                        media.push(m);
                     }
                 }
                 merged_msg.content = ChannelContent::Text(text_parts.join("\n"));
@@ -926,20 +933,14 @@ impl MessageDebouncer {
             let mut text_parts = vec![content_to_text(&merged_msg.content)];
             for pm in messages {
                 text_parts.push(content_to_text(&pm.message.content));
-                if let Some(blocks) = pm.image_blocks {
-                    all_blocks.extend(blocks);
+                if let Some(m) = pm.media {
+                    media.push(m);
                 }
             }
             merged_msg.content = ChannelContent::Text(text_parts.join("\n"));
         }
 
-        let blocks = if all_blocks.is_empty() {
-            None
-        } else {
-            Some(all_blocks)
-        };
-
-        Some((merged_msg, blocks))
+        Some((merged_msg, media))
     }
 }
 
@@ -1053,7 +1054,7 @@ fn flush_debounced(
     journal: &Option<crate::message_journal::MessageJournal>,
     thread_ownership: &Arc<crate::thread_ownership::ThreadOwnershipRegistry>,
 ) -> Option<tokio::task::JoinHandle<()>> {
-    let (merged_msg, blocks) = debouncer.drain(key, buffers)?;
+    let (merged_msg, media) = debouncer.drain(key, buffers)?;
 
     let channel_handle = (*handle).clone();
     let router = router.clone();
@@ -1070,7 +1071,16 @@ fn flush_debounced(
             Err(_) => return,
         };
 
-        if let Some(mut blocks) = blocks {
+        if !media.is_empty() {
+            // Finish each coalesced attachment's deferred enrichment (image description / audio transcription — LLM round-trips kept off the ingest loop) and concatenate, in arrival order.
+            // `enrich_media` is the same helper the immediate path uses, so coalesced and non-coalesced media reach the agent identically — the #6321 image parity fix generalized to audio and documents (#6348).
+            let mut blocks: Vec<ContentBlock> = Vec::new();
+            for m in media {
+                blocks.extend(enrich_media(&channel_handle, m).await);
+            }
+
+            // Prepend the coalesced text (plain-text / command bodies plus the `content_to_text` placeholders of every buffered message).
+            // This mirrors the pre-#6348 behaviour where the merged text led the image blocks, and keeps media captions inside the sanitizer-checked text below.
             let text = content_to_text(&merged_msg.content);
             if !text.is_empty() {
                 blocks.insert(
@@ -1081,11 +1091,6 @@ fn flush_debounced(
                     },
                 );
             }
-
-            // Parity with the immediate (`dispatch_message`) path: describe each inbound image so text-only models receive a description next to the `ImageFile` block.
-            // Coalesced (debounced) images used to skip this step entirely — the #6321 bug — because only the immediate path called it.
-            // Self-gates on `[media] image_description`.
-            let blocks = prepend_image_descriptions(&channel_handle, blocks).await;
 
             let ct_str = channel_type_str(&merged_msg.channel);
 
@@ -1451,7 +1456,6 @@ impl BridgeManager {
             .unwrap_or(64);
 
         let semaphore = Arc::new(tokio::sync::Semaphore::new(32));
-        let upload_dir = handle.effective_channels_download_dir();
 
         if debounce_ms == 0 {
             // Fast path: no debouncing (current behavior)
@@ -1524,19 +1528,12 @@ impl BridgeManager {
                                         message.sender.platform_id
                                     );
 
-                                    let image_blocks = if let ChannelContent::Image {
-                                        ref url, ref caption, ref mime_type
-                                    } = message.content {
-                                        let extra_headers = adapter_clone.fetch_headers_for(url);
-                                        match download_image_to_blocks(url, caption.as_deref(), mime_type.as_deref(), &upload_dir, &extra_headers).await {
-                                            blocks if blocks.iter().any(|b| matches!(b, ContentBlock::Image { .. } | ContentBlock::ImageFile { .. })) => Some(blocks),
-                                            _ => None,
-                                        }
-                                    } else {
-                                        None
-                                    };
+                                    // Pre-download any media attachment (image / file / voice / audio / video) to disk now, while we still have this message's individual content — after coalescing the debouncer only retains a merged text placeholder.
+                                    // I/O only; the LLM enrichment (describe / transcribe) is deferred to the flush task via `enrich_media`.
+                                    // Pre-#6348 only images were pre-downloaded, so a coalesced voice/document surfaced as a bare placeholder (#6348).
+                                    let media = download_media_blocks(&handle, adapter_clone.as_ref(), &message.content).await;
 
-                                    let pending = PendingMessage { message, image_blocks };
+                                    let pending = PendingMessage { message, media };
                                     debouncer.push(&sender_key, pending, &mut buffers);
                                 }
                                 None => {
@@ -3917,278 +3914,26 @@ async fn dispatch_message(
         );
     }
 
-    // For images: download, base64 encode, and send as multimodal content blocks
-    if let ChannelContent::Image {
-        ref url,
-        ref caption,
-        ref mime_type,
-    } = message.content
-    {
-        let upload_dir = handle.effective_channels_download_dir();
-        let extra_headers = adapter.fetch_headers_for(url);
-        let blocks = download_image_to_blocks(
-            url,
-            caption.as_deref(),
-            mime_type.as_deref(),
-            &upload_dir,
-            &extra_headers,
+    // Download + enrich any inbound media attachment (image / file / voice / audio / video) and dispatch it as structured content blocks.
+    // Both this immediate path and the debounced (`flush_debounced`) path funnel through `download_media_blocks` + `enrich_media` so the two cannot drift out of parity — the generalization of #6321 from images to every media type (#6348).
+    // A failed or non-media download returns `None`; we then fall through to the text-description fallback below.
+    if let Some(media) = download_media_blocks(handle, adapter, &message.content).await {
+        let blocks = enrich_media(handle, media).await;
+        dispatch_with_blocks(
+            blocks,
+            message,
+            handle,
+            router,
+            adapter,
+            ct_str,
+            thread_id,
+            output_format,
+            overrides.as_ref(),
+            journal,
+            thread_ownership,
         )
         .await;
-        if blocks.iter().any(|b| {
-            matches!(
-                b,
-                ContentBlock::Image { .. } | ContentBlock::ImageFile { .. }
-            )
-        }) {
-            // We have actual image data.
-            // Optionally run `describe_inbound_image` for each inbound image so that text-only models receive a natural-language description next to the `ImageFile` block; vision-capable models ignore the text block and use the raw image bytes directly.
-            // Inline `Image` blocks (base64 fallback when the save failed) have no on-disk path and are left untouched.
-            // This is the same helper the debounced path uses, so the two cannot drift out of parity (refs #6321).
-            let final_blocks = prepend_image_descriptions(handle, blocks).await;
-            // Send as structured blocks for vision
-            dispatch_with_blocks(
-                final_blocks,
-                message,
-                handle,
-                router,
-                adapter,
-                ct_str,
-                thread_id,
-                output_format,
-                overrides.as_ref(),
-                journal,
-                thread_ownership,
-            )
-            .await;
-            return;
-        }
-        // Image download failed — fall through to text description below
-    }
-
-    // For files: download to disk and send as content blocks
-    if let ChannelContent::File {
-        ref url,
-        ref filename,
-    } = message.content
-    {
-        let download_dir = handle.effective_channels_download_dir();
-        let max_bytes = handle
-            .channels_download_max_bytes()
-            .unwrap_or(CHANNEL_FILE_DOWNLOAD_MAX_BYTES);
-        let extra_headers = adapter.fetch_headers_for(url);
-        let downloaded =
-            download_file_to_blocks(url, filename, max_bytes, &download_dir, &extra_headers).await;
-        let blocks = downloaded.blocks;
-        if has_file_saved_block(&blocks) {
-            dispatch_with_blocks(
-                blocks,
-                message,
-                handle,
-                router,
-                adapter,
-                ct_str,
-                thread_id,
-                output_format,
-                overrides.as_ref(),
-                journal,
-                thread_ownership,
-            )
-            .await;
-            return;
-        }
-        // Download failed — fall through to text description below
-    }
-
-    // For voice messages: download to disk and send as content blocks so
-    // tools like media_transcribe can read the saved file directly.
-    if let ChannelContent::Voice {
-        ref url,
-        ref caption,
-        duration_seconds,
-    } = message.content
-    {
-        let download_dir = handle.effective_channels_download_dir();
-        let max_bytes = handle
-            .channels_download_max_bytes()
-            .unwrap_or(CHANNEL_FILE_DOWNLOAD_MAX_BYTES);
-        let filename = filename_from_url(url).unwrap_or_else(|| "voice.ogg".to_string());
-        let extra_headers = adapter.fetch_headers_for(url);
-        let downloaded =
-            download_file_to_blocks(url, &filename, max_bytes, &download_dir, &extra_headers).await;
-        let mut blocks = downloaded.blocks;
-        if has_file_saved_block(&blocks) {
-            // Auto-transcription when `[media] audio_transcription = true` (#4975).
-            // The kernel checks the flag and falls back to `Ok(None)` when disabled,
-            // so the existing default-OFF behaviour is preserved verbatim.
-            let transcription_block =
-                maybe_transcribe_inbound_audio(handle, downloaded.saved.as_ref()).await;
-
-            // Prepend a context block carrying duration + caption so the
-            // model knows this is voice (not an arbitrary file) and any
-            // user-supplied caption survives the save-path replacement.
-            let context = match caption {
-                Some(c) if !c.is_empty() => {
-                    format!("[Voice message ({duration_seconds}s)]\nCaption: {c}")
-                }
-                _ => format!("[Voice message ({duration_seconds}s)]"),
-            };
-            blocks.insert(
-                0,
-                ContentBlock::Text {
-                    text: context,
-                    provider_metadata: None,
-                },
-            );
-            if let Some(t) = transcription_block {
-                blocks.insert(1, t);
-            }
-            dispatch_with_blocks(
-                blocks,
-                message,
-                handle,
-                router,
-                adapter,
-                ct_str,
-                thread_id,
-                output_format,
-                overrides.as_ref(),
-                journal,
-                thread_ownership,
-            )
-            .await;
-            return;
-        }
-        // Download failed — fall through to text description below
-    }
-
-    // For audio (music/podcast — distinct from voice memos): same pattern
-    // as Voice. Audio carries optional title/performer metadata which we
-    // surface in the prepended context block.
-    if let ChannelContent::Audio {
-        ref url,
-        ref caption,
-        duration_seconds,
-        ref title,
-        ref performer,
-    } = message.content
-    {
-        let download_dir = handle.effective_channels_download_dir();
-        let max_bytes = handle
-            .channels_download_max_bytes()
-            .unwrap_or(CHANNEL_FILE_DOWNLOAD_MAX_BYTES);
-        let filename = filename_from_url(url).unwrap_or_else(|| "audio.mp3".to_string());
-        let extra_headers = adapter.fetch_headers_for(url);
-        let downloaded =
-            download_file_to_blocks(url, &filename, max_bytes, &download_dir, &extra_headers).await;
-        let mut blocks = downloaded.blocks;
-        if has_file_saved_block(&blocks) {
-            // Auto-transcription when `[media] audio_transcription = true` (#4975).
-            let transcription_block =
-                maybe_transcribe_inbound_audio(handle, downloaded.saved.as_ref()).await;
-
-            let mut header = format!("[Audio ({duration_seconds}s)");
-            match (title.as_deref(), performer.as_deref()) {
-                (Some(t), Some(p)) if !t.is_empty() && !p.is_empty() => {
-                    header.push_str(&format!(" — {t} by {p}"));
-                }
-                (Some(t), _) if !t.is_empty() => header.push_str(&format!(" — {t}")),
-                (_, Some(p)) if !p.is_empty() => header.push_str(&format!(" by {p}")),
-                _ => {}
-            }
-            header.push(']');
-            let context = match caption {
-                Some(c) if !c.is_empty() => format!("{header}\nCaption: {c}"),
-                _ => header,
-            };
-            blocks.insert(
-                0,
-                ContentBlock::Text {
-                    text: context,
-                    provider_metadata: None,
-                },
-            );
-            if let Some(t) = transcription_block {
-                blocks.insert(1, t);
-            }
-            dispatch_with_blocks(
-                blocks,
-                message,
-                handle,
-                router,
-                adapter,
-                ct_str,
-                thread_id,
-                output_format,
-                overrides.as_ref(),
-                journal,
-                thread_ownership,
-            )
-            .await;
-            return;
-        }
-        // Download failed — fall through to text description below
-    }
-
-    // For video messages: same pattern as Voice. Prefer the channel-
-    // provided `filename` when present, otherwise derive from URL, then
-    // fall back to a stable default so the saved file always has an
-    // extension hint for `media_transcribe` / vision tools.
-    if let ChannelContent::Video {
-        ref url,
-        ref caption,
-        duration_seconds,
-        ref filename,
-    } = message.content
-    {
-        let download_dir = handle.effective_channels_download_dir();
-        let max_bytes = handle
-            .channels_download_max_bytes()
-            .unwrap_or(CHANNEL_FILE_DOWNLOAD_MAX_BYTES);
-        let resolved_filename = filename
-            .clone()
-            .or_else(|| filename_from_url(url))
-            .unwrap_or_else(|| "video.mp4".to_string());
-        let extra_headers = adapter.fetch_headers_for(url);
-        let downloaded = download_file_to_blocks(
-            url,
-            &resolved_filename,
-            max_bytes,
-            &download_dir,
-            &extra_headers,
-        )
-        .await;
-        let mut blocks = downloaded.blocks;
-        if has_file_saved_block(&blocks) {
-            let context = match caption {
-                Some(c) if !c.is_empty() => {
-                    format!("[Video ({duration_seconds}s)]\nCaption: {c}")
-                }
-                _ => format!("[Video ({duration_seconds}s)]"),
-            };
-            blocks.insert(
-                0,
-                ContentBlock::Text {
-                    text: context,
-                    provider_metadata: None,
-                },
-            );
-            dispatch_with_blocks(
-                blocks,
-                message,
-                handle,
-                router,
-                adapter,
-                ct_str,
-                thread_id,
-                output_format,
-                overrides.as_ref(),
-                journal,
-                thread_ownership,
-            )
-            .await;
-            return;
-        }
-        // Download failed — fall through to text description below
+        return;
     }
 
     // Intercept interactive menu callbacks before forwarding to LLM.
@@ -5506,8 +5251,8 @@ async fn maybe_describe_inbound_image_with_timeout(
 ///
 /// The per-image work self-gates on `[media] image_description` (the flag is checked inside `describe_inbound_image`), so this is a cheap no-op when the operator has not opted in; a failed or timed-out description degrades to an opaque `[Image description unavailable]` note rather than dropping the image.
 ///
-/// Both inbound paths funnel through this one helper so they cannot drift apart again: the original bug was that only the immediate (`dispatch_message`) path described images while the debounced (`flush_debounced`) path did not.
-/// Because the debounced path coalesces several messages it can carry multiple `ImageFile` blocks, so every image is described — not just the first.
+/// Both inbound paths reach this helper through [`enrich_media`]'s `DescribeImage` arm, so they cannot drift apart again: the original #6321 bug was that only the immediate (`dispatch_message`) path described images while the debounced (`flush_debounced`) path did not.
+/// Because the debounced path coalesces several messages a single `DownloadedMedia`'s blocks can in principle carry multiple `ImageFile`s, so every image is described — not just the first.
 async fn prepend_image_descriptions(
     handle: &Arc<dyn ChannelBridgeHandle>,
     blocks: Vec<ContentBlock>,
@@ -5523,6 +5268,249 @@ async fn prepend_image_descriptions(
         out.push(block);
     }
     out
+}
+
+/// Inbound media downloaded to disk, paired with the LLM enrichment still owed to it.
+/// Built by [`download_media_blocks`] on both the immediate (`dispatch_message`) and the debounced (`flush_debounced`) ingest paths; finished by [`enrich_media`] in the dispatch task.
+///
+/// Splitting download (I/O-bound, safe to run on the debounce ingest `select!` loop) from enrichment (an LLM round-trip, deferred to the spawned dispatch task) lets the coalescing path carry a saved file path through the debounce window instead of a bare `[Voice message …: url]` placeholder, and lets both paths share one build-and-enrich implementation so they cannot drift out of parity — generalizing the image-only #6321 fix to audio and documents (#6348).
+/// The carried payload is per source message; a `ChannelContent` is a single attachment, so there is at most one media item per `DownloadedMedia`.
+#[derive(Debug)]
+struct DownloadedMedia {
+    /// Blocks built synchronously at download time: caption / context headers, the `ImageFile` or `[File: …] saved to …` marker, and any document enrichment (PDF / text extraction) already baked into [`download_file_to_blocks`].
+    blocks: Vec<ContentBlock>,
+    /// The deferred, LLM-backed enrichment owed to `blocks`.
+    enrich: PendingEnrich,
+}
+
+/// Deferred enrichment owed to a [`DownloadedMedia`], applied by [`enrich_media`].
+#[derive(Debug)]
+enum PendingEnrich {
+    /// Image source: describe every `ImageFile` block, inserting the description immediately before it (`prepend_image_descriptions`).
+    DescribeImage,
+    /// Voice / Audio source: transcribe the saved audio file and insert the transcription immediately after the context header (index 1), matching `dispatch_message`'s Voice/Audio arms.
+    TranscribeAudio { saved: (std::path::PathBuf, String) },
+    /// File / Video: document extraction is already baked into `blocks` (or none applies, e.g. video is not transcribed) — nothing further to do.
+    None,
+}
+
+/// Download one inbound media attachment to disk and build its content blocks.
+///
+/// Returns `None` for non-media content and for a failed download — the caller then falls back to a text description (`dispatch_message`'s text arm, or the coalesced `content_to_text` placeholder), exactly as the per-type arms did when their download failed.
+/// I/O-bound only, so it is safe to run inline on the debounce ingest loop just as the original image-only pre-download did; the LLM enrichment it records in [`PendingEnrich`] is deferred to [`enrich_media`] in the dispatch task.
+///
+/// Both inbound paths funnel through this helper (and [`enrich_media`]) so the immediate and debounced media handling cannot drift out of parity — the generalization of #6321 from images to every media type (#6348).
+async fn download_media_blocks(
+    handle: &Arc<dyn ChannelBridgeHandle>,
+    adapter: &dyn ChannelAdapter,
+    content: &ChannelContent,
+) -> Option<DownloadedMedia> {
+    match content {
+        ChannelContent::Image {
+            url,
+            caption,
+            mime_type,
+        } => {
+            let upload_dir = handle.effective_channels_download_dir();
+            let extra_headers = adapter.fetch_headers_for(url);
+            let blocks = download_image_to_blocks(
+                url,
+                caption.as_deref(),
+                mime_type.as_deref(),
+                &upload_dir,
+                &extra_headers,
+            )
+            .await;
+            // Only treat as media when we have actual image bytes; a failed download yields a text block, which we drop so the caller falls back to the text description.
+            if blocks.iter().any(|b| {
+                matches!(
+                    b,
+                    ContentBlock::Image { .. } | ContentBlock::ImageFile { .. }
+                )
+            }) {
+                Some(DownloadedMedia {
+                    blocks,
+                    enrich: PendingEnrich::DescribeImage,
+                })
+            } else {
+                None
+            }
+        }
+        ChannelContent::File { url, filename } => {
+            let download_dir = handle.effective_channels_download_dir();
+            let max_bytes = handle
+                .channels_download_max_bytes()
+                .unwrap_or(CHANNEL_FILE_DOWNLOAD_MAX_BYTES);
+            let extra_headers = adapter.fetch_headers_for(url);
+            let downloaded =
+                download_file_to_blocks(url, filename, max_bytes, &download_dir, &extra_headers)
+                    .await;
+            if has_file_saved_block(&downloaded.blocks) {
+                Some(DownloadedMedia {
+                    blocks: downloaded.blocks,
+                    enrich: PendingEnrich::None,
+                })
+            } else {
+                None
+            }
+        }
+        ChannelContent::Voice {
+            url,
+            caption,
+            duration_seconds,
+        } => {
+            let download_dir = handle.effective_channels_download_dir();
+            let max_bytes = handle
+                .channels_download_max_bytes()
+                .unwrap_or(CHANNEL_FILE_DOWNLOAD_MAX_BYTES);
+            let filename = filename_from_url(url).unwrap_or_else(|| "voice.ogg".to_string());
+            let extra_headers = adapter.fetch_headers_for(url);
+            let downloaded =
+                download_file_to_blocks(url, &filename, max_bytes, &download_dir, &extra_headers)
+                    .await;
+            if !has_file_saved_block(&downloaded.blocks) {
+                return None;
+            }
+            let mut blocks = downloaded.blocks;
+            // Prepend a context block carrying duration + caption so the model knows this is voice (not an arbitrary file) and any user-supplied caption survives the save-path replacement.
+            let context = match caption {
+                Some(c) if !c.is_empty() => {
+                    format!("[Voice message ({duration_seconds}s)]\nCaption: {c}")
+                }
+                _ => format!("[Voice message ({duration_seconds}s)]"),
+            };
+            blocks.insert(
+                0,
+                ContentBlock::Text {
+                    text: context,
+                    provider_metadata: None,
+                },
+            );
+            let enrich = match downloaded.saved {
+                Some(saved) => PendingEnrich::TranscribeAudio { saved },
+                None => PendingEnrich::None,
+            };
+            Some(DownloadedMedia { blocks, enrich })
+        }
+        ChannelContent::Audio {
+            url,
+            caption,
+            duration_seconds,
+            title,
+            performer,
+        } => {
+            let download_dir = handle.effective_channels_download_dir();
+            let max_bytes = handle
+                .channels_download_max_bytes()
+                .unwrap_or(CHANNEL_FILE_DOWNLOAD_MAX_BYTES);
+            let filename = filename_from_url(url).unwrap_or_else(|| "audio.mp3".to_string());
+            let extra_headers = adapter.fetch_headers_for(url);
+            let downloaded =
+                download_file_to_blocks(url, &filename, max_bytes, &download_dir, &extra_headers)
+                    .await;
+            if !has_file_saved_block(&downloaded.blocks) {
+                return None;
+            }
+            let mut blocks = downloaded.blocks;
+            // Audio carries optional title/performer metadata which we surface in the prepended context block.
+            let mut header = format!("[Audio ({duration_seconds}s)");
+            match (title.as_deref(), performer.as_deref()) {
+                (Some(t), Some(p)) if !t.is_empty() && !p.is_empty() => {
+                    header.push_str(&format!(" — {t} by {p}"));
+                }
+                (Some(t), _) if !t.is_empty() => header.push_str(&format!(" — {t}")),
+                (_, Some(p)) if !p.is_empty() => header.push_str(&format!(" by {p}")),
+                _ => {}
+            }
+            header.push(']');
+            let context = match caption {
+                Some(c) if !c.is_empty() => format!("{header}\nCaption: {c}"),
+                _ => header,
+            };
+            blocks.insert(
+                0,
+                ContentBlock::Text {
+                    text: context,
+                    provider_metadata: None,
+                },
+            );
+            let enrich = match downloaded.saved {
+                Some(saved) => PendingEnrich::TranscribeAudio { saved },
+                None => PendingEnrich::None,
+            };
+            Some(DownloadedMedia { blocks, enrich })
+        }
+        ChannelContent::Video {
+            url,
+            caption,
+            duration_seconds,
+            filename,
+        } => {
+            let download_dir = handle.effective_channels_download_dir();
+            let max_bytes = handle
+                .channels_download_max_bytes()
+                .unwrap_or(CHANNEL_FILE_DOWNLOAD_MAX_BYTES);
+            // Prefer the channel-provided filename, otherwise derive from URL, then fall back to a stable default so the saved file always has an extension hint for media tools.
+            let resolved_filename = filename
+                .clone()
+                .or_else(|| filename_from_url(url))
+                .unwrap_or_else(|| "video.mp4".to_string());
+            let extra_headers = adapter.fetch_headers_for(url);
+            let downloaded = download_file_to_blocks(
+                url,
+                &resolved_filename,
+                max_bytes,
+                &download_dir,
+                &extra_headers,
+            )
+            .await;
+            if !has_file_saved_block(&downloaded.blocks) {
+                return None;
+            }
+            let mut blocks = downloaded.blocks;
+            let context = match caption {
+                Some(c) if !c.is_empty() => format!("[Video ({duration_seconds}s)]\nCaption: {c}"),
+                _ => format!("[Video ({duration_seconds}s)]"),
+            };
+            blocks.insert(
+                0,
+                ContentBlock::Text {
+                    text: context,
+                    provider_metadata: None,
+                },
+            );
+            Some(DownloadedMedia {
+                blocks,
+                enrich: PendingEnrich::None,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Apply the deferred LLM enrichment recorded on a [`DownloadedMedia`] and return its final blocks.
+/// Runs in the dispatch task, off the ingest loop.
+///
+/// Shared by the immediate (`dispatch_message`) and debounced (`flush_debounced`) paths so inbound media reaches the agent enriched identically whether or not it was coalesced (#6348, generalizing #6321).
+async fn enrich_media(
+    handle: &Arc<dyn ChannelBridgeHandle>,
+    media: DownloadedMedia,
+) -> Vec<ContentBlock> {
+    match media.enrich {
+        // Self-gates on `[media] image_description`; describes every `ImageFile`.
+        PendingEnrich::DescribeImage => prepend_image_descriptions(handle, media.blocks).await,
+        // Self-gates on `[media] audio_transcription`.
+        PendingEnrich::TranscribeAudio { saved } => {
+            let mut blocks = media.blocks;
+            if let Some(t) = maybe_transcribe_inbound_audio(handle, Some(&saved)).await {
+                // Immediately after the context header (index 0) and before the saved-path block — matching `dispatch_message`'s Voice/Audio arms so the transcription reads as the spoken content.
+                let at = blocks.len().min(1);
+                blocks.insert(at, t);
+            }
+            blocks
+        }
+        PendingEnrich::None => media.blocks,
+    }
 }
 
 /// Hard deadline for the vision round-trip during channel image dispatch.
@@ -8993,16 +8981,107 @@ mod tests {
             let msg = make_test_message("hello");
             let pending = PendingMessage {
                 message: msg.clone(),
-                image_blocks: None,
+                media: None,
             };
 
             debouncer.push("discord:user123", pending, &mut buffers);
 
             let result = debouncer.drain("discord:user123", &mut buffers);
             assert!(result.is_some());
-            let (drained_msg, blocks) = result.unwrap();
+            let (drained_msg, media) = result.unwrap();
             assert_content_eq(&drained_msg.content, "hello");
-            assert!(blocks.is_none());
+            assert!(media.is_empty(), "a plain-text message carries no media");
+        }
+
+        #[tokio::test]
+        async fn test_debouncer_mixed_media_collects_each_payload() {
+            // Regression for #6348: an image coalesced with a voice note must surface BOTH media payloads to the flush task — each enriched on its own — not just the image, which was the pre-fix gap.
+            // The `content_to_text` placeholders for both still merge into `merged.content` so captions stay sanitizer-visible.
+            let (debouncer, _rx) = MessageDebouncer::new(100, 5000, 10);
+            let mut buffers: HashMap<String, SenderBuffer> = HashMap::new();
+
+            let mut image_msg = make_test_message("");
+            image_msg.content = ChannelContent::Image {
+                url: "https://example.com/photo.jpg".to_string(),
+                caption: None,
+                mime_type: None,
+            };
+            let image_media = DownloadedMedia {
+                blocks: vec![ContentBlock::ImageFile {
+                    path: "/tmp/photo.jpg".into(),
+                    media_type: "image/jpeg".into(),
+                }],
+                enrich: PendingEnrich::DescribeImage,
+            };
+
+            let mut voice_msg = make_test_message("");
+            voice_msg.content = ChannelContent::Voice {
+                url: "https://example.com/voice.ogg".to_string(),
+                duration_seconds: 5,
+                caption: None,
+            };
+            let voice_media = DownloadedMedia {
+                blocks: vec![
+                    ContentBlock::Text {
+                        text: "[Voice message (5s)]".into(),
+                        provider_metadata: None,
+                    },
+                    ContentBlock::Text {
+                        text: "[File: voice.ogg] saved to /tmp/voice.ogg".into(),
+                        provider_metadata: None,
+                    },
+                ],
+                enrich: PendingEnrich::TranscribeAudio {
+                    saved: (
+                        std::path::PathBuf::from("/tmp/voice.ogg"),
+                        "audio/ogg".into(),
+                    ),
+                },
+            };
+
+            debouncer.push(
+                "discord:user123",
+                PendingMessage {
+                    message: image_msg,
+                    media: Some(image_media),
+                },
+                &mut buffers,
+            );
+            debouncer.push(
+                "discord:user123",
+                PendingMessage {
+                    message: voice_msg,
+                    media: Some(voice_media),
+                },
+                &mut buffers,
+            );
+
+            let (merged, media) = debouncer.drain("discord:user123", &mut buffers).unwrap();
+
+            // Both payloads survive coalescing, in arrival order (image then voice).
+            assert_eq!(
+                media.len(),
+                2,
+                "both media payloads must survive coalescing"
+            );
+            assert!(
+                matches!(media[0].enrich, PendingEnrich::DescribeImage),
+                "first payload is the image (describe)"
+            );
+            assert!(
+                matches!(media[1].enrich, PendingEnrich::TranscribeAudio { .. }),
+                "second payload is the voice (transcribe)"
+            );
+            // The merged text still carries both placeholders so captions remain sanitizer-visible downstream.
+            let merged_text = content_to_text(&merged.content);
+            assert!(
+                merged_text.contains("[Photo:"),
+                "image placeholder retained: {merged_text}"
+            );
+            assert!(
+                merged_text.contains("[Voice message (5s):"),
+                "voice placeholder retained: {merged_text}"
+            );
         }
 
         #[tokio::test]
@@ -9017,7 +9096,7 @@ mod tests {
                 "discord:user123",
                 PendingMessage {
                     message: msg1,
-                    image_blocks: None,
+                    media: None,
                 },
                 &mut buffers,
             );
@@ -9025,7 +9104,7 @@ mod tests {
                 "discord:user123",
                 PendingMessage {
                     message: msg2,
-                    image_blocks: None,
+                    media: None,
                 },
                 &mut buffers,
             );
@@ -9048,7 +9127,7 @@ mod tests {
                 "discord:user123",
                 PendingMessage {
                     message: cmd1,
-                    image_blocks: None,
+                    media: None,
                 },
                 &mut buffers,
             );
@@ -9056,7 +9135,7 @@ mod tests {
                 "discord:user123",
                 PendingMessage {
                     message: cmd2,
-                    image_blocks: None,
+                    media: None,
                 },
                 &mut buffers,
             );
@@ -9085,7 +9164,7 @@ mod tests {
                 "discord:user123",
                 PendingMessage {
                     message: cmd1,
-                    image_blocks: None,
+                    media: None,
                 },
                 &mut buffers,
             );
@@ -9093,7 +9172,7 @@ mod tests {
                 "discord:user123",
                 PendingMessage {
                     message: cmd2,
-                    image_blocks: None,
+                    media: None,
                 },
                 &mut buffers,
             );
@@ -9125,7 +9204,7 @@ mod tests {
                 "discord:user1",
                 PendingMessage {
                     message: msg1,
-                    image_blocks: None,
+                    media: None,
                 },
                 &mut buffers,
             );
@@ -9133,7 +9212,7 @@ mod tests {
                 "discord:user2",
                 PendingMessage {
                     message: msg2,
-                    image_blocks: None,
+                    media: None,
                 },
                 &mut buffers,
             );
@@ -9159,7 +9238,7 @@ mod tests {
                 "discord:user123",
                 PendingMessage {
                     message: msg1,
-                    image_blocks: None,
+                    media: None,
                 },
                 &mut buffers,
             );
@@ -9167,7 +9246,7 @@ mod tests {
                 "discord:user123",
                 PendingMessage {
                     message: msg2,
-                    image_blocks: None,
+                    media: None,
                 },
                 &mut buffers,
             );
@@ -9194,7 +9273,7 @@ mod tests {
                 "discord:userX",
                 PendingMessage {
                     message: make_test_message("only"),
-                    image_blocks: None,
+                    media: None,
                 },
                 &mut buffers,
             );
@@ -10281,6 +10360,77 @@ mod tests {
                 other => panic!("timeout must produce the unavailable block, got {other:?}"),
             }
         }
+
+        #[tokio::test]
+        async fn enrich_media_transcribe_audio_inserts_after_header() {
+            // `PendingEnrich::TranscribeAudio` transcribes the saved file and inserts the transcription at index 1 — after the context header, before the saved-path block — identical to `dispatch_message`'s Voice/Audio arms.
+            // This is the coalesced (debounced) path reaching parity with the immediate path for audio (#6348), the exact ordering the manual `transcription_block_lands_between_header_and_file_path` test pins for the immediate path.
+            let (h, rec) = handle_with(Ok(Some("hello world".into())));
+            let media = DownloadedMedia {
+                blocks: vec![
+                    ContentBlock::Text {
+                        text: "[Voice message (5s)]".into(),
+                        provider_metadata: None,
+                    },
+                    ContentBlock::Text {
+                        text: "[File: voice.ogg] saved to /tmp/voice.ogg".into(),
+                        provider_metadata: None,
+                    },
+                ],
+                enrich: PendingEnrich::TranscribeAudio {
+                    saved: (PathBuf::from("/tmp/voice.ogg"), "audio/ogg".into()),
+                },
+            };
+            let out = enrich_media(&h, media).await;
+            assert_eq!(
+                out.len(),
+                3,
+                "transcription inserted between header and file"
+            );
+            assert!(
+                matches!(&out[0], ContentBlock::Text { text, .. } if text.starts_with("[Voice message")),
+                "blocks[0] is the voice header"
+            );
+            assert!(
+                matches!(&out[1], ContentBlock::Text { text, .. } if text == "[Transcription: hello world]"),
+                "blocks[1] must be the transcription"
+            );
+            assert!(
+                matches!(&out[2], ContentBlock::Text { text, .. } if text.starts_with("[File: voice.ogg]")),
+                "blocks[2] is the saved-path block"
+            );
+            let calls = rec.calls.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].0, PathBuf::from("/tmp/voice.ogg"));
+            assert_eq!(calls[0].1, "audio/ogg");
+        }
+
+        #[tokio::test]
+        async fn enrich_media_transcribe_audio_noop_when_disabled() {
+            // `audio_transcription = false` → kernel returns `Ok(None)` → no transcription block is inserted; the [header, saved-path] pair passes through unchanged (default-OFF behaviour preserved).
+            let (h, _rec) = handle_with(Ok(None));
+            let media = DownloadedMedia {
+                blocks: vec![
+                    ContentBlock::Text {
+                        text: "[Voice message (5s)]".into(),
+                        provider_metadata: None,
+                    },
+                    ContentBlock::Text {
+                        text: "[File: voice.ogg] saved to /tmp/voice.ogg".into(),
+                        provider_metadata: None,
+                    },
+                ],
+                enrich: PendingEnrich::TranscribeAudio {
+                    saved: (PathBuf::from("/tmp/voice.ogg"), "audio/ogg".into()),
+                },
+            };
+            let out = enrich_media(&h, media).await;
+            assert_eq!(out.len(), 2, "disabled transcription adds no block");
+            assert!(
+                matches!(&out[1], ContentBlock::Text { text, .. } if text.starts_with("[File: voice.ogg]")),
+                "saved-path block preserved"
+            );
+        }
     }
 
     /// Unit tests for `maybe_describe_inbound_image` (#5739).
@@ -10571,6 +10721,64 @@ mod tests {
                 }
                 other => panic!("timeout must produce the unavailable block, got {other:?}"),
             }
+        }
+
+        #[tokio::test]
+        async fn enrich_media_describe_image_describes_each_imagefile() {
+            // `PendingEnrich::DescribeImage` runs `prepend_image_descriptions`, so every ImageFile gets a description inserted before it.
+            // This is the shared enrich step both the immediate and debounced paths now funnel through (#6348, generalizing #6321).
+            let (h, rec) = handle_with(Ok(Some("a photo".into())));
+            let media = DownloadedMedia {
+                blocks: vec![
+                    ContentBlock::Text {
+                        text: "caption".into(),
+                        provider_metadata: None,
+                    },
+                    ContentBlock::ImageFile {
+                        path: "/tmp/a.jpg".into(),
+                        media_type: "image/jpeg".into(),
+                    },
+                ],
+                enrich: PendingEnrich::DescribeImage,
+            };
+            let out = enrich_media(&h, media).await;
+            assert_eq!(out.len(), 3, "description inserted before image");
+            assert!(
+                matches!(&out[0], ContentBlock::Text { text, .. } if text == "caption"),
+                "caption preserved at front"
+            );
+            assert!(
+                matches!(&out[1], ContentBlock::Text { text, .. } if text == "[Image description: a photo]"),
+                "description precedes the image"
+            );
+            assert!(
+                matches!(&out[2], ContentBlock::ImageFile { path, .. } if path == "/tmp/a.jpg"),
+                "image block preserved"
+            );
+            assert_eq!(rec.calls.lock().unwrap().len(), 1);
+        }
+
+        #[tokio::test]
+        async fn enrich_media_none_leaves_blocks_and_skips_vision() {
+            // `PendingEnrich::None` (File / Video) performs no LLM round-trip and returns the downloaded blocks verbatim — matching the immediate File arm, which never described even an image-typed document.
+            let (h, rec) = handle_with(Ok(Some("never used".into())));
+            let media = DownloadedMedia {
+                blocks: vec![ContentBlock::Text {
+                    text: "[File: doc.pdf] saved to /tmp/x.pdf".into(),
+                    provider_metadata: None,
+                }],
+                enrich: PendingEnrich::None,
+            };
+            let out = enrich_media(&h, media).await;
+            assert_eq!(out.len(), 1);
+            assert!(
+                matches!(&out[0], ContentBlock::Text { text, .. } if text.starts_with("[File: doc.pdf]")),
+                "downloaded blocks returned verbatim"
+            );
+            assert!(
+                rec.calls.lock().unwrap().is_empty(),
+                "None enrichment must not call the kernel"
+            );
         }
     }
 

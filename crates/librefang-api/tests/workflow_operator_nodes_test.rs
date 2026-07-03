@@ -560,13 +560,15 @@ async fn transform_step_missing_variable_halts_workflow_with_recorded_reason() {
 async fn transform_step_oversize_output_halts_workflow_with_recorded_reason() {
     let test = boot();
     let engine = test.state.kernel.workflow_engine();
-    // Tera's `range()` builtin is enabled by default; this template
-    // renders roughly 2 * MAX_TRANSFORM_OUTPUT_BYTES bytes — guaranteed
-    // to trip the cap.
-    let code = format!(
-        "{{% for i in range(end={}) %}}xx{{% endfor %}}",
-        MAX_TRANSFORM_OUTPUT_BYTES
+    // Trip the output cap; tera 2.0 limits range() to 100k iterations, so emit a wide chunk per loop.
+    const CHUNK_BYTES: usize = 64;
+    let iters = (2 * MAX_TRANSFORM_OUTPUT_BYTES).div_ceil(CHUNK_BYTES);
+    assert!(
+        iters < 100_000,
+        "loop count {iters} must stay under tera 2.0's range() limit"
     );
+    let chunk = "x".repeat(CHUNK_BYTES);
+    let code = format!("{{% for i in range(end={iters}) %}}{chunk}{{% endfor %}}");
     let workflow = workflow_with_op_step("transform-huge", StepMode::Transform { code });
     let wf_id = workflow.id;
     engine.register(workflow).await;
