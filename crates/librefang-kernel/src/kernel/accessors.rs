@@ -460,17 +460,80 @@ impl LibreFangKernel {
                             };
                             tracing::info!(provider = %id, valid, "provider key validation result");
                             let available_models = result.available_models.clone();
+                            let live_models = result.live_models.clone();
+                            let model_list_fetched = result.model_list_fetched;
                             kernel.model_catalog_update(|catalog| {
                                 catalog.set_provider_auth_status(&id, status);
-                                // Store available models so downstream can check
-                                // whether a configured model actually exists.
-                                if !available_models.is_empty() {
+                                if id == "openrouter" && model_list_fetched {
+                                    catalog.reconcile_live_provider_models(
+                                        &id,
+                                        available_models.clone(),
+                                        live_models.clone(),
+                                    );
+                                } else if !available_models.is_empty() {
+                                    // Store available models so downstream can check
+                                    // whether a configured model actually exists.
                                     catalog.set_provider_available_models(
                                         &id,
                                         available_models.clone(),
                                     );
                                 }
                             });
+
+                            // Existing installations may still have a delisted
+                            // OpenRouter free model in config.toml and on the
+                            // auto-created assistant. Keep the persisted config
+                            // untouched here, but hot-migrate the effective
+                            // default and eligible agents to another live free
+                            // model. Paid models always require explicit choice.
+                            if id == "openrouter" && model_list_fetched {
+                                let current = {
+                                    let guard = kernel
+                                        .llm
+                                        .default_model_override
+                                        .read()
+                                        .unwrap_or_else(|e| e.into_inner());
+                                    guard
+                                        .clone()
+                                        .unwrap_or_else(|| {
+                                            kernel.config.load().default_model.clone()
+                                        })
+                                };
+                                let replacement = {
+                                    let catalog = kernel.llm.model_catalog.load();
+                                    (current.provider == id
+                                        && current.model.ends_with(":free")
+                                        && catalog.is_model_available(&id, &current.model)
+                                            == Some(false))
+                                    .then(|| {
+                                        catalog.automatic_default_model_for_provider(&id)
+                                    })
+                                    .flatten()
+                                };
+                                if let Some(model) = replacement {
+                                    let migrated = librefang_types::config::DefaultModelConfig {
+                                        model,
+                                        ..current
+                                    };
+                                    {
+                                        let mut guard = kernel
+                                            .llm
+                                            .default_model_override
+                                            .write()
+                                            .unwrap_or_else(|e| e.into_inner());
+                                        *guard = Some(migrated.clone());
+                                    }
+                                    let failures =
+                                        kernel.sync_default_model_agents(&id, &migrated);
+                                    if !failures.is_empty() {
+                                        tracing::warn!(
+                                            provider = %id,
+                                            failures = failures.len(),
+                                            "some agents could not be migrated from a delisted OpenRouter free model"
+                                        );
+                                    }
+                                }
+                            }
                         }
                     })
                 })

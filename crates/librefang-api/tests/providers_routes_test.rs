@@ -858,6 +858,64 @@ async fn set_default_provider_unknown_returns_404() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn set_default_openrouter_rejects_model_missing_from_live_catalog() {
+    let h = boot_with_provider(ProviderInfo {
+        id: "openrouter".to_string(),
+        display_name: "OpenRouter".to_string(),
+        api_key_env: "OPENROUTER_API_KEY".to_string(),
+        base_url: "https://openrouter.ai/api/v1".to_string(),
+        key_required: true,
+        auth_status: AuthStatus::ValidatedKey,
+        ..ProviderInfo::default()
+    });
+    let live_model = ModelCatalogEntry {
+        id: "openrouter/acme/current:free".to_string(),
+        display_name: "Current Free".to_string(),
+        provider: "openrouter".to_string(),
+        tier: ModelTier::Balanced,
+        context_window: 32_768,
+        max_output_tokens: 4_096,
+        supports_streaming: true,
+        ..ModelCatalogEntry::default()
+    };
+    h._state.kernel.model_catalog_update(&mut |catalog| {
+        catalog.reconcile_live_provider_models(
+            "openrouter",
+            vec!["acme/current:free".to_string()],
+            vec![live_model.clone()],
+        );
+    });
+
+    let (list_status, list_body) =
+        json_request(&h, Method::GET, "/api/models?provider=openrouter", None).await;
+    assert_eq!(list_status, StatusCode::OK);
+    let listed_ids: Vec<&str> = list_body["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .filter_map(|model| model["id"].as_str())
+        .collect();
+    assert!(listed_ids.contains(&"openrouter/acme/current:free"));
+    assert!(!listed_ids.contains(&"openrouter/qwen/deprecated:free"));
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/providers/openrouter/default",
+        Some(serde_json::json!({
+            "model": "openrouter/qwen/deprecated:free"
+        })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        body.to_string().contains("not available"),
+        "rejection should explain that the model is absent from the live list: {body}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/catalog/status — purely reads filesystem state (none in tempdir).
 // ---------------------------------------------------------------------------

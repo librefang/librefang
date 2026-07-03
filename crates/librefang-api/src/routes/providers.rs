@@ -1406,6 +1406,45 @@ pub async fn set_provider_key(
         });
     }
 
+    // OpenRouter's model inventory changes frequently. Refresh it before
+    // choosing or migrating a default so a delisted static entry can never
+    // be selected during this request. Other providers keep the existing
+    // background-validation path.
+    if name == "openrouter" {
+        let base_url = {
+            let catalog = state.kernel.model_catalog_ref().load();
+            catalog
+                .get_provider(&name)
+                .map(|provider| provider.base_url.clone())
+                .unwrap_or_default()
+        };
+        if !base_url.is_empty() {
+            let result =
+                librefang_kernel::model_catalog::probe_api_key(&name, &base_url, &key).await;
+            if let Some(valid) = result.key_valid {
+                let status = if valid {
+                    librefang_types::model_catalog::AuthStatus::ValidatedKey
+                } else {
+                    librefang_types::model_catalog::AuthStatus::InvalidKey
+                };
+                let available_models = result.available_models;
+                let live_models = result.live_models;
+                let model_list_fetched = result.model_list_fetched;
+                let provider_id = name.clone();
+                state.kernel.model_catalog_update(&mut move |catalog| {
+                    catalog.set_provider_auth_status(&provider_id, status);
+                    if model_list_fetched {
+                        catalog.reconcile_live_provider_models(
+                            &provider_id,
+                            available_models.clone(),
+                            live_models.clone(),
+                        );
+                    }
+                });
+            }
+        }
+    }
+
     // Kick off a background probe to validate the new key immediately so the
     // dashboard reflects ValidatedKey / InvalidKey without waiting for restart.
     state.kernel.clone().spawn_key_validation();
@@ -1417,17 +1456,21 @@ pub async fn set_provider_key(
     // Read the effective default from the hot-reload override (if set) rather than
     // the stale boot-time config — a previous set_provider_key call may have already
     // switched the default.
-    let (current_provider, current_key_env) = {
+    let (current_provider, current_model, current_key_env) = {
         let guard = state
             .kernel
             .default_model_override_ref()
             .read()
             .unwrap_or_else(|e| e.into_inner());
         match guard.as_ref() {
-            Some(dm) => (dm.provider.clone(), dm.api_key_env.clone()),
+            Some(dm) => (
+                dm.provider.clone(),
+                dm.model.clone(),
+                dm.api_key_env.clone(),
+            ),
             None => {
                 let dm = state.kernel.config_ref().default_model.clone();
-                (dm.provider, dm.api_key_env)
+                (dm.provider, dm.model, dm.api_key_env)
             }
         }
     };
@@ -1443,7 +1486,7 @@ pub async fn set_provider_key(
         // Find a default model for the newly-keyed provider
         let default_model = {
             let catalog = state.kernel.model_catalog_ref().load();
-            catalog.default_model_for_provider(&name)
+            catalog.automatic_default_model_for_provider(&name)
         };
         if let Some(model_id) = default_model {
             // Update config.toml to persist the switch
@@ -1474,21 +1517,22 @@ pub async fn set_provider_key(
             false
         }
     } else if current_provider == name {
-        // User is saving a key for the CURRENT default provider. The env var is
-        // already set (set_var above), but we must ensure default_model_override
-        // has the correct api_key_env so resolve_driver reads the right variable.
-        let needs_update = {
-            let guard = state
-                .kernel
-                .default_model_override_ref()
-                .read()
-                .unwrap_or_else(|e| e.into_inner());
-            match guard.as_ref() {
-                Some(dm) => dm.api_key_env != env_var,
-                None => state.kernel.config_ref().default_model.api_key_env != env_var,
-            }
+        // If the current OpenRouter default was a free model that disappeared,
+        // migrate it to another live free model. Never replace it with a paid
+        // model automatically.
+        let replacement = {
+            let catalog = state.kernel.model_catalog_ref().load();
+            (name == "openrouter"
+                && current_model.ends_with(":free")
+                && catalog.is_model_available(&name, &current_model) == Some(false))
+            .then(|| catalog.automatic_default_model_for_provider(&name))
+            .flatten()
         };
-        if needs_update {
+        if let Some(model_id) = replacement {
+            let config_path = state.kernel.home_dir().join("config.toml");
+            if let Err(e) = persist_default_model(&config_path, &name, &model_id, &env_var) {
+                tracing::warn!("Failed to persist default_model to config.toml: {e}");
+            }
             let mut guard = state
                 .kernel
                 .default_model_override_ref()
@@ -1498,11 +1542,42 @@ pub async fn set_provider_key(
                 .clone()
                 .unwrap_or_else(|| state.kernel.config_ref().default_model.clone());
             *guard = Some(librefang_types::config::DefaultModelConfig {
+                model: model_id,
                 api_key_env: env_var.clone(),
                 ..base
             });
+            true
+        } else {
+            // User is saving a key for the CURRENT default provider. The env var is
+            // already set (set_var above), but we must ensure default_model_override
+            // has the correct api_key_env so resolve_driver reads the right variable.
+            let needs_update = {
+                let guard = state
+                    .kernel
+                    .default_model_override_ref()
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner());
+                match guard.as_ref() {
+                    Some(dm) => dm.api_key_env != env_var,
+                    None => state.kernel.config_ref().default_model.api_key_env != env_var,
+                }
+            };
+            if needs_update {
+                let mut guard = state
+                    .kernel
+                    .default_model_override_ref()
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
+                let base = guard
+                    .clone()
+                    .unwrap_or_else(|| state.kernel.config_ref().default_model.clone());
+                *guard = Some(librefang_types::config::DefaultModelConfig {
+                    api_key_env: env_var.clone(),
+                    ..base
+                });
+            }
+            false
         }
-        false
     } else {
         false
     };
@@ -1622,6 +1697,7 @@ pub async fn delete_provider_key(
         let name_for_closure = name.clone();
         state.kernel.model_catalog_update(&mut move |catalog| {
             catalog.suppress_provider(&name_for_closure);
+            catalog.clear_provider_available_models(&name_for_closure);
             catalog.save_suppressed(&suppressed_path);
             catalog.detect_auth();
         });
@@ -2171,7 +2247,15 @@ pub async fn set_default_provider(
                     .into_json_tuple();
             }
         };
-        let model_id = user_model.or_else(|| catalog.default_model_for_provider(&name));
+        if let Some(ref model_id) = user_model {
+            if catalog.is_model_available(&name, model_id) == Some(false) {
+                return ApiErrorResponse::bad_request(format!(
+                    "Model '{model_id}' is not available from provider '{name}'"
+                ))
+                .into_json_tuple();
+            }
+        }
+        let model_id = user_model.or_else(|| catalog.automatic_default_model_for_provider(&name));
         (model_id, provider.api_key_env.clone())
     };
 
