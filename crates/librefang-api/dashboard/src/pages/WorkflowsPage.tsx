@@ -370,6 +370,12 @@ export function WorkflowsPage() {
   const [paramValues, setParamValues] = useState<Record<string, string>>({});
   // Track whether the form was manually edited so auto-populate doesn't overwrite.
   const paramTouchedRef = useRef(false);
+  // Which steps are expanded in the run-history execution timeline, keyed by
+  // step index. Lifted to component scope (rather than a useState per step
+  // inside the steps.map() below) because the number of steps grows across
+  // renders while a run is live-polling — calling useState inside a loop
+  // whose iteration count changes violates the Rules of Hooks.
+  const [expandedTimelineSteps, setExpandedTimelineSteps] = useState<Set<number>>(new Set());
 
   const workflowsQuery = useWorkflows();
   const workflowDetailQuery = useWorkflowDetail(selectedWorkflowId);
@@ -391,6 +397,8 @@ export function WorkflowsPage() {
     }
     // Begin polling immediately while we wait for the first fetch.
     setRunDetailPollMs(3000);
+    // A newly selected run starts with no timeline steps expanded.
+    setExpandedTimelineSteps(new Set());
   }, [selectedRunId]);
   // Once we know the state, stop polling for terminal runs.
   useEffect(() => {
@@ -1442,7 +1450,7 @@ export function WorkflowsPage() {
                               {allSteps.map((step, i) => {
                                 const hasError = !!step.error;
                                 const stepStatus = hasError ? "failed" : "completed";
-                                const [expanded, setExpanded] = useState(false);
+                                const expanded = expandedTimelineSteps.has(i);
                                 const hasVars = step.variables && Object.keys(step.variables).length > 0;
                                 return (
                                 <div key={step.step_name + i} className="relative">
@@ -1463,7 +1471,11 @@ export function WorkflowsPage() {
                                       stepStatus === "completed" ? "bg-surface/50 border-border-subtle" :
                                       "bg-error/5 border-error/20"
                                     }`}>
-                                      <button className="w-full text-left" onClick={() => setExpanded(!expanded)}>
+                                      <button className="w-full text-left" onClick={() => setExpandedTimelineSteps((prev) => {
+                                        const next = new Set(prev);
+                                        if (next.has(i)) next.delete(i); else next.add(i);
+                                        return next;
+                                      })}>
                                         <div className="flex items-center gap-2">
                                           <span className="text-[10px] font-bold truncate">{step.step_name}</span>
                                           <span className="text-[9px] text-text-dim/40 truncate">via {step.agent_name || step.agent_id}</span>
