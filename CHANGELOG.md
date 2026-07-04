@@ -13,6 +13,10 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 - Stop CLI providers (`codex-cli`, `gemini-cli`, `claude-code`, `qwen-code`) from forcing a placeholder `--model <provider-id>` onto their CLI for a bare provider id, so each CLI defers to its own configured default model (#6365) (@houko)
 - Clear `cargo-deny` advisory failures on `main` by bumping `anyhow` to 1.0.103 (RUSTSEC-2026-0190) and ignoring the unmaintained `ttf-parser` advisory (RUSTSEC-2026-0192 — transitive via `pdf-extract` → `lopdf`, no safe upgrade available) (#6366) (@houko)
 
+### Documentation
+
+- Document installation from the signed project-maintained Arch Linux pacman repository while AUR account registration is unavailable (#6386) (@pavver)
+
 ## [2026.6.29] - 2026-06-29
 
 _14 PRs from 4 contributors since v2026.6.26-beta.24._

@@ -82,8 +82,8 @@ brew install librefang-rc           # RC
 **Arch Linux (pacman)**
 
 <Note>
-AUR account registration is temporarily unavailable. LibreFang currently
-publishes signed Arch packages through its official pacman repository.
+AUR account registration is temporarily unavailable.
+LibreFang currently publishes signed Arch packages through its official pacman repository.
 </Note>
 
 Import and locally trust the LibreFang package-signing key:
@@ -108,8 +108,7 @@ Install the CLI:
 sudo pacman -Syu librefang-bin
 ```
 
-See the [Arch repository documentation](https://github.com/librefang/librefang/blob/main/packaging/arch-repo/README.md)
-for package details and aarch64 support.
+See the [Arch repository documentation](https://github.com/librefang/librefang/blob/main/packaging/arch-repo/README.md) for package details and aarch64 support.
 
 **npm**
 
@@ -217,11 +216,11 @@ brew install --cask librefang-rc    # RC
 After configuring the official repository above:
 
 ```bash
-sudo pacman -S librefang-desktop-bin
+sudo pacman -Syu librefang-desktop-bin
 ```
 
-The desktop package is available on x86_64 only. On aarch64, install
-`librefang-bin` and use the web dashboard at `http://127.0.0.1:4545/`.
+The desktop package is available on x86_64 only.
+On aarch64, use `librefang-bin` for the native service or `librefang-docker` for the Docker-backed systemd service, then open the web dashboard at `http://127.0.0.1:4545/`.
 
 **Direct Download**
 
@@ -587,7 +586,6 @@ librefang migrate --from openfang       # Migrate from OpenFang
 librefang migrate --from openclaw       # Migrate from OpenClaw
 librefang mcp                           # Start MCP server (stdio)
 ```
-
 
 
 

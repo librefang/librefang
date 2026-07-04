@@ -10,13 +10,14 @@ The two are complementary: when AUR registration reopens, #6341 publishes the AU
 
 ## Installing (users)
 
+The LibreFang packaging key fingerprint is `2C32 5B0F 8870 6ED9 9C45 E216 DD09 DC7D 3E70 E1E9`.
+
 ```sh
-# 1. Import the LibreFang packaging public key and locally sign it so pacman
-#    will trust packages signed by it.
+# 1. Import the LibreFang packaging public key and locally sign it so pacman will trust packages signed by it.
 curl -fsSL https://packages.librefang.ai/librefang.gpg -o /tmp/librefang.gpg
 sudo pacman-key --add /tmp/librefang.gpg
-sudo pacman-key --finger packaging@librefang.ai      # confirm the fingerprint, then:
-sudo pacman-key --lsign-key <FINGERPRINT-printed-above>
+sudo pacman-key --finger 2C325B0F88706ED99C45E216DD09DC7D3E70E1E9
+sudo pacman-key --lsign-key 2C325B0F88706ED99C45E216DD09DC7D3E70E1E9
 
 # 2. Add the repository to /etc/pacman.conf (append at the end):
 #

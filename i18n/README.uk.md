@@ -77,8 +77,8 @@ brew install --cask librefang       # Desktop (стабільна версія)
 <details>
 <summary><strong>Arch Linux (pacman)</strong></summary>
 
-> Реєстрація облікових записів AUR тимчасово недоступна. Тому LibreFang зараз
-> публікує підписані пакети через свій офіційний репозиторій pacman.
+> Реєстрація облікових записів AUR тимчасово недоступна.
+> Тому LibreFang зараз публікує підписані пакети через свій офіційний репозиторій pacman.
 
 ```bash
 # Імпортуйте ключ підпису пакетів LibreFang і локально позначте його як довірений
@@ -100,8 +100,7 @@ sudo pacman -Syu librefang-bin
 sudo pacman -S librefang-desktop-bin  # Необов'язковий desktop-додаток (лише x86_64)
 ```
 
-Докладніше про пакети та підтримку aarch64 дивіться в
-[документації репозиторію Arch](../packaging/arch-repo/README.md).
+Докладніше про пакети та підтримку aarch64 дивіться в [документації репозиторію Arch](../packaging/arch-repo/README.md).
 
 </details>
 

@@ -77,8 +77,7 @@ brew install --cask librefang       # Desktop (stable)
 <details>
 <summary><strong>Arch Linux (pacman)</strong></summary>
 
-> AUR 账户注册目前暂时不可用，因此 LibreFang 目前通过官方 pacman
-> 仓库发布已签名的软件包。
+> AUR 账户注册目前暂时不可用，因此 LibreFang 目前通过官方 pacman 仓库发布已签名的软件包。
 
 ```bash
 # 导入并在本地信任 LibreFang 软件包签名密钥
@@ -100,8 +99,7 @@ sudo pacman -Syu librefang-bin
 sudo pacman -S librefang-desktop-bin  # 可选桌面应用（仅支持 x86_64）
 ```
 
-有关软件包详情和 aarch64 支持，请参阅
-[Arch 仓库文档](../packaging/arch-repo/README.md)。
+有关软件包详情和 aarch64 支持，请参阅 [Arch 仓库文档](../packaging/arch-repo/README.md)。
 
 </details>
 

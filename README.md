@@ -77,8 +77,7 @@ brew install --cask librefang       # Desktop (stable)
 <details>
 <summary><strong>Arch Linux (pacman)</strong></summary>
 
-> AUR account registration is temporarily unavailable, so LibreFang currently
-> publishes signed packages through its official pacman repository.
+> AUR account registration is temporarily unavailable, so LibreFang currently publishes signed packages through its official pacman repository.
 
 ```bash
 # Import and locally trust the LibreFang package-signing key
@@ -100,8 +99,7 @@ sudo pacman -Syu librefang-bin
 sudo pacman -S librefang-desktop-bin  # Optional desktop app (x86_64 only)
 ```
 
-See the [Arch repository documentation](packaging/arch-repo/README.md) for
-package details and aarch64 support.
+See the [Arch repository documentation](packaging/arch-repo/README.md) for package details and aarch64 support.
 
 </details>
 

@@ -82,8 +82,7 @@ brew install librefang-rc           # RC
 **Arch Linux (pacman)**
 
 <Note>
-AUR 账户注册目前暂时不可用，因此 LibreFang 目前通过官方 pacman
-仓库发布已签名的 Arch 软件包。
+AUR 账户注册目前暂时不可用，因此 LibreFang 目前通过官方 pacman 仓库发布已签名的 Arch 软件包。
 </Note>
 
 导入并在本地信任 LibreFang 软件包签名密钥：
@@ -108,8 +107,7 @@ Server = https://packages.librefang.ai/arch/$arch
 sudo pacman -Syu librefang-bin
 ```
 
-有关软件包详情和 aarch64 支持，请参阅
-[Arch 仓库文档](https://github.com/librefang/librefang/blob/main/packaging/arch-repo/README.md)。
+有关软件包详情和 aarch64 支持，请参阅 [Arch 仓库文档](https://github.com/librefang/librefang/blob/main/packaging/arch-repo/README.md)。
 
 **npm**
 
@@ -217,11 +215,11 @@ brew install --cask librefang-rc    # RC
 配置上述官方仓库后：
 
 ```bash
-sudo pacman -S librefang-desktop-bin
+sudo pacman -Syu librefang-desktop-bin
 ```
 
-桌面软件包仅支持 x86_64。在 aarch64 上，请安装 `librefang-bin`，并通过
-`http://127.0.0.1:4545/` 使用 Web Dashboard。
+桌面软件包仅支持 x86_64。
+在 aarch64 上，请使用 `librefang-bin` 运行原生服务，或使用 `librefang-docker` 运行基于 Docker 的 systemd 服务，然后通过 `http://127.0.0.1:4545/` 使用 Web Dashboard。
 
 **直接下载**
 
@@ -587,6 +585,5 @@ librefang migrate --from openfang       # 从 OpenFang 迁移
 librefang migrate --from openclaw       # 从 OpenClaw 迁移
 librefang mcp                           # 启动 MCP 服务器（stdio）
 ```
-
 
 

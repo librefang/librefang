@@ -77,9 +77,8 @@ brew install --cask librefang       # Desktop (stable)
 <details>
 <summary><strong>Arch Linux (pacman)</strong></summary>
 
-> Die AUR-Kontoregistrierung ist vorübergehend nicht verfügbar. Daher
-> veröffentlicht LibreFang signierte Pakete derzeit über sein offizielles
-> pacman-Repository.
+> Die AUR-Kontoregistrierung ist vorübergehend nicht verfügbar.
+> Daher veröffentlicht LibreFang signierte Pakete derzeit über sein offizielles pacman-Repository.
 
 ```bash
 # LibreFang-Paketsignaturschlüssel importieren und lokal als vertrauenswürdig markieren
@@ -101,8 +100,7 @@ sudo pacman -Syu librefang-bin
 sudo pacman -S librefang-desktop-bin  # Optionale Desktop-App (nur x86_64)
 ```
 
-Details zu Paketen und aarch64-Unterstützung finden Sie in der
-[Arch-Repository-Dokumentation](../packaging/arch-repo/README.md).
+Details zu Paketen und aarch64-Unterstützung finden Sie in der [Arch-Repository-Dokumentation](../packaging/arch-repo/README.md).
 
 </details>
 

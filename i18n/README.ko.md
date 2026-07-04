@@ -77,8 +77,8 @@ brew install --cask librefang       # Desktop (stable)
 <details>
 <summary><strong>Arch Linux (pacman)</strong></summary>
 
-> AUR 계정 등록은 현재 일시적으로 사용할 수 없습니다. 따라서 LibreFang은
-> 공식 pacman 저장소를 통해 서명된 패키지를 제공하고 있습니다.
+> AUR 계정 등록은 현재 일시적으로 사용할 수 없습니다.
+> 따라서 LibreFang은 공식 pacman 저장소를 통해 서명된 패키지를 제공하고 있습니다.
 
 ```bash
 # LibreFang 패키지 서명 키를 가져와 로컬에서 신뢰하도록 설정
@@ -100,8 +100,7 @@ sudo pacman -Syu librefang-bin
 sudo pacman -S librefang-desktop-bin  # 선택적 데스크톱 앱(x86_64 전용)
 ```
 
-패키지 세부 정보와 aarch64 지원은
-[Arch 저장소 문서](../packaging/arch-repo/README.md)를 참조하세요.
+패키지 세부 정보와 aarch64 지원은 [Arch 저장소 문서](../packaging/arch-repo/README.md)를 참조하세요.
 
 </details>
 
