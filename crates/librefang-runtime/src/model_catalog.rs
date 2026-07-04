@@ -26,9 +26,8 @@ pub struct ModelCatalog {
     models: Vec<ModelCatalogEntry>,
     aliases: HashMap<String, String>,
     providers: Vec<ProviderInfo>,
-    /// Providers whose model list was successfully fetched from their live
-    /// API during this process. Kept separately from `available_models` so an
-    /// empty successful response is distinguishable from "not probed yet".
+    /// Providers whose model list was successfully fetched from their live API during this process.
+    /// Kept separately from `available_models` so an empty successful response is distinguishable from "not probed yet".
     live_model_providers: HashSet<String>,
     /// Providers whose fallback/CLI detection is suppressed by the user
     /// (i.e. the user explicitly removed the key via the dashboard).
@@ -301,9 +300,8 @@ impl ModelCatalog {
             }
         }
 
-        // A clean build embeds a fresh OpenRouter `/models` response. It is a
-        // fallback snapshot only: runtime refreshes do not treat it as
-        // live-confirmed and replace it after the first successful API fetch.
+        // A clean build embeds a fresh OpenRouter `/models` response.
+        // It is a fallback snapshot only: runtime refreshes do not treat it as live-confirmed and replace it after the first successful API fetch.
         // Offline builds embed an empty response and retain the registry TOML.
         if let Ok(body) = serde_json::from_str::<serde_json::Value>(OPENROUTER_BUILD_SNAPSHOT) {
             let snapshot = parse_openrouter_model_entries(&body);
@@ -488,8 +486,8 @@ impl ModelCatalog {
         }
     }
 
-    /// Whether this process has successfully fetched a provider's live model
-    /// list. Build-time and registry snapshots deliberately return false.
+    /// Whether this process has successfully fetched a provider's live model list.
+    /// Build-time and registry snapshots deliberately return false.
     pub fn has_live_provider_models(&self, provider_id: &str) -> bool {
         self.live_model_providers.contains(provider_id)
     }
@@ -1126,9 +1124,9 @@ impl ModelCatalog {
         }
     }
 
-    /// Replace a provider's registry snapshot with a successful live API
-    /// response. Explicit custom entries survive reconciliation; all
-    /// registry-derived entries are replaced so delisted models disappear.
+    /// Replace a provider's registry snapshot with a successful live API response.
+    /// Explicit custom entries survive reconciliation.
+    /// All registry-derived entries are replaced so delisted models disappear.
     pub fn reconcile_live_provider_models(
         &mut self,
         provider: &str,
@@ -1565,8 +1563,7 @@ pub struct ProbeResult {
     pub available_models: Vec<String>,
     /// Rich live entries when the provider exposes model metadata.
     ///
-    /// OpenRouter returns context, pricing, modalities, and supported
-    /// parameters from `/models`; these entries replace its static snapshot.
+    /// OpenRouter returns context, pricing, modalities, and supported parameters from `/models`; these entries replace its static snapshot.
     pub live_models: Vec<ModelCatalogEntry>,
     /// True only when `/models` returned a successful, parseable list.
     pub model_list_fetched: bool,
@@ -1580,8 +1577,8 @@ pub struct ProviderModelSnapshot {
 
 /// Fetch OpenRouter's public model catalog without using an API key.
 ///
-/// Key validation is intentionally separate. `/models` is public and a 200
-/// response proves catalog reachability, not that a configured key is valid.
+/// Key validation is intentionally separate.
+/// `/models` is public, so a 200 response proves catalog reachability rather than configured-key validity.
 pub async fn fetch_openrouter_model_snapshot(
     base_url: &str,
 ) -> Result<ProviderModelSnapshot, String> {

@@ -570,9 +570,8 @@ impl LibreFangKernel {
         let mut manifest = entry.manifest.clone();
 
         // Resolve "default" provider/model to the current effective default.
-        // This covers agents that still explicitly track the default. Boot
-        // resolves legacy source manifests whose model is "default" before
-        // they reach this path.
+        // This covers agents that still explicitly track the default.
+        // Boot resolves legacy source manifests whose model is "default" before they reach this path.
         // 1. New agents stored as "default"/"default" (post-fix spawn behavior)
         // 2. TOML agents with provider="default" that remain unresolved
         {

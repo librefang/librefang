@@ -1028,12 +1028,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     }
 
     async fn list_models_text(&self) -> String {
-        if !self
-            .kernel
-            .model_catalog_ref()
-            .load()
-            .has_live_provider_models("openrouter")
-        {
+        if crate::routes::providers::openrouter_catalog_needs_refresh(&self.kernel) {
             let _ = crate::routes::providers::refresh_openrouter_catalog(&self.kernel).await;
         }
         let catalog = self.kernel.model_catalog_ref().load();
@@ -1085,11 +1080,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
 
     async fn list_models_by_provider(&self, provider_id: &str) -> Vec<(String, String)> {
         if provider_id == "openrouter"
-            && !self
-                .kernel
-                .model_catalog_ref()
-                .load()
-                .has_live_provider_models("openrouter")
+            && crate::routes::providers::openrouter_catalog_needs_refresh(&self.kernel)
         {
             let _ = crate::routes::providers::refresh_openrouter_catalog(&self.kernel).await;
         }

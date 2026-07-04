@@ -81,9 +81,30 @@ use crate::types::ApiErrorResponse;
 static OPENROUTER_REFRESH_ATTEMPTS: LazyLock<DashMap<String, Instant>> =
     LazyLock::new(DashMap::new);
 
+pub(crate) fn openrouter_catalog_needs_refresh(
+    kernel: &Arc<dyn librefang_kernel::kernel_api::KernelApi>,
+) -> bool {
+    use librefang_types::model_catalog::AuthStatus;
+
+    let catalog = kernel.model_catalog_ref().load();
+    let configured = catalog.get_provider("openrouter").is_some_and(|provider| {
+        matches!(
+            provider.auth_status,
+            AuthStatus::Configured
+                | AuthStatus::ValidatedKey
+                | AuthStatus::AutoDetected
+                | AuthStatus::InvalidKey
+        )
+    });
+    configured && !catalog.has_live_provider_models("openrouter")
+}
+
 pub(crate) async fn refresh_openrouter_catalog(
     kernel: &Arc<dyn librefang_kernel::kernel_api::KernelApi>,
 ) -> Result<usize, String> {
+    if !openrouter_catalog_needs_refresh(kernel) {
+        return Ok(0);
+    }
     let base_url = {
         let catalog = kernel.model_catalog_ref().load();
         catalog
@@ -301,12 +322,8 @@ pub async fn list_models(
         .as_deref()
         .map(|provider| provider == "openrouter")
         .unwrap_or(true);
-    let openrouter_needs_refresh = openrouter_in_scope
-        && !state
-            .kernel
-            .model_catalog_ref()
-            .load()
-            .has_live_provider_models("openrouter");
+    let openrouter_needs_refresh =
+        openrouter_in_scope && openrouter_catalog_needs_refresh(&state.kernel);
     if openrouter_needs_refresh {
         if let Err(error) = refresh_openrouter_catalog(&state.kernel).await {
             tracing::warn!(%error, "OpenRouter live catalog unavailable; using build snapshot");
@@ -575,11 +592,7 @@ pub async fn get_model(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     if (id.starts_with("openrouter/") || id.starts_with("openrouter:"))
-        && !state
-            .kernel
-            .model_catalog_ref()
-            .load()
-            .has_live_provider_models("openrouter")
+        && openrouter_catalog_needs_refresh(&state.kernel)
     {
         let _ = refresh_openrouter_catalog(&state.kernel).await;
     }
@@ -843,12 +856,7 @@ fn provider_max_output_tokens(
     )
 )]
 pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    if !state
-        .kernel
-        .model_catalog_ref()
-        .load()
-        .has_live_provider_models("openrouter")
-    {
+    if openrouter_catalog_needs_refresh(&state.kernel) {
         let _ = refresh_openrouter_catalog(&state.kernel).await;
     }
     // Snapshot both the provider list and the matching suppression flags
@@ -1117,13 +1125,7 @@ pub async fn get_provider(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    if name == "openrouter"
-        && !state
-            .kernel
-            .model_catalog_ref()
-            .load()
-            .has_live_provider_models("openrouter")
-    {
+    if name == "openrouter" && openrouter_catalog_needs_refresh(&state.kernel) {
         let _ = refresh_openrouter_catalog(&state.kernel).await;
     }
     let (provider, models, max_output_tokens) = {
@@ -1481,10 +1483,9 @@ pub async fn set_provider_key(
         });
     }
 
-    // OpenRouter's model inventory changes frequently. Refresh it before
-    // choosing or migrating a default so a delisted static entry can never
-    // be selected during this request. Other providers keep the existing
-    // background-validation path.
+    // OpenRouter's model inventory changes frequently.
+    // Refresh it before choosing or migrating a default so a delisted static entry can never be selected during this request.
+    // Other providers keep the existing background-validation path.
     if name == "openrouter" {
         let base_url = {
             let catalog = state.kernel.model_catalog_ref().load();
@@ -1594,9 +1595,8 @@ pub async fn set_provider_key(
             false
         }
     } else if current_provider == name {
-        // If the current OpenRouter default was a free model that disappeared,
-        // migrate it to another live free model. Never replace it with a paid
-        // model automatically.
+        // If the current OpenRouter default was a free model that disappeared, migrate it to another live free model.
+        // Never replace it with a paid model automatically.
         let replacement = {
             let catalog = state.kernel.model_catalog_ref().load();
             (name == "openrouter"
@@ -1625,9 +1625,8 @@ pub async fn set_provider_key(
             });
             true
         } else {
-            // User is saving a key for the CURRENT default provider. The env var is
-            // already set (set_var above), but we must ensure default_model_override
-            // has the correct api_key_env so resolve_driver reads the right variable.
+            // User is saving a key for the current default provider.
+            // The env var is already set above, but `default_model_override` must carry the correct `api_key_env` so `resolve_driver` reads it.
             let needs_update = {
                 let guard = state
                     .kernel
@@ -1955,9 +1954,9 @@ pub async fn test_provider(
 
     let api_key_val = api_key.unwrap_or_default();
 
-    // OpenRouter's model list is public and therefore cannot validate an API
-    // key. Probe `/key` for authentication and refresh `/models` separately;
-    // both operations are combined by the shared runtime helper.
+    // OpenRouter's model list is public and therefore cannot validate an API key.
+    // Probe `/key` for authentication and refresh `/models` separately.
+    // The shared runtime helper combines both operations.
     if name == "openrouter" {
         let start = Instant::now();
         let result =
@@ -2376,13 +2375,7 @@ pub async fn set_default_provider(
     Path(name): Path<String>,
     body: Option<axum::Json<serde_json::Value>>,
 ) -> impl IntoResponse {
-    if name == "openrouter"
-        && !state
-            .kernel
-            .model_catalog_ref()
-            .load()
-            .has_live_provider_models("openrouter")
-    {
+    if name == "openrouter" && openrouter_catalog_needs_refresh(&state.kernel) {
         let _ = refresh_openrouter_catalog(&state.kernel).await;
     }
     // Accept optional {"model": "model-id"} body to override the auto-selected model.

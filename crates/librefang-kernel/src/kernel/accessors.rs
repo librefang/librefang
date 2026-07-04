@@ -476,10 +476,9 @@ impl LibreFangKernel {
                                 );
                             });
 
-                            // Existing installations may still have a delisted
-                            // OpenRouter free model in config.toml. Hot-migrate
-                            // the effective default to another live free model;
-                            // explicitly selected agent models remain pinned.
+                            // Existing installations may still have a delisted OpenRouter free model in config.toml.
+                            // Hot-migrate the effective default to another live free model.
+                            // Explicitly selected agent models remain pinned.
                             let current = {
                                 let guard = kernel
                                     .llm
@@ -531,8 +530,7 @@ impl LibreFangKernel {
                             kernel.model_catalog_update(|catalog| {
                                 catalog.set_provider_auth_status(&id, status);
                                 if !available_models.is_empty() {
-                                    // Store available models so downstream can check
-                                    // whether a configured model actually exists.
+                                    // Store available models so downstream can check whether a configured model actually exists.
                                     catalog.set_provider_available_models(
                                         &id,
                                         available_models.clone(),

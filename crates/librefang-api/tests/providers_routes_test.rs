@@ -11,8 +11,8 @@
 //!   - `POST /api/providers/github-copilot/oauth/*` — outbound device-flow HTTP
 //!   - `GET  /api/providers/ollama/detect`          — outbound HTTP probe
 //!   - `POST /api/catalog/update`                   — outbound network sync
-//!   - Most `POST /api/providers/{name}/test` success paths — outbound HTTP /
-//!     CLI probe. OpenRouter is covered with a local mock server.
+//!   - Most `POST /api/providers/{name}/test` success paths — outbound HTTP / CLI probe.
+//!     OpenRouter is covered with a local mock server.
 //!
 //! These would either flake on CI (real network) or contaminate other test
 //! binaries running in parallel via `std::env::set_var`. Per CLAUDE.md
@@ -992,7 +992,7 @@ async fn first_openrouter_model_request_populates_live_cache() {
         api_key_env: "OPENROUTER_API_KEY".to_string(),
         base_url: server.uri(),
         key_required: true,
-        auth_status: AuthStatus::Missing,
+        auth_status: AuthStatus::Configured,
         ..ProviderInfo::default()
     });
 
@@ -1013,6 +1013,51 @@ async fn first_openrouter_model_request_populates_live_cache() {
         .expect("models array")
         .iter()
         .any(|model| model["id"] == "openrouter/acme/lazy:free"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unconfigured_openrouter_model_request_does_not_fetch_live_catalog() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{
+                "id": "acme/unexpected:free",
+                "name": "Unexpected Free",
+                "context_length": 65536,
+                "pricing": {"prompt": "0", "completion": "0"}
+            }]
+        })))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let h = boot_with_provider(ProviderInfo {
+        id: "openrouter".to_string(),
+        display_name: "OpenRouter".to_string(),
+        api_key_env: "OPENROUTER_API_KEY".to_string(),
+        base_url: server.uri(),
+        key_required: true,
+        auth_status: AuthStatus::Missing,
+        ..ProviderInfo::default()
+    });
+
+    for path in [
+        "/api/models?provider=openrouter",
+        "/api/providers",
+        "/api/providers/openrouter",
+    ] {
+        let (status, _) = json_request(&h, Method::GET, path, None).await;
+        assert_eq!(status, StatusCode::OK, "unexpected status for {path}");
+    }
+    assert!(!h
+        ._state
+        .kernel
+        .model_catalog_ref()
+        .load()
+        .has_live_provider_models("openrouter"));
 }
 
 // ---------------------------------------------------------------------------

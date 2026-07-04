@@ -988,12 +988,7 @@ pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoRespo
     //     Carries `{ select?, number_select?, min?, max?, step?, placeholder? }`.
     //
     // Replaces a 245-line hand-authored schema (issue #3048 follow-up).
-    if !state
-        .kernel
-        .model_catalog_ref()
-        .load()
-        .has_live_provider_models("openrouter")
-    {
+    if crate::routes::providers::openrouter_catalog_needs_refresh(&state.kernel) {
         let _ = crate::routes::providers::refresh_openrouter_catalog(&state.kernel).await;
     }
     let catalog = state.kernel.model_catalog_ref().load();
