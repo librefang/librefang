@@ -12,6 +12,7 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 - Surface the model each CLI passthrough provider (`codex-cli`, `claude-code`, `gemini-cli`, `qwen-code`) is configured to run, read live from the tool's own config, so a custom model — DeepSeek via `~/.codex/config.toml`, a Kimi/Moonshot id via Claude Code's `ANTHROPIC_MODEL` / `~/.claude/settings.json`, a Gemini preview via `GEMINI_MODEL` / `~/.gemini/settings.json`, or an OpenAI-compatible id via `~/.qwen/settings.json` — is recognised on the Providers page and in the agent model picker instead of only the catalog's default models (#6365) (@houko)
 - Stop CLI providers (`codex-cli`, `gemini-cli`, `claude-code`, `qwen-code`) from forcing a placeholder `--model <provider-id>` onto their CLI for a bare provider id, so each CLI defers to its own configured default model (#6365) (@houko)
 - Clear `cargo-deny` advisory failures on `main` by bumping `anyhow` to 1.0.103 (RUSTSEC-2026-0190) and ignoring the unmaintained `ttf-parser` advisory (RUSTSEC-2026-0192 — transitive via `pdf-extract` → `lopdf`, no safe upgrade available) (#6366) (@houko)
+- Clear the `quick-xml` advisories RUSTSEC-2026-0194 / RUSTSEC-2026-0195 by bumping `plist` to 1.10.0 (pulls the patched `quick-xml` 0.41.0) and `tauri-winrt-notification` to 0.7.3 (drops its `quick-xml` dependency), removing both vulnerable versions from the lockfile (#6387) (@houko)
 
 ### Documentation
 
