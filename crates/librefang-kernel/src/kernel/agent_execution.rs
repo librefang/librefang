@@ -1221,6 +1221,10 @@ impl LibreFangKernel {
         )
         .await;
 
+        if let Err(error) = &result {
+            self.refresh_openrouter_catalog_after_model_not_found(&manifest, error);
+        }
+
         // Tear down injection channel after loop finishes.
         self.teardown_injection_channel(agent_id, effective_session_id);
 

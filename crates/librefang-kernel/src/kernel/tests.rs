@@ -10720,6 +10720,32 @@ fn sync_default_model_agents_preserves_explicit_assistant_model() {
     kernel.shutdown();
 }
 
+#[test]
+fn openrouter_model_not_found_error_triggers_catalog_refresh_policy() {
+    let mut manifest = AgentManifest::default();
+    manifest.model.provider = "openrouter".to_string();
+    assert!(
+        super::accessors::should_refresh_openrouter_catalog_after_error(
+            &manifest,
+            "LLM driver error: Model not found: acme/retired"
+        )
+    );
+    assert!(
+        !super::accessors::should_refresh_openrouter_catalog_after_error(
+            &manifest,
+            "LLM driver error: Rate limited"
+        )
+    );
+
+    manifest.model.provider = "openai".to_string();
+    assert!(
+        !super::accessors::should_refresh_openrouter_catalog_after_error(
+            &manifest,
+            "LLM driver error: Model not found: ft:gpt-4o:new"
+        )
+    );
+}
+
 // ── resolve_scope_channel: reserved-name defense-in-depth ──────────────────
 // Audit: cron-channel-name-not-reserved. The kernel's channel-derived session
 // resolver re-sanitizes reserved channel names from UNtrusted callers, but

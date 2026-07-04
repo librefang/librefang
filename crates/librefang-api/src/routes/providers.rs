@@ -81,13 +81,14 @@ use crate::types::ApiErrorResponse;
 static OPENROUTER_REFRESH_ATTEMPTS: LazyLock<DashMap<String, Instant>> =
     LazyLock::new(DashMap::new);
 
-pub(crate) fn openrouter_catalog_needs_refresh(
+fn openrouter_provider_is_configured(
     kernel: &Arc<dyn librefang_kernel::kernel_api::KernelApi>,
 ) -> bool {
     use librefang_types::model_catalog::AuthStatus;
 
     let catalog = kernel.model_catalog_ref().load();
-    let configured = catalog.get_provider("openrouter").is_some_and(|provider| {
+    // `InvalidKey` is intentional because OpenRouter's model catalog is public.
+    catalog.get_provider("openrouter").is_some_and(|provider| {
         matches!(
             provider.auth_status,
             AuthStatus::Configured
@@ -95,8 +96,30 @@ pub(crate) fn openrouter_catalog_needs_refresh(
                 | AuthStatus::AutoDetected
                 | AuthStatus::InvalidKey
         )
-    });
-    configured && !catalog.has_live_provider_models("openrouter")
+    })
+}
+
+pub(crate) fn openrouter_catalog_needs_refresh(
+    kernel: &Arc<dyn librefang_kernel::kernel_api::KernelApi>,
+) -> bool {
+    openrouter_provider_is_configured(kernel)
+        && !kernel
+            .model_catalog_ref()
+            .load()
+            .has_live_provider_models("openrouter")
+}
+
+fn openrouter_catalog_needs_list_refresh(
+    kernel: &Arc<dyn librefang_kernel::kernel_api::KernelApi>,
+) -> bool {
+    openrouter_provider_is_configured(kernel)
+        && kernel
+            .model_catalog_ref()
+            .load()
+            .live_provider_models_are_stale(
+                "openrouter",
+                librefang_kernel::model_catalog::OPENROUTER_MODEL_CATALOG_TTL,
+            )
 }
 
 pub(crate) async fn refresh_openrouter_catalog(
@@ -105,6 +128,21 @@ pub(crate) async fn refresh_openrouter_catalog(
     if !openrouter_catalog_needs_refresh(kernel) {
         return Ok(0);
     }
+    refresh_openrouter_catalog_now(kernel).await
+}
+
+async fn refresh_openrouter_catalog_for_model_list(
+    kernel: &Arc<dyn librefang_kernel::kernel_api::KernelApi>,
+) -> Result<usize, String> {
+    if !openrouter_catalog_needs_list_refresh(kernel) {
+        return Ok(0);
+    }
+    refresh_openrouter_catalog_now(kernel).await
+}
+
+async fn refresh_openrouter_catalog_now(
+    kernel: &Arc<dyn librefang_kernel::kernel_api::KernelApi>,
+) -> Result<usize, String> {
     let base_url = {
         let catalog = kernel.model_catalog_ref().load();
         catalog
@@ -323,9 +361,9 @@ pub async fn list_models(
         .map(|provider| provider == "openrouter")
         .unwrap_or(true);
     let openrouter_needs_refresh =
-        openrouter_in_scope && openrouter_catalog_needs_refresh(&state.kernel);
+        openrouter_in_scope && openrouter_catalog_needs_list_refresh(&state.kernel);
     if openrouter_needs_refresh {
-        if let Err(error) = refresh_openrouter_catalog(&state.kernel).await {
+        if let Err(error) = refresh_openrouter_catalog_for_model_list(&state.kernel).await {
             tracing::warn!(%error, "OpenRouter live catalog unavailable; using build snapshot");
         }
     }
@@ -2399,7 +2437,7 @@ pub async fn set_default_provider(
             }
         };
         if let Some(ref model_id) = user_model {
-            if catalog.is_model_available(&name, model_id) == Some(false) {
+            if name == "openrouter" && catalog.is_model_available(&name, model_id) == Some(false) {
                 return ApiErrorResponse::bad_request(format!(
                     "Model '{model_id}' is not available from provider '{name}'"
                 ))

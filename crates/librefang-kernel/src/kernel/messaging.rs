@@ -3257,6 +3257,7 @@ impl LibreFangKernel {
                     Ok(result)
                 }
                 Err(e) => {
+                    kernel_clone.refresh_openrouter_catalog_after_model_not_found(&manifest, &e);
                     // Release the pre-charged token reservation — the
                     // streaming loop failed, no usage to settle.
                     kernel_clone

@@ -596,6 +596,8 @@ fn reconcile_openrouter_models_replaces_static_snapshot_and_keeps_custom() {
         live,
     );
     assert!(catalog.has_live_provider_models("openrouter"));
+    assert!(!catalog.live_provider_models_are_stale("openrouter", OPENROUTER_MODEL_CATALOG_TTL));
+    assert!(catalog.live_provider_models_are_stale("openrouter", std::time::Duration::ZERO));
 
     let ids: Vec<&str> = catalog
         .models_by_provider("openrouter")
@@ -700,8 +702,8 @@ fn openrouter_automatic_default_never_selects_paid_model() {
     let mut catalog = openrouter_test_catalog();
     assert_eq!(
         catalog.automatic_default_model_for_provider("openrouter"),
-        None,
-        "a static snapshot is not safe for automatic selection"
+        Some("openrouter/qwen/deprecated:free".to_string()),
+        "a failed live fetch should retain a free build-snapshot fallback"
     );
 
     let live = parse_openrouter_model_entries(&serde_json::json!({

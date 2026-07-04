@@ -7,12 +7,11 @@
 //! `tower::ServiceExt::oneshot` — same harness pattern as `users_test.rs`.
 //!
 //! Out of scope (not exercised here, by design):
-//!   - `POST /api/providers/{name}/key`             — mutates global `std::env`
 //!   - `POST /api/providers/github-copilot/oauth/*` — outbound device-flow HTTP
 //!   - `GET  /api/providers/ollama/detect`          — outbound HTTP probe
 //!   - `POST /api/catalog/update`                   — outbound network sync
 //!   - Most `POST /api/providers/{name}/test` success paths — outbound HTTP / CLI probe.
-//!     OpenRouter is covered with a local mock server.
+//!     OpenRouter key-save and provider-test paths are covered with local mock servers.
 //!
 //! These would either flake on CI (real network) or contaminate other test
 //! binaries running in parallel via `std::env::set_var`. Per CLAUDE.md
@@ -917,6 +916,78 @@ async fn set_default_openrouter_rejects_model_missing_from_live_catalog() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn set_default_openrouter_uses_free_snapshot_when_live_refresh_fails() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(429))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let h = boot_with_provider(ProviderInfo {
+        id: "openrouter".to_string(),
+        display_name: "OpenRouter".to_string(),
+        api_key_env: "OPENROUTER_API_KEY".to_string(),
+        base_url: server.uri(),
+        key_required: true,
+        auth_status: AuthStatus::ValidatedKey,
+        ..ProviderInfo::default()
+    });
+    let snapshot_model = ModelCatalogEntry {
+        id: "openrouter/acme/snapshot:free".to_string(),
+        display_name: "Snapshot Free".to_string(),
+        provider: "openrouter".to_string(),
+        tier: ModelTier::Balanced,
+        context_window: 32_768,
+        max_output_tokens: 4_096,
+        supports_streaming: true,
+        ..ModelCatalogEntry::default()
+    };
+    h._state.kernel.model_catalog_update(&mut |catalog| {
+        catalog.reconcile_live_provider_models(
+            "openrouter",
+            vec!["acme/snapshot:free".to_string()],
+            vec![snapshot_model.clone()],
+        );
+        catalog.clear_provider_available_models("openrouter");
+    });
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/providers/openrouter/default",
+        Some(serde_json::json!({})),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["model"], "openrouter/acme/snapshot:free");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn set_default_non_openrouter_accepts_model_missing_from_probe_snapshot() {
+    let h = boot();
+    h._state.kernel.model_catalog_update(&mut |catalog| {
+        catalog.set_provider_available_models("openai", vec!["gpt-4o-mini".to_string()]);
+    });
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/providers/openai/default",
+        Some(serde_json::json!({
+            "model": "ft:gpt-4o:new-after-startup"
+        })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_openrouter_refreshes_live_models() {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -965,6 +1036,94 @@ async fn test_openrouter_refreshes_live_models() {
     assert!(catalog
         .find_model_for_provider("openrouter", "openrouter/acme/live:free")
         .is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn set_first_openrouter_key_uses_free_snapshot_when_live_models_are_rate_limited() {
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const OPENROUTER_TEST_ENV: &str = "LIBREFANG_TEST_OPENROUTER_KEY_6384";
+    const CURRENT_TEST_ENV: &str = "LIBREFANG_TEST_CURRENT_KEY_6384";
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/key"))
+        .and(header("authorization", "Bearer test-openrouter-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {"label": "test"}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(429))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let provider = ProviderInfo {
+        id: "openrouter".to_string(),
+        display_name: "OpenRouter".to_string(),
+        api_key_env: OPENROUTER_TEST_ENV.to_string(),
+        base_url: server.uri(),
+        key_required: true,
+        auth_status: AuthStatus::Missing,
+        ..ProviderInfo::default()
+    };
+    let snapshot_model = ModelCatalogEntry {
+        id: "openrouter/acme/snapshot:free".to_string(),
+        display_name: "Snapshot Free".to_string(),
+        provider: "openrouter".to_string(),
+        tier: ModelTier::Balanced,
+        context_window: 32_768,
+        max_output_tokens: 4_096,
+        supports_streaming: true,
+        ..ModelCatalogEntry::default()
+    };
+    let test = TestAppState::with_builder(
+        MockKernelBuilder::new()
+            .with_config(|cfg| {
+                cfg.default_model = librefang_types::config::DefaultModelConfig {
+                    provider: "openai".to_string(),
+                    model: "gpt-4o-mini".to_string(),
+                    api_key_env: CURRENT_TEST_ENV.to_string(),
+                    ..Default::default()
+                };
+            })
+            .with_catalog_seed((vec![provider], vec![snapshot_model])),
+    );
+    let state = test.state.clone();
+    let h = Harness {
+        app: Router::new()
+            .nest("/api", routes::providers::router())
+            .with_state(state.clone()),
+        _state: state,
+        _test: test,
+    };
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/providers/openrouter/key",
+        Some(serde_json::json!({"key": "test-openrouter-key"})),
+    )
+    .await;
+    librefang_api::secrets_env::remove_env_var_guarded(OPENROUTER_TEST_ENV).await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["switched_default"], true);
+    let default_override = h
+        ._state
+        .kernel
+        .default_model_override_ref()
+        .read()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+        .expect("default override");
+    assert_eq!(default_override.provider, "openrouter");
+    assert_eq!(default_override.model, "openrouter/acme/snapshot:free");
 }
 
 #[tokio::test(flavor = "multi_thread")]

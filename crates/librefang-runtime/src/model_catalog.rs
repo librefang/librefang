@@ -8,10 +8,12 @@ use librefang_types::model_catalog::{
     ModelOverrides, ModelTier, ProviderInfo,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::time::{Duration, Instant};
 use tracing::warn;
 
 const OPENROUTER_BUILD_SNAPSHOT: &str =
     include_str!(concat!(env!("OUT_DIR"), "/openrouter-models.json"));
+pub const OPENROUTER_MODEL_CATALOG_TTL: Duration = Duration::from_secs(15 * 60);
 
 /// The model catalog — registry of all known models and providers.
 ///
@@ -29,6 +31,7 @@ pub struct ModelCatalog {
     /// Providers whose model list was successfully fetched from their live API during this process.
     /// Kept separately from `available_models` so an empty successful response is distinguishable from "not probed yet".
     live_model_providers: HashSet<String>,
+    live_model_fetched_at: HashMap<String, Instant>,
     /// Providers whose fallback/CLI detection is suppressed by the user
     /// (i.e. the user explicitly removed the key via the dashboard).
     suppressed_providers: HashSet<String>,
@@ -172,6 +175,7 @@ impl ModelCatalog {
             aliases,
             providers,
             live_model_providers: HashSet::new(),
+            live_model_fetched_at: HashMap::new(),
             suppressed_providers: HashSet::new(),
             overrides: HashMap::new(),
         }
@@ -338,6 +342,7 @@ impl ModelCatalog {
             aliases,
             providers,
             live_model_providers: HashSet::new(),
+            live_model_fetched_at: HashMap::new(),
             suppressed_providers: HashSet::new(),
             overrides: HashMap::new(),
         }
@@ -473,6 +478,8 @@ impl ModelCatalog {
     /// Store the list of models confirmed available via live probe.
     pub fn set_provider_available_models(&mut self, provider_id: &str, models: Vec<String>) {
         self.live_model_providers.insert(provider_id.to_string());
+        self.live_model_fetched_at
+            .insert(provider_id.to_string(), Instant::now());
         if let Some(p) = self.providers.iter_mut().find(|p| p.id == provider_id) {
             p.available_models = models;
         }
@@ -481,6 +488,7 @@ impl ModelCatalog {
     /// Forget live model availability after a provider is deconfigured.
     pub fn clear_provider_available_models(&mut self, provider_id: &str) {
         self.live_model_providers.remove(provider_id);
+        self.live_model_fetched_at.remove(provider_id);
         if let Some(p) = self.providers.iter_mut().find(|p| p.id == provider_id) {
             p.available_models.clear();
         }
@@ -490,6 +498,14 @@ impl ModelCatalog {
     /// Build-time and registry snapshots deliberately return false.
     pub fn has_live_provider_models(&self, provider_id: &str) -> bool {
         self.live_model_providers.contains(provider_id)
+    }
+
+    /// Whether a live model list is missing or older than `max_age`.
+    /// This is only a freshness signal; callers decide which user action is allowed to trigger network refresh.
+    pub fn live_provider_models_are_stale(&self, provider_id: &str, max_age: Duration) -> bool {
+        self.live_model_fetched_at
+            .get(provider_id)
+            .is_none_or(|fetched_at| fetched_at.elapsed() >= max_age)
     }
 
     /// Check whether a model is confirmed available on its provider.
@@ -655,14 +671,11 @@ impl ModelCatalog {
     /// Return a model that may be selected without explicit user consent.
     ///
     /// OpenRouter's catalog mixes free and paid models and changes frequently.
-    /// Automatic setup must therefore use a live-confirmed free model only.
+    /// Automatic setup prefers the live snapshot and falls back to a build-time free model when the live fetch fails.
     /// Paid OpenRouter models remain available for explicit selection.
     pub fn automatic_default_model_for_provider(&self, provider: &str) -> Option<String> {
         if provider != "openrouter" {
             return self.default_model_for_provider(provider);
-        }
-        if !self.live_model_providers.contains(provider) {
-            return None;
         }
         self.models
             .iter()

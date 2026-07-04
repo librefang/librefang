@@ -14,6 +14,7 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use super::spawn_logged;
 use super::subsystems::{EventSubsystemApi, McpSubsystemApi, MemorySubsystemApi};
 
 use tracing::{debug, info, warn};
@@ -27,6 +28,16 @@ use crate::workflow::WorkflowEngine;
 
 use super::workspace_setup::migrate_legacy_agent_dirs;
 use super::LibreFangKernel;
+
+pub(super) fn should_refresh_openrouter_catalog_after_error(
+    manifest: &librefang_types::agent::AgentManifest,
+    error: &str,
+) -> bool {
+    use librefang_llm_driver::llm_errors::{classify_error, LlmErrorCategory};
+
+    manifest.model.provider == "openrouter"
+        && classify_error(error, None).category == LlmErrorCategory::ModelNotFound
+}
 
 impl LibreFangKernel {
     /// Full kernel configuration (atomically loaded snapshot).
@@ -414,6 +425,54 @@ impl LibreFangKernel {
         F: FnMut(&mut librefang_runtime::model_catalog::ModelCatalog) -> R,
     {
         self.llm.catalog_update(f)
+    }
+
+    pub(crate) fn refresh_openrouter_catalog_after_model_not_found(
+        &self,
+        manifest: &librefang_types::agent::AgentManifest,
+        error: &impl std::fmt::Display,
+    ) {
+        if !should_refresh_openrouter_catalog_after_error(manifest, &error.to_string()) {
+            return;
+        }
+        let base_url = manifest.model.base_url.clone().or_else(|| {
+            self.llm
+                .model_catalog
+                .load()
+                .get_provider("openrouter")
+                .map(|provider| provider.base_url.clone())
+        });
+        let Some(base_url) = base_url.filter(|url| !url.is_empty()) else {
+            return;
+        };
+        let Some(kernel) = self.self_handle.get().and_then(|weak| weak.upgrade()) else {
+            return;
+        };
+
+        spawn_logged("openrouter_catalog_error_refresh", async move {
+            match librefang_runtime::model_catalog::fetch_openrouter_model_snapshot(&base_url).await
+            {
+                Ok(snapshot) => {
+                    kernel.model_catalog_update(|catalog| {
+                        catalog.reconcile_live_provider_models(
+                            "openrouter",
+                            snapshot.available_models.clone(),
+                            snapshot.live_models.clone(),
+                        );
+                    });
+                    tracing::info!(
+                        models = snapshot.live_models.len(),
+                        "refreshed OpenRouter catalog after model-not-found error"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "failed to refresh OpenRouter catalog after model-not-found error"
+                    );
+                }
+            }
+        });
     }
 
     /// Spawn background tasks to validate API keys for every `Configured` provider.
