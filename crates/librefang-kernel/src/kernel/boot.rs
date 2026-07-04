@@ -2132,12 +2132,10 @@ impl LibreFangKernel {
 
                     // Apply default_model to restored agents.
                     //
-                    // Three cases:
+                    // Two cases:
                     // 1. Agent has empty/default provider → always apply default_model
                     // 2. Agent's source TOML defines provider="default" → the DB value
                     //    is a stale resolved provider from a previous config; override it
-                    // 3. Agent named "assistant" (auto-spawned) → update to match
-                    //    default_model so config.toml changes take effect on restart
                     {
                         let dm = &cfg.default_model;
                         let is_default_provider = restored_entry.manifest.model.provider.is_empty()
@@ -2160,12 +2158,7 @@ impl LibreFangKernel {
                                 })
                                 .unwrap_or(false);
 
-                        let is_auto_spawned = restored_entry.name == "assistant"
-                            && restored_entry.manifest.description == "General-purpose assistant";
-                        if is_default_provider && is_default_model
-                            || toml_says_default
-                            || is_auto_spawned
-                        {
+                        if is_default_provider && is_default_model || toml_says_default {
                             if !dm.provider.is_empty() {
                                 restored_entry.manifest.model.provider = dm.provider.clone();
                             }

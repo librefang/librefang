@@ -572,6 +572,7 @@ fn openrouter_live_parser_maps_metadata() {
 #[test]
 fn reconcile_openrouter_models_replaces_static_snapshot_and_keeps_custom() {
     let mut catalog = openrouter_test_catalog();
+    assert!(!catalog.has_live_provider_models("openrouter"));
     let live = parse_openrouter_model_entries(&serde_json::json!({
         "data": [
             {
@@ -594,6 +595,7 @@ fn reconcile_openrouter_models_replaces_static_snapshot_and_keeps_custom() {
         vec!["acme/paid".to_string(), "acme/current:free".to_string()],
         live,
     );
+    assert!(catalog.has_live_provider_models("openrouter"));
 
     let ids: Vec<&str> = catalog
         .models_by_provider("openrouter")
@@ -629,6 +631,68 @@ fn reconcile_openrouter_models_replaces_static_snapshot_and_keeps_custom() {
         catalog.automatic_default_model_for_provider("openrouter"),
         Some("openrouter/acme/current:free".to_string())
     );
+}
+
+#[tokio::test]
+async fn openrouter_catalog_fetch_does_not_require_authorization() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{
+                "id": "acme/current:free",
+                "name": "Current Free",
+                "context_length": 65536,
+                "pricing": {"prompt": "0", "completion": "0"}
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let snapshot = fetch_openrouter_model_snapshot(&server.uri())
+        .await
+        .expect("public OpenRouter catalog fetch");
+    assert_eq!(snapshot.available_models, vec!["acme/current:free"]);
+    assert_eq!(snapshot.live_models[0].id, "openrouter/acme/current:free");
+}
+
+#[tokio::test]
+async fn openrouter_probe_validates_key_separately_from_catalog_fetch() {
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/key"))
+        .and(header("authorization", "Bearer test-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {"label": "test"}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{
+                "id": "acme/current:free",
+                "name": "Current Free",
+                "context_length": 65536,
+                "pricing": {"prompt": "0", "completion": "0"}
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let result = probe_api_key("openrouter", &server.uri(), "test-key").await;
+    assert_eq!(result.key_valid, Some(true));
+    assert!(result.model_list_fetched);
+    assert_eq!(result.available_models, vec!["acme/current:free"]);
 }
 
 #[test]

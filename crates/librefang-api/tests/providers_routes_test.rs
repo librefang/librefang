@@ -11,8 +11,8 @@
 //!   - `POST /api/providers/github-copilot/oauth/*` — outbound device-flow HTTP
 //!   - `GET  /api/providers/ollama/detect`          — outbound HTTP probe
 //!   - `POST /api/catalog/update`                   — outbound network sync
-//!   - `POST /api/providers/{name}/test` (success)  — outbound HTTP / CLI probe
-//!     (only the unknown-provider 404 branch is verified — pure catalog lookup)
+//!   - Most `POST /api/providers/{name}/test` success paths — outbound HTTP /
+//!     CLI probe. OpenRouter is covered with a local mock server.
 //!
 //! These would either flake on CI (real network) or contaminate other test
 //! binaries running in parallel via `std::env::set_var`. Per CLAUDE.md
@@ -914,6 +914,105 @@ async fn set_default_openrouter_rejects_model_missing_from_live_catalog() {
         body.to_string().contains("not available"),
         "rejection should explain that the model is absent from the live list: {body}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_openrouter_refreshes_live_models() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {"label": "test"}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{
+                "id": "acme/live:free",
+                "name": "Live Free",
+                "context_length": 65536,
+                "pricing": {"prompt": "0", "completion": "0"}
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let h = boot_with_provider(ProviderInfo {
+        id: "openrouter".to_string(),
+        display_name: "OpenRouter".to_string(),
+        api_key_env: String::new(),
+        base_url: server.uri(),
+        key_required: false,
+        auth_status: AuthStatus::Configured,
+        ..ProviderInfo::default()
+    });
+
+    let (status, body) =
+        json_request(&h, Method::POST, "/api/providers/openrouter/test", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "ok");
+    assert_eq!(body["models_refreshed"], 1);
+
+    let catalog = h._state.kernel.model_catalog_ref().load();
+    assert!(catalog.has_live_provider_models("openrouter"));
+    assert!(catalog
+        .find_model_for_provider("openrouter", "openrouter/acme/live:free")
+        .is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn first_openrouter_model_request_populates_live_cache() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{
+                "id": "acme/lazy:free",
+                "name": "Lazy Free",
+                "context_length": 65536,
+                "pricing": {"prompt": "0", "completion": "0"}
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let h = boot_with_provider(ProviderInfo {
+        id: "openrouter".to_string(),
+        display_name: "OpenRouter".to_string(),
+        api_key_env: "OPENROUTER_API_KEY".to_string(),
+        base_url: server.uri(),
+        key_required: true,
+        auth_status: AuthStatus::Missing,
+        ..ProviderInfo::default()
+    });
+
+    let (first_status, first_body) =
+        json_request(&h, Method::GET, "/api/models?provider=openrouter", None).await;
+    assert_eq!(first_status, StatusCode::OK);
+    assert!(first_body["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .any(|model| model["id"] == "openrouter/acme/lazy:free"));
+
+    let (second_status, second_body) =
+        json_request(&h, Method::GET, "/api/models?provider=openrouter", None).await;
+    assert_eq!(second_status, StatusCode::OK);
+    assert!(second_body["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .any(|model| model["id"] == "openrouter/acme/lazy:free"));
 }
 
 // ---------------------------------------------------------------------------

@@ -142,6 +142,7 @@ totp-rs = { workspace = true }
 # resulting JWKS over a local axum listener so `validate_jwt_cached` can
 # be driven end-to-end without a live identity provider.
 rsa = { workspace = true }
+wiremock = "0.6"
 
 [lints]
 workspace = true

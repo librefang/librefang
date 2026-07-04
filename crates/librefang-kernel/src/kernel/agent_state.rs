@@ -114,6 +114,18 @@ impl LibreFangKernel {
         } else {
             model.to_string()
         };
+        if provider.as_deref() == Some("openrouter")
+            && self
+                .llm
+                .model_catalog
+                .load()
+                .is_model_available("openrouter", &normalized_model)
+                == Some(false)
+        {
+            return Err(KernelError::LibreFang(LibreFangError::InvalidInput(
+                format!("OpenRouter model '{normalized_model}' is not in the live catalog"),
+            )));
+        }
 
         // Snapshot the full model state for rollback on DB persist failure (#3499).
         let prev_model_state = self.agents.registry.get(agent_id).map(|e| {

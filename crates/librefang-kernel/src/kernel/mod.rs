@@ -1021,7 +1021,6 @@ impl LibreFangKernel {
     ///
     /// Agents eligible for update:
     /// - Any agent with provider="default" or "" (new spawn-time behavior)
-    /// - The auto-spawned "assistant" agent (may have stale concrete provider in DB)
     /// - Dashboard-created agents (no source_toml_path, no custom api_key_env) whose
     ///   stored provider matches `old_provider` — these were using the old default
     ///
@@ -1042,19 +1041,18 @@ impl LibreFangKernel {
                 || entry.manifest.model.provider == "default";
             let is_default_model =
                 entry.manifest.model.model.is_empty() || entry.manifest.model.model == "default";
-            let is_auto_spawned = entry.name == "assistant"
-                && entry.manifest.description == "General-purpose assistant";
             // Dashboard-created agents that were using the old default provider:
             // no source TOML, no custom API key, and saved provider == old default
-            let is_stale_dashboard_default = entry.source_toml_path.is_none()
+            // The built-in assistant is excluded: users can explicitly select
+            // its model in the dashboard, and provider equality alone cannot
+            // distinguish that choice from a legacy resolved default.
+            let is_stale_dashboard_default = entry.name != "assistant"
+                && entry.source_toml_path.is_none()
                 && entry.manifest.model.api_key_env.is_none()
                 && entry.manifest.model.base_url.is_none()
                 && entry.manifest.model.provider == old_provider;
 
-            if (is_default_provider && is_default_model)
-                || is_auto_spawned
-                || is_stale_dashboard_default
-            {
+            if (is_default_provider && is_default_model) || is_stale_dashboard_default {
                 if let Err(e) = self.agents.registry.update_model_and_provider(
                     entry.id,
                     dm.model.clone(),

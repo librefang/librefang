@@ -78,6 +78,40 @@ use std::time::Instant;
 
 use crate::types::ApiErrorResponse;
 
+static OPENROUTER_REFRESH_ATTEMPTS: LazyLock<DashMap<String, Instant>> =
+    LazyLock::new(DashMap::new);
+
+pub(crate) async fn refresh_openrouter_catalog(
+    kernel: &Arc<dyn librefang_kernel::kernel_api::KernelApi>,
+) -> Result<usize, String> {
+    let base_url = {
+        let catalog = kernel.model_catalog_ref().load();
+        catalog
+            .get_provider("openrouter")
+            .map(|provider| provider.base_url.clone())
+            .filter(|url| !url.is_empty())
+            .ok_or_else(|| "OpenRouter base URL is not configured".to_string())?
+    };
+    if OPENROUTER_REFRESH_ATTEMPTS
+        .get(&base_url)
+        .is_some_and(|attempt| attempt.elapsed() < std::time::Duration::from_secs(60))
+    {
+        return Err("OpenRouter catalog refresh is in the 60-second retry window".to_string());
+    }
+    OPENROUTER_REFRESH_ATTEMPTS.insert(base_url.clone(), Instant::now());
+    let snapshot =
+        librefang_kernel::model_catalog::fetch_openrouter_model_snapshot(&base_url).await?;
+    let model_count = snapshot.live_models.len();
+    kernel.model_catalog_update(&mut move |catalog| {
+        catalog.reconcile_live_provider_models(
+            "openrouter",
+            snapshot.available_models.clone(),
+            snapshot.live_models.clone(),
+        );
+    });
+    Ok(model_count)
+}
+
 pub(crate) fn parse_codex_configured_model(body: &str) -> Option<String> {
     let value: toml::Value = toml::from_str(body).ok()?;
     let model = value.get("model")?.as_str()?.trim();
@@ -257,13 +291,28 @@ pub async fn list_models(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let catalog = state.kernel.model_catalog_ref().load();
     let provider_filter = params.get("provider").map(|s| s.to_lowercase());
     let tier_filter = params.get("tier").map(|s| s.to_lowercase());
     let available_only = params
         .get("available")
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false);
+    let openrouter_in_scope = provider_filter
+        .as_deref()
+        .map(|provider| provider == "openrouter")
+        .unwrap_or(true);
+    let openrouter_needs_refresh = openrouter_in_scope
+        && !state
+            .kernel
+            .model_catalog_ref()
+            .load()
+            .has_live_provider_models("openrouter");
+    if openrouter_needs_refresh {
+        if let Err(error) = refresh_openrouter_catalog(&state.kernel).await {
+            tracing::warn!(%error, "OpenRouter live catalog unavailable; using build snapshot");
+        }
+    }
+    let catalog = state.kernel.model_catalog_ref().load();
 
     // Pre-compute the live-discovered model ID set per local provider so we
     // can hide static catalog entries whose IDs aren't actually exposed by
@@ -525,6 +574,15 @@ pub async fn get_model(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    if (id.starts_with("openrouter/") || id.starts_with("openrouter:"))
+        && !state
+            .kernel
+            .model_catalog_ref()
+            .load()
+            .has_live_provider_models("openrouter")
+    {
+        let _ = refresh_openrouter_catalog(&state.kernel).await;
+    }
     let catalog = state.kernel.model_catalog_ref().load();
     match catalog.find_model(&id) {
         Some(m) => {
@@ -785,6 +843,14 @@ fn provider_max_output_tokens(
     )
 )]
 pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    if !state
+        .kernel
+        .model_catalog_ref()
+        .load()
+        .has_live_provider_models("openrouter")
+    {
+        let _ = refresh_openrouter_catalog(&state.kernel).await;
+    }
     // Snapshot both the provider list and the matching suppression flags
     // from the same catalog load — racing a `delete_provider_key` /
     // `enable_provider` mid-iteration would otherwise let the JSON show a
@@ -1051,6 +1117,15 @@ pub async fn get_provider(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
+    if name == "openrouter"
+        && !state
+            .kernel
+            .model_catalog_ref()
+            .load()
+            .has_live_provider_models("openrouter")
+    {
+        let _ = refresh_openrouter_catalog(&state.kernel).await;
+    }
     let (provider, models, max_output_tokens) = {
         let catalog = state.kernel.model_catalog_ref().load();
         match catalog.get_provider(&name) {
@@ -1421,27 +1496,29 @@ pub async fn set_provider_key(
         if !base_url.is_empty() {
             let result =
                 librefang_kernel::model_catalog::probe_api_key(&name, &base_url, &key).await;
-            if let Some(valid) = result.key_valid {
-                let status = if valid {
+            let key_status = result.key_valid.map(|valid| {
+                if valid {
                     librefang_types::model_catalog::AuthStatus::ValidatedKey
                 } else {
                     librefang_types::model_catalog::AuthStatus::InvalidKey
-                };
-                let available_models = result.available_models;
-                let live_models = result.live_models;
-                let model_list_fetched = result.model_list_fetched;
-                let provider_id = name.clone();
-                state.kernel.model_catalog_update(&mut move |catalog| {
+                }
+            });
+            let available_models = result.available_models;
+            let live_models = result.live_models;
+            let model_list_fetched = result.model_list_fetched;
+            let provider_id = name.clone();
+            state.kernel.model_catalog_update(&mut move |catalog| {
+                if let Some(status) = key_status {
                     catalog.set_provider_auth_status(&provider_id, status);
-                    if model_list_fetched {
-                        catalog.reconcile_live_provider_models(
-                            &provider_id,
-                            available_models.clone(),
-                            live_models.clone(),
-                        );
-                    }
-                });
-            }
+                }
+                if model_list_fetched {
+                    catalog.reconcile_live_provider_models(
+                        &provider_id,
+                        available_models.clone(),
+                        live_models.clone(),
+                    );
+                }
+            });
         }
     }
 
@@ -1877,6 +1954,78 @@ pub async fn test_provider(
     }
 
     let api_key_val = api_key.unwrap_or_default();
+
+    // OpenRouter's model list is public and therefore cannot validate an API
+    // key. Probe `/key` for authentication and refresh `/models` separately;
+    // both operations are combined by the shared runtime helper.
+    if name == "openrouter" {
+        let start = Instant::now();
+        let result =
+            librefang_kernel::model_catalog::probe_api_key(&name, &base_url, &api_key_val).await;
+        let latency_ms = start.elapsed().as_millis();
+        let refreshed_models = result.live_models.len();
+        let model_list_fetched = result.model_list_fetched;
+        let key_valid = result.key_valid;
+        let available_models = result.available_models;
+        let live_models = result.live_models;
+        state.kernel.model_catalog_update(&mut move |catalog| {
+            if let Some(valid) = key_valid {
+                let status = if valid {
+                    librefang_types::model_catalog::AuthStatus::ValidatedKey
+                } else {
+                    librefang_types::model_catalog::AuthStatus::InvalidKey
+                };
+                catalog.set_provider_auth_status("openrouter", status);
+            }
+            if model_list_fetched {
+                catalog.reconcile_live_provider_models(
+                    "openrouter",
+                    available_models.clone(),
+                    live_models.clone(),
+                );
+            }
+        });
+        state.provider_test_cache.insert(
+            name.clone(),
+            (
+                Instant::now(),
+                latency_ms,
+                chrono::Utc::now().to_rfc3339(),
+                key_valid.is_some() || model_list_fetched,
+            ),
+        );
+
+        return match key_valid {
+            Some(true) => (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "ok",
+                    "provider": name,
+                    "latency_ms": latency_ms,
+                    "models_refreshed": refreshed_models,
+                })),
+            ),
+            Some(false) => (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "provider": name,
+                    "error": "Authentication failed (HTTP 401/403)",
+                    "models_refreshed": refreshed_models,
+                })),
+            ),
+            None => (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "provider": name,
+                    "error": "OpenRouter key validation was inconclusive",
+                    "models_refreshed": refreshed_models,
+                })),
+            ),
+        };
+    }
+
     // Reuse the shared probe HTTP client instead of building a fresh
     // `reqwest::Client` per request. Each rebuild paid a TLS-config init +
     // root-cert-chain load (~50–100 ms) on top of the actual handshake,
@@ -2227,6 +2376,15 @@ pub async fn set_default_provider(
     Path(name): Path<String>,
     body: Option<axum::Json<serde_json::Value>>,
 ) -> impl IntoResponse {
+    if name == "openrouter"
+        && !state
+            .kernel
+            .model_catalog_ref()
+            .load()
+            .has_live_provider_models("openrouter")
+    {
+        let _ = refresh_openrouter_catalog(&state.kernel).await;
+    }
     // Accept optional {"model": "model-id"} body to override the auto-selected model.
     // This is needed for providers like ollama where models are dynamic and may
     // not be in the static catalog.

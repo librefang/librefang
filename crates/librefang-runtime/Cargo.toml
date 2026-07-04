@@ -99,6 +99,10 @@ metrics-util = { version = "0.20", features = ["debugging"] }
 wiremock = "0.6"
 tracing-subscriber = { workspace = true }
 
+[build-dependencies]
+serde_json = { workspace = true }
+ureq = { workspace = true }
+
 [features]
 default = ["media", "browser", "docker-sandbox", "seccomp-sandbox", "landlock-sandbox"]
 landlock-sandbox = ["dep:landlock"]

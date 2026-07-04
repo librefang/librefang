@@ -10,6 +10,9 @@ use librefang_types::model_catalog::{
 use std::collections::{BTreeMap, HashMap, HashSet};
 use tracing::warn;
 
+const OPENROUTER_BUILD_SNAPSHOT: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/openrouter-models.json"));
+
 /// The model catalog — registry of all known models and providers.
 ///
 /// `Clone` is required by the kernel's `ArcSwap<ModelCatalog>` storage
@@ -110,6 +113,36 @@ fn strip_catalog_provider_prefix<'a>(provider: &str, model: &'a str) -> &'a str 
 fn is_free_openrouter_model(model: &str) -> bool {
     model.ends_with(":free")
         || strip_catalog_provider_prefix("openrouter", model) == "openrouter/free"
+}
+
+fn replace_provider_snapshot(
+    models: &mut Vec<ModelCatalogEntry>,
+    provider: &str,
+    mut snapshot: Vec<ModelCatalogEntry>,
+) {
+    let curated: HashMap<String, ModelCatalogEntry> = models
+        .iter()
+        .filter(|model| model.provider == provider && model.tier != ModelTier::Custom)
+        .map(|model| (model.id.to_lowercase(), model.clone()))
+        .collect();
+    for model in &mut snapshot {
+        if let Some(existing) = curated.get(&model.id.to_lowercase()) {
+            model.tier = existing.tier;
+            model.reasoning_echo_policy = existing.reasoning_echo_policy;
+            model.aliases.clone_from(&existing.aliases);
+        }
+    }
+
+    let mut seen: HashSet<String> = models
+        .iter()
+        .filter(|model| model.provider == provider && model.tier == ModelTier::Custom)
+        .map(|model| model.id.to_lowercase())
+        .collect();
+    snapshot.retain(|model| model.provider == provider && seen.insert(model.id.to_lowercase()));
+    snapshot.sort_by(|a, b| a.id.cmp(&b.id));
+
+    models.retain(|model| model.provider != provider || model.tier == ModelTier::Custom);
+    models.extend(snapshot);
 }
 
 impl ModelCatalog {
@@ -265,6 +298,17 @@ impl ModelCatalog {
                     continue;
                 }
                 models.push(model);
+            }
+        }
+
+        // A clean build embeds a fresh OpenRouter `/models` response. It is a
+        // fallback snapshot only: runtime refreshes do not treat it as
+        // live-confirmed and replace it after the first successful API fetch.
+        // Offline builds embed an empty response and retain the registry TOML.
+        if let Ok(body) = serde_json::from_str::<serde_json::Value>(OPENROUTER_BUILD_SNAPSHOT) {
+            let snapshot = parse_openrouter_model_entries(&body);
+            if !snapshot.is_empty() {
+                replace_provider_snapshot(&mut models, "openrouter", snapshot);
             }
         }
 
@@ -442,6 +486,12 @@ impl ModelCatalog {
         if let Some(p) = self.providers.iter_mut().find(|p| p.id == provider_id) {
             p.available_models.clear();
         }
+    }
+
+    /// Whether this process has successfully fetched a provider's live model
+    /// list. Build-time and registry snapshots deliberately return false.
+    pub fn has_live_provider_models(&self, provider_id: &str) -> bool {
+        self.live_model_providers.contains(provider_id)
     }
 
     /// Check whether a model is confirmed available on its provider.
@@ -1083,35 +1133,9 @@ impl ModelCatalog {
         &mut self,
         provider: &str,
         available_models: Vec<String>,
-        mut live_models: Vec<ModelCatalogEntry>,
+        live_models: Vec<ModelCatalogEntry>,
     ) {
-        let curated: HashMap<String, ModelCatalogEntry> = self
-            .models
-            .iter()
-            .filter(|model| model.provider == provider && model.tier != ModelTier::Custom)
-            .map(|model| (model.id.to_lowercase(), model.clone()))
-            .collect();
-        for model in &mut live_models {
-            if let Some(existing) = curated.get(&model.id.to_lowercase()) {
-                model.tier = existing.tier;
-                model.reasoning_echo_policy = existing.reasoning_echo_policy;
-                model.aliases.clone_from(&existing.aliases);
-            }
-        }
-
-        let mut seen: HashSet<String> = self
-            .models
-            .iter()
-            .filter(|model| model.provider == provider && model.tier == ModelTier::Custom)
-            .map(|model| model.id.to_lowercase())
-            .collect();
-        live_models
-            .retain(|model| model.provider == provider && seen.insert(model.id.to_lowercase()));
-        live_models.sort_by(|a, b| a.id.cmp(&b.id));
-
-        self.models
-            .retain(|model| model.provider != provider || model.tier == ModelTier::Custom);
-        self.models.extend(live_models);
+        replace_provider_snapshot(&mut self.models, provider, live_models);
         self.set_provider_available_models(provider, available_models);
 
         if let Some(p) = self.providers.iter_mut().find(|p| p.id == provider) {
@@ -1548,6 +1572,64 @@ pub struct ProbeResult {
     pub model_list_fetched: bool,
 }
 
+#[derive(Debug)]
+pub struct ProviderModelSnapshot {
+    pub available_models: Vec<String>,
+    pub live_models: Vec<ModelCatalogEntry>,
+}
+
+/// Fetch OpenRouter's public model catalog without using an API key.
+///
+/// Key validation is intentionally separate. `/models` is public and a 200
+/// response proves catalog reachability, not that a configured key is valid.
+pub async fn fetch_openrouter_model_snapshot(
+    base_url: &str,
+) -> Result<ProviderModelSnapshot, String> {
+    use std::time::Duration;
+
+    let client = crate::http_client::proxied_client_builder()
+        .timeout(Duration::from_secs(8))
+        .build()
+        .map_err(|error| format!("failed to build OpenRouter catalog client: {error}"))?;
+    fetch_openrouter_model_snapshot_with_client(&client, base_url).await
+}
+
+async fn fetch_openrouter_model_snapshot_with_client(
+    client: &reqwest::Client,
+    base_url: &str,
+) -> Result<ProviderModelSnapshot, String> {
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| format!("OpenRouter model request failed: {error}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!(
+            "OpenRouter model request returned HTTP {}",
+            status.as_u16()
+        ));
+    }
+
+    let body = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|error| format!("OpenRouter model response was invalid JSON: {error}"))?;
+    let available_models = extract_available_model_ids(&body)
+        .filter(|models| !models.is_empty())
+        .ok_or_else(|| "OpenRouter model response contained no models".to_string())?;
+    let live_models = parse_openrouter_model_entries(&body);
+    if live_models.is_empty() {
+        return Err("OpenRouter model response contained no usable models".to_string());
+    }
+
+    Ok(ProviderModelSnapshot {
+        available_models,
+        live_models,
+    })
+}
+
 pub async fn probe_api_key(provider_id: &str, base_url: &str, api_key: &str) -> ProbeResult {
     use std::time::Duration;
 
@@ -1565,6 +1647,35 @@ pub async fn probe_api_key(provider_id: &str, base_url: &str, api_key: &str) -> 
             }
         }
     };
+
+    if provider_id.eq_ignore_ascii_case("openrouter") {
+        let auth_url = format!("{}/key", base_url.trim_end_matches('/'));
+        let (auth_response, snapshot) = tokio::join!(
+            client
+                .get(auth_url)
+                .header("Authorization", format!("Bearer {api_key}"))
+                .send(),
+            fetch_openrouter_model_snapshot_with_client(&client, base_url),
+        );
+        let key_valid = match auth_response {
+            Ok(response) => match response.status().as_u16() {
+                200..=299 | 429 => Some(true),
+                401 | 403 => Some(false),
+                _ => None,
+            },
+            Err(_) => None,
+        };
+        let (available_models, live_models, model_list_fetched) = match snapshot {
+            Ok(snapshot) => (snapshot.available_models, snapshot.live_models, true),
+            Err(_) => (Vec::new(), Vec::new(), false),
+        };
+        return ProbeResult {
+            key_valid,
+            available_models,
+            live_models,
+            model_list_fetched,
+        };
+    }
 
     let url = format!("{}/models", base_url.trim_end_matches('/'));
 

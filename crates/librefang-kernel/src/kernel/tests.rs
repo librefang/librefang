@@ -10586,6 +10586,54 @@ fn sync_default_model_agents_reports_no_failures_and_migrates() {
     kernel.shutdown();
 }
 
+#[test]
+fn sync_default_model_agents_preserves_explicit_assistant_model() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-explicit-assistant-model");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let agent_id = kernel
+        .agents
+        .registry
+        .list()
+        .into_iter()
+        .find(|entry| entry.name == "assistant")
+        .expect("boot should create the default assistant")
+        .id;
+    kernel
+        .set_agent_model(agent_id, "poolside/laguna-xs.2:free", Some("openrouter"))
+        .expect("explicit assistant model should be saved");
+
+    let new_dm = DefaultModelConfig {
+        provider: "openrouter".to_string(),
+        model: "poolside/laguna-m.1:free".to_string(),
+        api_key_env: "OPENROUTER_API_KEY".to_string(),
+        base_url: None,
+        ..Default::default()
+    };
+
+    let failures = kernel.sync_default_model_agents("openrouter", &new_dm);
+    assert!(failures.is_empty());
+
+    let entry = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent entry after sync");
+    assert_eq!(entry.manifest.model.provider, "openrouter");
+    assert_eq!(
+        entry.manifest.model.model, "poolside/laguna-xs.2:free",
+        "an explicit assistant model must not be replaced by the global default"
+    );
+
+    kernel.shutdown();
+}
+
 // ── resolve_scope_channel: reserved-name defense-in-depth ──────────────────
 // Audit: cron-channel-name-not-reserved. The kernel's channel-derived session
 // resolver re-sanitizes reserved channel names from UNtrusted callers, but

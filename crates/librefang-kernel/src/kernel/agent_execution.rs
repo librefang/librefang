@@ -570,21 +570,17 @@ impl LibreFangKernel {
         let mut manifest = entry.manifest.clone();
 
         // Resolve "default" provider/model to the current effective default.
-        // This covers three cases:
+        // This covers agents that still explicitly track the default. Boot
+        // resolves legacy source manifests whose model is "default" before
+        // they reach this path.
         // 1. New agents stored as "default"/"default" (post-fix spawn behavior)
-        // 2. The auto-spawned "assistant" agent that may have a stale concrete
-        //    provider/model in DB from before a provider switch
-        // 3. TOML agents with provider="default" that got a concrete value baked in
+        // 2. TOML agents with provider="default" that remain unresolved
         {
             let is_default_provider =
                 manifest.model.provider.is_empty() || manifest.model.provider == "default";
             let is_default_model =
                 manifest.model.model.is_empty() || manifest.model.model == "default";
-            let is_auto_spawned = entry.name == "assistant"
-                && manifest
-                    .description
-                    .starts_with("General-purpose assistant");
-            if (is_default_provider && is_default_model) || is_auto_spawned {
+            if is_default_provider && is_default_model {
                 let override_guard = self
                     .llm
                     .default_model_override
