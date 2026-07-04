@@ -95,9 +95,19 @@ sudo pacman-key --lsign-key 2C325B0F88706ED99C45E216DD09DC7D3E70E1E9
 Server = https://packages.librefang.ai/arch/$arch
 ```
 
+`librefang-bin` і `librefang-desktop-bin` є незалежними пакетами.
+Встановлюйте лише пакет для потрібного вам інтерфейсу.
+
+#### CLI, daemon і вебпанель
+
 ```bash
 sudo pacman -Syu librefang-bin
-sudo pacman -S librefang-desktop-bin  # Необов'язковий desktop-додаток (лише x86_64)
+```
+
+#### Desktop-додаток (лише x86_64)
+
+```bash
+sudo pacman -Syu librefang-desktop-bin
 ```
 
 Докладніше про пакети та підтримку aarch64 дивіться в [документації репозиторію Arch](../packaging/arch-repo/README.md).

@@ -95,9 +95,19 @@ Dodaj repozytorium do `/etc/pacman.conf`:
 Server = https://packages.librefang.ai/arch/$arch
 ```
 
+`librefang-bin` i `librefang-desktop-bin` są niezależnymi pakietami.
+Zainstaluj tylko pakiet dla potrzebnego interfejsu.
+
+#### CLI, daemon i panel internetowy
+
 ```bash
 sudo pacman -Syu librefang-bin
-sudo pacman -S librefang-desktop-bin  # Opcjonalna aplikacja desktopowa (tylko x86_64)
+```
+
+#### Aplikacja desktopowa (tylko x86_64)
+
+```bash
+sudo pacman -Syu librefang-desktop-bin
 ```
 
 Szczegóły pakietów i obsługi aarch64 znajdują się w [dokumentacji repozytorium Arch](../packaging/arch-repo/README.md).

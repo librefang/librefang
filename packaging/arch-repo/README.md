@@ -24,14 +24,38 @@ sudo pacman-key --lsign-key 2C325B0F88706ED99C45E216DD09DC7D3E70E1E9
 #      [librefang]
 #      Server = https://packages.librefang.ai/arch/$arch
 #
-# 3. Sync and install. The CLI/daemon and the desktop app:
-sudo pacman -Syu
-sudo pacman -S librefang-bin librefang-desktop-bin
 ```
 
 `$arch` is pacman's own variable — leave it literal in `pacman.conf`; pacman expands it to `x86_64` (or `aarch64` on Arch Linux ARM).
 Both the database and every package are GPG-signed, so the default `SigLevel` (inherited from `[options]`) verifies them once the key above is locally signed.
 Do **not** set `SigLevel = Never` — that disables the verification this repository exists to provide.
+
+The packages are independent.
+Install only the package for the deployment you need.
+
+### CLI, daemon, HTTP API, and web dashboard
+
+Available on x86_64 and aarch64:
+
+```sh
+sudo pacman -Syu librefang-bin
+```
+
+### Native desktop app
+
+Available on x86_64 only and does not require `librefang-bin`:
+
+```sh
+sudo pacman -Syu librefang-desktop-bin
+```
+
+### Docker-backed systemd service
+
+Available on x86_64 and aarch64:
+
+```sh
+sudo pacman -Syu librefang-docker
+```
 
 Available packages:
 

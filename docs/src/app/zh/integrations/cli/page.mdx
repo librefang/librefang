@@ -67,13 +67,13 @@ sudo pacman-key --lsign-key 2C325B0F88706ED99C45E216DD09DC7D3E70E1E9
 Server = https://packages.librefang.ai/arch/$arch
 ```
 
-安装 CLI，并可选择安装原生桌面应用：
+安装 CLI、守护进程、HTTP API 和 Web Dashboard：
 
 ```bash
 sudo pacman -Syu librefang-bin
-sudo pacman -S librefang-desktop-bin  # 仅支持 x86_64
 ```
 
+独立的 Desktop 软件包不需要 CLI 软件包，安装方法请参阅[快速上手](/zh/getting-started)。
 有关软件包详情和 aarch64 支持，请参阅 [Arch 仓库文档](https://github.com/librefang/librefang/blob/main/packaging/arch-repo/README.md)。
 
 ### Shell 安装脚本

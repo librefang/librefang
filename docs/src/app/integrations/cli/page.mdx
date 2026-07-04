@@ -68,13 +68,13 @@ Add the repository to `/etc/pacman.conf`:
 Server = https://packages.librefang.ai/arch/$arch
 ```
 
-Install the CLI and, optionally, the native desktop app:
+Install the CLI, daemon, HTTP API, and web dashboard:
 
 ```bash
 sudo pacman -Syu librefang-bin
-sudo pacman -S librefang-desktop-bin  # x86_64 only
 ```
 
+The standalone Desktop package does not require the CLI package and is documented separately in [Getting Started](/getting-started#desktop-app).
 See the [Arch repository documentation](https://github.com/librefang/librefang/blob/main/packaging/arch-repo/README.md) for package details and aarch64 support.
 
 ### Shell installer

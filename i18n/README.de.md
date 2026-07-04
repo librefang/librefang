@@ -95,9 +95,19 @@ Das Repository zu `/etc/pacman.conf` hinzufügen:
 Server = https://packages.librefang.ai/arch/$arch
 ```
 
+`librefang-bin` und `librefang-desktop-bin` sind voneinander unabhängige Pakete.
+Installieren Sie nur das Paket für die gewünschte Benutzeroberfläche.
+
+#### CLI, Daemon und Web-Dashboard
+
 ```bash
 sudo pacman -Syu librefang-bin
-sudo pacman -S librefang-desktop-bin  # Optionale Desktop-App (nur x86_64)
+```
+
+#### Desktop-App (nur x86_64)
+
+```bash
+sudo pacman -Syu librefang-desktop-bin
 ```
 
 Details zu Paketen und aarch64-Unterstützung finden Sie in der [Arch-Repository-Dokumentation](../packaging/arch-repo/README.md).

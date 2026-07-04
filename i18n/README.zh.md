@@ -94,9 +94,19 @@ sudo pacman-key --lsign-key 2C325B0F88706ED99C45E216DD09DC7D3E70E1E9
 Server = https://packages.librefang.ai/arch/$arch
 ```
 
+`librefang-bin` 和 `librefang-desktop-bin` 是相互独立的软件包。
+只需安装所需界面对应的软件包。
+
+#### CLI、守护进程和 Web Dashboard
+
 ```bash
 sudo pacman -Syu librefang-bin
-sudo pacman -S librefang-desktop-bin  # 可选桌面应用（仅支持 x86_64）
+```
+
+#### 桌面应用（仅支持 x86_64）
+
+```bash
+sudo pacman -Syu librefang-desktop-bin
 ```
 
 有关软件包详情和 aarch64 支持，请参阅 [Arch 仓库文档](../packaging/arch-repo/README.md)。

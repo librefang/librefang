@@ -95,9 +95,19 @@ sudo pacman-key --lsign-key 2C325B0F88706ED99C45E216DD09DC7D3E70E1E9
 Server = https://packages.librefang.ai/arch/$arch
 ```
 
+`librefang-bin`과 `librefang-desktop-bin`은 서로 독립된 패키지입니다.
+필요한 인터페이스의 패키지만 설치하세요.
+
+#### CLI, 데몬 및 웹 대시보드
+
 ```bash
 sudo pacman -Syu librefang-bin
-sudo pacman -S librefang-desktop-bin  # 선택적 데스크톱 앱(x86_64 전용)
+```
+
+#### 데스크톱 앱(x86_64 전용)
+
+```bash
+sudo pacman -Syu librefang-desktop-bin
 ```
 
 패키지 세부 정보와 aarch64 지원은 [Arch 저장소 문서](../packaging/arch-repo/README.md)를 참조하세요.
