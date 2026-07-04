@@ -1322,8 +1322,9 @@ export function WorkflowsPage() {
                       })();
                       return (
                         <div key={runId}>
+                          <div className="flex items-stretch gap-1">
                           <button
-                            className={`w-full flex items-center gap-3 p-2.5 rounded-xl border text-left transition-colors ${
+                            className={`flex-1 min-w-0 flex items-center gap-3 p-2.5 rounded-xl border text-left transition-colors ${
                               isSelected
                                 ? "border-brand bg-brand/5"
                                 : "border-border-subtle bg-main hover:bg-surface"
@@ -1356,17 +1357,6 @@ export function WorkflowsPage() {
                                 {t("workflows.from_review_banner", { defaultValue: "from review banner" })}
                               </span>
                             )}
-                            {/* Re-run button */}
-                            <button
-                              className="p-1 rounded-lg hover:bg-surface text-text-dim/40 hover:text-brand transition-colors shrink-0"
-                              title={t("workflows.rerun_hint", { defaultValue: "Re-run with these parameters" })}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleRerun(run.input);
-                              }}
-                            >
-                              <Play className="w-3 h-3" />
-                            </button>
                             <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded-full shrink-0 ${
                               state === "completed" ? "bg-success/10 text-success" :
                               state === "failed" ? "bg-error/10 text-error" :
@@ -1374,6 +1364,22 @@ export function WorkflowsPage() {
                               "bg-main text-text-dim"
                             }`}>{state ?? "unknown"}</span>
                           </button>
+                          {/* Re-run — a sibling of the row button, never nested
+                              inside it, so both stay valid standalone controls
+                              (a <button> cannot legally contain a <button>). */}
+                          <button
+                            type="button"
+                            className="shrink-0 px-2 flex items-center justify-center rounded-xl border border-border-subtle bg-main text-text-dim/40 hover:bg-surface hover:text-brand transition-colors"
+                            title={t("workflows.rerun_hint", { defaultValue: "Re-run with these parameters" })}
+                            aria-label={t("workflows.rerun_hint", { defaultValue: "Re-run with these parameters" })}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleRerun(run.input);
+                            }}
+                          >
+                            <Play className="w-3 h-3" />
+                          </button>
+                          </div>
                           {/* Inline run detail — execution timeline */}
                           {isSelected && runDetailQuery.data && (() => {
                             const rd = runDetailQuery.data;

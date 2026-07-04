@@ -270,11 +270,28 @@ describe("WorkflowsPage", () => {
     });
   });
 
-  it("surfaces run parameters + error inline and re-runs with the same params (#6292)", async () => {
+  it("surfaces run parameters inline and re-run pre-fills that run's params (#6292)", async () => {
     useWorkflowsMock.mockReturnValue(makeQuery([sampleWorkflow]));
-    const mutations = setMutationDefaults();
+    setMutationDefaults();
+    useWorkflowDetailMock.mockReturnValue(
+      makeQuery({
+        id: "wf-1",
+        name: "alpha-flow",
+        steps: [{ name: "step1", prompt_template: "Analyze {{sector}} trends" }],
+      }),
+    );
     useWorkflowRunsMock.mockReturnValue(
       makeQuery([
+        // Most recent run first — auto-populate seeds the form from this one.
+        {
+          id: "run-2",
+          workflow_name: "alpha-flow",
+          state: "completed",
+          steps_completed: 1,
+          input: '{"sector":"healthcare"}',
+          started_at: "2026-01-03T00:00:00Z",
+          completed_at: "2026-01-03T00:01:00Z",
+        },
         {
           id: "run-1",
           workflow_name: "alpha-flow",
@@ -289,18 +306,22 @@ describe("WorkflowsPage", () => {
     );
     renderPage();
 
-    // The run-history row shows WHAT params were used and WHY it failed,
-    // without opening the detail panel.
-    expect(screen.getByText(/sector: fintech/)).toBeInTheDocument();
-    expect(screen.getByText("step 'analyze' failed: provider 500")).toBeInTheDocument();
+    // Each run-history row shows WHAT params it was launched with, without
+    // opening the detail panel.
+    expect(screen.getByText("sector=healthcare")).toBeInTheDocument();
+    expect(screen.getByText("sector=fintech")).toBeInTheDocument();
 
-    // The per-row re-run control repeats that run with its stored params.
-    fireEvent.click(screen.getByLabelText("Re-run with same parameters"));
-    expect(mutations.rerun.mutateAsync).toHaveBeenCalledTimes(1);
-    expect(mutations.rerun.mutateAsync).toHaveBeenCalledWith({
-      runId: "run-1",
-      workflowId: "wf-1",
-    });
+    // Auto-populate seeded the form from the most recent run on load.
+    expect(screen.getByDisplayValue("healthcare")).toBeInTheDocument();
+
+    // Clicking the older run's (run-1, rendered second) re-run control
+    // pre-fills the form with THAT run's params instead (client-side
+    // only — #6324's server-side rerun mutation was replaced with this
+    // pre-fill-and-scroll flow).
+    const rerunButtons = screen.getAllByLabelText("Re-run with these parameters");
+    expect(rerunButtons).toHaveLength(2);
+    fireEvent.click(rerunButtons[1]);
+    expect(screen.getByDisplayValue("fintech")).toBeInTheDocument();
   });
 
   it("requires a second click to confirm delete and only then calls the mutation", () => {

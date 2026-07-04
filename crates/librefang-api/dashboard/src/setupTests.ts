@@ -55,6 +55,13 @@ global.ResizeObserver = class ResizeObserver {
   disconnect() {}
 };
 
+// jsdom does not implement scrollIntoView; WorkflowsPage's re-run flow
+// calls it on click and would otherwise throw an uncaught TypeError
+// during tests.
+if (typeof Element !== "undefined" && !Element.prototype.scrollIntoView) {
+  Element.prototype.scrollIntoView = () => {};
+}
+
 // jsdom does not implement matchMedia; PushDrawer.useIsMobile and a few
 // pages call it during mount and crash the test render without a stub.
 if (typeof window !== "undefined" && typeof window.matchMedia !== "function") {
