@@ -10721,6 +10721,54 @@ fn sync_default_model_agents_preserves_explicit_assistant_model() {
 }
 
 #[test]
+fn set_agent_model_rejects_only_against_a_fresh_openrouter_catalog() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = KernelConfig {
+        home_dir: tmp.path().to_path_buf(),
+        data_dir: tmp.path().join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("kernel should boot");
+    let agent_id = kernel
+        .agents
+        .registry
+        .list()
+        .into_iter()
+        .find(|entry| entry.name == "assistant")
+        .expect("default assistant")
+        .id;
+    let live_model = librefang_types::model_catalog::ModelCatalogEntry {
+        id: "openrouter/acme/current:free".to_string(),
+        display_name: "Current Free".to_string(),
+        provider: "openrouter".to_string(),
+        context_window: 32_768,
+        max_output_tokens: 4_096,
+        ..Default::default()
+    };
+    kernel.model_catalog_update(|catalog| {
+        catalog.reconcile_live_provider_models(
+            "openrouter",
+            vec!["acme/current:free".to_string()],
+            vec![live_model.clone()],
+        );
+    });
+
+    let error = kernel
+        .set_agent_model(agent_id, "acme/new:free", Some("openrouter"))
+        .expect_err("fresh catalog should reject an absent model");
+    assert!(error.to_string().contains("not in the live catalog"));
+
+    kernel.model_catalog_update(|catalog| {
+        catalog.clear_provider_available_models("openrouter");
+    });
+    kernel
+        .set_agent_model(agent_id, "acme/new:free", Some("openrouter"))
+        .expect("missing or stale availability must not reject an explicit user choice");
+
+    kernel.shutdown();
+}
+
+#[test]
 fn openrouter_model_not_found_error_triggers_catalog_refresh_policy() {
     let mut manifest = AgentManifest::default();
     manifest.model.provider = "openrouter".to_string();

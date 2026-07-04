@@ -551,10 +551,14 @@ impl LibreFangKernel {
                             let replacement = {
                                 let catalog = kernel.llm.model_catalog.load();
                                 (current.provider == id
-                                    && current.model.ends_with(":free")
+                                    && librefang_runtime::model_catalog::is_free_openrouter_model(
+                                        &current.model,
+                                    )
                                     && catalog.is_model_available(&id, &current.model)
                                         == Some(false))
-                                .then(|| catalog.automatic_default_model_for_provider(&id))
+                                .then(|| {
+                                    catalog.closest_free_openrouter_model(&current.model)
+                                })
                                 .flatten()
                             };
                             if let Some(model) = replacement {

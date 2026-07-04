@@ -377,7 +377,7 @@ impl LibreFangKernel {
                 // resolve a sensible default from the model catalog.
                 let model = if model_hint.is_empty() {
                     librefang_runtime::model_catalog::ModelCatalog::default()
-                        .default_model_for_provider(provider)
+                        .automatic_default_model_for_provider(provider)
                         .unwrap_or_else(|| "default".to_string())
                 } else {
                     model_hint.to_string()
@@ -604,7 +604,7 @@ impl LibreFangKernel {
                     {
                         let model = if model_hint.is_empty() {
                             librefang_runtime::model_catalog::ModelCatalog::default()
-                                .default_model_for_provider(provider)
+                                .automatic_default_model_for_provider(provider)
                                 .unwrap_or_else(|| "default".to_string())
                         } else {
                             model_hint.to_string()

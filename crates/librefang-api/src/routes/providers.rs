@@ -78,99 +78,6 @@ use std::time::Instant;
 
 use crate::types::ApiErrorResponse;
 
-static OPENROUTER_REFRESH_ATTEMPTS: LazyLock<DashMap<String, Instant>> =
-    LazyLock::new(DashMap::new);
-
-fn openrouter_provider_is_configured(
-    kernel: &Arc<dyn librefang_kernel::kernel_api::KernelApi>,
-) -> bool {
-    use librefang_types::model_catalog::AuthStatus;
-
-    let catalog = kernel.model_catalog_ref().load();
-    // `InvalidKey` is intentional because OpenRouter's model catalog is public.
-    catalog.get_provider("openrouter").is_some_and(|provider| {
-        matches!(
-            provider.auth_status,
-            AuthStatus::Configured
-                | AuthStatus::ValidatedKey
-                | AuthStatus::AutoDetected
-                | AuthStatus::InvalidKey
-        )
-    })
-}
-
-pub(crate) fn openrouter_catalog_needs_refresh(
-    kernel: &Arc<dyn librefang_kernel::kernel_api::KernelApi>,
-) -> bool {
-    openrouter_provider_is_configured(kernel)
-        && !kernel
-            .model_catalog_ref()
-            .load()
-            .has_live_provider_models("openrouter")
-}
-
-fn openrouter_catalog_needs_list_refresh(
-    kernel: &Arc<dyn librefang_kernel::kernel_api::KernelApi>,
-) -> bool {
-    openrouter_provider_is_configured(kernel)
-        && kernel
-            .model_catalog_ref()
-            .load()
-            .live_provider_models_are_stale(
-                "openrouter",
-                librefang_kernel::model_catalog::OPENROUTER_MODEL_CATALOG_TTL,
-            )
-}
-
-pub(crate) async fn refresh_openrouter_catalog(
-    kernel: &Arc<dyn librefang_kernel::kernel_api::KernelApi>,
-) -> Result<usize, String> {
-    if !openrouter_catalog_needs_refresh(kernel) {
-        return Ok(0);
-    }
-    refresh_openrouter_catalog_now(kernel).await
-}
-
-async fn refresh_openrouter_catalog_for_model_list(
-    kernel: &Arc<dyn librefang_kernel::kernel_api::KernelApi>,
-) -> Result<usize, String> {
-    if !openrouter_catalog_needs_list_refresh(kernel) {
-        return Ok(0);
-    }
-    refresh_openrouter_catalog_now(kernel).await
-}
-
-async fn refresh_openrouter_catalog_now(
-    kernel: &Arc<dyn librefang_kernel::kernel_api::KernelApi>,
-) -> Result<usize, String> {
-    let base_url = {
-        let catalog = kernel.model_catalog_ref().load();
-        catalog
-            .get_provider("openrouter")
-            .map(|provider| provider.base_url.clone())
-            .filter(|url| !url.is_empty())
-            .ok_or_else(|| "OpenRouter base URL is not configured".to_string())?
-    };
-    if OPENROUTER_REFRESH_ATTEMPTS
-        .get(&base_url)
-        .is_some_and(|attempt| attempt.elapsed() < std::time::Duration::from_secs(60))
-    {
-        return Err("OpenRouter catalog refresh is in the 60-second retry window".to_string());
-    }
-    OPENROUTER_REFRESH_ATTEMPTS.insert(base_url.clone(), Instant::now());
-    let snapshot =
-        librefang_kernel::model_catalog::fetch_openrouter_model_snapshot(&base_url).await?;
-    let model_count = snapshot.live_models.len();
-    kernel.model_catalog_update(&mut move |catalog| {
-        catalog.reconcile_live_provider_models(
-            "openrouter",
-            snapshot.available_models.clone(),
-            snapshot.live_models.clone(),
-        );
-    });
-    Ok(model_count)
-}
-
 pub(crate) fn parse_codex_configured_model(body: &str) -> Option<String> {
     let value: toml::Value = toml::from_str(body).ok()?;
     let model = value.get("model")?.as_str()?.trim();
@@ -315,6 +222,7 @@ fn synthesized_cli_model_row(
         "max_output_tokens": 0,
         "input_cost_per_m": 0.0,
         "output_cost_per_m": 0.0,
+        "pricing_known": true,
         // Text CLI models have no per-image pricing, but emit the keys (null) so
         // the row's shape matches every catalog row in the same response.
         "image_input_cost_per_m": serde_json::Value::Null,
@@ -360,11 +268,9 @@ pub async fn list_models(
         .as_deref()
         .map(|provider| provider == "openrouter")
         .unwrap_or(true);
-    let openrouter_needs_refresh =
-        openrouter_in_scope && openrouter_catalog_needs_list_refresh(&state.kernel);
-    if openrouter_needs_refresh {
-        if let Err(error) = refresh_openrouter_catalog_for_model_list(&state.kernel).await {
-            tracing::warn!(%error, "OpenRouter live catalog unavailable; using build snapshot");
+    if openrouter_in_scope {
+        if let Err(error) = crate::openrouter_catalog::refresh_if_stale(&state.kernel).await {
+            tracing::warn!(%error, "OpenRouter live catalog unavailable; using checked-in snapshot");
         }
     }
     let catalog = state.kernel.model_catalog_ref().load();
@@ -462,6 +368,7 @@ pub async fn list_models(
                 "max_output_tokens": m.max_output_tokens,
                 "input_cost_per_m": m.input_cost_per_m,
                 "output_cost_per_m": m.output_cost_per_m,
+                "pricing_known": m.pricing_known,
                 "image_input_cost_per_m": m.image_input_cost_per_m,
                 "image_output_cost_per_m": m.image_output_cost_per_m,
                 "supports_tools": eff.supports_tools,
@@ -629,10 +536,8 @@ pub async fn get_model(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if (id.starts_with("openrouter/") || id.starts_with("openrouter:"))
-        && openrouter_catalog_needs_refresh(&state.kernel)
-    {
-        let _ = refresh_openrouter_catalog(&state.kernel).await;
+    if id.starts_with("openrouter/") || id.starts_with("openrouter:") {
+        let _ = crate::openrouter_catalog::refresh_if_missing(&state.kernel).await;
     }
     let catalog = state.kernel.model_catalog_ref().load();
     match catalog.find_model(&id) {
@@ -657,6 +562,7 @@ pub async fn get_model(
                     "max_output_tokens": m.max_output_tokens,
                     "input_cost_per_m": m.input_cost_per_m,
                     "output_cost_per_m": m.output_cost_per_m,
+                    "pricing_known": m.pricing_known,
                     "image_input_cost_per_m": m.image_input_cost_per_m,
                     "image_output_cost_per_m": m.image_output_cost_per_m,
                     "supports_tools": eff.supports_tools,
@@ -894,9 +800,7 @@ fn provider_max_output_tokens(
     )
 )]
 pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    if openrouter_catalog_needs_refresh(&state.kernel) {
-        let _ = refresh_openrouter_catalog(&state.kernel).await;
-    }
+    crate::openrouter_catalog::refresh_if_missing_in_background(&state.kernel);
     // Snapshot both the provider list and the matching suppression flags
     // from the same catalog load — racing a `delete_provider_key` /
     // `enable_provider` mid-iteration would otherwise let the JSON show a
@@ -1163,8 +1067,8 @@ pub async fn get_provider(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    if name == "openrouter" && openrouter_catalog_needs_refresh(&state.kernel) {
-        let _ = refresh_openrouter_catalog(&state.kernel).await;
+    if name == "openrouter" {
+        let _ = crate::openrouter_catalog::refresh_if_stale(&state.kernel).await;
     }
     let (provider, models, max_output_tokens) = {
         let catalog = state.kernel.model_catalog_ref().load();
@@ -1186,6 +1090,7 @@ pub async fn get_provider(
                             "max_output_tokens": m.max_output_tokens,
                             "input_cost_per_m": m.input_cost_per_m,
                             "output_cost_per_m": m.output_cost_per_m,
+                            "pricing_known": m.pricing_known,
                             "image_input_cost_per_m": m.image_input_cost_per_m,
                             "image_output_cost_per_m": m.image_output_cost_per_m,
                             "supports_tools": eff.supports_tools,
@@ -1320,6 +1225,7 @@ pub async fn add_custom_model(
             .get("output_cost_per_m")
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0),
+        pricing_known: true,
         image_input_cost_per_m: body.get("image_input_cost_per_m").and_then(|v| v.as_f64()),
         image_output_cost_per_m: body.get("image_output_cost_per_m").and_then(|v| v.as_f64()),
         supports_tools: body
@@ -1638,9 +1544,9 @@ pub async fn set_provider_key(
         let replacement = {
             let catalog = state.kernel.model_catalog_ref().load();
             (name == "openrouter"
-                && current_model.ends_with(":free")
+                && librefang_kernel::model_catalog::is_free_openrouter_model(&current_model)
                 && catalog.is_model_available(&name, &current_model) == Some(false))
-            .then(|| catalog.automatic_default_model_for_provider(&name))
+            .then(|| catalog.closest_free_openrouter_model(&current_model))
             .flatten()
         };
         if let Some(model_id) = replacement {
@@ -2413,8 +2319,8 @@ pub async fn set_default_provider(
     Path(name): Path<String>,
     body: Option<axum::Json<serde_json::Value>>,
 ) -> impl IntoResponse {
-    if name == "openrouter" && openrouter_catalog_needs_refresh(&state.kernel) {
-        let _ = refresh_openrouter_catalog(&state.kernel).await;
+    if name == "openrouter" {
+        let _ = crate::openrouter_catalog::refresh_if_stale(&state.kernel).await;
     }
     // Accept optional {"model": "model-id"} body to override the auto-selected model.
     // This is needed for providers like ollama where models are dynamic and may

@@ -112,7 +112,7 @@ pub async fn quick_init(State(state): State<Arc<AppState>>) -> axum::response::R
 
     // Resolve default model from catalog
     let model = librefang_kernel::model_catalog::ModelCatalog::default()
-        .default_model_for_provider(&provider)
+        .automatic_default_model_for_provider(&provider)
         .unwrap_or_else(|| "auto".to_string());
 
     // Write minimal config.toml

@@ -244,6 +244,27 @@ describe("ModelsPage", () => {
     expect(screen.getByText("models.free")).toBeInTheDocument();
   });
 
+  it("does not label unknown OpenRouter pricing as free", () => {
+    setLoaded([
+      {
+        id: "openrouter/acme/unknown",
+        display_name: "Unknown pricing",
+        provider: "openrouter",
+        tier: "balanced",
+        context_window: 32_768,
+        input_cost_per_m: 0,
+        output_cost_per_m: 0,
+        pricing_known: false,
+        available: true,
+      },
+    ]);
+    setMutationDefaults();
+    renderPage();
+
+    expect(screen.queryByText("models.free")).toBeNull();
+    expect(screen.getByText("—")).toBeInTheDocument();
+  });
+
   it("opens the Add Custom Model drawer when the header button is clicked", () => {
     setLoaded();
     renderPage();

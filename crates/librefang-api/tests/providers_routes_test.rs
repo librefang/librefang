@@ -1175,6 +1175,53 @@ async fn first_openrouter_model_request_populates_live_cache() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn get_openrouter_model_populates_live_cache_before_lookup() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{
+                "id": "acme/lazy-detail:free",
+                "name": "Lazy Detail Free",
+                "context_length": 65536,
+                "pricing": {"prompt": "0", "completion": "0"}
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let h = boot_with_provider(ProviderInfo {
+        id: "openrouter".to_string(),
+        display_name: "OpenRouter".to_string(),
+        api_key_env: "OPENROUTER_API_KEY".to_string(),
+        base_url: server.uri(),
+        key_required: true,
+        auth_status: AuthStatus::Configured,
+        ..ProviderInfo::default()
+    });
+
+    let (status, body) = json_request(
+        &h,
+        Method::GET,
+        "/api/models/openrouter/acme/lazy-detail:free",
+        None,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["id"], "openrouter/acme/lazy-detail:free");
+    assert!(h
+        ._state
+        .kernel
+        .model_catalog_ref()
+        .load()
+        .has_live_provider_models("openrouter"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn unconfigured_openrouter_model_request_does_not_fetch_live_catalog() {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1291,6 +1338,7 @@ fn boot_with_provider(provider: ProviderInfo) -> Harness {
         max_output_tokens: 2_048,
         input_cost_per_m: 0.0,
         output_cost_per_m: 0.0,
+        pricing_known: true,
         image_input_cost_per_m: None,
         image_output_cost_per_m: None,
         supports_tools: false,

@@ -1652,6 +1652,7 @@ export interface ModelItem {
   max_output_tokens?: number;
   input_cost_per_m?: number;
   output_cost_per_m?: number;
+  pricing_known?: boolean;
   // Effective (catalog ∘ override) — use for "what the model actually does". Refs #4745.
   supports_tools?: boolean;
   supports_vision?: boolean;
@@ -1689,6 +1690,7 @@ export async function addCustomModel(model: {
   max_output_tokens?: number;
   input_cost_per_m?: number;
   output_cost_per_m?: number;
+  pricing_known?: boolean;
   supports_tools?: boolean;
   supports_vision?: boolean;
   supports_streaming?: boolean;

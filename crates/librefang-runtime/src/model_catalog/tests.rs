@@ -567,6 +567,23 @@ fn openrouter_live_parser_maps_metadata() {
     assert!(model.supports_vision);
     assert!(model.supports_thinking);
     assert!(model.supports_streaming);
+    assert!(model.pricing_known);
+}
+
+#[test]
+fn openrouter_live_parser_preserves_unknown_pricing() {
+    let entries = parse_openrouter_model_entries(&serde_json::json!({
+        "data": [{
+            "id": "acme/no-price",
+            "name": "No Price",
+            "context_length": 32768
+        }]
+    }));
+
+    let model = entries.first().expect("model without pricing");
+    assert!(!model.pricing_known);
+    assert_eq!(model.input_cost_per_m, 0.0);
+    assert_eq!(model.output_cost_per_m, 0.0);
 }
 
 #[test]
@@ -718,6 +735,78 @@ fn openrouter_automatic_default_never_selects_paid_model() {
     assert_eq!(
         catalog.automatic_default_model_for_provider("openrouter"),
         None
+    );
+}
+
+#[test]
+fn openrouter_free_predicate_includes_auto_router() {
+    assert!(is_free_openrouter_model("openrouter/openrouter/free"));
+    assert!(is_free_openrouter_model("openrouter/qwen/qwen3-8b:free"));
+    assert!(!is_free_openrouter_model("openrouter/qwen/qwen3-8b"));
+}
+
+#[test]
+fn openrouter_parameter_scale_parses_dense_and_moe_models() {
+    assert_eq!(
+        extract_parameter_scale("qwen/qwen3-14b:free"),
+        (Some(14.0), None)
+    );
+    assert_eq!(
+        extract_parameter_scale("qwen/qwen3-235b-a22b:free"),
+        (Some(235.0), Some(22.0))
+    );
+}
+
+#[test]
+fn openrouter_replacement_prefers_same_family_and_nearest_parameter_scale() {
+    let mut catalog = openrouter_test_catalog();
+    let live = parse_openrouter_model_entries(&serde_json::json!({
+        "data": [
+            {
+                "id": "qwen/qwen3-72b:free",
+                "name": "Qwen3 72B",
+                "context_length": 131072,
+                "pricing": {"prompt": "0", "completion": "0"}
+            },
+            {
+                "id": "qwen/qwen3-14b:free",
+                "name": "Qwen3 14B",
+                "context_length": 131072,
+                "pricing": {"prompt": "0", "completion": "0"}
+            },
+            {
+                "id": "qwen/qwen3-235b:free",
+                "name": "Qwen3 235B",
+                "context_length": 131072,
+                "pricing": {"prompt": "0", "completion": "0"}
+            },
+            {
+                "id": "qwen/qwen3-250b-a22b:free",
+                "name": "Qwen3 250B A22B",
+                "context_length": 131072,
+                "pricing": {"prompt": "0", "completion": "0"}
+            },
+            {
+                "id": "other/model-8b:free",
+                "name": "Other 8B",
+                "context_length": 131072,
+                "pricing": {"prompt": "0", "completion": "0"}
+            }
+        ]
+    }));
+    let available = live
+        .iter()
+        .map(|model| strip_catalog_provider_prefix("openrouter", &model.id).to_string())
+        .collect();
+    catalog.reconcile_live_provider_models("openrouter", available, live);
+
+    assert_eq!(
+        catalog.closest_free_openrouter_model("openrouter/qwen/qwen3-8b:free"),
+        Some("openrouter/qwen/qwen3-14b:free".to_string())
+    );
+    assert_eq!(
+        catalog.closest_free_openrouter_model("openrouter/qwen/qwen3-235b-a22b:free"),
+        Some("openrouter/qwen/qwen3-250b-a22b:free".to_string())
     );
 }
 

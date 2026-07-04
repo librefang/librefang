@@ -1028,9 +1028,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     }
 
     async fn list_models_text(&self) -> String {
-        if crate::routes::providers::openrouter_catalog_needs_refresh(&self.kernel) {
-            let _ = crate::routes::providers::refresh_openrouter_catalog(&self.kernel).await;
-        }
+        let _ = crate::openrouter_catalog::refresh_if_stale(&self.kernel).await;
         let catalog = self.kernel.model_catalog_ref().load();
         let available = catalog.available_models();
         if available.is_empty() {
@@ -1054,7 +1052,9 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                 .unwrap_or(provider);
             msg.push_str(&format!("\n{}:\n", provider_name));
             for m in &by_provider[provider] {
-                let cost = if m.input_cost_per_m > 0.0 {
+                let cost = if !m.pricing_known {
+                    "pricing unavailable".to_string()
+                } else if m.input_cost_per_m > 0.0 {
                     format!(
                         " (${:.2}/${:.2} per M)",
                         m.input_cost_per_m, m.output_cost_per_m
@@ -1079,10 +1079,8 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     }
 
     async fn list_models_by_provider(&self, provider_id: &str) -> Vec<(String, String)> {
-        if provider_id == "openrouter"
-            && crate::routes::providers::openrouter_catalog_needs_refresh(&self.kernel)
-        {
-            let _ = crate::routes::providers::refresh_openrouter_catalog(&self.kernel).await;
+        if provider_id == "openrouter" {
+            let _ = crate::openrouter_catalog::refresh_if_stale(&self.kernel).await;
         }
         let catalog = self.kernel.model_catalog_ref().load();
         catalog

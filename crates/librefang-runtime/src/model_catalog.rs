@@ -11,8 +11,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, Instant};
 use tracing::warn;
 
-const OPENROUTER_BUILD_SNAPSHOT: &str =
-    include_str!(concat!(env!("OUT_DIR"), "/openrouter-models.json"));
+const OPENROUTER_BUILD_SNAPSHOT: &str = include_str!("../openrouter-models.snapshot.json");
 pub const OPENROUTER_MODEL_CATALOG_TTL: Duration = Duration::from_secs(15 * 60);
 
 /// The model catalog — registry of all known models and providers.
@@ -112,9 +111,90 @@ fn strip_catalog_provider_prefix<'a>(provider: &str, model: &'a str) -> &'a str 
         .unwrap_or(model)
 }
 
-fn is_free_openrouter_model(model: &str) -> bool {
+pub fn is_free_openrouter_model(model: &str) -> bool {
     model.ends_with(":free")
         || strip_catalog_provider_prefix("openrouter", model) == "openrouter/free"
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct OpenRouterModelIdentity {
+    author: String,
+    family: String,
+    total_parameter_billions: Option<f64>,
+    active_parameter_billions: Option<f64>,
+}
+
+fn openrouter_model_identity(id: &str, display_name: &str) -> OpenRouterModelIdentity {
+    let normalized = strip_catalog_provider_prefix("openrouter", id)
+        .trim_end_matches(":free")
+        .to_ascii_lowercase();
+    let (author, slug) = normalized
+        .split_once('/')
+        .unwrap_or(("", normalized.as_str()));
+    let family = slug
+        .split(|character: char| !character.is_ascii_alphabetic())
+        .find(|part| !part.is_empty())
+        .unwrap_or(slug)
+        .to_string();
+    let (mut total_parameter_billions, mut active_parameter_billions) =
+        extract_parameter_scale(&normalized);
+    if total_parameter_billions.is_none() || active_parameter_billions.is_none() {
+        let display_scale = extract_parameter_scale(&display_name.to_ascii_lowercase());
+        total_parameter_billions = total_parameter_billions.or(display_scale.0);
+        active_parameter_billions = active_parameter_billions.or(display_scale.1);
+    }
+
+    OpenRouterModelIdentity {
+        author: author.to_string(),
+        family,
+        total_parameter_billions,
+        active_parameter_billions,
+    }
+}
+
+fn extract_parameter_scale(value: &str) -> (Option<f64>, Option<f64>) {
+    let bytes = value.as_bytes();
+    let mut total = None;
+    let mut active = None;
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte != b'b' || index == 0 {
+            continue;
+        }
+        let mut start = index;
+        while start > 0 && (bytes[start - 1].is_ascii_digit() || bytes[start - 1] == b'.') {
+            start -= 1;
+        }
+        if start == index {
+            continue;
+        }
+        let has_digit = bytes[start..index].iter().any(u8::is_ascii_digit);
+        let is_active = start > 0
+            && bytes[start - 1] == b'a'
+            && (start == 1 || !bytes[start - 2].is_ascii_alphanumeric());
+        let valid_boundary = start == 0 || !bytes[start - 1].is_ascii_alphanumeric() || is_active;
+        if has_digit && valid_boundary {
+            if let Ok(parameters) = value[start..index].parse::<f64>() {
+                if parameters.is_finite() && parameters > 0.0 {
+                    if is_active {
+                        active.get_or_insert(parameters);
+                    } else {
+                        total.get_or_insert(parameters);
+                    }
+                }
+            }
+        }
+    }
+    (total, active)
+}
+
+fn relative_parameter_distance(left: Option<f64>, right: Option<f64>) -> (bool, u64) {
+    match (left, right) {
+        (Some(left), Some(right)) => {
+            let distance = (left / right).ln().abs();
+            (false, (distance * 1_000_000.0).round() as u64)
+        }
+        _ => (true, u64::MAX),
+    }
 }
 
 fn replace_provider_snapshot(
@@ -304,9 +384,9 @@ impl ModelCatalog {
             }
         }
 
-        // A clean build embeds a fresh OpenRouter `/models` response.
+        // Builds embed the version-controlled OpenRouter `/models` snapshot.
         // It is a fallback snapshot only: runtime refreshes do not treat it as live-confirmed and replace it after the first successful API fetch.
-        // Offline builds embed an empty response and retain the registry TOML.
+        // A scheduled workflow refreshes the file without making builds depend on network access.
         if let Ok(body) = serde_json::from_str::<serde_json::Value>(OPENROUTER_BUILD_SNAPSHOT) {
             let snapshot = parse_openrouter_model_entries(&body);
             if !snapshot.is_empty() {
@@ -671,7 +751,7 @@ impl ModelCatalog {
     /// Return a model that may be selected without explicit user consent.
     ///
     /// OpenRouter's catalog mixes free and paid models and changes frequently.
-    /// Automatic setup prefers the live snapshot and falls back to a build-time free model when the live fetch fails.
+    /// Automatic setup prefers the live snapshot and falls back to a checked-in free model when the live fetch fails.
     /// Paid OpenRouter models remain available for explicit selection.
     pub fn automatic_default_model_for_provider(&self, provider: &str) -> Option<String> {
         if provider != "openrouter" {
@@ -681,6 +761,52 @@ impl ModelCatalog {
             .iter()
             .find(|m| m.provider == provider && is_free_openrouter_model(&m.id))
             .map(|m| m.id.clone())
+    }
+
+    /// Find the closest available free OpenRouter replacement for a delisted model.
+    ///
+    /// OpenRouter does not publish parameter count as a dedicated field, so model IDs and display names are parsed best-effort.
+    /// Selection is deterministic: same family, same author, nearest parameter scale, nearest context window, then lexical model ID.
+    pub fn closest_free_openrouter_model(&self, current_model: &str) -> Option<String> {
+        let current = openrouter_model_identity(current_model, current_model);
+        let current_context = self
+            .find_model(current_model)
+            .map(|model| model.context_window)
+            .unwrap_or_default();
+
+        self.models
+            .iter()
+            .filter(|model| {
+                model.provider == "openrouter"
+                    && model.id != current_model
+                    && is_free_openrouter_model(&model.id)
+                    && self.is_model_available("openrouter", &model.id) != Some(false)
+            })
+            .min_by_key(|model| {
+                let candidate = openrouter_model_identity(&model.id, &model.display_name);
+                let context_distance = if current_context == 0 || model.context_window == 0 {
+                    u64::MAX
+                } else {
+                    current_context.abs_diff(model.context_window)
+                };
+                (
+                    candidate.family != current.family,
+                    candidate.author != current.author,
+                    current.active_parameter_billions.is_some()
+                        && candidate.active_parameter_billions.is_none(),
+                    relative_parameter_distance(
+                        current.total_parameter_billions,
+                        candidate.total_parameter_billions,
+                    ),
+                    relative_parameter_distance(
+                        current.active_parameter_billions,
+                        candidate.active_parameter_billions,
+                    ),
+                    context_distance,
+                    model.id.as_str(),
+                )
+            })
+            .map(|model| model.id.clone())
     }
 
     /// List models that are available (from configured providers only).
@@ -700,7 +826,8 @@ impl ModelCatalog {
     /// Get pricing for a model: (input_cost_per_million, output_cost_per_million).
     pub fn pricing(&self, model_id: &str) -> Option<(f64, f64)> {
         self.find_model(model_id)
-            .map(|m| (m.input_cost_per_m, m.output_cost_per_m))
+            .filter(|model| model.pricing_known)
+            .map(|model| (model.input_cost_per_m, model.output_cost_per_m))
     }
 
     /// List all alias mappings.
@@ -1595,13 +1722,8 @@ pub struct ProviderModelSnapshot {
 pub async fn fetch_openrouter_model_snapshot(
     base_url: &str,
 ) -> Result<ProviderModelSnapshot, String> {
-    use std::time::Duration;
-
-    let client = crate::http_client::proxied_client_builder()
-        .timeout(Duration::from_secs(8))
-        .build()
-        .map_err(|error| format!("failed to build OpenRouter catalog client: {error}"))?;
-    fetch_openrouter_model_snapshot_with_client(&client, base_url).await
+    fetch_openrouter_model_snapshot_with_client(crate::provider_health::probe_client(), base_url)
+        .await
 }
 
 async fn fetch_openrouter_model_snapshot_with_client(
@@ -1641,22 +1763,7 @@ async fn fetch_openrouter_model_snapshot_with_client(
 }
 
 pub async fn probe_api_key(provider_id: &str, base_url: &str, api_key: &str) -> ProbeResult {
-    use std::time::Duration;
-
-    let client = match crate::http_client::proxied_client_builder()
-        .timeout(Duration::from_secs(8))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => {
-            return ProbeResult {
-                key_valid: None,
-                available_models: Vec::new(),
-                live_models: Vec::new(),
-                model_list_fetched: false,
-            }
-        }
-    };
+    let client = crate::provider_health::probe_client();
 
     if provider_id.eq_ignore_ascii_case("openrouter") {
         let auth_url = format!("{}/key", base_url.trim_end_matches('/'));
@@ -1665,7 +1772,7 @@ pub async fn probe_api_key(provider_id: &str, base_url: &str, api_key: &str) -> 
                 .get(auth_url)
                 .header("Authorization", format!("Bearer {api_key}"))
                 .send(),
-            fetch_openrouter_model_snapshot_with_client(&client, base_url),
+            fetch_openrouter_model_snapshot_with_client(client, base_url),
         );
         let key_valid = match auth_response {
             Ok(response) => match response.status().as_u16() {
@@ -1822,6 +1929,8 @@ fn parse_openrouter_model_entries(body: &serde_json::Value) -> Vec<ModelCatalogE
                         .any(|modality| modality.as_str() == Some("image"))
                 });
 
+            let input_cost_per_m = openrouter_price_per_million(model, "prompt");
+            let output_cost_per_m = openrouter_price_per_million(model, "completion");
             Some(ModelCatalogEntry {
                 id: format!("openrouter/{raw_id}"),
                 display_name: model
@@ -1834,8 +1943,9 @@ fn parse_openrouter_model_entries(body: &serde_json::Value) -> Vec<ModelCatalogE
                 tier: ModelTier::Balanced,
                 context_window,
                 max_output_tokens,
-                input_cost_per_m: openrouter_price_per_million(model, "prompt"),
-                output_cost_per_m: openrouter_price_per_million(model, "completion"),
+                input_cost_per_m: input_cost_per_m.unwrap_or_default(),
+                output_cost_per_m: output_cost_per_m.unwrap_or_default(),
+                pricing_known: input_cost_per_m.is_some() && output_cost_per_m.is_some(),
                 supports_tools: supports_parameter("tools"),
                 supports_vision,
                 supports_streaming: true,
@@ -1848,7 +1958,7 @@ fn parse_openrouter_model_entries(body: &serde_json::Value) -> Vec<ModelCatalogE
         .collect()
 }
 
-fn openrouter_price_per_million(model: &serde_json::Value, field: &str) -> f64 {
+fn openrouter_price_per_million(model: &serde_json::Value, field: &str) -> Option<f64> {
     model
         .get("pricing")
         .and_then(|pricing| pricing.get(field))
@@ -1856,7 +1966,6 @@ fn openrouter_price_per_million(model: &serde_json::Value, field: &str) -> f64 {
         .and_then(|price| price.parse::<f64>().ok())
         .filter(|price| price.is_finite() && *price >= 0.0)
         .map(|price| price * 1_000_000.0)
-        .unwrap_or(0.0)
 }
 
 #[cfg(test)]
