@@ -685,6 +685,7 @@
     "edit_name": "에이전트 이름",
     "model_save_failed": "모델을 업데이트하지 못했습니다.",
     "model_saved": "모델이 업데이트되었습니다.",
+    "use_global_default": "전역 기본 모델 사용",
     "rename_failed": "에이전트 이름을 바꾸지 못했습니다.",
     "rename_hand_disabled": "핸드가 관리하는 에이전트는 이름을 바꿀 수 없습니다.",
     "rename_hint": "이름을 바꾸려면 클릭하세요.",

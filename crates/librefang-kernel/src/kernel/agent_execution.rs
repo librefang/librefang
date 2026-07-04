@@ -569,11 +569,8 @@ impl LibreFangKernel {
         // Apply model routing if configured (disabled in Stable mode)
         let mut manifest = entry.manifest.clone();
 
-        // Resolve "default" provider/model to the current effective default.
-        // This covers agents that still explicitly track the default.
-        // Boot resolves legacy source manifests whose model is "default" before they reach this path.
-        // 1. New agents stored as "default"/"default" (post-fix spawn behavior)
-        // 2. TOML agents with provider="default" that remain unresolved
+        // Resolve `default/default` only in this per-execution copy.
+        // The registry and persisted manifest retain the sentinel so later global model changes take effect without rewriting the agent.
         {
             let is_default_provider =
                 manifest.model.provider.is_empty() || manifest.model.provider == "default";
@@ -597,6 +594,13 @@ impl LibreFangKernel {
                 }
                 if dm.base_url.is_some() && manifest.model.base_url.is_none() {
                     manifest.model.base_url.clone_from(&dm.base_url);
+                }
+                for (key, value) in &dm.extra_params {
+                    manifest
+                        .model
+                        .extra_params
+                        .entry(key.clone())
+                        .or_insert(value.clone());
                 }
             }
         }

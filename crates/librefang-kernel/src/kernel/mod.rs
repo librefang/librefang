@@ -1016,11 +1016,10 @@ struct KernelCronBridge {
 impl LibreFangKernel {
     /// Mark all active Hands' cron jobs as due-now so the next scheduler tick fires them.
     /// Called after a provider is first configured so Hands resume immediately.
-    /// Update registry entries for agents that should track the kernel default model.
-    /// Called after a provider switch so agents pick up the new provider without restart.
+    /// Update legacy concrete registry entries that should track the kernel default model.
+    /// Agents carrying the `default/default` sentinel resolve the new value at execution time and require no rewrite.
     ///
     /// Agents eligible for update:
-    /// - Any agent with provider="default" or "" (new spawn-time behavior)
     /// - Dashboard-created agents (no source_toml_path, no custom api_key_env) whose
     ///   stored provider matches `old_provider` — these were using the old default
     ///
@@ -1041,6 +1040,9 @@ impl LibreFangKernel {
                 || entry.manifest.model.provider == "default";
             let is_default_model =
                 entry.manifest.model.model.is_empty() || entry.manifest.model.model == "default";
+            if is_default_provider && is_default_model {
+                continue;
+            }
             // Dashboard-created agents that were using the old default provider:
             // no source TOML, no custom API key, and saved provider == old default
             // The built-in assistant is excluded because users can explicitly select its model in the dashboard.
@@ -1051,7 +1053,7 @@ impl LibreFangKernel {
                 && entry.manifest.model.base_url.is_none()
                 && entry.manifest.model.provider == old_provider;
 
-            if (is_default_provider && is_default_model) || is_stale_dashboard_default {
+            if is_stale_dashboard_default {
                 if let Err(e) = self.agents.registry.update_model_and_provider(
                     entry.id,
                     dm.model.clone(),

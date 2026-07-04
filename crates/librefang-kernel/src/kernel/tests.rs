@@ -823,6 +823,19 @@ fn test_set_agent_model_clears_overrides_when_provider_changes() {
         "same-provider swap must preserve per-agent base_url override"
     );
 
+    kernel
+        .set_agent_model(agent_id, "default", Some("default"))
+        .expect("switching back to the global default should succeed");
+    let inherited = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent after switching to global default");
+    assert_eq!(inherited.manifest.model.provider, "default");
+    assert_eq!(inherited.manifest.model.model, "default");
+    assert!(inherited.manifest.model.api_key_env.is_none());
+    assert!(inherited.manifest.model.base_url.is_none());
+
     kernel.shutdown();
 }
 
@@ -10510,15 +10523,11 @@ fn suspend_resume_actually_transition_in_memory_state() {
     kernel.shutdown();
 }
 
-/// #5137: `sync_default_model_agents` previously returned `()` and
-/// discarded the `update_model_and_provider` / `save_agent` Results, so a
-/// provider switch could half-apply with no signal. It now returns a
-/// per-agent partial-failure list. On the happy path the list must be
-/// empty AND the eligible agent must have been migrated to the new
-/// provider/model — proving the writes are observed, not swallowed, and
-/// that the new return contract is wired through the trait.
+/// #5137: `sync_default_model_agents` previously discarded update and save errors, so a provider switch could half-apply with no signal.
+/// The legacy concrete row must still migrate successfully.
+/// An agent carrying `default/default` must retain that sentinel because execution-time resolution now follows the effective global model.
 #[test]
-fn sync_default_model_agents_reports_no_failures_and_migrates() {
+fn sync_default_model_agents_migrates_legacy_and_keeps_default_sentinel() {
     let tmp = tempfile::tempdir().unwrap();
     let home_dir = tmp.path().join("librefang-kernel-sync-default-5137");
     std::fs::create_dir_all(&home_dir).unwrap();
@@ -10529,8 +10538,7 @@ fn sync_default_model_agents_reports_no_failures_and_migrates() {
     };
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
 
-    // Agent spawned with provider="default" — eligible for default-model sync.
-    let agent_id = kernel
+    let inherited_id = kernel
         .spawn_agent_inner(
             AgentManifest {
                 name: "default-tracking-agent".to_string(),
@@ -10557,6 +10565,33 @@ fn sync_default_model_agents_reports_no_failures_and_migrates() {
         )
         .expect("agent should spawn");
 
+    let legacy_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "legacy-default-agent".to_string(),
+                description: "contains a previously resolved default".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                model: ModelConfig {
+                    provider: "anthropic".to_string(),
+                    model: "claude-old-default".to_string(),
+                    max_tokens: 4096,
+                    temperature: 0.7,
+                    system_prompt: String::new(),
+                    api_key_env: None,
+                    base_url: None,
+                    context_window: None,
+                    max_output_tokens: None,
+                    extra_params: std::collections::BTreeMap::new(),
+                },
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("legacy agent should spawn");
+
     let new_dm = DefaultModelConfig {
         provider: "openrouter".to_string(),
         model: "anthropic/claude-3.5-sonnet".to_string(),
@@ -10571,19 +10606,70 @@ fn sync_default_model_agents_reports_no_failures_and_migrates() {
         "happy-path sync must report zero per-agent failures, got: {failures:?} (#5137)"
     );
 
-    let entry = kernel
+    let inherited = kernel
         .agents
         .registry
-        .get(agent_id)
-        .expect("agent entry after sync");
-    assert_eq!(
-        entry.manifest.model.provider, "openrouter",
-        "eligible agent must be migrated to the new provider — the \
-         update_model_and_provider Result is no longer swallowed (#5137)"
-    );
-    assert_eq!(entry.manifest.model.model, "anthropic/claude-3.5-sonnet");
+        .get(inherited_id)
+        .expect("inheriting agent after sync");
+    assert_eq!(inherited.manifest.model.provider, "default");
+    assert_eq!(inherited.manifest.model.model, "default");
+
+    let legacy = kernel
+        .agents
+        .registry
+        .get(legacy_id)
+        .expect("legacy agent after sync");
+    assert_eq!(legacy.manifest.model.provider, "openrouter");
+    assert_eq!(legacy.manifest.model.model, "anthropic/claude-3.5-sonnet");
 
     kernel.shutdown();
+}
+
+#[test]
+fn default_model_sentinel_survives_restart() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-default-model-restart");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        default_model: DefaultModelConfig {
+            provider: "openrouter".to_string(),
+            model: "acme/current:free".to_string(),
+            api_key_env: "OPENROUTER_API_KEY".to_string(),
+            ..Default::default()
+        },
+        ..KernelConfig::default()
+    };
+
+    let kernel =
+        LibreFangKernel::boot_with_config(config.clone()).expect("first kernel should boot");
+    let assistant_id = kernel
+        .agents
+        .registry
+        .list()
+        .into_iter()
+        .find(|entry| entry.name == "assistant")
+        .expect("default assistant")
+        .id;
+    kernel
+        .set_agent_model(assistant_id, "default", Some("default"))
+        .expect("assistant should follow the global default");
+    kernel.shutdown();
+    drop(kernel);
+
+    let restarted = LibreFangKernel::boot_with_config(config).expect("second kernel should boot");
+    let assistant = restarted
+        .agents
+        .registry
+        .get(assistant_id)
+        .expect("assistant should be restored");
+    assert_eq!(assistant.manifest.model.provider, "default");
+    assert_eq!(assistant.manifest.model.model, "default");
+    assert!(assistant.manifest.model.api_key_env.is_none());
+    assert!(assistant.manifest.model.base_url.is_none());
+
+    restarted.shutdown();
 }
 
 #[test]

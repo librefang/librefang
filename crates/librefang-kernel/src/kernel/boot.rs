@@ -2130,22 +2130,15 @@ impl LibreFangKernel {
                         &mut restored_entry.manifest.resources,
                     );
 
-                    // Apply default_model to restored agents.
-                    //
-                    // Two cases:
-                    // 1. Agent has empty/default provider → always apply default_model
-                    // 2. Agent's source TOML defines provider="default" → the DB value
-                    //    is a stale resolved provider from a previous config; override it
+                    // Preserve the default sentinel for agents that inherit the global model.
+                    // Older versions stored a concrete resolved value in SQLite even when the source TOML declared `default/default`.
                     {
-                        let dm = &cfg.default_model;
                         let is_default_provider = restored_entry.manifest.model.provider.is_empty()
                             || restored_entry.manifest.model.provider == "default";
                         let is_default_model = restored_entry.manifest.model.model.is_empty()
                             || restored_entry.manifest.model.model == "default";
 
-                        // Also check the source TOML: if the agent definition says
-                        // provider="default", the persisted value is stale and must
-                        // be overridden with the current default_model.
+                        // The source manifest is authoritative for legacy rows whose SQLite copy contains a previously resolved concrete model.
                         let toml_says_default = toml_path.exists()
                             && std::fs::read_to_string(&toml_path)
                                 .ok()
@@ -2159,32 +2152,10 @@ impl LibreFangKernel {
                                 .unwrap_or(false);
 
                         if is_default_provider && is_default_model || toml_says_default {
-                            if !dm.provider.is_empty() {
-                                restored_entry.manifest.model.provider = dm.provider.clone();
-                            }
-                            if !dm.model.is_empty() {
-                                restored_entry.manifest.model.model = dm.model.clone();
-                            }
-                            if !dm.api_key_env.is_empty() {
-                                restored_entry.manifest.model.api_key_env =
-                                    Some(dm.api_key_env.clone());
-                            }
-                            if dm.base_url.is_some() {
-                                restored_entry
-                                    .manifest
-                                    .model
-                                    .base_url
-                                    .clone_from(&dm.base_url);
-                            }
-                            // Merge extra_params from default_model
-                            for (key, value) in &dm.extra_params {
-                                restored_entry
-                                    .manifest
-                                    .model
-                                    .extra_params
-                                    .entry(key.clone())
-                                    .or_insert(value.clone());
-                            }
+                            restored_entry.manifest.model.provider = "default".to_string();
+                            restored_entry.manifest.model.model = "default".to_string();
+                            restored_entry.manifest.model.api_key_env = None;
+                            restored_entry.manifest.model.base_url = None;
                         }
                     }
 
