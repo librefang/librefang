@@ -265,10 +265,15 @@ impl LibreFangKernel {
 
         // If fallback models are configured, wrap in FallbackDriver
         if !effective_fallbacks.is_empty() {
-            // Primary driver uses the agent's own model name (already set in
-            // request). Each slot carries its provider name so the
-            // store-aware `FallbackDriver` can pre-skip a budget-exhausted
-            // slot (#5980): the gate flags the provider in the shared
+            // Primary driver uses the agent's own model name, stripped of any
+            // provider prefix the same way `strip_provider_prefix` normalizes
+            // it for the non-fallback request path (agent_loop/mod.rs) and
+            // for each fallback slot below — otherwise a prefixed model id
+            // (e.g. "openrouter/google/gemini-2.5-flash") reaches the API
+            // unstripped on the primary slot only.
+            // Each slot carries its provider name so the store-aware
+            // `FallbackDriver` can pre-skip a budget-exhausted slot (#5980):
+            // the gate flags the provider in the shared
             // `ProviderExhaustionStore`, and this driver reads that SAME
             // store via `is_slot_exhausted`. Mirrors boot.rs:698-714.
             let mut chain: Vec<(
@@ -277,7 +282,7 @@ impl LibreFangKernel {
                 String,
             )> = vec![(
                 primary.clone(),
-                manifest.model.model.clone(),
+                strip_provider_prefix(&manifest.model.model, agent_provider),
                 agent_provider.clone(),
             )];
             for fb in &effective_fallbacks {
