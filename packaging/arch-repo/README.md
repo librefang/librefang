@@ -10,27 +10,52 @@ The two are complementary: when AUR registration reopens, #6341 publishes the AU
 
 ## Installing (users)
 
+The LibreFang packaging key fingerprint is `2C32 5B0F 8870 6ED9 9C45 E216 DD09 DC7D 3E70 E1E9`.
+
 ```sh
-# 1. Import the LibreFang packaging public key and locally sign it so pacman
-#    will trust packages signed by it.
+# 1. Import the LibreFang packaging public key and locally sign it so pacman will trust packages signed by it.
 curl -fsSL https://packages.librefang.ai/librefang.gpg -o /tmp/librefang.gpg
 sudo pacman-key --add /tmp/librefang.gpg
-sudo pacman-key --finger packaging@librefang.ai      # confirm the fingerprint, then:
-sudo pacman-key --lsign-key <FINGERPRINT-printed-above>
+sudo pacman-key --finger 2C325B0F88706ED99C45E216DD09DC7D3E70E1E9
+sudo pacman-key --lsign-key 2C325B0F88706ED99C45E216DD09DC7D3E70E1E9
 
 # 2. Add the repository to /etc/pacman.conf (append at the end):
 #
 #      [librefang]
 #      Server = https://packages.librefang.ai/arch/$arch
 #
-# 3. Sync and install. The CLI/daemon and the desktop app:
-sudo pacman -Syu
-sudo pacman -S librefang-bin librefang-desktop-bin
 ```
 
 `$arch` is pacman's own variable — leave it literal in `pacman.conf`; pacman expands it to `x86_64` (or `aarch64` on Arch Linux ARM).
 Both the database and every package are GPG-signed, so the default `SigLevel` (inherited from `[options]`) verifies them once the key above is locally signed.
 Do **not** set `SigLevel = Never` — that disables the verification this repository exists to provide.
+
+The packages are independent.
+Install only the package for the deployment you need.
+
+### CLI, daemon, HTTP API, and web dashboard
+
+Available on x86_64 and aarch64:
+
+```sh
+sudo pacman -Syu librefang-bin
+```
+
+### Native desktop app
+
+Available on x86_64 only and does not require `librefang-bin`:
+
+```sh
+sudo pacman -Syu librefang-desktop-bin
+```
+
+### Docker-backed systemd service
+
+Available on x86_64 and aarch64:
+
+```sh
+sudo pacman -Syu librefang-docker
+```
 
 Available packages:
 

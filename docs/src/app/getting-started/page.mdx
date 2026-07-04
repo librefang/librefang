@@ -18,6 +18,33 @@ Project website: [https://librefang.ai/](https://librefang.ai/)
 
 ## Installation
 
+### Arch Linux repository setup
+
+<Note>
+AUR account registration is temporarily unavailable.
+LibreFang currently publishes signed Arch packages through its official pacman repository.
+</Note>
+
+Import and locally trust the LibreFang package-signing key:
+
+```bash
+curl -fsSL https://packages.librefang.ai/librefang.gpg -o /tmp/librefang.gpg
+sudo pacman-key --add /tmp/librefang.gpg
+sudo pacman-key --finger 2C325B0F88706ED99C45E216DD09DC7D3E70E1E9
+sudo pacman-key --lsign-key 2C325B0F88706ED99C45E216DD09DC7D3E70E1E9
+```
+
+Add the repository to `/etc/pacman.conf`:
+
+```ini
+[librefang]
+Server = https://packages.librefang.ai/arch/$arch
+```
+
+Configure the repository once, then install only the CLI or Desktop package from the corresponding section below.
+The packages are independent, so installing the CLI is not required for the Desktop app.
+See the [Arch repository documentation](https://github.com/librefang/librefang/blob/main/packaging/arch-repo/README.md) for package details and aarch64 support.
+
 ### CLI
 
 The CLI is the core command-line tool for managing agents, hands, workflows, and more.
@@ -78,6 +105,14 @@ brew install librefang              # Stable
 brew install librefang-beta         # Beta
 brew install librefang-rc           # RC
 ```
+
+**Arch Linux (pacman)**
+
+```bash
+sudo pacman -Syu librefang-bin
+```
+
+This installs the CLI, daemon, HTTP API, and web dashboard without the Desktop app.
 
 **npm**
 
@@ -179,6 +214,18 @@ brew install --cask librefang       # Stable
 brew install --cask librefang-beta  # Beta
 brew install --cask librefang-rc    # RC
 ```
+
+**Arch Linux (pacman)**
+
+After completing the [Arch Linux repository setup](#arch-linux-repository-setup):
+
+```bash
+sudo pacman -Syu librefang-desktop-bin
+```
+
+The Desktop package is standalone and does not require `librefang-bin`.
+The desktop package is available on x86_64 only.
+On aarch64, use `librefang-bin` for the native service or `librefang-docker` for the Docker-backed systemd service, then open the web dashboard at `http://127.0.0.1:4545/`.
 
 **Direct Download**
 
@@ -544,8 +591,5 @@ librefang migrate --from openfang       # Migrate from OpenFang
 librefang migrate --from openclaw       # Migrate from OpenClaw
 librefang mcp                           # Start MCP server (stdio)
 ```
-
-
-
 
 

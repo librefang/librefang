@@ -77,6 +77,46 @@ brew install --cask librefang       # Desktop (stable)
 </details>
 
 <details>
+<summary><strong>Arch Linux (pacman)</strong></summary>
+
+> L'inscription de comptes AUR est temporairement indisponible.
+> LibreFang publie donc actuellement des paquets signés via son dépôt pacman officiel.
+
+```bash
+# Importer la clé de signature des paquets LibreFang et lui faire confiance localement
+curl -fsSL https://packages.librefang.ai/librefang.gpg -o /tmp/librefang.gpg
+sudo pacman-key --add /tmp/librefang.gpg
+sudo pacman-key --finger 2C325B0F88706ED99C45E216DD09DC7D3E70E1E9
+sudo pacman-key --lsign-key 2C325B0F88706ED99C45E216DD09DC7D3E70E1E9
+```
+
+Ajoutez le dépôt à `/etc/pacman.conf` :
+
+```ini
+[librefang]
+Server = https://packages.librefang.ai/arch/$arch
+```
+
+`librefang-bin` et `librefang-desktop-bin` sont des paquets indépendants.
+Installez uniquement le paquet correspondant à l'interface dont vous avez besoin.
+
+#### CLI, daemon et tableau de bord web
+
+```bash
+sudo pacman -Syu librefang-bin
+```
+
+#### Application de bureau (x86_64 uniquement)
+
+```bash
+sudo pacman -Syu librefang-desktop-bin
+```
+
+Consultez la [documentation du dépôt Arch](../packaging/arch-repo/README.md) pour les détails des paquets et la prise en charge d'aarch64.
+
+</details>
+
+<details>
 <summary><strong>Docker</strong></summary>
 
 ```bash

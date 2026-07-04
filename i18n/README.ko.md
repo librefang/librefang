@@ -75,6 +75,46 @@ brew install --cask librefang       # Desktop (stable)
 </details>
 
 <details>
+<summary><strong>Arch Linux (pacman)</strong></summary>
+
+> AUR 계정 등록은 현재 일시적으로 사용할 수 없습니다.
+> 따라서 LibreFang은 공식 pacman 저장소를 통해 서명된 패키지를 제공하고 있습니다.
+
+```bash
+# LibreFang 패키지 서명 키를 가져와 로컬에서 신뢰하도록 설정
+curl -fsSL https://packages.librefang.ai/librefang.gpg -o /tmp/librefang.gpg
+sudo pacman-key --add /tmp/librefang.gpg
+sudo pacman-key --finger 2C325B0F88706ED99C45E216DD09DC7D3E70E1E9
+sudo pacman-key --lsign-key 2C325B0F88706ED99C45E216DD09DC7D3E70E1E9
+```
+
+`/etc/pacman.conf`에 저장소를 추가합니다:
+
+```ini
+[librefang]
+Server = https://packages.librefang.ai/arch/$arch
+```
+
+`librefang-bin`과 `librefang-desktop-bin`은 서로 독립된 패키지입니다.
+필요한 인터페이스의 패키지만 설치하세요.
+
+#### CLI, 데몬 및 웹 대시보드
+
+```bash
+sudo pacman -Syu librefang-bin
+```
+
+#### 데스크톱 앱(x86_64 전용)
+
+```bash
+sudo pacman -Syu librefang-desktop-bin
+```
+
+패키지 세부 정보와 aarch64 지원은 [Arch 저장소 문서](../packaging/arch-repo/README.md)를 참조하세요.
+
+</details>
+
+<details>
 <summary><strong>Docker</strong></summary>
 
 ```bash

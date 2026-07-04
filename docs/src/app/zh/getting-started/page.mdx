@@ -18,6 +18,32 @@
 
 ## 安装
 
+### Arch Linux 仓库设置
+
+<Note>
+AUR 账户注册目前暂时不可用，因此 LibreFang 目前通过官方 pacman 仓库发布已签名的 Arch 软件包。
+</Note>
+
+导入并在本地信任 LibreFang 软件包签名密钥：
+
+```bash
+curl -fsSL https://packages.librefang.ai/librefang.gpg -o /tmp/librefang.gpg
+sudo pacman-key --add /tmp/librefang.gpg
+sudo pacman-key --finger 2C325B0F88706ED99C45E216DD09DC7D3E70E1E9
+sudo pacman-key --lsign-key 2C325B0F88706ED99C45E216DD09DC7D3E70E1E9
+```
+
+将仓库添加到 `/etc/pacman.conf`：
+
+```ini
+[librefang]
+Server = https://packages.librefang.ai/arch/$arch
+```
+
+仓库只需配置一次，然后在下面对应的章节中仅安装 CLI 或 Desktop 软件包。
+这两个软件包相互独立，因此使用 Desktop 应用不需要安装 CLI。
+有关软件包详情和 aarch64 支持，请参阅 [Arch 仓库文档](https://github.com/librefang/librefang/blob/main/packaging/arch-repo/README.md)。
+
 ### CLI
 
 CLI 是管理 Agent、Hand、工作流等核心命令行工具。
@@ -78,6 +104,14 @@ brew install librefang              # 稳定版
 brew install librefang-beta         # Beta
 brew install librefang-rc           # RC
 ```
+
+**Arch Linux (pacman)**
+
+```bash
+sudo pacman -Syu librefang-bin
+```
+
+此命令安装 CLI、守护进程、HTTP API 和 Web Dashboard，不会安装 Desktop 应用。
 
 **npm**
 
@@ -179,6 +213,18 @@ brew install --cask librefang       # 稳定版
 brew install --cask librefang-beta  # Beta
 brew install --cask librefang-rc    # RC
 ```
+
+**Arch Linux (pacman)**
+
+完成本页上方的 **Arch Linux 仓库设置** 后：
+
+```bash
+sudo pacman -Syu librefang-desktop-bin
+```
+
+Desktop 软件包可独立运行，不需要安装 `librefang-bin`。
+桌面软件包仅支持 x86_64。
+在 aarch64 上，请使用 `librefang-bin` 运行原生服务，或使用 `librefang-docker` 运行基于 Docker 的 systemd 服务，然后通过 `http://127.0.0.1:4545/` 使用 Web Dashboard。
 
 **直接下载**
 
@@ -544,7 +590,3 @@ librefang migrate --from openfang       # 从 OpenFang 迁移
 librefang migrate --from openclaw       # 从 OpenClaw 迁移
 librefang mcp                           # 启动 MCP 服务器（stdio）
 ```
-
-
-
-
