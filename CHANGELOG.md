@@ -15,6 +15,7 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 - Stop CLI providers (`codex-cli`, `gemini-cli`, `claude-code`, `qwen-code`) from forcing a placeholder `--model <provider-id>` onto their CLI for a bare provider id, so each CLI defers to its own configured default model (#6365) (@houko)
 - Clear `cargo-deny` advisory failures on `main` by bumping `anyhow` to 1.0.103 (RUSTSEC-2026-0190) and ignoring the unmaintained `ttf-parser` advisory (RUSTSEC-2026-0192 — transitive via `pdf-extract` → `lopdf`, no safe upgrade available) (#6366) (@houko)
 - Clear the `quick-xml` advisories RUSTSEC-2026-0194 / RUSTSEC-2026-0195 by bumping `plist` to 1.10.0 (pulls the patched `quick-xml` 0.41.0) and `tauri-winrt-notification` to 0.7.3 (drops its `quick-xml` dependency), removing both vulnerable versions from the lockfile (#6387) (@houko)
+- Raise the Nix Build job timeout to 120 minutes so the now-routine cold builds — the Rust CI lanes churn the repo's 10 GB Actions cache quota daily, evicting the `/nix/store` cache between runs — complete instead of being cancelled at 60 minutes, unbreaking the workflow that had been red on `main` since June 11 (#6389) (@houko)
 
 ### Documentation
 
