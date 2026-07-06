@@ -1417,6 +1417,61 @@ export function WorkflowsPage() {
                               {runId && isPausedRunState(rd.state) && (
                                 <OperatorActionBar runId={runId} />
                               )}
+                              {/* Execution log console */}
+                              {(() => {
+                                const fmtTime = (ts?: string | null) => ts ? new Date(ts).toLocaleTimeString() : "--:--:--";
+                                const fmtDur = (ms: number) => ms >= 60000 ? `${(ms/60000).toFixed(1)}m` : `${(ms/1000).toFixed(1)}s`;
+                                const fmtN = (n: number) => n >= 1000 ? `${(n/1000).toFixed(1)}k` : String(n);
+                                const logs: Array<{ts: string; level: "info"|"warn"|"error"; msg: string}> = [];
+                                // Run start
+                                logs.push({ts: fmtTime(rd.started_at), level: "info", msg: `Run started — ${totalSteps || "?"} steps defined`});
+                                // Input params
+                                if (rd.input) {
+                                  try { const p = JSON.parse(rd.input); if (p && typeof p === "object" && !Array.isArray(p)) { for (const [k,v] of Object.entries(p).filter(([x]) => x !== "input")) { logs.push({ts: fmtTime(rd.started_at), level: "info", msg: `  {{${k}}} = "${String(v).slice(0,60)}"`}); } } } catch {}
+                                }
+                                // Each step
+                                for (let i = 0; i < allSteps.length; i++) {
+                                  const s = allSteps[i];
+                                  const hasErr = !!s.error;
+                                  logs.push({ts: fmtTime(rd.started_at), level: hasErr ? "error" : "info", msg: `Step ${i+1}/${totalSteps||allSteps.length} "${s.step_name}" → ${s.agent_name||s.agent_id}${hasErr ? " FAILED" : ""}`});
+                                  if (s.variables && Object.keys(s.variables).length > 0) {
+                                    for (const [k,v] of Object.entries(s.variables)) {
+                                      logs.push({ts: fmtTime(rd.started_at), level: "info", msg: `  {{${k}}} = "${String(v).slice(0,60)}"`});
+                                    }
+                                  }
+                                  logs.push({ts: fmtTime(rd.started_at), level: "info", msg: `  Prompt: ${fmtN(s.input_tokens||0)} tokens → Response: ${fmtN(s.output_tokens||0)} tokens in ${fmtDur(s.duration_ms||0)}`});
+                                  if (hasErr && s.error) logs.push({ts: fmtTime(rd.started_at), level: "error", msg: `  Error: ${s.error}`});
+                                }
+                                // Run completion
+                                if (rd.state === "completed") {
+                                  const totalMs = rd.completed_at && rd.started_at ? new Date(rd.completed_at).getTime() - new Date(rd.started_at).getTime() : 0;
+                                  const totalTokens = allSteps.reduce((sum, s) => sum + (s.input_tokens||0) + (s.output_tokens||0), 0);
+                                  logs.push({ts: fmtTime(rd.completed_at), level: "info", msg: `Run completed — ${fmtDur(totalMs)}, ${totalTokens.toLocaleString()} tokens`});
+                                } else if (rd.state === "failed") {
+                                  logs.push({ts: fmtTime(rd.completed_at), level: "error", msg: rd.error ? `Run FAILED: ${rd.error}` : "Run FAILED"});
+                                } else if (rd.state === "running" || rd.state === "pending") {
+                                  logs.push({ts: "--:--:--", level: "info", msg: `… executing (${allSteps.length}/${totalSteps||"?"} steps done)`});
+                                }
+                                const logRef = useRef<HTMLPreElement>(null);
+                                useEffect(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, [logs.length]);
+                                return (
+                                  <div className="rounded-lg border border-border-subtle bg-[#0a0a0f] overflow-hidden">
+                                    <div className="flex items-center gap-1.5 px-2.5 py-1.5 border-b border-border-subtle/50 bg-surface/50">
+                                      <div className="w-2 h-2 rounded-full bg-error/60" />
+                                      <div className="w-2 h-2 rounded-full bg-warning/60" />
+                                      <div className="w-2 h-2 rounded-full bg-success/60" />
+                                      <span className="text-[9px] font-semibold text-text-dim/40 ml-1 uppercase tracking-wider">{t("workflows.console", { defaultValue: "Console" })}</span>
+                                    </div>
+                                    <pre ref={logRef} className="p-2.5 text-[9px] leading-relaxed font-mono max-h-64 overflow-y-auto">
+                                      {logs.map((l, i) => (
+                                        <div key={i} className={l.level === "error" ? "text-error/90" : l.level === "warn" ? "text-warning/80" : "text-text-dim/70"}>
+                                          <span className="text-text-dim/30 select-none">{l.ts}</span>  {l.msg}
+                                        </div>
+                                      ))}
+                                    </pre>
+                                  </div>
+                                );
+                              })()}
                               {/* Pending/future steps (not yet executed) */}
                               {isActive && totalSteps > allSteps.length && (
                                 <div className="space-y-1">
