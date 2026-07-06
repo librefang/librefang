@@ -2389,6 +2389,44 @@ impl LibreFangKernel {
         );
         let mut manifest = entry.manifest.clone();
 
+        // Resolve "default" provider/model to the effective default.
+        // Mirrors the resolution in `execute_llm_agent` so the streaming
+        // path (WebUI, Telegram, forks) and the non-streaming path stay in
+        // sync. Without this, agents spawned post-boot with
+        // provider="default"/model="default" reach the LLM API with
+        // the literal sentinel values still in place.
+        {
+            let cfg = self.config.load();
+            let is_default_provider =
+                manifest.model.provider.is_empty() || manifest.model.provider == "default";
+            let is_default_model =
+                manifest.model.model.is_empty() || manifest.model.model == "default";
+            let is_auto_spawned = entry.name == "assistant"
+                && manifest
+                    .description
+                    .starts_with("General-purpose assistant");
+            if (is_default_provider && is_default_model) || is_auto_spawned {
+                let override_guard = self
+                    .llm
+                    .default_model_override
+                    .read()
+                    .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
+                let dm = override_guard.as_ref().unwrap_or(&cfg.default_model);
+                if !dm.provider.is_empty() {
+                    manifest.model.provider = dm.provider.clone();
+                }
+                if !dm.model.is_empty() {
+                    manifest.model.model = dm.model.clone();
+                }
+                if !dm.api_key_env.is_empty() && manifest.model.api_key_env.is_none() {
+                    manifest.model.api_key_env = Some(dm.api_key_env.clone());
+                }
+                if dm.base_url.is_some() && manifest.model.base_url.is_none() {
+                    manifest.model.base_url.clone_from(&dm.base_url);
+                }
+            }
+        }
+
         // Apply per-session model override (#4898) before any manifest field is
         // read downstream (model catalog lookup, system prompt build, billing).
         // The pre-lock session snapshot already carries model_override; the
