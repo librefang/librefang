@@ -67,6 +67,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import threading
 import time
 import urllib.error
@@ -873,7 +874,9 @@ class SlackAdapter(SidecarAdapter):
         thread_ts = None if self.force_flat_replies else inbound_thread_id
 
         content = cmd.content
-        text = cmd.text or ""
+        # Sidecars own outbound formatting (owns_formatting()=true), so the
+        # kernel hands us raw Markdown — convert to Slack mrkdwn here.
+        text = _markdown_to_mrkdwn(cmd.text or "")
         loop = asyncio.get_event_loop()
         if isinstance(content, dict) and "Text" in content:
             await loop.run_in_executor(
@@ -882,7 +885,7 @@ class SlackAdapter(SidecarAdapter):
             )
         elif isinstance(content, dict) and "Interactive" in content:
             payload = content["Interactive"]
-            interactive_text = payload.get("text", "") or text
+            interactive_text = _markdown_to_mrkdwn(payload.get("text", "")) or text
             buttons = payload.get("buttons", []) or []
             blocks = _build_block_kit(interactive_text, buttons)
             await loop.run_in_executor(
@@ -920,6 +923,130 @@ class SlackAdapter(SidecarAdapter):
                     channel_id, inbound_thread_id,
                 ),
             )
+
+
+# Splits text into code segments (fenced ```...``` or inline `...`) and
+# non-code segments. re.split with a capturing group keeps the delimiters,
+# so code lands at odd indices and is left untouched by the converter.
+_CODE_SPLIT_RE = re.compile(r"(```.*?```|`[^`]*`)", re.DOTALL)
+_ATX_HEADER_RE = re.compile(r"^(\s{0,3})#{1,6}\s+(.*?)\s*#*\s*$")
+_BULLET_RE = re.compile(r"^(\s*)[-*+]\s+(.*)$")
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)\s]+)\)")
+_BOLD_STAR_RE = re.compile(r"\*\*([^*\n]+)\*\*")
+_BOLD_USCORE_RE = re.compile(r"__([^_\n]+)__")
+_STRIKE_RE = re.compile(r"~~([^~\n]+)~~")
+# A GitHub-flavoured-Markdown table divider row: |---|:--:|---:| etc.
+# Requires ≥2 columns (≥1 internal pipe) so a lone `---` horizontal rule
+# is not mistaken for a table.
+_TABLE_DIVIDER_RE = re.compile(r"^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)+\|?\s*$")
+
+
+def _inline_md(s: str) -> str:
+    """Inline Markdown → Slack mrkdwn (links, bold, strikethrough)."""
+    s = _MD_LINK_RE.sub(r"<\2|\1>", s)      # [text](url) → <url|text>
+    s = _BOLD_STAR_RE.sub(r"*\1*", s)        # **bold** → *bold*
+    s = _BOLD_USCORE_RE.sub(r"*\1*", s)      # __bold__ → *bold*
+    s = _STRIKE_RE.sub(r"~\1~", s)           # ~~strike~~ → ~strike~
+    return s
+
+
+def _split_table_row(row: str) -> list[str]:
+    r = row.strip()
+    if r.startswith("|"):
+        r = r[1:]
+    if r.endswith("|"):
+        r = r[:-1]
+    return [c.strip() for c in r.split("|")]
+
+
+def _plain_cell(c: str) -> str:
+    """Strip inline markers from a cell so the monospace grid stays aligned."""
+    c = _MD_LINK_RE.sub(r"\1", c)  # [text](url) → text
+    return c.replace("**", "").replace("__", "").replace("`", "").strip()
+
+
+def _render_table(header: str, rows: list[str]) -> str:
+    """Render a Markdown table as a fixed-width Slack code block (Slack
+    mrkdwn has no table element; monospace preserves the columns)."""
+    hcells = [_plain_cell(c) for c in _split_table_row(header)]
+    rcells = [[_plain_cell(c) for c in _split_table_row(r)] for r in rows]
+    ncol = max([len(hcells)] + [len(r) for r in rcells])
+
+    def pad(cells: list[str]) -> list[str]:
+        return cells + [""] * (ncol - len(cells))
+
+    hcells = pad(hcells)
+    rcells = [pad(r) for r in rcells]
+    widths = []
+    for k in range(ncol):
+        w = len(hcells[k])
+        for r in rcells:
+            w = max(w, len(r[k]))
+        widths.append(w)
+
+    def fmt(cells: list[str]) -> str:
+        return " | ".join(cells[k].ljust(widths[k]) for k in range(ncol))
+
+    sep = "-+-".join("-" * widths[k] for k in range(ncol))
+    body = "\n".join([fmt(hcells), sep] + [fmt(r) for r in rcells])
+    return f"```\n{body}\n```"
+
+
+def _convert_md_segment(seg: str) -> str:
+    """Convert one non-code Markdown segment to Slack mrkdwn."""
+    lines = seg.split("\n")
+    out: list[str] = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i]
+        # Tables: a header row followed by a |---|---| divider. Rendered as
+        # a fixed-width code block since Slack has no table support.
+        if "|" in line and i + 1 < n and _TABLE_DIVIDER_RE.match(lines[i + 1]):
+            j = i + 2
+            body_rows: list[str] = []
+            while j < n and lines[j].strip() and "|" in lines[j]:
+                body_rows.append(lines[j])
+                j += 1
+            out.append(_render_table(line, body_rows))
+            i = j
+            continue
+        # ATX headers (# .. ######) → bold (Slack has no headings).
+        m = _ATX_HEADER_RE.match(line)
+        if m:
+            content = m.group(2).strip()
+            out.append(f"{m.group(1)}*{_inline_md(content)}*" if content else "")
+            i += 1
+            continue
+        # Bullets (-, *, +) → •. Also stops a "* item" bullet from being
+        # mistaken for italic.
+        b = _BULLET_RE.match(line)
+        if b:
+            out.append(f"{b.group(1)}•   {_inline_md(b.group(2))}")
+            i += 1
+            continue
+        out.append(_inline_md(line))
+        i += 1
+    return "\n".join(out)
+
+
+def _markdown_to_mrkdwn(text: str) -> str:
+    """Convert common Markdown to Slack mrkdwn, leaving code spans intact.
+
+    The Rust `formatter::markdown_to_slack_mrkdwn` used to run kernel-side,
+    but sidecar adapters report `owns_formatting() = true`, so the kernel
+    now sends raw text and the adapter owns the conversion. Handles bold,
+    headers, bullets, links, and strikethrough — the cases that otherwise
+    leak literal `**` / `##` into Slack. Italic and blockquotes already
+    share syntax with Slack (`_x_`, `> q`) and pass through untouched;
+    fenced/inline code is preserved verbatim (Slack renders backticks).
+    """
+    if not text:
+        return text
+    parts = _CODE_SPLIT_RE.split(text)
+    for i in range(0, len(parts), 2):  # even indices = non-code
+        parts[i] = _convert_md_segment(parts[i])
+    return "".join(parts)
 
 
 def _build_block_kit(text: str, buttons: list) -> list:

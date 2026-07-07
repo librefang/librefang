@@ -1042,3 +1042,74 @@ async def test_on_send_drops_when_no_channel(monkeypatch):
 
     await a.on_send(_Cmd())
     assert fake.calls == []
+
+
+# ---- Markdown → Slack mrkdwn conversion ----------------------------
+
+
+def test_mrkdwn_bold():
+    assert sa._markdown_to_mrkdwn("**bold** and __also__") == "*bold* and *also*"
+
+
+def test_mrkdwn_headers_become_bold():
+    assert sa._markdown_to_mrkdwn("# Title") == "*Title*"
+    assert sa._markdown_to_mrkdwn("### Sub ###") == "*Sub*"
+
+
+def test_mrkdwn_bullets():
+    assert (
+        sa._markdown_to_mrkdwn("- one\n* two\n+ three")
+        == "•   one\n•   two\n•   three"
+    )
+
+
+def test_mrkdwn_links():
+    assert (
+        sa._markdown_to_mrkdwn("see [docs](https://x.example/y)")
+        == "see <https://x.example/y|docs>"
+    )
+
+
+def test_mrkdwn_strikethrough():
+    assert sa._markdown_to_mrkdwn("~~gone~~") == "~gone~"
+
+
+def test_mrkdwn_preserves_code_spans():
+    # ** and ## inside code must survive verbatim.
+    src = "inline `a**b` and\n```\n## not a header\n**not bold**\n```"
+    assert sa._markdown_to_mrkdwn(src) == src
+
+
+def test_mrkdwn_passes_through_italic_and_quote():
+    # Slack shares `_italic_` and `> quote` syntax with Markdown.
+    assert sa._markdown_to_mrkdwn("_em_\n> quote") == "_em_\n> quote"
+
+
+def test_mrkdwn_table_becomes_code_block():
+    src = "| A | B |\n|---|---|\n| 1 | 22 |\n| 333 | 4 |"
+    assert sa._markdown_to_mrkdwn(src) == (
+        "```\n"
+        "A   | B \n"
+        "----+---\n"
+        "1   | 22\n"
+        "333 | 4 \n"
+        "```"
+    )
+
+
+@pytest.mark.asyncio
+async def test_on_send_converts_markdown_to_mrkdwn(monkeypatch):
+    fake = _FakeUrlopen([(200, {"ok": True})])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter()
+
+    class _Cmd:
+        channel_id = "C01"
+        text = "## Title\n**bold** [x](https://e.example)"
+        content = {"Text": text}
+        thread_id = None
+        user = {}
+
+    await a.on_send(_Cmd())
+    body = json.loads(fake.calls[0]["body_raw"])
+    assert body["text"] == "*Title*\n*bold* <https://e.example|x>"
