@@ -606,9 +606,9 @@ impl ModelCatalog {
         let p = self.providers.iter().find(|p| p.id == provider_id)?;
         let requested = strip_catalog_provider_prefix(provider_id, model);
         Some(
-            p.available_models
-                .iter()
-                .any(|m| strip_catalog_provider_prefix(provider_id, m) == requested),
+            p.available_models.iter().any(|m| {
+                m == requested || strip_catalog_provider_prefix(provider_id, m) == requested
+            }),
         )
     }
 

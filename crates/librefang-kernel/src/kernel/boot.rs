@@ -2139,7 +2139,17 @@ impl LibreFangKernel {
                             || restored_entry.manifest.model.provider == "default";
                         let is_default_model = restored_entry.manifest.model.model.is_empty()
                             || restored_entry.manifest.model.model == "default";
-
+                        // Older boots resolved the auto-spawned assistant's default OpenRouter
+                        // free model into a concrete SQLite row. Treat that row as a default
+                        // sentinel again so future boots can migrate away from delisted models.
+                        let is_legacy_auto_spawned_assistant = name == "assistant"
+                            && restored_entry.source_toml_path.is_none()
+                            && restored_entry.manifest.model.api_key_env.is_some()
+                            && restored_entry.manifest.model.base_url.is_none()
+                            && restored_entry.manifest.model.provider == "openrouter"
+                            && librefang_runtime::model_catalog::is_free_openrouter_model(
+                                &restored_entry.manifest.model.model,
+                            );
                         // The source manifest is authoritative for legacy rows whose SQLite copy contains a previously resolved concrete model.
                         let toml_says_default = toml_path.exists()
                             && std::fs::read_to_string(&toml_path)
@@ -2153,7 +2163,10 @@ impl LibreFangKernel {
                                 })
                                 .unwrap_or(false);
 
-                        if is_default_provider && is_default_model || toml_says_default {
+                        if (is_default_provider && is_default_model)
+                            || toml_says_default
+                            || is_legacy_auto_spawned_assistant
+                        {
                             restored_entry.manifest.model.provider = "default".to_string();
                             restored_entry.manifest.model.model = "default".to_string();
                             restored_entry.manifest.model.api_key_env = None;

@@ -10776,6 +10776,71 @@ fn default_model_sentinel_survives_restart() {
 }
 
 #[test]
+fn legacy_auto_spawned_assistant_with_delisted_openrouter_free_model_reverts_to_default_sentinel() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-legacy-assistant-default");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        default_model: DefaultModelConfig {
+            provider: "openrouter".to_string(),
+            model: "acme/deprecated:free".to_string(),
+            api_key_env: "OPENROUTER_API_KEY".to_string(),
+            ..Default::default()
+        },
+        ..KernelConfig::default()
+    };
+
+    let kernel =
+        LibreFangKernel::boot_with_config(config.clone()).expect("first kernel should boot");
+    let assistant_id = kernel
+        .agents
+        .registry
+        .list()
+        .into_iter()
+        .find(|entry| entry.name == "assistant")
+        .expect("default assistant")
+        .id;
+    kernel
+        .agents
+        .registry
+        .update_model_provider_config(
+            assistant_id,
+            "acme/deprecated:free".to_string(),
+            "openrouter".to_string(),
+            Some("OPENROUTER_API_KEY".to_string()),
+            None,
+        )
+        .expect("seed legacy assistant model");
+    let legacy = kernel
+        .agents
+        .registry
+        .get(assistant_id)
+        .expect("legacy assistant");
+    kernel
+        .memory
+        .substrate
+        .save_agent(&legacy)
+        .expect("persist legacy assistant");
+    kernel.shutdown();
+    drop(kernel);
+
+    let restarted = LibreFangKernel::boot_with_config(config).expect("second kernel should boot");
+    let assistant = restarted
+        .agents
+        .registry
+        .get(assistant_id)
+        .expect("assistant should be restored");
+    assert_eq!(assistant.manifest.model.provider, "default");
+    assert_eq!(assistant.manifest.model.model, "default");
+    assert!(assistant.manifest.model.api_key_env.is_none());
+    assert!(assistant.manifest.model.base_url.is_none());
+
+    restarted.shutdown();
+}
+
+#[test]
 fn sync_default_model_agents_preserves_explicit_assistant_model() {
     let tmp = tempfile::tempdir().unwrap();
     let home_dir = tmp.path().join("librefang-kernel-explicit-assistant-model");

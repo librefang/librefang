@@ -652,6 +652,29 @@ fn reconcile_openrouter_models_replaces_static_snapshot_and_keeps_custom() {
     );
 }
 
+#[test]
+fn openrouter_availability_accepts_raw_auto_router_ids() {
+    let mut catalog = openrouter_test_catalog();
+    catalog.reconcile_live_provider_models(
+        "openrouter",
+        vec!["openrouter/free".to_string()],
+        parse_openrouter_model_entries(&serde_json::json!({
+            "data": [{
+                "id": "openrouter/free",
+                "name": "OpenRouter Free",
+                "context_length": 4096,
+                "pricing": {"prompt": "0", "completion": "0"}
+            }]
+        })),
+    );
+
+    assert_eq!(
+        catalog.is_model_available("openrouter", "openrouter/openrouter/free"),
+        Some(true),
+        "catalog-form auto-router ids must match raw upstream OpenRouter ids"
+    );
+}
+
 #[tokio::test]
 async fn openrouter_catalog_fetch_does_not_require_authorization() {
     use wiremock::matchers::{method, path};
