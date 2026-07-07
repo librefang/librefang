@@ -362,6 +362,10 @@ export function WorkflowsPage() {
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [dryRunResult, setDryRunResult] = useState<DryRunResult | null>(null);
   const [paramValues, setParamValues] = useState<Record<string, string>>({});
+  // Per-step expansion in timeline (single index, not per-step useState).
+  const [expandedStepIdx, setExpandedStepIdx] = useState<number | null>(null);
+  // Log console auto-scroll ref.
+  const logConsoleRef = useRef<HTMLPreElement>(null);
   // Track whether the form was manually edited so auto-populate doesn't overwrite.
   const paramTouchedRef = useRef(false);
 
@@ -530,6 +534,13 @@ export function WorkflowsPage() {
       setSelectedWorkflowId(workflows[0]?.id ?? "");
     }
   }, [allWorkflows, workflows, selectedWorkflowId, workflowsQuery.isSuccess]);
+
+  // Auto-scroll log console to bottom when new step results arrive.
+  useEffect(() => {
+    if (logConsoleRef.current) {
+      logConsoleRef.current.scrollTop = logConsoleRef.current.scrollHeight;
+    }
+  }, [runDetailQuery.data?.step_results]);
 
   // Auto-populate params from the most recent run's input on page load.
   // Only fills when the form is untouched (paramTouchedRef = false).
@@ -1452,8 +1463,7 @@ export function WorkflowsPage() {
                                 } else if (rd.state === "running" || rd.state === "pending") {
                                   logs.push({ts: "--:--:--", level: "info", msg: `… executing (${allSteps.length}/${totalSteps||"?"} steps done)`});
                                 }
-                                const logRef = useRef<HTMLPreElement>(null);
-                                useEffect(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, [logs.length]);
+                                // use logConsoleRef from component level
                                 return (
                                   <div className="rounded-lg border border-border-subtle bg-[#0a0a0f] overflow-hidden">
                                     <div className="flex items-center gap-1.5 px-2.5 py-1.5 border-b border-border-subtle/50 bg-surface/50">
@@ -1462,7 +1472,7 @@ export function WorkflowsPage() {
                                       <div className="w-2 h-2 rounded-full bg-success/60" />
                                       <span className="text-[9px] font-semibold text-text-dim/40 ml-1 uppercase tracking-wider">{t("workflows.console", { defaultValue: "Console" })}</span>
                                     </div>
-                                    <pre ref={logRef} className="p-2.5 text-[9px] leading-relaxed font-mono max-h-64 overflow-y-auto">
+                                    <pre ref={logConsoleRef} className="p-2.5 text-[9px] leading-relaxed font-mono max-h-64 overflow-y-auto">
                                       {logs.map((l, i) => (
                                         <div key={i} className={l.level === "error" ? "text-error/90" : l.level === "warn" ? "text-warning/80" : "text-text-dim/70"}>
                                           <span className="text-text-dim/30 select-none">{l.ts}</span>  {l.msg}
@@ -1489,7 +1499,7 @@ export function WorkflowsPage() {
                               {allSteps.map((step, i) => {
                                 const hasError = !!step.error;
                                 const stepStatus = hasError ? "failed" : "completed";
-                                const [expanded, setExpanded] = useState(false);
+                                const expanded = expandedStepIdx === i;
                                 const hasVars = step.variables && Object.keys(step.variables).length > 0;
                                 return (
                                 <div key={step.step_name + i} className="relative">
@@ -1510,7 +1520,7 @@ export function WorkflowsPage() {
                                       stepStatus === "completed" ? "bg-surface/50 border-border-subtle" :
                                       "bg-error/5 border-error/20"
                                     }`}>
-                                      <button className="w-full text-left" onClick={() => setExpanded(!expanded)}>
+                                      <button className="w-full text-left" onClick={() => setExpandedStepIdx(expanded ? null : i)}>
                                         <div className="flex items-center gap-2">
                                           <span className="text-[10px] font-bold truncate">{step.step_name}</span>
                                           <span className="text-[9px] text-text-dim/40 truncate">via {step.agent_name || step.agent_id}</span>
