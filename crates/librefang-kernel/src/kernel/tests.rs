@@ -5596,6 +5596,109 @@ async fn test_push_notification_health_check_failed_agent_rule_overrides_alert_c
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn test_model_migrated_notification_falls_back_to_alert_channels() {
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    config.notification = NotificationConfig {
+        approval_channels: Vec::new(),
+        alert_channels: vec![NotificationTarget {
+            channel_type: "test".to_string(),
+            recipient: "ops".to_string(),
+            thread_id: None,
+        }],
+        agent_rules: Vec::new(),
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let adapter = Arc::new(RecordingChannelAdapter::new("test"));
+    let sent = adapter.sent.clone();
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("test".to_string(), adapter);
+
+    kernel
+        .notify_model_migrated(
+            "system",
+            "openrouter",
+            "openrouter/acme/old:free",
+            "openrouter/acme/new:free",
+            "old model disappeared",
+        )
+        .await;
+
+    let recorded = sent.lock().unwrap().clone();
+    assert_eq!(recorded.len(), 1);
+    assert!(
+        recorded[0].starts_with("ops:openrouter model migrated from `openrouter/acme/old:free`")
+    );
+    assert!(recorded[0].contains("`openrouter/acme/new:free`"));
+
+    kernel.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_model_migrated_agent_rule_overrides_alert_channels() {
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    config.notification = NotificationConfig {
+        approval_channels: Vec::new(),
+        alert_channels: vec![NotificationTarget {
+            channel_type: "test".to_string(),
+            recipient: "global-ops".to_string(),
+            thread_id: None,
+        }],
+        agent_rules: vec![AgentNotificationRule {
+            agent_pattern: "assistant".to_string(),
+            channels: vec![NotificationTarget {
+                channel_type: "test".to_string(),
+                recipient: "assistant-topic".to_string(),
+                thread_id: None,
+            }],
+            events: vec!["model_migrated".to_string()],
+        }],
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let adapter = Arc::new(RecordingChannelAdapter::new("test"));
+    let sent = adapter.sent.clone();
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("test".to_string(), adapter);
+
+    kernel
+        .notify_model_migrated(
+            "assistant",
+            "openrouter",
+            "openrouter/acme/old:free",
+            "openrouter/acme/new:free",
+            "old model disappeared",
+        )
+        .await;
+
+    let recorded = sent.lock().unwrap().clone();
+    assert_eq!(recorded.len(), 1);
+    assert!(recorded[0].starts_with("assistant-topic:"));
+
+    kernel.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_push_notification_health_check_failed_no_targets_when_unconfigured() {
     let dir = tempfile::tempdir().unwrap();
     let home_dir = dir.path().to_path_buf();

@@ -1127,6 +1127,124 @@ async fn set_first_openrouter_key_uses_free_snapshot_when_live_models_are_rate_l
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn resaving_openrouter_key_reports_same_provider_model_migration_separately() {
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const OPENROUTER_TEST_ENV: &str = "LIBREFANG_TEST_OPENROUTER_KEY_6384_RESAVE";
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/key"))
+        .and(header("authorization", "Bearer test-openrouter-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {"label": "test"}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{
+                "id": "acme/replacement:free",
+                "name": "Replacement Free",
+                "context_length": 65536,
+                "pricing": {"prompt": "0", "completion": "0"}
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let provider = ProviderInfo {
+        id: "openrouter".to_string(),
+        display_name: "OpenRouter".to_string(),
+        api_key_env: OPENROUTER_TEST_ENV.to_string(),
+        base_url: server.uri(),
+        key_required: true,
+        auth_status: AuthStatus::Missing,
+        ..ProviderInfo::default()
+    };
+    let stale_model = ModelCatalogEntry {
+        id: "openrouter/acme/old:free".to_string(),
+        display_name: "Old Free".to_string(),
+        provider: "openrouter".to_string(),
+        tier: ModelTier::Balanced,
+        context_window: 32_768,
+        max_output_tokens: 4_096,
+        supports_streaming: true,
+        ..ModelCatalogEntry::default()
+    };
+    let test = TestAppState::with_builder(
+        MockKernelBuilder::new()
+            .with_config(|cfg| {
+                cfg.default_model = librefang_types::config::DefaultModelConfig {
+                    provider: "openrouter".to_string(),
+                    model: "openrouter/acme/old:free".to_string(),
+                    api_key_env: OPENROUTER_TEST_ENV.to_string(),
+                    ..Default::default()
+                };
+            })
+            .with_catalog_seed((vec![provider], vec![stale_model])),
+    );
+    let state = test.state.clone();
+    let h = Harness {
+        app: Router::new()
+            .nest("/api", routes::providers::router())
+            .with_state(state.clone()),
+        _state: state,
+        _test: test,
+    };
+    {
+        let mut guard = h
+            ._state
+            .kernel
+            .default_model_override_ref()
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        *guard = Some(librefang_types::config::DefaultModelConfig {
+            provider: "openrouter".to_string(),
+            model: "openrouter/acme/old:free".to_string(),
+            api_key_env: OPENROUTER_TEST_ENV.to_string(),
+            ..Default::default()
+        });
+    }
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/providers/openrouter/key",
+        Some(serde_json::json!({"key": "test-openrouter-key"})),
+    )
+    .await;
+    librefang_api::secrets_env::remove_env_var_guarded(OPENROUTER_TEST_ENV).await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_ne!(body["switched_default"], true, "body: {body}");
+    assert_eq!(body["model_migrated"], true, "body: {body}");
+    assert_eq!(body["old_model"], "openrouter/acme/old:free");
+    assert_eq!(body["new_model"], "openrouter/acme/replacement:free");
+    assert!(
+        body["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("default model migrated")),
+        "body: {body}"
+    );
+
+    let default_override = h
+        ._state
+        .kernel
+        .default_model_override_ref()
+        .read()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+        .expect("default override");
+    assert_eq!(default_override.provider, "openrouter");
+    assert_eq!(default_override.model, "openrouter/acme/replacement:free");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn first_openrouter_model_request_populates_live_cache() {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};

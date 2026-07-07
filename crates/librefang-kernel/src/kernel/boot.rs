@@ -1294,6 +1294,8 @@ impl LibreFangKernel {
                 "task_completed",
                 "task_failed",
                 "tool_failure",
+                "health_check_failed",
+                "model_migrated",
             ];
             for (i, rule) in config.notification.agent_rules.iter().enumerate() {
                 for event in &rule.events {

@@ -1504,6 +1504,7 @@ pub async fn set_provider_key(
             .filter(|v| !v.is_empty())
             .is_some()
     };
+    let mut migrated_model: Option<(String, String)> = None;
     let switched = if !current_has_key && current_provider != name {
         // Find a default model for the newly-keyed provider
         let default_model = {
@@ -1550,6 +1551,7 @@ pub async fn set_provider_key(
             .flatten()
         };
         if let Some(model_id) = replacement {
+            let old_model = current_model.clone();
             let config_path = state.kernel.home_dir().join("config.toml");
             if let Err(e) = persist_default_model(&config_path, &name, &model_id, &env_var) {
                 tracing::warn!("Failed to persist default_model to config.toml: {e}");
@@ -1563,11 +1565,12 @@ pub async fn set_provider_key(
                 .clone()
                 .unwrap_or_else(|| state.kernel.config_ref().default_model.clone());
             *guard = Some(librefang_types::config::DefaultModelConfig {
-                model: model_id,
+                model: model_id.clone(),
                 api_key_env: env_var.clone(),
                 ..base
             });
-            true
+            migrated_model = Some((old_model, model_id));
+            false
         } else {
             // User is saving a key for the current default provider.
             // The env var is already set above, but `default_model_override` must carry the correct `api_key_env` so `resolve_driver` reads it.
@@ -1611,9 +1614,9 @@ pub async fn set_provider_key(
     // Trigger all active hands so they resume immediately
     state.kernel.trigger_all_hands();
 
-    // If default provider switched, update registry entries for agents that were
-    // using the old default so they immediately pick up the new provider/model.
-    if switched {
+    // If the effective default changed, update registry entries for agents that
+    // were using the old default so they immediately pick up the new provider/model.
+    if switched || migrated_model.is_some() {
         let new_dm = {
             let guard = state
                 .kernel
@@ -1628,17 +1631,45 @@ pub async fn set_provider_key(
             .kernel
             .sync_default_model_agents(&current_provider, &new_dm);
         if !sync_failures.is_empty() {
+            if let Some((old_model, new_model)) = migrated_model.as_ref() {
+                state
+                    .kernel
+                    .notify_model_migrated(
+                        "system",
+                        &name,
+                        old_model,
+                        new_model,
+                        "the previous free model is no longer listed by the provider",
+                    )
+                    .await;
+            }
             let mut resp = serde_json::json!({"status": "saved", "provider": name});
-            resp["switched_default"] = serde_json::json!(true);
+            if switched {
+                resp["switched_default"] = serde_json::json!(true);
+            }
+            if let Some((old_model, new_model)) = migrated_model.as_ref() {
+                resp["model_migrated"] = serde_json::json!(true);
+                resp["old_model"] = serde_json::json!(old_model);
+                resp["new_model"] = serde_json::json!(new_model);
+            }
             resp["sync_failures"] = serde_json::json!(sync_failures
                 .iter()
                 .map(|(agent, err)| serde_json::json!({"agent": agent, "error": err}))
                 .collect::<Vec<_>>());
-            resp["message"] = serde_json::json!(format!(
-                "API key saved and default provider switched to '{name}', but {} agent(s) \
-                 could not be migrated and remain pinned to the old provider on disk.",
-                sync_failures.len()
-            ));
+            resp["message"] = if let Some((old_model, new_model)) = migrated_model.as_ref() {
+                serde_json::json!(format!(
+                    "API key saved and OpenRouter default model migrated from '{old_model}' to \
+                     '{new_model}', but {} agent(s) could not be migrated and remain pinned to \
+                     the old model on disk.",
+                    sync_failures.len()
+                ))
+            } else {
+                serde_json::json!(format!(
+                    "API key saved and default provider switched to '{name}', but {} agent(s) \
+                     could not be migrated and remain pinned to the old provider on disk.",
+                    sync_failures.len()
+                ))
+            };
             // Mixed outcome: the key was saved but the fan-out half-applied.
             // 207 surfaces the partial failure instead of a lying 200.
             return (StatusCode::MULTI_STATUS, Json(resp));
@@ -1651,6 +1682,25 @@ pub async fn set_provider_key(
         resp["message"] = serde_json::json!(format!(
             "API key saved and default provider switched to '{}'.",
             name
+        ));
+    }
+    if let Some((old_model, new_model)) = migrated_model {
+        state
+            .kernel
+            .notify_model_migrated(
+                "system",
+                &name,
+                &old_model,
+                &new_model,
+                "the previous free model is no longer listed by the provider",
+            )
+            .await;
+        resp["model_migrated"] = serde_json::json!(true);
+        resp["old_model"] = serde_json::json!(old_model);
+        resp["new_model"] = serde_json::json!(new_model);
+        resp["message"] = serde_json::json!(format!(
+            "API key saved and OpenRouter default model migrated from '{old_model}' to \
+             '{new_model}' because the previous free model is no longer available."
         ));
     }
 

@@ -1263,9 +1263,11 @@ impl LibreFangKernel {
             // Fallback to global channels based on event type
             match event_type {
                 "approval_requested" => cfg.notification.approval_channels.clone(),
-                "task_completed" | "task_failed" | "tool_failure" | "health_check_failed" => {
-                    cfg.notification.alert_channels.clone()
-                }
+                "task_completed"
+                | "task_failed"
+                | "tool_failure"
+                | "health_check_failed"
+                | "model_migrated" => cfg.notification.alert_channels.clone(),
                 _ => Vec::new(),
             }
         };
@@ -1278,6 +1280,29 @@ impl LibreFangKernel {
         for target in &targets {
             self.push_to_target(target, &delivered).await;
         }
+    }
+
+    /// Record and notify operators that LibreFang changed a configured model automatically.
+    pub async fn notify_model_migrated(
+        &self,
+        agent_id: &str,
+        provider: &str,
+        old_model: &str,
+        new_model: &str,
+        reason: &str,
+    ) {
+        let detail =
+            format!("{provider} model migrated from `{old_model}` to `{new_model}`: {reason}");
+        self.metering.audit_log.record_with_context(
+            agent_id,
+            librefang_runtime::audit::AuditAction::ConfigChange,
+            detail.clone(),
+            "success",
+            None,
+            None,
+        );
+        self.push_notification(agent_id, "model_migrated", &detail, None)
+            .await;
     }
 
     /// Resolve an agent identifier string (either a UUID or a human-readable

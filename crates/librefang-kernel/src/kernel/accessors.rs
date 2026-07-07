@@ -562,8 +562,9 @@ impl LibreFangKernel {
                                 .flatten()
                             };
                             if let Some(model) = replacement {
+                                let old_model = current.model.clone();
                                 let migrated = librefang_types::config::DefaultModelConfig {
-                                    model,
+                                    model: model.clone(),
                                     ..current
                                 };
                                 {
@@ -582,6 +583,15 @@ impl LibreFangKernel {
                                         "some agents could not be migrated from a delisted OpenRouter free model"
                                     );
                                 }
+                                kernel
+                                    .notify_model_migrated(
+                                        "system",
+                                        &id,
+                                        &old_model,
+                                        &model,
+                                        "the previous free model is no longer listed by the provider",
+                                    )
+                                    .await;
                             }
                         } else if let Some(valid) = key_valid {
                             let status = if valid {
