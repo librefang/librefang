@@ -66,6 +66,32 @@ pub(super) fn failure_type_label(
     }
 }
 
+/// Spill a fresh tool result to the artifact store when it exceeds the configured threshold, preserving the full bytes before `sanitize_tool_result_content` truncates them.
+///
+/// `read_artifact` results pass through untouched (see [`crate::tool_budget::respill_allowed`]) — re-spilling the page-in tool's own output would make any read larger than the spill threshold unable to ever return real bytes (#6388).
+pub(super) fn spill_fresh_result(
+    tool_name: &str,
+    result_content: String,
+    cfg: &librefang_types::config::ToolResultsConfig,
+    artifact_dir: &std::path::Path,
+) -> String {
+    if !crate::tool_budget::respill_allowed(tool_name) {
+        return result_content;
+    }
+    let (threshold, max_artifact) =
+        crate::tool_runner::resolve_spill_config(cfg.spill_threshold_bytes, cfg.max_artifact_bytes);
+    match crate::artifact_store::maybe_spill(
+        tool_name,
+        result_content.as_bytes(),
+        threshold,
+        max_artifact,
+        artifact_dir,
+    ) {
+        Some(stub) => stub,
+        None => result_content,
+    }
+}
+
 /// Record a tool-call outcome for observability (#3495, #6228). Emits two
 /// metrics off the same dispatch event:
 ///
@@ -1170,22 +1196,15 @@ pub(super) async fn execute_single_tool_call_core(
     // bytes lost — the LLM would get clipped text with no `read_artifact`
     // reference. A web stub is already < threshold, so this is a no-op pass
     // through for it (no double-spill).
+    // `read_artifact` results pass through here and at both `tool_budget` layers (`respill_allowed`) — the per-turn budget keeps them only as last-resort spill victims (#6388).
     let result_content = {
         let cfg = ctx.opts.tool_results_config.clone().unwrap_or_default();
-        let (threshold, max_artifact) = crate::tool_runner::resolve_spill_config(
-            cfg.spill_threshold_bytes,
-            cfg.max_artifact_bytes,
-        );
-        match crate::artifact_store::maybe_spill(
+        spill_fresh_result(
             &tool_call.name,
-            result_content.as_bytes(),
-            threshold,
-            max_artifact,
+            result_content,
+            &cfg,
             &crate::artifact_store::default_artifact_storage_dir(),
-        ) {
-            Some(stub) => stub,
-            None => result_content,
-        }
+        )
     };
 
     let content = sanitize_tool_result_content(
@@ -1465,12 +1484,14 @@ pub(super) fn finalize_tool_use_results(
             .filter_map(|b| {
                 if let ContentBlock::ToolResult {
                     tool_use_id,
+                    tool_name,
                     content,
                     ..
                 } = b
                 {
                     Some(ToolResultEntry {
                         tool_use_id: tool_use_id.clone(),
+                        tool_name: tool_name.clone(),
                         content: content.clone(),
                     })
                 } else {

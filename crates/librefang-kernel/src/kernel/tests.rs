@@ -683,6 +683,40 @@ fn test_spawn_with_unknown_parent_fails_closed() {
     kernel.shutdown();
 }
 
+/// #6398: the global `[thinking]` backfill is suppressed only for models the
+/// catalog positively marks as non-reasoning.
+/// Unknown/custom models keep the historical backfill so explicit operator
+/// setups are never silently degraded; a known `supports_thinking = false`
+/// model no longer inherits the global budget (which the OpenAI-compat
+/// driver would now translate into a rejected `reasoning_effort` param).
+#[test]
+fn global_thinking_backfill_gated_on_catalog_capability() {
+    use librefang_runtime::model_catalog::ModelCatalog;
+    use librefang_types::model_catalog::ModelCatalogEntry;
+
+    let thinker = ModelCatalogEntry {
+        id: "openai/o4".to_string(),
+        provider: "openai".to_string(),
+        supports_thinking: true,
+        ..Default::default()
+    };
+    let plain = ModelCatalogEntry {
+        id: "openai/gpt-4o".to_string(),
+        provider: "openai".to_string(),
+        supports_thinking: false,
+        ..Default::default()
+    };
+    let catalog = ModelCatalog::from_entries(vec![thinker, plain], Vec::new());
+
+    use super::manifest_helpers::global_thinking_backfill_allowed;
+    assert!(global_thinking_backfill_allowed(&catalog, "openai/o4"));
+    assert!(!global_thinking_backfill_allowed(&catalog, "openai/gpt-4o"));
+    assert!(
+        global_thinking_backfill_allowed(&catalog, "totally-unknown-model"),
+        "an unknown model must keep the historical backfill"
+    );
+}
+
 /// Regression: switching an agent's provider via `set_agent_model` must
 /// clear any stale per-agent `api_key_env` / `base_url` overrides. Before
 /// the fix, `update_model_and_provider` only touched `model.provider` and

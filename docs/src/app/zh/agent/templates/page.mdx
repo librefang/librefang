@@ -479,8 +479,8 @@ pinned_model            = "anthropic/claude-sonnet-4"   # Stable kernel 模式�
 
 ```toml
 [channel_overrides]
-dm_policy = "always"
-group_policy = "trigger_only"
+dm_policy = "respond"
+group_policy = "mention_only"
 group_trigger_patterns = ["(?i)\\bmy-bot\\b"]
 
 [exec_policy]

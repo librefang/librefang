@@ -199,8 +199,8 @@ channel_type = "whatsapp"
 [sidecar_channels.env]
 WHATSAPP_PHONE_NUMBER_ID = "your-phone-id"
 WHATSAPP_WEBHOOK_PORT = "8460"
-# WHATSAPP_DM_POLICY = "respond"
-# WHATSAPP_GROUP_POLICY = "all"
+# WHATSAPP_DM_POLICY = "respond"     # 仅 Cloud API webhook 模式生效
+# WHATSAPP_GROUP_POLICY = "all"      # 会被读取但目前不生效
 ```
 
 5. 把 `WHATSAPP_ACCESS_TOKEN`、`WHATSAPP_VERIFY_TOKEN`、`WHATSAPP_APP_SECRET` 写入 `~/.librefang/secrets.env`。
@@ -237,15 +237,17 @@ Web/QR 模式下，网关直接把入站 POST 到 LibreFang REST API（`/api/age
 
 ### 群聊与 DM 策略
 
-sidecar 保留原 Rust 适配器的 DM × group 策略：
+sidecar 读取与原 Rust 适配器相同的 DM × group 策略环境变量，但有两点注意。
+`WHATSAPP_DM_POLICY` 仅在 Cloud API webhook 模式下生效 —— Web/QR 模式下 gateway 直接把入站 POST 给 REST API，绕过该过滤（见上文）。
+`WHATSAPP_GROUP_POLICY` 会被读取但目前两种模式下都不生效：Cloud API webhook 把所有入站都当 DM 处理，群组分支永远走不到。
 
-| `WHATSAPP_DM_POLICY` | 行为 |
+| `WHATSAPP_DM_POLICY` | 行为（Cloud API webhook 模式） |
 |---|---|
 | `respond`（默认） | 回复所有 DM |
 | `allowed_only` | 仅当发送方手机号在 `WHATSAPP_ALLOWED_USERS` 时回复 |
 | `ignore` | 丢弃所有 DM |
 
-| `WHATSAPP_GROUP_POLICY` | 行为 |
+| `WHATSAPP_GROUP_POLICY` | 文档值（目前不生效） |
 |---|---|
 | `all`（默认） | 回复所有群消息 |
 | `mention_only` | 仅当文本里出现 bot 手机号或 `WHATSAPP_BOT_NAME` 时回复 |

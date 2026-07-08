@@ -140,8 +140,8 @@ WHATSAPP_WEBHOOK_PORT = "8460"
 # WHATSAPP_WEBHOOK_PATH = "/webhook"
 # WHATSAPP_ALLOWED_USERS = "+15551111,+15552222"
 # WHATSAPP_ACCOUNT_ID = "production"
-# WHATSAPP_DM_POLICY = "respond"          # respond / allowed_only / ignore
-# WHATSAPP_GROUP_POLICY = "all"           # all / mention_only / commands_only / ignore
+# WHATSAPP_DM_POLICY = "respond"          # respond / allowed_only / ignore (Cloud API webhook mode only)
+# WHATSAPP_GROUP_POLICY = "all"           # read but currently has no effect in either mode
 ```
 
 `WHATSAPP_ACCESS_TOKEN` (Cloud API access token), `WHATSAPP_VERIFY_TOKEN` (for Meta's webhook subscription handshake), and `WHATSAPP_APP_SECRET` (HMAC-SHA256 key for inbound `X-Hub-Signature-256`) belong in `~/.librefang/secrets.env`. The sidecar runs its own webhook server on `WHATSAPP_WEBHOOK_PORT` (default 8460) — Meta's Webhook subscription URL becomes `https://<host>:<WHATSAPP_WEBHOOK_PORT><WHATSAPP_WEBHOOK_PATH>`.
@@ -609,7 +609,7 @@ The `[channels.<name>.overrides]` sub-table is **no longer recognised**. It live
 | Old override | Sidecar equivalent |
 |---|---|
 | `model`, `system_prompt` | Set on the agent (`agent.toml`) rather than per-channel — sidecars route every inbound to the same agent. |
-| `dm_policy`, `group_policy` | Pass as `*_DM_POLICY` / `*_GROUP_POLICY` env vars on the `[sidecar_channels.env]` block (Telegram / Discord / Slack / WhatsApp / Teams sidecars all read these). |
+| `dm_policy`, `group_policy` | Moved to the agent: set them under `agent.toml [channel_overrides]` — the channel bridge enforces them on every dispatch, and `allowed_only` user gating is backed by `[[users]]` channel bindings (RBAC). They are not sidecar env knobs: only the WhatsApp sidecar reads `WHATSAPP_DM_POLICY` (Cloud API webhook mode only), `WHATSAPP_GROUP_POLICY` is read but currently has no effect, and the Telegram / Discord / Slack / Teams sidecars read no `*_DM_POLICY` / `*_GROUP_POLICY` at all. |
 | `rate_limit_per_minute`, `rate_limit_per_user` | Sidecars rate-limit themselves to platform limits; for tighter caps, wrap the sidecar in a reverse proxy. |
 | `output_format` | Not exposed on `[[sidecar_channels]]`. Agents that need a specific output format should flip it on the agent side. |
 | `disable_commands`, `allowed_commands`, `blocked_commands` | Set on the agent's manifest (`agent.toml`) under the command-policy section — applies uniformly across channels. |

@@ -213,8 +213,8 @@ channel_type = "whatsapp"
 [sidecar_channels.env]
 WHATSAPP_PHONE_NUMBER_ID = "your-phone-id"
 WHATSAPP_WEBHOOK_PORT = "8460"
-# WHATSAPP_DM_POLICY = "respond"
-# WHATSAPP_GROUP_POLICY = "all"
+# WHATSAPP_DM_POLICY = "respond"     # Cloud API webhook mode only
+# WHATSAPP_GROUP_POLICY = "all"      # read but currently has no effect
 ```
 
 5. Put `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_APP_SECRET` in `~/.librefang/secrets.env`.
@@ -251,15 +251,17 @@ In Web/QR mode the gateway POSTs inbound directly to LibreFang's REST API (`/api
 
 ### Group chat & DM policy
 
-The sidecar applies the same DM × group policy as the legacy Rust adapter:
+The sidecar reads the same DM × group policy env vars as the legacy Rust adapter, with two caveats.
+`WHATSAPP_DM_POLICY` is enforced in Cloud API webhook mode only — in Web/QR mode the gateway POSTs inbound directly to the REST API and bypasses this filter (see above).
+`WHATSAPP_GROUP_POLICY` is accepted but currently has no effect in either mode: the Cloud API webhook treats every inbound as a DM, so the group branch is never reached.
 
-| `WHATSAPP_DM_POLICY` | Behaviour |
+| `WHATSAPP_DM_POLICY` | Behaviour (Cloud API webhook mode) |
 |---|---|
 | `respond` (default) | Respond to all DMs |
 | `allowed_only` | Respond only when sender's phone is in `WHATSAPP_ALLOWED_USERS` |
 | `ignore` | Drop all DMs |
 
-| `WHATSAPP_GROUP_POLICY` | Behaviour |
+| `WHATSAPP_GROUP_POLICY` | Documented value (currently inert) |
 |---|---|
 | `all` (default) | Respond to all group messages |
 | `mention_only` | Respond only when bot phone or `WHATSAPP_BOT_NAME` appears in the text |
