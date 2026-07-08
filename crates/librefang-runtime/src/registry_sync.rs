@@ -105,6 +105,14 @@ pub fn refresh_registry_checkout(
     let _guard = SYNC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let registry_cache = home_dir.join("registry");
 
+    if registry_offline(std::env::var("LIBREFANG_REGISTRY_OFFLINE").ok().as_deref()) {
+        // Same switch as `sync_registry`: this twin refresh path is what the
+        // daemon's startup/24h catalog task and `POST /api/catalog/update`
+        // call, so an offline process tree must not fetch here either (#6404).
+        tracing::debug!("LIBREFANG_REGISTRY_OFFLINE set — skipping registry checkout refresh");
+        return registry_cache.exists();
+    }
+
     if should_refresh(&registry_cache, cache_ttl_secs) {
         // Try git first (faster incremental updates, private fork support)
         let git_ok = match git_clone_fallback(&registry_cache, registry_mirror, registry_host) {
@@ -162,6 +170,16 @@ pub fn sync_registry(
         // Skip only the network refresh; the local pre-install copies below
         // still run so a pre-seeded cache keeps working offline.
         tracing::debug!("LIBREFANG_REGISTRY_OFFLINE set — skipping registry network refresh");
+        if !registry_cache.exists() {
+            // Preserve the return contract: `true` ⟹ a usable checkout
+            // exists. `librefang init --upgrade` branches on this to report
+            // "registry synced" — an offline skip with nothing on disk must
+            // not report success.
+            tracing::warn!(
+                "LIBREFANG_REGISTRY_OFFLINE set and no registry cache exists — registry content unavailable"
+            );
+            return false;
+        }
     } else if should_refresh(&registry_cache, cache_ttl_secs) {
         // Try git first (faster incremental updates, private fork support)
         let git_ok = match git_clone_fallback(&registry_cache, registry_mirror, registry_host) {
