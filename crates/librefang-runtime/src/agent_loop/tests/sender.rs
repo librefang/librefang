@@ -1710,36 +1710,35 @@ fn small_or_already_spilled_result_passes_through_without_double_spill() {
 
 #[test]
 fn read_artifact_results_are_exempt_from_the_respill_chokepoint() {
-    use super::super::tool_call::respill_allowed;
+    use super::super::tool_call::spill_fresh_result;
 
-    // The chokepoint gate: read_artifact output must never be re-spilled — it is the page-in tool, and converting its result back into a fresh artifact stub would make any read larger than the spill threshold unable to ever return real bytes (#6388).
-    // Everything else still spills through the normal path.
-    assert!(!respill_allowed("read_artifact"));
-    assert!(respill_allowed("web_fetch"));
-    assert!(respill_allowed("mcp_some_server.some_tool"));
-    assert!(respill_allowed("shell_exec"));
-
-    // Demonstrate the loop the gate prevents: a wrapped read_artifact page in the 16–64 KiB range (over the 16 KiB threshold, under the 64 KiB MAX_READ_LENGTH read cap) WOULD be re-spilled into a nested stub with a brand-new handle if it reached maybe_spill.
+    // Drive the actual chokepoint function used by execute_single_tool_call_core (#6388).
+    // A wrapped read_artifact page in the 16–64 KiB range (over the 16 KiB threshold, under the 64 KiB MAX_READ_LENGTH read cap) must come back verbatim — converting it into a fresh artifact stub would make any read larger than the spill threshold unable to ever return real bytes.
     let dir = tempfile::TempDir::new().expect("tempdir");
-    let threshold: u64 = 16_384;
+    let cfg = librefang_types::config::ToolResultsConfig::default();
+    assert_eq!(cfg.spill_threshold_bytes, 16_384);
     let page = format!(
         "[read_artifact: sha256:{} | offset=0 | 18000 bytes read]\n{}",
         "a".repeat(64),
         "x".repeat(18_000)
     );
-    assert!(page.len() as u64 > threshold);
+    assert!(page.len() as u64 > cfg.spill_threshold_bytes);
     assert!(page.len() <= crate::artifact_store::MAX_READ_LENGTH);
 
-    let nested = crate::artifact_store::maybe_spill(
-        "read_artifact",
-        page.as_bytes(),
-        threshold,
-        crate::artifact_store::DEFAULT_MAX_ARTIFACT_BYTES,
-        dir.path(),
-    )
-    .expect("without the chokepoint exemption this page-in would re-spill");
+    let out = spill_fresh_result("read_artifact", page.clone(), &cfg, dir.path());
+    assert_eq!(
+        out, page,
+        "a fresh read_artifact page must pass through verbatim"
+    );
     assert!(
-        nested.contains("read_artifact(\""),
-        "the nested stub tells the agent to call read_artifact again — the self-referential loop"
+        dir.path().read_dir().unwrap().next().is_none(),
+        "no nested artifact may be written for a read_artifact result"
+    );
+
+    // Every other tool still spills through the normal path: the same bytes under a different tool name become a stub with a brand-new handle — the self-referential loop the exemption prevents.
+    let nested = spill_fresh_result("web_fetch", page, &cfg, dir.path());
+    assert!(
+        nested.contains("read_artifact(\"") && nested.contains("sha256:"),
+        "non-exempt results must still spill to a recoverable stub, got: {nested}"
     );
 }
