@@ -620,7 +620,13 @@ impl LibreFangKernel {
         }
 
         // Backfill thinking config from global config if per-agent is not set
-        if manifest.thinking.is_none() {
+        // and the catalog does not mark the model as non-reasoning (#6398).
+        if manifest.thinking.is_none()
+            && super::manifest_helpers::global_thinking_backfill_allowed(
+                &self.llm.model_catalog.load(),
+                &manifest.model.model,
+            )
+        {
             manifest.thinking = cfg.thinking.clone();
         }
 

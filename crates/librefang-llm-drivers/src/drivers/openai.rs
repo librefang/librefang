@@ -1138,14 +1138,14 @@ impl OpenAIDriver {
                 None
             },
             // Request extended thinking when the caller configured a budget (#6398).
-            // The EmptyString disable above wins over the opt-in.
-            reasoning_effort: if echo_policy == ReasoningEchoPolicy::EmptyString {
-                None
-            } else {
+            // Emitted only under the default `None` echo policy: `EmptyString` (Kimi) disables thinking wire-side above, and `Strip` / `Echo` models (DeepSeek R1 / V4) reason by default without an opt-in — this API family rejects requests with unexpected reasoning fields (see the R1 `reasoning_content` note above), so nothing extra is sent to them.
+            reasoning_effort: if echo_policy == ReasoningEchoPolicy::None {
                 request
                     .thinking
                     .as_ref()
                     .and_then(|tc| reasoning_effort_for_budget(tc.budget_tokens))
+            } else {
+                None
             },
             response_format: request
                 .response_format
@@ -3298,6 +3298,23 @@ mod tests {
         assert_eq!(reasoning_effort_for_budget(16384), Some("medium"));
         assert_eq!(reasoning_effort_for_budget(16385), Some("high"));
         assert_eq!(reasoning_effort_for_budget(u32::MAX), Some("high"));
+    }
+
+    /// Strip / Echo models (DeepSeek R1 / V4 families) reason by default and reject requests carrying unexpected reasoning fields — a configured budget must not emit `reasoning_effort` to them.
+    #[test]
+    fn strip_and_echo_policies_do_not_emit_reasoning_effort() {
+        use librefang_types::config::ThinkingConfig;
+        use librefang_types::model_catalog::ReasoningEchoPolicy;
+        let driver = OpenAIDriver::new(String::new(), "https://example.com/v1".to_string());
+        for policy in [ReasoningEchoPolicy::Strip, ReasoningEchoPolicy::Echo] {
+            let mut req = build_catalog_policy_test_request("deepseek-reasoner", policy);
+            req.thinking = Some(ThinkingConfig::default());
+            let oai = driver.build_request(&req).expect("build_request");
+            assert_eq!(
+                oai.reasoning_effort, None,
+                "policy {policy:?} must not emit reasoning_effort"
+            );
+        }
     }
 
     /// Kimi's EmptyString policy disables thinking wire-side; the disable must win over a configured thinking budget.
