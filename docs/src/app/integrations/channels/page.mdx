@@ -125,10 +125,9 @@ group_trigger_patterns = ["(?i)\\bmy-bot\\b"]
 ```
 
 ```toml
-# config.toml — channel-level overrides (HISTORICAL — no longer
-# accepted). Pre-#5463, every agent on that channel inherited these
-# defaults. The block is shown for migration reference only; set the
-# equivalent on the agent (`agent.toml [channel_overrides]`).
+# config.toml — channel-level overrides (HISTORICAL — no longer accepted).
+# Pre-#5463, every agent on that channel inherited these defaults.
+# The block is shown for migration reference only; set the equivalent on the agent (`agent.toml [channel_overrides]`).
 # DM / group gating is kernel-side via `[[users]]` channel bindings; among the sidecars only WhatsApp reads a `WHATSAPP_DM_POLICY` env var.
 [channels.discord.overrides]
 model = "gemini-2.5-flash"
