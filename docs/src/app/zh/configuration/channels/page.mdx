@@ -573,7 +573,7 @@ channel_type = "wechat"
 | 旧的 override | 现在对应的 sidecar 写法 |
 |---|---|
 | `model`、`system_prompt` | 在 agent（`agent.toml`）上设置而不是按通道 —— sidecar 把每个入站都路由到同一个 agent。 |
-| `dm_policy`、`group_policy` | 写到 `[sidecar_channels.env]` 块里的 `*_DM_POLICY` / `*_GROUP_POLICY` 环境变量（Telegram / Discord / Slack / WhatsApp / Teams 五个 sidecar 都识别这套）。 |
+| `dm_policy`、`group_policy` | 不是 sidecar 环境变量 —— DM / 群组授权由内核侧的 `[[users]]` channel bindings（`authorize_channel_user`）强制执行。只有 WhatsApp sidecar 读 `WHATSAPP_DM_POLICY`；`WHATSAPP_GROUP_POLICY` 会被读取但目前不生效，Telegram / Discord / Slack / Teams 四个 sidecar 完全不读 `*_DM_POLICY` / `*_GROUP_POLICY`。 |
 | `rate_limit_per_minute`、`rate_limit_per_user` | Sidecar 自己按平台限流；要更严的话，在 sidecar 前面套反向代理。 |
 | `output_format` | `[[sidecar_channels]]` 没暴露这个 knob；需要特定输出格式的 agent 应在 agent 侧切换。 |
 | `disable_commands`、`allowed_commands`、`blocked_commands` | 在 agent 清单（`agent.toml`）的命令策略区块设置 —— 跨通道统一生效。 |

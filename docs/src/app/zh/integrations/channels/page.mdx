@@ -127,8 +127,8 @@ group_trigger_patterns = ["(?i)\\bmy-bot\\b"]
 ```toml
 # config.toml —— 通道级覆盖（历史 —— 已不再被识别）。
 # #5463 之前，使用该通道的每个 agent 都继承下面这套默认。保留只为
-# 迁移对照参考；新写法把等价值设在 agent 上（`agent.toml [channel_overrides]`）
-# 或写到 sidecar 的 `[sidecar_channels.env]` 环境变量（如 `*_DM_POLICY`）。
+# 迁移对照参考；新写法把等价值设在 agent 上（`agent.toml [channel_overrides]`）。
+# DM / 群组门禁由内核侧的 `[[users]]` channel bindings 授权；sidecar 环境变量里只有 WhatsApp 会读 `WHATSAPP_DM_POLICY`。
 [channels.discord.overrides]
 model = "gemini-2.5-flash"
 system_prompt = "You are a concise Discord assistant. Keep replies under 200 words."

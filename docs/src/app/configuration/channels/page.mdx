@@ -609,7 +609,7 @@ The `[channels.<name>.overrides]` sub-table is **no longer recognised**. It live
 | Old override | Sidecar equivalent |
 |---|---|
 | `model`, `system_prompt` | Set on the agent (`agent.toml`) rather than per-channel — sidecars route every inbound to the same agent. |
-| `dm_policy`, `group_policy` | Pass as `*_DM_POLICY` / `*_GROUP_POLICY` env vars on the `[sidecar_channels.env]` block (Telegram / Discord / Slack / WhatsApp / Teams sidecars all read these). |
+| `dm_policy`, `group_policy` | Not a sidecar env knob — DM / group authorization is enforced kernel-side by `[[users]]` channel bindings (`authorize_channel_user`). Only the WhatsApp sidecar reads `WHATSAPP_DM_POLICY`; `WHATSAPP_GROUP_POLICY` is read but currently has no effect, and the Telegram / Discord / Slack / Teams sidecars read no `*_DM_POLICY` / `*_GROUP_POLICY` at all. |
 | `rate_limit_per_minute`, `rate_limit_per_user` | Sidecars rate-limit themselves to platform limits; for tighter caps, wrap the sidecar in a reverse proxy. |
 | `output_format` | Not exposed on `[[sidecar_channels]]`. Agents that need a specific output format should flip it on the agent side. |
 | `disable_commands`, `allowed_commands`, `blocked_commands` | Set on the agent's manifest (`agent.toml`) under the command-policy section — applies uniformly across channels. |
