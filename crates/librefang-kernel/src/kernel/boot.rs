@@ -2139,19 +2139,34 @@ impl LibreFangKernel {
                             || restored_entry.manifest.model.provider == "default";
                         let is_default_model = restored_entry.manifest.model.model.is_empty()
                             || restored_entry.manifest.model.model == "default";
-                        // Older boots resolved the auto-spawned assistant's default OpenRouter
-                        // free model into a concrete SQLite row. Treat that row as a default
-                        // sentinel again so future boots can migrate away from delisted models.
+                        // Older boots resolved the auto-spawned assistant's default OpenRouter free model into a concrete SQLite row.
+                        // Treat that row as a default sentinel again when it still uses the catalog's standard OpenRouter credential and no local catalog entry exists for that model.
+                        let uses_legacy_openrouter_key =
+                            restored_entry.manifest.model.api_key_env.as_deref()
+                                == Some("OPENROUTER_API_KEY")
+                                || (!cfg.default_model.api_key_env.is_empty()
+                                    && restored_entry.manifest.model.api_key_env.as_deref()
+                                        == Some(cfg.default_model.api_key_env.as_str()));
+                        let openrouter_model_missing = {
+                            let catalog = kernel.llm.model_catalog.load();
+                            catalog
+                                .find_model_for_provider(
+                                    "openrouter",
+                                    &restored_entry.manifest.model.model,
+                                )
+                                .is_none()
+                        };
                         let is_legacy_auto_spawned_assistant = name == "assistant"
                             && restored_entry.source_toml_path.is_none()
-                            && restored_entry.manifest.model.api_key_env.is_some()
-                            && restored_entry.manifest.model.base_url.is_none()
                             && restored_entry.manifest.model.provider == "openrouter"
+                            && uses_legacy_openrouter_key
+                            && openrouter_model_missing
                             && librefang_runtime::model_catalog::is_free_openrouter_model(
                                 &restored_entry.manifest.model.model,
                             );
                         // The source manifest is authoritative for legacy rows whose SQLite copy contains a previously resolved concrete model.
-                        let toml_says_default = toml_path.exists()
+                        let toml_says_default = restored_entry.source_toml_path.is_some()
+                            && toml_path.exists()
                             && std::fs::read_to_string(&toml_path)
                                 .ok()
                                 .and_then(|s| {

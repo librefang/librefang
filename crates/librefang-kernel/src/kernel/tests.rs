@@ -10841,6 +10841,76 @@ fn legacy_auto_spawned_assistant_with_delisted_openrouter_free_model_reverts_to_
 }
 
 #[test]
+fn explicit_assistant_openrouter_free_model_with_custom_key_survives_restart() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp
+        .path()
+        .join("librefang-kernel-explicit-assistant-openrouter-key");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        default_model: DefaultModelConfig {
+            provider: "openrouter".to_string(),
+            model: "acme/deprecated:free".to_string(),
+            api_key_env: "OPENROUTER_API_KEY".to_string(),
+            ..Default::default()
+        },
+        ..KernelConfig::default()
+    };
+
+    let kernel =
+        LibreFangKernel::boot_with_config(config.clone()).expect("first kernel should boot");
+    let assistant_id = kernel
+        .agents
+        .registry
+        .list()
+        .into_iter()
+        .find(|entry| entry.name == "assistant")
+        .expect("default assistant")
+        .id;
+    kernel
+        .agents
+        .registry
+        .update_model_provider_config(
+            assistant_id,
+            "acme/deprecated:free".to_string(),
+            "openrouter".to_string(),
+            Some("OPENROUTER_SECONDARY_KEY".to_string()),
+            None,
+        )
+        .expect("seed explicit assistant model");
+    let explicit = kernel
+        .agents
+        .registry
+        .get(assistant_id)
+        .expect("explicit assistant");
+    kernel
+        .memory
+        .substrate
+        .save_agent(&explicit)
+        .expect("persist explicit assistant");
+    kernel.shutdown();
+    drop(kernel);
+
+    let restarted = LibreFangKernel::boot_with_config(config).expect("second kernel should boot");
+    let assistant = restarted
+        .agents
+        .registry
+        .get(assistant_id)
+        .expect("assistant should be restored");
+    assert_eq!(assistant.manifest.model.provider, "openrouter");
+    assert_eq!(assistant.manifest.model.model, "acme/deprecated:free");
+    assert_eq!(
+        assistant.manifest.model.api_key_env.as_deref(),
+        Some("OPENROUTER_SECONDARY_KEY")
+    );
+    assert!(assistant.manifest.model.base_url.is_none());
+
+    restarted.shutdown();
+}
+
+#[test]
 fn sync_default_model_agents_preserves_explicit_assistant_model() {
     let tmp = tempfile::tempdir().unwrap();
     let home_dir = tmp.path().join("librefang-kernel-explicit-assistant-model");
