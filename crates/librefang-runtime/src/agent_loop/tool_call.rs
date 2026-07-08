@@ -66,6 +66,13 @@ pub(super) fn failure_type_label(
     }
 }
 
+/// Whether a fresh tool result may be re-spilled to the artifact store at the post-tool chokepoint.
+///
+/// `read_artifact` is exempt: it is the page-in tool, and re-spilling its output mints a fresh artifact whose stub again says "use read_artifact(...)", so any read larger than the spill threshold could never return real bytes (#6388).
+pub(super) fn respill_allowed(tool_name: &str) -> bool {
+    tool_name != crate::tool_runner::tool_name::READ_ARTIFACT
+}
+
 /// Record a tool-call outcome for observability (#3495, #6228). Emits two
 /// metrics off the same dispatch event:
 ///
@@ -81,13 +88,6 @@ pub(super) fn failure_type_label(
 /// `None` on the circuit-break path where no result exists.
 /// `execution_ms` is the measured tool duration in milliseconds, or
 /// `None` when the call never reached the timed body (circuit break, etc.).
-/// Whether a fresh tool result may be re-spilled to the artifact store at the post-tool chokepoint.
-///
-/// `read_artifact` is exempt: it is the page-in tool, and re-spilling its output mints a fresh artifact whose stub again says "use read_artifact(...)", so any read larger than the spill threshold could never return real bytes (#6388).
-pub(super) fn respill_allowed(tool_name: &str) -> bool {
-    tool_name != crate::tool_runner::tool_name::READ_ARTIFACT
-}
-
 pub(super) fn record_tool_call_metric(
     agent_id: &str,
     tool_name: &str,
