@@ -1351,6 +1351,7 @@ async fn run_agent_loop_streaming_inner(
                         .maybe_persist_result(
                             &executed.final_content,
                             &executed.result.tool_use_id,
+                            tool_name,
                         );
 
                         // Notify client of tool execution result. Emitted in

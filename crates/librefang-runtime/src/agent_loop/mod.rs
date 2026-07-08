@@ -1662,6 +1662,7 @@ async fn run_agent_loop_inner(
                             .maybe_persist_result(
                                 &executed.final_content,
                                 &executed.result.tool_use_id,
+                                tool_name,
                             );
                     staged.append_result(ContentBlock::ToolResult {
                         tool_use_id: executed.result.tool_use_id.clone(),

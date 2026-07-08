@@ -1707,3 +1707,38 @@ fn small_or_already_spilled_result_passes_through_without_double_spill() {
         "an already-compact web stub must NOT be re-spilled (no double-spill)"
     );
 }
+
+#[test]
+fn read_artifact_results_are_exempt_from_the_respill_chokepoint() {
+    use super::super::tool_call::spill_fresh_result;
+
+    // Drive the actual chokepoint function used by execute_single_tool_call_core (#6388).
+    // A wrapped read_artifact page in the 16–64 KiB range (over the 16 KiB threshold, under the 64 KiB MAX_READ_LENGTH read cap) must come back verbatim — converting it into a fresh artifact stub would make any read larger than the spill threshold unable to ever return real bytes.
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let cfg = librefang_types::config::ToolResultsConfig::default();
+    assert_eq!(cfg.spill_threshold_bytes, 16_384);
+    let page = format!(
+        "[read_artifact: sha256:{} | offset=0 | 18000 bytes read]\n{}",
+        "a".repeat(64),
+        "x".repeat(18_000)
+    );
+    assert!(page.len() as u64 > cfg.spill_threshold_bytes);
+    assert!(page.len() <= crate::artifact_store::MAX_READ_LENGTH);
+
+    let out = spill_fresh_result("read_artifact", page.clone(), &cfg, dir.path());
+    assert_eq!(
+        out, page,
+        "a fresh read_artifact page must pass through verbatim"
+    );
+    assert!(
+        dir.path().read_dir().unwrap().next().is_none(),
+        "no nested artifact may be written for a read_artifact result"
+    );
+
+    // Every other tool still spills through the normal path: the same bytes under a different tool name become a stub with a brand-new handle — the self-referential loop the exemption prevents.
+    let nested = spill_fresh_result("web_fetch", page, &cfg, dir.path());
+    assert!(
+        nested.contains("read_artifact(\"") && nested.contains("sha256:"),
+        "non-exempt results must still spill to a recoverable stub, got: {nested}"
+    );
+}

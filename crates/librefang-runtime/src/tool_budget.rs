@@ -51,6 +51,14 @@ pub const PER_TURN_BUDGET: usize = 200 * 1024;
 /// [`crate::artifact_store::build_spill_stub`].
 const PERSISTED_MARKER: &str = "[tool_result:";
 
+/// Whether a fresh tool result may be spilled back to the artifact store.
+///
+/// `read_artifact` is exempt: it is the page-in tool, and re-spilling its output mints a fresh artifact whose stub again says "use read_artifact(...)", so a page-in larger than the active threshold could never return real bytes (#6388).
+/// Shared by the post-tool chokepoint (`agent_loop::tool_call`) and both budget layers below, so all fresh-result gates apply one policy.
+pub(crate) fn respill_allowed(tool_name: &str) -> bool {
+    tool_name != crate::tool_runner::tool_name::READ_ARTIFACT
+}
+
 /// A single tool result entry used by the per-turn budget enforcer.
 #[derive(Debug)]
 pub struct ToolResultEntry {
@@ -59,6 +67,9 @@ pub struct ToolResultEntry {
     /// `tracing::debug!(tool_use_id = …)` below).  Not used as a filename
     /// stem any more — `artifact_store` is content-addressed.
     pub tool_use_id: String,
+    /// Name of the tool that produced this result.
+    /// Layer 3 uses it to keep `read_artifact` pages as last-resort spill victims (see [`respill_allowed`]).
+    pub tool_name: String,
     /// Content of the result. May be replaced in-place by the enforcer.
     pub content: String,
 }
@@ -132,8 +143,15 @@ impl ToolBudgetEnforcer {
     /// **Fallback**: if the spill fails (per-artifact cap exceeded, disk
     /// full), the content is truncated inline to `per_result_threshold`
     /// bytes.  Never panics.
-    pub fn maybe_persist_result(&self, content: &str, tool_use_id: &str) -> String {
-        if content.len() <= self.per_result_threshold {
+    ///
+    /// `read_artifact` results pass through untouched regardless of size — re-spilling the page-in tool's own output would recreate the #6388 loop at this layer whenever `spill_threshold_bytes` is configured below the sanitize cap.
+    pub fn maybe_persist_result(
+        &self,
+        content: &str,
+        tool_use_id: &str,
+        tool_name: &str,
+    ) -> String {
+        if content.len() <= self.per_result_threshold || !respill_allowed(tool_name) {
             return content.to_string();
         }
 
@@ -194,18 +212,21 @@ impl ToolBudgetEnforcer {
         );
 
         // Build a candidate list: (index, size) for non-persisted results,
-        // sorted largest-first.
-        let mut candidates: Vec<(usize, usize)> = results
+        // sorted largest-first. Fresh `read_artifact` pages sort behind
+        // everything else so the turn-budget safety valve spills them only
+        // when no other victim can bring the turn under budget (#6388) —
+        // fully exempting them here would leave a many-page turn unbounded.
+        let mut candidates: Vec<(usize, usize, bool)> = results
             .iter()
             .enumerate()
             .filter(|(_, r)| !r.content.starts_with(PERSISTED_MARKER))
-            .map(|(i, r)| (i, r.content.len()))
+            .map(|(i, r)| (i, r.content.len(), !respill_allowed(&r.tool_name)))
             .collect();
-        candidates.sort_by_key(|b| std::cmp::Reverse(b.1));
+        candidates.sort_by_key(|&(_, size, exempt)| (exempt, std::cmp::Reverse(size)));
 
         let mut running_total = total;
 
-        for (idx, size) in candidates {
+        for (idx, size, _exempt) in candidates {
             if running_total <= self.per_turn_budget {
                 break;
             }
@@ -296,10 +317,91 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let enforcer = make_enforcer(dir.path());
         let content = "x".repeat(50);
-        let result = enforcer.maybe_persist_result(&content, "id-1");
+        let result = enforcer.maybe_persist_result(&content, "id-1", "web_fetch");
         assert_eq!(result, content);
         // No file should be written.
         assert!(dir.path().read_dir().unwrap().next().is_none());
+    }
+
+    /// #6388: a fresh `read_artifact` page must never be re-spilled by
+    /// Layer 2, even when it exceeds the per-result threshold — otherwise
+    /// an operator setting `spill_threshold_bytes` below the sanitize cap
+    /// resurrects the self-referential stub loop at this layer.
+    #[test]
+    fn layer2_read_artifact_page_is_exempt() {
+        let dir = tempfile::tempdir().unwrap();
+        let enforcer = make_enforcer(dir.path());
+        let page = format!(
+            "[read_artifact: sha256:aa | offset=0 | 200 bytes read]\n{}",
+            "x".repeat(200)
+        );
+        assert!(page.len() > enforcer.per_result_threshold);
+        let result = enforcer.maybe_persist_result(&page, "id-read", "read_artifact");
+        assert_eq!(result, page);
+        assert!(dir.path().read_dir().unwrap().next().is_none());
+    }
+
+    /// #6388: Layer 3 spills non-exempt victims first; a fresh
+    /// `read_artifact` page survives when spilling the other result already
+    /// brings the turn under budget, and is spilled only as a last resort.
+    #[test]
+    fn layer3_read_artifact_page_is_last_resort_victim() {
+        // Contents must be well above the ~1.3 KB stub size (PREVIEW_BYTES +
+        // framing) so a spill actually shrinks the running total.
+        let dir = tempfile::tempdir().unwrap();
+        let enforcer = ToolBudgetEnforcer {
+            per_result_threshold: 100_000, // Layer 2 inert for this test
+            per_turn_budget: 7_500,
+            max_artifact_bytes: crate::artifact_store::DEFAULT_MAX_ARTIFACT_BYTES,
+            artifact_dir: dir.path().to_path_buf(),
+        };
+        // The read page is deliberately the LARGEST result: the pre-fix
+        // largest-first ordering would have picked it as the first victim.
+        let page = format!(
+            "[read_artifact: sha256:aa | offset=0 | 6000 bytes read]\n{}",
+            "x".repeat(6_000)
+        );
+        let web = "w".repeat(4_000);
+        let mut entries = vec![
+            ToolResultEntry {
+                tool_use_id: "id-read".to_string(),
+                tool_name: "read_artifact".to_string(),
+                content: page.clone(),
+            },
+            ToolResultEntry {
+                tool_use_id: "id-web".to_string(),
+                tool_name: "web_fetch".to_string(),
+                content: web.clone(),
+            },
+        ];
+        // Total ~10 KB > 7.5 KB budget; spilling the web result (4 KB → ~1.3 KB stub) suffices.
+        enforcer.enforce_turn_budget(&mut entries);
+        assert_eq!(
+            entries[0].content, page,
+            "read_artifact page must survive when another victim suffices"
+        );
+        assert_ne!(
+            entries[1].content, web,
+            "the smaller non-exempt result is spilled first because the read page is deprioritized"
+        );
+
+        // Only read_artifact pages left and still over budget: the safety
+        // valve wins and the page is spilled — full exemption would leave a
+        // many-page turn unbounded.
+        let big_page = format!(
+            "[read_artifact: sha256:bb | offset=0 | 8000 bytes read]\n{}",
+            "y".repeat(8_000)
+        );
+        let mut only_pages = vec![ToolResultEntry {
+            tool_use_id: "id-read2".to_string(),
+            tool_name: "read_artifact".to_string(),
+            content: big_page.clone(),
+        }];
+        enforcer.enforce_turn_budget(&mut only_pages);
+        assert_ne!(
+            only_pages[0].content, big_page,
+            "last-resort spill keeps the turn budget bounded"
+        );
     }
 
     #[test]
@@ -307,7 +409,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let enforcer = make_enforcer(dir.path());
         let content = "y".repeat(200);
-        let result = enforcer.maybe_persist_result(&content, "id-2");
+        let result = enforcer.maybe_persist_result(&content, "id-2", "web_fetch");
         // Stub from `artifact_store::build_spill_stub` carries the
         // `PERSISTED_MARKER` prefix and an `sha256:<hex>` handle.
         assert!(result.starts_with(PERSISTED_MARKER));
@@ -337,7 +439,7 @@ mod tests {
             artifact_dir: dir.path().to_path_buf(),
         };
         let content = "z".repeat(100);
-        let result = enforcer.maybe_persist_result(&content, "bad-id");
+        let result = enforcer.maybe_persist_result(&content, "bad-id", "web_fetch");
         assert!(result.ends_with("[Truncated: could not save full output]"));
         assert!(result.len() <= 10 + 50); // truncated portion + notice
     }
@@ -349,10 +451,12 @@ mod tests {
         let mut entries = vec![
             ToolResultEntry {
                 tool_use_id: "a".into(),
+                tool_name: "web_fetch".to_string(),
                 content: "x".repeat(50),
             },
             ToolResultEntry {
                 tool_use_id: "b".into(),
+                tool_name: "web_fetch".to_string(),
                 content: "y".repeat(50),
             },
         ];
@@ -370,10 +474,12 @@ mod tests {
         let mut entries = vec![
             ToolResultEntry {
                 tool_use_id: "small".into(),
+                tool_name: "web_fetch".to_string(),
                 content: "s".repeat(150),
             },
             ToolResultEntry {
                 tool_use_id: "large".into(),
+                tool_name: "web_fetch".to_string(),
                 content: "L".repeat(200),
             },
         ];
@@ -399,10 +505,12 @@ mod tests {
         let mut entries = vec![
             ToolResultEntry {
                 tool_use_id: "persisted".into(),
+                tool_name: "web_fetch".to_string(),
                 content: persisted_content.clone(),
             },
             ToolResultEntry {
                 tool_use_id: "fresh".into(),
+                tool_name: "web_fetch".to_string(),
                 content: "F".repeat(250),
             },
         ];
@@ -445,7 +553,7 @@ mod tests {
         let raw_50kb = "R".repeat(50 * 1024);
 
         // Layer 2: collapse to a persisted summary stub.
-        let post_l2 = enforcer.maybe_persist_result(&raw_50kb, "tool-big");
+        let post_l2 = enforcer.maybe_persist_result(&raw_50kb, "tool-big", "web_fetch");
         assert!(
             post_l2.starts_with(PERSISTED_MARKER),
             "Layer 2 should have persisted the large result"
@@ -461,6 +569,7 @@ mod tests {
         // is well under the 10 KB budget, so the entry must remain unchanged.
         let mut entries = vec![ToolResultEntry {
             tool_use_id: "tool-big".into(),
+            tool_name: "web_fetch".to_string(),
             content: post_l2.clone(),
         }];
         enforcer.enforce_turn_budget(&mut entries);
