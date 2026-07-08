@@ -1712,20 +1712,14 @@ fn small_or_already_spilled_result_passes_through_without_double_spill() {
 fn read_artifact_results_are_exempt_from_the_respill_chokepoint() {
     use super::super::tool_call::respill_allowed;
 
-    // The chokepoint gate: read_artifact output must never be re-spilled —
-    // it is the page-in tool, and converting its result back into a fresh
-    // artifact stub would make any read larger than the spill threshold
-    // unable to ever return real bytes (#6388). Everything else still
-    // spills through the normal path.
+    // The chokepoint gate: read_artifact output must never be re-spilled — it is the page-in tool, and converting its result back into a fresh artifact stub would make any read larger than the spill threshold unable to ever return real bytes (#6388).
+    // Everything else still spills through the normal path.
     assert!(!respill_allowed("read_artifact"));
     assert!(respill_allowed("web_fetch"));
     assert!(respill_allowed("mcp_some_server.some_tool"));
     assert!(respill_allowed("shell_exec"));
 
-    // Demonstrate the loop the gate prevents: a wrapped read_artifact page
-    // in the 16–64 KiB range (over the 16 KiB threshold, under the 64 KiB
-    // MAX_READ_LENGTH read cap) WOULD be re-spilled into a nested stub with
-    // a brand-new handle if it reached maybe_spill.
+    // Demonstrate the loop the gate prevents: a wrapped read_artifact page in the 16–64 KiB range (over the 16 KiB threshold, under the 64 KiB MAX_READ_LENGTH read cap) WOULD be re-spilled into a nested stub with a brand-new handle if it reached maybe_spill.
     let dir = tempfile::TempDir::new().expect("tempdir");
     let threshold: u64 = 16_384;
     let page = format!(
