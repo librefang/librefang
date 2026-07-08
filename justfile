@@ -34,8 +34,10 @@ default:
 build:
     cargo build --workspace --lib
 
-# Run all workspace tests
-test:
+# Run all workspace tests.
+# The exported LIBREFANG_REGISTRY_OFFLINE keeps every test-booted kernel from fetching the content registry (git clone / tarball fallback) — hermetic, and it avoids the git fork storm that exhausts pid limits in containers (#6404).
+# Pass `just test 0` to re-enable the network refresh.
+test $LIBREFANG_REGISTRY_OFFLINE="1":
     cargo test --workspace
 
 # Run clippy with strict warnings
@@ -54,8 +56,9 @@ fmt-check:
 check:
     cargo check --workspace
 
-# Local CI simulation: build + test + clippy + web lint
-ci:
+# Local CI simulation: build + test + clippy + web lint.
+# Exports the same registry-offline switch as `just test` — the xtask ci test phase would otherwise re-trigger the per-test registry fetches (#6404).
+ci $LIBREFANG_REGISTRY_OFFLINE="1":
     cargo xtask ci
 
 # Build and open workspace documentation
@@ -323,9 +326,15 @@ update-deps *ARGS:
 validate-config *ARGS:
     cargo xtask validate-config {{ARGS}}
 
-# Run pre-commit checks (fmt + clippy + test)
+# Run pre-commit checks (fmt + clippy + test).
+# Same registry-offline switch as `just test` / `just ci`; set inline (not as an exported recipe parameter) because a defaulted parameter in front of `*ARGS` would swallow the first forwarded argument (#6404).
+[unix]
 pre-commit *ARGS:
-    cargo xtask pre-commit {{ARGS}}
+    LIBREFANG_REGISTRY_OFFLINE=1 cargo xtask pre-commit {{ARGS}}
+
+[windows]
+pre-commit *ARGS:
+    set LIBREFANG_REGISTRY_OFFLINE=1&& cargo xtask pre-commit {{ARGS}}
 
 # Generate API docs from OpenAPI spec
 api-docs *ARGS:
