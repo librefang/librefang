@@ -105,6 +105,14 @@ pub fn refresh_registry_checkout(
     let _guard = SYNC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let registry_cache = home_dir.join("registry");
 
+    if registry_offline(std::env::var("LIBREFANG_REGISTRY_OFFLINE").ok().as_deref()) {
+        // Same switch as `sync_registry`: this twin refresh path is what the
+        // daemon's startup/24h catalog task and `POST /api/catalog/update`
+        // call, so an offline process tree must not fetch here either (#6404).
+        tracing::debug!("LIBREFANG_REGISTRY_OFFLINE set — skipping registry checkout refresh");
+        return registry_cache.exists();
+    }
+
     if should_refresh(&registry_cache, cache_ttl_secs) {
         // Try git first (faster incremental updates, private fork support)
         let git_ok = match git_clone_fallback(&registry_cache, registry_mirror, registry_host) {
@@ -146,6 +154,9 @@ pub fn refresh_registry_checkout(
 ///
 /// `registry_host` is the optional full base URL of the forge hosting the registry (e.g. `Some("https://codeberg.org")`).
 /// `None` keeps the GitHub defaults — see [`registry_urls`].
+///
+/// Setting `LIBREFANG_REGISTRY_OFFLINE` (any value except empty / `0` / `false`) skips the network refresh entirely and serves whatever is already cached.
+/// Every kernel boot funnels through this function, so the variable makes an entire process tree hermetic — test runners spawning many kernels (each with a fresh home whose cache is always stale) and air-gapped deployments both need that guarantee (#6404).
 pub fn sync_registry(
     home_dir: &Path,
     cache_ttl_secs: u64,
@@ -155,7 +166,21 @@ pub fn sync_registry(
     let _guard = SYNC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let registry_cache = home_dir.join("registry");
 
-    if should_refresh(&registry_cache, cache_ttl_secs) {
+    if registry_offline(std::env::var("LIBREFANG_REGISTRY_OFFLINE").ok().as_deref()) {
+        // Skip only the network refresh; the local pre-install copies below
+        // still run so a pre-seeded cache keeps working offline.
+        tracing::debug!("LIBREFANG_REGISTRY_OFFLINE set — skipping registry network refresh");
+        if !registry_cache.exists() {
+            // Preserve the return contract: `true` ⟹ a usable checkout
+            // exists. `librefang init --upgrade` branches on this to report
+            // "registry synced" — an offline skip with nothing on disk must
+            // not report success.
+            tracing::warn!(
+                "LIBREFANG_REGISTRY_OFFLINE set and no registry cache exists — registry content unavailable"
+            );
+            return false;
+        }
+    } else if should_refresh(&registry_cache, cache_ttl_secs) {
         // Try git first (faster incremental updates, private fork support)
         let git_ok = match git_clone_fallback(&registry_cache, registry_mirror, registry_host) {
             Ok(()) => true,
@@ -273,6 +298,19 @@ pub fn sync_registry(
         cleanup_stale_dirs(&workspaces_dir);
     }
     true
+}
+
+/// Whether a `LIBREFANG_REGISTRY_OFFLINE` value disables the network refresh.
+///
+/// Unset, empty, `0`, and `false` (any case) keep the refresh enabled; every other value turns it off.
+fn registry_offline(value: Option<&str>) -> bool {
+    match value {
+        None => false,
+        Some(v) => {
+            let v = v.trim();
+            !(v.is_empty() || v == "0" || v.eq_ignore_ascii_case("false"))
+        }
+    }
 }
 
 /// Check whether we should re-download the registry.
@@ -826,6 +864,21 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The offline switch is truthy for anything except unset / empty / `0` / `false` (#6404).
+    /// Tested through the pure parser so no test mutates process-global env.
+    #[test]
+    fn registry_offline_parses_the_env_convention() {
+        assert!(!registry_offline(None));
+        assert!(!registry_offline(Some("")));
+        assert!(!registry_offline(Some("  ")));
+        assert!(!registry_offline(Some("0")));
+        assert!(!registry_offline(Some("false")));
+        assert!(!registry_offline(Some("FALSE")));
+        assert!(registry_offline(Some("1")));
+        assert!(registry_offline(Some("true")));
+        assert!(registry_offline(Some("yes")));
+    }
 
     /// `None` ⇒ byte-identical GitHub URLs/prefix shipped before #6095.
     #[test]
