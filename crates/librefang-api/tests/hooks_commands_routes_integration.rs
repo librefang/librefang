@@ -12,9 +12,9 @@
 //!   stack so the auth middleware is not in scope — the handler-level
 //!   bearer-token check on `/api/hooks/*` (env-var sourced) is what gets
 //!   exercised here.
-//! - For `/api/hooks/agent` we cover validation + auth-gate + 404 paths
-//!   only. The happy path requires a live LLM dispatch (`send_message`
-//!   round-trip), which is out of scope for unit-suite-friendly tests.
+//! - For `/api/hooks/agent` we cover validation, auth-gate, and 404 paths, plus the happy path.
+//!   `hooks_agent_dispatches_to_default_agent` stands up a local OpenAI-compatible mock provider (bound to `127.0.0.1:0`) and points the kernel's `default_model` at it, so the full `send_message` round-trip runs hermetically without consulting any ambient provider key.
+//!   Previously that test left `default_model.provider = "auto"`, which makes `boot_with_config` scan the process environment for a real key and — on any machine with `OPENAI_API_KEY` (etc.) set — wire a live driver and make a real API call, so the test failed with whatever the provider returned instead of exercising the wiring.
 //! - Each test that touches the bearer-token env var uses a unique env
 //!   name so parallel test execution stays deterministic (env is process
 //!   global).
@@ -24,7 +24,7 @@ use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use librefang_api::routes::{self, AppState};
 use librefang_testing::{MockKernelBuilder, TestAppState};
-use librefang_types::config::WebhookTriggerConfig;
+use librefang_types::config::{DefaultModelConfig, WebhookTriggerConfig};
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -75,6 +75,81 @@ async fn boot_enabled(token_env: &str) -> Harness {
         rate_limit_per_minute: 30,
     }))
     .await
+}
+
+/// The assistant text the local mock provider always returns. The webhook
+/// happy-path test asserts the dispatch response echoes this verbatim, which
+/// proves the whole `send_message` round-trip (not just a canned kernel stub)
+/// carried the LLM output back through the handler.
+const MOCK_LLM_REPLY: &str = "dispatched via mock provider";
+
+/// Stand up a local OpenAI-compatible provider on `127.0.0.1:0` that answers
+/// every `POST /chat/completions` with a fixed assistant message. The reply
+/// carries `finish_reason = "stop"` and no tool calls, so the agent loop ends
+/// after a single turn. Returns the base URL to point `default_model.base_url`
+/// at; the spawned server is torn down when the returned handle is dropped.
+async fn spawn_mock_openai() -> (String, tokio::task::JoinHandle<()>) {
+    async fn completions_handler() -> axum::Json<serde_json::Value> {
+        axum::Json(serde_json::json!({
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": MOCK_LLM_REPLY },
+                "finish_reason": "stop"
+            }],
+            "usage": { "prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8 }
+        }))
+    }
+
+    let app: Router = Router::new().route(
+        "/chat/completions",
+        axum::routing::post(completions_handler),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}"), handle)
+}
+
+/// Like [`boot_enabled`] but also points the kernel's default model at a local
+/// mock OpenAI-compatible endpoint so `/api/hooks/agent` can drive a full
+/// `send_message` round-trip. `provider` is a fixed unknown name (NOT `"auto"`)
+/// with `base_url` set, which `create_driver` treats as a custom
+/// OpenAI-compatible endpoint (`librefang-llm-drivers`: unknown provider +
+/// base_url). Because the provider is not `"auto"`, boot skips the
+/// environment-key scan, so the test is hermetic regardless of ambient
+/// `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / etc.
+async fn boot_enabled_with_llm(token_env: &str, llm_base_url: String) -> Harness {
+    let webhook = WebhookTriggerConfig {
+        enabled: true,
+        token_env: token_env.to_string(),
+        max_payload_bytes: 65536,
+        rate_limit_per_minute: 30,
+    };
+    let test = TestAppState::with_builder(MockKernelBuilder::new().with_config(move |cfg| {
+        cfg.webhook_triggers = Some(webhook);
+        cfg.default_model = DefaultModelConfig {
+            provider: "librefang-test-mock".to_string(),
+            model: "mock-model".to_string(),
+            base_url: Some(llm_base_url),
+            ..Default::default()
+        };
+    }));
+    let state = test.state.clone();
+    let app = Router::new()
+        .nest(
+            "/api",
+            routes::system::router().merge(routes::webhooks::router()),
+        )
+        .with_state(state.clone());
+    Harness {
+        app,
+        _state: state,
+        _test: test,
+    }
 }
 
 async fn send(
@@ -419,18 +494,23 @@ async fn hooks_agent_rejects_oversize_timeout() {
     );
 }
 
-/// Auth + payload pass and the default mock agent dispatches the message.
-/// Proves the agent-resolve branch picks the only available agent when the
-/// caller doesn't name one, and that the handler returns the dispatch result
-/// envelope (`status`, `agent_id`, `response`).
+/// Auth + payload pass and the default agent dispatches the message against a
+/// local mock provider. Proves the agent-resolve branch picks the only
+/// available agent when the caller doesn't name one, and that the handler
+/// returns the dispatch result envelope (`status`, `agent_id`, `response`)
+/// carrying the LLM output. Hermetic: the LLM round-trip goes to an in-process
+/// mock, never a real provider — see [`spawn_mock_openai`] / [`boot_enabled_with_llm`].
 #[tokio::test(flavor = "multi_thread")]
 async fn hooks_agent_dispatches_to_default_agent() {
+    // Server must outlive the request; `_llm` drop tears it down.
+    let (llm_base_url, _llm) = spawn_mock_openai().await;
+
     let env_name = "LIBREFANG_TEST_WEBHOOK_TOKEN_AGENT_DEFAULT_3571";
     let token = "n".repeat(40);
     unsafe {
         std::env::set_var(env_name, &token);
     }
-    let h = boot_enabled(env_name).await;
+    let h = boot_enabled_with_llm(env_name, llm_base_url).await;
     let (status, body) = send(
         &h,
         Method::POST,
@@ -445,7 +525,7 @@ async fn hooks_agent_dispatches_to_default_agent() {
     assert_eq!(status, StatusCode::OK, "{body:?}");
     assert_eq!(body["status"], "completed", "{body:?}");
     assert!(body["agent_id"].is_string(), "{body:?}");
-    assert!(body["response"].is_string(), "{body:?}");
+    assert_eq!(body["response"], MOCK_LLM_REPLY, "{body:?}");
 }
 
 /// When the caller names an agent that does not exist (and isn't a UUID),

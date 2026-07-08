@@ -9,6 +9,7 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ### Fixed
 
+- Add a `LIBREFANG_REGISTRY_OFFLINE` switch that skips the registry network refresh (git clone / tarball fallback) while keeping local pre-install copies, and export it from `just test`: every test-booted kernel previously attempted a real registry fetch from its fresh temp home, and the resulting git fork storm exhausted pid limits in constrained containers (`Resource temporarily unavailable` failures in `just test`) (#6408) (@houko)
 - Clear the `cargo-deny` / security-audit advisory RUSTSEC-2026-0204 failing CI on every branch by bumping the transitive `crossbeam-epoch` to 0.9.20 (invalid pointer dereference in the `fmt::Pointer` / `fmt::Display` impls for null `Atomic` / `Shared` pointers; pulled in via `rayon-core` → `crossbeam-deque`, lockfile-only change) (#6400) (@houko)
 - Prefer OpenRouter's live `/models` catalog over the checked-in fallback snapshot when selecting or validating a model, refresh stale data when the user opens the model picker, replace a delisted free model with the closest live free model by family and parameter scale, surface automatic model migrations through audit plus configured `model_migrated` notifications, and treat missing pricing as unknown instead of free (#6384) (@pavver)
 - Preserve `provider = "default"` and `model = "default"` as an explicit agent setting that follows future global model changes, expose a dashboard action to restore that mode, and treat every concrete agent model as an explicit pin (#6384) (@pavver)

@@ -67,6 +67,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import threading
 import time
 import urllib.error
@@ -873,7 +874,8 @@ class SlackAdapter(SidecarAdapter):
         thread_ts = None if self.force_flat_replies else inbound_thread_id
 
         content = cmd.content
-        text = cmd.text or ""
+        # Sidecars own outbound formatting (owns_formatting()=true), so the kernel hands us raw Markdown — convert to Slack mrkdwn here.
+        text = _markdown_to_mrkdwn(cmd.text or "")
         loop = asyncio.get_event_loop()
         if isinstance(content, dict) and "Text" in content:
             await loop.run_in_executor(
@@ -882,7 +884,7 @@ class SlackAdapter(SidecarAdapter):
             )
         elif isinstance(content, dict) and "Interactive" in content:
             payload = content["Interactive"]
-            interactive_text = payload.get("text", "") or text
+            interactive_text = _markdown_to_mrkdwn(payload.get("text", "")) or text
             buttons = payload.get("buttons", []) or []
             blocks = _build_block_kit(interactive_text, buttons)
             await loop.run_in_executor(
@@ -920,6 +922,151 @@ class SlackAdapter(SidecarAdapter):
                     channel_id, inbound_thread_id,
                 ),
             )
+
+
+# Matches one code span — fenced ```...``` or inline `...`.
+# The converter masks every match with an index token before any other rule runs, then restores the spans at the end, so a bold/link span or header/bullet line that wraps around a code span is still seen whole by the regexes (the previous top-level split hid everything past the code delimiter from them).
+_CODE_SPAN_RE = re.compile(r"```.*?```|`[^`]*`", re.DOTALL)
+# An index token standing in for a masked code span: \x00<index>\x01.
+# Control-character delimiters guarantee no Markdown rule can match into or across a token.
+_CODE_TOKEN_RE = re.compile("\x00(\\d+)\x01")
+_ATX_HEADER_RE = re.compile(r"^(\s{0,3})#{1,6}\s+(.*?)\s*#*\s*$")
+_BULLET_RE = re.compile(r"^(\s*)[-*+]\s+(.*)$")
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)\s]+)\)")
+_BOLD_STAR_RE = re.compile(r"\*\*([^*\n]+)\*\*")
+_BOLD_USCORE_RE = re.compile(r"__([^_\n]+)__")
+_STRIKE_RE = re.compile(r"~~([^~\n]+)~~")
+# A GitHub-flavoured-Markdown table divider row: |---|:--:|---:| etc.
+# Requires ≥2 columns (≥1 internal pipe) so a lone `---` horizontal rule is not mistaken for a table.
+_TABLE_DIVIDER_RE = re.compile(r"^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)+\|?\s*$")
+
+
+def _restore_code_spans(s: str, codes: list[str], strip_backticks: bool = False) -> str:
+    """Replace \\x00<i>\\x01 tokens with the masked code span at index i.
+
+    Every token is one the converter minted itself (`_markdown_to_mrkdwn` drops any pre-existing delimiter bytes), so the index is always in range.
+    ``strip_backticks`` is for table cells, which land inside a monospace code block where literal backtick delimiters would just be noise.
+    """
+
+    def repl(m: "re.Match[str]") -> str:
+        code = codes[int(m.group(1))]
+        return code.replace("`", "") if strip_backticks else code
+
+    return _CODE_TOKEN_RE.sub(repl, s)
+
+
+def _inline_md(s: str) -> str:
+    """Inline Markdown → Slack mrkdwn (links, bold, strikethrough)."""
+    s = _MD_LINK_RE.sub(r"<\2|\1>", s)      # [text](url) → <url|text>
+    s = _BOLD_STAR_RE.sub(r"*\1*", s)        # **bold** → *bold*
+    s = _BOLD_USCORE_RE.sub(r"*\1*", s)      # __bold__ → *bold*
+    s = _STRIKE_RE.sub(r"~\1~", s)           # ~~strike~~ → ~strike~
+    return s
+
+
+def _split_table_row(row: str) -> list[str]:
+    r = row.strip()
+    if r.startswith("|"):
+        r = r[1:]
+    if r.endswith("|"):
+        r = r[:-1]
+    return [c.strip() for c in r.split("|")]
+
+
+def _plain_cell(c: str, codes: list[str]) -> str:
+    """Strip inline markers from a cell so the monospace grid stays aligned."""
+    c = _restore_code_spans(c, codes, strip_backticks=True)
+    c = _MD_LINK_RE.sub(r"\1", c)  # [text](url) → text
+    return c.replace("**", "").replace("__", "").replace("`", "").strip()
+
+
+def _render_table(header: str, rows: list[str], codes: list[str]) -> str:
+    """Render a Markdown table as a fixed-width Slack code block (Slack mrkdwn has no table element; monospace preserves the columns).
+
+    Cells may contain code-span tokens; they are restored (backticks stripped) before widths are computed so the grid aligns on the real cell text.
+    """
+    hcells = [_plain_cell(c, codes) for c in _split_table_row(header)]
+    rcells = [[_plain_cell(c, codes) for c in _split_table_row(r)] for r in rows]
+    ncol = max([len(hcells)] + [len(r) for r in rcells])
+
+    def pad(cells: list[str]) -> list[str]:
+        return cells + [""] * (ncol - len(cells))
+
+    hcells = pad(hcells)
+    rcells = [pad(r) for r in rcells]
+    widths = []
+    for k in range(ncol):
+        w = len(hcells[k])
+        for r in rcells:
+            w = max(w, len(r[k]))
+        widths.append(w)
+
+    def fmt(cells: list[str]) -> str:
+        return " | ".join(cells[k].ljust(widths[k]) for k in range(ncol))
+
+    sep = "-+-".join("-" * widths[k] for k in range(ncol))
+    body = "\n".join([fmt(hcells), sep] + [fmt(r) for r in rcells])
+    return f"```\n{body}\n```"
+
+
+def _convert_md_lines(masked: str, codes: list[str]) -> str:
+    """Convert code-masked Markdown to Slack mrkdwn (tokens still in place)."""
+    lines = masked.split("\n")
+    out: list[str] = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i]
+        # Tables: a header row followed by a |---|---| divider.
+        # Rendered as a fixed-width code block since Slack has no table support.
+        if "|" in line and i + 1 < n and _TABLE_DIVIDER_RE.match(lines[i + 1]):
+            j = i + 2
+            body_rows: list[str] = []
+            while j < n and lines[j].strip() and "|" in lines[j]:
+                body_rows.append(lines[j])
+                j += 1
+            out.append(_render_table(line, body_rows, codes))
+            i = j
+            continue
+        # ATX headers (# .. ######) → bold (Slack has no headings).
+        m = _ATX_HEADER_RE.match(line)
+        if m:
+            content = m.group(2).strip()
+            out.append(f"{m.group(1)}*{_inline_md(content)}*" if content else "")
+            i += 1
+            continue
+        # Bullets (-, *, +) → •. Also stops a "* item" bullet from being mistaken for italic.
+        b = _BULLET_RE.match(line)
+        if b:
+            out.append(f"{b.group(1)}•   {_inline_md(b.group(2))}")
+            i += 1
+            continue
+        out.append(_inline_md(line))
+        i += 1
+    return "\n".join(out)
+
+
+def _markdown_to_mrkdwn(text: str) -> str:
+    """Convert common Markdown to Slack mrkdwn, leaving code spans intact.
+
+    The Rust `formatter::markdown_to_slack_mrkdwn` used to run kernel-side, but sidecar adapters report `owns_formatting() = true`, so the kernel now sends raw text and the adapter owns the conversion.
+    Handles bold, headers, bullets, links, and strikethrough — the cases that otherwise leak literal `**` / `##` into Slack.
+    Italic and blockquotes already share syntax with Slack (`_x_`, `> q`) and pass through untouched; fenced/inline code is preserved verbatim (Slack renders backticks).
+
+    Code spans are masked with index tokens up front and restored after all other rules have run, so an inline construct wrapping a code span ("**the `foo()` method**") converts as one whole span instead of leaking its markers.
+    """
+    if not text:
+        return text
+    # The delimiter bytes cannot legitimately occur in chat text; dropping them up front means a pathological input can never alias a real token.
+    text = text.replace("\x00", "").replace("\x01", "")
+    codes: list[str] = []
+
+    def mask(m: "re.Match[str]") -> str:
+        codes.append(m.group(0))
+        return f"\x00{len(codes) - 1}\x01"
+
+    masked = _CODE_SPAN_RE.sub(mask, text)
+    return _restore_code_spans(_convert_md_lines(masked, codes), codes)
 
 
 def _build_block_kit(text: str, buttons: list) -> list:
