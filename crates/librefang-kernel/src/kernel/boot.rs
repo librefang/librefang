@@ -2166,6 +2166,7 @@ impl LibreFangKernel {
                             );
                         // The source manifest is authoritative for legacy rows whose SQLite copy contains a previously resolved concrete model.
                         let toml_says_default = restored_entry.source_toml_path.is_some()
+                            && restored_entry.manifest.model.api_key_env.is_none()
                             && toml_path.exists()
                             && std::fs::read_to_string(&toml_path)
                                 .ok()
