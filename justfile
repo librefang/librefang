@@ -35,9 +35,7 @@ build:
     cargo build --workspace --lib
 
 # Run all workspace tests.
-# The exported LIBREFANG_REGISTRY_OFFLINE keeps every test-booted kernel from
-# fetching the content registry (git clone / tarball fallback) — hermetic, and
-# it avoids the git fork storm that exhausts pid limits in containers (#6404).
+# The exported LIBREFANG_REGISTRY_OFFLINE keeps every test-booted kernel from fetching the content registry (git clone / tarball fallback) — hermetic, and it avoids the git fork storm that exhausts pid limits in containers (#6404).
 # Pass `just test 0` to re-enable the network refresh.
 test $LIBREFANG_REGISTRY_OFFLINE="1":
     cargo test --workspace
