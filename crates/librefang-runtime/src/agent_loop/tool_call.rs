@@ -81,6 +81,14 @@ pub(super) fn failure_type_label(
 /// `None` on the circuit-break path where no result exists.
 /// `execution_ms` is the measured tool duration in milliseconds, or
 /// `None` when the call never reached the timed body (circuit break, etc.).
+/// Whether a fresh tool result may be re-spilled to the artifact store at
+/// the post-tool chokepoint.
+///
+/// `read_artifact` is exempt: it is the page-in tool, and re-spilling its output mints a fresh artifact whose stub again says "use read_artifact(...)", so any read larger than the spill threshold could never return real bytes (#6388).
+pub(super) fn respill_allowed(tool_name: &str) -> bool {
+    tool_name != crate::tool_runner::tool_name::READ_ARTIFACT
+}
+
 pub(super) fn record_tool_call_metric(
     agent_id: &str,
     tool_name: &str,
@@ -1169,8 +1177,13 @@ pub(super) async fn execute_single_tool_call_core(
     // without this they would be destructively truncated and the original
     // bytes lost — the LLM would get clipped text with no `read_artifact`
     // reference. A web stub is already < threshold, so this is a no-op pass
-    // through for it (no double-spill).
-    let result_content = {
+    // through for it (no double-spill). `read_artifact` results are exempt
+    // (see `respill_allowed`); history compaction (`tool_budget`) still
+    // spills old read_artifact results — the exemption is only for the
+    // fresh result on this turn.
+    let result_content = if !respill_allowed(&tool_call.name) {
+        result_content
+    } else {
         let cfg = ctx.opts.tool_results_config.clone().unwrap_or_default();
         let (threshold, max_artifact) = crate::tool_runner::resolve_spill_config(
             cfg.spill_threshold_bytes,
