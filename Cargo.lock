@@ -230,7 +230,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -241,7 +241,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1146,9 +1146,9 @@ dependencies = [
 
 [[package]]
 name = "clap_complete"
-version = "4.6.5"
+version = "4.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0a7a9bfdb35811f9e59832f0f05975114d2251b415fb534108e6f34060fd772"
+checksum = "db8b397918185f0161ff3d6fcaa9e4bfc09b8367caf6e1d4a2848e5477ed027b"
 dependencies = [
  "clap",
 ]
@@ -1207,7 +1207,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2132,7 +2132,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2487,7 +2487,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3939,7 +3939,7 @@ checksum = "ae8e22120c32fb4d19ec55fba35015f57095cd95a2e3b732e44457f5915b2ee8"
 dependencies = [
  "num-integer",
  "num-traits",
- "rand 0.10.1",
+ "rand 0.10.2",
  "rand_core 0.10.0",
 ]
 
@@ -4466,7 +4466,7 @@ dependencies = [
  "opentelemetry_sdk",
  "portable-pty",
  "psl",
- "rand 0.10.1",
+ "rand 0.10.2",
  "reqwest",
  "rsa 0.9.10",
  "rustix",
@@ -4631,7 +4631,7 @@ dependencies = [
  "keyring",
  "librefang-runtime",
  "librefang-types",
- "rand 0.10.1",
+ "rand 0.10.2",
  "rand_core 0.6.4",
  "reqwest",
  "rustls",
@@ -4742,7 +4742,7 @@ dependencies = [
  "proptest",
  "r2d2",
  "r2d2_sqlite",
- "rand 0.10.1",
+ "rand 0.10.2",
  "regex",
  "regex-lite",
  "reqwest",
@@ -4838,7 +4838,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-http",
  "opentelemetry_sdk",
- "rand 0.10.1",
+ "rand 0.10.2",
  "reqwest",
  "serde",
  "serde_json",
@@ -4951,7 +4951,7 @@ dependencies = [
  "proptest",
  "r2d2",
  "r2d2_sqlite",
- "rand 0.10.1",
+ "rand 0.10.2",
  "regex",
  "regex-lite",
  "reqwest",
@@ -5011,9 +5011,9 @@ dependencies = [
  "opentelemetry-http",
  "opentelemetry_sdk",
  "psl",
- "rand 0.10.1",
+ "rand 0.10.2",
  "reqwest",
- "rmcp 2.0.0",
+ "rmcp 2.1.0",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -5262,7 +5262,7 @@ dependencies = [
  "log",
  "md-5",
  "nom 8.0.0",
- "rand 0.10.1",
+ "rand 0.10.2",
  "rangemap",
  "sha2 0.10.9",
  "stringprep",
@@ -5580,7 +5580,7 @@ dependencies = [
  "png 0.18.1",
  "serde",
  "thiserror 2.0.18",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5719,7 +5719,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6272,7 +6272,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.45.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6352,7 +6352,7 @@ dependencies = [
  "delegate",
  "futures",
  "log",
- "rand 0.10.1",
+ "rand 0.10.2",
  "sha2 0.11.0",
  "thiserror 2.0.18",
  "tokio",
@@ -7242,7 +7242,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27c6023962132f4b30eb4c172c91ce92d933da334c59c23cddee82358ddafb0b"
 dependencies = [
  "anyhow",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -7259,9 +7259,9 @@ dependencies = [
 
 [[package]]
 name = "psl"
-version = "2.1.215"
+version = "2.1.216"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "caff7403e06671f170c65dc7bf475ed31d6e108c7e0d2440fb4df8ba56cfded6"
+checksum = "9826c2fe4dade07e9da1af2e18427257877bc8bc27aa810f6fbb52d907a480cc"
 dependencies = [
  "psl-types",
 ]
@@ -7500,9 +7500,9 @@ dependencies = [
 
 [[package]]
 name = "rand"
-version = "0.10.1"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2e8e8bcc7961af1fdac401278c6a831614941f6164ee3bf4ce61b7edb162207"
+checksum = "c7f5fa3a058cd35567ef9bfa5e75732bee0f9e4c55fa90477bef2dfcdbc4be80"
 dependencies = [
  "chacha20",
  "getrandom 0.4.2",
@@ -7984,9 +7984,9 @@ dependencies = [
 
 [[package]]
 name = "rmcp"
-version = "2.0.0"
+version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d52d21e5b342699bc4de690e6104fc4e43255e4e8420ff0f2cbb963aac09da6f"
+checksum = "f00a32c3b81b7b254076a65abd5ab2551209146713ba38f73818657e865e9433"
 dependencies = [
  "async-trait",
  "chrono",
@@ -8152,7 +8152,7 @@ dependencies = [
  "pkcs5",
  "pkcs8 0.11.0",
  "polyval",
- "rand 0.10.1",
+ "rand 0.10.2",
  "rand_core 0.10.0",
  "rsa 0.10.0-rc.18",
  "russh-cryptovec",
@@ -8260,7 +8260,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8319,7 +8319,7 @@ dependencies = [
  "security-framework 3.7.0",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9106,7 +9106,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9539,9 +9539,9 @@ checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
 
 [[package]]
 name = "tauri"
-version = "2.11.3"
+version = "2.11.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c2616f96cb644bf2c5c456d9de4d5d5100e592d7424c74d8b55c5cb96e359e93"
+checksum = "667b20e2726d572dea2de7370da16e188eb06008faf9a92fab7cdc46791190b5"
 dependencies = [
  "anyhow",
  "bytes",
@@ -9868,9 +9868,9 @@ dependencies = [
 
 [[package]]
 name = "tauri-runtime-wry"
-version = "2.11.3"
+version = "2.11.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe41e015bf8fc4d6477ff4926a0ef769dc64ff34c7b0038b6f7cacae892acb5c"
+checksum = "4e6fac707727b7a2f48e4ded90976324267371073edbb415ffb73bb0458d203f"
 dependencies = [
  "gtk",
  "http",
@@ -9964,7 +9964,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -10016,7 +10016,7 @@ dependencies = [
  "parking_lot",
  "rustix",
  "signal-hook",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -10660,7 +10660,7 @@ dependencies = [
  "png 0.18.1",
  "serde",
  "thiserror 2.0.18",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -10743,7 +10743,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -11018,7 +11018,7 @@ dependencies = [
  "atomic",
  "getrandom 0.4.2",
  "js-sys",
- "rand 0.10.1",
+ "rand 0.10.2",
  "serde_core",
  "sha1_smol",
  "wasm-bindgen",
@@ -11878,7 +11878,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
