@@ -519,6 +519,11 @@ struct OaiRequest {
     /// Moonshot Kimi K2.5: disable thinking so multi-turn with tool_calls works without preserving reasoning_content.
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<serde_json::Value>,
+    /// OpenAI-style extended-thinking opt-in, derived from `CompletionRequest.thinking` (#6398).
+    /// Many OpenAI-compatible gateways gate reasoning behind this parameter and map it to a thinking budget server-side; without it they never produce the `reasoning_content` deltas the stream path already parses.
+    /// An explicit `extra_body.reasoning_effort` overrides this value in `merge_extra_body`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<&'static str>,
     /// Structured output: `response_format` field (json_object or json_schema).
     #[serde(skip_serializing_if = "Option::is_none")]
     response_format: Option<serde_json::Value>,
@@ -553,6 +558,19 @@ fn merge_extra_body(
         for k in keys {
             obj.insert(k.clone(), extra[k].clone());
         }
+    }
+}
+
+/// Map a requested thinking budget to the OpenAI-style `reasoning_effort` bucket.
+///
+/// There is no cross-vendor convention for requesting extended thinking over the OpenAI-compatible wire; `reasoning_effort` (`low` / `medium` / `high`) is the most widely supported opt-in, with gateways translating it back into a token budget server-side.
+/// Budgets below 1024 tokens are treated as thinking-off — the same minimum-budget gate the anthropic driver applies.
+fn reasoning_effort_for_budget(budget_tokens: u32) -> Option<&'static str> {
+    match budget_tokens {
+        0..=1023 => None,
+        1024..=4096 => Some("low"),
+        4097..=16384 => Some("medium"),
+        _ => Some("high"),
     }
 }
 
@@ -1118,6 +1136,16 @@ impl OpenAIDriver {
                 Some(serde_json::json!({"type": "disabled"}))
             } else {
                 None
+            },
+            // Request extended thinking when the caller configured a budget
+            // (#6398). The EmptyString disable above wins over the opt-in.
+            reasoning_effort: if echo_policy == ReasoningEchoPolicy::EmptyString {
+                None
+            } else {
+                request
+                    .thinking
+                    .as_ref()
+                    .and_then(|tc| reasoning_effort_for_budget(tc.budget_tokens))
             },
             response_format: request
                 .response_format
@@ -3229,6 +3257,87 @@ mod tests {
         }
     }
 
+    // ── CompletionRequest.thinking → reasoning_effort (#6398) ──────────────
+
+    /// A configured thinking budget must be requested on the wire.
+    /// The stream path already parses `reasoning_content` deltas; without this opt-in, gateways that gate thinking behind `reasoning_effort` never produce them.
+    #[test]
+    fn thinking_budget_maps_to_reasoning_effort_on_the_wire() {
+        use librefang_types::config::ThinkingConfig;
+        use librefang_types::model_catalog::ReasoningEchoPolicy;
+        let driver = OpenAIDriver::new(String::new(), "https://example.com/v1".to_string());
+        let mut req =
+            build_catalog_policy_test_request("some-thinking-model", ReasoningEchoPolicy::None);
+        req.thinking = Some(ThinkingConfig::default()); // budget_tokens: 10_000
+        let oai = driver.build_request(&req).expect("build_request");
+        assert_eq!(oai.reasoning_effort, Some("medium"));
+        let wire = serde_json::to_value(&oai).expect("serialize");
+        assert_eq!(wire["reasoning_effort"], "medium");
+    }
+
+    /// No thinking config → the field must be absent from the wire, so
+    /// backends that reject unknown/unsupported params are untouched.
+    #[test]
+    fn no_thinking_config_omits_reasoning_effort() {
+        use librefang_types::model_catalog::ReasoningEchoPolicy;
+        let driver = OpenAIDriver::new(String::new(), "https://example.com/v1".to_string());
+        let req = build_catalog_policy_test_request("plain-model", ReasoningEchoPolicy::None);
+        let oai = driver.build_request(&req).expect("build_request");
+        assert_eq!(oai.reasoning_effort, None);
+        let wire = serde_json::to_string(&oai).expect("serialize");
+        assert!(!wire.contains("reasoning_effort"));
+    }
+
+    /// Budget buckets: below the anthropic-parity 1024 minimum is off; the
+    /// boundaries between low / medium / high are stable.
+    #[test]
+    fn reasoning_effort_buckets_scale_with_budget() {
+        assert_eq!(reasoning_effort_for_budget(0), None);
+        assert_eq!(reasoning_effort_for_budget(1023), None);
+        assert_eq!(reasoning_effort_for_budget(1024), Some("low"));
+        assert_eq!(reasoning_effort_for_budget(4096), Some("low"));
+        assert_eq!(reasoning_effort_for_budget(4097), Some("medium"));
+        assert_eq!(reasoning_effort_for_budget(16384), Some("medium"));
+        assert_eq!(reasoning_effort_for_budget(16385), Some("high"));
+        assert_eq!(reasoning_effort_for_budget(u32::MAX), Some("high"));
+    }
+
+    /// Kimi's EmptyString policy disables thinking wire-side; the disable
+    /// must win over a configured thinking budget.
+    #[test]
+    fn empty_string_policy_disable_wins_over_thinking_opt_in() {
+        use librefang_types::config::ThinkingConfig;
+        use librefang_types::model_catalog::ReasoningEchoPolicy;
+        let driver = OpenAIDriver::new(String::new(), "https://example.com/v1".to_string());
+        let mut req =
+            build_catalog_policy_test_request("kimi-k2.5", ReasoningEchoPolicy::EmptyString);
+        req.thinking = Some(ThinkingConfig::default());
+        let oai = driver.build_request(&req).expect("build_request");
+        assert_eq!(oai.thinking, Some(serde_json::json!({"type": "disabled"})));
+        assert_eq!(oai.reasoning_effort, None);
+    }
+
+    /// An explicit `extra_body.reasoning_effort` (ModelOverrides →
+    /// extra_params) must override the budget-derived value on the merged
+    /// body — user intent wins over the heuristic.
+    #[test]
+    fn extra_body_reasoning_effort_overrides_derived_value() {
+        use librefang_types::config::ThinkingConfig;
+        use librefang_types::model_catalog::ReasoningEchoPolicy;
+        let driver = OpenAIDriver::new(String::new(), "https://example.com/v1".to_string());
+        let mut req =
+            build_catalog_policy_test_request("some-thinking-model", ReasoningEchoPolicy::None);
+        req.thinking = Some(ThinkingConfig::default()); // derives "medium"
+        req.extra_body = Some(std::collections::BTreeMap::from([(
+            "reasoning_effort".to_string(),
+            serde_json::json!("high"),
+        )]));
+        let oai = driver.build_request(&req).expect("build_request");
+        let mut wire = serde_json::to_value(&oai).expect("serialize");
+        merge_extra_body(&oai.extra_body, &mut wire);
+        assert_eq!(wire["reasoning_effort"], "high");
+    }
+
     /// Catalog `Echo` policy on a model the substring fallback would NOT
     /// recognize must still produce the V4 Flash wire shape (echo thinking
     /// text on tool_calls turns).
@@ -3623,6 +3732,7 @@ mod tests {
             stream: false,
             stream_options: None,
             thinking: None,
+            reasoning_effort: None,
             response_format: None,
             extra_body: Some(extra),
         };
@@ -3674,6 +3784,7 @@ mod tests {
                 stream: false,
                 stream_options: None,
                 thinking: None,
+                reasoning_effort: None,
                 response_format: None,
                 extra_body: Some(extra),
             };
@@ -3726,6 +3837,7 @@ mod tests {
             stream: false,
             stream_options: None,
             thinking: None,
+            reasoning_effort: None,
             response_format: None,
             extra_body: None,
         };
