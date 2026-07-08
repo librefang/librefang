@@ -1137,8 +1137,8 @@ impl OpenAIDriver {
             } else {
                 None
             },
-            // Request extended thinking when the caller configured a budget
-            // (#6398). The EmptyString disable above wins over the opt-in.
+            // Request extended thinking when the caller configured a budget (#6398).
+            // The EmptyString disable above wins over the opt-in.
             reasoning_effort: if echo_policy == ReasoningEchoPolicy::EmptyString {
                 None
             } else {
@@ -3275,8 +3275,7 @@ mod tests {
         assert_eq!(wire["reasoning_effort"], "medium");
     }
 
-    /// No thinking config → the field must be absent from the wire, so
-    /// backends that reject unknown/unsupported params are untouched.
+    /// No thinking config → the field must be absent from the wire, so backends that reject unknown/unsupported params are untouched.
     #[test]
     fn no_thinking_config_omits_reasoning_effort() {
         use librefang_types::model_catalog::ReasoningEchoPolicy;
@@ -3288,8 +3287,7 @@ mod tests {
         assert!(!wire.contains("reasoning_effort"));
     }
 
-    /// Budget buckets: below the anthropic-parity 1024 minimum is off; the
-    /// boundaries between low / medium / high are stable.
+    /// Budget buckets: below the anthropic-parity 1024 minimum is off; the boundaries between low / medium / high are stable.
     #[test]
     fn reasoning_effort_buckets_scale_with_budget() {
         assert_eq!(reasoning_effort_for_budget(0), None);
@@ -3302,8 +3300,7 @@ mod tests {
         assert_eq!(reasoning_effort_for_budget(u32::MAX), Some("high"));
     }
 
-    /// Kimi's EmptyString policy disables thinking wire-side; the disable
-    /// must win over a configured thinking budget.
+    /// Kimi's EmptyString policy disables thinking wire-side; the disable must win over a configured thinking budget.
     #[test]
     fn empty_string_policy_disable_wins_over_thinking_opt_in() {
         use librefang_types::config::ThinkingConfig;
@@ -3317,9 +3314,7 @@ mod tests {
         assert_eq!(oai.reasoning_effort, None);
     }
 
-    /// An explicit `extra_body.reasoning_effort` (ModelOverrides →
-    /// extra_params) must override the budget-derived value on the merged
-    /// body — user intent wins over the heuristic.
+    /// An explicit `extra_body.reasoning_effort` (ModelOverrides → extra_params) must override the budget-derived value on the merged body — user intent wins over the heuristic.
     #[test]
     fn extra_body_reasoning_effort_overrides_derived_value() {
         use librefang_types::config::ThinkingConfig;
