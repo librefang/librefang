@@ -1434,11 +1434,10 @@ jobs:
 
           # --- Versioned formula (e.g. librefang@2026.3.2114) ---
           # Always generated for every release, regardless of channel
-          # Strip every non-alphanumeric char (not just '.') so pre-release
-          # versions like 2026.6.29-beta.14 yield a valid Ruby class name
-          # (LibrefangAT2026629beta14); `tr -d '.'` left the '-' in, producing
-          # `class LibrefangAT2026629-beta14` which is a syntax error.
-          CLASS_SUFFIX=$(echo "$SEMVER" | tr -cd '[:alnum:]')
+          # The class name must equal Homebrew's Formulary.class_s of the formula name, i.e. drop each separator AND uppercase the char that follows it, so librefang@2026.6.29-beta.14 -> LibrefangAT2026629Beta14.
+          # Homebrew's golden_gate audit rejects any other casing.
+          # (`tr -d '.'` left the '-' in -> a Ruby syntax error; `tr -cd [:alnum:]` dropped the '-' but kept 'beta' lowercase, which golden_gate still rejects.)
+          CLASS_SUFFIX=$(printf '%s' "$SEMVER" | perl -pe 's/[-._]([[:alnum:]])/\U$1/g; s/[-._]//g')
           CLASS_NAME="LibrefangAT${CLASS_SUFFIX}"
 
           cat > "tap/Formula/librefang@${SEMVER}.rb" <<FORMULA
