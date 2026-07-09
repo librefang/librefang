@@ -1025,10 +1025,13 @@ async fn handle_text_message(
                     if is_missing {
                         return send_json_or_close(
                             sender,
-                            &serde_json::json!({
-                                "type": "error",
-                                "content": format!("API key not configured for provider '{}'. Set it in Settings > Providers.", provider),
-                            }),
+                            &stamp_message_id(
+                                serde_json::json!({
+                                    "type": "error",
+                                    "content": format!("API key not configured for provider '{}'. Set it in Settings > Providers.", provider),
+                                }),
+                                message_id.as_deref(),
+                            ),
                         )
                         .await;
                     }
