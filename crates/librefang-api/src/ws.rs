@@ -907,12 +907,6 @@ async fn handle_agent_ws(
 // Message Handler
 // ---------------------------------------------------------------------------
 
-/// Handle a text message from the WebSocket client.
-///
-/// Returns `Err(WsClosed)` when a frame send has failed and the helper has
-/// already pushed a 1011 close frame — the caller MUST stop pumping the main
-/// loop in that case (#5137). Successful handling (including validation
-/// errors that were reported back to the client) returns `Ok(())`.
 /// Maximum accepted length for a client-supplied `message_id`.
 /// The id is echoed verbatim on terminal frames; the cap keeps a hostile client from inflating every outbound frame.
 const MAX_MESSAGE_ID_LEN: usize = 128;
@@ -926,6 +920,12 @@ fn stamp_message_id(mut frame: serde_json::Value, message_id: Option<&str>) -> s
     frame
 }
 
+/// Handle a text message from the WebSocket client.
+///
+/// Returns `Err(WsClosed)` when a frame send has failed and the helper has
+/// already pushed a 1011 close frame — the caller MUST stop pumping the main
+/// loop in that case (#5137). Successful handling (including validation
+/// errors that were reported back to the client) returns `Ok(())`.
 async fn handle_text_message(
     sender: &Arc<Mutex<SplitSink<WebSocket, Message>>>,
     state: &Arc<AppState>,
@@ -2192,9 +2192,8 @@ mod tests {
         let _ = VerboseLevel::Off;
     }
 
-    /// #6390: terminal frames echo the client's `message_id` so the dashboard
-    /// can bind a late frame to the turn that owns it. Without an id the
-    /// frame stays untouched — pre-correlation clients see the old shape.
+    /// #6390: terminal frames echo the client's `message_id` so the dashboard can bind a late frame to the turn that owns it.
+    /// Without an id the frame stays untouched — pre-correlation clients see the old shape.
     #[test]
     fn stamp_message_id_echoes_the_turn_correlation_id() {
         let stamped = stamp_message_id(
