@@ -63,7 +63,8 @@ librefang start
 <details>
 <summary><strong>Homebrew</strong></summary>
 
-> 🎉 **LibreFang が [homebrew-core](https://github.com/Homebrew/homebrew-core/pull/290413) に登録されました！** 2026-07-08 に公式 Homebrew に採用されました — tap 不要、追加設定なしで CLI をインストールできます。
+> 🎉 **LibreFang が [homebrew-core](https://github.com/Homebrew/homebrew-core/pull/290413) に登録されました！**
+> 2026-07-08 に公式 Homebrew に採用されました — tap 不要、追加設定なしで CLI をインストールできます。
 
 ```bash
 brew install librefang              # CLI (stable) — 公式 homebrew-core
