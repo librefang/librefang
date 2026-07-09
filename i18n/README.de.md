@@ -63,13 +63,20 @@ librefang start
 <details>
 <summary><strong>Homebrew</strong></summary>
 
+> 🎉 **LibreFang ist jetzt in [homebrew-core](https://github.com/Homebrew/homebrew-core/pull/290413)!** Am 2026-07-08 in den offiziellen Homebrew-Tap aufgenommen — die CLI lässt sich ohne Einrichtung und ohne Tap installieren.
+
+```bash
+brew install librefang              # CLI (stable) — offizielles homebrew-core
+```
+
+Die Desktop-App und die Vorabversions-Kanäle werden weiterhin über den LibreFang-Tap veröffentlicht:
+
 ```bash
 brew tap librefang/tap
-brew install librefang              # CLI (stable)
 brew install --cask librefang       # Desktop (stable)
-# Beta/RC channels also available:
-# brew install librefang-beta       # or librefang-rc
-# brew install --cask librefang-rc  # or librefang-beta
+# Beta/RC-Kanäle:
+# brew install librefang-beta       # oder librefang-rc
+# brew install --cask librefang-rc  # oder librefang-beta
 ```
 
 </details>
