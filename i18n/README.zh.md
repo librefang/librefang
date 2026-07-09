@@ -60,21 +60,29 @@ librefang start
 # librefang init
 ```
 
-<details>
+<details open>
 <summary><strong>Homebrew</strong></summary>
+
+> 🎉 **LibreFang 已进入 [homebrew-core](https://github.com/Homebrew/homebrew-core/pull/290413)！**
+> 2026-07-08 正式合入官方 Homebrew 仓库——安装 CLI 无需额外配置，也无需再 tap。
+
+```bash
+brew install librefang              # CLI (stable) — 官方 homebrew-core
+```
+
+桌面版和预发布渠道仍通过 LibreFang tap 发布：
 
 ```bash
 brew tap librefang/tap
-brew install librefang              # CLI (stable)
 brew install --cask librefang       # Desktop (stable)
-# Beta/RC channels also available:
-# brew install librefang-beta       # or librefang-rc
-# brew install --cask librefang-rc  # or librefang-beta
+# Beta/RC 渠道：
+# brew install librefang-beta       # 或 librefang-rc
+# brew install --cask librefang-rc  # 或 librefang-beta
 ```
 
 </details>
 
-<details>
+<details open>
 <summary><strong>Arch Linux (pacman)</strong></summary>
 
 > AUR 账户注册目前暂时不可用，因此 LibreFang 目前通过官方 pacman 仓库发布已签名的软件包。
@@ -113,7 +121,7 @@ sudo pacman -Syu librefang-desktop-bin
 
 </details>
 
-<details>
+<details open>
 <summary><strong>Docker</strong></summary>
 
 ```bash
@@ -122,7 +130,7 @@ docker run -p 4545:4545 ghcr.io/librefang/librefang
 
 </details>
 
-<details>
+<details open>
 <summary><strong>云部署</strong></summary>
 
 [![Deploy Hub](https://img.shields.io/badge/Deploy%20Hub-000?style=for-the-badge&logo=rocket)](https://deploy.librefang.ai) [![Fly.io](https://img.shields.io/badge/Fly.io-purple?style=for-the-badge&logo=fly.io)](https://deploy.librefang.ai) [![Render](https://img.shields.io/badge/Render-46E3B7?style=for-the-badge&logo=render)](https://render.com/deploy?repo=https://github.com/librefang/librefang) [![Railway](https://img.shields.io/badge/Railway-0B0D0E?style=for-the-badge&logo=railway)](https://railway.app/template/librefang) [![GCP](https://img.shields.io/badge/GCP-4285F4?style=for-the-badge&logo=googlecloud)](../deploy/gcp/README.md)

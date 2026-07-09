@@ -60,21 +60,29 @@ librefang start
 # librefang init
 ```
 
-<details>
+<details open>
 <summary><strong>Homebrew</strong></summary>
+
+> 🎉 **LibreFang이 [homebrew-core](https://github.com/Homebrew/homebrew-core/pull/290413)에 등록되었습니다!**
+> 2026-07-08 공식 Homebrew tap에 채택되었습니다 — tap 없이, 별도 설정 없이 CLI를 설치할 수 있습니다.
+
+```bash
+brew install librefang              # CLI (stable) — 공식 homebrew-core
+```
+
+데스크톱 앱과 프리릴리스 채널은 계속 LibreFang tap을 통해 배포됩니다:
 
 ```bash
 brew tap librefang/tap
-brew install librefang              # CLI (stable)
 brew install --cask librefang       # Desktop (stable)
-# Beta/RC channels also available:
-# brew install librefang-beta       # or librefang-rc
-# brew install --cask librefang-rc  # or librefang-beta
+# Beta/RC 채널:
+# brew install librefang-beta       # 또는 librefang-rc
+# brew install --cask librefang-rc  # 또는 librefang-beta
 ```
 
 </details>
 
-<details>
+<details open>
 <summary><strong>Arch Linux (pacman)</strong></summary>
 
 > AUR 계정 등록은 현재 일시적으로 사용할 수 없습니다.
@@ -114,7 +122,7 @@ sudo pacman -Syu librefang-desktop-bin
 
 </details>
 
-<details>
+<details open>
 <summary><strong>Docker</strong></summary>
 
 ```bash
@@ -123,7 +131,7 @@ docker run -p 4545:4545 ghcr.io/librefang/librefang
 
 </details>
 
-<details>
+<details open>
 <summary><strong>클라우드 배포</strong></summary>
 
 [![Deploy Hub](https://img.shields.io/badge/Deploy%20Hub-000?style=for-the-badge&logo=rocket)](https://deploy.librefang.ai) [![Fly.io](https://img.shields.io/badge/Fly.io-purple?style=for-the-badge&logo=fly.io)](https://deploy.librefang.ai) [![Render](https://img.shields.io/badge/Render-46E3B7?style=for-the-badge&logo=render)](https://render.com/deploy?repo=https://github.com/librefang/librefang) [![Railway](https://img.shields.io/badge/Railway-0B0D0E?style=for-the-badge&logo=railway)](https://railway.app/template/librefang) [![GCP](https://img.shields.io/badge/GCP-4285F4?style=for-the-badge&logo=googlecloud)](../deploy/gcp/README.md)

@@ -60,21 +60,29 @@ librefang start
 # librefang init
 ```
 
-<details>
+<details open>
 <summary><strong>Homebrew</strong></summary>
+
+> 🎉 **LibreFang тепер у [homebrew-core](https://github.com/Homebrew/homebrew-core/pull/290413)!**
+> Прийнято до офіційного tap Homebrew 2026-07-08 — встановлюйте CLI без налаштувань і без tap.
+
+```bash
+brew install librefang              # CLI (стабільна версія) — офіційний homebrew-core
+```
+
+Десктопний застосунок і канали передрелізів, як і раніше, публікуються через tap LibreFang:
 
 ```bash
 brew tap librefang/tap
-brew install librefang              # CLI (стабільна версія)
 brew install --cask librefang       # Desktop (стабільна версія)
-# Також доступні бета та RC канали:
+# Канали бета та RC:
 # brew install librefang-beta       # або librefang-rc
 # brew install --cask librefang-rc  # або librefang-beta
 ```
 
 </details>
 
-<details>
+<details open>
 <summary><strong>Arch Linux (pacman)</strong></summary>
 
 > Реєстрація облікових записів AUR тимчасово недоступна.
@@ -114,7 +122,7 @@ sudo pacman -Syu librefang-desktop-bin
 
 </details>
 
-<details>
+<details open>
 <summary><strong>Docker</strong></summary>
 
 ```bash
@@ -123,7 +131,7 @@ docker run -p 4545:4545 ghcr.io/librefang/librefang
 
 </details>
 
-<details>
+<details open>
 <summary><strong>Хмарне розгортання</strong></summary>
 
 [![Deploy Hub](https://img.shields.io/badge/Deploy%20Hub-000?style=for-the-badge&logo=rocket)](https://deploy.librefang.ai) [![Fly.io](https://img.shields.io/badge/Fly.io-purple?style=for-the-badge&logo=fly.io)](https://deploy.librefang.ai) [![Render](https://img.shields.io/badge/Render-46E3B7?style=for-the-badge&logo=render)](https://render.com/deploy?repo=https://github.com/librefang/librefang) [![Railway](https://img.shields.io/badge/Railway-0B0D0E?style=for-the-badge&logo=railway)](https://railway.app/template/librefang) [![GCP](https://img.shields.io/badge/GCP-4285F4?style=for-the-badge&logo=googlecloud)](../deploy/gcp/README.md)
