@@ -18,7 +18,7 @@ import { useSessionStream } from "../lib/queries/sessions";
 import { useActiveHandsWhen } from "../lib/queries/hands";
 import { agentKeys, approvalKeys } from "../lib/queries/keys";
 import { groupedPicker } from "../lib/chatPicker";
-import { isTerminalFrameType, normalizeToolOutput, terminalFrameOwner } from "../lib/chat";
+import { applyForeignTerminalFrame, isTerminalFrameType, normalizeToolOutput, terminalFrameOwner } from "../lib/chat";
 import {
   deriveDropdownActiveSessionId,
   pickSessionDropdownLabel,
@@ -990,35 +990,25 @@ function useChatMessages(
           resetFallbackTimer();
           try {
             const data = JSON.parse(event.data as string);
-            // #6390: a previous turn's terminal frame can land after this turn replaced the socket listener — post-turn memory extraction delays `response` past the next user send.
-            // The daemon echoes the `message_id` we sent, so route a foreign frame to the bubble that owns it and leave this turn's lifecycle (cleanup / finishTurn / auto-pin) untouched.
+            // #6390: a previous turn's terminal frame can land here after this turn replaced the socket listener — post-turn memory extraction delays `response` past the next user send.
+            // The daemon echoes the `message_id` we sent, so route a foreign frame to the bubble that owns it (patch / silent-remove / error-mark) and leave this turn's own bubble and lifecycle (cleanup / finishTurn) untouched.
             if (
               isTerminalFrameType(data.type) &&
               terminalFrameOwner(data.message_id, botMsg.id) === "foreign"
             ) {
-              const foreignId = data.message_id as string;
-              if (data.type === "response") {
-                updateAgentMessages(sendAgentId, prev => prev.map(m =>
-                  m.id === foreignId
-                    ? {
-                        ...m, content: data.content || m.content, isStreaming: false,
-                        tokens: { output: data.output_tokens, input: data.input_tokens },
-                        cost_usd: data.cost_usd,
-                        memories_saved: data.memories_saved,
-                        memories_used: data.memories_used,
-                        thinking: typeof data.thinking === "string" ? data.thinking : m.thinking,
-                        thinkingCollapsed: m.thinkingCollapsed ?? true,
-                      }
-                    : m
-                ));
-              } else if (data.type === "silent_complete") {
-                updateAgentMessages(sendAgentId, prev => prev.filter(m => m.id !== foreignId));
-              } else {
-                updateAgentMessages(sendAgentId, prev => prev.map(m =>
-                  m.id === foreignId
-                    ? { ...m, isStreaming: false, error: data.content || "WebSocket error" }
-                    : m
-                ));
+              updateAgentMessages(sendAgentId, prev => applyForeignTerminalFrame(prev, data));
+              // #6390 + #5199-B: a foreign `response` can be the frame that first carries the resolved session id for a still-unpinned chat — the first turn is usually the one that creates the session — so run the same auto-pin gate here too.
+              // Without this the chat stays unpinned for the rest of the tab's life whenever the current (newer) turn ends as `silent_complete` / `error` and never re-resolves the id itself.
+              if (data.type === "response" && shouldAutoPinResolvedSession({
+                sendAgentId,
+                currentAgentId: currentAgentRef.current,
+                currentSessionId: currentSessionRef.current,
+                urlSessionId: sessionId,
+                resolvedSessionId: data.session_id,
+              })) {
+                const newSid = data.session_id as string;
+                cacheSet(cacheKey(sendAgentId, newSid), applyForeignTerminalFrame(messagesRef.current, data));
+                onAutoPinSession?.(newSid);
               }
               return;
             }
