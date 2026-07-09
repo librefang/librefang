@@ -990,12 +990,8 @@ function useChatMessages(
           resetFallbackTimer();
           try {
             const data = JSON.parse(event.data as string);
-            // #6390: a previous turn's terminal frame can land after this
-            // turn replaced the socket listener — post-turn memory extraction
-            // delays `response` past the next user send. The daemon echoes
-            // the `message_id` we sent, so route a foreign frame to the
-            // bubble that owns it and leave this turn's lifecycle
-            // (cleanup / finishTurn / auto-pin) untouched.
+            // #6390: a previous turn's terminal frame can land after this turn replaced the socket listener — post-turn memory extraction delays `response` past the next user send.
+            // The daemon echoes the `message_id` we sent, so route a foreign frame to the bubble that owns it and leave this turn's lifecycle (cleanup / finishTurn / auto-pin) untouched.
             if (
               isTerminalFrameType(data.type) &&
               terminalFrameOwner(data.message_id, botMsg.id) === "foreign"
@@ -1242,9 +1238,8 @@ function useChatMessages(
           content: trimmed,
           thinking: deepThinking,
           show_thinking: showThinkingProcess,
-          // Turn correlation id (#6390): the daemon echoes it on every
-          // terminal frame so late frames bind to this bubble, not the
-          // newest one. Reuses the bubble id — no extra mapping needed.
+          // Turn correlation id (#6390): the daemon echoes it on every terminal frame so late frames bind to this bubble, not the newest one.
+          // Reuses the bubble id — no extra mapping needed.
           message_id: botMsg.id,
           // Backend ws handler reads `parsed["attachments"]` (ws.rs) and
           // resolves them via the same path as the HTTP /message endpoint.
@@ -2069,8 +2064,7 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
   }, [message]);
 
   const effectiveDisabled = disabled || !!authMissing;
-  // Both the textarea and the send button unlock on `typing:stop` (`disabled`
-  // and `inputDisabled` both track `isStreaming`).
+  // Both the textarea and the send button unlock on `typing:stop` (`disabled` and `inputDisabled` both track `isStreaming`).
   // The `response` frame still arrives later; the daemon echoes our `message_id` on it, and the foreign-terminal router in `handleMessage` binds it to the bubble that owns it even when a newer turn has already replaced the listener (#6390) — so the send-button gate does not need to wait for it.
   const textareaDisabled = (inputDisabled ?? disabled) || !!authMissing;
 

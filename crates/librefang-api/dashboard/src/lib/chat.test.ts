@@ -181,8 +181,7 @@ describe("terminalFrameOwner (#6390)", () => {
   });
 
   it("routes a different echoed id to the foreign turn that owns it", () => {
-    // The misbind race: turn A's late `response` arrives while turn B's
-    // listener is active — it must NOT be treated as B's terminal frame.
+    // The misbind race: turn A's late `response` arrives while turn B's listener is active — it must NOT be treated as B's terminal frame.
     expect(terminalFrameOwner("bot-A", "bot-B")).toBe("foreign");
   });
 
