@@ -62,7 +62,7 @@ librefang start
 # librefang init
 ```
 
-<details>
+<details open>
 <summary><strong>Homebrew</strong></summary>
 
 > 🎉 **LibreFang est désormais dans [homebrew-core](https://github.com/Homebrew/homebrew-core/pull/290413) !**
@@ -84,7 +84,7 @@ brew install --cask librefang       # Desktop (stable)
 
 </details>
 
-<details>
+<details open>
 <summary><strong>Arch Linux (pacman)</strong></summary>
 
 > L'inscription de comptes AUR est temporairement indisponible.
@@ -124,7 +124,7 @@ Consultez la [documentation du dépôt Arch](../packaging/arch-repo/README.md) p
 
 </details>
 
-<details>
+<details open>
 <summary><strong>Docker</strong></summary>
 
 ```bash
@@ -133,7 +133,7 @@ docker run -p 4545:4545 ghcr.io/librefang/librefang
 
 </details>
 
-<details>
+<details open>
 <summary><strong>Déploiement Cloud</strong></summary>
 
 [![Deploy Hub](https://img.shields.io/badge/Deploy%20Hub-000?style=for-the-badge&logo=rocket)](https://deploy.librefang.ai) [![Fly.io](https://img.shields.io/badge/Fly.io-purple?style=for-the-badge&logo=fly.io)](https://deploy.librefang.ai) [![Render](https://img.shields.io/badge/Render-46E3B7?style=for-the-badge&logo=render)](https://render.com/deploy?repo=https://github.com/librefang/librefang) [![Railway](https://img.shields.io/badge/Railway-0B0D0E?style=for-the-badge&logo=railway)](https://railway.app/template/librefang) [![GCP](https://img.shields.io/badge/GCP-4285F4?style=for-the-badge&logo=googlecloud)](../deploy/gcp/README.md)
