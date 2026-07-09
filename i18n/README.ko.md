@@ -63,13 +63,20 @@ librefang start
 <details>
 <summary><strong>Homebrew</strong></summary>
 
+> 🎉 **LibreFang이 [homebrew-core](https://github.com/Homebrew/homebrew-core/pull/290413)에 등록되었습니다!** 2026-07-08 공식 Homebrew tap에 채택되었습니다 — tap 없이, 별도 설정 없이 CLI를 설치할 수 있습니다.
+
+```bash
+brew install librefang              # CLI (stable) — 공식 homebrew-core
+```
+
+데스크톱 앱과 프리릴리스 채널은 계속 LibreFang tap을 통해 배포됩니다:
+
 ```bash
 brew tap librefang/tap
-brew install librefang              # CLI (stable)
 brew install --cask librefang       # Desktop (stable)
-# Beta/RC channels also available:
-# brew install librefang-beta       # or librefang-rc
-# brew install --cask librefang-rc  # or librefang-beta
+# Beta/RC 채널:
+# brew install librefang-beta       # 또는 librefang-rc
+# brew install --cask librefang-rc  # 또는 librefang-beta
 ```
 
 </details>
