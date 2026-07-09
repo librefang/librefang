@@ -1,0 +1,38 @@
+id = "guilded"
+name = "Guilded"
+description = "Guilded bot adapter for messaging in Guilded servers and channels"
+category = "enterprise"
+icon = "lucide:castle"
+protocol = "websocket"
+
+[i18n.zh]
+name = "Guilded"
+description = "Guilded 机器人适配器，在 Guilded 服务器和频道中收发消息"
+
+[i18n.zh-TW]
+name = "Guilded"
+description = "Guilded 機器人適配器，在 Guilded 伺服器和頻道中收發訊息"
+
+[i18n.ja]
+name = "Guilded"
+description = "Guildedボットアダプター、Guildedサーバーとチャンネルでのメッセージング"
+
+[i18n.ko]
+name = "Guilded"
+description = "Guilded 봇 어댑터, Guilded 서버와 채널에서 메시지 송수신"
+
+[i18n.de]
+name = "Guilded"
+description = "Guilded-Bot-Adapter für Nachrichten in Guilded-Servern und -Kanälen"
+
+[i18n.es]
+name = "Guilded"
+description = "Adaptador de bot Guilded para mensajería en servidores y canales de Guilded"
+
+[metadata]
+url = "https://www.guilded.gg"
+docs = "https://www.guilded.gg/docs/api/"
+
+[i18n.fr]
+name = "Guilded"
+description = "Adaptateur bot Guilded — messagerie dans les serveurs et salons Guilded."

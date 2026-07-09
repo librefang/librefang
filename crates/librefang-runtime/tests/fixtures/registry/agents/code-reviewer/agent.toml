@@ -1,0 +1,102 @@
+name = "code-reviewer"
+version = "0.4.3-beta3-20260314"
+description = "Senior code reviewer. Reviews PRs, identifies issues, suggests improvements with production standards."
+author = "librefang"
+module = "builtin:chat"
+tags = ["review", "code-quality", "best-practices"]
+
+# Per-agent resource allowlists (refs librefang/librefang-registry#87).
+# Empty list = all available; explicit list filters the prompt surface
+# so the LLM only sees what this agent actually uses.
+mcp_servers = ["memory", "github", "git"]
+skills = ["code-reviewer", "rust-expert", "python-expert", "typescript-expert"]
+
+
+max_history_messages = 80
+[metadata.routing]
+aliases = [
+  "code review",
+  "review this pr",
+  "review this patch",
+  "review this diff",
+  "pull request review",
+]
+weak_aliases = ["review", "pr review", "best practices"]
+
+[model]
+provider = "default"
+model = "default"
+api_key_env = "GEMINI_API_KEY"
+max_tokens = 4096
+temperature = 0.3
+system_prompt = """You are Code Reviewer, a senior engineer running inside the LibreFang Agent OS.
+
+Review criteria (in priority order):
+1. CORRECTNESS: Does it work? Logic errors, edge cases, error handling
+2. SECURITY: Injection, auth, data exposure, input validation
+3. PERFORMANCE: Algorithmic complexity, unnecessary allocations, I/O patterns
+4. MAINTAINABILITY: Naming, structure, separation of concerns
+5. STYLE: Consistency with codebase, idiomatic patterns
+
+Review format:
+- Start with a summary (approve / request changes / comment)
+- Group feedback by file
+- Use severity: [MUST FIX] / [SHOULD FIX] / [NIT] / [PRAISE]
+- Always explain WHY, not just WHAT
+- Suggest specific code when proposing changes
+
+Rules:
+- Be respectful and constructive
+- Acknowledge good code, not just problems
+- Don't bikeshed on style if there's a formatter
+- Focus on things that matter for production"""
+
+[[fallback_models]]
+provider = "default"
+model = "default"
+api_key_env = "GROQ_API_KEY"
+
+[resources]
+max_llm_tokens_per_hour = 150000
+
+[capabilities]
+tools = [
+  "file_read",
+  "file_list",
+  "shell_exec",
+  "memory_store",
+  "memory_recall",
+  "web_search",
+]
+memory_read = ["*"]
+memory_write = ["self.*", "shared.*"]
+shell = ["cargo clippy *", "cargo fmt *", "git diff *", "git log *"]
+
+
+[i18n.zh]
+name = "代码评审员"
+description = "资深代码评审员：审查 PR、发现问题，按生产标准给出改进建议。"
+
+[i18n.zh-TW]
+name = "程式碼評審員"
+description = "資深程式碼評審員：審查 PR、發現問題，按生產標準給出改進建議。"
+
+[i18n.ja]
+name = "コードレビュアー"
+description = "シニアコードレビュアー：PR を精査し、本番品質を基準に問題を指摘し改善案を提示。"
+
+[i18n.ko]
+name = "코드 리뷰어"
+description = "시니어 코드 리뷰어: PR을 검토하고 프로덕션 기준으로 문제 지적 및 개선 제안."
+
+[i18n.de]
+name = "Code-Reviewer"
+description = "Senior Code-Reviewer: prüft PRs, erkennt Probleme, schlägt Verbesserungen nach Produktionsstandards vor."
+
+[i18n.es]
+name = "Revisor de código"
+description = "Revisor senior: inspecciona PRs, detecta problemas y sugiere mejoras con estándares de producción."
+
+[i18n.fr]
+name = "Relecteur de code"
+description = "Relecteur senior : examine les PR, identifie les problèmes et propose des améliorations aux standards de production."

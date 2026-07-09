@@ -1,0 +1,38 @@
+id = "mastodon"
+name = "Mastodon"
+description = "Mastodon adapter for posting toots and reading timelines on Mastodon instances"
+category = "social"
+icon = "lucide:database"
+protocol = "rest-api"
+
+[i18n.zh]
+name = "Mastodon"
+description = "Mastodon 适配器，在 Mastodon 实例上发布嘟文和阅读时间线"
+
+[i18n.zh-TW]
+name = "Mastodon"
+description = "Mastodon 適配器，在 Mastodon 實例上發布嘟文和閱讀時間線"
+
+[i18n.ja]
+name = "Mastodon"
+description = "Mastodonアダプター、Mastodonインスタンスでのトゥート投稿とタイムライン閲覧"
+
+[i18n.ko]
+name = "Mastodon"
+description = "Mastodon 어댑터, Mastodon 인스턴스에서 글 게시 및 타임라인 읽기"
+
+[i18n.de]
+name = "Mastodon"
+description = "Mastodon-Adapter zum Posten von Toots und Lesen von Timelines auf Mastodon-Instanzen"
+
+[i18n.es]
+name = "Mastodon"
+description = "Adaptador de Mastodon para publicar toots y leer líneas de tiempo en instancias de Mastodon"
+
+[metadata]
+url = "https://joinmastodon.org"
+docs = "https://docs.joinmastodon.org/api/"
+
+[i18n.fr]
+name = "Mastodon"
+description = "Adaptateur Mastodon — publication de pouets et lecture des flux sur les instances Mastodon."

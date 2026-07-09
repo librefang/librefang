@@ -1,0 +1,60 @@
+id = "google-maps"
+name = "Google Maps"
+description = "Geocoding, reverse geocoding, directions, distance matrix, and place search via Google Maps Platform"
+category = "data"
+icon = "🗺️"
+tags = ["maps", "geocoding", "directions", "places", "google", "location"]
+
+[transport]
+type = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-google-maps@latest"]
+
+[[required_env]]
+name = "GOOGLE_MAPS_API_KEY"
+label = "Google Maps API Key"
+help = "Enable Maps JavaScript API, Geocoding API, and Places API in Google Cloud Console, then create an API key"
+is_secret = true
+get_url = "https://console.cloud.google.com/apis/credentials"
+
+[health_check]
+interval_secs = 120
+unhealthy_threshold = 3
+
+setup_instructions = """
+1. Go to https://console.cloud.google.com
+2. Enable: Geocoding API, Directions API, Places API, Distance Matrix API
+3. Create credentials → API Key
+4. Paste the key into the field above
+
+Free tier includes $200/month credit (~40,000 geocoding requests).
+"""
+
+
+[i18n.zh]
+name = "Google Maps"
+description = "通过 Google Maps 平台进行地理编码、反向地理编码、路线规划、距离矩阵与地点搜索。"
+
+[i18n.zh-TW]
+name = "Google Maps"
+description = "透過 Google Maps 平台進行地理編碼、反向地理編碼、路線規劃、距離矩陣與地點搜尋。"
+
+[i18n.ja]
+name = "Google Maps"
+description = "Google Maps プラットフォームによるジオコーディング、逆ジオコーディング、経路、距離行列、場所検索。"
+
+[i18n.ko]
+name = "Google Maps"
+description = "Google Maps 플랫폼을 통한 지오코딩, 역지오코딩, 길찾기, 거리 매트릭스, 장소 검색."
+
+[i18n.de]
+name = "Google Maps"
+description = "Geocoding, Reverse-Geocoding, Routing, Distanzmatrix und Ortssuche über die Google-Maps-Plattform."
+
+[i18n.es]
+name = "Google Maps"
+description = "Geocodificación, geocodificación inversa, rutas, matriz de distancias y búsqueda de lugares en Google Maps."
+
+[i18n.fr]
+name = "Google Maps"
+description = "Géocodage, géocodage inverse, itinéraires, matrice de distances et recherche de lieux via Google Maps Platform."

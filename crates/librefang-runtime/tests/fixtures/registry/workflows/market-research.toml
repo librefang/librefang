@@ -1,0 +1,110 @@
+id = "market-research"
+name = "Market Research Report"
+description = "Analyse a market opportunity: size, trends, customer segments, key players, and go-to-market entry points."
+category = "business"
+tags = ["market", "research", "strategy", "business"]
+
+[i18n.zh]
+name = "市场调研报告"
+description = "分析市场机会：市场规模、趋势、客户细分、主要参与者和进入市场的切入点。"
+
+[[parameters]]
+name = "market"
+description = "The market or industry to research"
+param_type = "string"
+required = true
+
+[[parameters]]
+name = "business_context"
+description = "Your company, product, or investment thesis context"
+param_type = "string"
+required = false
+default = ""
+
+[[steps]]
+name = "market_landscape"
+prompt_template = """
+You are a market research analyst. Map the current landscape for: {{market}}
+
+1. **Market definition** — precise scope and adjacent markets
+2. **Market size** — TAM, SAM, SOM estimates with methodology
+3. **Growth rate** — historical and projected CAGR
+4. **Maturity stage** — emerging / growth / mature / declining
+5. **Key trends** — top 5 forces shaping the market (technology, regulation, behaviour)
+6. **Geographic distribution** — where activity is concentrated
+
+Context: {{business_context}}
+"""
+
+[[steps]]
+name = "customer_segments"
+prompt_template = """
+Identify and profile the customer segments in this market:
+
+For each segment (aim for 3-5):
+- Name and size
+- Demographics/firmographics
+- Key pain points and jobs-to-be-done
+- Current solutions they use
+- Willingness to pay signals
+- Acquisition channels
+- Which segment is most underserved
+
+Market landscape:
+{{market_landscape}}
+"""
+depends_on = ["market_landscape"]
+
+[[steps]]
+name = "research_report"
+prompt_template = """
+Write a structured market research report:
+
+## Executive Summary
+3 bullet points: opportunity, risk, recommended entry point.
+
+## Market Overview
+## Customer Segments
+## Competitive Landscape
+Top players by segment, their moats and vulnerabilities.
+
+## Market Entry Analysis
+- Best beachhead segment
+- Entry barriers and how to overcome them
+- Differentiation opportunities
+- Estimated time to meaningful traction
+
+## Key Risks
+## Recommended Next Steps
+
+Market landscape:
+{{market_landscape}}
+
+Customer segments:
+{{customer_segments}}
+"""
+depends_on = ["market_landscape", "customer_segments"]
+
+[i18n.zh-TW]
+name = "市場研究報告"
+description = "分析市場機會：市場規模、趨勢、客戶區隔、主要玩家與進入切入點。"
+
+[i18n.ja]
+name = "市場調査レポート"
+description = "市場機会を分析：規模、トレンド、顧客セグメント、主要プレイヤー、GTM の切り口。"
+
+[i18n.ko]
+name = "시장 조사 보고서"
+description = "시장 기회 분석: 규모, 트렌드, 고객 세그먼트, 주요 플레이어, GTM 진입점."
+
+[i18n.de]
+name = "Marktforschungsbericht"
+description = "Eine Marktchance analysieren: Größe, Trends, Kundensegmente, Key-Player und Go-to-Market-Einstiegspunkte."
+
+[i18n.es]
+name = "Informe de investigación de mercado"
+description = "Analiza una oportunidad de mercado: tamaño, tendencias, segmentos de clientes, actores clave y puntos de entrada GTM."
+
+[i18n.fr]
+name = "Étude de marché"
+description = "Analyser une opportunité de marché : taille, tendances, segments clients, acteurs clés et points d’entrée GTM."

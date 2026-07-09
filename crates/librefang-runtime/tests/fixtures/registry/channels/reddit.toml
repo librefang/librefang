@@ -1,0 +1,38 @@
+id = "reddit"
+name = "Reddit"
+description = "Reddit adapter for posting and reading content via the Reddit API"
+category = "social"
+icon = "lucide:bot"
+protocol = "rest-api"
+
+[i18n.zh]
+name = "Reddit"
+description = "Reddit 适配器，通过 Reddit API 发布和阅读内容"
+
+[i18n.zh-TW]
+name = "Reddit"
+description = "Reddit 適配器，透過 Reddit API 發布和閱讀內容"
+
+[i18n.ja]
+name = "Reddit"
+description = "Redditアダプター、Reddit APIを介したコンテンツの投稿と閲覧"
+
+[i18n.ko]
+name = "Reddit"
+description = "Reddit 어댑터, Reddit API를 통한 콘텐츠 게시 및 읽기"
+
+[i18n.de]
+name = "Reddit"
+description = "Reddit-Adapter zum Posten und Lesen von Inhalten über die Reddit-API"
+
+[i18n.es]
+name = "Reddit"
+description = "Adaptador de Reddit para publicar y leer contenido a través de la API de Reddit"
+
+[metadata]
+url = "https://www.reddit.com"
+docs = "https://www.reddit.com/dev/api/"
+
+[i18n.fr]
+name = "Reddit"
+description = "Adaptateur Reddit — publication et lecture de contenu via l'API Reddit."

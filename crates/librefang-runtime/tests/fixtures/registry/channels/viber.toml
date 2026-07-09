@@ -1,0 +1,38 @@
+id = "viber"
+name = "Viber"
+description = "Viber bot adapter for sending and receiving messages via the Viber Bot API"
+category = "messaging"
+icon = "lucide:heart"
+protocol = "webhook"
+
+[i18n.zh]
+name = "Viber"
+description = "Viber 机器人适配器，通过 Viber Bot API 收发消息"
+
+[i18n.zh-TW]
+name = "Viber"
+description = "Viber 機器人適配器，透過 Viber Bot API 收發訊息"
+
+[i18n.ja]
+name = "Viber"
+description = "Viberボットアダプター、Viber Bot APIを介したメッセージの送受信"
+
+[i18n.ko]
+name = "Viber"
+description = "Viber 봇 어댑터, Viber Bot API를 통한 메시지 송수신"
+
+[i18n.de]
+name = "Viber"
+description = "Viber-Bot-Adapter zum Senden und Empfangen von Nachrichten über die Viber Bot API"
+
+[i18n.es]
+name = "Viber"
+description = "Adaptador de bot Viber para enviar y recibir mensajes a través de la API de bot Viber"
+
+[metadata]
+url = "https://www.viber.com"
+docs = "https://developers.viber.com/docs/api/"
+
+[i18n.fr]
+name = "Viber"
+description = "Adaptateur bot Viber — envoie et reçoit des messages via l'API Viber Bot."

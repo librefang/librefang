@@ -1,0 +1,39 @@
+id = "teams"
+name = "Microsoft Teams"
+description = "Microsoft Teams adapter for messaging and notifications in Teams channels"
+category = "enterprise"
+tags = ["popular"]
+icon = "lucide:square"
+protocol = "webhook"
+
+[i18n.zh]
+name = "Microsoft Teams"
+description = "Microsoft Teams 适配器，在 Teams 频道中收发消息和通知"
+
+[i18n.zh-TW]
+name = "Microsoft Teams"
+description = "Microsoft Teams 適配器，在 Teams 頻道中收發訊息和通知"
+
+[i18n.ja]
+name = "Microsoft Teams"
+description = "Microsoft Teamsアダプター、Teamsチャンネルでのメッセージングと通知"
+
+[i18n.ko]
+name = "Microsoft Teams"
+description = "Microsoft Teams 어댑터, Teams 채널에서 메시지 및 알림 송수신"
+
+[i18n.de]
+name = "Microsoft Teams"
+description = "Microsoft Teams-Adapter für Nachrichten und Benachrichtigungen in Teams-Kanälen"
+
+[i18n.es]
+name = "Microsoft Teams"
+description = "Adaptador de Microsoft Teams para mensajería y notificaciones en canales de Teams"
+
+[metadata]
+url = "https://www.microsoft.com/en-us/microsoft-teams"
+docs = "https://learn.microsoft.com/en-us/microsoftteams/platform/"
+
+[i18n.fr]
+name = "Microsoft Teams"
+description = "Adaptateur Microsoft Teams — messagerie et notifications dans les canaux Teams."

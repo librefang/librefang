@@ -1,0 +1,39 @@
+id = "matrix"
+name = "Matrix"
+description = "Matrix adapter for decentralized messaging via the Matrix client-server API"
+category = "messaging"
+tags = ["popular"]
+icon = "lucide:square"
+protocol = "matrix"
+
+[i18n.zh]
+name = "Matrix"
+description = "Matrix 适配器，通过 Matrix 客户端-服务器 API 进行去中心化通信"
+
+[i18n.zh-TW]
+name = "Matrix"
+description = "Matrix 適配器，透過 Matrix 用戶端-伺服器 API 進行去中心化通訊"
+
+[i18n.ja]
+name = "Matrix"
+description = "Matrixアダプター、Matrixクライアント-サーバーAPIによる分散型メッセージング"
+
+[i18n.ko]
+name = "Matrix"
+description = "Matrix 어댑터, Matrix 클라이언트-서버 API를 통한 탈중앙화 메시지 송수신"
+
+[i18n.de]
+name = "Matrix"
+description = "Matrix-Adapter für dezentrales Messaging über die Matrix Client-Server-API"
+
+[i18n.es]
+name = "Matrix"
+description = "Adaptador de Matrix para mensajería descentralizada a través de la API cliente-servidor de Matrix"
+
+[metadata]
+url = "https://matrix.org"
+docs = "https://spec.matrix.org/latest/client-server-api/"
+
+[i18n.fr]
+name = "Matrix"
+description = "Adaptateur Matrix — messagerie décentralisée via l'API client-serveur Matrix."

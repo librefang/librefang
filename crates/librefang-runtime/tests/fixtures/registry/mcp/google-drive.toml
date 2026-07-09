@@ -1,0 +1,56 @@
+id = "google-drive"
+name = "Google Drive"
+description = "Browse, search, and read files from Google Drive through the Anthropic MCP server"
+category = "productivity"
+icon = "lucide:folder"
+tags = ["files", "storage", "google", "documents", "cloud-storage"]
+
+[transport]
+type = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-gdrive@2025.1.14"]
+
+[oauth]
+provider = "google"
+scopes = ["https://www.googleapis.com/auth/drive.readonly"]
+auth_url = "https://accounts.google.com/o/oauth2/v2/auth"
+token_url = "https://oauth2.googleapis.com/token"
+
+[health_check]
+interval_secs = 60
+unhealthy_threshold = 3
+
+setup_instructions = """
+1. Click 'Connect' to initiate the OAuth flow with your Google account.
+2. Grant LibreFang read-only access to your Google Drive files when prompted.
+3. The connection will be established automatically after authorization.
+"""
+
+
+[i18n.zh]
+name = "Google Drive"
+description = "通过 Anthropic MCP 服务器浏览、搜索并读取 Google Drive 中的文件。"
+
+[i18n.zh-TW]
+name = "Google Drive"
+description = "透過 Anthropic MCP 伺服器瀏覽、搜尋並讀取 Google Drive 中的檔案。"
+
+[i18n.ja]
+name = "Google Drive"
+description = "Anthropic MCP サーバー経由で Google Drive のファイルを閲覧・検索・読み取り。"
+
+[i18n.ko]
+name = "Google Drive"
+description = "Anthropic MCP 서버를 통해 Google Drive의 파일을 탐색, 검색, 읽기."
+
+[i18n.de]
+name = "Google Drive"
+description = "Dateien aus Google Drive über den Anthropic-MCP-Server durchsuchen und lesen."
+
+[i18n.es]
+name = "Google Drive"
+description = "Navega, busca y lee archivos de Google Drive mediante el servidor MCP de Anthropic."
+
+[i18n.fr]
+name = "Google Drive"
+description = "Parcours, recherche et lecture de fichiers Google Drive via le serveur MCP Anthropic."

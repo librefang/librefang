@@ -1,0 +1,56 @@
+# Moonshot / Kimi — https://moonshot.ai
+# Models: 3
+
+[provider]
+id = "moonshot"
+display_name = "Moonshot (Kimi)"
+api_key_env = "MOONSHOT_API_KEY"
+base_url = "https://api.moonshot.ai/v1"
+key_required = true
+
+[[models]]
+id = "kimi-k2.6"
+display_name = "Kimi K2.6"
+tier = "frontier"
+context_window = 262144
+max_output_tokens = 16384
+input_cost_per_m = 0.74
+output_cost_per_m = 3.49
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+supports_thinking = true
+# Kimi requires reasoning_content present (empty string) on assistant
+# turns with tool_calls, with thinking disabled wire-side for multi-turn
+# compatibility. See librefang/librefang openai driver.
+reasoning_echo_policy = "empty_string"
+aliases = ["kimi", "kimi-k2.6-0420"]
+
+[[models]]
+id = "kimi-k2.5"
+display_name = "Kimi K2.5"
+tier = "frontier"
+context_window = 131072
+max_output_tokens = 16384
+input_cost_per_m = 0.44
+output_cost_per_m = 2.0
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+supports_thinking = true
+reasoning_echo_policy = "empty_string"
+aliases = ["kimi-k2.5-0711"]
+
+[[models]]
+id = "kimi-k2"
+display_name = "Kimi K2"
+tier = "frontier"
+context_window = 131072
+max_output_tokens = 16384
+input_cost_per_m = 0.57
+output_cost_per_m = 2.3
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+reasoning_echo_policy = "empty_string"
+aliases = []

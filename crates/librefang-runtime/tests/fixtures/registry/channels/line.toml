@@ -1,0 +1,38 @@
+id = "line"
+name = "LINE"
+description = "LINE Messaging API adapter for sending and receiving messages on the LINE platform"
+category = "messaging"
+icon = "lucide:circle"
+protocol = "webhook"
+
+[i18n.zh]
+name = "LINE"
+description = "LINE Messaging API 适配器，在 LINE 平台上收发消息"
+
+[i18n.zh-TW]
+name = "LINE"
+description = "LINE Messaging API 適配器，在 LINE 平台上收發訊息"
+
+[i18n.ja]
+name = "LINE"
+description = "LINE Messaging APIアダプター、LINEプラットフォームでのメッセージ送受信"
+
+[i18n.ko]
+name = "LINE"
+description = "LINE Messaging API 어댑터, LINE 플랫폼에서 메시지 송수신"
+
+[i18n.de]
+name = "LINE"
+description = "LINE Messaging API-Adapter zum Senden und Empfangen von Nachrichten auf der LINE-Plattform"
+
+[i18n.es]
+name = "LINE"
+description = "Adaptador de LINE Messaging API para enviar y recibir mensajes en la plataforma LINE"
+
+[metadata]
+url = "https://line.me"
+docs = "https://developers.line.biz/en/docs/messaging-api/"
+
+[i18n.fr]
+name = "LINE"
+description = "Adaptateur LINE Messaging API — envoie et reçoit des messages sur la plateforme LINE."

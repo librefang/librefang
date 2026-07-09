@@ -1,0 +1,102 @@
+id = "research"
+name = "Research & Summarise"
+description = "Research pipeline that investigates a topic from multiple angles, cross-checks findings for accuracy, and produces a concise executive summary with citations."
+category = "research"
+tags = ["research", "fact-check", "summarise", "analysis"]
+
+[i18n.zh]
+name = "调研与摘要"
+description = "调研流水线，从多个角度研究主题，交叉验证结果的准确性，并生成带引用的精炼摘要。"
+
+[[parameters]]
+name = "topic"
+description = "The research topic or question to investigate"
+param_type = "string"
+required = true
+
+[[parameters]]
+name = "depth"
+description = "Research depth: overview, standard, or deep-dive"
+param_type = "string"
+required = false
+default = "standard"
+
+[[parameters]]
+name = "audience"
+description = "Target audience for the summary (executive, technical, general)"
+param_type = "string"
+required = false
+default = "general"
+
+[[steps]]
+name = "research_primary"
+prompt_template = """
+Conduct {{depth}}-level research on the following topic. Identify key facts, major viewpoints, recent developments, and relevant data points. Organise findings into clear sections with source attribution where possible.
+
+Topic: {{topic}}
+"""
+
+[[steps]]
+name = "research_counter"
+prompt_template = """
+Investigate counter-arguments, alternative perspectives, and potential criticisms related to the following topic. Identify areas of genuine controversy or debate, and note any commonly cited claims that are misleading or outdated.
+
+Topic: {{topic}}
+"""
+
+[[steps]]
+name = "fact_check"
+prompt_template = """
+Cross-check the following research findings for factual accuracy. For each major claim, assess confidence level (confirmed, likely, uncertain, disputed). Flag any contradictions between the primary research and counter-arguments. Note any claims that require additional verification.
+
+Primary research:
+{{research_primary}}
+
+Counter-arguments:
+{{research_counter}}
+"""
+depends_on = ["research_primary", "research_counter"]
+
+[[steps]]
+name = "summarise"
+prompt_template = """
+Produce a concise executive summary suitable for a {{audience}} audience. Incorporate verified findings from the fact-check step. Structure as:
+1. Key takeaways (3-5 bullet points)
+2. Detailed analysis with confidence levels
+3. Areas of uncertainty or debate
+4. Recommendations for further investigation
+
+Fact-checked research:
+{{fact_check}}
+
+Primary findings:
+{{research_primary}}
+
+Alternative perspectives:
+{{research_counter}}
+"""
+depends_on = ["fact_check"]
+
+[i18n.zh-TW]
+name = "研究與摘要"
+description = "從多個角度調研主題、交叉驗證結果準確性，並產生含引用的精煉摘要。"
+
+[i18n.ja]
+name = "リサーチと要約"
+description = "多角的にトピックを調査し、結果を相互検証、引用付きの要約を生成するリサーチパイプライン。"
+
+[i18n.ko]
+name = "리서치 및 요약"
+description = "다양한 각도로 주제를 조사하고, 결과를 교차 검증한 뒤, 인용이 포함된 간결한 요약을 생성."
+
+[i18n.de]
+name = "Recherche & Zusammenfassung"
+description = "Recherche-Pipeline: untersucht ein Thema aus mehreren Blickwinkeln, gleicht Ergebnisse ab und liefert eine prägnante Zusammenfassung mit Quellen."
+
+[i18n.es]
+name = "Investigación y resumen"
+description = "Pipeline de investigación: analiza un tema desde múltiples ángulos, contrasta hallazgos y produce un resumen conciso con citas."
+
+[i18n.fr]
+name = "Recherche et synthèse"
+description = "Pipeline de recherche : étudie un sujet sous plusieurs angles, recoupe les informations et produit une synthèse concise avec citations."

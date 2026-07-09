@@ -1,0 +1,64 @@
+id = "sentry"
+name = "Sentry"
+description = "Monitor and manage Sentry error tracking, issues, and releases through the MCP server"
+category = "devtools"
+icon = "lucide:bug"
+tags = ["monitoring", "errors", "debugging", "observability", "apm"]
+
+[transport]
+type = "stdio"
+command = "npx"
+args = ["-y", "@sentry/mcp-server@0.30.0"]
+
+[[required_env]]
+name = "SENTRY_AUTH_TOKEN"
+label = "Sentry Auth Token"
+help = "An authentication token with project:read and event:read scopes"
+is_secret = true
+get_url = "https://sentry.io/settings/account/api/auth-tokens/"
+
+[[required_env]]
+name = "SENTRY_ORG_SLUG"
+label = "Sentry Organization Slug"
+help = "Your Sentry organization slug (found in Settings > General)"
+is_secret = false
+get_url = ""
+
+[health_check]
+interval_secs = 60
+unhealthy_threshold = 3
+
+setup_instructions = """
+1. Go to Sentry > Settings > Auth Tokens (https://sentry.io/settings/account/api/auth-tokens/) and create a new token with 'project:read' and 'event:read' scopes.
+2. Find your organization slug in Sentry > Settings > General Settings.
+3. Paste the auth token and organization slug into the fields above.
+"""
+
+
+[i18n.zh]
+name = "Sentry"
+description = "通过 MCP 服务器监控与管理 Sentry 的错误追踪、Issue 与发布。"
+
+[i18n.zh-TW]
+name = "Sentry"
+description = "透過 MCP 伺服器監控與管理 Sentry 的錯誤追蹤、Issue 與發佈。"
+
+[i18n.ja]
+name = "Sentry"
+description = "MCP サーバー経由で Sentry のエラートラッキング、Issue、リリースを監視・管理。"
+
+[i18n.ko]
+name = "Sentry"
+description = "MCP 서버를 통해 Sentry의 오류 추적, 이슈, 릴리스를 모니터링 및 관리."
+
+[i18n.de]
+name = "Sentry"
+description = "Sentry-Fehlertracking, -Issues und -Releases über den MCP-Server überwachen und verwalten."
+
+[i18n.es]
+name = "Sentry"
+description = "Monitoriza y gestiona errores, issues y releases de Sentry mediante el servidor MCP."
+
+[i18n.fr]
+name = "Sentry"
+description = "Supervise et gère le tracking d’erreurs, issues et releases Sentry via le serveur MCP."

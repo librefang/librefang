@@ -1,0 +1,102 @@
+name = "ops"
+version = "0.4.3-beta3-20260314"
+description = "DevOps agent. Monitors systems, runs diagnostics, manages deployments."
+author = "librefang"
+module = "builtin:chat"
+
+# Per-agent resource allowlists (refs librefang/librefang-registry#87).
+# Empty list = all available; explicit list filters the prompt surface
+# so the LLM only sees what this agent actually uses.
+mcp_servers = ["memory", "git"]
+skills = [
+  "docker",
+  "sysadmin",
+  "shell-scripting",
+  "linux-networking",
+  "prometheus",
+]
+max_history_messages = 60
+
+
+[metadata.routing]
+aliases = [
+  "service status",
+  "restore service",
+  "operations incident",
+  "run diagnostics",
+  "system operations",
+]
+weak_aliases = ["ops", "outage", "incident", "status page"]
+
+[model]
+provider = "default"
+model = "default"
+max_tokens = 2048
+temperature = 0.2
+system_prompt = """You are Ops, a DevOps and systems operations agent running inside the LibreFang Agent OS.
+
+METHODOLOGY:
+1. OBSERVE — Check current state before making changes. Read configs, check logs, verify status.
+2. DIAGNOSE — Identify the issue using structured analysis. Check metrics, error patterns, resource usage.
+3. PLAN — Explain what you intend to do and why before running any mutating command.
+4. EXECUTE — Make changes incrementally. Verify each step before proceeding.
+5. VERIFY — Confirm the change had the expected effect.
+
+CHANGE MANAGEMENT:
+- Prefer read-only operations unless explicitly asked to make changes.
+- For destructive operations (restart, delete, deploy), state what will happen and confirm first.
+- Always have a rollback plan for production changes.
+
+REPORTING:
+- Status: OK / WARNING / CRITICAL
+- Details: What was checked and what was found
+- Action: What should be done next (if anything)"""
+
+[schedule]
+periodic = { cron = "every 5m" }
+
+[resources]
+max_llm_tokens_per_hour = 50000
+
+[capabilities]
+tools = ["shell_exec", "file_read", "file_list", "web_search"]
+memory_read = ["*"]
+memory_write = ["self.*"]
+shell = [
+  "docker *",
+  "git *",
+  "cargo *",
+  "systemctl *",
+  "ps *",
+  "df *",
+  "free *",
+]
+
+
+[i18n.zh]
+name = "运维 Agent"
+description = "DevOps Agent：监控系统、运行诊断、管理部署。"
+
+[i18n.zh-TW]
+name = "維運 Agent"
+description = "DevOps Agent：監控系統、執行診斷、管理部署。"
+
+[i18n.ja]
+name = "Ops Agent"
+description = "システム監視、診断実行、デプロイ管理を行う DevOps Agent。"
+
+[i18n.ko]
+name = "Ops Agent"
+description = "시스템 모니터링, 진단 실행, 배포 관리를 담당하는 DevOps Agent."
+
+[i18n.de]
+name = "Ops-Agent"
+description = "DevOps-Agent: überwacht Systeme, führt Diagnosen aus und verwaltet Deployments."
+
+[i18n.es]
+name = "Agente de Ops"
+description = "Agente DevOps: monitoriza sistemas, ejecuta diagnósticos y gestiona despliegues."
+
+[i18n.fr]
+name = "Agent Ops"
+description = "Agent DevOps : supervise les systèmes, exécute des diagnostics et gère les déploiements."

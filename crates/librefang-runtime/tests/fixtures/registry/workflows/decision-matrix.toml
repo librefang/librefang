@@ -1,0 +1,100 @@
+id = "decision-matrix"
+name = "Decision Matrix"
+description = "Evaluate competing options against weighted criteria to produce a clear, defensible recommendation."
+category = "thinking"
+tags = ["decision", "analysis", "strategy", "thinking"]
+
+[i18n.zh]
+name = "决策矩阵"
+description = "对竞争方案按加权标准进行评估，输出清晰、有据可查的推荐结论。"
+
+[[parameters]]
+name = "decision"
+description = "The decision to be made and its context"
+param_type = "string"
+required = true
+
+[[parameters]]
+name = "options"
+description = "The options or alternatives being considered"
+param_type = "string"
+required = true
+
+[[steps]]
+name = "criteria"
+prompt_template = """
+You are a decision analyst. For the decision below, define the evaluation criteria:
+1. List 5-8 criteria that matter most for this decision
+2. For each criterion: define what 'good' looks like (high score) and 'bad' looks like (low score)
+3. Assign weights (must sum to 100%) based on business importance
+4. Note which criteria are must-haves (disqualifiers if failed)
+
+Decision: {{decision}}
+Options: {{options}}
+"""
+
+[[steps]]
+name = "scoring"
+prompt_template = """
+Score each option against each criterion on a 1-10 scale. Justify every score with one sentence of evidence or reasoning. Then calculate weighted scores.
+
+Format as a table: Option | Criterion | Raw Score | Weight | Weighted Score.
+
+Add a totals row per option.
+
+Decision: {{decision}}
+Options: {{options}}
+
+Criteria and weights:
+{{criteria}}
+"""
+depends_on = ["criteria"]
+
+[[steps]]
+name = "recommendation"
+prompt_template = """
+Synthesise the analysis into a decision memo:
+
+## Recommendation
+Clear winner with one-sentence rationale.
+
+## Why Not the Others
+For each non-recommended option: the decisive weakness.
+
+## Key Risks of the Recommended Option
+Top 3 risks and mitigations.
+
+## Conditions That Would Change This Recommendation
+What new information would flip the decision.
+
+## Next Steps
+3 immediate actions to execute the decision.
+
+Scoring:
+{{scoring}}
+"""
+depends_on = ["scoring"]
+
+[i18n.zh-TW]
+name = "決策矩陣"
+description = "依加權標準評估多個方案，輸出清晰且有依據的推薦結論。"
+
+[i18n.ja]
+name = "意思決定マトリクス"
+description = "重み付き基準で複数案を評価し、根拠ある推奨結論を導出。"
+
+[i18n.ko]
+name = "의사결정 매트릭스"
+description = "가중 기준으로 경쟁하는 옵션들을 평가해 명확하고 근거 있는 권고안을 도출."
+
+[i18n.de]
+name = "Entscheidungsmatrix"
+description = "Konkurrierende Optionen anhand gewichteter Kriterien bewerten und eine klare, belastbare Empfehlung ableiten."
+
+[i18n.es]
+name = "Matriz de decisión"
+description = "Evalúa opciones rivales frente a criterios ponderados y produce una recomendación clara y defendible."
+
+[i18n.fr]
+name = "Matrice de décision"
+description = "Évaluer des options concurrentes selon des critères pondérés et produire une recommandation claire et défendable."

@@ -1,0 +1,102 @@
+id = "competitor-analysis"
+name = "Competitor Analysis"
+description = "Research competitors, map their strengths and weaknesses, and produce a strategic positioning report."
+category = "business"
+tags = ["strategy", "market", "competitive", "business"]
+
+[i18n.zh]
+name = "竞品分析"
+description = "调研竞争对手，梳理其优劣势，输出战略定位报告。"
+
+[[parameters]]
+name = "product"
+description = "Your product or business and its target market"
+param_type = "string"
+required = true
+
+[[parameters]]
+name = "competitors"
+description = "List of competitors to analyse (names or URLs)"
+param_type = "string"
+required = true
+
+[[steps]]
+name = "competitor_profiles"
+prompt_template = """
+You are a market analyst. For each competitor listed, create a profile:
+- Core product and value proposition
+- Target customer segment
+- Pricing model and tiers
+- Key features and differentiators
+- Known weaknesses or complaints (from reviews, forums)
+- Go-to-market strategy
+- Estimated market share or traction signals
+
+Our product: {{product}}
+Competitors: {{competitors}}
+"""
+
+[[steps]]
+name = "swot_comparison"
+prompt_template = """
+Perform a comparative SWOT analysis:
+1. For each competitor: their Strengths, Weaknesses, Opportunities they exploit, Threats they face
+2. Our position relative to each on: product depth, pricing, UX, distribution, brand
+3. Whitespace — what pain points do all competitors fail to address?
+
+Competitor profiles:
+{{competitor_profiles}}
+"""
+depends_on = ["competitor_profiles"]
+
+[[steps]]
+name = "strategy_report"
+prompt_template = """
+Write a strategic positioning report:
+
+## Market Landscape
+Summary of the competitive field.
+
+## Our Differentiation
+Where we win, where we are at parity, where we lag.
+
+## Attack Vectors
+3 specific opportunities to take share from each competitor.
+
+## Defensive Priorities
+What strengths to reinforce before competitors close the gap.
+
+## Recommended Positioning Statement
+One sentence that clearly differentiates us from all listed competitors.
+
+## 90-Day Action Items
+Top 5 concrete actions sorted by impact.
+
+SWOT comparison:
+{{swot_comparison}}
+"""
+depends_on = ["swot_comparison"]
+
+[i18n.zh-TW]
+name = "競爭對手分析"
+description = "調研競爭對手、梳理其優劣勢，輸出策略定位報告。"
+
+[i18n.ja]
+name = "競合分析"
+description = "競合を調査し強み・弱みを整理、戦略ポジショニングレポートを作成。"
+
+[i18n.ko]
+name = "경쟁사 분석"
+description = "경쟁사를 조사하고 강점·약점을 정리해 전략적 포지셔닝 보고서를 생성."
+
+[i18n.de]
+name = "Wettbewerbsanalyse"
+description = "Konkurrenten recherchieren, Stärken und Schwächen aufzeigen und einen strategischen Positionierungsbericht erstellen."
+
+[i18n.es]
+name = "Análisis de competencia"
+description = "Investiga competidores, mapea sus fortalezas y debilidades y produce un informe de posicionamiento estratégico."
+
+[i18n.fr]
+name = "Analyse concurrentielle"
+description = "Étudier les concurrents, cartographier forces et faiblesses et produire un rapport de positionnement stratégique."

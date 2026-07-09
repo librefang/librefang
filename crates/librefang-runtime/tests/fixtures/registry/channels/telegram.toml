@@ -1,0 +1,39 @@
+id = "telegram"
+name = "Telegram"
+description = "Telegram Bot API adapter for sending and receiving messages"
+category = "messaging"
+tags = ["popular"]
+icon = "lucide:smartphone"
+protocol = "bot-api"
+
+[i18n.zh]
+name = "Telegram"
+description = "Telegram Bot API 适配器，收发消息"
+
+[i18n.zh-TW]
+name = "Telegram"
+description = "Telegram Bot API 適配器，收發訊息"
+
+[i18n.ja]
+name = "Telegram"
+description = "Telegram Bot APIアダプター、メッセージの送受信"
+
+[i18n.ko]
+name = "Telegram"
+description = "Telegram Bot API 어댑터, 메시지 송수신"
+
+[i18n.de]
+name = "Telegram"
+description = "Telegram Bot API-Adapter zum Senden und Empfangen von Nachrichten"
+
+[i18n.es]
+name = "Telegram"
+description = "Adaptador de Telegram Bot API para enviar y recibir mensajes"
+
+[metadata]
+url = "https://telegram.org"
+docs = "https://core.telegram.org/bots/api"
+
+[i18n.fr]
+name = "Telegram"
+description = "Adaptateur Telegram Bot API — envoie et reçoit des messages."

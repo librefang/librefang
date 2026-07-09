@@ -1,0 +1,57 @@
+id = "dropbox"
+name = "Dropbox"
+description = "Access and manage Dropbox files and folders through the MCP server"
+category = "productivity"
+icon = "lucide:package"
+tags = ["files", "storage", "cloud-storage", "sync", "sharing"]
+
+[transport]
+type = "stdio"
+command = "npx"
+args = ["-y", "@microagents/mcp-server-dropbox@0.0.1"]
+
+[[required_env]]
+name = "DROPBOX_ACCESS_TOKEN"
+label = "Dropbox Access Token"
+help = "A short-lived or long-lived access token from the Dropbox App Console"
+is_secret = true
+get_url = "https://www.dropbox.com/developers/apps"
+
+[health_check]
+interval_secs = 60
+unhealthy_threshold = 3
+
+setup_instructions = """
+1. Go to the Dropbox App Console (https://www.dropbox.com/developers/apps) and create a new app or select an existing one.
+2. Under the 'OAuth 2' section, generate an access token with the required permissions.
+3. Paste the access token into the DROPBOX_ACCESS_TOKEN field above.
+"""
+
+
+[i18n.zh]
+name = "Dropbox"
+description = "通过 MCP 服务器访问和管理 Dropbox 的文件与文件夹。"
+
+[i18n.zh-TW]
+name = "Dropbox"
+description = "透過 MCP 伺服器存取並管理 Dropbox 的檔案與資料夾。"
+
+[i18n.ja]
+name = "Dropbox"
+description = "MCP サーバー経由で Dropbox のファイルとフォルダを操作。"
+
+[i18n.ko]
+name = "Dropbox"
+description = "MCP 서버를 통해 Dropbox 파일과 폴더를 관리."
+
+[i18n.de]
+name = "Dropbox"
+description = "Zugriff und Verwaltung von Dropbox-Dateien und -Ordnern über den MCP-Server."
+
+[i18n.es]
+name = "Dropbox"
+description = "Accede y gestiona archivos y carpetas de Dropbox mediante el servidor MCP."
+
+[i18n.fr]
+name = "Dropbox"
+description = "Accès et gestion des fichiers et dossiers Dropbox via le serveur MCP."

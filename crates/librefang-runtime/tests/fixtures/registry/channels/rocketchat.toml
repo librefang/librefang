@@ -1,0 +1,38 @@
+id = "rocketchat"
+name = "Rocket.Chat"
+description = "Rocket.Chat adapter for messaging in self-hosted Rocket.Chat instances"
+category = "enterprise"
+icon = "lucide:rocket"
+protocol = "rest-api"
+
+[i18n.zh]
+name = "Rocket.Chat"
+description = "Rocket.Chat 适配器，在自托管 Rocket.Chat 实例中收发消息"
+
+[i18n.zh-TW]
+name = "Rocket.Chat"
+description = "Rocket.Chat 適配器，在自架 Rocket.Chat 實例中收發訊息"
+
+[i18n.ja]
+name = "Rocket.Chat"
+description = "Rocket.Chatアダプター、セルフホストRocket.Chatインスタンスでのメッセージング"
+
+[i18n.ko]
+name = "Rocket.Chat"
+description = "Rocket.Chat 어댑터, 자체 호스팅 Rocket.Chat 인스턴스에서 메시지 송수신"
+
+[i18n.de]
+name = "Rocket.Chat"
+description = "Rocket.Chat-Adapter für Nachrichten in selbstgehosteten Rocket.Chat-Instanzen"
+
+[i18n.es]
+name = "Rocket.Chat"
+description = "Adaptador de Rocket.Chat para mensajería en instancias autoalojadas de Rocket.Chat"
+
+[metadata]
+url = "https://www.rocket.chat"
+docs = "https://developer.rocket.chat/reference/api"
+
+[i18n.fr]
+name = "Rocket.Chat"
+description = "Adaptateur Rocket.Chat — messagerie dans les instances Rocket.Chat auto-hébergées."

@@ -1,0 +1,51 @@
+id = "sequential-thinking"
+name = "Sequential Thinking"
+description = "Structured multi-step reasoning tool — breaks complex problems into revisable thought chains before answering"
+category = "ai"
+icon = "🔗"
+tags = ["reasoning", "thinking", "chain-of-thought", "planning", "logic"]
+
+[transport]
+type = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-sequential-thinking@latest"]
+
+[health_check]
+interval_secs = 60
+unhealthy_threshold = 3
+
+setup_instructions = """
+No API key required.
+
+Useful for complex reasoning tasks: multi-step math, logic puzzles, planning, debugging.
+The agent can revise earlier steps as it learns more during the thought chain.
+"""
+
+
+[i18n.zh]
+name = "Sequential Thinking"
+description = "结构化的多步推理工具 —— 在回答前把复杂问题拆成可修订的思维链。"
+
+[i18n.zh-TW]
+name = "Sequential Thinking"
+description = "結構化多步推理工具 —— 回答前將複雜問題拆成可修訂的思維鏈。"
+
+[i18n.ja]
+name = "Sequential Thinking"
+description = "構造化された多段推論ツール —— 回答前に複雑な問題を修正可能な思考チェーンに分解。"
+
+[i18n.ko]
+name = "Sequential Thinking"
+description = "구조화된 다단계 추론 도구 —— 답변 전에 복잡한 문제를 수정 가능한 사고 체인으로 분해."
+
+[i18n.de]
+name = "Sequential Thinking"
+description = "Strukturiertes mehrstufiges Reasoning — komplexe Probleme in überarbeitbare Gedankenketten zerlegen."
+
+[i18n.es]
+name = "Sequential Thinking"
+description = "Razonamiento estructurado multi-paso: descompone problemas complejos en cadenas de pensamiento revisables antes de responder."
+
+[i18n.fr]
+name = "Sequential Thinking"
+description = "Raisonnement multi-étapes structuré : décompose les problèmes complexes en chaînes de pensée révisables avant de répondre."

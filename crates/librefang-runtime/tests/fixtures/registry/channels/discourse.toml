@@ -1,0 +1,38 @@
+id = "discourse"
+name = "Discourse"
+description = "Discourse forum adapter for posting topics and replies via the Discourse API"
+category = "developer"
+icon = "lucide:message-circle"
+protocol = "rest-api"
+
+[i18n.zh]
+name = "Discourse"
+description = "Discourse 论坛适配器，通过 Discourse API 发布主题和回复"
+
+[i18n.zh-TW]
+name = "Discourse"
+description = "Discourse 論壇適配器，透過 Discourse API 發布主題和回覆"
+
+[i18n.ja]
+name = "Discourse"
+description = "Discourseフォーラムアダプター、Discourse APIを介したトピックと返信の投稿"
+
+[i18n.ko]
+name = "Discourse"
+description = "Discourse 포럼 어댑터, Discourse API를 통한 주제 및 답글 게시"
+
+[i18n.de]
+name = "Discourse"
+description = "Discourse-Forum-Adapter zum Posten von Themen und Antworten über die Discourse-API"
+
+[i18n.es]
+name = "Discourse"
+description = "Adaptador de foro Discourse para publicar temas y respuestas a través de la API de Discourse"
+
+[metadata]
+url = "https://www.discourse.org"
+docs = "https://docs.discourse.org"
+
+[i18n.fr]
+name = "Discourse"
+description = "Adaptateur de forum Discourse — publie sujets et réponses via l'API Discourse."

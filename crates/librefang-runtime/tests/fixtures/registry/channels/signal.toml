@@ -1,0 +1,39 @@
+id = "signal"
+name = "Signal"
+description = "Signal adapter for secure end-to-end encrypted messaging via Signal CLI"
+category = "messaging"
+tags = ["popular"]
+icon = "lucide:lock"
+protocol = "rest-api"
+
+[i18n.zh]
+name = "Signal"
+description = "Signal 适配器，通过 Signal CLI 进行端到端加密安全通信"
+
+[i18n.zh-TW]
+name = "Signal"
+description = "Signal 適配器，透過 Signal CLI 進行端對端加密安全通訊"
+
+[i18n.ja]
+name = "Signal"
+description = "Signalアダプター、Signal CLIによるエンドツーエンド暗号化メッセージング"
+
+[i18n.ko]
+name = "Signal"
+description = "Signal 어댑터, Signal CLI를 통한 종단간 암호화 보안 메시지 송수신"
+
+[i18n.de]
+name = "Signal"
+description = "Signal-Adapter für sichere Ende-zu-Ende-verschlüsselte Nachrichten über Signal CLI"
+
+[i18n.es]
+name = "Signal"
+description = "Adaptador de Signal para mensajería segura con cifrado de extremo a extremo a través de Signal CLI"
+
+[metadata]
+url = "https://signal.org"
+docs = "https://github.com/AsamK/signal-cli"
+
+[i18n.fr]
+name = "Signal"
+description = "Adaptateur Signal — messagerie chiffrée de bout en bout via Signal CLI."

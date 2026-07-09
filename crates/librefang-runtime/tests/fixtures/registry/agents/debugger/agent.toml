@@ -1,0 +1,108 @@
+name = "debugger"
+version = "0.4.3-beta3-20260314"
+description = "Expert debugger. Traces bugs, analyzes stack traces, performs root cause analysis."
+author = "librefang"
+module = "builtin:chat"
+
+# Per-agent resource allowlists (refs librefang/librefang-registry#87).
+# Empty list = all available; explicit list filters the prompt surface
+# so the LLM only sees what this agent actually uses.
+mcp_servers = ["memory", "git", "github", "sentry"]
+skills = ["rust-expert", "python-expert", "shell-scripting"]
+
+
+max_history_messages = 80
+[metadata.routing]
+aliases = [
+  "debug this",
+  "root cause analysis",
+  "investigate bug",
+  "trace the bug",
+  "analyze stack trace",
+]
+weak_aliases = ["debug", "bug", "stack trace", "reproduce issue"]
+
+[model]
+provider = "default"
+model = "default"
+api_key_env = "GEMINI_API_KEY"
+max_tokens = 4096
+temperature = 0.2
+system_prompt = """You are Debugger, an expert bug hunter running inside the LibreFang Agent OS.
+
+DEBUGGING METHODOLOGY:
+1. REPRODUCE — Understand the exact failure. Get the error message, stack trace, or unexpected behavior.
+2. ISOLATE — Read the relevant source files. Use git log/diff to check recent changes. Narrow the search space.
+3. IDENTIFY — Find the root cause, not just symptoms. Trace data flow. Check boundary conditions.
+4. FIX — Propose the minimal correct fix. Don't refactor — just fix the bug.
+5. VERIFY — Write or suggest a test that catches this bug. Run existing tests.
+
+COMMON PATTERNS TO CHECK:
+- Off-by-one errors, null/None handling, race conditions
+- Resource leaks (file handles, connections, memory)
+- Error handling paths (what happens on failure?)
+- Type mismatches, silent truncation, encoding issues
+- Concurrency bugs: shared mutable state, lock ordering, TOCTOU
+
+RESEARCH:
+- When you see an unfamiliar error message, use web_search to find known causes and fixes.
+- Check issue trackers and Stack Overflow for similar reports.
+
+OUTPUT FORMAT:
+- Bug Report: What's happening and how to reproduce it
+- Root Cause: Why it's happening (with code references)
+- Fix: The specific change needed
+- Prevention: Test or pattern to prevent recurrence"""
+
+[[fallback_models]]
+provider = "default"
+model = "default"
+api_key_env = "GROQ_API_KEY"
+
+[resources]
+max_llm_tokens_per_hour = 150000
+
+[capabilities]
+tools = [
+  "file_read",
+  "file_write",
+  "file_list",
+  "shell_exec",
+  "web_search",
+  "web_fetch",
+  "memory_store",
+  "memory_recall",
+]
+network = ["*"]
+memory_read = ["*"]
+memory_write = ["self.*", "shared.*"]
+shell = ["cargo *", "git log *", "git diff *", "git show *", "python *"]
+
+
+[i18n.zh]
+name = "调试专家"
+description = "调试专家：追踪 Bug、分析堆栈、定位根因。"
+
+[i18n.zh-TW]
+name = "除錯專家"
+description = "除錯專家：追蹤 Bug、分析堆疊、定位根因。"
+
+[i18n.ja]
+name = "デバッガー"
+description = "バグの追跡、スタックトレース解析、根本原因分析を行うエキスパート。"
+
+[i18n.ko]
+name = "디버거"
+description = "버그 추적, 스택 트레이스 분석, 근본 원인 분석을 수행하는 전문가."
+
+[i18n.de]
+name = "Debugger"
+description = "Experte für Bug-Tracing, Stack-Trace-Analyse und Root-Cause-Analysis."
+
+[i18n.es]
+name = "Depurador"
+description = "Experto en rastreo de bugs, análisis de stack traces y análisis de causa raíz."
+
+[i18n.fr]
+name = "Débogueur"
+description = "Expert en traçage de bugs, analyse de piles d'appels et recherche de causes racines."

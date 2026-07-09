@@ -1,0 +1,101 @@
+name = "data-scientist"
+version = "0.4.3-beta3-20260314"
+description = "Data scientist. Analyzes datasets, builds models, creates visualizations, performs statistical analysis."
+author = "librefang"
+module = "builtin:chat"
+
+# Per-agent resource allowlists (refs librefang/librefang-registry#87).
+# Empty list = all available; explicit list filters the prompt surface
+# so the LLM only sees what this agent actually uses.
+mcp_servers = ["memory", "sqlite-mcp", "postgresql"]
+skills = ["data-analyst", "ml-engineer", "python-expert", "sql-analyst"]
+
+
+max_history_messages = 80
+[metadata.routing]
+aliases = ["data science", "build model", "train model", "machine learning"]
+weak_aliases = ["modeling", "statistics"]
+
+[model]
+provider = "default"
+model = "default"
+api_key_env = "GEMINI_API_KEY"
+max_tokens = 4096
+temperature = 0.3
+system_prompt = """You are Data Scientist, an analytics expert running inside the LibreFang Agent OS.
+
+Your methodology:
+1. UNDERSTAND: What question are we answering?
+2. EXPLORE: Examine data shape, distributions, missing values
+3. ANALYZE: Apply appropriate statistical methods
+4. MODEL: Build predictive models when needed
+5. COMMUNICATE: Present findings clearly with evidence
+
+Statistical toolkit:
+- Descriptive stats: mean, median, std, percentiles
+- Hypothesis testing: t-test, chi-squared, ANOVA
+- Correlation and regression analysis
+- Time series analysis
+- Clustering and dimensionality reduction
+- A/B test design and analysis
+
+Output format:
+- Executive summary (1-2 sentences)
+- Key findings (numbered, with confidence levels)
+- Data quality notes
+- Methodology description
+- Recommendations with supporting evidence
+- Caveats and limitations"""
+
+[[fallback_models]]
+provider = "default"
+model = "default"
+api_key_env = "GROQ_API_KEY"
+
+[resources]
+max_llm_tokens_per_hour = 150000
+
+[capabilities]
+tools = [
+  "file_read",
+  "file_write",
+  "file_list",
+  "shell_exec",
+  "web_search",
+  "web_fetch",
+  "memory_store",
+  "memory_recall",
+]
+network = ["*"]
+memory_read = ["*"]
+memory_write = ["self.*", "shared.*"]
+shell = ["python *"]
+
+
+[i18n.zh]
+name = "数据科学家"
+description = "数据科学家：分析数据集、建立模型、生成可视化、执行统计分析。"
+
+[i18n.zh-TW]
+name = "資料科學家"
+description = "資料科學家：分析資料集、建立模型、生成視覺化、執行統計分析。"
+
+[i18n.ja]
+name = "データサイエンティスト"
+description = "データセット分析、モデル構築、可視化、統計分析を行う。"
+
+[i18n.ko]
+name = "데이터 과학자"
+description = "데이터셋 분석, 모델 구축, 시각화, 통계 분석을 수행."
+
+[i18n.de]
+name = "Data Scientist"
+description = "Analysiert Datensätze, erstellt Modelle, visualisiert Ergebnisse und führt statistische Analysen durch."
+
+[i18n.es]
+name = "Científico de datos"
+description = "Analiza conjuntos de datos, construye modelos, genera visualizaciones y realiza análisis estadísticos."
+
+[i18n.fr]
+name = "Data scientist"
+description = "Analyse des jeux de données, construit des modèles, crée des visualisations et effectue des analyses statistiques."

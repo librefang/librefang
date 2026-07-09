@@ -1,0 +1,110 @@
+id = "learning-plan"
+name = "Personalised Learning Plan"
+description = "Assess current knowledge, identify gaps, and build a structured learning roadmap with resources and milestones."
+category = "productivity"
+tags = ["learning", "education", "planning", "productivity"]
+
+[i18n.zh]
+name = "个性化学习计划"
+description = "评估当前知识水平，识别差距，构建带资源和里程碑的结构化学习路线图。"
+
+[[parameters]]
+name = "skill"
+description = "The skill or subject to learn"
+param_type = "string"
+required = true
+
+[[parameters]]
+name = "current_level"
+description = "Your current knowledge and experience with this topic"
+param_type = "string"
+required = false
+default = "complete beginner"
+
+[[parameters]]
+name = "goal"
+description = "What you want to be able to do once you've learned it"
+param_type = "string"
+required = false
+default = "professional proficiency"
+
+[[parameters]]
+name = "time_available"
+description = "Hours per week available for learning"
+param_type = "string"
+required = false
+default = "5 hours per week"
+
+[[steps]]
+name = "gap_analysis"
+prompt_template = """
+You are an expert educator in {{skill}}. Analyse the learner's situation:
+1. **Knowledge map** — the full topic broken into sub-skills and concepts
+2. **Current position** — what they likely know given their stated level
+3. **Target position** — what they need to know to reach their goal
+4. **Critical gaps** — the 5 most important things to learn first
+5. **Common pitfalls** — mistakes beginners make, concepts people find hardest
+
+Skill: {{skill}}
+Current level: {{current_level}}
+Goal: {{goal}}
+"""
+
+[[steps]]
+name = "roadmap"
+prompt_template = """
+Design a learning roadmap divided into phases. For each phase:
+- Name and duration estimate
+- Learning objectives (what they'll be able to do)
+- Core concepts to master
+- 3-5 specific resources (books, courses, docs, tutorials — real names where possible)
+- Practice project or exercise
+- How to know the phase is complete (milestone)
+
+Time available: {{time_available}}
+
+Gap analysis:
+{{gap_analysis}}
+"""
+depends_on = ["gap_analysis"]
+
+[[steps]]
+name = "week1_plan"
+prompt_template = """
+Create a concrete day-by-day plan for the first week of learning. For each day:
+- Specific topic to cover
+- Exact resource to use (chapter, video, section)
+- Time estimate
+- Exercise or thing to build/practice
+- End-of-day check: how to verify understanding
+
+Assume {{time_available}} is available.
+
+Roadmap:
+{{roadmap}}
+"""
+depends_on = ["roadmap"]
+
+[i18n.zh-TW]
+name = "個人化學習計劃"
+description = "評估目前知識水準、找出差距，建立帶資源與里程碑的結構化學習路線圖。"
+
+[i18n.ja]
+name = "パーソナライズ学習計画"
+description = "現在の知識を評価し、ギャップを特定、リソースとマイルストーンを含む構造化ロードマップを作成。"
+
+[i18n.ko]
+name = "맞춤 학습 계획"
+description = "현재 지식을 평가하고 격차를 파악해 리소스와 마일스톤이 포함된 구조화된 학습 로드맵을 수립."
+
+[i18n.de]
+name = "Personalisierter Lernplan"
+description = "Aktuelles Wissen einschätzen, Lücken identifizieren und eine strukturierte Lernroadmap mit Ressourcen und Meilensteinen erstellen."
+
+[i18n.es]
+name = "Plan de aprendizaje personalizado"
+description = "Evalúa el conocimiento actual, identifica brechas y construye un itinerario estructurado con recursos e hitos."
+
+[i18n.fr]
+name = "Plan d’apprentissage personnalisé"
+description = "Évaluer les connaissances actuelles, identifier les lacunes et bâtir une feuille de route structurée avec ressources et jalons."

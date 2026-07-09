@@ -1,0 +1,63 @@
+id = "time"
+name = "Time & Timezone"
+description = "Get current time in any timezone, convert between timezones, and calculate time differences"
+category = "productivity"
+icon = "🕐"
+tags = ["time", "timezone", "clock", "datetime", "conversion"]
+
+[transport]
+type = "stdio"
+command = "uvx"
+args = ["mcp-server-time", "--local-timezone", "UTC"]
+
+[health_check]
+interval_secs = 60
+unhealthy_threshold = 3
+
+setup_instructions = """
+No API key required. Requires `uv`:
+- macOS/Linux: `curl -LsSf https://astral.sh/uv/install.sh | sh`
+
+To set your local timezone, update config.toml:
+
+```toml
+[[mcp_servers]]
+name = "time"
+
+[mcp_servers.transport]
+type = "stdio"
+command = "uvx"
+args = ["mcp-server-time", "--local-timezone", "Asia/Shanghai"]
+```
+
+Supports all IANA timezone names (e.g. `America/New_York`, `Europe/London`, `Asia/Tokyo`).
+"""
+
+
+[i18n.zh]
+name = "时间 & 时区"
+description = "获取任意时区的当前时间、时区换算与时差计算。"
+
+[i18n.zh-TW]
+name = "時間 & 時區"
+description = "取得任意時區的目前時間、時區轉換與時差計算。"
+
+[i18n.ja]
+name = "時刻 & タイムゾーン"
+description = "任意のタイムゾーンの現在時刻取得、タイムゾーン変換、時差計算。"
+
+[i18n.ko]
+name = "시간 & 타임존"
+description = "임의 타임존의 현재 시간 조회, 타임존 변환, 시차 계산."
+
+[i18n.de]
+name = "Zeit & Zeitzone"
+description = "Aktuelle Uhrzeit in beliebigen Zeitzonen, Zeitzonenumrechnung und Zeitdifferenzberechnung."
+
+[i18n.es]
+name = "Hora y zona horaria"
+description = "Hora actual en cualquier zona horaria, conversión entre zonas y cálculo de diferencias."
+
+[i18n.fr]
+name = "Heure & Fuseau"
+description = "Heure actuelle dans n'importe quel fuseau, conversion entre fuseaux et calcul des différences."

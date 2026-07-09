@@ -1,0 +1,38 @@
+id = "irc"
+name = "IRC"
+description = "IRC adapter for connecting to Internet Relay Chat networks and channels"
+category = "messaging"
+icon = "lucide:satellite-dish"
+protocol = "irc"
+
+[i18n.zh]
+name = "IRC"
+description = "IRC 适配器，连接 Internet Relay Chat 网络和频道"
+
+[i18n.zh-TW]
+name = "IRC"
+description = "IRC 適配器，連接 Internet Relay Chat 網路和頻道"
+
+[i18n.ja]
+name = "IRC"
+description = "IRCアダプター、Internet Relay Chatネットワークとチャンネルへの接続"
+
+[i18n.ko]
+name = "IRC"
+description = "IRC 어댑터, Internet Relay Chat 네트워크와 채널에 연결"
+
+[i18n.de]
+name = "IRC"
+description = "IRC-Adapter zur Verbindung mit Internet Relay Chat-Netzwerken und -Kanälen"
+
+[i18n.es]
+name = "IRC"
+description = "Adaptador IRC para conectar a redes y canales de Internet Relay Chat"
+
+[metadata]
+url = ""
+docs = "https://datatracker.ietf.org/doc/html/rfc2812"
+
+[i18n.fr]
+name = "IRC"
+description = "Adaptateur IRC — connexion aux réseaux et salons Internet Relay Chat."

@@ -1,0 +1,38 @@
+id = "keybase"
+name = "Keybase"
+description = "Keybase adapter for encrypted messaging via the Keybase chat API"
+category = "messaging"
+icon = "lucide:lock"
+protocol = "rest-api"
+
+[i18n.zh]
+name = "Keybase"
+description = "Keybase 适配器，通过 Keybase 聊天 API 进行加密通信"
+
+[i18n.zh-TW]
+name = "Keybase"
+description = "Keybase 適配器，透過 Keybase 聊天 API 進行加密通訊"
+
+[i18n.ja]
+name = "Keybase"
+description = "Keybaseアダプター、Keybaseチャット APIによる暗号化メッセージング"
+
+[i18n.ko]
+name = "Keybase"
+description = "Keybase 어댑터, Keybase 채팅 API를 통한 암호화 메시지 송수신"
+
+[i18n.de]
+name = "Keybase"
+description = "Keybase-Adapter für verschlüsseltes Messaging über die Keybase-Chat-API"
+
+[i18n.es]
+name = "Keybase"
+description = "Adaptador de Keybase para mensajería cifrada a través de la API de chat de Keybase"
+
+[metadata]
+url = "https://keybase.io"
+docs = "https://keybase.io/docs/api/"
+
+[i18n.fr]
+name = "Keybase"
+description = "Adaptateur Keybase — messagerie chiffrée via l'API chat Keybase."

@@ -50,12 +50,7 @@ async fn boot_open_with_dashboard() -> Harness {
     // A real asset with an extension, so the asset-hit branch is exercised too.
     std::fs::write(dashboard.join("app.js"), b"console.log('app');").expect("write app.js");
 
-    librefang_kernel::registry_sync::sync_registry(
-        tmp.path(),
-        librefang_kernel::registry_sync::DEFAULT_CACHE_TTL_SECS,
-        "",
-        None,
-    );
+    librefang_kernel::registry_sync::seed_registry_fixture_for_tests(tmp.path());
 
     let config = KernelConfig {
         home_dir: tmp.path().to_path_buf(),

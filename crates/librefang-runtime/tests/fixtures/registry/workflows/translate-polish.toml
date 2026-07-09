@@ -1,0 +1,105 @@
+id = "translate-polish"
+name = "Translation & Polish"
+description = "Translate text into a target language, then review for accuracy, naturalness, and cultural fit."
+category = "language"
+tags = ["translation", "language", "localization", "writing"]
+
+[i18n.zh]
+name = "翻译与润色"
+description = "将文本翻译为目标语言，再审校准确性、自然度和文化适配性。"
+
+[[parameters]]
+name = "source_text"
+description = "The text to translate"
+param_type = "string"
+required = true
+
+[[parameters]]
+name = "target_language"
+description = "Target language (e.g. English, Chinese, Spanish, Japanese, French)"
+param_type = "string"
+required = false
+default = "auto: if Chinese → English, if English → Chinese, otherwise → English"
+
+[[parameters]]
+name = "register"
+description = "Desired register: formal, casual, technical, literary"
+param_type = "string"
+required = false
+default = "match source"
+
+[[steps]]
+name = "translate"
+prompt_template = """
+You are a professional translator. Translate the following text into {{target_language}}.
+
+Guidelines:
+- Preserve the original meaning, tone, and structure as closely as the target language allows
+- Use {{register}} register
+- For idiomatic expressions, translate the meaning rather than word-for-word
+- For proper nouns and technical terms, keep the original with a parenthetical explanation on first use if needed
+- If any passage is ambiguous in the source, note the ambiguity briefly after the translation
+
+Source text:
+{{source_text}}
+"""
+
+[[steps]]
+name = "back_translate"
+prompt_template = """
+Back-translate the following {{target_language}} translation into the source language. Do not look at the original — produce an independent translation from the target language only.
+
+This is used to verify accuracy by comparing the back-translation to the original.
+
+Translation to back-translate:
+{{translate}}
+"""
+depends_on = ["translate"]
+
+[[steps]]
+name = "review_and_polish"
+prompt_template = """
+You are a bilingual editor. Review the translation quality by comparing original, translation, and back-translation.
+
+Check for:
+1. Meaning shifts — where the back-translation diverges from the original
+2. Unnatural phrasing that sounds translated rather than native
+3. Register consistency (target: {{register}})
+4. Cultural appropriateness for {{target_language}} readers
+
+Output: the polished final translation only, with a brief note on any changes made.
+
+Original:
+{{source_text}}
+
+Translation:
+{{translate}}
+
+Back-translation:
+{{back_translate}}
+"""
+depends_on = ["translate", "back_translate"]
+
+[i18n.zh-TW]
+name = "翻譯與潤色"
+description = "將文字翻譯為目標語言，再審校準確性、自然度與文化契合度。"
+
+[i18n.ja]
+name = "翻訳と校正"
+description = "テキストを目標言語に翻訳した後、正確性・自然さ・文化的適合性を校正。"
+
+[i18n.ko]
+name = "번역 및 다듬기"
+description = "텍스트를 대상 언어로 번역한 뒤 정확성, 자연스러움, 문화적 적합성을 검토."
+
+[i18n.de]
+name = "Übersetzen & Feinschliff"
+description = "Text in die Zielsprache übersetzen und auf Genauigkeit, Natürlichkeit und kulturelle Passform überprüfen."
+
+[i18n.es]
+name = "Traducir y pulir"
+description = "Traduce texto al idioma destino y revísalo por precisión, naturalidad y adecuación cultural."
+
+[i18n.fr]
+name = "Traduire et peaufiner"
+description = "Traduire un texte dans la langue cible puis en vérifier la précision, la fluidité et l’adéquation culturelle."

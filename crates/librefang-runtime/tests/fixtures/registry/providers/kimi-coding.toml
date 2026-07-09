@@ -1,0 +1,25 @@
+# Kimi for Code — https://api.kimi.com
+# Models: 1 (membership-based, not per-token billing)
+# Note: Free tier has limited weekly quota; paid plans from ~49 RMB/month
+# Underlying model is Kimi K2.5 (~$0.45/$2.20 per M on standard Moonshot API)
+
+[provider]
+id = "kimi_coding"
+display_name = "Kimi for Code"
+api_key_env = "KIMI_API_KEY"
+base_url = "https://api.kimi.com/coding"
+key_required = true
+
+[[models]]
+id = "kimi-for-coding"
+display_name = "Kimi For Coding"
+tier = "frontier"
+context_window = 262144
+max_output_tokens = 32768
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+reasoning_echo_policy = "empty_string"
+aliases = []

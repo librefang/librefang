@@ -1,0 +1,28 @@
+# xiaomi — auto-generated from OpenRouter API
+
+[provider]
+id = "xiaomi"
+display_name = "Xiaomi"
+api_key_env = "XIAOMI_ACCESS_KEY_ID"
+base_url = "https://cnbj3-cloud-ml.api.xiaomi.net"
+key_required = true
+
+[[models]]
+id = "mimo-v2.5"
+display_name = "Xiaomi: MiMo-V2.5"
+tier = "fast"
+context_window = 1048576
+max_output_tokens = 131072
+input_cost_per_m = 0.4
+output_cost_per_m = 2.0
+supports_streaming = true
+
+[[models]]
+id = "mimo-v2.5-pro"
+display_name = "Xiaomi: MiMo-V2.5-Pro"
+tier = "smart"
+context_window = 1048576
+max_output_tokens = 131072
+input_cost_per_m = 1.0
+output_cost_per_m = 3.0
+supports_streaming = true

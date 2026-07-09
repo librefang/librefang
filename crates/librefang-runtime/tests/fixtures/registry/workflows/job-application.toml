@@ -1,0 +1,113 @@
+id = "job-application"
+name = "Job Application Package"
+description = "Tailor a resume and cover letter to a specific job posting, then prepare targeted interview talking points."
+category = "productivity"
+tags = ["career", "resume", "job", "interview"]
+
+[i18n.zh]
+name = "求职材料准备"
+description = "针对特定职位定制简历和求职信，并准备有针对性的面试谈话要点。"
+
+[[parameters]]
+name = "job_posting"
+description = "The full job posting or description"
+param_type = "string"
+required = true
+
+[[parameters]]
+name = "resume"
+description = "Your current resume or experience summary"
+param_type = "string"
+required = true
+
+[[steps]]
+name = "job_analysis"
+prompt_template = """
+Analyse the job posting as an experienced recruiter:
+1. **Must-have requirements** — skills/experience that are non-negotiable
+2. **Nice-to-have requirements** — preferred but not required
+3. **Company signals** — culture, values, team dynamics from the language used
+4. **Role signals** — what success looks like in 90 days, key challenges
+5. **Keywords** — ATS-critical terms to include in application materials
+6. **Red flags** — anything unusual or concerning in the posting
+
+Job posting:
+{{job_posting}}
+"""
+
+[[steps]]
+name = "resume_tailoring"
+prompt_template = """
+Tailor the resume for this specific role:
+1. **Reorder sections** — put most relevant experience first
+2. **Rewrite bullet points** — for each experience, suggest stronger versions that match job keywords
+3. **Quantify impacts** — flag any bullet points that should have metrics added
+4. **Gaps to address** — experience or skills missing vs. the role requirements
+5. **Summary statement** — write a 3-sentence tailored summary for the top of the resume
+
+Job analysis:
+{{job_analysis}}
+
+Resume:
+{{resume}}
+"""
+depends_on = ["job_analysis"]
+
+[[steps]]
+name = "cover_letter"
+prompt_template = """
+Write a compelling cover letter (3-4 paragraphs, under 400 words):
+- Opening: specific hook connecting your background to the company's mission
+- Body: 2 concrete achievements that directly address the job's must-haves
+- Closing: clear ask + why this specific company
+
+Avoid clichés like 'I am writing to apply' or 'I am a hard worker'.
+
+Job analysis:
+{{job_analysis}}
+
+Resume:
+{{resume}}
+"""
+depends_on = ["job_analysis"]
+
+[[steps]]
+name = "interview_prep"
+prompt_template = """
+Prepare interview talking points:
+1. **STAR stories** — 3 specific situations from the resume mapped to the job's key requirements
+2. **Questions to ask** — 5 smart questions that show deep interest
+3. **Difficult questions** — likely tough questions for this role with suggested answers
+4. **Salary research** — how to position compensation discussion
+
+Job analysis:
+{{job_analysis}}
+
+Resume:
+{{resume}}
+"""
+depends_on = ["job_analysis", "resume_tailoring"]
+
+[i18n.zh-TW]
+name = "求職應聘包"
+description = "針對特定職位客製履歷與求職信，並準備具針對性的面試談話要點。"
+
+[i18n.ja]
+name = "応募パッケージ"
+description = "特定の求人に合わせて履歴書とカバーレターをカスタマイズし、的を射た面接トーキングポイントを準備。"
+
+[i18n.ko]
+name = "입사 지원 패키지"
+description = "특정 채용 공고에 맞춰 이력서와 커버레터를 맞춤화하고, 타겟팅된 면접 대화 포인트를 준비."
+
+[i18n.de]
+name = "Bewerbungspaket"
+description = "Lebenslauf und Anschreiben passgenau auf eine Stellenausschreibung zuschneiden und gezielte Gesprächspunkte für das Interview vorbereiten."
+
+[i18n.es]
+name = "Paquete de candidatura"
+description = "Adapta el CV y la carta de presentación a una oferta específica y prepara puntos clave enfocados para la entrevista."
+
+[i18n.fr]
+name = "Dossier de candidature"
+description = "Adapter un CV et une lettre de motivation à une offre précise, puis préparer des points de discussion ciblés pour l’entretien."

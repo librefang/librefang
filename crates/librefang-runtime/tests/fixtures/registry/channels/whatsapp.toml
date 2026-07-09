@@ -1,0 +1,39 @@
+id = "whatsapp"
+name = "WhatsApp"
+description = "WhatsApp Business API adapter for sending and receiving messages on WhatsApp"
+category = "messaging"
+tags = ["popular"]
+icon = "lucide:smartphone"
+protocol = "rest-api"
+
+[i18n.zh]
+name = "WhatsApp"
+description = "WhatsApp Business API 适配器，在 WhatsApp 上收发消息"
+
+[i18n.zh-TW]
+name = "WhatsApp"
+description = "WhatsApp Business API 適配器，在 WhatsApp 上收發訊息"
+
+[i18n.ja]
+name = "WhatsApp"
+description = "WhatsApp Business APIアダプター、WhatsAppでのメッセージ送受信"
+
+[i18n.ko]
+name = "WhatsApp"
+description = "WhatsApp Business API 어댑터, WhatsApp에서 메시지 송수신"
+
+[i18n.de]
+name = "WhatsApp"
+description = "WhatsApp Business API-Adapter zum Senden und Empfangen von Nachrichten auf WhatsApp"
+
+[i18n.es]
+name = "WhatsApp"
+description = "Adaptador de WhatsApp Business API para enviar y recibir mensajes en WhatsApp"
+
+[metadata]
+url = "https://www.whatsapp.com"
+docs = "https://developers.facebook.com/docs/whatsapp/cloud-api/"
+
+[i18n.fr]
+name = "WhatsApp"
+description = "Adaptateur WhatsApp Business API — envoie et reçoit des messages sur WhatsApp."

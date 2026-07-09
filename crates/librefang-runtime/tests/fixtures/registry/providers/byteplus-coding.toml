@@ -1,0 +1,135 @@
+# BytePlus ModelArk — Coding Plan (Anthropic-compatible) — https://www.byteplus.com/en/product/ModelArk
+# International edition's Claude Code-compatible endpoint with friendly model aliases.
+# Models: 9 (auto-routed alias + 8 named models)
+#
+# 💡 BILLING — calls here count against your **Coding Plan
+# subscription quota**, not your per-token ModelArk USD balance. If you
+# don't have a Coding Plan or want per-token billing instead, use the
+# `byteplus` provider in byteplus.toml. The Coding Plan endpoint also
+# does not expose image / video / embedding models — only the text
+# models listed below.
+#
+# Pricing fields below mirror the underlying versioned snapshots in
+# byteplus.toml for catalog accounting purposes; actual subscription
+# consumption is tracked by the BytePlus console, not these numbers.
+#
+# The Coding Plan endpoint exposes friendly stable names that route to
+# the current production snapshot, so versions advance silently without
+# config changes (use `ark-code-latest` to always get the best current
+# routing).
+
+[provider]
+id = "byteplus_coding"
+display_name = "BytePlus Coding Plan"
+api_key_env = "BYTEPLUS_CODING_API_KEY"
+base_url = "https://ark.ap-southeast.bytepluses.com/api/coding"
+key_required = true
+
+[[models]]
+id = "ark-code-latest"
+display_name = "Ark Code (auto-routed)"
+tier = "frontier"
+context_window = 196608
+max_output_tokens = 8192
+input_cost_per_m = 1.00
+output_cost_per_m = 6.00
+supports_tools = true
+supports_streaming = true
+aliases = ["ark-coding"]
+
+[[models]]
+id = "bytedance-seed-code"
+display_name = "ByteDance Seed Code"
+tier = "frontier"
+context_window = 196608
+max_output_tokens = 8192
+input_cost_per_m = 1.00
+output_cost_per_m = 6.00
+supports_tools = true
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "dola-seed-2.0-pro"
+display_name = "Dola Seed 2.0 Pro"
+tier = "frontier"
+context_window = 196608
+max_output_tokens = 8192
+input_cost_per_m = 1.00
+output_cost_per_m = 6.00
+supports_tools = true
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "dola-seed-2.0-code"
+display_name = "Dola Seed 2.0 Code"
+tier = "smart"
+context_window = 196608
+max_output_tokens = 8192
+input_cost_per_m = 1.00
+output_cost_per_m = 6.00
+supports_tools = true
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "dola-seed-2.0-lite"
+display_name = "Dola Seed 2.0 Lite"
+tier = "smart"
+context_window = 196608
+max_output_tokens = 8192
+input_cost_per_m = 0.50
+output_cost_per_m = 4.00
+supports_tools = true
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "kimi-k2.5"
+display_name = "Kimi K2.5"
+tier = "frontier"
+context_window = 196608
+max_output_tokens = 8192
+input_cost_per_m = 0.44
+output_cost_per_m = 2.0
+supports_tools = true
+supports_streaming = true
+reasoning_echo_policy = "empty_string"
+aliases = []
+
+[[models]]
+id = "glm-4.7"
+display_name = "GLM-4.7"
+tier = "smart"
+context_window = 196608
+max_output_tokens = 8192
+input_cost_per_m = 0.38
+output_cost_per_m = 1.74
+supports_tools = true
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "glm-5.1"
+display_name = "GLM-5.1"
+tier = "frontier"
+context_window = 196608
+max_output_tokens = 8192
+input_cost_per_m = 1.05
+output_cost_per_m = 3.5
+supports_tools = true
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "gpt-oss-120b"
+display_name = "GPT-OSS 120B"
+tier = "smart"
+context_window = 131072
+max_output_tokens = 8192
+input_cost_per_m = 0.039
+output_cost_per_m = 0.18
+supports_tools = true
+supports_streaming = true
+aliases = []

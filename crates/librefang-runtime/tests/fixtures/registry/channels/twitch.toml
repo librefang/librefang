@@ -1,0 +1,38 @@
+id = "twitch"
+name = "Twitch"
+description = "Twitch adapter for reading and sending messages in Twitch stream chats"
+category = "social"
+icon = "lucide:gamepad-2"
+protocol = "irc"
+
+[i18n.zh]
+name = "Twitch"
+description = "Twitch 适配器，在 Twitch 直播聊天中收发消息"
+
+[i18n.zh-TW]
+name = "Twitch"
+description = "Twitch 適配器，在 Twitch 直播聊天中收發訊息"
+
+[i18n.ja]
+name = "Twitch"
+description = "Twitchアダプター、Twitch配信チャットでのメッセージの読み取りと送信"
+
+[i18n.ko]
+name = "Twitch"
+description = "Twitch 어댑터, Twitch 스트림 채팅에서 메시지 읽기 및 전송"
+
+[i18n.de]
+name = "Twitch"
+description = "Twitch-Adapter zum Lesen und Senden von Nachrichten in Twitch-Stream-Chats"
+
+[i18n.es]
+name = "Twitch"
+description = "Adaptador de Twitch para leer y enviar mensajes en chats de transmisiones de Twitch"
+
+[metadata]
+url = "https://www.twitch.tv"
+docs = "https://dev.twitch.tv/docs/irc/"
+
+[i18n.fr]
+name = "Twitch"
+description = "Adaptateur Twitch — lecture et envoi de messages dans les chats de stream Twitch."

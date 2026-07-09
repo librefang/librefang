@@ -1,0 +1,102 @@
+id = "customer-support"
+name = "Customer Support Triage"
+description = "Tiered customer support pipeline that classifies incoming requests by urgency and category, drafts an appropriate response, and escalates complex issues to a specialist."
+category = "business"
+tags = ["support", "triage", "customer-service", "escalation"]
+
+[i18n.zh]
+name = "客户支持分流"
+description = "分级客户支持流水线，按紧急程度和类别对请求进行分类，起草相应回复，并将复杂问题升级给专家处理。"
+
+[[parameters]]
+name = "customer_message"
+description = "The customer's support request or message"
+param_type = "string"
+required = true
+
+[[parameters]]
+name = "customer_name"
+description = "Name of the customer for personalisation"
+param_type = "string"
+required = false
+default = "Customer"
+
+[[parameters]]
+name = "product_context"
+description = "Product or service context for more accurate responses"
+param_type = "string"
+required = false
+default = ""
+
+[[steps]]
+name = "classify"
+prompt_template = """
+Classify the following customer support request. Determine:
+1. Category: billing, technical, account, feature-request, bug-report, or general
+2. Urgency: low, medium, high, critical
+3. Sentiment: positive, neutral, frustrated, angry
+4. Whether escalation to a human specialist is needed (true/false)
+
+Return a structured assessment with reasoning for each classification.
+
+Product context: {{product_context}}
+
+Customer message:
+{{customer_message}}
+"""
+
+[[steps]]
+name = "draft_response"
+prompt_template = """
+Draft a helpful, empathetic support response for {{customer_name}} based on the classification below. The response should:
+- Acknowledge the customer's concern
+- Provide a clear solution or next steps
+- Match the appropriate tone for the detected sentiment
+- Include specific action items
+
+Classification:
+{{classify}}
+
+Original message:
+{{customer_message}}
+"""
+depends_on = ["classify"]
+
+[[steps]]
+name = "escalation_check"
+prompt_template = """
+Review the classification and drafted response below. Determine if this case requires escalation beyond automated support. If escalation is needed, prepare a concise internal handoff note for the specialist team that includes: summary, category, urgency, customer sentiment, attempted resolution, and recommended next steps.
+
+If no escalation is needed, confirm the drafted response is complete and ready to send.
+
+Classification:
+{{classify}}
+
+Drafted response:
+{{draft_response}}
+"""
+depends_on = ["classify", "draft_response"]
+
+[i18n.zh-TW]
+name = "客戶支援分級"
+description = "分級客戶支援流水線，按緊急程度與類別分類請求，草擬適當回覆，並將複雜問題升級給專家處理。"
+
+[i18n.ja]
+name = "カスタマーサポート トリアージ"
+description = "階層型サポートパイプライン。緊急度とカテゴリで分類し、適切な回答を下書きし、複雑な案件は専門家にエスカレーション。"
+
+[i18n.ko]
+name = "고객 지원 분류"
+description = "단계별 고객 지원 파이프라인. 긴급도와 카테고리로 요청을 분류하고 적절한 응답을 작성하며, 복잡한 이슈는 전문가에게 에스컬레이션."
+
+[i18n.de]
+name = "Customer-Support-Triage"
+description = "Gestufte Support-Pipeline: klassifiziert Anfragen nach Dringlichkeit und Kategorie, entwirft passende Antworten und eskaliert komplexe Fälle an Spezialisten."
+
+[i18n.es]
+name = "Triage de soporte"
+description = "Pipeline de soporte por niveles: clasifica solicitudes por urgencia y categoría, redacta una respuesta adecuada y escala los casos complejos a un especialista."
+
+[i18n.fr]
+name = "Triage du support client"
+description = "Pipeline de support par niveaux : classe les demandes par urgence et catégorie, rédige une réponse appropriée et escalade les cas complexes à un spécialiste."

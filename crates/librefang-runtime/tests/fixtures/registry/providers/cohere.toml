@@ -1,0 +1,35 @@
+# Cohere — https://cohere.com
+# Models: 2
+
+[provider]
+id = "cohere"
+display_name = "Cohere"
+api_key_env = "COHERE_API_KEY"
+base_url = "https://api.cohere.com/v2"
+key_required = true
+
+[[models]]
+id = "command-r-plus"
+display_name = "Command R+"
+tier = "smart"
+context_window = 128000
+max_output_tokens = 4096
+input_cost_per_m = 2.50
+output_cost_per_m = 10.0
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["command-r"]
+
+[[models]]
+id = "command-a"
+display_name = "Command A"
+tier = "smart"
+context_window = 256000
+max_output_tokens = 8192
+input_cost_per_m = 2.50
+output_cost_per_m = 10.0
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["command"]

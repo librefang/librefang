@@ -1,0 +1,38 @@
+id = "mumble"
+name = "Mumble"
+description = "Mumble adapter for text messaging in Mumble voice communication servers"
+category = "iot"
+icon = "lucide:mic"
+protocol = "websocket"
+
+[i18n.zh]
+name = "Mumble"
+description = "Mumble 适配器，在 Mumble 语音通信服务器中发送文字消息"
+
+[i18n.zh-TW]
+name = "Mumble"
+description = "Mumble 適配器，在 Mumble 語音通訊伺服器中發送文字訊息"
+
+[i18n.ja]
+name = "Mumble"
+description = "Mumbleアダプター、Mumble音声通信サーバーでのテキストメッセージング"
+
+[i18n.ko]
+name = "Mumble"
+description = "Mumble 어댑터, Mumble 음성 통신 서버에서 텍스트 메시지 전송"
+
+[i18n.de]
+name = "Mumble"
+description = "Mumble-Adapter für Textnachrichten in Mumble-Sprachkommunikationsservern"
+
+[i18n.es]
+name = "Mumble"
+description = "Adaptador de Mumble para mensajería de texto en servidores de comunicación por voz Mumble"
+
+[metadata]
+url = "https://www.mumble.info"
+docs = "https://wiki.mumble.info/wiki/Protocol"
+
+[i18n.fr]
+name = "Mumble"
+description = "Adaptateur Mumble — messagerie texte dans les serveurs de communication vocale Mumble."

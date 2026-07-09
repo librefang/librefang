@@ -1,0 +1,70 @@
+id = "slack"
+name = "Slack"
+description = "Access Slack channels, messages, and users through the MCP server"
+category = "communication"
+icon = "lucide:message-circle"
+tags = ["chat", "messaging", "team", "channels", "collaboration"]
+
+[transport]
+type = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-slack@2025.4.25"]
+
+[[required_env]]
+name = "SLACK_BOT_TOKEN"
+label = "Slack Bot Token"
+help = "A bot user OAuth token starting with xoxb-"
+is_secret = true
+get_url = "https://api.slack.com/apps"
+
+[[required_env]]
+name = "SLACK_TEAM_ID"
+label = "Slack Team ID"
+help = "Your Slack workspace team ID (found in workspace settings or URL)"
+is_secret = false
+get_url = ""
+
+[oauth]
+provider = "slack"
+scopes = ["channels:read", "chat:write", "users:read"]
+auth_url = "https://slack.com/oauth/v2/authorize"
+token_url = "https://slack.com/api/oauth.v2.access"
+
+[health_check]
+interval_secs = 60
+unhealthy_threshold = 3
+
+setup_instructions = """
+1. Go to https://api.slack.com/apps and create a new Slack app (or use an existing one). Add the 'channels:read', 'chat:write', and 'users:read' bot token scopes.
+2. Install the app to your workspace and copy the Bot User OAuth Token (starts with xoxb-).
+3. Paste the bot token and your workspace Team ID into the fields above, or use the OAuth flow to authorize directly.
+"""
+
+
+[i18n.zh]
+name = "Slack"
+description = "通过 MCP 服务器访问 Slack 频道、消息与用户。"
+
+[i18n.zh-TW]
+name = "Slack"
+description = "透過 MCP 伺服器存取 Slack 頻道、訊息與使用者。"
+
+[i18n.ja]
+name = "Slack"
+description = "MCP サーバー経由で Slack のチャンネル、メッセージ、ユーザーにアクセス。"
+
+[i18n.ko]
+name = "Slack"
+description = "MCP 서버를 통해 Slack 채널, 메시지, 사용자에 접근."
+
+[i18n.de]
+name = "Slack"
+description = "Zugriff auf Slack-Kanäle, -Nachrichten und -Nutzer über den MCP-Server."
+
+[i18n.es]
+name = "Slack"
+description = "Accede a canales, mensajes y usuarios de Slack mediante el servidor MCP."
+
+[i18n.fr]
+name = "Slack"
+description = "Accès aux salons, messages et utilisateurs Slack via le serveur MCP."

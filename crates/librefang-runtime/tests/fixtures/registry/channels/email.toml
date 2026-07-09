@@ -1,0 +1,38 @@
+id = "email"
+name = "Email"
+description = "Email adapter for sending and receiving messages via SMTP and IMAP protocols"
+category = "messaging"
+icon = "lucide:mail"
+protocol = "imap"
+
+[i18n.zh]
+name = "电子邮件"
+description = "电子邮件适配器，通过 SMTP 和 IMAP 协议收发邮件"
+
+[i18n.zh-TW]
+name = "電子郵件"
+description = "電子郵件適配器，透過 SMTP 和 IMAP 協議收發郵件"
+
+[i18n.ja]
+name = "メール"
+description = "メールアダプター、SMTPとIMAPプロトコルによるメッセージの送受信"
+
+[i18n.ko]
+name = "이메일"
+description = "이메일 어댑터, SMTP 및 IMAP 프로토콜을 통한 메시지 송수신"
+
+[i18n.de]
+name = "E-Mail"
+description = "E-Mail-Adapter zum Senden und Empfangen von Nachrichten über SMTP- und IMAP-Protokolle"
+
+[i18n.es]
+name = "Correo"
+description = "Adaptador de correo electrónico para enviar y recibir mensajes mediante protocolos SMTP e IMAP"
+
+[metadata]
+url = ""
+docs = ""
+
+[i18n.fr]
+name = "Email"
+description = "Adaptateur e-mail — envoie et reçoit des messages via les protocoles SMTP et IMAP."

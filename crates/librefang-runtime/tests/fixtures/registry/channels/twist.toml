@@ -1,0 +1,38 @@
+id = "twist"
+name = "Twist"
+description = "Twist adapter for async team communication in Twist workspaces"
+category = "enterprise"
+icon = "lucide:shuffle"
+protocol = "rest-api"
+
+[i18n.zh]
+name = "Twist"
+description = "Twist 适配器，在 Twist 工作区中进行异步团队沟通"
+
+[i18n.zh-TW]
+name = "Twist"
+description = "Twist 適配器，在 Twist 工作區中進行非同步團隊溝通"
+
+[i18n.ja]
+name = "Twist"
+description = "Twistアダプター、Twistワークスペースでの非同期チームコミュニケーション"
+
+[i18n.ko]
+name = "Twist"
+description = "Twist 어댑터, Twist 워크스페이스에서 비동기 팀 커뮤니케이션"
+
+[i18n.de]
+name = "Twist"
+description = "Twist-Adapter für asynchrone Teamkommunikation in Twist-Workspaces"
+
+[i18n.es]
+name = "Twist"
+description = "Adaptador de Twist para comunicación asíncrona de equipo en espacios de trabajo Twist"
+
+[metadata]
+url = "https://twist.com"
+docs = "https://developer.twist.com/v3/"
+
+[i18n.fr]
+name = "Twist"
+description = "Adaptateur Twist — communication asynchrone d'équipe dans les espaces Twist."

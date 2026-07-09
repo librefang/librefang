@@ -1,0 +1,86 @@
+name = "hello-world"
+version = "0.4.3-beta3-20260314"
+description = "A friendly greeting agent that can read files, search the web, and answer everyday questions."
+author = "librefang"
+module = "builtin:chat"
+
+# Per-agent resource allowlists (refs librefang/librefang-registry#87).
+# Empty list = all available; explicit list filters the prompt surface
+# so the LLM only sees what this agent actually uses.
+mcp_servers = ["memory", "fetch"]
+skills = []
+skills_disabled = true
+
+
+[metadata.routing]
+aliases = [
+  "hello world",
+  "greeting",
+  "say hello",
+  "introduce yourself",
+  "new user welcome",
+]
+weak_aliases = ["hello", "welcome", "intro", "getting started"]
+
+[model]
+provider = "default"
+model = "default"
+max_tokens = 4096
+temperature = 0.6
+system_prompt = """You are Hello World, a friendly and approachable agent in the LibreFang Agent OS.
+
+You are the first agent new users interact with. Be warm, concise, and helpful.
+Answer questions directly. If you can look something up to give a better answer, do it.
+
+When the user asks a factual question, use web_search to find current information rather than relying on potentially outdated knowledge. Present findings clearly without dumping raw search results.
+
+Keep responses brief (2-4 paragraphs max) unless the user asks for detail.
+
+Always reply in the same language the user uses. Never literally translate proper nouns, product names, or technical terms (e.g. "Hello World", "LibreFang", "Agent OS" stay as-is)."""
+
+[resources]
+max_llm_tokens_per_hour = 100000
+
+[capabilities]
+tools = [
+  "file_read",
+  "file_write",
+  "file_list",
+  "web_fetch",
+  "web_search",
+  "memory_store",
+  "memory_recall",
+]
+network = ["*"]
+memory_read = ["*"]
+memory_write = ["self.*"]
+agent_spawn = false
+
+
+[i18n.zh]
+name = "Hello World"
+description = "友好的问候 Agent，可以读文件、搜索网页、回答日常问题。"
+
+[i18n.zh-TW]
+name = "Hello World"
+description = "友善的問候 Agent，可讀檔案、搜尋網頁、回答日常問題。"
+
+[i18n.ja]
+name = "Hello World"
+description = "ファイルの読み取り、ウェブ検索、日常の質問に答えるフレンドリーな挨拶 Agent。"
+
+[i18n.ko]
+name = "Hello World"
+description = "파일 읽기, 웹 검색, 일상 질문에 답하는 친근한 인사 Agent."
+
+[i18n.de]
+name = "Hello World"
+description = "Freundlicher Begrüßungs-Agent, der Dateien lesen, das Web durchsuchen und Alltagsfragen beantworten kann."
+
+[i18n.es]
+name = "Hello World"
+description = "Agente de saludo amigable que lee archivos, busca en la web y responde preguntas cotidianas."
+
+[i18n.fr]
+name = "Hello World"
+description = "Agent de bienvenue amical, capable de lire des fichiers, chercher sur le web et répondre aux questions courantes."

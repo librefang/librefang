@@ -1,0 +1,57 @@
+id = "gcp-mcp"
+name = "Google Cloud Platform"
+description = "Manage GCP resources including Compute Engine, Cloud Storage, and BigQuery through the MCP server"
+category = "cloud"
+icon = "lucide:globe"
+tags = ["cloud", "google", "infrastructure", "gce", "gcs", "bigquery", "devops"]
+
+[transport]
+type = "stdio"
+command = "npx"
+args = ["-y", "@google-cloud/gcloud-mcp@0.5.3"]
+
+[[required_env]]
+name = "GOOGLE_APPLICATION_CREDENTIALS"
+label = "Service Account Key Path"
+help = "Absolute path to a GCP service account JSON key file"
+is_secret = false
+get_url = "https://console.cloud.google.com/iam-admin/serviceaccounts"
+
+[health_check]
+interval_secs = 60
+unhealthy_threshold = 3
+
+setup_instructions = """
+1. Go to the GCP Console > IAM & Admin > Service Accounts (https://console.cloud.google.com/iam-admin/serviceaccounts) and create a new service account with the necessary roles.
+2. Generate a JSON key file for the service account and save it to a secure location on your filesystem.
+3. Enter the absolute path to the JSON key file in the GOOGLE_APPLICATION_CREDENTIALS field above.
+"""
+
+
+[i18n.zh]
+name = "Google Cloud Platform"
+description = "通过 MCP 服务器管理 GCP 资源（Compute Engine、Cloud Storage、BigQuery 等）。"
+
+[i18n.zh-TW]
+name = "Google Cloud Platform"
+description = "透過 MCP 伺服器管理 GCP 資源（Compute Engine、Cloud Storage、BigQuery 等）。"
+
+[i18n.ja]
+name = "Google Cloud Platform"
+description = "MCP サーバー経由で GCP リソース（Compute Engine、Cloud Storage、BigQuery）を管理。"
+
+[i18n.ko]
+name = "Google Cloud Platform"
+description = "MCP 서버를 통해 GCP 리소스(Compute Engine, Cloud Storage, BigQuery)를 관리."
+
+[i18n.de]
+name = "Google Cloud Platform"
+description = "Verwaltet GCP-Ressourcen (Compute Engine, Cloud Storage, BigQuery) über den MCP-Server."
+
+[i18n.es]
+name = "Google Cloud Platform"
+description = "Gestiona recursos de GCP (Compute Engine, Cloud Storage, BigQuery) mediante el servidor MCP."
+
+[i18n.fr]
+name = "Google Cloud Platform"
+description = "Gère les ressources GCP (Compute Engine, Cloud Storage, BigQuery) via le serveur MCP."

@@ -1,0 +1,38 @@
+id = "flock"
+name = "Flock"
+description = "Flock bot adapter for team messaging and notifications in Flock workspaces"
+category = "enterprise"
+icon = "lucide:bird"
+protocol = "webhook"
+
+[i18n.zh]
+name = "Flock"
+description = "Flock 机器人适配器，在 Flock 工作区中发送团队消息和通知"
+
+[i18n.zh-TW]
+name = "Flock"
+description = "Flock 機器人適配器，在 Flock 工作區中發送團隊訊息和通知"
+
+[i18n.ja]
+name = "Flock"
+description = "Flockボットアダプター、Flockワークスペースでのチームメッセージングと通知"
+
+[i18n.ko]
+name = "Flock"
+description = "Flock 봇 어댑터, Flock 워크스페이스에서 팀 메시지 및 알림 전송"
+
+[i18n.de]
+name = "Flock"
+description = "Flock-Bot-Adapter für Team-Messaging und Benachrichtigungen in Flock-Workspaces"
+
+[i18n.es]
+name = "Flock"
+description = "Adaptador de bot Flock para mensajería de equipo y notificaciones en espacios de trabajo Flock"
+
+[metadata]
+url = "https://www.flock.com"
+docs = "https://docs.flock.com"
+
+[i18n.fr]
+name = "Flock"
+description = "Adaptateur bot Flock — messagerie d'équipe et notifications dans les espaces Flock."

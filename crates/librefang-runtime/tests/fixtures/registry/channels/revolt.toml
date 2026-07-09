@@ -1,0 +1,38 @@
+id = "revolt"
+name = "Revolt"
+description = "Revolt adapter for messaging in the open-source Revolt chat platform"
+category = "developer"
+icon = "lucide:circle"
+protocol = "websocket"
+
+[i18n.zh]
+name = "Revolt"
+description = "Revolt 适配器，在开源 Revolt 聊天平台中收发消息"
+
+[i18n.zh-TW]
+name = "Revolt"
+description = "Revolt 適配器，在開源 Revolt 聊天平台中收發訊息"
+
+[i18n.ja]
+name = "Revolt"
+description = "Revoltアダプター、オープンソースRevoltチャットプラットフォームでのメッセージング"
+
+[i18n.ko]
+name = "Revolt"
+description = "Revolt 어댑터, 오픈소스 Revolt 채팅 플랫폼에서 메시지 송수신"
+
+[i18n.de]
+name = "Revolt"
+description = "Revolt-Adapter für Nachrichten in der Open-Source-Revolt-Chat-Plattform"
+
+[i18n.es]
+name = "Revolt"
+description = "Adaptador de Revolt para mensajería en la plataforma de chat de código abierto Revolt"
+
+[metadata]
+url = "https://revolt.chat"
+docs = "https://developers.revolt.chat/api/"
+
+[i18n.fr]
+name = "Revolt"
+description = "Adaptateur Revolt — messagerie sur la plateforme de chat open source Revolt."

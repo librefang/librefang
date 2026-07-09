@@ -1,0 +1,56 @@
+id = "gmail"
+name = "Gmail"
+description = "Read, send, and manage Gmail messages and drafts through the Anthropic MCP server"
+category = "productivity"
+icon = "lucide:mail"
+tags = ["email", "google", "messaging", "inbox", "communication"]
+
+[transport]
+type = "stdio"
+command = "npx"
+args = ["-y", "@gongrzhe/server-gmail-autoauth-mcp@1.1.11"]
+
+[oauth]
+provider = "google"
+scopes = ["https://www.googleapis.com/auth/gmail.modify"]
+auth_url = "https://accounts.google.com/o/oauth2/v2/auth"
+token_url = "https://oauth2.googleapis.com/token"
+
+[health_check]
+interval_secs = 60
+unhealthy_threshold = 3
+
+setup_instructions = """
+1. Click 'Connect' to initiate the OAuth flow with your Google account.
+2. Grant LibreFang permission to read and modify your Gmail messages when prompted.
+3. The connection will be established automatically after authorization.
+"""
+
+
+[i18n.zh]
+name = "Gmail"
+description = "通过 Anthropic MCP 服务器读取、发送和管理 Gmail 邮件与草稿。"
+
+[i18n.zh-TW]
+name = "Gmail"
+description = "透過 Anthropic MCP 伺服器讀取、傳送與管理 Gmail 郵件與草稿。"
+
+[i18n.ja]
+name = "Gmail"
+description = "Anthropic MCP サーバー経由で Gmail のメッセージと下書きを読み書き。"
+
+[i18n.ko]
+name = "Gmail"
+description = "Anthropic MCP 서버를 통해 Gmail 메시지와 초안을 읽고, 보내고, 관리."
+
+[i18n.de]
+name = "Gmail"
+description = "Gmail-Nachrichten und Entwürfe über den Anthropic-MCP-Server lesen, senden und verwalten."
+
+[i18n.es]
+name = "Gmail"
+description = "Lee, envía y gestiona mensajes y borradores de Gmail mediante el servidor MCP de Anthropic."
+
+[i18n.fr]
+name = "Gmail"
+description = "Lire, envoyer et gérer les messages et brouillons Gmail via le serveur MCP Anthropic."

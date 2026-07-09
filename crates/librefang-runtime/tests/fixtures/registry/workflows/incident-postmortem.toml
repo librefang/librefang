@@ -1,0 +1,108 @@
+id = "incident-postmortem"
+name = "Incident Postmortem"
+description = "Turn raw incident notes into a structured postmortem: timeline, root cause, impact assessment, and action items."
+category = "engineering"
+tags = ["incident", "postmortem", "devops", "reliability"]
+
+[i18n.zh]
+name = "故障复盘"
+description = "将原始故障记录整理为结构化复盘报告：时间线、根因分析、影响评估和行动项。"
+
+[[parameters]]
+name = "incident_notes"
+description = "Raw notes, chat logs, or timeline from the incident"
+param_type = "string"
+required = true
+
+[[parameters]]
+name = "service_name"
+description = "Name of the affected service or system"
+param_type = "string"
+required = false
+default = ""
+
+[[steps]]
+name = "timeline"
+prompt_template = """
+You are an SRE writing a postmortem. From the raw incident notes below, reconstruct a clean chronological timeline:
+- Format: [HH:MM UTC] — event description
+- Include: first alert, detection, escalation, mitigation steps, resolution
+- Note who was involved at each stage
+- Mark the start and end of user impact
+
+Service: {{service_name}}
+
+Raw notes:
+{{incident_notes}}
+"""
+
+[[steps]]
+name = "root_cause_analysis"
+prompt_template = """
+Perform a thorough root cause analysis using the 5-Whys method:
+1. Immediate trigger
+2. Five-whys chain down to the systemic root cause
+3. Contributing factors (monitoring gaps, process failures, dependency issues)
+4. Detection gap — why it took as long as it did to detect
+
+Timeline:
+{{timeline}}
+"""
+depends_on = ["timeline"]
+
+[[steps]]
+name = "postmortem_report"
+prompt_template = """
+Write a complete postmortem report with these sections:
+
+## Summary
+One paragraph: what happened, impact, duration, resolution.
+
+## Impact
+Quantified: users affected, error rate, revenue/SLA impact.
+
+## Timeline
+(Use the timeline above)
+
+## Root Cause
+(Use the RCA above)
+
+## What Went Well
+## What Went Wrong
+## Action Items
+Table: | Action | Owner | Priority | Due date |
+Minimum 5 concrete, measurable actions.
+
+## Lessons Learned
+
+Timeline:
+{{timeline}}
+
+Root cause analysis:
+{{root_cause_analysis}}
+"""
+depends_on = ["timeline", "root_cause_analysis"]
+
+[i18n.zh-TW]
+name = "事故復盤"
+description = "將原始故障記錄整理為結構化復盤報告：時間線、根因分析、影響評估與行動項。"
+
+[i18n.ja]
+name = "インシデント ポストモーテム"
+description = "生のインシデントメモを構造化されたポストモーテムに整理：タイムライン、根本原因、影響評価、アクションアイテム。"
+
+[i18n.ko]
+name = "장애 포스트모템"
+description = "원시 장애 기록을 구조화된 포스트모템으로 정리: 타임라인, 근본 원인, 영향 평가, 액션 아이템."
+
+[i18n.de]
+name = "Incident-Postmortem"
+description = "Rohe Vorfallsnotizen in ein strukturiertes Postmortem umwandeln: Timeline, Root Cause, Impact-Analyse und Action-Items."
+
+[i18n.es]
+name = "Postmortem de incidentes"
+description = "Convierte notas de incidente en un postmortem estructurado: línea de tiempo, causa raíz, evaluación de impacto y acciones."
+
+[i18n.fr]
+name = "Post-mortem d’incident"
+description = "Transformer des notes brutes d’incident en post-mortem structuré : chronologie, cause racine, évaluation d’impact et actions."

@@ -1,0 +1,36 @@
+# Qwen Code CLI
+# Models: 2
+
+[provider]
+id = "qwen-code"
+display_name = "Qwen Code"
+api_key_env = ""
+base_url = ""
+key_required = false
+
+[[models]]
+id = "qwen-code/qwen3-coder"
+display_name = "Qwen3 Coder (CLI)"
+tier = "smart"
+context_window = 131072
+max_output_tokens = 8192
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = false
+supports_vision = false
+supports_streaming = true
+supports_thinking = true
+aliases = ["qwen-code"]
+
+[[models]]
+id = "qwen-code/qwen-coder-plus"
+display_name = "Qwen Coder Plus (CLI)"
+tier = "frontier"
+context_window = 131072
+max_output_tokens = 8192
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = false
+supports_vision = false
+supports_streaming = true
+aliases = ["qwen-code-coder-plus"]

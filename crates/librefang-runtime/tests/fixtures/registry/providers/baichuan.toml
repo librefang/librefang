@@ -1,0 +1,22 @@
+# Baichuan (百川智能) — https://platform.baichuan-ai.com
+# Models: 1
+
+[provider]
+id = "baichuan"
+display_name = "Baichuan (百川)"
+api_key_env = "BAICHUAN_API_KEY"
+base_url = "https://api.baichuan-ai.com/v1"
+key_required = true
+
+[[models]]
+id = "Baichuan4"
+display_name = "Baichuan-4"
+tier = "frontier"
+context_window = 131072
+max_output_tokens = 8192
+input_cost_per_m = 14.30
+output_cost_per_m = 14.30
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["baichuan-4", "baichuan4"]

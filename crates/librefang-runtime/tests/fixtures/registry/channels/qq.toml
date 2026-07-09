@@ -1,0 +1,38 @@
+id = "qq"
+name = "QQ"
+description = "QQ bot adapter for messaging within Tencent QQ groups and channels"
+category = "messaging"
+icon = "lucide:command"
+protocol = "websocket"
+
+[i18n.zh]
+name = "QQ"
+description = "QQ 机器人适配器，在腾讯 QQ 群组和频道中收发消息"
+
+[i18n.zh-TW]
+name = "QQ"
+description = "QQ 機器人適配器，在騰訊 QQ 群組和頻道中收發訊息"
+
+[i18n.ja]
+name = "QQ"
+description = "QQボットアダプター、Tencent QQグループとチャンネルでのメッセージング"
+
+[i18n.ko]
+name = "QQ"
+description = "QQ 봇 어댑터, Tencent QQ 그룹 및 채널에서 메시지 송수신"
+
+[i18n.de]
+name = "QQ"
+description = "QQ-Bot-Adapter für Nachrichten in Tencent QQ-Gruppen und -Kanälen"
+
+[i18n.es]
+name = "QQ"
+description = "Adaptador de bot QQ para mensajería en grupos y canales de Tencent QQ"
+
+[metadata]
+url = "https://im.qq.com"
+docs = "https://bot.q.qq.com/wiki/"
+
+[i18n.fr]
+name = "QQ"
+description = "Adaptateur bot QQ — messagerie au sein des groupes et canaux Tencent QQ."

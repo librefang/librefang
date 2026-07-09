@@ -1,0 +1,105 @@
+id = "refactor-plan"
+name = "Refactor Plan"
+description = "Analyse code for quality issues, prioritise refactoring opportunities, and produce a safe incremental migration plan."
+category = "engineering"
+tags = ["refactoring", "code-quality", "engineering", "architecture"]
+
+[i18n.zh]
+name = "重构计划"
+description = "分析代码质量问题，优先排序重构机会，制定安全的增量迁移计划。"
+
+[[parameters]]
+name = "code"
+description = "Code to refactor"
+param_type = "string"
+required = true
+
+[[parameters]]
+name = "context"
+description = "Why refactoring is being considered (performance, maintainability, tech debt)"
+param_type = "string"
+required = false
+default = "general code quality improvement"
+
+[[steps]]
+name = "smell_analysis"
+prompt_template = """
+You are a senior software architect performing a code quality audit. Identify all code smells and issues:
+
+For each issue found:
+- Category: naming / duplication / complexity / coupling / abstraction / performance / security
+- Severity: critical / high / medium / low
+- Location: function/class name
+- Description: what is wrong
+- Impact: why it matters
+
+Context: {{context}}
+
+Code:
+{{code}}
+"""
+
+[[steps]]
+name = "prioritised_opportunities"
+prompt_template = """
+Prioritise refactoring opportunities by: (impact × risk_reduction) / effort.
+
+For the top 5 opportunities:
+- What to change
+- Expected benefit
+- Estimated effort: hours
+- Risk level: low / medium / high
+- Prerequisites: what must be done first
+- Whether tests are needed before refactoring
+
+Smell analysis:
+{{smell_analysis}}
+"""
+depends_on = ["smell_analysis"]
+
+[[steps]]
+name = "migration_plan"
+prompt_template = """
+Design an incremental refactoring plan that keeps the system working throughout:
+
+**Phase 1 — Safety net** (tests and coverage)
+**Phase 2 — Low-risk quick wins**
+**Phase 3 — Structural changes**
+**Phase 4 — Validation and cleanup**
+
+For each phase:
+- Specific changes in order
+- How to verify nothing broke after each change
+- Rollback strategy
+- Definition of done
+
+Also note: what NOT to change in this refactoring cycle.
+
+Prioritised opportunities:
+{{prioritised_opportunities}}
+"""
+depends_on = ["prioritised_opportunities"]
+
+[i18n.zh-TW]
+name = "重構計劃"
+description = "分析程式碼品質問題、優先排序重構機會，制定安全的漸進式遷移計劃。"
+
+[i18n.ja]
+name = "リファクタリング計画"
+description = "コードの品質問題を解析し、リファクタリングの優先度を決め、安全な漸進的移行計画を作成。"
+
+[i18n.ko]
+name = "리팩터링 계획"
+description = "코드 품질 이슈를 분석하고 리팩터링 기회를 우선순위화하며, 안전한 점진적 마이그레이션 계획을 수립."
+
+[i18n.de]
+name = "Refactoring-Plan"
+description = "Code auf Qualitätsprobleme analysieren, Refactoring-Chancen priorisieren und einen sicheren, inkrementellen Migrationsplan erstellen."
+
+[i18n.es]
+name = "Plan de refactorización"
+description = "Analiza problemas de calidad, prioriza oportunidades de refactorización y elabora un plan incremental y seguro de migración."
+
+[i18n.fr]
+name = "Plan de refactoring"
+description = "Analyser les problèmes de qualité, prioriser les opportunités de refactoring et produire un plan de migration incrémental et sûr."

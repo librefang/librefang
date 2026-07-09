@@ -1,0 +1,38 @@
+id = "gitter"
+name = "Gitter"
+description = "Gitter adapter for developer chat rooms linked to GitHub repositories"
+category = "developer"
+icon = "lucide:monitor"
+protocol = "rest-api"
+
+[i18n.zh]
+name = "Gitter"
+description = "Gitter 适配器，连接 GitHub 仓库的开发者聊天室"
+
+[i18n.zh-TW]
+name = "Gitter"
+description = "Gitter 適配器，連接 GitHub 儲存庫的開發者聊天室"
+
+[i18n.ja]
+name = "Gitter"
+description = "Gitterアダプター、GitHubリポジトリに連携した開発者チャットルーム"
+
+[i18n.ko]
+name = "Gitter"
+description = "Gitter 어댑터, GitHub 저장소에 연결된 개발자 채팅방"
+
+[i18n.de]
+name = "Gitter"
+description = "Gitter-Adapter für Entwickler-Chatrooms, die mit GitHub-Repositories verknüpft sind"
+
+[i18n.es]
+name = "Gitter"
+description = "Adaptador de Gitter para salas de chat de desarrolladores vinculadas a repositorios de GitHub"
+
+[metadata]
+url = "https://gitter.im"
+docs = "https://developer.gitter.im/docs/"
+
+[i18n.fr]
+name = "Gitter"
+description = "Adaptateur Gitter — salons de discussion développeurs liés aux dépôts GitHub."

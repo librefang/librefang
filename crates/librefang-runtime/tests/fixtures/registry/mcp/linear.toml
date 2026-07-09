@@ -1,0 +1,57 @@
+id = "linear"
+name = "Linear"
+description = "Manage Linear issues, projects, cycles, and teams through the MCP server"
+category = "devtools"
+icon = "lucide:ruler"
+tags = ["project-management", "issues", "agile", "tracking", "sprint"]
+
+[transport]
+type = "stdio"
+command = "npx"
+args = ["-y", "linear-mcp@1.2.0"]
+
+[[required_env]]
+name = "LINEAR_API_KEY"
+label = "Linear API Key"
+help = "A personal API key from your Linear account settings"
+is_secret = true
+get_url = "https://linear.app/settings/api"
+
+[health_check]
+interval_secs = 60
+unhealthy_threshold = 3
+
+setup_instructions = """
+1. Open Linear and go to Settings > API (https://linear.app/settings/api).
+2. Click 'Create key' to generate a new personal API key.
+3. Paste the key into the LINEAR_API_KEY field above.
+"""
+
+
+[i18n.zh]
+name = "Linear"
+description = "通过 MCP 服务器管理 Linear 的 Issue、项目、Cycle 与团队。"
+
+[i18n.zh-TW]
+name = "Linear"
+description = "透過 MCP 伺服器管理 Linear 的 Issue、專案、Cycle 與團隊。"
+
+[i18n.ja]
+name = "Linear"
+description = "MCP サーバー経由で Linear の Issue、プロジェクト、サイクル、チームを管理。"
+
+[i18n.ko]
+name = "Linear"
+description = "MCP 서버를 통해 Linear 이슈, 프로젝트, 사이클, 팀을 관리."
+
+[i18n.de]
+name = "Linear"
+description = "Verwaltet Linear-Issues, -Projekte, -Zyklen und -Teams über den MCP-Server."
+
+[i18n.es]
+name = "Linear"
+description = "Gestiona issues, proyectos, ciclos y equipos de Linear mediante el servidor MCP."
+
+[i18n.fr]
+name = "Linear"
+description = "Gère les issues, projets, cycles et équipes Linear via le serveur MCP."

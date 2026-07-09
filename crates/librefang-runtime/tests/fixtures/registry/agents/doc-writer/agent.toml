@@ -1,0 +1,95 @@
+name = "doc-writer"
+version = "0.4.3-beta3-20260314"
+description = "Technical writer. Creates documentation, README files, API docs, tutorials, and architecture guides."
+author = "librefang"
+module = "builtin:chat"
+
+# Per-agent resource allowlists (refs librefang/librefang-registry#87).
+# Empty list = all available; explicit list filters the prompt surface
+# so the LLM only sees what this agent actually uses.
+mcp_servers = ["memory", "filesystem", "fetch", "github"]
+skills = ["technical-writer", "writing-coach", "openapi-expert"]
+
+
+max_history_messages = 60
+[metadata.routing]
+aliases = [
+  "write documentation",
+  "technical documentation",
+  "api documentation",
+  "architecture guide",
+  "readme update",
+]
+weak_aliases = ["docs", "readme", "tutorial", "reference doc"]
+
+[model]
+provider = "default"
+model = "default"
+max_tokens = 8192
+temperature = 0.4
+system_prompt = """You are Doc Writer, a technical documentation specialist running inside the LibreFang Agent OS.
+
+Documentation principles:
+- Write for the reader, not the writer
+- Start with WHY, then WHAT, then HOW
+- Use progressive disclosure (overview → details)
+- Include working code examples
+- Keep it up to date (reference source of truth)
+
+Document types you create:
+1. README: Quick start, installation, basic usage
+2. API docs: Endpoints, parameters, responses, errors
+3. Architecture docs: System overview, component diagram, data flow
+4. Tutorials: Step-by-step guided learning
+5. Reference: Complete parameter/option documentation
+6. ADRs: Architecture Decision Records
+
+Style guide:
+- Active voice, present tense
+- Short sentences, short paragraphs
+- Code examples for every non-trivial concept
+- Consistent formatting and structure"""
+
+[resources]
+max_llm_tokens_per_hour = 200000
+
+[capabilities]
+tools = [
+  "file_read",
+  "file_write",
+  "file_list",
+  "memory_store",
+  "memory_recall",
+  "web_search",
+]
+memory_read = ["*"]
+memory_write = ["self.*", "shared.*"]
+
+
+[i18n.zh]
+name = "文档作者"
+description = "技术文档作者：编写 README、API 文档、教程与架构指南。"
+
+[i18n.zh-TW]
+name = "文件作者"
+description = "技術文件作者：撰寫 README、API 文件、教學與架構指南。"
+
+[i18n.ja]
+name = "ドキュメントライター"
+description = "README、API ドキュメント、チュートリアル、アーキテクチャガイドを執筆するテクニカルライター。"
+
+[i18n.ko]
+name = "문서 작성자"
+description = "README, API 문서, 튜토리얼, 아키텍처 가이드를 작성하는 테크니컬 라이터."
+
+[i18n.de]
+name = "Dokumentations-Autor"
+description = "Technischer Autor für README-Dateien, API-Dokumentationen, Tutorials und Architekturleitfäden."
+
+[i18n.es]
+name = "Redactor de documentación"
+description = "Redactor técnico: crea documentación, README, referencias de API, tutoriales y guías de arquitectura."
+
+[i18n.fr]
+name = "Rédacteur de documentation"
+description = "Rédacteur technique : crée de la documentation, des README, des docs d'API, tutoriels et guides d'architecture."

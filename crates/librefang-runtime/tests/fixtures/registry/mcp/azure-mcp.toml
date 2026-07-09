@@ -1,0 +1,78 @@
+id = "azure-mcp"
+name = "Microsoft Azure"
+description = "Manage Azure resources including VMs, Storage, and App Services through the MCP server"
+category = "cloud"
+icon = "lucide:diamond"
+tags = ["cloud", "microsoft", "infrastructure", "azure", "devops", "enterprise"]
+
+[transport]
+type = "stdio"
+command = "npx"
+args = ["-y", "@azure/mcp@1.0.4", "server", "start"]
+
+[[required_env]]
+name = "AZURE_SUBSCRIPTION_ID"
+label = "Azure Subscription ID"
+help = "Your Azure subscription ID (found in the Azure Portal under Subscriptions)"
+is_secret = false
+get_url = "https://portal.azure.com/#blade/Microsoft_Azure_Billing/SubscriptionsBlade"
+
+[[required_env]]
+name = "AZURE_TENANT_ID"
+label = "Azure Tenant ID"
+help = "Your Azure Active Directory tenant ID"
+is_secret = false
+get_url = "https://portal.azure.com/#blade/Microsoft_AAD_IAM/ActiveDirectoryMenuBlade/Overview"
+
+[[required_env]]
+name = "AZURE_CLIENT_ID"
+label = "Azure Client ID"
+help = "The application (client) ID of your Azure AD app registration"
+is_secret = false
+get_url = "https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps/ApplicationsListBlade"
+
+[[required_env]]
+name = "AZURE_CLIENT_SECRET"
+label = "Azure Client Secret"
+help = "A client secret generated for your Azure AD app registration"
+is_secret = true
+get_url = "https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps/ApplicationsListBlade"
+
+[health_check]
+interval_secs = 60
+unhealthy_threshold = 3
+
+setup_instructions = """
+1. In the Azure Portal, register an application under Azure Active Directory > App registrations and note the Client ID and Tenant ID.
+2. Create a client secret under Certificates & Secrets for the registered application.
+3. Assign the appropriate RBAC roles to the application on your subscription, then paste all four values into the fields above.
+"""
+
+
+[i18n.zh]
+name = "Microsoft Azure"
+description = "通过 MCP 服务器管理 Azure 资源（虚拟机、存储、App Services 等）。"
+
+[i18n.zh-TW]
+name = "Microsoft Azure"
+description = "透過 MCP 伺服器管理 Azure 資源（虛擬機、儲存體、App Services 等）。"
+
+[i18n.ja]
+name = "Microsoft Azure"
+description = "MCP サーバー経由で Azure リソース（VM、ストレージ、App Services）を管理。"
+
+[i18n.ko]
+name = "Microsoft Azure"
+description = "MCP 서버를 통해 Azure 리소스(VM, 스토리지, App Services)를 관리."
+
+[i18n.de]
+name = "Microsoft Azure"
+description = "Verwaltet Azure-Ressourcen (VMs, Storage, App Services) über den MCP-Server."
+
+[i18n.es]
+name = "Microsoft Azure"
+description = "Gestiona recursos de Azure (VMs, Storage, App Services) a través del servidor MCP."
+
+[i18n.fr]
+name = "Microsoft Azure"
+description = "Gère les ressources Azure (VM, Storage, App Services) via le serveur MCP."

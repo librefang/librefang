@@ -1,0 +1,38 @@
+id = "nextcloud"
+name = "Nextcloud"
+description = "Nextcloud Talk adapter for messaging within self-hosted Nextcloud instances"
+category = "iot"
+icon = "lucide:cloud"
+protocol = "rest-api"
+
+[i18n.zh]
+name = "Nextcloud"
+description = "Nextcloud Talk 适配器，在自托管 Nextcloud 实例中收发消息"
+
+[i18n.zh-TW]
+name = "Nextcloud"
+description = "Nextcloud Talk 適配器，在自架 Nextcloud 實例中收發訊息"
+
+[i18n.ja]
+name = "Nextcloud"
+description = "Nextcloud Talkアダプター、セルフホストNextcloudインスタンスでのメッセージング"
+
+[i18n.ko]
+name = "Nextcloud"
+description = "Nextcloud Talk 어댑터, 자체 호스팅 Nextcloud 인스턴스에서 메시지 송수신"
+
+[i18n.de]
+name = "Nextcloud"
+description = "Nextcloud Talk-Adapter für Nachrichten in selbstgehosteten Nextcloud-Instanzen"
+
+[i18n.es]
+name = "Nextcloud"
+description = "Adaptador de Nextcloud Talk para mensajería en instancias de Nextcloud autoalojadas"
+
+[metadata]
+url = "https://nextcloud.com"
+docs = "https://nextcloud-talk.readthedocs.io/en/latest/"
+
+[i18n.fr]
+name = "Nextcloud"
+description = "Adaptateur Nextcloud Talk — messagerie au sein des instances Nextcloud auto-hébergées."
