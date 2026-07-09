@@ -355,8 +355,9 @@ jobs:
             echo ""
             echo '**Homebrew (macOS):**'
             echo '```bash'
-            echo 'brew tap librefang/tap'
-            echo 'brew install librefang              # CLI (stable)'
+            echo 'brew install librefang              # CLI (stable) — official homebrew-core'
+            echo ''
+            echo 'brew tap librefang/tap              # pre-release CLI + desktop app'
             echo 'brew install librefang-beta         # CLI (beta channel)'
             echo 'brew install librefang-rc           # CLI (rc channel)'
             echo 'brew install --cask librefang       # Desktop (stable)'
@@ -1330,13 +1331,18 @@ jobs:
           # Channel strategy (like Apple software updates):
           #   -rc tag    → update rc channel only
           #   -beta tag  → update beta + rc channels
-          #   stable tag → update stable + beta + rc channels
+          #   stable tag → update beta + rc channels (cascade the newest build down)
+          #
+          # The stable CLI now ships from homebrew-core (Homebrew/homebrew-core#290413),
+          # so the tap no longer generates a stable `librefang` formula — it would shadow
+          # core and duplicate maintenance. A stable tag still cascades the newest build
+          # into the beta/rc channels; the keg-only versioned formula below is unaffected.
           if echo "$VERSION" | grep -qE '\-rc'; then
             CHANNELS=(rc)
           elif echo "$VERSION" | grep -qE '\-beta'; then
             CHANNELS=(beta rc)
           else
-            CHANNELS=(stable beta rc)
+            CHANNELS=(beta rc)
           fi
 
           echo "Release $VERSION → updating formula channels: ${CHANNELS[*]}"
@@ -1428,7 +1434,10 @@ jobs:
 
           # --- Versioned formula (e.g. librefang@2026.3.2114) ---
           # Always generated for every release, regardless of channel
-          CLASS_SUFFIX=$(echo "$SEMVER" | tr -d '.')
+          # The class name must equal Homebrew's Formulary.class_s of the formula name, i.e. drop each separator AND uppercase the char that follows it, so librefang@2026.6.29-beta.14 -> LibrefangAT2026629Beta14.
+          # Homebrew's golden_gate audit rejects any other casing.
+          # (`tr -d '.'` left the '-' in -> a Ruby syntax error; `tr -cd [:alnum:]` dropped the '-' but kept 'beta' lowercase, which golden_gate still rejects.)
+          CLASS_SUFFIX=$(printf '%s' "$SEMVER" | perl -pe 's/[-._]([[:alnum:]])/\U$1/g; s/[-._]//g')
           CLASS_NAME="LibrefangAT${CLASS_SUFFIX}"
 
           cat > "tap/Formula/librefang@${SEMVER}.rb" <<FORMULA
@@ -2478,15 +2487,20 @@ jobs:
               desc_suffix=" (${channel} channel)"
             fi
 
-            # Build conflicts_with lines
-            local conflicts=""
+            # Build the conflicts_with cask array. Casks allow only ONE
+            # conflicts_with stanza, so collect the other channels into a
+            # single array literal instead of emitting one stanza each.
+            local conflict_items=""
             for other in "${ALL_CHANNELS[@]}"; do
               [ "$other" = "$channel" ] && continue
               local other_name="librefang"
               [ "$other" != "stable" ] && other_name="librefang-${other}"
-              conflicts="${conflicts}
-            conflicts_with cask: \"${other_name}\""
+              [ -n "$conflict_items" ] && conflict_items="${conflict_items}, "
+              conflict_items="${conflict_items}\"${other_name}\""
             done
+            local conflicts=""
+            [ -n "$conflict_items" ] && conflicts="
+            conflicts_with cask: [${conflict_items}]"
 
             # Livecheck only for stable channel
             local livecheck=""

@@ -60,21 +60,29 @@ librefang start
 # librefang init
 ```
 
-<details>
+<details open>
 <summary><strong>Homebrew</strong></summary>
+
+> 🎉 **¡LibreFang ya está en [homebrew-core](https://github.com/Homebrew/homebrew-core/pull/290413)!**
+> Aceptado en el tap oficial de Homebrew el 2026-07-08: instala la CLI sin configuración y sin necesidad de tap.
+
+```bash
+brew install librefang              # CLI (stable) — homebrew-core oficial
+```
+
+La app de escritorio y los canales de prelanzamiento se siguen publicando a través del tap de LibreFang:
 
 ```bash
 brew tap librefang/tap
-brew install librefang              # CLI (stable)
 brew install --cask librefang       # Desktop (stable)
-# Beta/RC channels also available:
-# brew install librefang-beta       # or librefang-rc
-# brew install --cask librefang-rc  # or librefang-beta
+# Canales Beta/RC:
+# brew install librefang-beta       # o librefang-rc
+# brew install --cask librefang-rc  # o librefang-beta
 ```
 
 </details>
 
-<details>
+<details open>
 <summary><strong>Arch Linux (pacman)</strong></summary>
 
 > El registro de cuentas de AUR no está disponible temporalmente.
@@ -114,7 +122,7 @@ Consulte la [documentación del repositorio de Arch](../packaging/arch-repo/READ
 
 </details>
 
-<details>
+<details open>
 <summary><strong>Docker</strong></summary>
 
 ```bash
@@ -123,7 +131,7 @@ docker run -p 4545:4545 ghcr.io/librefang/librefang
 
 </details>
 
-<details>
+<details open>
 <summary><strong>Despliegue en la Nube</strong></summary>
 
 [![Deploy Hub](https://img.shields.io/badge/Deploy%20Hub-000?style=for-the-badge&logo=rocket)](https://deploy.librefang.ai) [![Fly.io](https://img.shields.io/badge/Fly.io-purple?style=for-the-badge&logo=fly.io)](https://deploy.librefang.ai) [![Render](https://img.shields.io/badge/Render-46E3B7?style=for-the-badge&logo=render)](https://render.com/deploy?repo=https://github.com/librefang/librefang) [![Railway](https://img.shields.io/badge/Railway-0B0D0E?style=for-the-badge&logo=railway)](https://railway.app/template/librefang) [![GCP](https://img.shields.io/badge/GCP-4285F4?style=for-the-badge&logo=googlecloud)](../deploy/gcp/README.md)
