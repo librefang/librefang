@@ -321,14 +321,19 @@ jobs:
               desc_suffix=" (${channel} channel)"
             fi
 
-            local conflicts=""
+            # Casks allow only ONE conflicts_with stanza, so collect the other
+            # channels into a single array literal instead of one stanza each.
+            local conflict_items=""
             for other in "${ALL_CHANNELS[@]}"; do
               [ "$other" = "$channel" ] && continue
               local other_name="librefang"
               [ "$other" != "stable" ] && other_name="librefang-${other}"
-              conflicts="${conflicts}
-            conflicts_with cask: \"${other_name}\""
+              [ -n "$conflict_items" ] && conflict_items="${conflict_items}, "
+              conflict_items="${conflict_items}\"${other_name}\""
             done
+            local conflicts=""
+            [ -n "$conflict_items" ] && conflicts="
+            conflicts_with cask: [${conflict_items}]"
 
             local livecheck=""
             if [ "$channel" = "stable" ]; then
