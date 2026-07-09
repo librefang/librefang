@@ -63,7 +63,8 @@ librefang start
 <details>
 <summary><strong>Homebrew</strong></summary>
 
-> 🎉 **LibreFang jest już w [homebrew-core](https://github.com/Homebrew/homebrew-core/pull/290413)!** Przyjęty do oficjalnego tap Homebrew 2026-07-08 — zainstaluj CLI bez konfiguracji i bez tap.
+> 🎉 **LibreFang jest już w [homebrew-core](https://github.com/Homebrew/homebrew-core/pull/290413)!**
+> Przyjęty do oficjalnego tap Homebrew 2026-07-08 — zainstaluj CLI bez konfiguracji i bez tap.
 
 ```bash
 brew install librefang              # CLI (stable) — oficjalne homebrew-core
