@@ -45,8 +45,7 @@ impl Drop for TestServer {
 async fn start_full_router(api_key: &str) -> TestServer {
     let tmp = tempfile::tempdir().expect("create temp dir");
 
-    // Seed the pinned registry fixture into the temp home_dir so the kernel boots with
-    // a populated model catalog (mirrors api_integration_test::start_full_router).
+    // Seed the pinned registry fixture into the temp home_dir so the kernel boots with a populated model catalog (mirrors api_integration_test::start_full_router).
     librefang_kernel::registry_sync::seed_registry_fixture_for_tests(tmp.path());
 
     let config = KernelConfig {
