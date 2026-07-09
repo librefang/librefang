@@ -520,7 +520,12 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
 
-        const KEYS: [&str; 3] = ["OPENAI_API_KEY", "ELEVENLABS_API_KEY", "GOOGLE_API_KEY"];
+        const KEYS: [&str; 4] = [
+            "OPENAI_API_KEY",
+            "ELEVENLABS_API_KEY",
+            "GOOGLE_API_KEY",
+            "GOOGLE_CLOUD_API_KEY",
+        ];
         let preserved: Vec<(&str, Option<String>)> =
             KEYS.iter().map(|k| (*k, std::env::var(k).ok())).collect();
         // SAFETY: single-threaded section guarded by ENV_LOCK.
