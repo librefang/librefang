@@ -865,8 +865,7 @@ fn test_hand_activation_does_not_seed_runtime_tool_filters() {
     let tmp = tempfile::tempdir().unwrap();
     let home_dir = tmp.path().join("librefang-kernel-hand-test");
     std::fs::create_dir_all(&home_dir).unwrap();
-    // Seed the pinned registry fixture so the apitester hand definition
-    // exists under home/registry/hands — hermetic under LIBREFANG_REGISTRY_OFFLINE.
+    // Seed the pinned registry fixture so the apitester hand definition exists under home/registry/hands — hermetic under LIBREFANG_REGISTRY_OFFLINE.
     librefang_runtime::registry_sync::seed_registry_fixture_for_tests(&home_dir);
 
     let config = KernelConfig {
@@ -909,8 +908,7 @@ fn test_hand_reactivation_rebuilds_same_runtime_profile() {
     let tmp = tempfile::tempdir().unwrap();
     let home_dir = tmp.path().join("librefang-kernel-reactivation-test");
     std::fs::create_dir_all(&home_dir).unwrap();
-    // Seed the pinned registry fixture so the apitester hand definition
-    // exists under home/registry/hands — hermetic under LIBREFANG_REGISTRY_OFFLINE.
+    // Seed the pinned registry fixture so the apitester hand definition exists under home/registry/hands — hermetic under LIBREFANG_REGISTRY_OFFLINE.
     librefang_runtime::registry_sync::seed_registry_fixture_for_tests(&home_dir);
 
     let config = KernelConfig {
@@ -1025,8 +1023,7 @@ fn reactivate_builds_from_hand_toml_not_override() {
     let tmp = tempfile::tempdir().unwrap();
     let home_dir = tmp.path().join("librefang-kernel-reactivation-hand-toml");
     std::fs::create_dir_all(&home_dir).unwrap();
-    // Seed the pinned registry fixture so the apitester hand definition
-    // exists under home/registry/hands — hermetic under LIBREFANG_REGISTRY_OFFLINE.
+    // Seed the pinned registry fixture so the apitester hand definition exists under home/registry/hands — hermetic under LIBREFANG_REGISTRY_OFFLINE.
     librefang_runtime::registry_sync::seed_registry_fixture_for_tests(&home_dir);
 
     let config = KernelConfig {
@@ -3398,8 +3395,7 @@ fn hand_runtime_override_survives_restart_via_activate_hand_with_id() {
     let tmp = tempfile::tempdir().unwrap();
     let home_dir = tmp.path().join("librefang-kernel-hand-override-restart");
     std::fs::create_dir_all(&home_dir).unwrap();
-    // Seed the pinned registry fixture so the apitester hand definition
-    // exists under home/registry/hands — hermetic under LIBREFANG_REGISTRY_OFFLINE.
+    // Seed the pinned registry fixture so the apitester hand definition exists under home/registry/hands — hermetic under LIBREFANG_REGISTRY_OFFLINE.
     librefang_runtime::registry_sync::seed_registry_fixture_for_tests(&home_dir);
 
     // ── Boot 1: activate apitester, apply override, persist, shutdown ──
@@ -3666,8 +3662,7 @@ fn deactivate_hand_removes_hand_agent_rows_from_sqlite() {
     let tmp = tempfile::tempdir().unwrap();
     let home_dir = tmp.path().join("librefang-kernel-deactivate-gc");
     std::fs::create_dir_all(&home_dir).unwrap();
-    // Seed the pinned registry fixture so the apitester hand definition
-    // exists under home/registry/hands — hermetic under LIBREFANG_REGISTRY_OFFLINE.
+    // Seed the pinned registry fixture so the apitester hand definition exists under home/registry/hands — hermetic under LIBREFANG_REGISTRY_OFFLINE.
     librefang_runtime::registry_sync::seed_registry_fixture_for_tests(&home_dir);
 
     let config = KernelConfig {
@@ -3936,8 +3931,7 @@ fn clear_hand_agent_runtime_override_resets_manifest_and_state() {
     let tmp = tempfile::tempdir().unwrap();
     let home_dir = tmp.path().join("librefang-kernel-hand-clear");
     std::fs::create_dir_all(&home_dir).unwrap();
-    // Seed the pinned registry fixture so the apitester hand definition
-    // exists under home/registry/hands — hermetic under LIBREFANG_REGISTRY_OFFLINE.
+    // Seed the pinned registry fixture so the apitester hand definition exists under home/registry/hands — hermetic under LIBREFANG_REGISTRY_OFFLINE.
     librefang_runtime::registry_sync::seed_registry_fixture_for_tests(&home_dir);
 
     let config = KernelConfig {
@@ -4062,8 +4056,7 @@ fn update_hand_agent_runtime_override_merges_partial_updates_in_state() {
     let tmp = tempfile::tempdir().unwrap();
     let home_dir = tmp.path().join("librefang-kernel-hand-merge");
     std::fs::create_dir_all(&home_dir).unwrap();
-    // Seed the pinned registry fixture so the apitester hand definition
-    // exists under home/registry/hands — hermetic under LIBREFANG_REGISTRY_OFFLINE.
+    // Seed the pinned registry fixture so the apitester hand definition exists under home/registry/hands — hermetic under LIBREFANG_REGISTRY_OFFLINE.
     librefang_runtime::registry_sync::seed_registry_fixture_for_tests(&home_dir);
 
     let config = KernelConfig {

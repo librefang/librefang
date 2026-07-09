@@ -12,4 +12,5 @@ Anything the tests don't read (channels, workflow templates, schema.toml, other 
 
 Consumed by `librefang_runtime::registry_sync::seed_registry_fixture_for_tests`, which copies it into a test home's `registry/` cache and fans content out exactly like a real sync — no network, deterministic under `LIBREFANG_REGISTRY_OFFLINE=1`.
 
-To refresh: clone the registry, re-copy the directories above with the same pruning, and update the pinned commit here. Tests that assert on specific entries define what the snapshot must contain.
+To refresh: clone the registry, re-copy the directories above with the same pruning, and update the pinned commit here.
+Tests that assert on specific entries define what the snapshot must contain.

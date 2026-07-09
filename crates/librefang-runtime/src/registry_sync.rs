@@ -207,10 +207,8 @@ pub fn sync_registry(
     true
 }
 
-/// Fan registry-cache content out into the live home directory: providers,
-/// channels, the MCP catalog, agent templates, workflow templates, aliases,
-/// and schema. Shared by [`sync_registry`] (after a fetch or on a warm cache)
-/// and [`seed_registry_fixture_for_tests`] (fixture-seeded cache, no network).
+/// Fan registry-cache content out into the live home directory: providers, channels, the MCP catalog, agent templates, workflow templates, aliases, and schema.
+/// Shared by [`sync_registry`] (after a fetch or on a warm cache) and [`seed_registry_fixture_for_tests`] (fixture-seeded cache, no network).
 fn fanout_registry_content(home_dir: &Path, registry_cache: &Path) {
     // Pre-install core content users need out of the box.
     // Skills and plugins stay in registry — users install via dashboard.
@@ -308,23 +306,16 @@ fn fanout_registry_content(home_dir: &Path, registry_cache: &Path) {
     }
 }
 
-/// Absolute path of the in-repo pinned registry snapshot (baked at compile
-/// time; see `tests/fixtures/registry/README.md` for provenance and refresh).
+/// Absolute path of the in-repo pinned registry snapshot (baked at compile time; see `tests/fixtures/registry/README.md` for provenance and refresh).
 #[doc(hidden)]
 pub const REGISTRY_FIXTURE_DIR: &str =
     concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/registry");
 
-/// Seed `home_dir` with registry content from the pinned in-repo fixture — the
-/// hermetic, no-network replacement for calling [`sync_registry`] in test
-/// setups. Every test lane exports `LIBREFANG_REGISTRY_OFFLINE=1` (#6410), which
-/// turns a plain [`sync_registry`] on a fresh home into a no-op; before that,
-/// each fresh test home did a real git clone per kernel boot (#6404).
+/// Seed `home_dir` with registry content from the pinned in-repo fixture — the hermetic, no-network replacement for calling [`sync_registry`] in test setups.
+/// Every test lane exports `LIBREFANG_REGISTRY_OFFLINE=1` (#6410), which turns a plain [`sync_registry`] on a fresh home into a no-op; before that, each fresh test home did a real git clone per kernel boot (#6404).
 ///
-/// Copies the fixture into `home/registry/`, touches the sync marker so a later
-/// [`sync_registry`] (e.g. kernel boot) treats the cache as fresh and never
-/// fetches, then fans content out exactly like a real sync. Panics on copy
-/// failure — a silently empty home is precisely the failure mode this exists
-/// to prevent.
+/// Copies the fixture into `home/registry/`, touches the sync marker so a later [`sync_registry`] (e.g. kernel boot) treats the cache as fresh and never fetches, then fans content out exactly like a real sync.
+/// Panics on copy failure — a silently empty home is precisely the failure mode this exists to prevent.
 #[doc(hidden)]
 pub fn seed_registry_fixture_for_tests(home_dir: &Path) {
     let _guard = SYNC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -603,8 +594,7 @@ fn git_clone_fallback(
 
 /// Resolve the default home directory (for tests and standalone usage).
 pub fn resolve_home_dir_for_tests() -> std::path::PathBuf {
-    // OnceLock ensures the fixture seeding runs exactly once per process,
-    // so parallel test threads never race on the shared home's content.
+    // OnceLock ensures the fixture seeding runs exactly once per process, so parallel test threads never race on the shared home's content.
     use std::sync::OnceLock;
     static HOME: OnceLock<std::path::PathBuf> = OnceLock::new();
     HOME.get_or_init(|| {
@@ -616,8 +606,7 @@ pub fn resolve_home_dir_for_tests() -> std::path::PathBuf {
                 std::env::temp_dir().join(format!("librefang-test-{}", std::process::id()))
             });
         // Auto-seed if the providers dir is empty (fresh CI environment).
-        // Seeds from the in-repo fixture snapshot instead of the network, so
-        // the shared test home is deterministic and works offline (#6410).
+        // Seeds from the in-repo fixture snapshot instead of the network, so the shared test home is deterministic and works offline (#6410).
         if !home.join("providers").exists()
             || std::fs::read_dir(home.join("providers"))
                 .map(|d| d.count() == 0)

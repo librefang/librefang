@@ -115,8 +115,7 @@ impl Drop for TestServer {
 async fn start_test_server() -> TestServer {
     let tmp = tempfile::tempdir().expect("Failed to create temp dir");
 
-    // Seed the pinned registry fixture in the temp home so the kernel boots with a
-    // registry fixture (matches start_full_router in api_integration_test.rs).
+    // Seed the pinned registry fixture in the temp home so the kernel boots with a registry fixture (matches start_full_router in api_integration_test.rs).
     librefang_kernel::registry_sync::seed_registry_fixture_for_tests(tmp.path());
 
     let config = KernelConfig {

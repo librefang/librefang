@@ -173,8 +173,7 @@ async fn start_test_server_with_provider(
 async fn start_full_router(api_key: &str) -> FullRouterHarness {
     let tmp = tempfile::tempdir().expect("Failed to create temp dir");
 
-    // Seed the pinned registry fixture into the temp home_dir so the kernel
-    // boots with a populated model catalog, offline.
+    // Seed the pinned registry fixture into the temp home_dir so the kernel boots with a populated model catalog, offline.
     librefang_kernel::registry_sync::seed_registry_fixture_for_tests(tmp.path());
 
     let config = KernelConfig {

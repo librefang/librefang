@@ -511,11 +511,8 @@ mod tests {
 
     #[test]
     fn test_synthesize_no_provider() {
-        // Provider detection reads process-global env; clear the keys under the
-        // crate-wide env lock so a concurrent test's key (e.g. model_catalog's
-        // GOOGLE_API_KEY) can't route detection onto a real-provider path.
-        // Plain #[test] + block_on keeps the guard held across the await
-        // without tripping clippy::await_holding_lock.
+        // Provider detection reads process-global env; clear the keys under the crate-wide env lock so a concurrent test's key (e.g. model_catalog's GOOGLE_API_KEY) can't route detection onto a real-provider path.
+        // Plain #[test] + block_on keeps the guard held across the await without tripping clippy::await_holding_lock.
         let _guard = crate::test_env::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());

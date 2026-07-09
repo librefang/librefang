@@ -276,9 +276,7 @@ fn test_detect_auth_local_providers() {
     assert_eq!(vllm.auth_status, AuthStatus::NotRequired);
 }
 
-// Env-touching tests share the crate-wide lock: module-scope statics were the
-// earlier bug at test scope (two disjoint mutexes = no mutual exclusion), and
-// the same failure recurred one level up, across modules — see test_env.rs.
+// Env-touching tests share the crate-wide lock: module-scope statics were the earlier bug at test scope (two disjoint mutexes = no mutual exclusion), and the same failure recurred one level up, across modules — see test_env.rs.
 use crate::test_env::ENV_LOCK;
 
 /// Regression: a CLI login must NOT auto-configure the corresponding API

@@ -129,10 +129,7 @@ async fn boot_enabled_with_llm(token_env: &str, llm_base_url: String) -> Harness
         max_payload_bytes: 65536,
         rate_limit_per_minute: 30,
     };
-    // The registry fixture provides the `hello-world` agent template the
-    // dispatch path instantiates when no agent exists yet — without it the
-    // handler 500s with "template 'hello-world' not found" under
-    // LIBREFANG_REGISTRY_OFFLINE (no network sync at boot).
+    // The registry fixture provides the `hello-world` agent template the dispatch path instantiates when no agent exists yet — without it the handler 500s with "template 'hello-world' not found" under LIBREFANG_REGISTRY_OFFLINE (no network sync at boot).
     let test = TestAppState::with_builder(
         MockKernelBuilder::new()
             .with_registry_fixture()

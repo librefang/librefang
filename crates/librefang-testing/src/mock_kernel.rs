@@ -140,8 +140,7 @@ pub struct MockKernelBuilder {
     /// state left behind by `sync_registry`'s network fetch) with a
     /// deterministic baseline.
     catalog_seed: Option<CatalogSeed>,
-    /// When true, seed the temp home from the pinned in-repo registry fixture
-    /// before boot (providers, hands, agent templates, MCP catalog).
+    /// When true, seed the temp home from the pinned in-repo registry fixture before boot (providers, hands, agent templates, MCP catalog).
     seed_registry_fixture: bool,
 }
 
@@ -190,13 +189,9 @@ impl MockKernelBuilder {
         self
     }
 
-    /// Seed the temp home from the pinned in-repo registry fixture before boot,
-    /// so registry content (agent templates like `hello-world`, hands,
-    /// providers, the MCP catalog) exists without any network access.
+    /// Seed the temp home from the pinned in-repo registry fixture before boot, so registry content (agent templates like `hello-world`, hands, providers, the MCP catalog) exists without any network access.
     ///
-    /// Opt-in: most mock-kernel tests want an empty home, and some (e.g.
-    /// restart/restore tests) specifically assert behaviour when no registry
-    /// template is present on disk.
+    /// Opt-in: most mock-kernel tests want an empty home, and some (e.g. restart/restore tests) specifically assert behaviour when no registry template is present on disk.
     pub fn with_registry_fixture(mut self) -> Self {
         self.seed_registry_fixture = true;
         self

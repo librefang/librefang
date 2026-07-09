@@ -5,8 +5,7 @@ use super::registry::{
 };
 use super::*;
 
-// Crate-wide env lock — module-local statics don't exclude env-touching tests
-// in other modules; see test_env.rs.
+// Crate-wide env lock — module-local statics don't exclude env-touching tests in other modules; see test_env.rs.
 use crate::test_env::ENV_LOCK;
 
 #[test]
