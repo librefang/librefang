@@ -3,7 +3,9 @@ import {
   asText,
   extractAssistantHistoryParts,
   formatMeta,
+  isTerminalFrameType,
   normalizeRole,
+  terminalFrameOwner,
   normalizeToolOutput,
 } from "./chat";
 import type { ContentBlock } from "../api";
@@ -170,5 +172,38 @@ describe("extractAssistantHistoryParts", () => {
       text: "[object Object]",
       thinking: "",
     });
+  });
+});
+
+describe("terminalFrameOwner (#6390)", () => {
+  it("treats a matching echoed id as the current turn", () => {
+    expect(terminalFrameOwner("bot-1", "bot-1")).toBe("current");
+  });
+
+  it("routes a different echoed id to the foreign turn that owns it", () => {
+    // The misbind race: turn A's late `response` arrives while turn B's
+    // listener is active — it must NOT be treated as B's terminal frame.
+    expect(terminalFrameOwner("bot-A", "bot-B")).toBe("foreign");
+  });
+
+  it("keeps legacy behavior when the daemon echoes no id", () => {
+    expect(terminalFrameOwner(undefined, "bot-1")).toBe("current");
+    expect(terminalFrameOwner(null, "bot-1")).toBe("current");
+    expect(terminalFrameOwner("", "bot-1")).toBe("current");
+    expect(terminalFrameOwner(42, "bot-1")).toBe("current");
+  });
+});
+
+describe("isTerminalFrameType (#6390)", () => {
+  it("matches exactly the frames that end a turn's lifecycle", () => {
+    expect(isTerminalFrameType("response")).toBe(true);
+    expect(isTerminalFrameType("silent_complete")).toBe(true);
+    expect(isTerminalFrameType("error")).toBe(true);
+  });
+
+  it("leaves streaming and lifecycle frames on the normal path", () => {
+    for (const t of ["text_delta", "thinking_delta", "typing", "tool_start", "tool_end", "tool_result", "command_result", undefined]) {
+      expect(isTerminalFrameType(t)).toBe(false);
+    }
   });
 });

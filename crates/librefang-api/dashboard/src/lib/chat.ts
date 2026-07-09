@@ -146,3 +146,23 @@ export function extractAssistantHistoryParts(
     thinking: thinkingParts.join("\n\n"),
   };
 }
+
+/** Terminal WS frame types — the frames that end a turn's lifecycle (#6390). */
+export function isTerminalFrameType(t: unknown): t is "response" | "silent_complete" | "error" {
+  return t === "response" || t === "silent_complete" || t === "error";
+}
+
+/**
+ * Decide which turn a terminal WS frame belongs to (#6390).
+ *
+ * The daemon echoes the `message_id` the client sent with the turn.
+ * A terminal frame can arrive after a newer turn replaced the socket listener — post-turn memory extraction delays `response` past the next user send — so a frame whose echoed id differs from the current bubble's id belongs to a previous turn ("foreign") and must be routed to its own bubble, never bound to the current one.
+ * Frames without an id (pre-correlation daemons) are treated as the current turn's, preserving the legacy behavior.
+ */
+export function terminalFrameOwner(
+  frameMessageId: unknown,
+  currentBotMsgId: string,
+): "current" | "foreign" {
+  if (typeof frameMessageId !== "string" || frameMessageId.length === 0) return "current";
+  return frameMessageId === currentBotMsgId ? "current" : "foreign";
+}

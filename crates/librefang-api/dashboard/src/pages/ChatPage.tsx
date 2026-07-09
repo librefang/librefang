@@ -18,7 +18,7 @@ import { useSessionStream } from "../lib/queries/sessions";
 import { useActiveHandsWhen } from "../lib/queries/hands";
 import { agentKeys, approvalKeys } from "../lib/queries/keys";
 import { groupedPicker } from "../lib/chatPicker";
-import { normalizeToolOutput } from "../lib/chat";
+import { isTerminalFrameType, normalizeToolOutput, terminalFrameOwner } from "../lib/chat";
 import {
   deriveDropdownActiveSessionId,
   pickSessionDropdownLabel,
@@ -990,6 +990,42 @@ function useChatMessages(
           resetFallbackTimer();
           try {
             const data = JSON.parse(event.data as string);
+            // #6390: a previous turn's terminal frame can land after this
+            // turn replaced the socket listener — post-turn memory extraction
+            // delays `response` past the next user send. The daemon echoes
+            // the `message_id` we sent, so route a foreign frame to the
+            // bubble that owns it and leave this turn's lifecycle
+            // (cleanup / finishTurn / auto-pin) untouched.
+            if (
+              isTerminalFrameType(data.type) &&
+              terminalFrameOwner(data.message_id, botMsg.id) === "foreign"
+            ) {
+              const foreignId = data.message_id as string;
+              if (data.type === "response") {
+                updateAgentMessages(sendAgentId, prev => prev.map(m =>
+                  m.id === foreignId
+                    ? {
+                        ...m, content: data.content || m.content, isStreaming: false,
+                        tokens: { output: data.output_tokens, input: data.input_tokens },
+                        cost_usd: data.cost_usd,
+                        memories_saved: data.memories_saved,
+                        memories_used: data.memories_used,
+                        thinking: typeof data.thinking === "string" ? data.thinking : m.thinking,
+                        thinkingCollapsed: m.thinkingCollapsed ?? true,
+                      }
+                    : m
+                ));
+              } else if (data.type === "silent_complete") {
+                updateAgentMessages(sendAgentId, prev => prev.filter(m => m.id !== foreignId));
+              } else {
+                updateAgentMessages(sendAgentId, prev => prev.map(m =>
+                  m.id === foreignId
+                    ? { ...m, isStreaming: false, error: data.content || "WebSocket error" }
+                    : m
+                ));
+              }
+              return;
+            }
             if (data.type === "text_delta") {
               const chunk = data.content || "";
               // Accumulate into the buffer without a React state update on every token.
@@ -1206,6 +1242,10 @@ function useChatMessages(
           content: trimmed,
           thinking: deepThinking,
           show_thinking: showThinkingProcess,
+          // Turn correlation id (#6390): the daemon echoes it on every
+          // terminal frame so late frames bind to this bubble, not the
+          // newest one. Reuses the bubble id — no extra mapping needed.
+          message_id: botMsg.id,
           // Backend ws handler reads `parsed["attachments"]` (ws.rs) and
           // resolves them via the same path as the HTTP /message endpoint.
           ...(hasAttachments ? { attachments } : {}),
@@ -2030,10 +2070,8 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
 
   const effectiveDisabled = disabled || !!authMissing;
   // Both the textarea and the send button unlock on `typing:stop` (`disabled`
-  // and `inputDisabled` both track `isStreaming`). The `response` frame still
-  // arrives later and attaches `memories_saved` to the correct message via its
-  // keyed `updateAgentMessages` call — the send-button gate does not need to
-  // wait for it.
+  // and `inputDisabled` both track `isStreaming`).
+  // The `response` frame still arrives later; the daemon echoes our `message_id` on it, and the foreign-terminal router in `handleMessage` binds it to the bubble that owns it even when a newer turn has already replaced the listener (#6390) — so the send-button gate does not need to wait for it.
   const textareaDisabled = (inputDisabled ?? disabled) || !!authMissing;
 
   return (
