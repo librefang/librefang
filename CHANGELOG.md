@@ -7,6 +7,10 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ## [Unreleased]
 
+### Changed
+
+- Stop the release pipeline from generating a stable `librefang` formula in `librefang/homebrew-tap`: the stable CLI now ships from homebrew-core (Homebrew/homebrew-core#290413), so the tap keeping its own copy shadowed the core formula and duplicated maintenance on every release; a stable tag now cascades the newest build into the `beta` / `rc` tap channels only, the keg-only `librefang@<ver>` versioned formula and the desktop cask sync are unaffected, and the release-notes install block now installs the stable CLI directly from core (#6416) (@houko)
+
 ### Fixed
 
 - Export `LIBREFANG_REGISTRY_OFFLINE=1` in the four CI test lanes (unit, Ubuntu shards, Windows, macOS) so test-booted kernels stop fetching the content registry: each fresh temp home triggered a real git clone per boot, and whether the fetch succeeded changed test outcomes — a registry-pre-installed `assistant` `agent.toml` made restore treat the disk template as authoritative and clobber explicit DB model config, deterministically failing PR #6384's restart test in CI while passing locally under `just test` (#6410) (@houko)
