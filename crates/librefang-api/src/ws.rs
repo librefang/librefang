@@ -948,8 +948,7 @@ async fn handle_text_message(
 
     match msg_type {
         "message" => {
-            // Optional client-supplied correlation id, echoed on every
-            // terminal frame of this turn (#6390 — see module docs).
+            // Optional client-supplied correlation id, echoed on every terminal frame of this turn (#6390 — see module docs).
             let message_id: Option<String> = parsed["message_id"]
                 .as_str()
                 .filter(|s| !s.is_empty() && s.len() <= MAX_MESSAGE_ID_LEN)
