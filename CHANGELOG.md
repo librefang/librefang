@@ -42,15 +42,7 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ## [2026.7.10] - 2026-07-10
 
-_39 PRs from 4 contributors since v2026.6.29._
-
-### Highlights
-
-- **Codex CLI model visibility** — the dashboard now surfaces which model your Codex CLI is configured to use
-- **Slack formatting** — messages are converted from Markdown to Slack's native mrkdwn format in the Slack sidecar
-- **OpenAI-compat extended thinking** — reasoning effort is now correctly forwarded to the OpenAI-compatible driver, enabling extended thinking on supported models
-- **Artifact read deduplication** — read_artifact results are no longer re-spilled at the post-tool chokepoint, preventing redundant output
-- **Dashboard & website translations** — completed and proofread translations across the dashboard and website
+_40 PRs from 4 contributors since v2026.6.29._
 
 ### Added
 
@@ -70,6 +62,7 @@ _39 PRs from 4 contributors since v2026.6.29._
 - Correlate chat turns with their WS terminal frames (#6419) (@houko)
 - Single-source the invisible-char set; skip reply-precheck on captionless media (#6426) (@houko)
 - Drop redundant refs in TUI format! args (Rust 1.97 clippy) (#6428) (@houko)
+- Reliable CLI→PyPI publishing — stable-only gate + stop desktop deleting CLI assets (#6433) (@houko)
 
 <details>
 <summary>Documentation, maintenance, and other internal changes</summary>
