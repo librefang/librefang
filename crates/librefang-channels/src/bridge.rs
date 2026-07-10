@@ -6168,34 +6168,41 @@ async fn media_dispatch_allowed(
             }
 
             // Reply-intent precheck: lightweight LLM classification when
-            // group_policy is "all" and precheck is enabled, mirroring the text
-            // path so a stray captioned media message does not get a reply where
-            // the same text would have stayed silent.
+            // group_policy is "all" and precheck is enabled. This IS run on the
+            // media path for parity with the text path — a deliberate choice, so
+            // a captioned media message does not get a reply where the same text
+            // would have stayed silent. Captionless media has no text to
+            // classify, so we skip the (billed) LLM call and proceed rather than
+            // classify an empty string: group_policy=all is opt-in to respond
+            // broadly, and bare media always reached the agent before the media
+            // gate existed, so proceeding preserves that behavior.
             if ov.reply_precheck && matches!(ov.group_policy, GroupPolicy::All) {
                 let text = extracted_user_text(&message.content).unwrap_or_default();
-                let sender = &message.sender.display_name;
-                let model = ov.reply_precheck_model.as_deref();
-                let account_id = message.metadata.get("account_id").and_then(|v| v.as_str());
-                let channel_key_for_name = match account_id {
-                    Some(aid) => format!("{ct_str}:{aid}"),
-                    None => ct_str.to_string(),
-                };
-                let bot_name = router.channel_default_name(&channel_key_for_name);
-                let aliases = if ov.group_trigger_patterns.is_empty() {
-                    None
-                } else {
-                    Some(ov.group_trigger_patterns.as_slice())
-                };
-                if !handle
-                    .classify_reply_intent(&text, sender, model, bot_name.as_deref(), aliases)
-                    .await
-                {
-                    debug!(
-                        channel = ct_str,
-                        sender = %sender,
-                        "Reply precheck declined — staying silent (media)"
-                    );
-                    return false;
+                if !text.trim().is_empty() {
+                    let sender = &message.sender.display_name;
+                    let model = ov.reply_precheck_model.as_deref();
+                    let account_id = message.metadata.get("account_id").and_then(|v| v.as_str());
+                    let channel_key_for_name = match account_id {
+                        Some(aid) => format!("{ct_str}:{aid}"),
+                        None => ct_str.to_string(),
+                    };
+                    let bot_name = router.channel_default_name(&channel_key_for_name);
+                    let aliases = if ov.group_trigger_patterns.is_empty() {
+                        None
+                    } else {
+                        Some(ov.group_trigger_patterns.as_slice())
+                    };
+                    if !handle
+                        .classify_reply_intent(&text, sender, model, bot_name.as_deref(), aliases)
+                        .await
+                    {
+                        debug!(
+                            channel = ct_str,
+                            sender = %sender,
+                            "Reply precheck declined — staying silent (media)"
+                        );
+                        return false;
+                    }
                 }
             }
         } else {

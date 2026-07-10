@@ -30,6 +30,7 @@ pub mod serde_compat;
 pub mod subagent;
 pub mod taint;
 pub mod task;
+pub mod text;
 pub mod tool;
 pub mod tool_class;
 pub mod tool_compat;
