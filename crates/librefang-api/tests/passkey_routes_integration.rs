@@ -46,12 +46,7 @@ fn base_config() -> KernelConfig {
 
 async fn boot(config: KernelConfig) -> Harness {
     let tmp = tempfile::tempdir().expect("tempdir");
-    librefang_kernel::registry_sync::sync_registry(
-        tmp.path(),
-        librefang_kernel::registry_sync::DEFAULT_CACHE_TTL_SECS,
-        "",
-        None,
-    );
+    librefang_kernel::registry_sync::seed_registry_fixture_for_tests(tmp.path());
     let config = KernelConfig {
         home_dir: tmp.path().to_path_buf(),
         data_dir: tmp.path().join("data"),

@@ -96,6 +96,8 @@ pub mod shell_bleed;
 pub mod stderr_log;
 pub mod str_utils;
 pub mod subprocess_sandbox;
+#[cfg(test)]
+pub(crate) mod test_env;
 pub mod tool_budget;
 pub mod tool_classifier;
 pub mod tool_exec_backend;

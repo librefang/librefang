@@ -1,0 +1,62 @@
+id = "filesystem"
+name = "Filesystem"
+description = "Read, write, search, and manage local files through the official MCP filesystem server"
+category = "devtools"
+icon = "📁"
+tags = ["files", "local", "read", "write", "search"]
+
+[transport]
+type = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem@latest", "$HOME"]
+
+[health_check]
+interval_secs = 60
+unhealthy_threshold = 3
+
+setup_instructions = """
+Exposes your home directory to agents by default.
+
+To restrict access to specific directories, add a custom entry in config.toml:
+
+```toml
+[[mcp_servers]]
+name = "filesystem"
+
+[mcp_servers.transport]
+type = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem@latest", "/path/to/expose"]
+```
+
+Requires Node.js / npx.
+"""
+
+
+[i18n.zh]
+name = "Filesystem"
+description = "通过官方 MCP Filesystem 服务器读、写、搜索和管理本地文件。"
+
+[i18n.zh-TW]
+name = "Filesystem"
+description = "透過官方 MCP Filesystem 伺服器讀、寫、搜尋與管理本地檔案。"
+
+[i18n.ja]
+name = "Filesystem"
+description = "公式 MCP Filesystem サーバー経由でローカルファイルを読み書き・検索・管理。"
+
+[i18n.ko]
+name = "Filesystem"
+description = "공식 MCP Filesystem 서버를 통해 로컬 파일을 읽기/쓰기/검색/관리."
+
+[i18n.de]
+name = "Filesystem"
+description = "Lokale Dateien über den offiziellen MCP-Filesystem-Server lesen, schreiben, suchen und verwalten."
+
+[i18n.es]
+name = "Filesystem"
+description = "Lee, escribe, busca y gestiona archivos locales mediante el servidor MCP oficial de sistema de archivos."
+
+[i18n.fr]
+name = "Filesystem"
+description = "Lire, écrire, rechercher et gérer les fichiers locaux via le serveur MCP Filesystem officiel."

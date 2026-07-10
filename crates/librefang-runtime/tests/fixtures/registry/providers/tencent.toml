@@ -1,0 +1,18 @@
+# tencent — auto-generated from OpenRouter API
+
+[provider]
+id = "tencent"
+display_name = "Tencent"
+api_key_env = "HUNYUAN_API_KEY"
+base_url = "https://api.hunyuan.cloud.tencent.com/v1"
+key_required = true
+
+[[models]]
+id = "hunyuan-a13b-instruct"
+display_name = "Tencent: Hunyuan A13B Instruct"
+tier = "fast"
+context_window = 131072
+max_output_tokens = 131072
+input_cost_per_m = 0.14
+output_cost_per_m = 0.57
+supports_streaming = true

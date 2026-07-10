@@ -1,0 +1,61 @@
+id = "memory"
+name = "Memory (Knowledge Graph)"
+description = "Persistent knowledge graph that lets agents store and retrieve facts, entities, and relationships across sessions"
+category = "ai"
+icon = "🧠"
+tags = ["memory", "knowledge-graph", "persistence", "facts", "entities"]
+
+[transport]
+type = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-memory@latest"]
+
+[health_check]
+interval_secs = 60
+unhealthy_threshold = 3
+
+setup_instructions = """
+No API key required. Stores a knowledge graph locally in JSON format.
+
+Default storage: the server's working directory. To persist to a specific path, set:
+
+```toml
+[[mcp_servers]]
+name = "memory"
+env = ["MEMORY_FILE_PATH=/path/to/memory.json"]
+
+[mcp_servers.transport]
+type = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-memory@latest"]
+```
+"""
+
+
+[i18n.zh]
+name = "Memory (知识图谱)"
+description = "持久化知识图谱，让 Agent 跨会话存取事实、实体与关系。"
+
+[i18n.zh-TW]
+name = "Memory (知識圖譜)"
+description = "持久化知識圖譜，讓 Agent 跨會話存取事實、實體與關係。"
+
+[i18n.ja]
+name = "Memory (ナレッジグラフ)"
+description = "セッションを跨いで事実・エンティティ・関係を保存・参照できる永続ナレッジグラフ。"
+
+[i18n.ko]
+name = "Memory (지식 그래프)"
+description = "세션 간에 사실, 엔티티, 관계를 저장 및 조회할 수 있는 영구 지식 그래프."
+
+[i18n.de]
+name = "Memory (Wissensgraph)"
+description = "Persistenter Wissensgraph, in dem Agenten Fakten, Entitäten und Beziehungen über Sitzungen hinweg speichern."
+
+[i18n.es]
+name = "Memory (grafo de conocimiento)"
+description = "Grafo de conocimiento persistente para almacenar hechos, entidades y relaciones entre sesiones."
+
+[i18n.fr]
+name = "Memory (graphe de connaissances)"
+description = "Graphe de connaissances persistant pour stocker faits, entités et relations entre sessions."

@@ -1,0 +1,35 @@
+# Stepfun (阶跃星辰) — https://platform.stepfun.com
+# Models: 2
+
+[provider]
+id = "stepfun"
+display_name = "Stepfun (阶跃星辰)"
+api_key_env = "STEPFUN_API_KEY"
+base_url = "https://api.stepfun.com/v1"
+key_required = true
+
+[[models]]
+id = "step-3.5-flash"
+display_name = "Step 3.5 Flash"
+tier = "smart"
+context_window = 256000
+max_output_tokens = 256000
+input_cost_per_m = 0.1
+output_cost_per_m = 0.3
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["stepfun-flash", "step-flash"]
+
+[[models]]
+id = "step-3"
+display_name = "Step 3"
+tier = "frontier"
+context_window = 65536
+max_output_tokens = 16384
+input_cost_per_m = 0.1
+output_cost_per_m = 0.3
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = ["stepfun-3"]

@@ -1,0 +1,57 @@
+id = "discord-mcp"
+name = "Discord"
+description = "Access Discord servers, channels, and messages through the MCP server"
+category = "communication"
+icon = "lucide:gamepad-2"
+tags = ["chat", "messaging", "community", "gaming", "voice"]
+
+[transport]
+type = "stdio"
+command = "npx"
+args = ["-y", "mcp-discord@1.3.4"]
+
+[[required_env]]
+name = "DISCORD_BOT_TOKEN"
+label = "Discord Bot Token"
+help = "A bot token from the Discord Developer Portal"
+is_secret = true
+get_url = "https://discord.com/developers/applications"
+
+[health_check]
+interval_secs = 60
+unhealthy_threshold = 3
+
+setup_instructions = """
+1. Go to the Discord Developer Portal (https://discord.com/developers/applications) and create a new application.
+2. Navigate to the 'Bot' section, click 'Add Bot', and copy the bot token.
+3. Invite the bot to your server using the OAuth2 URL generator with the required permissions, then paste the token into the DISCORD_BOT_TOKEN field above.
+"""
+
+
+[i18n.zh]
+name = "Discord"
+description = "通过 MCP 服务器访问 Discord 服务器、频道与消息。"
+
+[i18n.zh-TW]
+name = "Discord"
+description = "透過 MCP 伺服器存取 Discord 伺服器、頻道與訊息。"
+
+[i18n.ja]
+name = "Discord"
+description = "MCP サーバー経由で Discord のサーバー、チャンネル、メッセージにアクセス。"
+
+[i18n.ko]
+name = "Discord"
+description = "MCP 서버를 통해 Discord 서버, 채널, 메시지에 접근."
+
+[i18n.de]
+name = "Discord"
+description = "Zugriff auf Discord-Server, Kanäle und Nachrichten über den MCP-Server."
+
+[i18n.es]
+name = "Discord"
+description = "Accede a servidores, canales y mensajes de Discord mediante el servidor MCP."
+
+[i18n.fr]
+name = "Discord"
+description = "Accès aux serveurs, salons et messages Discord via le serveur MCP."

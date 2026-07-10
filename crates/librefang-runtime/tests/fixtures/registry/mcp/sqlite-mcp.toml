@@ -1,0 +1,57 @@
+id = "sqlite-mcp"
+name = "SQLite"
+description = "Query and manage local SQLite databases through the MCP server"
+category = "data"
+icon = "lucide:save"
+tags = ["database", "sql", "relational", "sqlite", "local", "embedded"]
+
+[transport]
+type = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-sqlite"]
+
+[[required_env]]
+name = "SQLITE_DB_PATH"
+label = "SQLite Database Path"
+help = "Absolute path to the SQLite database file (e.g., /home/user/data/mydb.sqlite)"
+is_secret = false
+get_url = ""
+
+[health_check]
+interval_secs = 60
+unhealthy_threshold = 3
+
+setup_instructions = """
+1. Locate the SQLite database file you want to connect to on your local filesystem.
+2. Enter the absolute path to the database file in the SQLITE_DB_PATH field above.
+3. Ensure the file has appropriate read/write permissions for the LibreFang process.
+"""
+
+
+[i18n.zh]
+name = "SQLite"
+description = "通过 MCP 服务器查询与管理本地 SQLite 数据库。"
+
+[i18n.zh-TW]
+name = "SQLite"
+description = "透過 MCP 伺服器查詢與管理本地 SQLite 資料庫。"
+
+[i18n.ja]
+name = "SQLite"
+description = "MCP サーバー経由でローカルの SQLite データベースを問い合わせ・管理。"
+
+[i18n.ko]
+name = "SQLite"
+description = "MCP 서버를 통해 로컬 SQLite 데이터베이스를 조회 및 관리."
+
+[i18n.de]
+name = "SQLite"
+description = "Lokale SQLite-Datenbanken über den MCP-Server abfragen und verwalten."
+
+[i18n.es]
+name = "SQLite"
+description = "Consulta y gestiona bases de datos SQLite locales mediante el servidor MCP."
+
+[i18n.fr]
+name = "SQLite"
+description = "Interroge et gère les bases SQLite locales via le serveur MCP."

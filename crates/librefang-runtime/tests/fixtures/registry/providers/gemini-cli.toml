@@ -1,0 +1,36 @@
+[provider]
+id = "gemini-cli"
+display_name = "Gemini CLI"
+api_key_env = ""
+base_url = ""
+key_required = false
+
+[[models]]
+id = "gemini-cli/gemini-2.5-pro"
+display_name = "Gemini 2.5 Pro (CLI)"
+provider = "gemini-cli"
+tier = "frontier"
+context_window = 1048576
+max_output_tokens = 65536
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = false
+supports_vision = false
+supports_streaming = false
+supports_thinking = true
+aliases = ["gemini-cli-pro"]
+
+[[models]]
+id = "gemini-cli/gemini-2.5-flash"
+display_name = "Gemini 2.5 Flash (CLI)"
+provider = "gemini-cli"
+tier = "smart"
+context_window = 1048576
+max_output_tokens = 65536
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = false
+supports_vision = false
+supports_streaming = false
+supports_thinking = true
+aliases = ["gemini-cli-flash"]

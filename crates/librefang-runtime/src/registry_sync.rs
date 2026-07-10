@@ -203,6 +203,13 @@ pub fn sync_registry(
         tracing::debug!("Registry cache is fresh, skipping download");
     }
 
+    fanout_registry_content(home_dir, &registry_cache);
+    true
+}
+
+/// Fan registry-cache content out into the live home directory: providers, channels, the MCP catalog, agent templates, workflow templates, aliases, and schema.
+/// Shared by [`sync_registry`] (after a fetch or on a warm cache) and [`seed_registry_fixture_for_tests`] (fixture-seeded cache, no network).
+fn fanout_registry_content(home_dir: &Path, registry_cache: &Path) {
     // Pre-install core content users need out of the box.
     // Skills and plugins stay in registry — users install via dashboard.
     for &dir_name in &["providers", "channels"] {
@@ -297,7 +304,27 @@ pub fn sync_registry(
     if workspaces_dir.exists() {
         cleanup_stale_dirs(&workspaces_dir);
     }
-    true
+}
+
+/// Absolute path of the in-repo pinned registry snapshot (baked at compile time; see `tests/fixtures/registry/README.md` for provenance and refresh).
+#[doc(hidden)]
+pub const REGISTRY_FIXTURE_DIR: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/registry");
+
+/// Seed `home_dir` with registry content from the pinned in-repo fixture — the hermetic, no-network replacement for calling [`sync_registry`] in test setups.
+/// Every test lane exports `LIBREFANG_REGISTRY_OFFLINE=1` (#6410), which turns a plain [`sync_registry`] on a fresh home into a no-op; before that, each fresh test home did a real git clone per kernel boot (#6404).
+///
+/// Copies the fixture into `home/registry/`, touches the sync marker so a later [`sync_registry`] (e.g. kernel boot) treats the cache as fresh and never fetches, then fans content out exactly like a real sync.
+/// Panics on copy failure — a silently empty home is precisely the failure mode this exists to prevent.
+#[doc(hidden)]
+pub fn seed_registry_fixture_for_tests(home_dir: &Path) {
+    let _guard = SYNC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let registry_cache = home_dir.join("registry");
+    if let Err(e) = copy_dir_recursive(Path::new(REGISTRY_FIXTURE_DIR), &registry_cache) {
+        panic!("failed to seed registry fixture from {REGISTRY_FIXTURE_DIR}: {e}");
+    }
+    touch_marker(&registry_cache);
+    fanout_registry_content(home_dir, &registry_cache);
 }
 
 /// Whether a `LIBREFANG_REGISTRY_OFFLINE` value disables the network refresh.
@@ -565,14 +592,9 @@ fn git_clone_fallback(
     Ok(())
 }
 
-/// Check if the registry content appears to be populated.
-///
-/// Returns `false` if any critical directories are missing, meaning
-/// auto-sync should run.
 /// Resolve the default home directory (for tests and standalone usage).
 pub fn resolve_home_dir_for_tests() -> std::path::PathBuf {
-    // OnceLock ensures the registry sync runs exactly once per process,
-    // preventing concurrent git clone races when tests run in parallel threads.
+    // OnceLock ensures the fixture seeding runs exactly once per process, so parallel test threads never race on the shared home's content.
     use std::sync::OnceLock;
     static HOME: OnceLock<std::path::PathBuf> = OnceLock::new();
     HOME.get_or_init(|| {
@@ -583,13 +605,14 @@ pub fn resolve_home_dir_for_tests() -> std::path::PathBuf {
                 // when nextest runs tests in parallel processes.
                 std::env::temp_dir().join(format!("librefang-test-{}", std::process::id()))
             });
-        // Auto-sync if the providers dir is empty (fresh CI environment)
+        // Auto-seed if the providers dir is empty (fresh CI environment).
+        // Seeds from the in-repo fixture snapshot instead of the network, so the shared test home is deterministic and works offline (#6410).
         if !home.join("providers").exists()
             || std::fs::read_dir(home.join("providers"))
                 .map(|d| d.count() == 0)
                 .unwrap_or(true)
         {
-            sync_registry(&home, DEFAULT_CACHE_TTL_SECS, "", None);
+            seed_registry_fixture_for_tests(&home);
         }
         home
     })

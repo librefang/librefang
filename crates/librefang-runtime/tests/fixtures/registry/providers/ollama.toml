@@ -1,0 +1,104 @@
+# Ollama — https://ollama.com
+# Current-generation models only. Additional models are discovered dynamically at runtime.
+
+[provider]
+id = "ollama"
+display_name = "Ollama"
+api_key_env = "OLLAMA_API_KEY"
+base_url = "http://127.0.0.1:11434/v1"
+key_required = false
+
+[[models]]
+id = "gemma4"
+display_name = "Gemma 4"
+tier = "local"
+context_window = 128000
+max_output_tokens = 8192
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+supports_thinking = true
+aliases = ["gemma4:latest"]
+
+[[models]]
+id = "deepseek-r1:latest"
+display_name = "DeepSeek R1"
+tier = "local"
+context_window = 64000
+max_output_tokens = 8192
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = false
+supports_vision = false
+supports_streaming = true
+supports_thinking = true
+aliases = ["deepseek-r1"]
+
+[[models]]
+id = "qwen3"
+display_name = "Qwen 3"
+tier = "local"
+context_window = 40960
+max_output_tokens = 8192
+input_cost_per_m = 0.4
+output_cost_per_m = 2.4
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+supports_thinking = true
+aliases = ["qwen3:latest"]
+
+[[models]]
+id = "qwq"
+display_name = "QwQ"
+tier = "local"
+context_window = 40960
+max_output_tokens = 8192
+input_cost_per_m = 0.15
+output_cost_per_m = 0.58
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+supports_thinking = true
+aliases = ["qwq:latest"]
+
+[[models]]
+id = "llama4"
+display_name = "Llama 4"
+tier = "local"
+context_window = 128000
+max_output_tokens = 8192
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = ["llama4:latest"]
+
+[[models]]
+id = "mistral:latest"
+display_name = "Mistral"
+tier = "local"
+context_window = 32768
+max_output_tokens = 4096
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "phi4"
+display_name = "Phi-4"
+tier = "local"
+context_window = 16384
+max_output_tokens = 4096
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["phi4:latest"]

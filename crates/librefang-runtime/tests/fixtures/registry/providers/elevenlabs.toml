@@ -1,0 +1,10 @@
+# ElevenLabs — https://elevenlabs.io
+# Media-only provider (TTS), no LLM models
+
+[provider]
+id = "elevenlabs"
+display_name = "ElevenLabs"
+api_key_env = "ELEVENLABS_API_KEY"
+base_url = "https://api.elevenlabs.io/v1"
+key_required = true
+media_capabilities = ["text_to_speech"]

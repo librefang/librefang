@@ -276,13 +276,8 @@ fn test_detect_auth_local_providers() {
     assert_eq!(vllm.auth_status, AuthStatus::NotRequired);
 }
 
-/// Module-scope mutex for tests that mutate process env vars.
-///
-/// `cargo test` runs tests in parallel by default, so any two tests
-/// touching the same env var must share this lock — otherwise they race
-/// on process-global state. Each test declaring its own `static` was the
-/// earlier bug: two disjoint mutexes = no mutual exclusion.
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+// Env-touching tests share the crate-wide lock: module-scope statics were the earlier bug at test scope (two disjoint mutexes = no mutual exclusion), and the same failure recurred one level up, across modules — see test_env.rs.
+use crate::test_env::ENV_LOCK;
 
 /// Regression: a CLI login must NOT auto-configure the corresponding API
 /// provider. `anthropic` / `openai` / `gemini` / `qwen` only light up

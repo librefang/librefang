@@ -1,0 +1,61 @@
+id = "puppeteer"
+name = "Puppeteer"
+description = "Control a headless Chrome browser — navigate pages, take screenshots, fill forms, and scrape JavaScript-rendered content"
+category = "devtools"
+icon = "🤖"
+tags = [
+  "browser",
+  "puppeteer",
+  "headless",
+  "screenshot",
+  "scraping",
+  "automation",
+  "chrome",
+]
+
+[transport]
+type = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-puppeteer@latest"]
+
+[health_check]
+interval_secs = 60
+unhealthy_threshold = 3
+
+setup_instructions = """
+Requires Chrome or Chromium to be installed:
+- macOS: `brew install --cask google-chrome`
+- Ubuntu/Debian: `sudo apt install chromium-browser`
+- Docker: add `--cap-add=SYS_ADMIN` to your container run command
+
+No API key required.
+"""
+
+
+[i18n.zh]
+name = "Puppeteer"
+description = "驱动无头 Chrome —— 导航页面、截图、填表并抓取 JavaScript 渲染后的内容。"
+
+[i18n.zh-TW]
+name = "Puppeteer"
+description = "驅動無頭 Chrome —— 導航頁面、截圖、填表並擷取 JavaScript 渲染後的內容。"
+
+[i18n.ja]
+name = "Puppeteer"
+description = "ヘッドレス Chrome を操作 —— ページ遷移、スクリーンショット、フォーム入力、JS レンダリング済みコンテンツのスクレイピング。"
+
+[i18n.ko]
+name = "Puppeteer"
+description = "헤드리스 Chrome 제어 —— 페이지 이동, 스크린샷, 폼 입력, JS 렌더링 콘텐츠 스크래핑."
+
+[i18n.de]
+name = "Puppeteer"
+description = "Steuert Headless-Chrome — Seiten navigieren, Screenshots, Formulare ausfüllen, JS-gerenderte Inhalte scrapen."
+
+[i18n.es]
+name = "Puppeteer"
+description = "Controla Chrome headless: navegación, capturas, formularios y scraping de contenido renderizado por JavaScript."
+
+[i18n.fr]
+name = "Puppeteer"
+description = "Pilote un Chrome headless — navigation, captures, remplissage de formulaires, scraping de contenu rendu par JS."
