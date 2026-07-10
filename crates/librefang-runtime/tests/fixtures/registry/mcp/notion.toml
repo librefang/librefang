@@ -1,0 +1,57 @@
+id = "notion"
+name = "Notion"
+description = "Access and manage Notion pages, databases, and blocks through the MCP server"
+category = "productivity"
+icon = "lucide:file-text"
+tags = ["notes", "wiki", "knowledge-base", "documentation", "databases"]
+
+[transport]
+type = "stdio"
+command = "npx"
+args = ["-y", "@notionhq/notion-mcp-server@2.2.1"]
+
+[[required_env]]
+name = "NOTION_API_KEY"
+label = "Notion Integration Token"
+help = "An internal integration token created in your Notion workspace settings"
+is_secret = true
+get_url = "https://www.notion.so/my-integrations"
+
+[health_check]
+interval_secs = 60
+unhealthy_threshold = 3
+
+setup_instructions = """
+1. Go to https://www.notion.so/my-integrations and click 'New integration'.
+2. Give it a name, select your workspace, and grant the required capabilities (Read/Update/Insert content).
+3. Copy the Internal Integration Token and paste it into the NOTION_API_KEY field above. Then share relevant pages with the integration in Notion.
+"""
+
+
+[i18n.zh]
+name = "Notion"
+description = "通过 MCP 服务器访问和管理 Notion 的页面、数据库与区块。"
+
+[i18n.zh-TW]
+name = "Notion"
+description = "透過 MCP 伺服器存取並管理 Notion 的頁面、資料庫與區塊。"
+
+[i18n.ja]
+name = "Notion"
+description = "MCP サーバー経由で Notion のページ、データベース、ブロックにアクセス・管理。"
+
+[i18n.ko]
+name = "Notion"
+description = "MCP 서버를 통해 Notion 페이지, 데이터베이스, 블록에 접근 및 관리."
+
+[i18n.de]
+name = "Notion"
+description = "Zugriff und Verwaltung von Notion-Seiten, -Datenbanken und -Blöcken über den MCP-Server."
+
+[i18n.es]
+name = "Notion"
+description = "Accede y gestiona páginas, bases de datos y bloques de Notion mediante el servidor MCP."
+
+[i18n.fr]
+name = "Notion"
+description = "Accès et gestion des pages, bases et blocs Notion via le serveur MCP."

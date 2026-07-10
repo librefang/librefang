@@ -509,17 +509,50 @@ mod tests {
         let _ = TtsEngine::detect_provider(); // Just verify no panic
     }
 
-    #[tokio::test]
-    async fn test_synthesize_no_provider() {
+    #[test]
+    fn test_synthesize_no_provider() {
+        // Provider detection reads process-global env; clear the keys under the crate-wide env lock so a concurrent test's key (e.g. model_catalog's GOOGLE_API_KEY) can't route detection onto a real-provider path.
+        // Plain #[test] + block_on keeps the guard held across the await without tripping clippy::await_holding_lock.
+        let _guard = crate::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        const KEYS: [&str; 4] = [
+            "OPENAI_API_KEY",
+            "ELEVENLABS_API_KEY",
+            "GOOGLE_API_KEY",
+            "GOOGLE_CLOUD_API_KEY",
+        ];
+        let preserved: Vec<(&str, Option<String>)> =
+            KEYS.iter().map(|k| (*k, std::env::var(k).ok())).collect();
+        // SAFETY: single-threaded section guarded by ENV_LOCK.
+        unsafe {
+            for k in KEYS {
+                std::env::remove_var(k);
+            }
+        }
+
         let mut config = default_config();
         config.enabled = true;
         let engine = TtsEngine::new(config);
-        // This may or may not error depending on env vars
-        let result = engine.synthesize("Hello world", None, None).await;
-        // If no API keys are set, should error
-        if let Err(err) = result {
-            assert!(err.contains("No TTS provider") || err.contains("not set"));
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime")
+            .block_on(engine.synthesize("Hello world", None, None));
+
+        // SAFETY: single-threaded section guarded by ENV_LOCK.
+        unsafe {
+            for (k, v) in preserved {
+                match v {
+                    Some(val) => std::env::set_var(k, val),
+                    None => std::env::remove_var(k),
+                }
+            }
         }
+
+        let err = result.expect_err("no provider key set — synthesize must error");
+        assert!(err.contains("No TTS provider") || err.contains("not set"));
     }
 
     #[test]

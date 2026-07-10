@@ -1,0 +1,63 @@
+id = "github"
+name = "GitHub"
+description = "Access GitHub repositories, issues, pull requests, and organizations through the official MCP server"
+category = "devtools"
+icon = "lucide:github"
+tags = ["git", "vcs", "code", "issues", "pull-requests", "ci"]
+
+[transport]
+type = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github@2025.4.8"]
+
+[[required_env]]
+name = "GITHUB_PERSONAL_ACCESS_TOKEN"
+label = "GitHub Personal Access Token"
+help = "A fine-grained or classic PAT with repo and read:org scopes"
+is_secret = true
+get_url = "https://github.com/settings/tokens"
+
+[oauth]
+provider = "github"
+scopes = ["repo", "read:org"]
+auth_url = "https://github.com/login/oauth/authorize"
+token_url = "https://github.com/login/oauth/access_token"
+
+[health_check]
+interval_secs = 60
+unhealthy_threshold = 3
+
+setup_instructions = """
+1. Go to https://github.com/settings/tokens and create a Personal Access Token (classic or fine-grained) with 'repo' and 'read:org' scopes.
+2. Paste the token into the GITHUB_PERSONAL_ACCESS_TOKEN field above.
+3. Alternatively, use the OAuth flow to authorize LibreFang directly with your GitHub account.
+"""
+
+
+[i18n.zh]
+name = "GitHub"
+description = "通过官方 MCP 服务器访问 GitHub 仓库、Issue、Pull Request 与组织。"
+
+[i18n.zh-TW]
+name = "GitHub"
+description = "透過官方 MCP 伺服器存取 GitHub 儲存庫、Issue、Pull Request 與組織。"
+
+[i18n.ja]
+name = "GitHub"
+description = "公式 MCP サーバー経由で GitHub のリポジトリ、Issue、Pull Request、Organization にアクセス。"
+
+[i18n.ko]
+name = "GitHub"
+description = "공식 MCP 서버를 통해 GitHub 저장소, 이슈, PR, 조직에 접근."
+
+[i18n.de]
+name = "GitHub"
+description = "Zugriff auf GitHub-Repositories, Issues, Pull-Requests und Organisationen über den offiziellen MCP-Server."
+
+[i18n.es]
+name = "GitHub"
+description = "Accede a repositorios, issues, pull requests y organizaciones de GitHub mediante el servidor MCP oficial."
+
+[i18n.fr]
+name = "GitHub"
+description = "Accès aux dépôts, issues, pull requests et organisations GitHub via le serveur MCP officiel."

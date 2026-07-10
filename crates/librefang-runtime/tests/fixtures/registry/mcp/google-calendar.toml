@@ -1,0 +1,56 @@
+id = "google-calendar"
+name = "Google Calendar"
+description = "Manage Google Calendar events, schedules, and availability through the Anthropic MCP server"
+category = "productivity"
+icon = "lucide:calendar"
+tags = ["calendar", "scheduling", "google", "events", "meetings"]
+
+[transport]
+type = "stdio"
+command = "npx"
+args = ["-y", "@cocal/google-calendar-mcp@2.6.1"]
+
+[oauth]
+provider = "google"
+scopes = ["https://www.googleapis.com/auth/calendar"]
+auth_url = "https://accounts.google.com/o/oauth2/v2/auth"
+token_url = "https://oauth2.googleapis.com/token"
+
+[health_check]
+interval_secs = 60
+unhealthy_threshold = 3
+
+setup_instructions = """
+1. Click 'Connect' to initiate the OAuth flow with your Google account.
+2. Grant LibreFang access to your Google Calendar when prompted.
+3. The connection will be established automatically after authorization.
+"""
+
+
+[i18n.zh]
+name = "Google Calendar"
+description = "通过 Anthropic MCP 服务器管理 Google 日历的活动、日程与可用时段。"
+
+[i18n.zh-TW]
+name = "Google Calendar"
+description = "透過 Anthropic MCP 伺服器管理 Google 日曆的活動、行程與空檔。"
+
+[i18n.ja]
+name = "Google Calendar"
+description = "Anthropic MCP サーバー経由で Google カレンダーのイベント、スケジュール、空き時間を管理。"
+
+[i18n.ko]
+name = "Google Calendar"
+description = "Anthropic MCP 서버를 통해 Google 캘린더 이벤트, 일정, 가용 시간을 관리."
+
+[i18n.de]
+name = "Google Calendar"
+description = "Verwaltet Google-Kalender-Ereignisse, Zeitpläne und Verfügbarkeiten über den Anthropic-MCP-Server."
+
+[i18n.es]
+name = "Google Calendar"
+description = "Gestiona eventos, horarios y disponibilidad de Google Calendar mediante el servidor MCP de Anthropic."
+
+[i18n.fr]
+name = "Google Calendar"
+description = "Gère les événements, horaires et disponibilités Google Calendar via le serveur MCP Anthropic."

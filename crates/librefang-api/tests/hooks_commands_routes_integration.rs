@@ -129,15 +129,20 @@ async fn boot_enabled_with_llm(token_env: &str, llm_base_url: String) -> Harness
         max_payload_bytes: 65536,
         rate_limit_per_minute: 30,
     };
-    let test = TestAppState::with_builder(MockKernelBuilder::new().with_config(move |cfg| {
-        cfg.webhook_triggers = Some(webhook);
-        cfg.default_model = DefaultModelConfig {
-            provider: "librefang-test-mock".to_string(),
-            model: "mock-model".to_string(),
-            base_url: Some(llm_base_url),
-            ..Default::default()
-        };
-    }));
+    // The registry fixture provides the `hello-world` agent template the dispatch path instantiates when no agent exists yet — without it the handler 500s with "template 'hello-world' not found" under LIBREFANG_REGISTRY_OFFLINE (no network sync at boot).
+    let test = TestAppState::with_builder(
+        MockKernelBuilder::new()
+            .with_registry_fixture()
+            .with_config(move |cfg| {
+                cfg.webhook_triggers = Some(webhook);
+                cfg.default_model = DefaultModelConfig {
+                    provider: "librefang-test-mock".to_string(),
+                    model: "mock-model".to_string(),
+                    base_url: Some(llm_base_url),
+                    ..Default::default()
+                };
+            }),
+    );
     let state = test.state.clone();
     let app = Router::new()
         .nest(

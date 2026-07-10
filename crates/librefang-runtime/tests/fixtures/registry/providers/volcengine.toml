@@ -1,0 +1,71 @@
+# Volcano Engine / Doubao — https://volcengine.com
+# Models: 5
+
+[provider]
+id = "volcengine"
+display_name = "Volcano Engine (Doubao)"
+api_key_env = "VOLCENGINE_API_KEY"
+base_url = "https://ark.cn-beijing.volces.com/api/v3"
+key_required = true
+
+[[models]]
+id = "doubao-seed-2-0-pro-260215"
+display_name = "Doubao Seed 2.0 Pro"
+tier = "frontier"
+context_window = 262144
+max_output_tokens = 131072
+input_cost_per_m = 0.47
+output_cost_per_m = 2.37
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = ["doubao-pro", "doubao-seed-pro", "doubao-2-pro"]
+
+[[models]]
+id = "doubao-seed-2-0-lite-260215"
+display_name = "Doubao Seed 2.0 Lite"
+tier = "smart"
+context_window = 262144
+max_output_tokens = 131072
+input_cost_per_m = 0.09
+output_cost_per_m = 0.53
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = ["doubao-lite", "doubao-seed-lite", "doubao-2-lite"]
+
+[[models]]
+id = "doubao-seed-2-0-mini-260215"
+display_name = "Doubao Seed 2.0 Mini"
+tier = "fast"
+context_window = 262144
+max_output_tokens = 131072
+input_cost_per_m = 0.03
+output_cost_per_m = 0.31
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = ["doubao-mini", "doubao-seed-mini", "doubao-2-mini"]
+
+[[models]]
+id = "doubao-seed-2-0-code"
+display_name = "Doubao Seed 2.0 Code"
+tier = "smart"
+context_window = 262144
+max_output_tokens = 131072
+input_cost_per_m = 0.47
+output_cost_per_m = 2.37
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["doubao-code", "doubao-seed-code"]
+
+[[models]]
+id = "ui-tars-1.5-7b"
+display_name = "ByteDance: UI-TARS 7B"
+tier = "fast"
+context_window = 128000
+max_output_tokens = 2048
+input_cost_per_m = 0.1
+output_cost_per_m = 0.2
+supports_streaming = true

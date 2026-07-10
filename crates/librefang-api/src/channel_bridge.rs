@@ -1401,7 +1401,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                 let job = librefang_types::scheduler::CronJob {
                     id: librefang_types::scheduler::CronJobId::new(),
                     agent_id: agent.id,
-                    name: format!("chat-{}", &agent.name),
+                    name: format!("chat-{}", agent.name),
                     enabled: true,
                     schedule: librefang_types::scheduler::CronSchedule::Cron {
                         expr: cron_expr.clone(),

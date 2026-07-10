@@ -1,0 +1,451 @@
+id = "creator"
+version = "1.0.0"
+name = "Creator Hand"
+description = "AI media studio — generates images, videos, music, and speech from text prompts"
+
+category = "content"
+icon = "lucide:palette"
+tools = [
+  "image_generate",
+  "video_generate",
+  "video_status",
+  "music_generate",
+  "text_to_speech",
+  "file_read",
+  "file_write",
+  "file_list",
+  "web_fetch",
+  "web_search",
+  "memory_store",
+  "memory_recall",
+]
+
+# Per-hand resource allowlists (refs librefang/librefang-registry#87).
+# Inherited by every [agents.*] in this hand unless overridden.
+mcp_servers = ["memory", "filesystem"]
+skills = []
+# `skills_disabled = true` lives on each [agents.*] below — HandDefinitionRaw
+# in librefang-hands doesn't carry the field, so a hand-level entry would be
+# silently dropped by serde.
+
+
+[routing]
+aliases = [
+  "generate image",
+  "create image",
+  "make a picture",
+  "generate video",
+  "create video",
+  "make a video",
+  "generate music",
+  "create music",
+  "compose music",
+  "text to speech",
+  "generate speech",
+  "voice over",
+  "media generation",
+]
+weak_aliases = [
+  "illustration",
+  "artwork",
+  "album cover",
+  "background music",
+  "jingle",
+  "narration",
+  "audio",
+  "thumbnail",
+  "poster",
+  "banner",
+]
+
+# ---- Requirements ----------------------------------------------------------------
+
+[[requires]]
+key = "media_provider"
+label = "At least one media provider API key must be set"
+requirement_type = "any_env_var"
+check_value = "OPENAI_API_KEY,MINIMAX_API_KEY"
+description = "Creator Hand needs at least one configured media provider. OpenAI supports image and TTS; MiniMax supports image, TTS, video, and music."
+optional = false
+
+# ---- Settings --------------------------------------------------------------------
+
+[[settings]]
+key = "default_provider"
+label = "Preferred Provider"
+description = "Which provider to use by default. Auto will pick the first configured provider for each capability."
+setting_type = "select"
+default = "auto"
+
+[[settings.options]]
+value = "auto"
+label = "Auto-detect (best available)"
+
+[[settings.options]]
+value = "openai"
+label = "OpenAI (image, TTS)"
+provider_env = "OPENAI_API_KEY"
+
+[[settings.options]]
+value = "minimax"
+label = "MiniMax (image, TTS, video, music)"
+provider_env = "MINIMAX_API_KEY"
+
+[[settings]]
+key = "image_model"
+label = "Image Model"
+description = "Model to use for image generation"
+setting_type = "select"
+default = "auto"
+
+[[settings.options]]
+value = "auto"
+label = "Provider default"
+
+[[settings.options]]
+value = "gpt-image-1"
+label = "GPT Image 1 (OpenAI)"
+
+[[settings.options]]
+value = "dall-e-3"
+label = "DALL-E 3 (OpenAI)"
+
+[[settings.options]]
+value = "image-01"
+label = "Image-01 (MiniMax)"
+
+[[settings]]
+key = "image_size"
+label = "Default Image Size"
+description = "Default resolution for generated images"
+setting_type = "select"
+default = "1024x1024"
+
+[[settings.options]]
+value = "1024x1024"
+label = "1024x1024 (square)"
+
+[[settings.options]]
+value = "1792x1024"
+label = "1792x1024 (landscape)"
+
+[[settings.options]]
+value = "1024x1792"
+label = "1024x1792 (portrait)"
+
+[[settings]]
+key = "tts_voice"
+label = "TTS Voice"
+description = "Default voice for text-to-speech"
+setting_type = "select"
+default = "alloy"
+
+[[settings.options]]
+value = "alloy"
+label = "Alloy (neutral)"
+
+[[settings.options]]
+value = "echo"
+label = "Echo (male)"
+
+[[settings.options]]
+value = "fable"
+label = "Fable (storytelling)"
+
+[[settings.options]]
+value = "nova"
+label = "Nova (female)"
+
+[[settings.options]]
+value = "onyx"
+label = "Onyx (deep male)"
+
+[[settings.options]]
+value = "shimmer"
+label = "Shimmer (warm female)"
+
+[[settings]]
+key = "minimax_api_key"
+label = "MiniMax API Key"
+description = "API key from platform.minimaxi.com for video and music generation"
+setting_type = "text"
+env_var = "MINIMAX_API_KEY"
+default = ""
+
+# ---- Agent configuration ---------------------------------------------------------
+
+[agents.main]
+coordinator = true
+name = "creator-hand"
+description = "AI media studio — generates images, videos, music, and speech from natural language"
+module = "builtin:chat"
+provider = "default"
+model = "default"
+skills_disabled = true
+max_tokens = 8192
+temperature = 0.5
+max_iterations = 30
+# Raise the history cap above the kernel default. Creator Hand's
+# async video_generate flow polls video_status every 15-20s
+# until completion (1-3 min typical), so a single video request
+# consumes 5-15 turns. Combined workflows (video + TTS + music) plus
+# normal back-and-forth easily exceed 60 messages, which triggered
+# every-turn history trim and 0% prompt-cache hit-ratio in production.
+# 80 covers ~30 polls plus a comfortable pre-context window.
+max_history_messages = 80
+system_prompt = """You are Creator Hand — an AI media studio that generates images, videos, music, and speech from natural language requests.
+
+## Available Tools
+
+You have access to these media generation tools:
+
+### image_generate
+Generate images from text prompts.
+- Parameters: `prompt` (required), `provider`, `model`, `width`, `height`, `count`, `quality`, `seed`
+- Returns: URLs of generated images (served at /api/uploads/...)
+- Providers: OpenAI (gpt-image-1, dall-e-3), MiniMax (image-01)
+
+### text_to_speech
+Convert text to spoken audio.
+- Parameters: `text` (required), `provider`, `model`, `voice`, `speed`, `format`
+- Returns: URL to the audio file
+- Providers: OpenAI (tts-1, tts-1-hd), MiniMax (speech-2.8-hd)
+
+### video_generate
+Submit a video generation task (asynchronous).
+- Parameters: `prompt` (required), `provider`, `model`, `duration_secs`, `resolution`
+- Returns: `task_id` and `provider` — use video_status to poll for completion
+- Providers: MiniMax (T2V-01, video-01)
+
+### video_status
+Check the status of a video generation task.
+- Parameters: `task_id` (required), `provider` (required)
+- Returns: status ("pending", "processing", "completed", "failed") and result URL when done
+
+### music_generate
+Generate music from a text prompt and/or lyrics.
+- Parameters: `prompt`, `lyrics`, `provider`, `model`, `instrumental` (bool), `format`
+- At least one of `prompt` or `lyrics` is required
+- Returns: URL to the audio file
+- Providers: MiniMax (music-2.5)
+
+## Workflow Guidelines
+
+1. **Clarify intent**: If the user's request is vague, ask what type of media they want and suggest options.
+
+2. **Image generation**:
+   - Be detailed in prompts — describe style, mood, composition, lighting
+   - For multi-image requests, vary the prompts meaningfully
+   - Default to 1024x1024 unless the user specifies otherwise
+
+3. **Video generation** (async):
+   - Always explain that video takes time (typically 1-3 minutes)
+   - After calling video_generate, immediately poll with video_status
+   - If status is "processing", wait 15-20 seconds and poll again
+   - Keep the user informed of progress
+
+4. **Music generation**:
+   - For instrumental, set `instrumental: true`
+   - For songs with vocals, provide both `prompt` (style description) and `lyrics`
+   - Suggest genres and moods if the user doesn't specify
+
+5. **TTS**:
+   - Choose a voice that matches the content tone
+   - For long text, break into paragraphs and generate separately if needed
+
+6. **Combined workflows** — these are where you shine:
+   - "Make a podcast intro" → generate music + TTS narration
+   - "Create a social media post" → generate image + caption
+   - "Make a video with narration" → generate video + TTS voice-over
+   - Always present results together with all URLs
+
+## User Configuration
+
+Check the User Configuration section for:
+- `default_provider` — use this provider unless the user overrides
+- `image_model` — preferred image model (use if not "auto")
+- `image_size` — default image dimensions
+- `tts_voice` — default TTS voice
+
+Apply these defaults but allow the user to override in any request.
+
+## Important Rules
+
+- Always show the result URLs to the user so they can access the generated media
+- For video tasks, ALWAYS poll until completion or failure — don't leave the user hanging
+- Track generation stats via memory_store:
+  - `creator_hand_images_generated` — count
+  - `creator_hand_videos_generated` — count
+  - `creator_hand_music_generated` — count
+  - `creator_hand_tts_generated` — count
+- If a provider is not configured, suggest the user set up the API key
+- Never fabricate URLs or results — only return actual tool output
+"""
+
+[agents.prompt_writer]
+invoke_hint = "Creative prompt engineering — writing detailed, effective prompts for image, video, and music generation"
+name = "prompt-writer"
+description = "Prompt engineer that crafts detailed, effective prompts for media generation"
+module = "builtin:chat"
+provider = "default"
+model = "default"
+skills_disabled = true
+max_tokens = 4096
+temperature = 0.8
+system_prompt = """You are Prompt Writer, a creative prompt engineer within the Creator Hand.
+
+Your job is to transform simple user requests into detailed, effective prompts for media generation models.
+
+IMAGE PROMPTS:
+- Specify art style (photorealistic, watercolor, digital art, anime, oil painting, etc.)
+- Include composition details (wide shot, close-up, bird's eye view, etc.)
+- Describe lighting (golden hour, studio lighting, dramatic shadows, etc.)
+- Add mood/atmosphere (serene, chaotic, mysterious, vibrant, etc.)
+- Include technical details when relevant (depth of field, lens type, etc.)
+
+VIDEO PROMPTS:
+- Describe the scene and action clearly
+- Specify camera movement if desired (pan, zoom, dolly, tracking shot)
+- Keep descriptions concise but vivid — video models work best with clear, focused prompts
+
+MUSIC PROMPTS:
+- Specify genre, tempo (BPM), and mood
+- Describe instrumentation (piano, synth, acoustic guitar, etc.)
+- Include structure hints (intro, verse, chorus, bridge)
+- For songs with vocals, write lyrics with clear verse/chorus structure
+
+Always present multiple prompt variations for the user to choose from."""
+
+# ---- Dashboard metrics -----------------------------------------------------------
+
+[dashboard]
+[[dashboard.metrics]]
+label = "Images Generated"
+memory_key = "creator_hand_images_generated"
+format = "number"
+
+[[dashboard.metrics]]
+label = "Videos Generated"
+memory_key = "creator_hand_videos_generated"
+format = "number"
+
+[[dashboard.metrics]]
+label = "Music Tracks"
+memory_key = "creator_hand_music_generated"
+format = "number"
+
+[[dashboard.metrics]]
+label = "TTS Audio"
+memory_key = "creator_hand_tts_generated"
+format = "number"
+
+# ---- Metadata --------------------------------------------------------------------
+
+[metadata]
+frequency = "on-demand"
+token_consumption = "low"
+default_active = false
+
+# ---- Internationalization --------------------------------------------------------
+
+[i18n.zh]
+name = "创作 Hand"
+description = "AI 媒体工作室——根据文本提示生成图片、视频、音乐和语音"
+category = "内容"
+
+[i18n.zh.agents.main]
+name = "创作工作室"
+description = "AI 媒体工作室——通过自然语言生成图片、视频、音乐和语音"
+
+[i18n.zh.agents.prompt_writer]
+name = "提示词工程师"
+description = "提示词工程师，为媒体生成模型编写详细、高效的提示词。"
+
+[i18n.zh.settings.default_provider]
+label = "首选提供商"
+description = "默认使用哪个提供商。自动模式会为每种能力选择首个可用的提供商。"
+
+[i18n.zh.settings.image_model]
+label = "图像模型"
+description = "用于图像生成的模型"
+
+[i18n.zh.settings.image_size]
+label = "默认图像尺寸"
+description = "生成图像的默认分辨率"
+
+[i18n.zh.settings.tts_voice]
+label = "TTS 语音"
+description = "文字转语音的默认声音"
+
+[i18n.zh.settings.minimax_api_key]
+label = "MiniMax API 密钥"
+description = "来自 platform.minimaxi.com 的 API 密钥，用于视频和音乐生成"
+
+[i18n.zh-TW]
+name = "創作者 Hand"
+description = "AI 媒體工作室——根據文字提示生成圖片、影片、音樂和語音"
+
+[i18n.ja]
+name = "クリエイター Hand"
+description = "AIメディアスタジオ——テキストから画像、動画、音楽、音声を生成"
+category = "コンテンツ"
+
+[i18n.ja.settings.default_provider]
+label = "優先プロバイダー"
+description = "デフォルトで使用するプロバイダー。自動は各機能で最初に設定されたプロバイダーを選択。"
+
+[i18n.ja.settings.image_model]
+label = "画像モデル"
+description = "画像生成に使用するモデル"
+
+[i18n.ja.settings.image_size]
+label = "デフォルト画像サイズ"
+description = "生成画像のデフォルト解像度"
+
+[i18n.ja.settings.tts_voice]
+label = "TTS音声"
+description = "テキスト読み上げのデフォルト音声"
+
+[i18n.ja.settings.minimax_api_key]
+label = "MiniMax APIキー"
+description = "platform.minimaxi.comからのAPIキー。動画と音楽生成に使用。"
+
+[i18n.ko]
+name = "크리에이터 Hand"
+description = "AI 미디어 스튜디오 — 텍스트 프롬프트로 이미지, 비디오, 음악, 음성 생성"
+category = "콘텐츠"
+
+[i18n.ko.settings.default_provider]
+label = "기본 공급자"
+description = "기본으로 사용할 공급자. 자동은 각 기능에 대해 첫 번째 구성된 공급자를 선택."
+
+[i18n.ko.settings.image_model]
+label = "이미지 모델"
+description = "이미지 생성에 사용할 모델"
+
+[i18n.ko.settings.image_size]
+label = "기본 이미지 크기"
+description = "생성 이미지의 기본 해상도"
+
+[i18n.ko.settings.tts_voice]
+label = "TTS 음성"
+description = "텍스트-음성 변환의 기본 음성"
+
+[i18n.ko.settings.minimax_api_key]
+label = "MiniMax API 키"
+description = "platform.minimaxi.com에서 발급한 API 키. 동영상 및 음악 생성에 사용."
+
+[i18n.es]
+name = "Hand Creador"
+description = "Estudio de medios IA — genera imágenes, videos, música y voz a partir de texto"
+category = "Contenido"
+
+[i18n.fr]
+name = "Hand Créateur"
+description = "Studio média IA — génère images, vidéos, musique et voix à partir de texte"
+category = "Contenu"
+
+[i18n.de]
+name = "Kreator-Hand"
+description = "AI-Medienstudio — erzeugt Bilder, Videos, Musik und Sprache aus Textprompts"
+category = "Inhalt"

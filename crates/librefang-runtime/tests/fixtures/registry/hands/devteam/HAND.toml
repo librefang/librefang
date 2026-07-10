@@ -1,0 +1,422 @@
+id = "devteam"
+version = "1.0.0"
+name = "Dev Team"
+description = "Autonomous software development team — PM triages issues, Engineer implements, QA validates"
+
+category = "development"
+icon = "lucide:construction"
+
+# ─── Hand-level resource composition ─────────────────────────────────────────
+
+# Tools available to ALL agents (kernel overrides per-agent capabilities.tools)
+tools = [
+  "shell_exec",
+  "file_read",
+  "file_write",
+  "file_list",
+  "web_fetch",
+  "web_search",
+  "memory_store",
+  "memory_recall",
+  "memory_list",
+  "schedule_create",
+  "schedule_list",
+  "schedule_delete",
+  "knowledge_add_entity",
+  "knowledge_add_relation",
+  "knowledge_query",
+  "event_publish",
+  "agent_list",
+  "workflow_run",
+]
+
+# Per-hand resource allowlists (refs librefang/librefang-registry#87).
+# Inherited by every [agents.*] in this hand unless overridden.
+mcp_servers = ["memory", "github", "git", "filesystem"]
+skills = [
+  "github",
+  "git-expert",
+  "rust-expert",
+  "python-expert",
+  "typescript-expert",
+  "code-reviewer",
+  "api-tester",
+  "ci-cd",
+]
+
+
+# Plugins: useful for dev workflow
+allowed_plugins = ["todo-tracker", "auto-summarizer", "episodic-memory"]
+
+# ─── Requirements ────────────────────────────────────────────────────────────
+
+[[requires]]
+key = "git"
+label = "git"
+requirement_type = "binary"
+check_value = "git"
+
+[requires.install]
+macos = "brew install git"
+linux_apt = "sudo apt install git"
+
+[[requires]]
+key = "gh"
+label = "GitHub CLI (preferred for GitHub operations)"
+requirement_type = "binary"
+check_value = "gh"
+optional = true
+
+[requires.install]
+macos = "brew install gh"
+linux_apt = "sudo apt install gh"
+manual_url = "https://cli.github.com/"
+
+[[requires]]
+key = "GITHUB_TOKEN"
+label = "GitHub Token"
+requirement_type = "api_key"
+check_value = "GITHUB_TOKEN"
+
+[requires.install]
+signup_url = "https://github.com/settings/tokens"
+env_example = "GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+steps = [
+  "Go to GitHub Settings → Developer settings → Fine-grained tokens",
+  "Grant: Issues (read/write), Pull requests (read/write), Contents (read/write)",
+  "Set as GITHUB_TOKEN environment variable",
+]
+
+# ─── Routing ─────────────────────────────────────────────────────────────────
+
+[routing]
+aliases = [
+  "dev team",
+  "development team",
+  "software team",
+  "build a project",
+  "issue triage",
+]
+weak_aliases = ["project management", "sprint", "kanban", "team implement"]
+
+# ─── Settings ────────────────────────────────────────────────────────────────
+
+[[settings]]
+key = "team_size"
+label = "Team Size"
+description = "Lite = PM + Engineer (PM handles QA). Standard = PM + Engineer + QA."
+setting_type = "select"
+default = "standard"
+
+[[settings.options]]
+value = "lite"
+label = "Lite (PM + Engineer)"
+
+[[settings.options]]
+value = "standard"
+label = "Standard (PM + Engineer + QA)"
+
+[[settings]]
+key = "repo_url"
+label = "Repository"
+description = "GitHub repository (owner/repo)"
+setting_type = "text"
+default = ""
+
+[[settings]]
+key = "scan_interval"
+label = "Issue Scan Interval"
+setting_type = "select"
+default = "15min"
+
+[[settings.options]]
+value = "5min"
+label = "Every 5 minutes"
+
+[[settings.options]]
+value = "15min"
+label = "Every 15 minutes"
+
+[[settings.options]]
+value = "1hour"
+label = "Every hour"
+
+[[settings.options]]
+value = "manual"
+label = "Manual only"
+
+[[settings]]
+key = "approval_mode"
+label = "Approval Mode"
+description = "ON = PM waits for human approval before merging. OFF = auto-merge after QA passes."
+setting_type = "toggle"
+default = "true"
+
+# ─── Agents ──────────────────────────────────────────────────────────────────
+# Each agent uses `base` to inherit from a registry agent template.
+# Only hand-specific overrides are defined here.
+
+[agents.pm]
+coordinator = true
+base = "planner"
+name = "pm"
+description = "Product Manager — triages issues, assigns tasks, tracks progress"
+invoke_hint = "Issue triage, task assignment, progress tracking, status reports, rollback coordination"
+
+[agents.pm.model]
+max_tokens = 8192
+temperature = 0.3
+system_prompt = """You are the PM of an autonomous dev team. You coordinate, you do NOT write code.
+
+## Team
+Read **User Configuration** for team_size:
+- **Lite**: You + Engineer. You handle QA (review PR diffs, verify acceptance criteria).
+- **Standard**: You + Engineer + QA. Delegate implementation to Engineer, verification to QA.
+
+## Repo
+All agents share one checkout at `../shared/repo/`. Engineer clones it. You read from it or use GitHub MCP/gh CLI.
+Read the **Repository** value from **User Configuration** (injected below). If empty, tell the user to configure it and stop.
+
+## Workflow
+1. **Startup**: memory_recall devteam_board, create scan schedule (5min=300s, 15min=900s, 1hour=3600s) if not exists
+2. **Scan**: Use GitHub MCP tools to list open issues (filter out PRs). Read comments. Skip assigned/wontfix/duplicate.
+3. **Triage** (Planner methodology — SCOPE, DECOMPOSE, SEQUENCE, ESTIMATE, RISK, MILESTONE):
+   - SCOPE: what's in/out for this issue
+   - Classify (bug/feature/refactor), ESTIMATE size (S/M/L/XL)
+   - For XL: DECOMPOSE into sub-issues, SEQUENCE by dependencies, identify RISK, set MILESTONEs. Use workflow_run product-spec for vague features.
+   - Label, comment (English)
+4. **Delegate**: Send Engineer issue #, acceptance criteria, branch name, tech stack. Use workflow_run bug-triage for complex bugs.
+5. **Review**: Check CI first. Send to QA (standard) or review yourself (lite). Max 3 rounds before escalating to user.
+6. **Merge**: If approval_mode ON, wait for user. Check mergeable. Comment on issue. Merge. Close.
+7. **Knowledge**: After each resolve, knowledge_add_entity for the fix. Flag modules with 3+ bugs as hotspots.
+8. **Standup**: Daily summary via event_publish.
+9. **Rollback**: On regression report, revert PR, re-open issue, workflow_run incident-postmortem.
+
+## Rules
+- All GitHub comments/reviews in English.
+- Max 2 concurrent tasks for Engineer.
+- Never close without verification.
+- Prioritize: production bugs > regressions > features > tech debt.
+"""
+
+[agents.pm.capabilities]
+agent_message = ["*"]
+memory_read = ["*"]
+memory_write = ["self.*", "shared.*"]
+shell = ["gh *", "git *"]
+
+[agents.pm.resources]
+max_llm_tokens_per_hour = 200000
+
+[agents.engineer]
+base = "coder"
+name = "engineer"
+description = "Full-stack Engineer — designs, implements, tests, handles CI/CD"
+invoke_hint = "Code implementation, bug fixing, architecture, CI/CD, tests"
+
+[agents.engineer.model]
+max_tokens = 16384
+temperature = 0.2
+system_prompt = """You are the Engineer of an autonomous dev team. Senior full-stack developer.
+
+## Repo
+All agents share `../shared/repo/`. You own it — clone on first task.
+Read the **Repository** value from **User Configuration** (injected below your prompt) and substitute it in commands. Example for owner/repo:
+```bash
+REPO_DIR="../shared/repo"
+[ ! -d "$REPO_DIR" ] && mkdir -p ../shared && git clone "https://x-access-token:$GITHUB_TOKEN@github.com/OWNER/REPO.git" "$REPO_DIR" && cd "$REPO_DIR" && git config user.name "DevTeam Hand" && git config user.email "devteam@librefang.ai"
+cd "$REPO_DIR" && git checkout -- . 2>/dev/null; git clean -fd 2>/dev/null; git checkout main && git pull
+```
+
+## Methodology (inherited from Coder agent)
+READ → PLAN → IMPLEMENT → TEST → VERIFY
+
+## Workflow
+1. Receive task from PM with issue #, acceptance criteria, branch name
+2. Create branch: `git checkout -B {branch} main`
+3. Read code, understand context
+4. For L/XL: send design to PM for alignment first
+5. Implement + write tests
+6. Run build/lint/test for the detected stack
+7. Commit specific files, push, create PR via GitHub MCP or gh CLI
+8. Report to PM: branch, PR #, files changed, build status
+
+## Fix Requests
+Same branch. Fix. Push. Reply on PR in English. If rebase needed: `git fetch origin && git rebase origin/main && git push --force-with-lease`
+
+## Workflows
+- workflow_run test-generation: when adding test coverage
+- workflow_run code-review: for external PR reviews
+- workflow_run refactor-plan: for refactoring tasks
+- workflow_run api-design: for new API endpoints
+
+## Knowledge
+After each task: knowledge_add_entity for what was done and why.
+Before each task: knowledge_query for the affected module.
+"""
+
+[agents.engineer.capabilities]
+network = ["*"]
+memory_read = ["*"]
+memory_write = ["self.*", "shared.*"]
+shell = [
+  "cargo *",
+  "rustc *",
+  "npm *",
+  "node *",
+  "python *",
+  "pip *",
+  "go *",
+  "swift *",
+  "mvn *",
+  "git *",
+  "gh *",
+  "make *",
+  "docker *",
+]
+
+[agents.engineer.resources]
+max_llm_tokens_per_hour = 300000
+
+[agents.qa]
+base = "code-reviewer"
+name = "qa"
+description = "QA Engineer — reviews code, runs tests, catches bugs"
+invoke_hint = "Code review, testing, quality verification, security audit"
+# QA can't modify code — only read and verify
+tool_blocklist = ["file_write"]
+
+[agents.qa.model]
+max_tokens = 8192
+temperature = 0.2
+system_prompt = """You are the QA Engineer of an autonomous dev team. Be skeptical — assume bugs until proven otherwise.
+
+## Repo
+Shared checkout at `../shared/repo/`. Force-sync to remote:
+`cd ../shared/repo && git fetch origin && git checkout -B {branch} origin/{branch}`
+
+## Review Criteria (inherited from Code Reviewer agent)
+1. CORRECTNESS: Logic errors, edge cases, error handling
+2. SECURITY: Injection, auth, data exposure, input validation
+3. PERFORMANCE: Complexity, allocations, I/O patterns
+4. MAINTAINABILITY: Naming, structure, separation of concerns
+
+## Severity
+[MUST FIX] / [SHOULD FIX] / [NIT] / [PRAISE]
+
+## Workflow
+1. Receive branch + PR # + acceptance criteria from PM
+2. Checkout branch, read changes: `git diff main...HEAD`
+3. Review code against criteria above
+4. Run FULL test suite (not just changed files)
+5. Identify test gaps — report to PM, don't commit code yourself
+6. Submit PR review via GitHub MCP or gh CLI (APPROVE or REQUEST_CHANGES with line comments)
+7. Report to PM: PASS or FAIL with details
+
+## Workflows
+- workflow_run code-review: for comprehensive parallel review (correctness + security + style)
+- workflow_run test-generation: when reporting test gaps, generate specific suggestions
+
+## Principles
+- Don't trust the implementation. That's why you exist.
+- Test what's NOT tested, not just what is.
+- Focus on behavior, not style.
+- Run the FULL test suite. Check for regressions.
+"""
+
+[agents.qa.capabilities]
+memory_read = ["*"]
+memory_write = ["self.*", "shared.*"]
+# QA has NO file_write — can't modify code, only verify
+shell = [
+  "cargo test *",
+  "cargo clippy *",
+  "cargo audit *",
+  "npm test *",
+  "npm run lint *",
+  "pytest *",
+  "ruff *",
+  "go test *",
+  "golangci-lint *",
+  "swift test *",
+  "git *",
+  "gh *",
+]
+
+[agents.qa.resources]
+max_llm_tokens_per_hour = 150000
+
+# ─── Dashboard ───────────────────────────────────────────────────────────────
+
+[dashboard]
+[[dashboard.metrics]]
+label = "Issues Triaged"
+memory_key = "devteam_issues_triaged"
+format = "number"
+
+[[dashboard.metrics]]
+label = "Tasks Completed"
+memory_key = "devteam_tasks_completed"
+format = "number"
+
+[[dashboard.metrics]]
+label = "Active Tasks"
+memory_key = "devteam_active_tasks"
+format = "number"
+
+[[dashboard.metrics]]
+label = "QA Pass Rate"
+memory_key = "devteam_qa_pass_rate"
+format = "percentage"
+
+# ─── Metadata ────────────────────────────────────────────────────────────────
+
+[metadata]
+frequency = "continuous"
+token_consumption = "medium"
+default_active = false
+
+# ─── i18n ────────────────────────────────────────────────────────────────────
+
+[i18n.zh]
+name = "开发团队"
+description = "自主软件开发团队 — PM 分拣 Issue，工程师实现，QA 验证"
+category = "开发"
+
+[i18n.zh.agents.pm]
+name = "产品经理"
+description = "产品经理 — 分拣 Issue、分配任务、跟踪进度"
+
+[i18n.zh.agents.engineer]
+name = "全栈工程师"
+description = "全栈工程师 — 设计、实现、测试"
+
+[i18n.zh.agents.qa]
+name = "测试工程师"
+description = "QA 工程师 — 验证实现、捕获 Bug"
+
+[i18n.ja]
+name = "開発チーム"
+description = "自律型開発チーム — PMがIssueをトリアージ、エンジニアが実装、QAが検証"
+category = "開発"
+
+[i18n.ko]
+name = "개발팀"
+description = "자율 개발팀 — PM이 이슈 분류, 엔지니어가 구현, QA가 검증"
+category = "개발"
+
+[i18n.zh-TW]
+name = "開發團隊 Hand"
+description = "自主軟體開發團隊 Hand —— PM 分流 Issue、工程師實作、QA 測試、Reviewer 審查，最後編排者統整結果。"
+
+[i18n.de]
+name = "Dev-Team-Hand"
+description = "Autonomes Softwareentwicklungs-Team: PM triagiert Issues, Engineer implementiert, QA testet, Reviewer prüft, der Orchestrator führt alles zusammen."
+
+[i18n.es]
+name = "Hand Dev Team"
+description = "Equipo de desarrollo autónomo: el PM clasifica incidencias, el ingeniero implementa, QA prueba, el revisor audita y el orquestador lo integra todo."
+
+[i18n.fr]
+name = "Hand Équipe Dev"
+description = "Équipe de développement autonome : le PM trie les issues, l’ingénieur implémente, le QA teste, le relecteur audite et l’orchestrateur coordonne."

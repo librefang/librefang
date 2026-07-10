@@ -173,14 +173,8 @@ async fn start_test_server_with_provider(
 async fn start_full_router(api_key: &str) -> FullRouterHarness {
     let tmp = tempfile::tempdir().expect("Failed to create temp dir");
 
-    // Sync registry content into the temp home_dir so the kernel boots
-    // with a populated model catalog.
-    librefang_kernel::registry_sync::sync_registry(
-        tmp.path(),
-        librefang_kernel::registry_sync::DEFAULT_CACHE_TTL_SECS,
-        "",
-        None,
-    );
+    // Seed the pinned registry fixture into the temp home_dir so the kernel boots with a populated model catalog, offline.
+    librefang_kernel::registry_sync::seed_registry_fixture_for_tests(tmp.path());
 
     let config = KernelConfig {
         home_dir: tmp.path().to_path_buf(),
@@ -3018,12 +3012,7 @@ async fn test_attach_session_stream_fans_out_to_multiple_clients() {
 async fn start_full_router_with_proactive(enabled: bool) -> FullRouterHarness {
     let tmp = tempfile::tempdir().expect("Failed to create temp dir");
 
-    librefang_kernel::registry_sync::sync_registry(
-        tmp.path(),
-        librefang_kernel::registry_sync::DEFAULT_CACHE_TTL_SECS,
-        "",
-        None,
-    );
+    librefang_kernel::registry_sync::seed_registry_fixture_for_tests(tmp.path());
 
     let proactive = librefang_types::memory::ProactiveMemoryConfig {
         enabled,

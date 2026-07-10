@@ -1,0 +1,18 @@
+# inception — auto-generated from OpenRouter API
+
+[provider]
+id = "inception"
+display_name = "Inception"
+api_key_env = "INCEPTION_API_KEY"
+base_url = "https://api.inceptionlabs.ai/v1"
+key_required = true
+
+[[models]]
+id = "mercury-2"
+display_name = "Inception: Mercury 2"
+tier = "fast"
+context_window = 128000
+max_output_tokens = 50000
+input_cost_per_m = 0.25
+output_cost_per_m = 0.75
+supports_streaming = true

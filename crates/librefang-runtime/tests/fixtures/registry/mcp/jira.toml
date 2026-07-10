@@ -1,0 +1,71 @@
+id = "jira"
+name = "Jira"
+description = "Access Jira issues, projects, boards, and sprints through the Atlassian MCP server"
+category = "devtools"
+icon = "lucide:clipboard-list"
+tags = ["project-management", "issues", "agile", "atlassian", "tracking"]
+
+[transport]
+type = "stdio"
+command = "npx"
+args = ["-y", "@aashari/mcp-server-atlassian-jira@3.3.0"]
+
+[[required_env]]
+name = "JIRA_API_TOKEN"
+label = "Jira API Token"
+help = "An API token generated from your Atlassian account"
+is_secret = true
+get_url = "https://id.atlassian.com/manage-profile/security/api-tokens"
+
+[[required_env]]
+name = "JIRA_INSTANCE_URL"
+label = "Jira Instance URL"
+help = "Your Jira Cloud instance URL (e.g., https://yourcompany.atlassian.net)"
+is_secret = false
+get_url = ""
+
+[[required_env]]
+name = "JIRA_USER_EMAIL"
+label = "Jira User Email"
+help = "The email address associated with your Atlassian account"
+is_secret = false
+get_url = ""
+
+[health_check]
+interval_secs = 60
+unhealthy_threshold = 3
+
+setup_instructions = """
+1. Go to https://id.atlassian.com/manage-profile/security/api-tokens and create a new API token.
+2. Enter your Jira Cloud instance URL (e.g., https://yourcompany.atlassian.net) and the email linked to your Atlassian account.
+3. Paste the API token into the JIRA_API_TOKEN field above.
+"""
+
+
+[i18n.zh]
+name = "Jira"
+description = "通过 Atlassian MCP 服务器访问 Jira 的工单、项目、看板与 Sprint。"
+
+[i18n.zh-TW]
+name = "Jira"
+description = "透過 Atlassian MCP 伺服器存取 Jira 的工單、專案、看板與 Sprint。"
+
+[i18n.ja]
+name = "Jira"
+description = "Atlassian MCP サーバー経由で Jira の課題、プロジェクト、ボード、スプリントにアクセス。"
+
+[i18n.ko]
+name = "Jira"
+description = "Atlassian MCP 서버를 통해 Jira 이슈, 프로젝트, 보드, 스프린트에 접근."
+
+[i18n.de]
+name = "Jira"
+description = "Zugriff auf Jira-Vorgänge, -Projekte, -Boards und -Sprints über den Atlassian-MCP-Server."
+
+[i18n.es]
+name = "Jira"
+description = "Accede a issues, proyectos, tableros y sprints de Jira mediante el servidor MCP de Atlassian."
+
+[i18n.fr]
+name = "Jira"
+description = "Accès aux tickets, projets, tableaux et sprints Jira via le serveur MCP Atlassian."

@@ -1,0 +1,549 @@
+# OpenRouter — https://openrouter.ai
+# Models: 38
+
+[provider]
+id = "openrouter"
+display_name = "OpenRouter"
+api_key_env = "OPENROUTER_API_KEY"
+base_url = "https://openrouter.ai/api/v1"
+key_required = true
+
+# Default for the provider: the first [[models]] entry is returned by
+# default_model_for_provider("openrouter") when no alias override is set.
+
+[[models]]
+id = "openrouter/qwen/qwen3.6-plus:free"
+display_name = "Qwen 3.6 Plus Free (OpenRouter)"
+tier = "smart"
+context_window = 1000000
+max_output_tokens = 65536
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+supports_thinking = true
+aliases = []
+
+[[models]]
+id = "openrouter/google/gemini-2.5-flash"
+display_name = "Gemini 2.5 Flash (OpenRouter)"
+tier = "smart"
+context_window = 1048576
+max_output_tokens = 65536
+input_cost_per_m = 0.15
+output_cost_per_m = 0.60
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+supports_thinking = true
+aliases = []
+
+[[models]]
+id = "openrouter/deepseek/deepseek-chat"
+display_name = "DeepSeek V3 (OpenRouter)"
+tier = "smart"
+context_window = 128000
+max_output_tokens = 32768
+input_cost_per_m = 0.14
+output_cost_per_m = 0.28
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "openrouter/google/gemini-2.5-pro"
+display_name = "Gemini 2.5 Pro (OpenRouter)"
+tier = "frontier"
+context_window = 1048576
+max_output_tokens = 65536
+input_cost_per_m = 1.25
+output_cost_per_m = 10.0
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+supports_thinking = true
+aliases = []
+
+[[models]]
+id = "openrouter/mistralai/mistral-large"
+display_name = "Mistral Large (OpenRouter)"
+tier = "smart"
+context_window = 128000
+max_output_tokens = 8192
+input_cost_per_m = 2.0
+output_cost_per_m = 6.0
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "openrouter/deepseek/deepseek-r1"
+display_name = "DeepSeek R1 (OpenRouter)"
+tier = "frontier"
+context_window = 128000
+max_output_tokens = 32768
+input_cost_per_m = 0.55
+output_cost_per_m = 2.19
+supports_tools = false
+supports_vision = false
+supports_streaming = true
+supports_thinking = true
+aliases = []
+
+# Free models — verified against openrouter.ai/api/v1/models on 2026-04-10.
+# Previous entries (stepfun/step-3.5-flash:free, gemma-2-9b-it:free,
+# llama-3.1-8b-instruct:free, qwen-2.5-7b-instruct:free, mistral-7b-instruct:free,
+# zephyr-7b-beta:free, deepseek-r1:free) have all been delisted by OpenRouter
+# and replaced below. See librefang#2283.
+
+[[models]]
+id = "openrouter/meta-llama/llama-3.3-70b-instruct:free"
+display_name = "Llama 3.3 70B Free (OpenRouter)"
+tier = "balanced"
+context_window = 65536
+max_output_tokens = 8192
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "openrouter/qwen/qwen3-next-80b-a3b-instruct:free"
+display_name = "Qwen3 Next 80B Free (OpenRouter)"
+tier = "smart"
+context_window = 262144
+max_output_tokens = 8192
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+supports_thinking = true
+aliases = []
+
+[[models]]
+id = "openrouter/openai/gpt-oss-120b:free"
+display_name = "GPT-OSS 120B Free (OpenRouter)"
+tier = "smart"
+context_window = 131072
+max_output_tokens = 32768
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "openrouter/z-ai/glm-4.5-air:free"
+display_name = "GLM 4.5 Air Free (OpenRouter)"
+tier = "balanced"
+context_window = 131072
+max_output_tokens = 32768
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "openrouter/google/gemma-3-27b-it:free"
+display_name = "Gemma 3 27B Free (OpenRouter)"
+tier = "fast"
+context_window = 131072
+max_output_tokens = 8192
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = false
+supports_vision = true
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "openrouter/nvidia/nemotron-nano-9b-v2:free"
+display_name = "Nemotron Nano 9B Free (OpenRouter)"
+tier = "fast"
+context_window = 128000
+max_output_tokens = 8192
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "openrouter/ai21/jamba-large-1.7"
+display_name = "AI21: Jamba Large 1.7 (OpenRouter)"
+tier = "smart"
+context_window = 256000
+max_output_tokens = 4096
+input_cost_per_m = 2.0
+output_cost_per_m = 8.0
+supports_streaming = true
+
+[[models]]
+id = "openrouter/alibaba/tongyi-deepresearch-30b-a3b"
+display_name = "Tongyi DeepResearch 30B A3B (OpenRouter)"
+tier = "fast"
+context_window = 131072
+max_output_tokens = 131072
+input_cost_per_m = 0.09
+output_cost_per_m = 0.45
+supports_streaming = true
+
+[[models]]
+id = "openrouter/allenai/olmo-3.1-32b-instruct"
+display_name = "AllenAI: Olmo 3.1 32B Instruct (OpenRouter)"
+tier = "fast"
+context_window = 65536
+max_output_tokens = 16384
+input_cost_per_m = 0.2
+output_cost_per_m = 0.6
+supports_streaming = true
+
+[[models]]
+id = "openrouter/amazon/nova-2-lite-v1"
+display_name = "Amazon: Nova 2 Lite (OpenRouter)"
+tier = "fast"
+context_window = 1000000
+max_output_tokens = 65535
+input_cost_per_m = 0.3
+output_cost_per_m = 2.5
+supports_streaming = true
+
+[[models]]
+id = "openrouter/amazon/nova-micro-v1"
+display_name = "Amazon: Nova Micro 1.0 (OpenRouter)"
+tier = "fast"
+context_window = 128000
+max_output_tokens = 5120
+input_cost_per_m = 0.035
+output_cost_per_m = 0.14
+supports_streaming = true
+
+[[models]]
+id = "openrouter/amazon/nova-premier-v1"
+display_name = "Amazon: Nova Premier 1.0 (OpenRouter)"
+tier = "smart"
+context_window = 1000000
+max_output_tokens = 32000
+input_cost_per_m = 2.5
+output_cost_per_m = 12.5
+supports_streaming = true
+
+[[models]]
+id = "openrouter/amazon/nova-pro-v1"
+display_name = "Amazon: Nova Pro 1.0 (OpenRouter)"
+tier = "smart"
+context_window = 300000
+max_output_tokens = 5120
+input_cost_per_m = 0.8
+output_cost_per_m = 3.2
+supports_streaming = true
+
+[[models]]
+id = "openrouter/bytedance/ui-tars-1.5-7b"
+display_name = "ByteDance: UI-TARS 7B  (OpenRouter)"
+tier = "fast"
+context_window = 128000
+max_output_tokens = 2048
+input_cost_per_m = 0.1
+output_cost_per_m = 0.2
+supports_streaming = true
+
+[[models]]
+id = "openrouter/deepcogito/cogito-v2.1-671b"
+display_name = "Deep Cogito: Cogito v2.1 671B (OpenRouter)"
+tier = "smart"
+context_window = 128000
+max_output_tokens = 16384
+input_cost_per_m = 1.25
+output_cost_per_m = 1.25
+supports_streaming = true
+
+[[models]]
+id = "openrouter/essentialai/rnj-1-instruct"
+display_name = "EssentialAI: Rnj 1 Instruct (OpenRouter)"
+tier = "fast"
+context_window = 32768
+max_output_tokens = 8192
+input_cost_per_m = 0.15
+output_cost_per_m = 0.15
+supports_streaming = true
+
+[[models]]
+id = "openrouter/inclusionai/ling-2.6-1t:free"
+display_name = "inclusionAI: Ling-2.6-1T (free) (OpenRouter)"
+tier = "fast"
+context_window = 262144
+max_output_tokens = 32768
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_streaming = true
+
+[[models]]
+id = "openrouter/inclusionai/ling-2.6-flash:free"
+display_name = "inclusionAI: Ling-2.6-flash (free) (OpenRouter)"
+tier = "fast"
+context_window = 262144
+max_output_tokens = 32768
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_streaming = true
+
+[[models]]
+id = "openrouter/inflection/inflection-3-pi"
+display_name = "Inflection: Inflection 3 Pi (OpenRouter)"
+tier = "smart"
+context_window = 8000
+max_output_tokens = 1024
+input_cost_per_m = 2.5
+output_cost_per_m = 10.0
+supports_streaming = true
+
+[[models]]
+id = "openrouter/inflection/inflection-3-productivity"
+display_name = "Inflection: Inflection 3 Productivity (OpenRouter)"
+tier = "smart"
+context_window = 8000
+max_output_tokens = 1024
+input_cost_per_m = 2.5
+output_cost_per_m = 10.0
+supports_streaming = true
+
+[[models]]
+id = "openrouter/liquid/lfm-2.5-1.2b-instruct:free"
+display_name = "LiquidAI: LFM2.5-1.2B-Instruct (free) (OpenRouter)"
+tier = "fast"
+context_window = 32768
+max_output_tokens = 8192
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_streaming = true
+
+[[models]]
+id = "openrouter/liquid/lfm-2.5-1.2b-thinking:free"
+display_name = "LiquidAI: LFM2.5-1.2B-Thinking (free) (OpenRouter)"
+tier = "fast"
+context_window = 32768
+max_output_tokens = 8192
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_streaming = true
+
+[[models]]
+id = "openrouter/nex-agi/deepseek-v3.1-nex-n1"
+display_name = "Nex AGI: DeepSeek V3.1 Nex N1 (OpenRouter)"
+tier = "fast"
+context_window = 131072
+max_output_tokens = 163840
+input_cost_per_m = 0.135
+output_cost_per_m = 0.5
+supports_streaming = true
+
+[[models]]
+id = "openrouter/nousresearch/hermes-4-405b"
+display_name = "Nous: Hermes 4 405B (OpenRouter)"
+tier = "smart"
+context_window = 131072
+max_output_tokens = 16384
+input_cost_per_m = 1.0
+output_cost_per_m = 3.0
+supports_streaming = true
+
+[[models]]
+id = "openrouter/nousresearch/hermes-4-70b"
+display_name = "Nous: Hermes 4 70B (OpenRouter)"
+tier = "fast"
+context_window = 131072
+max_output_tokens = 16384
+input_cost_per_m = 0.13
+output_cost_per_m = 0.4
+supports_streaming = true
+
+[[models]]
+id = "openrouter/prime-intellect/intellect-3"
+display_name = "Prime Intellect: INTELLECT-3 (OpenRouter)"
+tier = "fast"
+context_window = 131072
+max_output_tokens = 131072
+input_cost_per_m = 0.2
+output_cost_per_m = 1.1
+supports_streaming = true
+
+[[models]]
+id = "openrouter/rekaai/reka-flash-3"
+display_name = "Reka Flash 3 (OpenRouter)"
+tier = "fast"
+context_window = 65536
+max_output_tokens = 65536
+input_cost_per_m = 0.1
+output_cost_per_m = 0.2
+supports_streaming = true
+
+[[models]]
+id = "openrouter/relace/relace-apply-3"
+display_name = "Relace: Relace Apply 3 (OpenRouter)"
+tier = "smart"
+context_window = 256000
+max_output_tokens = 128000
+input_cost_per_m = 0.85
+output_cost_per_m = 1.25
+supports_streaming = true
+
+[[models]]
+id = "openrouter/relace/relace-search"
+display_name = "Relace: Relace Search (OpenRouter)"
+tier = "smart"
+context_window = 256000
+max_output_tokens = 128000
+input_cost_per_m = 1.0
+output_cost_per_m = 3.0
+supports_streaming = true
+
+[[models]]
+id = "openrouter/switchpoint/router"
+display_name = "Switchpoint Router (OpenRouter)"
+tier = "smart"
+context_window = 131072
+max_output_tokens = 16384
+input_cost_per_m = 0.85
+output_cost_per_m = 3.4
+supports_streaming = true
+
+[[models]]
+id = "openrouter/tngtech/deepseek-r1t2-chimera"
+display_name = "TNG: DeepSeek R1T2 Chimera (OpenRouter)"
+tier = "fast"
+context_window = 163840
+max_output_tokens = 163840
+input_cost_per_m = 0.3
+output_cost_per_m = 1.1
+supports_streaming = true
+
+[[models]]
+id = "openrouter/writer/palmyra-x5"
+display_name = "Writer: Palmyra X5 (OpenRouter)"
+tier = "smart"
+context_window = 1040000
+max_output_tokens = 8192
+input_cost_per_m = 0.6
+output_cost_per_m = 6.0
+supports_streaming = true
+
+[[models]]
+id = "openrouter/allenai/olmo-3-32b-think"
+display_name = "AllenAI: Olmo 3 32B Think (OpenRouter)"
+tier = "fast"
+context_window = 65536
+max_output_tokens = 65536
+input_cost_per_m = 0.15
+output_cost_per_m = 0.5
+supports_streaming = true
+
+[[models]]
+id = "openrouter/amazon/nova-lite-v1"
+display_name = "Amazon: Nova Lite 1.0 (OpenRouter)"
+tier = "fast"
+context_window = 300000
+max_output_tokens = 5120
+input_cost_per_m = 0.06
+output_cost_per_m = 0.24
+supports_streaming = true
+
+[[models]]
+id = "openrouter/liquid/lfm-2-24b-a2b"
+display_name = "LiquidAI: LFM2-24B-A2B (OpenRouter)"
+tier = "fast"
+context_window = 32768
+max_output_tokens = 8192
+input_cost_per_m = 0.03
+output_cost_per_m = 0.12
+supports_streaming = true
+
+[[models]]
+id = "openrouter/nousresearch/hermes-2-pro-llama-3-8b"
+display_name = "NousResearch: Hermes 2 Pro - Llama-3 8B (OpenRouter)"
+tier = "fast"
+context_window = 8192
+max_output_tokens = 8192
+input_cost_per_m = 0.14
+output_cost_per_m = 0.14
+supports_streaming = true
+
+[[models]]
+id = "openrouter/nousresearch/hermes-3-llama-3.1-405b"
+display_name = "Nous: Hermes 3 405B Instruct (OpenRouter)"
+tier = "smart"
+context_window = 131072
+max_output_tokens = 16384
+input_cost_per_m = 1.0
+output_cost_per_m = 1.0
+supports_streaming = true
+
+[[models]]
+id = "openrouter/nousresearch/hermes-3-llama-3.1-405b:free"
+display_name = "Nous: Hermes 3 405B Instruct (free) (OpenRouter)"
+tier = "fast"
+context_window = 131072
+max_output_tokens = 16384
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_streaming = true
+
+[[models]]
+id = "openrouter/nousresearch/hermes-3-llama-3.1-70b"
+display_name = "Nous: Hermes 3 70B Instruct (OpenRouter)"
+tier = "fast"
+context_window = 131072
+max_output_tokens = 16384
+input_cost_per_m = 0.3
+output_cost_per_m = 0.3
+supports_streaming = true
+
+[[models]]
+id = "openrouter/rekaai/reka-edge"
+display_name = "Reka Edge (OpenRouter)"
+tier = "fast"
+context_window = 16384
+max_output_tokens = 16384
+input_cost_per_m = 0.1
+output_cost_per_m = 0.1
+supports_streaming = true
+
+[[models]]
+id = "openrouter/inclusionai/ling-2.6-flash"
+display_name = "inclusionAI: Ling-2.6-flash (OpenRouter)"
+tier = "fast"
+context_window = 262144
+max_output_tokens = 32768
+input_cost_per_m = 0.08
+output_cost_per_m = 0.24
+supports_streaming = true
+
+[[models]]
+id = "openrouter/poolside/laguna-m.1:free"
+display_name = "Poolside: Laguna M.1 (free) (OpenRouter)"
+tier = "fast"
+context_window = 131072
+max_output_tokens = 8192
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_streaming = true
+
+[[models]]
+id = "openrouter/poolside/laguna-xs.2:free"
+display_name = "Poolside: Laguna XS.2 (free) (OpenRouter)"
+tier = "fast"
+context_window = 131072
+max_output_tokens = 8192
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_streaming = true

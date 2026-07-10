@@ -1,0 +1,20 @@
+# Global alias mappings
+# Maps short names to canonical model IDs.
+# Aliases defined in provider TOML files (via the `aliases` field on each model)
+# are auto-registered at load time. This file contains additional global aliases
+# that are not tied to a specific model entry.
+
+[aliases]
+# GitHub Copilot — bare names not registered on the copilot/gpt-4o model
+"copilot" = "copilot/gpt-4o"
+"copilot-4o" = "copilot/gpt-4o"
+
+# Chinese models — common short names not on the canonical model entries
+"ernie" = "ernie-4.5-8k"
+"moonshot" = "kimi-k2.6"
+"minimax" = "MiniMax-M2.7"
+"minimax-highspeed" = "MiniMax-M2.7-highspeed"
+"doubao" = "doubao-seed-2-0-pro-260215"
+"doubao-seed" = "doubao-seed-2-0-pro-260215"
+"stepfun" = "step-3.5-flash"
+"baichuan" = "Baichuan4"
