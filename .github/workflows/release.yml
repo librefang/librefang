@@ -1167,16 +1167,10 @@ jobs:
   cli_pypi:
     name: CLI / PyPI
     # Stable and LTS releases only — NOT beta/rc pre-releases.
-    # Each release uploads ~8 per-platform CLI binary wheels (~250 MB total)
-    # to the `librefang` PyPI project, whose total-size quota is 10 GB. When
-    # every beta/rc tag also published, the accumulated pre-releases exhausted
-    # the quota and stable publishes started failing with
-    # `400 Project size too large`. Pre-release CLI binaries are still attached
-    # to the GitHub Release; PyPI now carries stable/LTS versions only, which
-    # is what `pip install librefang` resolves. A tag is a pre-release when it
-    # carries any `-suffix` (e.g. `-beta.10`, `-rc.1`); `-lts` is the sole
-    # non-pre-release suffix, matching the repo's own `-lts` special-casing in
-    # create_release.
+    # Each release uploads ~8 per-platform CLI binary wheels (~250 MB total) to the `librefang` PyPI project, whose total-size quota is 10 GB.
+    # When every beta/rc tag also published, the accumulated pre-releases exhausted the quota and stable publishes started failing with `400 Project size too large`.
+    # Pre-release CLI binaries are still attached to the GitHub Release; PyPI now carries stable/LTS versions only, which is what `pip install librefang` resolves.
+    # A tag is a pre-release when it carries any `-suffix` (e.g. `-beta.10`, `-rc.1`); `-lts` is the sole non-pre-release suffix, matching the repo's own `-lts` special-casing in create_release.
     if: >
       (
         (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
