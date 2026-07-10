@@ -332,11 +332,14 @@ const CONFIG_WRITE_VERBS: &[&str] = &["write", "modify", "overwrite", "append to
 
 /// Invisible Unicode characters that may be used for steganography or obfuscation.
 ///
-/// Keep this set in sync with the duplicated copies in
-/// `librefang-runtime::prompt_builder::INVISIBLE_PROMPT_CHARS` and the inline
-/// const in `librefang-kernel::kernel::prompt_context` — all three must strip
-/// the same code points so a literal obfuscated in a skill body is normalized
-/// identically wherever it is scanned or injected.
+/// The code points here must match the single source of truth
+/// `librefang_types::text::INVISIBLE_FORMAT_CHARS` (which the runtime and kernel
+/// sanitizers alias directly) so a literal obfuscated in a skill body is
+/// normalized identically wherever it is scanned or injected. This table carries
+/// an extra human-readable label per code point for the warning message, so it
+/// stays a separate `(char, &str)` list rather than aliasing the shared const;
+/// `tests::invisible_chars_match_shared_source` fails the build if the two ever
+/// diverge.
 const INVISIBLE_CHARS: &[(char, &str)] = &[
     // ── Zero-width & joiner code points ─────────────────────────
     ('\u{00AD}', "soft hyphen"),
@@ -948,6 +951,37 @@ mod tests {
         assert!(
             warnings.is_empty(),
             "benign prose must not be flagged by compact matching, got {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn invisible_chars_match_shared_source() {
+        // This labeled table and the shared source of truth
+        // `librefang_types::text::INVISIBLE_FORMAT_CHARS` (aliased by the
+        // runtime injection guard, the prompt-builder sanitizer, and the kernel
+        // prompt-context sanitizer) MUST cover the exact same code points. If
+        // they diverge, an obfuscated literal stripped in one place survives in
+        // another and reopens the scanner bypass this guards against.
+        let scanner_set: std::collections::BTreeSet<char> =
+            INVISIBLE_CHARS.iter().map(|(c, _)| *c).collect();
+        let shared_set: std::collections::BTreeSet<char> =
+            librefang_types::text::INVISIBLE_FORMAT_CHARS
+                .iter()
+                .copied()
+                .collect();
+
+        let only_in_scanner: Vec<char> = scanner_set.difference(&shared_set).copied().collect();
+        let only_in_shared: Vec<char> = shared_set.difference(&scanner_set).copied().collect();
+        assert!(
+            only_in_scanner.is_empty() && only_in_shared.is_empty(),
+            "INVISIBLE_CHARS diverged from librefang_types::text::INVISIBLE_FORMAT_CHARS — \
+             only in scanner table: {only_in_scanner:?}, only in shared const: {only_in_shared:?}"
+        );
+        // No duplicate code points in the labeled table.
+        assert_eq!(
+            scanner_set.len(),
+            INVISIBLE_CHARS.len(),
+            "INVISIBLE_CHARS contains duplicate code points"
         );
     }
 
