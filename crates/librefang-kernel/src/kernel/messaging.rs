@@ -2427,6 +2427,22 @@ impl LibreFangKernel {
             }
         }
 
+        // Stamp sender_chat_id into the manifest so tool dispatch
+        // (agent_send, defer, approval-resume) can thread the
+        // conversation context through async task registration.
+        // Mirrors the identical block in send_message_full_inner so
+        // the streaming and non-streaming paths stay in sync.
+        if let Some(ref ctx) = sender_context {
+            if let Some(ref cid) = ctx.chat_id {
+                if !cid.is_empty() {
+                    manifest.metadata.insert(
+                        "sender_chat_id".to_string(),
+                        serde_json::Value::String(cid.clone()),
+                    );
+                }
+            }
+        }
+
         // Apply per-session model override (#4898) before any manifest field is
         // read downstream (model catalog lookup, system prompt build, billing).
         // The pre-lock session snapshot already carries model_override; the
