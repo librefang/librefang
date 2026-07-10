@@ -1658,6 +1658,19 @@ jobs:
           # Delete any matching this target
           echo "$ASSETS" | while read -r name; do
             [ -z "$name" ] && continue
+            # Never touch CLI-owned assets. The cli_* jobs upload
+            # `librefang-<rust_target>.tar.gz|.zip` (+ `.sha256`) and the
+            # aggregate `SHA256SUMS*`; those names embed the SAME target triple
+            # as this desktop matrix entry, so a bare `*<rust_target>*` glob
+            # deletes them as collateral. That is exactly how the macOS CLI
+            # tarballs vanished when the desktop job re-ran (for notarization)
+            # after cli_mac had already uploaded, breaking the CLI / PyPI job's
+            # asset download. Desktop bundles use Tauri's own naming
+            # (`LibreFang_<ver>_<x64|aarch64|amd64|arm64>…`), which never
+            # contains the triple, so this guard costs the desktop nothing.
+            case "$name" in
+              librefang-*|SHA256SUMS*) continue ;;
+            esac
             case "$name" in
               *${{ matrix.platform.rust_target }}*|*latest.json)
                 echo "Deleting existing asset: $name"
