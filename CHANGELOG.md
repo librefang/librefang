@@ -14,6 +14,8 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ### Fixed
 
+- Gate the `cli_pypi` release job to stable and LTS tags only, in both `release.yml` (the tag-push pipeline) and `release-cli.yml` (the manual `workflow_dispatch` CLI re-run path): every beta/rc pre-release tag was also uploading ~250 MB of per-platform CLI binary wheels to the `librefang` PyPI project, and 46 accumulated pre-releases consumed 10.35 GB of its 10 GB total-size quota, so the `v2026.7.10` stable publish started failing with `400 Project size too large`; pre-release CLI binaries remain attached to the GitHub Release, only the PyPI upload is now skipped for them (#6433) (@houko)
+- Stop the desktop release job's asset cleanup from deleting the CLI binary tarballs: its "Delete existing assets for this target" step matched `*<rust_target>*`, the same target triple the `cli_*` jobs embed in `librefang-<target>.tar.gz` (+ `.sha256`), so a desktop job re-running after its CLI counterpart had already uploaded — exactly what the macOS desktop jobs do when they re-run for notarization — deleted the freshly-uploaded `librefang-{x86_64,aarch64}-apple-darwin.tar.gz` as collateral, which then made `cli_pypi` fail with a 404 when it downloaded them to build the wheels; the cleanup now skips CLI-owned `librefang-*` / `SHA256SUMS*` assets (desktop bundles use Tauri's own `LibreFang_<ver>_<x64|aarch64|…>` naming, which never contains the triple, so the guard costs the desktop nothing) (#6433) (@houko)
 - Clear 13 more Rust 1.97 stable clippy `useless_borrows_in_formatting` errors (`redundant reference in format! argument`) across the CLI TUI screens (`comms.rs`, `hands.rs`, `settings.rs`, `skills.rs`, `templates.rs`): stable's tightened lint turned the `Quality / Build + clippy` gate red on every PR regardless of which one triggered the `main` run, the same lint class #6421 cleared elsewhere in the workspace; `format!` captures its arguments by reference either way, so dropping the borrow is a pure lint fix with no behavior change, and the genuine `widgets::truncate(&x, n)` function-argument borrows are untouched (#6427) (@houko)
 - Stop the channel media gate from spending a billed reply-precheck LLM call on captionless media in a `group_policy=all` group: #6141 ran `classify_reply_intent` on an empty string (`extracted_user_text(...).unwrap_or_default()`) for a caption-less image / voice / video, so the precheck now runs only when there is text to classify (captioned media keeps parity with the text path) and captionless media proceeds without the call, which also reconciles #6141's PR notes that claimed the precheck was not replicated onto the media path when the merged code did replicate it (#6426) (@houko)
 - Seed test-booted kernels from a pinned in-repo registry snapshot (`crates/librefang-runtime/tests/fixtures/registry/`, librefang-registry@89d0e4c8) instead of the network: #6410's `LIBREFANG_REGISTRY_OFFLINE=1` export made `sync_registry` a no-op on fresh test homes, turning main red with ~111 registry-content unit tests (model catalog, hand routing, hands registry, MCP catalog/installer, hand activation, metering) plus 3 `librefang-api` integration tests; a new `registry_sync::seed_registry_fixture_for_tests` copies the fixture into the test home and fans it out through the real sync path, `resolve_home_dir_for_tests` and the 27 API-test harnesses use it, `MockKernelBuilder` gains an opt-in `.with_registry_fixture()`, and the env-var test locks are promoted to a crate-wide `test_env::ENV_LOCK` so `tts::test_synthesize_no_provider` no longer races `model_catalog`'s `GOOGLE_API_KEY` setter under threaded `cargo test` (#6421) (@houko)
@@ -37,6 +39,68 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 ### Documentation
 
 - Document installation from the signed project-maintained Arch Linux pacman repository while AUR account registration is unavailable (#6386) (@pavver)
+
+## [2026.7.10] - 2026-07-10
+
+_40 PRs from 4 contributors since v2026.6.29._
+
+### Added
+
+- Surface the model the Codex CLI is configured to run (#6365) (@houko)
+- Complete and proofread dashboard and website translations (#6376) (@houko)
+
+### Fixed
+
+- Clear cargo-deny advisory failures on main (#6366) (@houko)
+- Keep [Unreleased] at the top; prune stale buried entries (#6367) (@houko)
+- Clear quick-xml RUSTSEC-2026-0194/0195 advisories (#6387) (@houko)
+- Convert Markdown to Slack mrkdwn in the Slack sidecar (#6397) (@neo-wanderer)
+- Clear crossbeam-epoch RUSTSEC-2026-0204 advisory (#6400) (@houko)
+- Never re-spill read_artifact results at the post-tool chokepoint (#6406) (@houko)
+- Request extended thinking via reasoning_effort in the OpenAI-compat driver (#6407) (@houko)
+- Add LIBREFANG_REGISTRY_OFFLINE to skip registry network refresh in tests (#6408) (@houko)
+- Correlate chat turns with their WS terminal frames (#6419) (@houko)
+- Single-source the invisible-char set; skip reply-precheck on captionless media (#6426) (@houko)
+- Drop redundant refs in TUI format! args (Rust 1.97 clippy) (#6428) (@houko)
+- Reliable CLI→PyPI publishing — stable-only gate + stop desktop deleting CLI assets (#6433) (@houko)
+
+<details>
+<summary>Documentation, maintenance, and other internal changes</summary>
+
+### Documentation
+
+- Add Arch Linux pacman installation instructions (#6386) (@pavver)
+- Only the WhatsApp sidecar reads DM/group policy env vars (#6405) (@houko)
+- Install CLI from official homebrew-core (#6414) (@houko)
+- Wrap homebrew-core note at sentence boundaries (#6415) (@houko)
+
+### Maintenance
+
+- Bump rmcp from 1.7.0 to 2.0.0 (#6364) (@app/dependabot)
+- Adopt tera 2.0 (#6368) (@houko)
+- Adopt aes-gcm 0.11 and the cargo-minor-patch bumps (#6369) (@houko)
+- Gitignore the AUR CI deploy key pair (#6370) (@houko)
+- Bump the actions-minor-patch group with 2 updates (#6373) (@app/dependabot)
+- Bump tauri-apps/tauri-action from 0.6.2 to 1.0.0 (#6374) (@app/dependabot)
+- Bump the web-minor-patch group in /web with 10 updates (#6377) (@app/dependabot)
+- Bump the dashboard-minor-patch group in /crates/librefang-api/dashboard with 15 updates (#6378) (@app/dependabot)
+- Bump the docs-minor-patch group in /docs with 10 updates (#6380) (@app/dependabot)
+- Bump @types/node from 25.9.3 to 26.1.0 in /docs (#6381) (@app/dependabot)
+- Raise job timeout to 120 minutes for cold builds (#6389) (@houko)
+- Bump the cargo-minor-patch group with 5 updates (#6394) (@app/dependabot)
+- Bump the actions-minor-patch group with 5 updates (#6401) (@app/dependabot)
+- Make webhook-agent happy-path test hermetic (#6402) (@houko)
+- Export LIBREFANG_REGISTRY_OFFLINE in the workspace test lanes (#6410) (@houko)
+- Bump the web-minor-patch group in /web with 3 updates (#6411) (@app/dependabot)
+- Bump typescript from 6.0.3 to 7.0.2 in /web (#6412) (@app/dependabot)
+- Bump the dashboard-minor-patch group in /crates/librefang-api/dashboard with 6 updates (#6413) (@app/dependabot)
+- Move stable CLI to homebrew-core and fix tap sync bugs (#6416) (@houko)
+- Match Homebrew class_s casing for versioned tap formula (#6418) (@houko)
+- Seed registry content from a pinned in-repo fixture instead of the network (#6421) (@houko)
+- Bump the docs-minor-patch group in /docs with 4 updates (#6424) (@app/dependabot)
+
+</details>
+
 
 ## [2026.6.29] - 2026-06-29
 
