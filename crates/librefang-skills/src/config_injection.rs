@@ -158,10 +158,7 @@ fn resolve_dotpath<'a>(root: &'a toml::Value, dotted_key: &str) -> Option<&'a to
     let mut current = root;
     for part in dotted_key.split('.') {
         match current {
-            toml::Value::Table(tbl) => match tbl.get(part) {
-                Some(next) => current = next,
-                None => return None,
-            },
+            toml::Value::Table(tbl) => current = tbl.get(part)?,
             _ => return None,
         }
     }

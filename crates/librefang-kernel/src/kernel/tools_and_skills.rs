@@ -1347,18 +1347,15 @@ impl LibreFangKernel {
                 }
             }
 
-            if let Some(end_idx) = end {
-                let candidate: String = chars[start..=end_idx].iter().collect();
-                if serde_json::from_str::<serde_json::Value>(&candidate).is_ok() {
-                    return Some(candidate);
-                }
-                // Try the next '{' after the one we just rejected.
-                search_from = start + 1;
-            } else {
-                // Unbalanced braces from `start` to EOF — nothing later
-                // can match either, so stop.
-                return None;
+            // Unbalanced braces from `start` to EOF — nothing later can match
+            // either, so stop (the `?` returns None from the function).
+            let end_idx = end?;
+            let candidate: String = chars[start..=end_idx].iter().collect();
+            if serde_json::from_str::<serde_json::Value>(&candidate).is_ok() {
+                return Some(candidate);
             }
+            // Try the next '{' after the one we just rejected.
+            search_from = start + 1;
         }
 
         None
