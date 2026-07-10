@@ -1,0 +1,39 @@
+# meta-llama — https://llama.com
+# Models: 3
+
+[provider]
+id = "meta-llama"
+display_name = "Meta Llama"
+api_key_env = "LLAMA_API_KEY"
+base_url = "https://api.llama.com/v1"
+key_required = true
+
+[[models]]
+id = "llama-4-maverick"
+display_name = "Meta: Llama 4 Maverick"
+tier = "fast"
+context_window = 1048576
+max_output_tokens = 16384
+input_cost_per_m = 0.15
+output_cost_per_m = 0.6
+supports_streaming = true
+
+[[models]]
+id = "llama-4-scout"
+display_name = "Meta: Llama 4 Scout"
+tier = "fast"
+context_window = 327680
+max_output_tokens = 16384
+input_cost_per_m = 0.08
+output_cost_per_m = 0.3
+supports_streaming = true
+
+[[models]]
+id = "llama-guard-4-12b"
+display_name = "Meta: Llama Guard 4 12B"
+tier = "fast"
+context_window = 163840
+max_output_tokens = 16384
+input_cost_per_m = 0.18
+output_cost_per_m = 0.18
+supports_streaming = true

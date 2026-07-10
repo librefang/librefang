@@ -3,7 +3,7 @@
 //! Provides a persistent bidirectional channel between the client
 //! and an agent. Messages are exchanged as JSON:
 //!
-//! Client → Server: `{"type":"message","content":"..."}`
+//! Client → Server: `{"type":"message","content":"...","message_id":"..."}` (`message_id` optional)
 //! Server → Client: `{"type":"typing","state":"start|tool|stop"}`
 //! Server → Client: `{"type":"text_delta","content":"..."}`
 //! Server → Client: `{"type":"response","content":"...","input_tokens":N,"output_tokens":N,"iterations":N}`
@@ -11,6 +11,9 @@
 //! Server → Client: `{"type":"agents_updated","agents":[...]}`
 //! Server → Client: `{"type":"silent_complete"}` (agent chose NO_REPLY)
 //! Server → Client: `{"type":"canvas","canvas_id":"...","html":"...","title":"..."}`
+//!
+//! When the client supplies a `message_id` on a `message` frame, every terminal frame for that turn (`response`, `silent_complete`, `error`) echoes it back (#6390).
+//! Terminal frames can arrive after the client has already started a newer turn on the same socket — post-turn work such as proactive-memory extraction delays them past the next user send — and the echoed id lets the client bind a late frame to the turn that owns it instead of the newest one.
 
 use crate::routes::AppState;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
@@ -904,6 +907,19 @@ async fn handle_agent_ws(
 // Message Handler
 // ---------------------------------------------------------------------------
 
+/// Maximum accepted length for a client-supplied `message_id`.
+/// The id is echoed verbatim on terminal frames; the cap keeps a hostile client from inflating every outbound frame.
+const MAX_MESSAGE_ID_LEN: usize = 128;
+
+/// Echo the client's `message_id` onto an outbound terminal frame (#6390).
+/// See the module docs for why terminal frames need turn correlation.
+fn stamp_message_id(mut frame: serde_json::Value, message_id: Option<&str>) -> serde_json::Value {
+    if let Some(mid) = message_id {
+        frame["message_id"] = serde_json::Value::String(mid.to_string());
+    }
+    frame
+}
+
 /// Handle a text message from the WebSocket client.
 ///
 /// Returns `Err(WsClosed)` when a frame send has failed and the helper has
@@ -932,15 +948,24 @@ async fn handle_text_message(
 
     match msg_type {
         "message" => {
+            // Optional client-supplied correlation id, echoed on every terminal frame of this turn (#6390 — see module docs).
+            let message_id: Option<String> = parsed["message_id"]
+                .as_str()
+                .filter(|s| !s.is_empty() && s.len() <= MAX_MESSAGE_ID_LEN)
+                .map(String::from);
+
             let raw_content = match parsed["content"].as_str() {
                 Some(c) if !c.trim().is_empty() => c.to_string(),
                 _ => {
                     return send_json_or_close(
                         sender,
-                        &serde_json::json!({
-                            "type": "error",
-                            "content": "Missing or empty 'content' field",
-                        }),
+                        &stamp_message_id(
+                            serde_json::json!({
+                                "type": "error",
+                                "content": "Missing or empty 'content' field",
+                            }),
+                            message_id.as_deref(),
+                        ),
                     )
                     .await;
                 }
@@ -957,10 +982,13 @@ async fn handle_text_message(
             if content.is_empty() {
                 return send_json_or_close(
                     sender,
-                    &serde_json::json!({
-                        "type": "error",
-                        "content": "Message content is empty after sanitization",
-                    }),
+                    &stamp_message_id(
+                        serde_json::json!({
+                            "type": "error",
+                            "content": "Message content is empty after sanitization",
+                        }),
+                        message_id.as_deref(),
+                    ),
                 )
                 .await;
             }
@@ -997,10 +1025,13 @@ async fn handle_text_message(
                     if is_missing {
                         return send_json_or_close(
                             sender,
-                            &serde_json::json!({
-                                "type": "error",
-                                "content": format!("API key not configured for provider '{}'. Set it in Settings > Providers.", provider),
-                            }),
+                            &stamp_message_id(
+                                serde_json::json!({
+                                    "type": "error",
+                                    "content": format!("API key not configured for provider '{}'. Set it in Settings > Providers.", provider),
+                                }),
+                                message_id.as_deref(),
+                            ),
                         )
                         .await;
                     }
@@ -1312,11 +1343,14 @@ async fn handle_text_message(
                             if result.silent {
                                 return send_json_or_close(
                                     sender,
-                                    &serde_json::json!({
-                                        "type": "silent_complete",
-                                        "input_tokens": result.total_usage.input_tokens,
-                                        "output_tokens": result.total_usage.output_tokens,
-                                    }),
+                                    &stamp_message_id(
+                                        serde_json::json!({
+                                            "type": "silent_complete",
+                                            "input_tokens": result.total_usage.input_tokens,
+                                            "output_tokens": result.total_usage.output_tokens,
+                                        }),
+                                        message_id.as_deref(),
+                                    ),
                                 )
                                 .await;
                             }
@@ -1396,7 +1430,11 @@ async fn handle_text_message(
                                         serde_json::json!(entry.session_id.to_string());
                                 }
                             }
-                            send_json_or_close(sender, &resp_json).await?;
+                            send_json_or_close(
+                                sender,
+                                &stamp_message_id(resp_json, message_id.as_deref()),
+                            )
+                            .await?;
                         }
                         Ok(Err(e)) => {
                             // Let the stream forwarder drain before
@@ -1414,10 +1452,13 @@ async fn handle_text_message(
                             let user_msg = classify_streaming_error(&e);
                             send_json_or_close(
                                 sender,
-                                &serde_json::json!({
-                                    "type": "error",
-                                    "content": user_msg,
-                                }),
+                                &stamp_message_id(
+                                    serde_json::json!({
+                                        "type": "error",
+                                        "content": user_msg,
+                                    }),
+                                    message_id.as_deref(),
+                                ),
                             )
                             .await?;
                         }
@@ -1436,10 +1477,13 @@ async fn handle_text_message(
                             .await?;
                             send_json_or_close(
                                 sender,
-                                &serde_json::json!({
-                                    "type": "error",
-                                    "content": "Internal error occurred",
-                                }),
+                                &stamp_message_id(
+                                    serde_json::json!({
+                                        "type": "error",
+                                        "content": "Internal error occurred",
+                                    }),
+                                    message_id.as_deref(),
+                                ),
                             )
                             .await?;
                         }
@@ -1457,10 +1501,13 @@ async fn handle_text_message(
                     let user_msg = classify_streaming_error(&e);
                     send_json_or_close(
                         sender,
-                        &serde_json::json!({
-                            "type": "error",
-                            "content": user_msg,
-                        }),
+                        &stamp_message_id(
+                            serde_json::json!({
+                                "type": "error",
+                                "content": user_msg,
+                            }),
+                            message_id.as_deref(),
+                        ),
                     )
                     .await?;
                 }
@@ -2145,6 +2192,22 @@ mod tests {
     fn test_ws_module_loads() {
         // Verify module compiles and loads correctly
         let _ = VerboseLevel::Off;
+    }
+
+    /// #6390: terminal frames echo the client's `message_id` so the dashboard can bind a late frame to the turn that owns it.
+    /// Without an id the frame stays untouched — pre-correlation clients see the old shape.
+    #[test]
+    fn stamp_message_id_echoes_the_turn_correlation_id() {
+        let stamped = stamp_message_id(
+            serde_json::json!({"type": "response", "content": "hi"}),
+            Some("bot-123"),
+        );
+        assert_eq!(stamped["message_id"], "bot-123");
+        assert_eq!(stamped["type"], "response");
+        assert_eq!(stamped["content"], "hi");
+
+        let unstamped = stamp_message_id(serde_json::json!({"type": "error"}), None);
+        assert!(unstamped.get("message_id").is_none());
     }
 
     #[test]

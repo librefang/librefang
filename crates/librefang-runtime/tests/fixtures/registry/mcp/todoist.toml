@@ -1,0 +1,57 @@
+id = "todoist"
+name = "Todoist"
+description = "Manage Todoist tasks, projects, and labels through the MCP server"
+category = "productivity"
+icon = "lucide:check-circle"
+tags = ["tasks", "todo", "project-management", "productivity", "gtd"]
+
+[transport]
+type = "stdio"
+command = "npx"
+args = ["-y", "todoist-mcp@1.3.0"]
+
+[[required_env]]
+name = "TODOIST_API_KEY"
+label = "Todoist API Token"
+help = "Your personal API token from Todoist settings"
+is_secret = true
+get_url = "https://todoist.com/prefs/integrations"
+
+[health_check]
+interval_secs = 60
+unhealthy_threshold = 3
+
+setup_instructions = """
+1. Open Todoist and go to Settings > Integrations > Developer (https://todoist.com/prefs/integrations).
+2. Copy your API token from the 'API token' section.
+3. Paste the token into the TODOIST_API_KEY field above.
+"""
+
+
+[i18n.zh]
+name = "Todoist"
+description = "通过 MCP 服务器管理 Todoist 的任务、项目与标签。"
+
+[i18n.zh-TW]
+name = "Todoist"
+description = "透過 MCP 伺服器管理 Todoist 的任務、專案與標籤。"
+
+[i18n.ja]
+name = "Todoist"
+description = "MCP サーバー経由で Todoist のタスク、プロジェクト、ラベルを管理。"
+
+[i18n.ko]
+name = "Todoist"
+description = "MCP 서버를 통해 Todoist 작업, 프로젝트, 라벨을 관리."
+
+[i18n.de]
+name = "Todoist"
+description = "Todoist-Aufgaben, -Projekte und -Labels über den MCP-Server verwalten."
+
+[i18n.es]
+name = "Todoist"
+description = "Gestiona tareas, proyectos y etiquetas de Todoist mediante el servidor MCP."
+
+[i18n.fr]
+name = "Todoist"
+description = "Gère les tâches, projets et étiquettes Todoist via le serveur MCP."

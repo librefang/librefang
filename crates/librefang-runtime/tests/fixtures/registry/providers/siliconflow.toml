@@ -1,0 +1,9 @@
+# SiliconFlow (硅基流动) — https://siliconflow.cn
+# Models: 0 (hosts third-party models, discovered dynamically at runtime)
+
+[provider]
+id = "siliconflow"
+display_name = "SiliconFlow"
+api_key_env = "SILICONFLOW_API_KEY"
+base_url = "https://api.siliconflow.cn/v1"
+key_required = true

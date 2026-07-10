@@ -1,0 +1,62 @@
+id = "git"
+name = "Git"
+description = "Inspect local Git repositories — read commits, diffs, branches, file history, and blame without shell access"
+category = "devtools"
+icon = "🌿"
+tags = ["git", "version-control", "commits", "diff", "history", "blame"]
+
+[transport]
+type = "stdio"
+command = "uvx"
+args = ["mcp-server-git", "--repository", "."]
+
+[health_check]
+interval_secs = 60
+unhealthy_threshold = 3
+
+setup_instructions = """
+Requires `uv` (Python package manager):
+- macOS/Linux: `curl -LsSf https://astral.sh/uv/install.sh | sh`
+- Or: `pip install uv`
+
+The `--repository .` argument uses the current working directory. To point at a specific repo:
+
+```toml
+[[mcp_servers]]
+name = "git"
+
+[mcp_servers.transport]
+type = "stdio"
+command = "uvx"
+args = ["mcp-server-git", "--repository", "/path/to/your/repo"]
+```
+"""
+
+
+[i18n.zh]
+name = "Git"
+description = "检视本地 Git 仓库 —— 读取提交、diff、分支、文件历史与 blame，无需 shell 访问。"
+
+[i18n.zh-TW]
+name = "Git"
+description = "檢視本地 Git 儲存庫 —— 讀取 Commit、Diff、分支、檔案歷史與 blame，無需 Shell 存取。"
+
+[i18n.ja]
+name = "Git"
+description = "シェルなしでローカル Git リポジトリを検査 —— コミット、diff、ブランチ、ファイル履歴、blame を取得。"
+
+[i18n.ko]
+name = "Git"
+description = "셸 접근 없이 로컬 Git 저장소를 조사 —— 커밋, diff, 브랜치, 파일 이력, blame을 확인."
+
+[i18n.de]
+name = "Git"
+description = "Lokale Git-Repositories inspizieren — Commits, Diffs, Branches, Datei-Historie und Blame ohne Shell-Zugriff."
+
+[i18n.es]
+name = "Git"
+description = "Inspecciona repositorios Git locales: commits, diffs, ramas, historial y blame sin acceso a shell."
+
+[i18n.fr]
+name = "Git"
+description = "Inspecte les dépôts Git locaux — commits, diffs, branches, historique et blame sans accès shell."

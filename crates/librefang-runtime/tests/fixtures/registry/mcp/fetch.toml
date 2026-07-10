@@ -1,0 +1,50 @@
+id = "fetch"
+name = "Web Fetch"
+description = "Fetch any web URL and receive its content as clean Markdown — ideal for reading docs, articles, and APIs"
+category = "devtools"
+icon = "🌐"
+tags = ["web", "fetch", "scraping", "markdown", "http"]
+
+[transport]
+type = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-fetch@latest"]
+
+[health_check]
+interval_secs = 60
+unhealthy_threshold = 3
+
+setup_instructions = """
+No API key required. Fetches any publicly accessible URL and returns the content as Markdown.
+
+For JavaScript-rendered pages (SPAs), use the Puppeteer integration instead.
+"""
+
+
+[i18n.zh]
+name = "Web Fetch"
+description = "抓取任意网页并以干净的 Markdown 返回内容 —— 适合阅读文档、文章与 API。"
+
+[i18n.zh-TW]
+name = "Web Fetch"
+description = "擷取任意網頁並以乾淨的 Markdown 回傳 —— 適合閱讀文件、文章與 API。"
+
+[i18n.ja]
+name = "Web Fetch"
+description = "任意の URL を取得しクリーンな Markdown に整形 —— ドキュメント、記事、API の読み取りに最適。"
+
+[i18n.ko]
+name = "Web Fetch"
+description = "임의의 웹 URL을 가져와 깔끔한 Markdown으로 반환 —— 문서, 기사, API 읽기에 적합."
+
+[i18n.de]
+name = "Web Fetch"
+description = "Ruft beliebige Web-URLs ab und liefert sauberes Markdown — ideal für Dokumentationen, Artikel und APIs."
+
+[i18n.es]
+name = "Web Fetch"
+description = "Obtiene cualquier URL web y devuelve su contenido en Markdown limpio — ideal para docs, artículos y APIs."
+
+[i18n.fr]
+name = "Web Fetch"
+description = "Récupère n'importe quelle URL et retourne son contenu en Markdown propre — idéal pour docs, articles et API."

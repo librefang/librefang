@@ -195,7 +195,7 @@ pub async fn get_agent_session(
                 }
                 let msg_idx = built_messages.len();
                 // Fix up the msg_idx for tool_use entries registered with sentinel
-                for (_, (mi, _)) in tool_use_index.iter_mut() {
+                for (mi, _) in tool_use_index.values_mut() {
                     if *mi == usize::MAX {
                         *mi = msg_idx;
                     }

@@ -1,0 +1,57 @@
+id = "redis"
+name = "Redis"
+description = "Access and manage Redis key-value stores through the MCP server"
+category = "data"
+icon = "lucide:circle"
+tags = ["database", "cache", "key-value", "in-memory", "nosql"]
+
+[transport]
+type = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-redis@2025.4.25"]
+
+[[required_env]]
+name = "REDIS_URL"
+label = "Redis Connection URL"
+help = "A Redis connection URL (e.g., redis://user:password@host:6379/0)"
+is_secret = true
+get_url = ""
+
+[health_check]
+interval_secs = 60
+unhealthy_threshold = 3
+
+setup_instructions = """
+1. Obtain your Redis connection URL from your Redis hosting provider or local instance (e.g., redis://localhost:6379/0).
+2. If authentication is required, include the password in the URL: redis://user:password@host:6379/0.
+3. Paste the full connection URL into the REDIS_URL field above.
+"""
+
+
+[i18n.zh]
+name = "Redis"
+description = "通过 MCP 服务器访问和管理 Redis 键值存储。"
+
+[i18n.zh-TW]
+name = "Redis"
+description = "透過 MCP 伺服器存取並管理 Redis 鍵值儲存。"
+
+[i18n.ja]
+name = "Redis"
+description = "MCP サーバー経由で Redis のキーバリューストアにアクセス・管理。"
+
+[i18n.ko]
+name = "Redis"
+description = "MCP 서버를 통해 Redis 키-값 저장소에 접근 및 관리."
+
+[i18n.de]
+name = "Redis"
+description = "Zugriff und Verwaltung von Redis-Key-Value-Stores über den MCP-Server."
+
+[i18n.es]
+name = "Redis"
+description = "Accede y gestiona almacenes clave-valor de Redis mediante el servidor MCP."
+
+[i18n.fr]
+name = "Redis"
+description = "Accès et gestion des magasins clé-valeur Redis via le serveur MCP."

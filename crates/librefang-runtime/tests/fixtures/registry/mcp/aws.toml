@@ -1,0 +1,71 @@
+id = "aws"
+name = "AWS"
+description = "Manage Amazon Web Services resources including S3, EC2, Lambda, and more through the MCP server"
+category = "cloud"
+icon = "lucide:cloud"
+tags = ["cloud", "amazon", "infrastructure", "s3", "ec2", "lambda", "devops"]
+
+[transport]
+type = "stdio"
+command = "npx"
+args = ["-y", "@aws-mcp/server-aws"]
+
+[[required_env]]
+name = "AWS_ACCESS_KEY_ID"
+label = "AWS Access Key ID"
+help = "The access key ID from your AWS IAM credentials"
+is_secret = true
+get_url = "https://console.aws.amazon.com/iam/home#/security_credentials"
+
+[[required_env]]
+name = "AWS_SECRET_ACCESS_KEY"
+label = "AWS Secret Access Key"
+help = "The secret access key paired with your access key ID"
+is_secret = true
+get_url = "https://console.aws.amazon.com/iam/home#/security_credentials"
+
+[[required_env]]
+name = "AWS_REGION"
+label = "AWS Region"
+help = "The default AWS region to use (e.g., us-east-1, eu-west-1)"
+is_secret = false
+get_url = ""
+
+[health_check]
+interval_secs = 60
+unhealthy_threshold = 3
+
+setup_instructions = """
+1. Go to the AWS IAM Console (https://console.aws.amazon.com/iam/) and create or select an IAM user with programmatic access.
+2. Generate an access key pair and note down the Access Key ID and Secret Access Key.
+3. Paste both credentials and your preferred AWS region (default: us-east-1) into the fields above.
+"""
+
+
+[i18n.zh]
+name = "AWS"
+description = "通过 MCP 服务器管理 Amazon Web Services 资源（S3、EC2、Lambda 等）。"
+
+[i18n.zh-TW]
+name = "AWS"
+description = "透過 MCP 伺服器管理 Amazon Web Services 資源（S3、EC2、Lambda 等）。"
+
+[i18n.ja]
+name = "AWS"
+description = "MCP サーバー経由で AWS リソース（S3、EC2、Lambda 等）を管理。"
+
+[i18n.ko]
+name = "AWS"
+description = "MCP 서버를 통해 AWS 리소스(S3, EC2, Lambda 등)를 관리."
+
+[i18n.de]
+name = "AWS"
+description = "Verwaltet AWS-Ressourcen (S3, EC2, Lambda u. a.) über den MCP-Server."
+
+[i18n.es]
+name = "AWS"
+description = "Gestiona recursos de AWS (S3, EC2, Lambda, etc.) a través del servidor MCP."
+
+[i18n.fr]
+name = "AWS"
+description = "Gère les ressources AWS (S3, EC2, Lambda, etc.) via le serveur MCP."

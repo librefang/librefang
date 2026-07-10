@@ -37,13 +37,8 @@ impl Drop for Harness {
 async fn boot() -> Harness {
     let tmp = tempfile::tempdir().expect("tempdir");
 
-    // Populate the registry cache so the kernel boots without network.
-    librefang_kernel::registry_sync::sync_registry(
-        tmp.path(),
-        librefang_kernel::registry_sync::DEFAULT_CACHE_TTL_SECS,
-        "",
-        None,
-    );
+    // Seed the pinned registry fixture so the kernel boots with content, offline.
+    librefang_kernel::registry_sync::seed_registry_fixture_for_tests(tmp.path());
 
     let config = KernelConfig {
         home_dir: tmp.path().to_path_buf(),

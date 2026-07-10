@@ -18,7 +18,7 @@ import { useSessionStream } from "../lib/queries/sessions";
 import { useActiveHandsWhen } from "../lib/queries/hands";
 import { agentKeys, approvalKeys } from "../lib/queries/keys";
 import { groupedPicker } from "../lib/chatPicker";
-import { normalizeToolOutput } from "../lib/chat";
+import { applyForeignTerminalFrame, isTerminalFrameType, normalizeToolOutput, terminalFrameOwner } from "../lib/chat";
 import {
   deriveDropdownActiveSessionId,
   pickSessionDropdownLabel,
@@ -990,6 +990,28 @@ function useChatMessages(
           resetFallbackTimer();
           try {
             const data = JSON.parse(event.data as string);
+            // #6390: a previous turn's terminal frame can land here after this turn replaced the socket listener — post-turn memory extraction delays `response` past the next user send.
+            // The daemon echoes the `message_id` we sent, so route a foreign frame to the bubble that owns it (patch / silent-remove / error-mark) and leave this turn's own bubble and lifecycle (cleanup / finishTurn) untouched.
+            if (
+              isTerminalFrameType(data.type) &&
+              terminalFrameOwner(data.message_id, botMsg.id) === "foreign"
+            ) {
+              updateAgentMessages(sendAgentId, prev => applyForeignTerminalFrame(prev, data));
+              // #6390 + #5199-B: a foreign `response` can be the frame that first carries the resolved session id for a still-unpinned chat — the first turn is usually the one that creates the session — so run the same auto-pin gate here too.
+              // Without this the chat stays unpinned for the rest of the tab's life whenever the current (newer) turn ends as `silent_complete` / `error` and never re-resolves the id itself.
+              if (data.type === "response" && shouldAutoPinResolvedSession({
+                sendAgentId,
+                currentAgentId: currentAgentRef.current,
+                currentSessionId: currentSessionRef.current,
+                urlSessionId: sessionId,
+                resolvedSessionId: data.session_id,
+              })) {
+                const newSid = data.session_id as string;
+                cacheSet(cacheKey(sendAgentId, newSid), applyForeignTerminalFrame(messagesRef.current, data));
+                onAutoPinSession?.(newSid);
+              }
+              return;
+            }
             if (data.type === "text_delta") {
               const chunk = data.content || "";
               // Accumulate into the buffer without a React state update on every token.
@@ -1206,6 +1228,9 @@ function useChatMessages(
           content: trimmed,
           thinking: deepThinking,
           show_thinking: showThinkingProcess,
+          // Turn correlation id (#6390): the daemon echoes it on every terminal frame so late frames bind to this bubble, not the newest one.
+          // Reuses the bubble id — no extra mapping needed.
+          message_id: botMsg.id,
           // Backend ws handler reads `parsed["attachments"]` (ws.rs) and
           // resolves them via the same path as the HTTP /message endpoint.
           ...(hasAttachments ? { attachments } : {}),
@@ -2029,11 +2054,8 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
   }, [message]);
 
   const effectiveDisabled = disabled || !!authMissing;
-  // Both the textarea and the send button unlock on `typing:stop` (`disabled`
-  // and `inputDisabled` both track `isStreaming`). The `response` frame still
-  // arrives later and attaches `memories_saved` to the correct message via its
-  // keyed `updateAgentMessages` call — the send-button gate does not need to
-  // wait for it.
+  // Both the textarea and the send button unlock on `typing:stop` (`disabled` and `inputDisabled` both track `isStreaming`).
+  // The `response` frame still arrives later; the daemon echoes our `message_id` on it, and the foreign-terminal router in `handleMessage` binds it to the bubble that owns it even when a newer turn has already replaced the listener (#6390) — so the send-button gate does not need to wait for it.
   const textareaDisabled = (inputDisabled ?? disabled) || !!authMissing;
 
   return (

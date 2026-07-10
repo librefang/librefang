@@ -386,7 +386,7 @@ fn draw_installed(f: &mut Frame, area: Rect, state: &mut SkillsState) {
                             .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(format!(" {:<10}", runtime_badge), runtime_style),
-                    Span::styled(format!("{:<12}", &s.source), source_style),
+                    Span::styled(format!("{:<12}", s.source), source_style),
                     Span::styled(
                         format!(" {}", widgets::truncate(&s.description, 30)),
                         theme::dim_style(),
@@ -485,7 +485,7 @@ fn draw_clawhub(f: &mut Frame, area: Rect, state: &mut SkillsState) {
                             .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(format!(" {:<10}", dl), Style::default().fg(theme::ACCENT)),
-                    Span::styled(format!(" {:<10}", &r.runtime), runtime_style),
+                    Span::styled(format!(" {:<10}", r.runtime), runtime_style),
                     Span::styled(
                         format!(" {}", widgets::truncate(&r.description, 30)),
                         theme::dim_style(),

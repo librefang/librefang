@@ -1,0 +1,18 @@
+# upstage — auto-generated from OpenRouter API
+
+[provider]
+id = "upstage"
+display_name = "Upstage"
+api_key_env = "UPSTAGE_API_KEY"
+base_url = "https://api.upstage.ai/v1"
+key_required = true
+
+[[models]]
+id = "solar-pro-3"
+display_name = "Upstage: Solar Pro 3"
+tier = "fast"
+context_window = 128000
+max_output_tokens = 16384
+input_cost_per_m = 0.15
+output_cost_per_m = 0.6
+supports_streaming = true

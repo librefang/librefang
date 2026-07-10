@@ -1,0 +1,49 @@
+# Groq — https://groq.com
+# Models: 3
+
+[provider]
+id = "groq"
+display_name = "Groq"
+api_key_env = "GROQ_API_KEY"
+base_url = "https://api.groq.com/openai/v1"
+key_required = true
+
+[[models]]
+id = "llama-3.3-70b-versatile"
+display_name = "Llama 3.3 70B"
+tier = "balanced"
+context_window = 128000
+max_output_tokens = 32768
+input_cost_per_m = 0.059
+output_cost_per_m = 0.079
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["llama", "llama-70b"]
+
+[[models]]
+id = "meta-llama/llama-4-scout-17b-16e-instruct"
+display_name = "Llama 4 Scout 17B"
+tier = "balanced"
+context_window = 128000
+max_output_tokens = 8192
+input_cost_per_m = 0.11
+output_cost_per_m = 0.34
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "qwen-qwq-32b"
+display_name = "Qwen QWQ 32B"
+tier = "balanced"
+context_window = 128000
+max_output_tokens = 16384
+input_cost_per_m = 0.20
+output_cost_per_m = 0.20
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+supports_thinking = true
+aliases = []
