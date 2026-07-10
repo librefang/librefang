@@ -575,7 +575,11 @@ impl LibreFangKernel {
                                         .unwrap_or_else(|e| e.into_inner());
                                     *guard = Some(migrated.clone());
                                 }
-                                let failures = kernel.sync_default_model_agents(&id, &migrated);
+                                let failures = kernel.sync_default_model_agents(
+                                     &id,
+                                     Some(old_model.as_str()),
+                                     &migrated,
+                                 );
                                 if !failures.is_empty() {
                                     tracing::warn!(
                                         provider = %id,

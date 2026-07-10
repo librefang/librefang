@@ -10751,7 +10751,7 @@ fn sync_default_model_agents_migrates_legacy_and_keeps_default_sentinel() {
         ..Default::default()
     };
 
-    let failures = kernel.sync_default_model_agents("anthropic", &new_dm);
+    let failures = kernel.sync_default_model_agents("anthropic", None, &new_dm);
     assert!(
         failures.is_empty(),
         "happy-path sync must report zero per-agent failures, got: {failures:?} (#5137)"
@@ -10781,6 +10781,9 @@ fn default_model_sentinel_survives_restart() {
     let tmp = tempfile::tempdir().unwrap();
     let home_dir = tmp.path().join("librefang-kernel-default-model-restart");
     std::fs::create_dir_all(&home_dir).unwrap();
+    let registry_dir = home_dir.join("registry");
+    std::fs::create_dir_all(&registry_dir).unwrap();
+    std::fs::write(registry_dir.join(".sync_marker"), "").unwrap();
     let config = KernelConfig {
         home_dir: home_dir.clone(),
         data_dir: home_dir.join("data"),
@@ -10895,6 +10898,9 @@ fn explicit_assistant_openrouter_free_model_with_custom_key_survives_restart() {
         .path()
         .join("librefang-kernel-explicit-assistant-openrouter-key");
     std::fs::create_dir_all(&home_dir).unwrap();
+    let registry_dir = home_dir.join("registry");
+    std::fs::create_dir_all(&registry_dir).unwrap();
+    std::fs::write(registry_dir.join(".sync_marker"), "").unwrap();
     let config = KernelConfig {
         home_dir: home_dir.clone(),
         data_dir: home_dir.join("data"),
@@ -10989,7 +10995,7 @@ fn sync_default_model_agents_preserves_explicit_assistant_model() {
         ..Default::default()
     };
 
-    let failures = kernel.sync_default_model_agents("openrouter", &new_dm);
+    let failures = kernel.sync_default_model_agents("openrouter", None, &new_dm);
     assert!(failures.is_empty());
 
     let entry = kernel
@@ -11002,6 +11008,103 @@ fn sync_default_model_agents_preserves_explicit_assistant_model() {
         entry.manifest.model.model, "poolside/laguna-xs.2:free",
         "an explicit assistant model must not be replaced by the global default"
     );
+
+    kernel.shutdown();
+}
+
+#[test]
+fn sync_default_model_agents_with_old_model_spares_agents_on_other_models() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = KernelConfig {
+        home_dir: tmp.path().to_path_buf(),
+        data_dir: tmp.path().join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("kernel should boot");
+
+    // Spawn agent 1: pinned to the old delisted model (e.g. "poolside/laguna-xs.2:free") on openrouter
+    let migrated_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "migrated-agent".to_string(),
+                description: "agent pinned to delisted model".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                model: ModelConfig {
+                    provider: "openrouter".to_string(),
+                    model: "poolside/laguna-xs.2:free".to_string(),
+                    max_tokens: 4096,
+                    temperature: 0.7,
+                    system_prompt: String::new(),
+                    api_key_env: None,
+                    base_url: None,
+                    context_window: None,
+                    max_output_tokens: None,
+                    extra_params: std::collections::BTreeMap::new(),
+                },
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+
+    // Spawn agent 2: pinned to a different model (e.g. "openai/gpt-4o") on openrouter
+    let spared_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "spared-agent".to_string(),
+                description: "agent pinned to different model".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                model: ModelConfig {
+                    provider: "openrouter".to_string(),
+                    model: "openai/gpt-4o".to_string(),
+                    max_tokens: 4096,
+                    temperature: 0.7,
+                    system_prompt: String::new(),
+                    api_key_env: None,
+                    base_url: None,
+                    context_window: None,
+                    max_output_tokens: None,
+                    extra_params: std::collections::BTreeMap::new(),
+                },
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+
+    let new_dm = DefaultModelConfig {
+        provider: "openrouter".to_string(),
+        model: "poolside/laguna-m.1:free".to_string(),
+        api_key_env: "OPENROUTER_API_KEY".to_string(),
+        base_url: None,
+        ..Default::default()
+    };
+
+    // Narrow sync to poolside/laguna-xs.2:free
+    let failures = kernel.sync_default_model_agents("openrouter", Some("poolside/laguna-xs.2:free"), &new_dm);
+    assert!(failures.is_empty());
+
+    // Agent 1 should be migrated
+    let migrated = kernel
+        .agents
+        .registry
+        .get(migrated_id)
+        .expect("migrated agent");
+    assert_eq!(migrated.manifest.model.model, "poolside/laguna-m.1:free");
+
+    // Agent 2 should be spared
+    let spared = kernel
+        .agents
+        .registry
+        .get(spared_id)
+        .expect("spared agent");
+    assert_eq!(spared.manifest.model.model, "openai/gpt-4o");
 
     kernel.shutdown();
 }

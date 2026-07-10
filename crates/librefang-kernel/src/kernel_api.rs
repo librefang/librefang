@@ -531,11 +531,12 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         model: &str,
         explicit_provider: Option<&str>,
     ) -> KernelResult<()>;
-    /// Returns a per-agent partial-failure list `(agent_name, error)`;
-    /// empty means every eligible agent migrated cleanly.
+    /// Returns a per-agent partial-failure list `(agent_name, error)`; empty means every eligible agent migrated cleanly.
+    /// `old_model` narrows the match to agents pinned to that model too — see the `LibreFangKernel::sync_default_model_agents` doc comment for when to pass `Some`/`None`.
     fn sync_default_model_agents(
         &self,
         old_provider: &str,
+        old_model: Option<&str>,
         dm: &librefang_types::config::DefaultModelConfig,
     ) -> Vec<(String, String)>;
     async fn notify_model_migrated(
@@ -1350,9 +1351,10 @@ impl KernelApi for LibreFangKernel {
     fn sync_default_model_agents(
         &self,
         old_provider: &str,
+        old_model: Option<&str>,
         dm: &librefang_types::config::DefaultModelConfig,
     ) -> Vec<(String, String)> {
-        Self::sync_default_model_agents(self, old_provider, dm)
+        Self::sync_default_model_agents(self, old_provider, old_model, dm)
     }
     async fn notify_model_migrated(
         &self,

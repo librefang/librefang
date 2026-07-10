@@ -1614,8 +1614,7 @@ pub async fn set_provider_key(
     // Trigger all active hands so they resume immediately
     state.kernel.trigger_all_hands();
 
-    // If the effective default changed, update registry entries for agents that
-    // were using the old default so they immediately pick up the new provider/model.
+    // If the effective default changed, update registry entries for agents that were using the old default so they immediately pick up the new provider/model.
     if switched || migrated_model.is_some() {
         let new_dm = {
             let guard = state
@@ -1627,9 +1626,13 @@ pub async fn set_provider_key(
                 .clone()
                 .unwrap_or_else(|| state.kernel.config_ref().default_model.clone())
         };
-        let sync_failures = state
-            .kernel
-            .sync_default_model_agents(&current_provider, &new_dm);
+        // `switched` is a full provider switch: every dashboard agent on the old provider should move regardless of which model it was on, so pass `None`.
+        // `migrated_model` is an intra-provider free-model migration: only agents pinned to the specific delisted model should move, so narrow by `old_model`.
+        let old_model_for_sync = migrated_model.as_ref().map(|(old, _)| old.as_str());
+        let sync_failures =
+            state
+                .kernel
+                .sync_default_model_agents(&current_provider, old_model_for_sync, &new_dm);
         if !sync_failures.is_empty() {
             if let Some((old_model, new_model)) = migrated_model.as_ref() {
                 state
@@ -2455,10 +2458,11 @@ pub async fn set_default_provider(
         *guard = Some(new_dm.clone());
     }
 
-    // Update registry entries for agents that were tracking the old default
+    // Update registry entries for agents that were tracking the old default.
+    // This is an explicit user-driven default change (possibly same provider, different model), so every dashboard agent following the old default moves — pass `None` rather than narrowing to a specific old model.
     let sync_failures = state
         .kernel
-        .sync_default_model_agents(&old_provider, &new_dm);
+        .sync_default_model_agents(&old_provider, None, &new_dm);
 
     let mut body = serde_json::json!({
         "status": "updated",

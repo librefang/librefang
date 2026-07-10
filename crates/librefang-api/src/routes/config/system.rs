@@ -110,8 +110,12 @@ pub async fn quick_init(State(state): State<Arc<AppState>>) -> axum::response::R
         ("groq".to_string(), "GROQ_API_KEY".to_string())
     };
 
-    // Resolve default model from catalog
-    let model = librefang_kernel::model_catalog::ModelCatalog::default()
+    // Resolve default model from the kernel's live catalog rather than a throwaway `ModelCatalog::default()`, so a first-run auto-detect of `openrouter` (via `OPENROUTER_API_KEY`) picks a model consistent with the live catalog instead of only ever the checked-in build snapshot (#6384).
+    crate::openrouter_catalog::refresh_if_missing_in_background(&state.kernel);
+    let model = state
+        .kernel
+        .model_catalog_ref()
+        .load()
         .automatic_default_model_for_provider(&provider)
         .unwrap_or_else(|| "auto".to_string());
 

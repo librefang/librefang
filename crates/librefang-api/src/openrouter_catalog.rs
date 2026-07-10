@@ -101,3 +101,8 @@ async fn refresh_now(kernel: &Arc<dyn KernelApi>) -> Result<usize, String> {
     });
     Ok(model_count)
 }
+
+/// Helper function to clear the rate-limiting attempts cache during integration testing to prevent sequential port reuse contamination (#6384).
+pub fn clear_refresh_attempts() {
+    REFRESH_ATTEMPTS.clear();
+}

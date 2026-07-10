@@ -1023,6 +1023,10 @@ impl LibreFangKernel {
     /// - Dashboard-created agents (no source_toml_path, no custom api_key_env) whose
     ///   stored provider matches `old_provider` — these were using the old default
     ///
+    /// `old_model` narrows the match to agents also pinned to that specific model.
+    /// Pass `None` for a full provider switch, where every dashboard-created agent on the old provider should move regardless of which model it was on.
+    /// Pass `Some(old_model)` for an intra-provider free-model migration (the old and new provider are the same), so only agents actually pinned to the delisted model move — an agent deliberately pinned to a different model on the same provider must not be silently overwritten.
+    ///
     /// Returns a per-agent partial-failure list `(agent_name, error)`. An
     /// empty vec means every eligible agent was migrated cleanly. Callers
     /// (the provider-switch API handlers) surface this so an operator sees
@@ -1032,6 +1036,7 @@ impl LibreFangKernel {
     pub fn sync_default_model_agents(
         &self,
         old_provider: &str,
+        old_model: Option<&str>,
         dm: &librefang_types::config::DefaultModelConfig,
     ) -> Vec<(String, String)> {
         let mut failures: Vec<(String, String)> = Vec::new();
@@ -1047,11 +1052,16 @@ impl LibreFangKernel {
             // no source TOML, no custom API key, and saved provider == old default
             // The built-in assistant is excluded because users can explicitly select its model in the dashboard.
             // Provider equality alone cannot distinguish that choice from a legacy resolved default.
+            // When `old_model` is set (intra-provider free-model migration) the stored model must also match,
+            // so an agent deliberately pinned to a different model on the same provider is left alone.
             let is_stale_dashboard_default = entry.name != "assistant"
                 && entry.source_toml_path.is_none()
                 && entry.manifest.model.api_key_env.is_none()
                 && entry.manifest.model.base_url.is_none()
-                && entry.manifest.model.provider == old_provider;
+                && entry.manifest.model.provider == old_provider
+                && old_model
+                    .map(|m| entry.manifest.model.model == m)
+                    .unwrap_or(true);
 
             if is_stale_dashboard_default {
                 if let Err(e) = self.agents.registry.update_model_and_provider(

@@ -920,6 +920,8 @@ async fn set_default_openrouter_uses_free_snapshot_when_live_refresh_fails() {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    librefang_api::openrouter_catalog::clear_refresh_attempts();
+
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/models"))
@@ -931,7 +933,7 @@ async fn set_default_openrouter_uses_free_snapshot_when_live_refresh_fails() {
         id: "openrouter".to_string(),
         display_name: "OpenRouter".to_string(),
         api_key_env: "OPENROUTER_API_KEY".to_string(),
-        base_url: server.uri(),
+        base_url: String::new(),
         key_required: true,
         auth_status: AuthStatus::ValidatedKey,
         ..ProviderInfo::default()
@@ -947,6 +949,7 @@ async fn set_default_openrouter_uses_free_snapshot_when_live_refresh_fails() {
         ..ModelCatalogEntry::default()
     };
     h._state.kernel.model_catalog_update(&mut |catalog| {
+        catalog.set_provider_url("openrouter", &server.uri());
         catalog.reconcile_live_provider_models(
             "openrouter",
             vec!["acme/snapshot:free".to_string()],
