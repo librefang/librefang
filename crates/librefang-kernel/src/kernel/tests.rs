@@ -11087,7 +11087,8 @@ fn sync_default_model_agents_with_old_model_spares_agents_on_other_models() {
     };
 
     // Narrow sync to poolside/laguna-xs.2:free
-    let failures = kernel.sync_default_model_agents("openrouter", Some("poolside/laguna-xs.2:free"), &new_dm);
+    let failures =
+        kernel.sync_default_model_agents("openrouter", Some("poolside/laguna-xs.2:free"), &new_dm);
     assert!(failures.is_empty());
 
     // Agent 1 should be migrated
@@ -11099,11 +11100,7 @@ fn sync_default_model_agents_with_old_model_spares_agents_on_other_models() {
     assert_eq!(migrated.manifest.model.model, "poolside/laguna-m.1:free");
 
     // Agent 2 should be spared
-    let spared = kernel
-        .agents
-        .registry
-        .get(spared_id)
-        .expect("spared agent");
+    let spared = kernel.agents.registry.get(spared_id).expect("spared agent");
     assert_eq!(spared.manifest.model.model, "openai/gpt-4o");
 
     kernel.shutdown();
