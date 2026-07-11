@@ -1323,7 +1323,7 @@ pub async fn execute_tool_raw(
             }
             // Fallback 2: Skill registry tool providers
             else if let Some(registry) = skill_registry {
-                if let Some(skill) = registry.find_tool_provider(other) {
+                if let Some(skill) = registry.find_tool_provider(other, *allowed_skills) {
                     if let Some(allowed) = allowed_skills {
                         if !allowed.is_empty() && !allowed.contains(&skill.manifest.skill.name) {
                             warn!(tool = other, "Skill not in agent's allowed_skills list");

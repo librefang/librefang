@@ -84,17 +84,19 @@ pub fn parse_tick(reply: &str) -> ParsedTick {
 
 /// Match `marker` as a standalone token at the start of `line`, not a bare
 /// prefix. The marker counts only when the line begins with it AND the byte
-/// immediately after is a word boundary — end-of-line, whitespace, `:`, or `.`.
-/// This prevents "GOAL_DONE_CRITERIA" or "GOAL_DONENESS" from being read as the
-/// `GOAL_DONE` control marker while still honouring the intended bare form
-/// (`GOAL_DONE`) and the trailing-colon form the prompt suggests
-/// (`GOAL_BLOCKED: need a key`). `line` is expected to be already uppercased.
+/// immediately after is a word boundary — end-of-line, or any character that is
+/// not a word-continuation char (i.e. not alphanumeric and not `_`). That
+/// admits the bare form (`GOAL_DONE`), trailing punctuation the model tends to
+/// add (`GOAL_DONE!`, `GOAL_DONE.`), and the trailing-note form the prompt
+/// suggests (`GOAL_BLOCKED: need a key`), while still rejecting a longer
+/// identifier that merely starts with the token (`GOAL_DONE_CRITERIA`,
+/// `GOAL_DONENESS`). `line` is expected to be already uppercased.
 fn marker_present(line: &str, marker: &str) -> bool {
     match line.strip_prefix(marker) {
         Some(rest) => rest
             .chars()
             .next()
-            .is_none_or(|c| c.is_whitespace() || c == ':' || c == '.'),
+            .is_none_or(|c| !c.is_alphanumeric() && c != '_'),
         None => false,
     }
 }
@@ -683,12 +685,16 @@ mod tests {
         assert!(!parse_tick("GOAL_COMPLETENESS: 40%").done);
         assert!(!parse_tick("GOAL_BLOCKEDNESS is low").blocked);
 
-        // Bare and boundary-delimited forms still register.
+        // Bare and boundary-delimited forms still register, including the
+        // trailing punctuation the model commonly appends.
         assert!(parse_tick("GOAL_DONE").done);
         assert!(parse_tick("GOAL_DONE now").done);
         assert!(parse_tick("GOAL_DONE.").done);
+        assert!(parse_tick("GOAL_DONE!").done);
+        assert!(parse_tick("GOAL_DONE - shipped the report").done);
         assert!(parse_tick("GOAL_COMPLETE").done);
         assert!(parse_tick("GOAL_BLOCKED").blocked);
+        assert!(parse_tick("GOAL_BLOCKED! waiting on a key").blocked);
         assert!(parse_tick("GOAL_BLOCKED: need a key").blocked);
     }
 

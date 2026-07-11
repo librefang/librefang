@@ -206,11 +206,12 @@ async fn dispatch_pending<K: AcpKernel>(
     // always" for a high-risk tool, but a misbehaving / compromised ACP
     // client can echo `option_id = "allow_always"` anyway, and
     // `decision_from_outcome` derives `remember` purely from that
-    // client-returned id. Re-check `high_risk` here so a persisted
-    // `(agent, tool)` grant can never be installed for a high-risk tool
-    // regardless of what the client sends — the suppression lives in the
-    // decision path, not only in the option list.
-    let remember = sanitize_remember(remember, high_risk);
+    // client-returned id. Re-check here so a persisted `(agent, tool)`
+    // *allow* grant can never be installed for a high-risk tool regardless of
+    // what the client sends — the suppression lives in the decision path, not
+    // only in the option list. A high-risk "Deny always" is still persisted
+    // (fail-closed, and offered by the modal unconditionally).
+    let remember = sanitize_remember(remember, high_risk, &decision);
 
     // Persist "always" choices so future tool requests for the same
     // (agent_id, tool_name) skip the editor entirely. Done before the
@@ -274,12 +275,19 @@ fn decision_from_outcome(outcome: RequestPermissionOutcome) -> (ApprovalDecision
     }
 }
 
-/// Drop a `remember` ("always") flag for high-risk tools. Called after
-/// [`decision_from_outcome`] so an echoed `allow_always` / `reject_always`
-/// option id from the client can never persist a blanket grant that the
-/// modal deliberately withheld (#3313 H2).
-fn sanitize_remember(remember: bool, high_risk: bool) -> bool {
-    remember && !high_risk
+/// Drop a `remember` ("always") flag only for a high-risk **allow**. Called
+/// after [`decision_from_outcome`] so an echoed `allow_always` option id from
+/// the client can never persist a blanket high-risk grant that the modal
+/// deliberately withheld (#3313 H2). A `Denied` decision keeps its flag: the
+/// modal offers `reject_always` unconditionally, denying forever is
+/// fail-closed, and "Deny always is preserved on every tool" is the documented
+/// invariant — so this must gate on the decision, not on `high_risk` alone.
+fn sanitize_remember(remember: bool, high_risk: bool, decision: &ApprovalDecision) -> bool {
+    if high_risk && matches!(decision, ApprovalDecision::Approved) {
+        false
+    } else {
+        remember
+    }
 }
 
 /// Tools where a one-click "Allow always" would grant the agent
@@ -370,18 +378,37 @@ mod tests {
         let high_risk = is_high_risk_tool("shell_exec");
         assert!(high_risk);
         assert!(
-            !sanitize_remember(remember, high_risk),
+            !sanitize_remember(remember, high_risk, &decision),
             "high-risk allow_always must not persist a grant"
         );
     }
 
     #[test]
+    fn high_risk_deny_always_still_persists() {
+        // Regression: "Deny always" is offered on every tool (including
+        // high-risk) and denying forever is fail-closed, so a high-risk
+        // reject_always MUST persist. Gating suppression on high_risk alone
+        // (rather than on Approved) silently dropped this and re-prompted the
+        // user on every subsequent high-risk call.
+        let (decision, remember) = decision_from_outcome(outcome("reject_always"));
+        assert_eq!(decision, ApprovalDecision::Denied);
+        assert!(remember, "outcome parser trusts the echoed id");
+
+        let high_risk = is_high_risk_tool("shell_exec");
+        assert!(high_risk);
+        assert!(
+            sanitize_remember(remember, high_risk, &decision),
+            "high-risk deny_always must still persist (fail-closed)"
+        );
+    }
+
+    #[test]
     fn low_risk_allow_always_still_persists() {
-        let (_decision, remember) = decision_from_outcome(outcome("allow_always"));
+        let (decision, remember) = decision_from_outcome(outcome("allow_always"));
         let high_risk = is_high_risk_tool("file_read");
         assert!(!high_risk);
         assert!(
-            sanitize_remember(remember, high_risk),
+            sanitize_remember(remember, high_risk, &decision),
             "low-risk allow_always keeps the friction-reduction UX"
         );
     }

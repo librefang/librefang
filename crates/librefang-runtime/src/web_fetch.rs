@@ -250,11 +250,9 @@ impl WebFetchEngine {
                 Err(e) => return Err(format!("Failed to read response body: {e}")),
             }
         }
-        // Decode the capped bytes to text. `Response::text()` did charset
-        // sniffing then defaulted to UTF-8; the responses these tools handle
-        // are UTF-8, so decode lossily to match that default without pulling
-        // the encoding machinery back in after the cap.
-        let resp_body = String::from_utf8_lossy(&body_bytes).into_owned();
+        // Decode the capped bytes using the Content-Type charset, matching the
+        // `Response::text()` this replaced when the read became size-capped.
+        let resp_body = decode_body_with_charset(&body_bytes, &content_type);
 
         // Step 4: For GET requests, detect HTML and convert to Markdown.
         // For non-GET (API calls), return raw body — don't mangle JSON/XML responses.
@@ -376,6 +374,28 @@ impl SsrfResolution {
 ///
 /// Returns the resolved addresses on success so that callers can pin DNS
 /// and avoid TOCTOU / DNS-rebinding attacks.
+/// Decode a response body to text using the charset declared in the
+/// `Content-Type` header, defaulting to (and falling back to) UTF-8 for an
+/// absent or unrecognised label. This matches `reqwest::Response::text()`,
+/// which the size-capped streaming read replaced: without it a non-UTF-8 page
+/// (Shift-JIS / GBK / EUC-JP / ISO-8859-1) would be mangled into U+FFFD
+/// replacement characters. Decoding is lossy exactly as `text()` was. Shared by
+/// the builtin web-fetch path and the WASM `host_net_fetch` host function so
+/// both decode identically.
+pub(crate) fn decode_body_with_charset(bytes: &[u8], content_type: &str) -> String {
+    let label = content_type
+        .to_ascii_lowercase()
+        .split(';')
+        .find_map(|p| {
+            p.trim()
+                .strip_prefix("charset=")
+                .map(|c| c.trim().trim_matches('"').to_string())
+        })
+        .unwrap_or_default();
+    let encoding = encoding_rs::Encoding::for_label(label.as_bytes()).unwrap_or(encoding_rs::UTF_8);
+    encoding.decode(bytes).0.into_owned()
+}
+
 pub fn check_ssrf(url: &str, allowed_hosts: &[String]) -> Result<SsrfResolution, String> {
     let precheck = ssrf_precheck(url)?;
     // Resolve DNS on the calling thread. Only for sync callers (fail-fast
@@ -1080,6 +1100,28 @@ mod tests {
         // A public literal IP resolves and passes.
         let ok = check_ssrf_async("http://8.8.8.8/", &[]).await;
         assert!(ok.is_ok(), "public IP should pass, got: {ok:?}");
+    }
+
+    #[test]
+    fn decode_body_with_charset_honours_content_type() {
+        // Regression: a non-UTF-8 page must decode via its declared charset,
+        // not be mangled into U+FFFD by a bare from_utf8_lossy.
+        let (sjis_bytes, _, had_errors) = encoding_rs::SHIFT_JIS.encode("こんにちは");
+        assert!(!had_errors);
+        assert_eq!(
+            decode_body_with_charset(&sjis_bytes, "text/html; charset=Shift_JIS"),
+            "こんにちは"
+        );
+        // An absent charset defaults to UTF-8.
+        assert_eq!(
+            decode_body_with_charset("héllo".as_bytes(), "text/plain"),
+            "héllo"
+        );
+        // An unrecognised label falls back to UTF-8 rather than erroring.
+        assert_eq!(
+            decode_body_with_charset("ok".as_bytes(), "text/plain; charset=bogus-xyz"),
+            "ok"
+        );
     }
 
     #[test]

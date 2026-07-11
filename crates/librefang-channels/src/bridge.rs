@@ -1053,6 +1053,12 @@ fn content_to_text(content: &ChannelContent) -> String {
 /// unchecked). Variants that never carry free-form user text (Location,
 /// ButtonCallback action, Sticker, poll ids, …) return `None`.
 fn sanitizer_text_to_check(content: &ChannelContent) -> Option<String> {
+    // Every arm that `content_to_text` renders into agent-facing prompt text
+    // from an attacker-controlled field MUST be scanned here, or Block mode is
+    // bypassable through that field. The match is deliberately wildcard-free:
+    // a new text-bearing `ChannelContent` variant then fails to compile until
+    // it is classified, instead of silently falling through to `None` (the
+    // exact gap that let File / FileData / Interactive text through before).
     match content {
         ChannelContent::Text(t) => Some(t.clone()),
         ChannelContent::Command { name, args } => {
@@ -1062,13 +1068,29 @@ fn sanitizer_text_to_check(content: &ChannelContent) -> Option<String> {
                 Some(format!("/{name} {}", args.join(" ")))
             }
         }
-        ChannelContent::Image { caption, .. } => caption.clone(),
-        ChannelContent::Voice { caption, .. } => caption.clone(),
-        ChannelContent::Video { caption, .. } => caption.clone(),
-        ChannelContent::File { filename, .. } => Some(filename.clone()),
-        ChannelContent::FileData { filename, .. } => Some(filename.clone()),
-        ChannelContent::Interactive { text, .. } => Some(text.clone()),
-        _ => None,
+        // Attacker-controlled captions rendered into the prompt.
+        ChannelContent::Image { caption, .. }
+        | ChannelContent::Voice { caption, .. }
+        | ChannelContent::Video { caption, .. }
+        | ChannelContent::Audio { caption, .. }
+        | ChannelContent::Animation { caption, .. } => caption.clone(),
+        // Filenames rendered as `[File (…)]` / `[File: …]`.
+        ChannelContent::File { filename, .. } | ChannelContent::FileData { filename, .. } => {
+            Some(filename.clone())
+        }
+        // Free text forwarded verbatim to the agent.
+        ChannelContent::Interactive { text, .. } | ChannelContent::EditInteractive { text, .. } => {
+            Some(text.clone())
+        }
+        ChannelContent::Poll { question, .. } => Some(question.clone()),
+        ChannelContent::ButtonCallback { action, .. } => Some(action.clone()),
+        // No prompt-bound free text (identifiers, coordinates, counts): nothing
+        // for the injection scanner to act on.
+        ChannelContent::Location { .. }
+        | ChannelContent::DeleteMessage { .. }
+        | ChannelContent::Sticker { .. }
+        | ChannelContent::MediaGroup { .. }
+        | ChannelContent::PollAnswer { .. } => None,
     }
 }
 

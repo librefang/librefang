@@ -25,6 +25,10 @@ bytes = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true }
+# Charset-aware decoding of fetched response bodies. reqwest already pulls this
+# in for its own `text()`; the size-capped streaming read decodes with it so a
+# non-UTF-8 page (Shift-JIS / GBK / EUC-JP / ISO-8859-1) is not mangled.
+encoding_rs = "0.8"
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }

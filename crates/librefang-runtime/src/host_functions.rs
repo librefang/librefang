@@ -475,6 +475,14 @@ fn append_capped(buf: &mut Vec<u8>, chunk: &[u8], max_bytes: usize) -> Result<()
 /// accumulated decompressed size exceeds `max_bytes`, instead of buffering the
 /// whole body with `resp.text()`.
 async fn read_body_capped(mut resp: reqwest::Response, max_bytes: usize) -> Result<String, String> {
+    // Capture the charset before the body is consumed so the decode matches the
+    // Content-Type, exactly as the previous `resp.text()` did.
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
     let mut buf: Vec<u8> = Vec::new();
     loop {
         match resp.chunk().await {
@@ -483,7 +491,13 @@ async fn read_body_capped(mut resp: reqwest::Response, max_bytes: usize) -> Resu
             Err(e) => return Err(format!("Failed to read response: {e}")),
         }
     }
-    String::from_utf8(buf).map_err(|e| format!("Response body is not valid UTF-8: {e}"))
+    // Decode via the shared charset-aware helper (lossy for invalid sequences),
+    // matching web_fetch and the prior `text()`. A non-UTF-8 or binary body no
+    // longer hard-errors and denies the guest a response it could read before.
+    Ok(crate::web_fetch::decode_body_with_charset(
+        &buf,
+        &content_type,
+    ))
 }
 
 fn host_net_fetch(state: &GuestState, params: &serde_json::Value) -> serde_json::Value {
