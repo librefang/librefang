@@ -245,7 +245,7 @@ pub(crate) fn service_install_macos(binary: &std::path::Path, librefang_home: &s
             let stderr = String::from_utf8_lossy(&o.stderr);
             ui::error(&i18n::t_args(
                 "maintenance-launchctl-load-failed",
-                &[("error", &stderr.to_string())],
+                &[("error", stderr.as_ref())],
             ));
         }
         Err(e) => ui::error(&i18n::t_args(

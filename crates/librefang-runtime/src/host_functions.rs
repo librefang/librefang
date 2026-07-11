@@ -446,6 +446,60 @@ fn host_fs_list(state: &GuestState, params: &serde_json::Value) -> serde_json::V
 // Network (capability-checked)
 // ---------------------------------------------------------------------------
 
+/// Maximum number of decompressed response bytes `host_net_fetch` will buffer
+/// into host memory before aborting.
+///
+/// A `NetConnect`-capable WASM guest chooses the fetch URL, so an unbounded
+/// `resp.text()` on a large chunked or compressed response is fully buffered
+/// into host memory, defeating sandbox isolation. This fixed cap mirrors
+/// `web_fetch`'s default `max_response_bytes` of 10 MiB. No per-fetch config
+/// is threaded into the WASM host path, so the cap is a compiled constant
+/// rather than a configurable field.
+const MAX_NET_FETCH_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
+
+/// Append `chunk` to `buf`, aborting if doing so would exceed `max_bytes`.
+///
+/// The size check runs against the accumulated length reqwest has already
+/// decompressed (gzip/deflate/brotli), so it bounds the true in-memory cost
+/// even when the wire response is chunked or its `Content-Length` is absent or
+/// understated — cases a header-only guard (like `web_fetch`'s) misses.
+fn append_capped(buf: &mut Vec<u8>, chunk: &[u8], max_bytes: usize) -> Result<(), String> {
+    if buf.len().saturating_add(chunk.len()) > max_bytes {
+        return Err(format!("Response too large: exceeds {max_bytes} byte cap"));
+    }
+    buf.extend_from_slice(chunk);
+    Ok(())
+}
+
+/// Read a response body, streaming chunk-by-chunk and aborting once the
+/// accumulated decompressed size exceeds `max_bytes`, instead of buffering the
+/// whole body with `resp.text()`.
+async fn read_body_capped(mut resp: reqwest::Response, max_bytes: usize) -> Result<String, String> {
+    // Capture the charset before the body is consumed so the decode matches the
+    // Content-Type, exactly as the previous `resp.text()` did.
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        match resp.chunk().await {
+            Ok(Some(chunk)) => append_capped(&mut buf, &chunk, max_bytes)?,
+            Ok(None) => break,
+            Err(e) => return Err(format!("Failed to read response: {e}")),
+        }
+    }
+    // Decode via the shared charset-aware helper (lossy for invalid sequences),
+    // matching web_fetch and the prior `text()`. A non-UTF-8 or binary body no
+    // longer hard-errors and denies the guest a response it could read before.
+    Ok(crate::web_fetch::decode_body_with_charset(
+        &buf,
+        &content_type,
+    ))
+}
+
 fn host_net_fetch(state: &GuestState, params: &serde_json::Value) -> serde_json::Value {
     let url = match params.get("url").and_then(|u| u.as_str()) {
         Some(u) => u,
@@ -513,9 +567,9 @@ fn host_net_fetch(state: &GuestState, params: &serde_json::Value) -> serde_json:
                 let status = resp.status();
                 if !status.is_redirection() {
                     let status_u16 = status.as_u16();
-                    return match resp.text().await {
+                    return match read_body_capped(resp, MAX_NET_FETCH_RESPONSE_BYTES).await {
                         Ok(text) => json!({"ok": {"status": status_u16, "body": text}}),
-                        Err(e) => json!({"error": format!("Failed to read response: {e}")}),
+                        Err(e) => json!({"error": e}),
                     };
                 }
 
@@ -529,9 +583,9 @@ fn host_net_fetch(state: &GuestState, params: &serde_json::Value) -> serde_json:
                 else {
                     // 3xx with no usable Location — return it rather than loop.
                     let status_u16 = status.as_u16();
-                    return match resp.text().await {
+                    return match read_body_capped(resp, MAX_NET_FETCH_RESPONSE_BYTES).await {
                         Ok(text) => json!({"ok": {"status": status_u16, "body": text}}),
-                        Err(e) => json!({"error": format!("Failed to read response: {e}")}),
+                        Err(e) => json!({"error": e}),
                     };
                 };
                 let base = match url::Url::parse(&current_url) {
@@ -1094,6 +1148,33 @@ mod tests {
             "test-agent".to_string(),
             tokio::runtime::Handle::current(),
         )
+    }
+
+    /// `append_capped` bounds the accumulated body size: chunks that stay
+    /// under the cap append, and the first chunk that would cross it aborts
+    /// with a limit error instead of buffering unboundedly. This is the
+    /// size-cap logic `read_body_capped` (and hence `host_net_fetch`) relies
+    /// on to keep a `NetConnect`-capable guest from buffering an arbitrarily
+    /// large response into host memory.
+    #[test]
+    fn test_append_capped_enforces_limit() {
+        let max = 8usize;
+        let mut buf: Vec<u8> = Vec::new();
+
+        // Chunks within the cap accumulate.
+        assert!(append_capped(&mut buf, b"1234", max).is_ok());
+        assert!(append_capped(&mut buf, b"5678", max).is_ok());
+        assert_eq!(buf.len(), 8);
+
+        // The next byte would exceed the cap: abort, and buf is left unchanged.
+        let err = append_capped(&mut buf, b"9", max).unwrap_err();
+        assert!(err.contains("Response too large"), "got: {err}");
+        assert_eq!(buf.len(), 8, "rejected chunk must not be appended");
+
+        // A single oversized chunk is rejected even against an empty buffer.
+        let mut fresh: Vec<u8> = Vec::new();
+        assert!(append_capped(&mut fresh, &vec![0u8; max + 1], max).is_err());
+        assert!(fresh.is_empty());
     }
 
     /// Word-boundary blocklist: real secret-shaped names match, benign

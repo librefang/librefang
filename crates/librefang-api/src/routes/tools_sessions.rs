@@ -245,7 +245,7 @@ pub async fn invoke_tool(
             .skill_registry_ref()
             .read()
             .ok()
-            .is_some_and(|reg| reg.find_tool_provider(&name).is_some());
+            .is_some_and(|reg| reg.find_tool_provider(&name, None).is_some());
     if !tool_exists {
         let t = ErrorTranslator::new(lang_code);
         return ApiErrorResponse::not_found(

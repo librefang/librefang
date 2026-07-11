@@ -3,7 +3,7 @@
 use crate::openclaw_compat;
 use crate::verify::SkillVerifier;
 use crate::{InstalledSkill, SkillError, SkillManifest, SkillToolDef};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
@@ -444,10 +444,35 @@ impl SkillRegistry {
         let mut enabled: Vec<&InstalledSkill> =
             self.skills.values().filter(|s| s.enabled).collect();
         enabled.sort_by(|a, b| a.manifest.skill.name.cmp(&b.manifest.skill.name));
-        enabled
-            .into_iter()
-            .flat_map(|s| s.manifest.tools.provided.iter().cloned())
-            .collect()
+        Self::dedup_tool_defs(&enabled)
+    }
+
+    /// Flatten each skill's provided tools into one list, dropping any tool
+    /// whose name already appeared (keeping the first occurrence). `skills`
+    /// must already be in the deterministic emission order (sorted by skill
+    /// name). Duplicate names are logged and skipped: a provider rejects a
+    /// tools array with duplicate names (HTTP 400), which would fail the whole
+    /// agent turn. Shared by [`all_tool_definitions`] and
+    /// [`tool_definitions_for_skills`] so the two paths dedup identically.
+    fn dedup_tool_defs(skills: &[&InstalledSkill]) -> Vec<SkillToolDef> {
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut out = Vec::new();
+        for skill in skills {
+            for tool in &skill.manifest.tools.provided {
+                if seen.insert(tool.name.clone()) {
+                    out.push(tool.clone());
+                } else {
+                    warn!(
+                        skill = %skill.manifest.skill.name,
+                        tool = %tool.name,
+                        "Skipping duplicate skill tool name in LLM tool definitions; \
+                         keeping the first occurrence. Providers reject duplicate tool \
+                         names — rename one of the colliding skill tools"
+                    );
+                }
+            }
+        }
+        out
     }
 
     /// Get tool definitions only from the named skills.
@@ -460,10 +485,7 @@ impl SkillRegistry {
             .filter(|s| s.enabled && names.contains(&s.manifest.skill.name))
             .collect();
         matching.sort_by(|a, b| a.manifest.skill.name.cmp(&b.manifest.skill.name));
-        matching
-            .into_iter()
-            .flat_map(|s| s.manifest.tools.provided.iter().cloned())
-            .collect()
+        Self::dedup_tool_defs(&matching)
     }
 
     /// Return all installed skill names.
@@ -471,16 +493,47 @@ impl SkillRegistry {
         self.skills.keys().cloned().collect()
     }
 
-    /// Find which skill provides a given tool name.
-    pub fn find_tool_provider(&self, tool_name: &str) -> Option<&InstalledSkill> {
-        self.skills.values().find(|s| {
+    /// Find which skill provides a given tool name, respecting the agent's
+    /// skill allowlist.
+    ///
+    /// Under a tool-name collision across skills the choice must be
+    /// deterministic (HashMap iteration order is not) AND aware of the agent's
+    /// `allowed_skills`: the agent's prompt was built from
+    /// [`tool_definitions_for_skills`] scoped to its allowed skills, so a
+    /// colliding tool it calls must route to an allowed provider — otherwise
+    /// the dispatch layer permission-denies a tool the prompt advertised. This
+    /// prefers the first allowed provider in skill-name order and falls back to
+    /// the first provider overall (so the dispatch allowlist check still
+    /// surfaces "permission denied" when only a disallowed skill provides it).
+    /// An empty / `None` allowlist means no restriction. Single-pass, no
+    /// allocation.
+    pub fn find_tool_provider(
+        &self,
+        tool_name: &str,
+        allowed_skills: Option<&[String]>,
+    ) -> Option<&InstalledSkill> {
+        let provides = |s: &&InstalledSkill| {
             s.enabled
                 && s.manifest
                     .tools
                     .provided
                     .iter()
                     .any(|t| t.name == tool_name)
-        })
+        };
+        let first_overall = self
+            .skills
+            .values()
+            .filter(|s| provides(s))
+            .min_by(|a, b| a.manifest.skill.name.cmp(&b.manifest.skill.name));
+        match allowed_skills {
+            Some(allowed) if !allowed.is_empty() => self
+                .skills
+                .values()
+                .filter(|s| provides(s) && allowed.contains(&s.manifest.skill.name))
+                .min_by(|a, b| a.manifest.skill.name.cmp(&b.manifest.skill.name))
+                .or(first_overall),
+            _ => first_overall,
+        }
     }
 
     /// Count installed skills.
@@ -967,8 +1020,8 @@ input_schema = {{ type = "object" }}
         let mut registry = SkillRegistry::new(dir.path().to_path_buf());
         registry.load_all().unwrap();
 
-        assert!(registry.find_tool_provider("finder_tool").is_some());
-        assert!(registry.find_tool_provider("nonexistent").is_none());
+        assert!(registry.find_tool_provider("finder_tool", None).is_some());
+        assert!(registry.find_tool_provider("nonexistent", None).is_none());
     }
 
     #[test]
@@ -1095,6 +1148,87 @@ input_schema = {{ type = "object" }}
         assert_eq!(
             tools_a,
             vec!["alpha_tool".to_string(), "gamma_tool".to_string()]
+        );
+    }
+
+    #[test]
+    fn tool_name_collisions_are_deduped_deterministically() {
+        // Two independently-installed skills each declare a tool named
+        // "search". The registry must emit exactly one definition with that
+        // name (keeping the first occurrence in sorted-skill-name order), so
+        // the kernel never forwards duplicate tool names — providers reject
+        // those with HTTP 400 and fail the whole turn.
+        let dir_a = TempDir::new().unwrap();
+        let mut reg_a = SkillRegistry::new(dir_a.path().to_path_buf());
+        install_with_tool(&mut reg_a, "alpha", "search");
+        install_with_tool(&mut reg_a, "beta", "search");
+
+        let dir_b = TempDir::new().unwrap();
+        let mut reg_b = SkillRegistry::new(dir_b.path().to_path_buf());
+        // Reverse insertion order — dedup result MUST be identical.
+        install_with_tool(&mut reg_b, "beta", "search");
+        install_with_tool(&mut reg_b, "alpha", "search");
+
+        let names_a: Vec<String> = reg_a
+            .all_tool_definitions()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        let names_b: Vec<String> = reg_b
+            .all_tool_definitions()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert_eq!(
+            names_a,
+            vec!["search".to_string()],
+            "colliding tool name must be emitted exactly once"
+        );
+        assert_eq!(
+            names_a, names_b,
+            "dedup must be deterministic across insertion orders"
+        );
+
+        // tool_definitions_for_skills must dedup identically.
+        let names = vec!["alpha".to_string(), "beta".to_string()];
+        let scoped: Vec<String> = reg_a
+            .tool_definitions_for_skills(&names)
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert_eq!(
+            scoped,
+            vec!["search".to_string()],
+            "tool_definitions_for_skills must also emit the colliding name once"
+        );
+
+        // With no allowlist, routing resolves to the first skill in
+        // sorted-skill-name order ("alpha"), matching the emitted definition —
+        // deterministically regardless of insertion order.
+        assert_eq!(
+            reg_a
+                .find_tool_provider("search", None)
+                .map(|s| s.manifest.skill.name.as_str()),
+            Some("alpha")
+        );
+        assert_eq!(
+            reg_b
+                .find_tool_provider("search", None)
+                .map(|s| s.manifest.skill.name.as_str()),
+            Some("alpha")
+        );
+
+        // With an allowlist that excludes the alphabetically-first provider,
+        // routing must resolve to the allowed provider ("beta"), not "alpha" —
+        // otherwise dispatch permission-denies a tool the agent's own prompt
+        // (scoped to "beta") advertised.
+        let allow_beta = vec!["beta".to_string()];
+        assert_eq!(
+            reg_a
+                .find_tool_provider("search", Some(&allow_beta))
+                .map(|s| s.manifest.skill.name.as_str()),
+            Some("beta"),
+            "a scoped agent's colliding tool call must route to its allowed skill"
         );
     }
 

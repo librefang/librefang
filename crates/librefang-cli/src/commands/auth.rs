@@ -161,8 +161,31 @@ pub(crate) fn write_chatgpt_secrets(
         updated.push('\n');
     }
 
-    std::fs::write(&secrets_path, updated)
+    // SECURITY: secrets.env holds OAuth session/refresh tokens. Create the
+    // file with owner-only (0600) permissions from the start so there is no
+    // window in which a freshly created file sits at the umask default (often
+    // 0644, world-readable) before it is tightened.
+    #[cfg(unix)]
+    {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&secrets_path)
+            .map_err(|e| i18n::t_args("auth-error-write-secrets", &[("error", &e.to_string())]))?;
+        f.write_all(updated.as_bytes())
+            .map_err(|e| i18n::t_args("auth-error-write-secrets", &[("error", &e.to_string())]))?;
+    }
+    #[cfg(not(unix))]
+    std::fs::write(&secrets_path, &updated)
         .map_err(|e| i18n::t_args("auth-error-write-secrets", &[("error", &e.to_string())]))?;
+
+    // `OpenOptions.mode` only applies to a newly created file, so still tighten
+    // a pre-existing file that an older build may have written at a looser mode.
+    restrict_file_permissions(&secrets_path);
 
     Ok(secrets_path)
 }
@@ -1045,5 +1068,26 @@ pub(crate) fn cmd_hash_password(password: Option<String>) {
             ));
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn write_chatgpt_secrets_is_owner_only_on_fresh_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let secrets_path =
+            write_chatgpt_secrets(dir.path(), "session-token", Some("refresh-token"))
+                .expect("write secrets");
+
+        let mode = std::fs::metadata(&secrets_path)
+            .expect("stat secrets.env")
+            .permissions()
+            .mode();
+        // secrets.env holds OAuth tokens; the file must be owner-only (0600).
+        assert_eq!(mode & 0o777, 0o600, "secrets.env must be created with 0600");
     }
 }

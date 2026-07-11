@@ -4923,6 +4923,7 @@ dependencies = [
  "dashmap",
  "dirs 6.0.0",
  "ed25519-dalek 2.2.0",
+ "encoding_rs",
  "flate2",
  "futures",
  "hex",

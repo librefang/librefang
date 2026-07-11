@@ -159,7 +159,16 @@ pub(crate) async fn export_to_atropos_with_base(
     let group_size = tuning.group_size.unwrap_or(DEFAULT_GROUP_SIZE);
     let weight = tuning.weight.unwrap_or(DEFAULT_WEIGHT);
 
-    let client = librefang_http::proxied_client();
+    // Disable redirect following: the SSRF allowlist validates only the
+    // initial base URL, so a redirect-following client would let an
+    // attacker-controlled base 3xx to an internal host (e.g. cloud
+    // metadata), bypassing the guard. A finished upload never needs to
+    // follow a redirect; a 3xx must surface as an error. Mirrors
+    // `librefang_http::oauth_client_builder`.
+    let client = librefang_http::proxied_client_builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap_or_else(|_| librefang_http::proxied_client());
 
     // Step 1: register this producer with the running Atropos trainer.
     let register_url = format!("{}/register-env", base.trim_end_matches('/'));
@@ -454,6 +463,56 @@ mod tests {
                 assert!(body.contains("field required"), "body={body}");
             }
             other => panic!("expected UpstreamRejected, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn export_does_not_follow_redirects_ssrf_guard() {
+        // The SSRF allowlist validates only the initial base URL. A
+        // redirect-following client would let an attacker-controlled base
+        // 3xx to an internal host, bypassing the guard. The upload client
+        // must NOT follow redirects: a 3xx surfaces as an error rather
+        // than being chased to the Location target. Both endpoints below
+        // are mounted so that IF the client followed the redirect the
+        // whole export would succeed — the `expect_err` only holds when
+        // redirects are disabled.
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/register-env"))
+            .respond_with(
+                ResponseTemplate::new(307).insert_header("location", "/redirected/register-env"),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/redirected/register-env"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "success",
+                "env_id": 7,
+                "wandb_name": "rl-proj_3",
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/scored_data"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "received",
+            })))
+            .mount(&server)
+            .await;
+
+        let err = export_to_atropos_with_base(
+            &server.uri(),
+            "rl-proj",
+            AtroposTuning::default(),
+            sample_export("rid"),
+        )
+        .await
+        .expect_err("a 3xx redirect must surface as an error, not be followed");
+        match err {
+            ExportError::UpstreamRejected { status, .. } => assert_eq!(status, 307),
+            other => panic!("expected UpstreamRejected {{ status: 307 }}, got {other:?}"),
         }
     }
 

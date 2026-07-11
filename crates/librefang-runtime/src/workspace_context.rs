@@ -5,7 +5,7 @@
 //! state files. Provides mtime-cached file reads to avoid redundant I/O.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use tracing::debug;
@@ -64,7 +64,12 @@ pub struct WorkspaceContext {
     /// Whether .librefang/ directory exists.
     pub has_librefang_dir: bool,
     /// Cached context files.
-    cache: HashMap<String, CachedFile>,
+    ///
+    /// A `BTreeMap` (not `HashMap`) so iteration order is deterministic:
+    /// `build_context_section` feeds the result into the LLM system prompt,
+    /// and non-deterministic ordering silently invalidates provider prompt
+    /// caches even when content is unchanged (#3298).
+    cache: BTreeMap<String, CachedFile>,
 }
 
 impl WorkspaceContext {
@@ -74,7 +79,7 @@ impl WorkspaceContext {
         let is_git_repo = root.join(".git").exists();
         let has_librefang_dir = root.join(".librefang").exists();
 
-        let mut cache = HashMap::new();
+        let mut cache = BTreeMap::new();
         for &name in CONTEXT_FILES {
             // Prefer .identity/ (current layout); fall back to workspace root (pre-migration)
             let identity_path = root.join(".identity").join(name);
@@ -380,6 +385,38 @@ mod tests {
         assert!(section.contains("Git repository: yes"));
         assert!(section.contains("SOUL.md"));
         assert!(section.contains("Be nice"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_build_context_section_order_is_deterministic() {
+        let dir = std::env::temp_dir().join("librefang_ws_section_order_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Seed multiple context files. Their file-order in CONTEXT_FILES is
+        // IDENTITY before SOUL, but alphabetical order is IDENTITY then SOUL,
+        // and both differ from any HashMap iteration order.
+        std::fs::write(dir.join("SOUL.md"), "Be nice").unwrap();
+        std::fs::write(dir.join("IDENTITY.md"), "I am Fang").unwrap();
+        std::fs::write(dir.join("AGENTS.md"), "Guidelines").unwrap();
+
+        let mut ctx = WorkspaceContext::detect(&dir);
+
+        // Section order must be stable across repeated builds within the process.
+        let first = ctx.build_context_section();
+        let second = ctx.build_context_section();
+        assert_eq!(first, second, "section output must be stable across builds");
+
+        // And the `### {name}` headings must appear in sorted (BTreeMap) order,
+        // independent of insertion / hash order — this is what #3298 requires.
+        let idx_agents = first.find("### AGENTS.md").expect("AGENTS.md heading");
+        let idx_identity = first.find("### IDENTITY.md").expect("IDENTITY.md heading");
+        let idx_soul = first.find("### SOUL.md").expect("SOUL.md heading");
+        assert!(
+            idx_agents < idx_identity && idx_identity < idx_soul,
+            "context file sections must be emitted in sorted order, got: {first}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

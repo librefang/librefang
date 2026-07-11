@@ -15,7 +15,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tracing::warn;
 
-use crate::web_fetch::check_ssrf;
+use crate::web_fetch::check_ssrf_async;
 use crate::web_search::WebToolsContext;
 
 /// Execute `web_fetch_to_file`. Returns a short human-readable summary on
@@ -75,7 +75,9 @@ pub async fn tool_web_fetch_to_file(
         ));
     }
     // Early fail-fast with a consistent error before the redirect loop.
-    check_ssrf(url, &cfg.ssrf_allowed_hosts)?;
+    // Async resolution keeps the blocking DNS lookup off the tokio worker,
+    // matching the per-hop resolution inside `send_with_pinned_redirects`.
+    check_ssrf_async(url, &cfg.ssrf_allowed_hosts).await?;
 
     let mut resp = engine
         .send_with_pinned_redirects(&method_upper, url, headers, body)

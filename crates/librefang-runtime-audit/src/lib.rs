@@ -104,9 +104,90 @@ pub enum AuditAction {
     A2aTrusted,
 }
 
+impl AuditAction {
+    /// The canonical string form of this variant, byte-identical to its
+    /// derived `Debug` output (i.e. the variant name). This is the value
+    /// persisted in the `audit_entries.action` column and folded into the
+    /// per-entry hash via [`Display`], so it must stay stable — renaming a
+    /// variant invalidates every persisted hash that mentions it.
+    ///
+    /// The exhaustive `match` (no wildcard arm) makes the compiler force
+    /// coverage: adding a variant to the enum fails to compile until it is
+    /// mapped here and in [`FromStr`], which is what prevents the reload
+    /// path from silently coercing an unmapped variant to `ToolInvoke`.
+    fn as_str(&self) -> &'static str {
+        match self {
+            AuditAction::ToolInvoke => "ToolInvoke",
+            AuditAction::CapabilityCheck => "CapabilityCheck",
+            AuditAction::AgentSpawn => "AgentSpawn",
+            AuditAction::AgentKill => "AgentKill",
+            AuditAction::AgentMessage => "AgentMessage",
+            AuditAction::MemoryAccess => "MemoryAccess",
+            AuditAction::FileAccess => "FileAccess",
+            AuditAction::NetworkAccess => "NetworkAccess",
+            AuditAction::ShellExec => "ShellExec",
+            AuditAction::AuthAttempt => "AuthAttempt",
+            AuditAction::WireConnect => "WireConnect",
+            AuditAction::ConfigChange => "ConfigChange",
+            AuditAction::DreamConsolidation => "DreamConsolidation",
+            AuditAction::UserLogin => "UserLogin",
+            AuditAction::RoleChange => "RoleChange",
+            AuditAction::PermissionDenied => "PermissionDenied",
+            AuditAction::BudgetExceeded => "BudgetExceeded",
+            AuditAction::RetentionTrim => "RetentionTrim",
+            AuditAction::A2aDiscovered => "A2aDiscovered",
+            AuditAction::A2aTrusted => "A2aTrusted",
+        }
+    }
+}
+
 impl std::fmt::Display for AuditAction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
+        f.write_str(self.as_str())
+    }
+}
+
+/// Error returned when a persisted `action` string does not correspond to any
+/// known [`AuditAction`] variant. Surfaced by the reload path so an unknown
+/// value is logged by name rather than silently coerced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownAuditAction(pub String);
+
+impl std::fmt::Display for UnknownAuditAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unknown audit action {:?}", self.0)
+    }
+}
+
+impl std::error::Error for UnknownAuditAction {}
+
+impl std::str::FromStr for AuditAction {
+    type Err = UnknownAuditAction;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "ToolInvoke" => AuditAction::ToolInvoke,
+            "CapabilityCheck" => AuditAction::CapabilityCheck,
+            "AgentSpawn" => AuditAction::AgentSpawn,
+            "AgentKill" => AuditAction::AgentKill,
+            "AgentMessage" => AuditAction::AgentMessage,
+            "MemoryAccess" => AuditAction::MemoryAccess,
+            "FileAccess" => AuditAction::FileAccess,
+            "NetworkAccess" => AuditAction::NetworkAccess,
+            "ShellExec" => AuditAction::ShellExec,
+            "AuthAttempt" => AuditAction::AuthAttempt,
+            "WireConnect" => AuditAction::WireConnect,
+            "ConfigChange" => AuditAction::ConfigChange,
+            "DreamConsolidation" => AuditAction::DreamConsolidation,
+            "UserLogin" => AuditAction::UserLogin,
+            "RoleChange" => AuditAction::RoleChange,
+            "PermissionDenied" => AuditAction::PermissionDenied,
+            "BudgetExceeded" => AuditAction::BudgetExceeded,
+            "RetentionTrim" => AuditAction::RetentionTrim,
+            "A2aDiscovered" => AuditAction::A2aDiscovered,
+            "A2aTrusted" => AuditAction::A2aTrusted,
+            other => return Err(UnknownAuditAction(other.to_string())),
+        })
     }
 }
 
@@ -529,27 +610,22 @@ impl AuditLog {
             if let Ok(mut stmt) = result {
                 let rows = stmt.query_map([], |row| {
                     let action_str: String = row.get(3)?;
-                    let action = match action_str.as_str() {
-                        "ToolInvoke" => AuditAction::ToolInvoke,
-                        "CapabilityCheck" => AuditAction::CapabilityCheck,
-                        "AgentSpawn" => AuditAction::AgentSpawn,
-                        "AgentKill" => AuditAction::AgentKill,
-                        "AgentMessage" => AuditAction::AgentMessage,
-                        "MemoryAccess" => AuditAction::MemoryAccess,
-                        "FileAccess" => AuditAction::FileAccess,
-                        "NetworkAccess" => AuditAction::NetworkAccess,
-                        "ShellExec" => AuditAction::ShellExec,
-                        "AuthAttempt" => AuditAction::AuthAttempt,
-                        "WireConnect" => AuditAction::WireConnect,
-                        "ConfigChange" => AuditAction::ConfigChange,
-                        "DreamConsolidation" => AuditAction::DreamConsolidation,
-                        "UserLogin" => AuditAction::UserLogin,
-                        "RoleChange" => AuditAction::RoleChange,
-                        "PermissionDenied" => AuditAction::PermissionDenied,
-                        "BudgetExceeded" => AuditAction::BudgetExceeded,
-                        "RetentionTrim" => AuditAction::RetentionTrim,
-                        _ => AuditAction::ToolInvoke, // fallback
-                    };
+                    // Decode via `FromStr` (exhaustive over every variant).
+                    // A genuinely unknown string means the row was written by
+                    // a newer daemon whose enum this binary does not know; we
+                    // log it by name rather than silently coercing, because
+                    // any coercion recomputes a different `action.to_string()`
+                    // than the persisted one and would trip `verify_integrity`
+                    // with a false hash mismatch on every subsequent boot.
+                    let action = action_str.parse::<AuditAction>().unwrap_or_else(|e| {
+                        tracing::warn!(
+                            seq = row.get::<_, i64>(0).unwrap_or_default(),
+                            "Audit reload hit {e}; retaining the row but its hash \
+                             will not recompute until this binary is upgraded to a \
+                             version that knows the action"
+                        );
+                        AuditAction::ToolInvoke
+                    });
                     let seq_raw: i64 = row.get(0)?;
                     let seq = u64::try_from(seq_raw)
                         .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, seq_raw))?;
