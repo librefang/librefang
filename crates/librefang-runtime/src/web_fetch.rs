@@ -87,8 +87,11 @@ impl WebFetchEngine {
 
         for _ in 0..=MAX_REDIRECTS {
             // SSRF check + DNS pin happen together per hop so the IP we
-            // validated is the IP the pinned client connects to.
-            let resolution = check_ssrf(&current_url, &self.config.ssrf_allowed_hosts)?;
+            // validated is the IP the pinned client connects to. Async
+            // resolution keeps the blocking lookup off the tokio worker
+            // (this runs once per redirect hop, up to MAX_REDIRECTS times).
+            let resolution =
+                check_ssrf_async(&current_url, &self.config.ssrf_allowed_hosts).await?;
             let client = self.pinned_client(resolution);
             let mut req = match current_method.as_str() {
                 "POST" => client.post(&current_url),
@@ -178,8 +181,9 @@ impl WebFetchEngine {
     ) -> Result<String, String> {
         let method_upper = method.to_uppercase();
 
-        // Step 1: SSRF protection — resolve DNS once and validate IPs
-        let resolution = check_ssrf(url, &self.config.ssrf_allowed_hosts)?;
+        // Step 1: SSRF protection — resolve DNS once and validate IPs.
+        // Async resolution keeps the blocking lookup off the tokio worker.
+        let resolution = check_ssrf_async(url, &self.config.ssrf_allowed_hosts).await?;
 
         // Step 2: Cache lookup (only for GET)
         let cache_key = format!("fetch:{}:{}", method_upper, url);
@@ -196,13 +200,18 @@ impl WebFetchEngine {
         // step 1 was the early-fail / cache-key gate; the loop re-validates
         // the first hop too so there is a single source of truth.
         let _ = resolution;
-        let resp = self
+        let mut resp = self
             .send_with_pinned_redirects(&method_upper, url, headers, body)
             .await?;
 
         let status = resp.status();
 
-        // Check response size
+        // Fast-path Content-Length check: reject an honestly-oversized body
+        // before reading any bytes. This is the *compressed* size when
+        // gzip / deflate / brotli are enabled in `pinned_client`, and it is
+        // absent entirely on chunked responses — so it is only an early-exit,
+        // never the real gate. The streaming loop below is the true cap
+        // against oversized *decompressed* bodies.
         if let Some(len) = resp.content_length() {
             if len > self.config.max_response_bytes as u64 {
                 return Err(format!(
@@ -219,10 +228,31 @@ impl WebFetchEngine {
             .unwrap_or("")
             .to_string();
 
-        let resp_body = resp
-            .text()
-            .await
-            .map_err(|e| format!("Failed to read response body: {e}"))?;
+        // Stream the (decompressed) body, capping the running total so a
+        // chunked or transparently-decompressed response — for which
+        // `content_length()` is `None` and the fast-path check above is
+        // skipped — cannot buffer past `max_response_bytes`. Mirrors the
+        // streaming gate in `web_fetch_to_file`.
+        let cap = self.config.max_response_bytes as u64;
+        let mut body_bytes: Vec<u8> = Vec::new();
+        loop {
+            match resp.chunk().await {
+                Ok(Some(chunk)) => {
+                    if body_bytes.len() as u64 + chunk.len() as u64 > cap {
+                        return Err(format!(
+                            "Response too large: exceeds max {} bytes (server omitted or misreported Content-Length)",
+                            self.config.max_response_bytes
+                        ));
+                    }
+                    body_bytes.extend_from_slice(&chunk);
+                }
+                Ok(None) => break,
+                Err(e) => return Err(format!("Failed to read response body: {e}")),
+            }
+        }
+        // Decode the capped bytes using the Content-Type charset, matching the
+        // `Response::text()` this replaced when the read became size-capped.
+        let resp_body = decode_body_with_charset(&body_bytes, &content_type);
 
         // Step 4: For GET requests, detect HTML and convert to Markdown.
         // For non-GET (API calls), return raw body — don't mangle JSON/XML responses.
@@ -313,6 +343,7 @@ fn is_sensitive_redirect_header(name: &str) -> bool {
 /// addresses.  Callers should use [`SsrfResolution::pin_dns`] to build an
 /// HTTP client that connects to the *already-validated* IPs, preventing
 /// DNS-rebinding TOCTOU attacks.
+#[derive(Debug)]
 pub struct SsrfResolution {
     /// The hostname extracted from the URL (without port).
     pub hostname: String,
@@ -343,7 +374,80 @@ impl SsrfResolution {
 ///
 /// Returns the resolved addresses on success so that callers can pin DNS
 /// and avoid TOCTOU / DNS-rebinding attacks.
+/// Decode a response body to text using the charset declared in the
+/// `Content-Type` header, defaulting to (and falling back to) UTF-8 for an
+/// absent or unrecognised label. This matches `reqwest::Response::text()`,
+/// which the size-capped streaming read replaced: without it a non-UTF-8 page
+/// (Shift-JIS / GBK / EUC-JP / ISO-8859-1) would be mangled into U+FFFD
+/// replacement characters. Decoding is lossy exactly as `text()` was. Shared by
+/// the builtin web-fetch path and the WASM `host_net_fetch` host function so
+/// both decode identically.
+pub(crate) fn decode_body_with_charset(bytes: &[u8], content_type: &str) -> String {
+    let label = content_type
+        .to_ascii_lowercase()
+        .split(';')
+        .find_map(|p| {
+            p.trim()
+                .strip_prefix("charset=")
+                .map(|c| c.trim().trim_matches('"').to_string())
+        })
+        .unwrap_or_default();
+    let encoding = encoding_rs::Encoding::for_label(label.as_bytes()).unwrap_or(encoding_rs::UTF_8);
+    encoding.decode(bytes).0.into_owned()
+}
+
 pub fn check_ssrf(url: &str, allowed_hosts: &[String]) -> Result<SsrfResolution, String> {
+    let precheck = ssrf_precheck(url)?;
+    // Resolve DNS on the calling thread. Only for sync callers (fail-fast
+    // gates, tests); async callers MUST use [`check_ssrf_async`] so this
+    // blocking lookup does not stall a tokio worker.
+    let resolved = precheck
+        .socket_addr
+        .to_socket_addrs()
+        .map_err(|e| {
+            format!(
+                "SSRF blocked: DNS resolution failed for {}: {e}",
+                precheck.hostname
+            )
+        })?
+        .collect::<Vec<_>>();
+    validate_resolved(&precheck.hostname, resolved, allowed_hosts)
+}
+
+/// Async twin of [`check_ssrf`]: identical policy, but DNS resolution runs
+/// through `tokio::net::lookup_host` instead of the blocking
+/// `to_socket_addrs`. Async request paths use this so the resolver does not
+/// block a tokio worker thread (the WASM path wraps its lookup in
+/// `block_in_place` for the same reason).
+pub async fn check_ssrf_async(
+    url: &str,
+    allowed_hosts: &[String],
+) -> Result<SsrfResolution, String> {
+    let precheck = ssrf_precheck(url)?;
+    let resolved = tokio::net::lookup_host(&precheck.socket_addr)
+        .await
+        .map_err(|e| {
+            format!(
+                "SSRF blocked: DNS resolution failed for {}: {e}",
+                precheck.hostname
+            )
+        })?
+        .collect::<Vec<_>>();
+    validate_resolved(&precheck.hostname, resolved, allowed_hosts)
+}
+
+/// Result of the pre-resolution SSRF checks: the extracted hostname and the
+/// `host:port` string to feed the resolver. Produced by [`ssrf_precheck`],
+/// consumed by the two resolution entry points.
+struct SsrfPrecheck {
+    hostname: String,
+    socket_addr: String,
+}
+
+/// Scheme / userinfo / hostname-blocklist checks that require no network I/O.
+/// Shared verbatim by the sync and async resolution paths so the policy stays
+/// identical; only the DNS call differs between them.
+fn ssrf_precheck(url: &str) -> Result<SsrfPrecheck, String> {
     // Only allow http:// and https:// schemes
     if !url.starts_with("http://") && !url.starts_with("https://") {
         return Err("Only http:// and https:// URLs are allowed".to_string());
@@ -393,50 +497,54 @@ pub fn check_ssrf(url: &str, allowed_hosts: &[String]) -> Result<SsrfResolution,
         return Err(format!("SSRF blocked: {hostname} is a restricted hostname"));
     }
 
-    // Resolve DNS and check every returned IP
     let port = if url.starts_with("https") { 443 } else { 80 };
-    let socket_addr = format!("{hostname}:{port}");
+    Ok(SsrfPrecheck {
+        hostname: hostname.to_string(),
+        socket_addr: format!("{hostname}:{port}"),
+    })
+}
+
+/// Validate the resolved addresses against the private / loopback / cloud
+/// metadata rules and the allowlist. Shared by the sync and async paths so
+/// the IP policy is defined once. Cloud metadata ranges stay blocked even
+/// when the host appears in `allowed_hosts`.
+fn validate_resolved(
+    hostname: &str,
+    addrs: Vec<std::net::SocketAddr>,
+    allowed_hosts: &[String],
+) -> Result<SsrfResolution, String> {
     let mut resolved = Vec::new();
-    match socket_addr.to_socket_addrs() {
-        Ok(addrs) => {
-            for addr in addrs {
-                // Canonicalise IPv4-mapped IPv6 (::ffff:X.X.X.X) before any
-                // safety check. The OS transparently connects these to the
-                // embedded IPv4 target, so leaving them as IPv6 lets an
-                // attacker reach loopback / private / cloud-metadata IPs via
-                // the IPv6 form (e.g. [::ffff:169.254.169.254]) which the
-                // v6-only branches of is_private_ip / is_cloud_metadata_ip
-                // do not recognise.
-                let ip = canonical_ip(&addr.ip());
-                // is_cloud_metadata_ip must be consulted here, not only inside
-                // the allowlist branch: 192.0.0.192 (Azure IMDS alternative,
-                // IETF protocol-assignment space) and 100.64.0.0/10 (CGNAT /
-                // Alibaba IMDS) are not private ranges, so a hostname that
-                // DNS-resolves to them would otherwise be accepted outright.
-                // The literal-host blocklist above only catches literal URLs.
-                if ip.is_loopback()
-                    || ip.is_unspecified()
-                    || is_private_ip(&ip)
-                    || is_cloud_metadata_ip(&ip)
-                {
-                    // Before rejecting, check the allowlist — but cloud metadata
-                    // ranges are unconditionally blocked regardless of allowlist.
-                    if !is_cloud_metadata_ip(&ip) && is_host_allowed(hostname, &ip, allowed_hosts) {
-                        resolved.push(addr);
-                        continue;
-                    }
-                    return Err(format!(
-                        "SSRF blocked: {hostname} resolves to private IP {ip}"
-                    ));
-                }
+    for addr in addrs {
+        // Canonicalise IPv4-mapped IPv6 (::ffff:X.X.X.X) before any
+        // safety check. The OS transparently connects these to the
+        // embedded IPv4 target, so leaving them as IPv6 lets an
+        // attacker reach loopback / private / cloud-metadata IPs via
+        // the IPv6 form (e.g. [::ffff:169.254.169.254]) which the
+        // v6-only branches of is_private_ip / is_cloud_metadata_ip
+        // do not recognise.
+        let ip = canonical_ip(&addr.ip());
+        // is_cloud_metadata_ip must be consulted here, not only inside
+        // the allowlist branch: 192.0.0.192 (Azure IMDS alternative,
+        // IETF protocol-assignment space) and 100.64.0.0/10 (CGNAT /
+        // Alibaba IMDS) are not private ranges, so a hostname that
+        // DNS-resolves to them would otherwise be accepted outright.
+        // The literal-host blocklist above only catches literal URLs.
+        if ip.is_loopback()
+            || ip.is_unspecified()
+            || is_private_ip(&ip)
+            || is_cloud_metadata_ip(&ip)
+        {
+            // Before rejecting, check the allowlist — but cloud metadata
+            // ranges are unconditionally blocked regardless of allowlist.
+            if !is_cloud_metadata_ip(&ip) && is_host_allowed(hostname, &ip, allowed_hosts) {
                 resolved.push(addr);
+                continue;
             }
-        }
-        Err(e) => {
             return Err(format!(
-                "SSRF blocked: DNS resolution failed for {hostname}: {e}"
+                "SSRF blocked: {hostname} resolves to private IP {ip}"
             ));
         }
+        resolved.push(addr);
     }
     if resolved.is_empty() {
         return Err(format!(
@@ -917,6 +1025,102 @@ mod tests {
         assert!(
             err.contains("169.254.169.254") || err.to_lowercase().contains("restricted"),
             "expected SSRF block on the metadata hop, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_body_cap_enforced_when_content_length_stripped_by_decompression() {
+        use std::io::Write;
+        use std::sync::Arc;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // ATTACK: the decompressed body far exceeds max_response_bytes, but the
+        // response carries Content-Encoding: gzip. reqwest (gzip enabled in
+        // pinned_client) transparently decompresses and drops Content-Length,
+        // so the fast-path Content-Length check is skipped. Without the
+        // streaming cap, resp.text() would buffer the full decompressed body
+        // unbounded. The streaming loop must reject it instead.
+        let decompressed = vec![b'a'; 5000];
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(&decompressed).unwrap();
+        let gzipped = enc.finish().unwrap();
+        // Sanity: the compressed payload is well under the cap, so only the
+        // decompressed size can trip the guard — proving the streaming loop
+        // (not the Content-Length fast-path) is what rejects it.
+        assert!(gzipped.len() < 1000);
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/big"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-encoding", "gzip")
+                    .set_body_bytes(gzipped),
+            )
+            .mount(&server)
+            .await;
+
+        let config = WebFetchConfig {
+            ssrf_allowed_hosts: vec!["127.0.0.0/8".to_string()],
+            max_response_bytes: 1000,
+            ..Default::default()
+        };
+        let engine = WebFetchEngine::new(
+            config,
+            Arc::new(WebCache::new(std::time::Duration::from_secs(60))),
+        );
+
+        let err = engine
+            .fetch(&format!("{}/big", server.uri()))
+            .await
+            .expect_err("oversized decompressed body must be rejected");
+        assert!(
+            err.contains("too large"),
+            "expected a size-cap rejection, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_check_ssrf_async_matches_sync_policy() {
+        // The async resolver must enforce the identical policy to the sync
+        // check_ssrf — only the DNS call moves off the executor. These cases
+        // are deterministic: literal IPs and the scheme / hostname-blocklist
+        // gates require no external DNS.
+        assert!(check_ssrf_async("http://localhost/admin", &[])
+            .await
+            .is_err());
+        assert!(check_ssrf_async("http://10.0.0.1/", &[]).await.is_err());
+        assert!(check_ssrf_async("http://169.254.169.254/latest/", &[])
+            .await
+            .is_err());
+        assert!(check_ssrf_async("ftp://internal.corp/data", &[])
+            .await
+            .is_err());
+        // A public literal IP resolves and passes.
+        let ok = check_ssrf_async("http://8.8.8.8/", &[]).await;
+        assert!(ok.is_ok(), "public IP should pass, got: {ok:?}");
+    }
+
+    #[test]
+    fn decode_body_with_charset_honours_content_type() {
+        // Regression: a non-UTF-8 page must decode via its declared charset,
+        // not be mangled into U+FFFD by a bare from_utf8_lossy.
+        let (sjis_bytes, _, had_errors) = encoding_rs::SHIFT_JIS.encode("こんにちは");
+        assert!(!had_errors);
+        assert_eq!(
+            decode_body_with_charset(&sjis_bytes, "text/html; charset=Shift_JIS"),
+            "こんにちは"
+        );
+        // An absent charset defaults to UTF-8.
+        assert_eq!(
+            decode_body_with_charset("héllo".as_bytes(), "text/plain"),
+            "héllo"
+        );
+        // An unrecognised label falls back to UTF-8 rather than erroring.
+        assert_eq!(
+            decode_body_with_charset("ok".as_bytes(), "text/plain; charset=bogus-xyz"),
+            "ok"
         );
     }
 

@@ -296,17 +296,66 @@ impl SemanticStore {
                 params.push(Box::new(before.to_rfc3339()));
                 param_idx += 1;
             }
-            // Metadata filtering via json_extract (keys must be alphanumeric/underscore only)
+            // Metadata filtering via json_extract. Keys must be
+            // alphanumeric/underscore only (interpolated into the JSON path,
+            // so a non-identifier key would be an injection vector); a
+            // rejected key is logged, never silently dropped. Every scalar
+            // value type yields a predicate so the filter is actually applied
+            // rather than silently widening the result set.
             for (key, value) in &f.metadata {
-                if let Some(s) = value.as_str() {
-                    // Reject keys with non-alphanumeric characters to prevent injection
-                    if key.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                if !key.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                    tracing::warn!(
+                        metadata_key = %key,
+                        "recall: ignoring metadata filter with non-identifier key (allowed: [A-Za-z0-9_]); filter not applied"
+                    );
+                    continue;
+                }
+                match value {
+                    serde_json::Value::String(s) => {
                         sql.push_str(&format!(
                             " AND json_extract(metadata, '$.{}') = ?{param_idx}",
                             key
                         ));
                         params.push(Box::new(s.to_string()));
                         param_idx += 1;
+                    }
+                    serde_json::Value::Bool(b) => {
+                        // SQLite's json_extract yields integer 1/0 for JSON
+                        // booleans; bind the matching integer so the equality
+                        // holds (a text "true"/"false" would never match).
+                        sql.push_str(&format!(
+                            " AND json_extract(metadata, '$.{}') = ?{param_idx}",
+                            key
+                        ));
+                        params.push(Box::new(if *b { 1_i64 } else { 0_i64 }));
+                        param_idx += 1;
+                    }
+                    serde_json::Value::Number(n) => {
+                        // Bind numbers with their native SQLite type so the
+                        // comparison against json_extract's numeric result
+                        // holds under SQLite type affinity rules.
+                        sql.push_str(&format!(
+                            " AND json_extract(metadata, '$.{}') = ?{param_idx}",
+                            key
+                        ));
+                        if let Some(i) = n.as_i64() {
+                            params.push(Box::new(i));
+                        } else if let Some(f) = n.as_f64() {
+                            params.push(Box::new(f));
+                        } else {
+                            // u64 beyond i64 range — fall back to text form.
+                            params.push(Box::new(n.to_string()));
+                        }
+                        param_idx += 1;
+                    }
+                    // Null / array / object filters have no equality predicate;
+                    // warn rather than silently drop them.
+                    other => {
+                        tracing::warn!(
+                            metadata_key = %key,
+                            value_kind = ?other,
+                            "recall: ignoring metadata filter with unsupported value type (only string/bool/number); filter not applied"
+                        );
                     }
                 }
             }
@@ -1361,6 +1410,59 @@ mod tests {
         let results = store.recall("Memory", 10, Some(filter)).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].content, "Memory A");
+    }
+
+    #[test]
+    fn recall_honors_non_string_metadata_filters() {
+        // Regression: a bool / number metadata filter must emit a predicate
+        // and actually narrow the result set, not be silently dropped
+        // (which returned a superset — the filter appeared to have no effect).
+        let store = setup();
+        let agent_id = AgentId::new();
+
+        let mut meta_pinned = HashMap::new();
+        meta_pinned.insert("pinned".to_string(), serde_json::Value::Bool(true));
+        meta_pinned.insert("priority".to_string(), serde_json::Value::Number(5.into()));
+        store
+            .remember(
+                agent_id,
+                "Pinned high-priority memory",
+                MemorySource::Conversation,
+                "episodic",
+                meta_pinned,
+            )
+            .unwrap();
+
+        let mut meta_other = HashMap::new();
+        meta_other.insert("pinned".to_string(), serde_json::Value::Bool(false));
+        meta_other.insert("priority".to_string(), serde_json::Value::Number(1.into()));
+        store
+            .remember(
+                agent_id,
+                "Unpinned low-priority memory",
+                MemorySource::Conversation,
+                "episodic",
+                meta_other,
+            )
+            .unwrap();
+
+        // Bool filter must select exactly the pinned row.
+        let mut f_bool = MemoryFilter::agent(agent_id);
+        f_bool
+            .metadata
+            .insert("pinned".to_string(), serde_json::Value::Bool(true));
+        let by_bool = store.recall("memory", 10, Some(f_bool)).unwrap();
+        assert_eq!(by_bool.len(), 1, "bool metadata filter must be applied");
+        assert_eq!(by_bool[0].content, "Pinned high-priority memory");
+
+        // Number filter must select exactly the priority-5 row.
+        let mut f_num = MemoryFilter::agent(agent_id);
+        f_num
+            .metadata
+            .insert("priority".to_string(), serde_json::Value::Number(5.into()));
+        let by_num = store.recall("memory", 10, Some(f_num)).unwrap();
+        assert_eq!(by_num.len(), 1, "number metadata filter must be applied");
+        assert_eq!(by_num[0].content, "Pinned high-priority memory");
     }
 
     #[test]

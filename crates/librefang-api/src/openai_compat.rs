@@ -316,16 +316,7 @@ pub async fn chat_completions(
         .await
         {
             Ok(sse) => sse.into_response(),
-            Err(e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": {
-                        "message": format!("{e}"),
-                        "type": "server_error"
-                    }
-                })),
-            )
-                .into_response(),
+            Err(e) => streaming_setup_error_response(&e),
         };
     }
 
@@ -374,6 +365,25 @@ pub async fn chat_completions(
                 .into_response()
         }
     }
+}
+
+/// Build the client-facing 500 response for a streaming-setup failure.
+///
+/// The detailed error is logged server-side; the client only sees a generic
+/// message so internal kernel/provider detail is not leaked over the wire.
+/// This mirrors the non-streaming branch's error handling.
+fn streaming_setup_error_response(detail: &str) -> axum::response::Response {
+    warn!("OpenAI compat: streaming setup error: {detail}");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(serde_json::json!({
+            "error": {
+                "message": "Agent processing failed",
+                "type": "server_error"
+            }
+        })),
+    )
+        .into_response()
 }
 
 /// Build an SSE stream response for streaming completions.
@@ -579,6 +589,25 @@ pub async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoRespons
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn streaming_setup_error_scrubs_internal_detail() {
+        let raw = "Streaming setup failed: provider connection refused at 10.0.0.5:8443";
+        let resp = streaming_setup_error_response(raw);
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+
+        // The raw internal error must not leak to the client.
+        assert!(!body.contains("provider connection refused"));
+        assert!(!body.contains("10.0.0.5"));
+        // The generic client-facing message is returned instead.
+        assert!(body.contains("Agent processing failed"));
+        assert!(body.contains("server_error"));
+    }
 
     #[test]
     fn test_oai_content_deserialize_string() {
