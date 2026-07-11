@@ -1,0 +1,30 @@
+{
+  "stage": "analyze",
+  "phase": "phase-10-uar-sidecar-availability",
+  "completed_at": "2026-07-11",
+  "artifacts": ["analysis.md", "library-candidates.json", "decision-log.md"],
+  "candidate_count": 7,
+  "new_third_party_dependencies": 0,
+  "summary": "UAR is not a greenfield integration — it already ships a Dockerfile, a published image (us-docker.pkg.dev/.../universal-agent-runtime), a release pipeline, a live GKE Deployment (deploy/uar, svc uar-svc), a purpose-built `uar-sidecar` binary (READY:{port} stdout handshake + stdin-EOF shutdown), and a full HTTP control surface (/healthz, /readyz, /api/models, /api/chat/completion, SSE /api/live). Three of the four assessment blockers are therefore solved by existing first-party assets: ADOPT UAR's image (COPY --from), REUSE librefang's own sidecar supervisor (sidecar.rs:502-520 already has restart+backoff), REUSE librefang's reqwest/futures/tokio-stream stack for the HTTP+SSE client. ZERO new third-party dependencies. Remaining work is small and in-tree: generalize resolve_sidecar_command (sidecar.rs:728) from Telegram-only to stem-parameterized so PATH is never load-bearing; extend UarConfig; add the READY handshake + stdin-EOF shutdown to the supervisor; build console controls; fail loudly on unresolvable binary.",
+  "decisions": [
+    "D-1 integration shape = child process in-container (user-confirmed). Rejected native k8s sidecar container (cannot start/stop a sibling container from inside the pod) and client-of-existing-Deployment (no lifecycle control). Only D-1 delivers 'run' as well as 'use' and 'test', and it behaves identically locally and in cloud.",
+    "D-2 uar-driver = un-force now, delete later (user-confirmed). Drop the unconditional feature edge at librefang-kernel/Cargo.toml:16."
+  ],
+  "key_finding": "cargo tree -i surrealdb proves UAR (=3.2.1, EXACT) is the SOLE rigid constraint on surrealdb; surreal-memory (3.2.0, CARET) flexes freely. Retiring the in-process UAR link therefore DOES remove the three-repo lockstep pin. This settles assessment open-question 3.",
+  "blocking_upstream_change": {
+    "repo": "GQAdonis/universal-agent-runtime",
+    "change": "Build + publish the `uar-sidecar` binary — it is currently NOT built (grep -c uar-sidecar release.yml = 0; Dockerfile:225 builds only --bin universal-agent-runtime)",
+    "severity": "blocker",
+    "size": "small/additive",
+    "blocks": ["G-1"]
+  },
+  "open_questions": [
+    "Which of UAR's /opt/uar/{static,skills,models} assets does uar-sidecar actually need at runtime? (determines the COPY --from set and image size)",
+    "Image-size budget for baking UAR into the BossFang image — quantify before committing",
+    "Is desktop/local support in v1? UAR's own release.yml:160 calls cross-platform prebuilt binaries 'an aspirational extra' — Linux/container is unaffected",
+    "Version compatibility once the cargo pin is gone — pin the UAR image tag + add a startup capability check",
+    "Loopback auth for the in-container UAR — sufficient, or add a shared token?",
+    "Does the existing standalone `uar` Deployment stay? It is operator-managed and may serve other consumers — not ours to delete unilaterally"
+  ],
+  "next_stage": "spec"
+}

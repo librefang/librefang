@@ -1,0 +1,129 @@
+{
+  "phase": "phase-10-uar-sidecar-availability",
+  "generated": "2026-07-11",
+  "mode": "stack-specified",
+  "stack": {
+    "language": "rust",
+    "async": "tokio",
+    "http": "reqwest 0.13",
+    "orchestration": "kubernetes (GKE)"
+  },
+  "summary": "No new third-party dependency is required for this phase. Three of the four assessment blockers are already solved by existing first-party assets: UAR's published container image, librefang's own sidecar supervisor (spawn + restart + backoff), and librefang's existing reqwest/futures/tokio-stream HTTP+SSE stack. The remaining work is small, confined, in-tree code plus one additive upstream change to UAR's release pipeline.",
+  "candidates": [
+    {
+      "gap": "G-1",
+      "need": "Ship a UAR binary so it can be located and executed at runtime",
+      "verdict": "adopt",
+      "choice": "UAR's existing container image (us-docker.pkg.dev/<project>/<repo>/universal-agent-runtime:<tag>)",
+      "mechanism": "multi-stage `COPY --from=<uar-image>` into librefang's Dockerfile; bundle beside `librefang` in the release tarball",
+      "evidence": "UAR .github/workflows/build-image.yml:19,69-71 (image built + pushed); UAR Dockerfile:264-267 (binary + /opt/uar/{static,skills,models}); Dockerfile:281 CMD; healthcheck port 1906 (Dockerfile:279)",
+      "rejected_alternatives": [
+        "Build UAR from source inside librefang's Dockerfile — reintroduces UAR's build.rs (network models.dev fetch + pnpm frontend) into librefang's hot build path; this is the cost we are trying to shed"
+      ],
+      "blocking_upstream_change": true,
+      "confidence": "high"
+    },
+    {
+      "gap": "G-3",
+      "need": "Spawn, health-check, restart-with-backoff, and gracefully shut down a child process",
+      "verdict": "reuse-internal",
+      "choice": "crates/librefang-channels/src/sidecar.rs (existing channel sidecar supervisor)",
+      "mechanism": "Extend the existing supervisor; add the READY:{port} stdout handshake and stdin-EOF shutdown, which it does not currently have",
+      "evidence": "sidecar.rs:502-520 already exposes restart, initial_backoff_ms, max_backoff_ms, max_retries, reset_after_secs; sidecar.rs:777-827 spawn_once + stderr classification",
+      "rejected_alternatives": [
+        "External Rust supervision crate — would duplicate working, proven in-tree code and add a dependency for no benefit"
+      ],
+      "blocking_upstream_change": false,
+      "confidence": "high"
+    },
+    {
+      "gap": "G-4",
+      "need": "Locate the UAR binary deterministically; never depend on PATH",
+      "verdict": "build-small",
+      "choice": "Generalize resolve_sidecar_command from a Telegram-only special case to a stem-parameterized helper",
+      "mechanism": "current_exe() dir -> <home_dir>/bin/ -> PATH fallback (algorithm unchanged, stem becomes a parameter)",
+      "evidence": "sidecar.rs:728 resolve_sidecar_command; TELEGRAM_SIDECAR_STEM at :699; call site SidecarAdapter::new sidecar.rs:1468. Today any non-Telegram command (including universal-agent-runtime) falls through to a bare OS PATH lookup — this is the reported bug.",
+      "rejected_alternatives": [
+        "Copy-paste a second UAR-specific resolver — divergence risk; generalizing the proven one is strictly safer",
+        "which/which-rs crate — solves PATH lookup, which is exactly the mechanism we are trying to NOT depend on"
+      ],
+      "blocking_upstream_change": false,
+      "confidence": "high"
+    },
+    {
+      "gap": "G-5",
+      "need": "UarDriver becomes an HTTP + SSE client instead of an in-process library call",
+      "verdict": "reuse-internal",
+      "choice": "reqwest 0.13 (stream feature) + futures + tokio-stream, already in the workspace",
+      "mechanism": "POST /api/chat/completion; consume SSE from /api/live; health via /healthz + /readyz",
+      "evidence": "workspace Cargo.toml:136 reqwest 0.13 with \"stream\"; :47 tokio-stream; :156 futures. SSE already consumed in-tree (librefang-runtime-mcp). UAR routes at src/server.rs:694+",
+      "rejected_alternatives": [
+        "reqwest-eventsource / eventsource-client — an added dependency for a stream we can already consume with reqwest's stream feature",
+        "tonic/gRPC — UAR exposes it, but HTTP+SSE covers completions and token streaming at far lower integration cost"
+      ],
+      "blocking_upstream_change": false,
+      "confidence": "high"
+    },
+    {
+      "gap": "G-6",
+      "need": "Config surface for a UAR sidecar",
+      "verdict": "build-small",
+      "choice": "Extend UarConfig (crates/librefang-types/src/config/types.rs:3099)",
+      "mechanism": "Add enabled, binary stem/command, endpoint override, and restart/backoff knobs; mirror SidecarChannelConfig field names for one consistent operator vocabulary",
+      "evidence": "UarConfig today has only api_key/model/surreal_data_dir/base_url/remote/share_librefang_storage — no binary path, no enable flag, no endpoint-to-spawn. base_url is an LLM-provider override, NOT a UAR endpoint (drivers/uar.rs:97).",
+      "blocking_upstream_change": false,
+      "confidence": "high"
+    },
+    {
+      "gap": "G-7",
+      "need": "Web console can run / stop / restart / test UAR",
+      "verdict": "build",
+      "choice": "Dashboard query + mutation hooks (per CLAUDE.md data-layer rules)",
+      "mechanism": "status pill <- supervisor state + /healthz,/readyz; start/stop/restart <- supervisor commands; 'Test' button <- POST /api/chat/completion; model picker <- GET /api/models",
+      "evidence": "All backing endpoints already exist (UAR src/server.rs:694+). Today the dashboard's only UAR affordances are manifest import (POST /api/agents/uar) and SurrealDB namespace linking (POST /api/storage/link-uar) — neither touches a process.",
+      "blocking_upstream_change": false,
+      "confidence": "high"
+    },
+    {
+      "gap": "G-9",
+      "need": "Remove the surrealdb lockstep pin and UAR's build cost from the default build",
+      "verdict": "build-trivial",
+      "choice": "Drop the unconditional `features = [\"uar-driver\"]` edge at librefang-kernel/Cargo.toml:16",
+      "mechanism": "One-line Cargo.toml change; makes the feature genuinely opt-in",
+      "evidence": "cargo tree -i surrealdb: universal-agent-runtime pins =3.2.1 (EXACT, rigid); surreal-memory pins 3.2.0 (CARET, flexible). UAR is the SOLE source of the lockstep constraint.",
+      "blocking_upstream_change": false,
+      "confidence": "high"
+    }
+  ],
+  "upstream_changes_required": [
+    {
+      "repo": "GQAdonis/universal-agent-runtime",
+      "change": "Build and publish the `uar-sidecar` binary (currently only `universal-agent-runtime` is built)",
+      "evidence": "grep -c uar-sidecar .github/workflows/release.yml => 0; Dockerfile:225 builds only `--bin universal-agent-runtime`; release matrix ships only universal-agent-runtime-{linux-x64,macos-x64,macos-arm64,windows-x64.exe}",
+      "severity": "blocker",
+      "size": "small/additive",
+      "note": "Same repo and branch family we already cut this session (sync-gqadonis-8c7377a1)."
+    }
+  ],
+  "risks": [
+    {
+      "id": "R-A",
+      "risk": "UAR's cross-platform prebuilt binaries are self-described as 'an aspirational extra' (release.yml:160) and may not build reliably",
+      "impact": "Blocks the desktop/local shape only. Linux/container (the reported bug) is unaffected because the binary comes from the image.",
+      "mitigation": "Verify the macOS/Windows release targets before promising local support; scope v1 to Linux/container if they are unreliable."
+    },
+    {
+      "id": "R-B",
+      "risk": "Baking UAR's binary + /opt/uar/{static,skills,models} into the BossFang image grows it",
+      "impact": "Image size / pull time",
+      "mitigation": "Quantify before committing; determine which asset dirs uar-sidecar actually needs at runtime; consider first-run fetch or a shared volume if the models dir is large."
+    },
+    {
+      "id": "R-C",
+      "risk": "With the cargo-level pin gone, librefang's HTTP client and UAR's API can drift independently",
+      "impact": "Silent incompatibility at runtime rather than a compile error",
+      "mitigation": "Pin the UAR image tag; add a startup version/capability check."
+    }
+  ],
+  "new_third_party_dependencies": []
+}

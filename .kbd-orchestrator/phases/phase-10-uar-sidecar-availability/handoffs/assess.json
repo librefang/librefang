@@ -1,0 +1,15 @@
+{
+  "stage": "assess",
+  "phase": "phase-10-uar-sidecar-availability",
+  "completed_at": "2026-07-11",
+  "artifact": "assessment.md",
+  "summary": "The 'UAR not found in PATH' bug is a missing capability, not a misconfiguration: librefang never builds, ships, spawns, or supervises a UAR process anywhere, and the web console has no control that runs or tests one. UAR is instead compiled in-process (and, contrary to CLAUDE.md, force-enabled for EVERY build via librefang-kernel/Cargo.toml:16), which is a model that structurally cannot express 'run/use/test UAR from the console'. Recommendation: adopt UAR-as-sidecar — UAR already ships a purpose-built `uar-sidecar` binary with a READY:{port} + stdin-EOF contract and a full /healthz + /api/chat/completion HTTP surface — using a k8s native sidecar container in cloud and a bundled child process (current_exe() resolution, never PATH) locally.",
+  "open_questions": [
+    "Who builds/publishes the UAR binary/image, and at what cadence? (blocks G-1/G-2)",
+    "Ship both runtime shapes (container sidecar + local child), or cloud-only for v1?",
+    "Does dropping the in-process UAR link actually remove the surrealdb lockstep pin, or does surreal-memory re-impose it?",
+    "Keep uar-driver as an opt-in fallback for one release, or delete outright?",
+    "Console scope for v1: status + test-ping only, or full start/stop/restart?"
+  ],
+  "next_stage": "analyze"
+}

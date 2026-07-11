@@ -1,0 +1,32 @@
+{
+  "phase": "phase-10-uar-sidecar-availability",
+  "assessment_complete": true,
+  "plan_complete": false,
+  "execution_started": false,
+  "backend": "native-tool",
+  "assessment_date": "2026-07-11",
+  "verdict": "proceed-with-architecture-change",
+  "changes_total": 0,
+  "changes_completed": 0,
+  "changes": {},
+  "headline": "The reported 'UAR not found in PATH' bug is a MISSING CAPABILITY, not a misconfiguration. LibreFang never installs, spawns, or supervises a UAR process anywhere: no UAR binary in the image (Dockerfile:177-178 links UAR in-process via --features uar-driver and copies only /usr/local/bin/librefang), no sidecar container (k8s/base/bossfang-deployment.yaml:64-68 has one container), and no spawn code. The error originates from the GENERIC channel sidecar supervisor (sidecar.rs:783 Command::new -> sidecar.rs:822-827 wrapper) when UAR is hand-configured as a [[sidecar_channels]] entry; resolve_sidecar_command (sidecar.rs:728) only covers the Telegram stem, so UAR falls through to a bare PATH lookup for a binary that was never shipped.",
+  "recommendation": "SUPERSEDED BY D-1 (see decisions). Adopt UAR-as-sidecar and retire the in-process uar-driver link. The embedded model cannot express the goal (an in-process library has no process for a console to run/stop/test). Shape chosen at analyze: CHILD PROCESS IN-CONTAINER \u2014 librefang spawns UAR's `uar-sidecar` binary (READY:{port} stdout handshake, stdin-EOF shutdown), binary baked into the BossFang image via COPY --from=<uar-image>, resolved via current_exe() -> ~/.librefang/bin -> PATH so PATH is never load-bearing. The k8s native-sidecar-container shape was considered and REJECTED (a container cannot start/stop a sibling container from inside the pod, so it delivers use+test but not run).",
+  "correction_found": "CLAUDE.md documents uar-driver as 'off by default, opt-in'. This is FALSE. librefang-kernel/Cargo.toml:16 requests features = [\"uar-driver\"] unconditionally, and librefang-cli -> librefang-kernel is not feature-gated, so EVERY shipped binary compiles UAR in. This is why the surrealdb =3.2.0 vs =3.2.1 exact-pin mismatch found during the 2026-07-11 upstream merge would have broken every build, not just an opt-in one.",
+  "blockers": [
+    "G-1 no UAR binary shipped (blocked on upstream: UAR must build/publish `uar-sidecar`)",
+    "G-3 no spawn/supervision code (READY handshake + stdin-EOF shutdown on top of the existing supervisor)",
+    "G-4 no bundled-binary resolution for UAR (generalize resolve_sidecar_command, sidecar.rs:728)"
+  ],
+  "research_doc": "docs/architecture/uar-runtime-integration-research.md",
+  "next_action": "/kbd-spec phase-10-uar-sidecar-availability",
+  "analysis_complete": true,
+  "analysis_date": "2026-07-11",
+  "decisions": {
+    "D-1": "Integration shape = child process in-container (user-confirmed). librefang spawns UAR's `uar-sidecar` binary as a supervised child; binary baked into the BossFang image via COPY --from=<uar-image> and resolved via current_exe() -> ~/.librefang/bin -> PATH, so PATH is never load-bearing. Rejected: native k8s sidecar container (cannot start/stop a sibling container from inside the pod) and client-of-existing-Deployment (no lifecycle control).",
+    "D-2": "uar-driver = un-force now, delete later (user-confirmed). Drop the unconditional features = [\"uar-driver\"] edge at librefang-kernel/Cargo.toml:16."
+  },
+  "build_vs_adopt": "ZERO new third-party dependencies. ADOPT UAR's published image (COPY --from). REUSE librefang's own sidecar supervisor (sidecar.rs:502-520 already has spawn + restart + backoff) and its reqwest 0.13 (stream) / futures / tokio-stream stack for the HTTP+SSE client. BUILD only small in-tree pieces: generalize resolve_sidecar_command (sidecar.rs:728) from Telegram-only to stem-parameterized; add READY:{port} handshake + stdin-EOF shutdown; extend UarConfig; console controls; loud startup failure.",
+  "blocking_upstream_change": "GQAdonis/universal-agent-runtime does NOT build/publish the `uar-sidecar` binary (grep -c uar-sidecar release.yml = 0; Dockerfile:225 builds only --bin universal-agent-runtime). Small additive change, same repo/branch family as sync-gqadonis-8c7377a1. BLOCKS G-1.",
+  "surrealdb_pin_finding": "cargo tree -i surrealdb: universal-agent-runtime pins =3.2.1 (EXACT, rigid); surreal-memory pins 3.2.0 (CARET, flexible). UAR is the SOLE source of the lockstep pin \u2014 retiring the in-process link DOES free librefang to bump surrealdb unilaterally. Settles assessment open-question 3.",
+  "blockers_resolved_at_analyze": "G-2 (no sidecar container in k8s) is N/A under D-1 \u2014 UAR runs as a child process inside the BossFang container, so no second container, Service, or NetworkPolicy change is needed."
+}
