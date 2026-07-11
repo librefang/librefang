@@ -1712,6 +1712,117 @@ fn delimited_hash_distinguishes_field_boundary_shifts() {
 }
 
 #[test]
+fn audit_action_round_trips_display_and_from_str() {
+    // Every variant's `Display` output must parse back to the same variant
+    // via `FromStr`. This is the invariant `with_db()` relies on when it
+    // decodes the persisted `action` column after a restart: a variant that
+    // stringifies one way but fails to parse back (as A2aDiscovered /
+    // A2aTrusted did before the fix, falling through to ToolInvoke) silently
+    // rewrites the hash input and breaks Merkle verification.
+    let all = [
+        AuditAction::ToolInvoke,
+        AuditAction::CapabilityCheck,
+        AuditAction::AgentSpawn,
+        AuditAction::AgentKill,
+        AuditAction::AgentMessage,
+        AuditAction::MemoryAccess,
+        AuditAction::FileAccess,
+        AuditAction::NetworkAccess,
+        AuditAction::ShellExec,
+        AuditAction::AuthAttempt,
+        AuditAction::WireConnect,
+        AuditAction::ConfigChange,
+        AuditAction::DreamConsolidation,
+        AuditAction::UserLogin,
+        AuditAction::RoleChange,
+        AuditAction::PermissionDenied,
+        AuditAction::BudgetExceeded,
+        AuditAction::RetentionTrim,
+        AuditAction::A2aDiscovered,
+        AuditAction::A2aTrusted,
+    ];
+    for action in &all {
+        let s = action.to_string();
+        let parsed: AuditAction = s.parse().expect("every variant must parse back");
+        assert_eq!(
+            parsed.to_string(),
+            s,
+            "Display <-> FromStr round-trip must be stable for {s}"
+        );
+    }
+
+    // The two variants that regressed must map to their exact names.
+    assert_eq!(AuditAction::A2aDiscovered.to_string(), "A2aDiscovered");
+    assert_eq!(AuditAction::A2aTrusted.to_string(), "A2aTrusted");
+    assert!(matches!(
+        "A2aDiscovered".parse::<AuditAction>(),
+        Ok(AuditAction::A2aDiscovered)
+    ));
+    assert!(matches!(
+        "A2aTrusted".parse::<AuditAction>(),
+        Ok(AuditAction::A2aTrusted)
+    ));
+
+    // A genuinely unknown string is reported by name, not coerced.
+    assert!("NotARealAction".parse::<AuditAction>().is_err());
+}
+
+#[test]
+fn a2a_actions_survive_reload_with_intact_chain() {
+    // Regression: `with_db()` reload used to decode A2aDiscovered /
+    // A2aTrusted as ToolInvoke, so `verify_integrity()` recomputed the
+    // hash with "ToolInvoke" and reported a false mismatch after restart.
+    let pool = Pool::builder()
+        .max_size(1)
+        .build(SqliteConnectionManager::memory())
+        .unwrap();
+    {
+        let conn = pool.get().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE audit_entries (
+                seq INTEGER PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                detail TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                user_id TEXT,
+                channel TEXT,
+                prev_hash TEXT NOT NULL,
+                hash TEXT NOT NULL
+            )",
+        )
+        .unwrap();
+    }
+
+    let log = AuditLog::with_db(pool.clone());
+    log.record(
+        "system",
+        AuditAction::A2aDiscovered,
+        "https://peer.example/agent.json name=peer",
+        "ok",
+    );
+    log.record(
+        "system",
+        AuditAction::A2aTrusted,
+        "https://peer.example/agent.json name=peer",
+        "ok",
+    );
+    assert!(log.verify_integrity().is_ok());
+
+    // Simulate a daemon restart: reload from the same DB and re-verify.
+    let reloaded = AuditLog::with_db(pool.clone());
+    assert_eq!(reloaded.len(), 2);
+    let entries = reloaded.recent(2);
+    assert!(matches!(entries[0].action, AuditAction::A2aDiscovered));
+    assert!(matches!(entries[1].action, AuditAction::A2aTrusted));
+    assert!(
+        reloaded.verify_integrity().is_ok(),
+        "A2A actions must decode to their own variants so the chain verifies after reload"
+    );
+}
+
+#[test]
 fn verify_integrity_accepts_legacy_hashed_entries() {
     // An audit log written before the delimiter fix (rows hashed with the v1
     // layout) must still verify after upgrade — no false tamper alarms.

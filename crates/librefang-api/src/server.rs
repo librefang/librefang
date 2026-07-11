@@ -1692,6 +1692,17 @@ pub async fn build_router(
         // from RequestBodyLimitLayer (applied below) because the handler
         // enforces its own configurable limit.
         .merge(upload_routes)
+        // JSON depth guard — buffers `application/json` bodies once,
+        // checks nesting depth against MAX_JSON_BODY_DEPTH, rejects
+        // adversarial `[[[[…]]]]` payloads before any handler sees them.
+        // Added FIRST in the builder so it is the innermost layer and
+        // therefore executes AFTER auth + rate-limit on the request path
+        // (Axum runs the last-added layer first): the cost of buffering the
+        // body and parsing it with serde_json is gated by auth and the rate
+        // limiters upstream. request_logging is added later (outermost of
+        // these), so it still wraps the guard and a depth rejection surfaces
+        // in the request log with the right status. Audit: check-json-depth-unused.
+        .layer(axum::middleware::from_fn(middleware::enforce_json_body_depth))
         .layer(axum::middleware::from_fn_with_state(
             auth_state,
             middleware::auth,
@@ -1715,14 +1726,6 @@ pub async fn build_router(
             rate_limiter::auth_rate_limit_layer,
         ))
         .layer(axum::middleware::from_fn(middleware::api_version_headers))
-        // JSON depth guard — buffers `application/json` bodies once,
-        // checks nesting depth against MAX_JSON_BODY_DEPTH, rejects
-        // adversarial `[[[[…]]]]` payloads at the layer boundary
-        // before any handler sees them. Sits below auth/rate-limit
-        // (so the cost of buffering is gated by auth) and above
-        // request-logging (so rejections show up in the request log
-        // with the right status). Audit: check-json-depth-unused.
-        .layer(axum::middleware::from_fn(middleware::enforce_json_body_depth))
         .layer(axum::middleware::from_fn(middleware::security_headers))
         .layer(axum::middleware::from_fn(middleware::request_logging))
         .layer(CompressionLayer::new())
@@ -2586,6 +2589,77 @@ fn stop_observability_stack(
         .map_err(|e| format!("docker compose down failed: {e}"))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod layer_order_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use librefang_types::config::{DefaultModelConfig, KernelConfig};
+    use tower::ServiceExt;
+
+    /// Regression for finding #10: the JSON body-depth guard must execute
+    /// AFTER auth so the cost of buffering + parsing an adversarial body is
+    /// gated by authentication. An unauthenticated request carrying an
+    /// over-deep JSON body must be rejected by auth with 401 — the depth
+    /// guard (which would return 400 `BAD_REQUEST`) must never run.
+    ///
+    /// Before the fix the depth guard was the outermost of the two layers and
+    /// ran first, so this request returned 400 (depth) instead of 401 (auth),
+    /// letting an unauthenticated caller drive body buffering + `serde_json`
+    /// parsing on every request.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn json_depth_guard_runs_after_auth() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        // Seed the pinned registry fixture so the kernel boots offline.
+        librefang_kernel::registry_sync::seed_registry_fixture_for_tests(tmp.path());
+
+        let config = KernelConfig {
+            home_dir: tmp.path().to_path_buf(),
+            data_dir: tmp.path().join("data"),
+            api_key: "secret-token".to_string(),
+            default_model: DefaultModelConfig {
+                provider: "ollama".to_string(),
+                model: "test-model".to_string(),
+                api_key_env: "OLLAMA_API_KEY".to_string(),
+                base_url: None,
+                message_timeout_secs: 300,
+                extra_params: std::collections::BTreeMap::new(),
+                cli_profile_dirs: Vec::new(),
+            },
+            ..KernelConfig::default()
+        };
+
+        let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("kernel boots"));
+        kernel.clone().set_self_handle();
+        let (app, state) = build_router(kernel, "127.0.0.1:0".parse().unwrap()).await;
+
+        // Nesting depth 60 comfortably exceeds MAX_JSON_BODY_DEPTH (32), so the
+        // depth guard WOULD reject this body with 400 if it ran before auth.
+        let deep_body = format!("{}{}", "[".repeat(60), "]".repeat(60));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    // A protected write route: not on the public allowlist.
+                    .method("POST")
+                    .uri("/api/agents/some-agent/message")
+                    .header("content-type", "application/json")
+                    .body(Body::from(deep_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "auth must reject the unauthenticated request (401) before the depth guard \
+             (400) ever buffers and parses the body"
+        );
+
+        state.kernel.shutdown();
+    }
 }
 
 #[cfg(test)]

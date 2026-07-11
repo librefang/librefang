@@ -157,7 +157,16 @@ pub(crate) async fn export_to_tinker_with_base(
         .as_ref()
         .map(crate::redact::redact_metadata);
 
-    let client = librefang_http::proxied_client();
+    // Disable redirect following: the SSRF allowlist validates only the
+    // initial base URL, so a redirect-following client would let an
+    // attacker-controlled base 3xx to an internal host (e.g. cloud
+    // metadata), replaying the `x-api-key` header on 307/308. A finished
+    // upload never needs to follow a redirect; a 3xx must surface as an
+    // error. Mirrors `librefang_http::oauth_client_builder`.
+    let client = librefang_http::proxied_client_builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap_or_else(|_| librefang_http::proxied_client());
 
     // Step 1: register the session on Tinker. Sort tags for byte-
     // identical wire output (refs #3298 prompt-cache determinism).
@@ -436,6 +445,51 @@ mod tests {
                 assert!(body.contains("invalid session payload"), "body={body}");
             }
             other => panic!("expected UpstreamRejected, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn export_does_not_follow_redirects_ssrf_guard() {
+        // The SSRF allowlist validates only the initial base URL. A
+        // redirect-following client would let an attacker-controlled base
+        // 3xx to an internal host, replaying the `x-api-key` header. The
+        // upload client must NOT follow redirects: a 3xx surfaces as an
+        // error rather than being chased to the Location target. All
+        // three endpoints below are mounted so that IF the client
+        // followed the redirect the whole export would succeed — the
+        // `expect_err` only holds when redirects are disabled.
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/create_session"))
+            .respond_with(
+                ResponseTemplate::new(307).insert_header("location", "/redirected/create_session"),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/redirected/create_session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "type": "create_session",
+                "session_id": "leaked-session",
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/telemetry"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "accepted",
+            })))
+            .mount(&server)
+            .await;
+
+        let err =
+            export_to_tinker_with_base(&server.uri(), "rl-proj", "tml-key", sample_export("rid"))
+                .await
+                .expect_err("a 3xx redirect must surface as an error, not be followed");
+        match err {
+            ExportError::UpstreamRejected { status, .. } => assert_eq!(status, 307),
+            other => panic!("expected UpstreamRejected {{ status: 307 }}, got {other:?}"),
         }
     }
 

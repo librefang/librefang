@@ -164,6 +164,11 @@ pub(crate) fn write_chatgpt_secrets(
     std::fs::write(&secrets_path, updated)
         .map_err(|e| i18n::t_args("auth-error-write-secrets", &[("error", &e.to_string())]))?;
 
+    // SECURITY: secrets.env holds OAuth session/refresh tokens.
+    // Restrict to owner-only (0600) so a fresh file created at the umask
+    // default (often 0644, world-readable) does not leak credentials.
+    restrict_file_permissions(&secrets_path);
+
     Ok(secrets_path)
 }
 
@@ -1045,5 +1050,26 @@ pub(crate) fn cmd_hash_password(password: Option<String>) {
             ));
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn write_chatgpt_secrets_is_owner_only_on_fresh_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let secrets_path =
+            write_chatgpt_secrets(dir.path(), "session-token", Some("refresh-token"))
+                .expect("write secrets");
+
+        let mode = std::fs::metadata(&secrets_path)
+            .expect("stat secrets.env")
+            .permissions()
+            .mode();
+        // secrets.env holds OAuth tokens; the file must be owner-only (0600).
+        assert_eq!(mode & 0o777, 0o600, "secrets.env must be created with 0600");
     }
 }

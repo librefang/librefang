@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use chrono::Timelike;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{watch, RwLock};
 use tracing::{debug, info, warn};
 
 /// Default cooldown period for an exhausted key (5 minutes).
@@ -313,28 +313,84 @@ impl LlmDriver for TokenRotationDriver {
                 slot.driver.clone()
             };
 
-            match driver.stream(request.clone(), tx.clone()).await {
+            // Intercept the event stream so we can detect whether any content
+            // has already been forwarded to the caller before deciding whether
+            // rotation is safe. If content was emitted and the key then errors,
+            // the caller has already received partial output; rotating to the
+            // next key would concatenate a second response onto the partial
+            // content, producing garbage. In that case we propagate the error
+            // regardless of `should_rotate`. Mirrors FallbackChain::stream.
+            let (content_emitted_tx, content_emitted_rx) = watch::channel(false);
+            let (intercept_tx, mut intercept_rx) = tokio::sync::mpsc::channel::<StreamEvent>(32);
+
+            let tx_relay = tx.clone();
+            let content_flag = content_emitted_tx.clone();
+            let relay_handle = tokio::spawn(async move {
+                while let Some(event) = intercept_rx.recv().await {
+                    // Any event that represents observable LLM output to the
+                    // caller. PhaseChange is metadata-only and excluded.
+                    let is_content = matches!(
+                        &event,
+                        StreamEvent::TextDelta { .. }
+                            | StreamEvent::ToolUseStart { .. }
+                            | StreamEvent::ToolInputDelta { .. }
+                            | StreamEvent::ToolUseEnd { .. }
+                            | StreamEvent::ThinkingDelta { .. }
+                            | StreamEvent::ContentComplete { .. }
+                            | StreamEvent::ToolExecutionResult { .. }
+                    );
+                    if is_content {
+                        let _ = content_flag.send(true);
+                    }
+                    if tx_relay.send(event).await.is_err() {
+                        // Downstream caller dropped the receiver. Close the
+                        // relay's inbound channel so the wrapped driver's next
+                        // `tx.send(...)` fails, triggering its backpressure
+                        // path and aborting the upstream LLM stream.
+                        intercept_rx.close();
+                        break;
+                    }
+                }
+            });
+
+            match driver.stream(request.clone(), intercept_tx).await {
                 Ok(response) => {
+                    // Wait for the relay to drain all buffered events so they
+                    // are not silently dropped when the handle is discarded.
+                    let _ = relay_handle.await;
                     self.current.store(idx, Ordering::Relaxed);
                     self.advance();
                     return Ok(response);
                 }
-                Err(err) if Self::should_rotate(&err) => {
-                    let cooldown = Self::cooldown_from_error(&err);
-                    self.mark_exhausted(idx, cooldown).await;
-                    self.advance();
-                    // Keep the error with the earliest reset time so the
-                    // user sees when the first profile becomes available.
-                    if last_error
-                        .as_ref()
-                        .is_none_or(|cur| Self::resets_sooner(cur, &err))
-                    {
-                        last_error = Some(err);
-                    }
-                    tried += 1;
-                }
                 Err(err) => {
-                    return Err(err);
+                    // Wait for the relay to finish draining before reading the
+                    // content flag to avoid a TOCTOU race (events already in
+                    // the mpsc buffer but not yet forwarded).
+                    let _ = relay_handle.await;
+
+                    // If the key already forwarded content to the caller,
+                    // rotation would produce a corrupted concatenation — bail
+                    // out regardless of whether the error is rotatable.
+                    if *content_emitted_rx.borrow() {
+                        return Err(err);
+                    }
+
+                    if Self::should_rotate(&err) {
+                        let cooldown = Self::cooldown_from_error(&err);
+                        self.mark_exhausted(idx, cooldown).await;
+                        self.advance();
+                        // Keep the error with the earliest reset time so the
+                        // user sees when the first profile becomes available.
+                        if last_error
+                            .as_ref()
+                            .is_none_or(|cur| Self::resets_sooner(cur, &err))
+                        {
+                            last_error = Some(err);
+                        }
+                        tried += 1;
+                    } else {
+                        return Err(err);
+                    }
                 }
             }
         }
@@ -636,6 +692,93 @@ mod tests {
             message: "some other CLI error".to_string(),
             code: None,
         }));
+    }
+
+    #[tokio::test]
+    async fn test_stream_no_rotation_after_content_emitted() {
+        // First key emits observable content (a TextDelta) and only THEN
+        // fails with a rotatable rate-limit error. Rotating to the next key
+        // would concatenate a second response onto the partial output, so the
+        // error must propagate and the second key's stream must never run.
+        struct PartialThenRateLimitDriver;
+
+        #[async_trait]
+        impl LlmDriver for PartialThenRateLimitDriver {
+            async fn complete(
+                &self,
+                _req: CompletionRequest,
+            ) -> Result<CompletionResponse, LlmError> {
+                unreachable!("stream path only")
+            }
+
+            async fn stream(
+                &self,
+                _req: CompletionRequest,
+                tx: tokio::sync::mpsc::Sender<StreamEvent>,
+            ) -> Result<CompletionResponse, LlmError> {
+                tx.send(StreamEvent::TextDelta {
+                    text: "partial answer".to_string(),
+                })
+                .await
+                .expect("relay receiver should be alive");
+                Err(LlmError::RateLimited {
+                    retry_after_ms: 60_000,
+                    message: None,
+                })
+            }
+        }
+
+        struct StreamCountingDriver {
+            call_count: Arc<AtomicU32>,
+        }
+
+        #[async_trait]
+        impl LlmDriver for StreamCountingDriver {
+            async fn complete(
+                &self,
+                _req: CompletionRequest,
+            ) -> Result<CompletionResponse, LlmError> {
+                Ok(ok_response("key-b"))
+            }
+
+            async fn stream(
+                &self,
+                _req: CompletionRequest,
+                _tx: tokio::sync::mpsc::Sender<StreamEvent>,
+            ) -> Result<CompletionResponse, LlmError> {
+                self.call_count.fetch_add(1, Ordering::SeqCst);
+                Ok(ok_response("key-b"))
+            }
+        }
+
+        let key_b_calls = Arc::new(AtomicU32::new(0));
+        let driver = TokenRotationDriver::new(
+            vec![
+                (Arc::new(PartialThenRateLimitDriver), "key-a".to_string()),
+                (
+                    Arc::new(StreamCountingDriver {
+                        call_count: key_b_calls.clone(),
+                    }),
+                    "key-b".to_string(),
+                ),
+            ],
+            "test-provider".to_string(),
+        );
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamEvent>(32);
+        let result = driver.stream(test_request(), tx).await;
+
+        // The rotatable error must propagate — rotation is unsafe once
+        // partial content reached the caller.
+        assert!(matches!(result, Err(LlmError::RateLimited { .. })));
+        // The second key's stream must never have been invoked.
+        assert_eq!(key_b_calls.load(Ordering::SeqCst), 0);
+        // The partial content really did reach the caller's channel.
+        let first = rx
+            .recv()
+            .await
+            .expect("caller should have received the delta");
+        assert!(matches!(first, StreamEvent::TextDelta { text } if text == "partial answer"));
     }
 
     #[test]

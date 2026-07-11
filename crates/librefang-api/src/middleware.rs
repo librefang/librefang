@@ -388,6 +388,19 @@ pub async fn request_logging(mut request: Request<Body>, next: Next) -> Response
     let uri = request.uri().path().to_string();
     let start = Instant::now();
 
+    // Prefer the matched route TEMPLATE (e.g. `/api/models/aliases/{alias}`)
+    // for the metric `path` label so free-text route params never inflate
+    // Prometheus label cardinality. `MatchedPath` is inserted by axum's
+    // router before any `Router::layer` middleware runs, so it is present
+    // for every request that matched a route. Fall back to `normalize_path`
+    // on the concrete URI only when it is absent (e.g. 404 / unmatched),
+    // which still collapses UUID/hex segments. Captured before `next.run`
+    // consumes the request.
+    let matched_path = request
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(|m| m.as_str().to_string());
+
     // #3639: stash the id in request extensions BEFORE the handler runs so
     // the [`crate::extractors::RequestId`] extractor (and any handler that
     // reads the extension directly) sees the same value that surfaces on
@@ -504,7 +517,12 @@ pub async fn request_logging(mut request: Request<Body>, next: Next) -> Response
         );
     }
 
-    metrics::record_http_request(&uri, method.as_str(), status, elapsed);
+    // Use the matched route template when available (bounded cardinality);
+    // `record_http_request` runs `normalize_path` internally, which is a
+    // no-op on an already-templated path and collapses UUID/hex on the
+    // concrete-URI fallback.
+    let metric_path = matched_path.as_deref().unwrap_or(&uri);
+    metrics::record_http_request(metric_path, method.as_str(), status, elapsed);
 
     // Inject the request ID into the response header (always).
     if let Ok(header_val) = request_id.parse() {
@@ -3273,6 +3291,45 @@ mod tests {
         // deserialize. The point of this test is that the *middleware*
         // doesn't short-circuit a 400 on malformed JSON itself.
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn request_logging_sees_matched_route_template_not_free_text_param() {
+        // Regression for finding #14: the metric `path` label must be built
+        // from the matched route TEMPLATE, not the concrete URI, so a
+        // free-text route param never inflates Prometheus label cardinality.
+        //
+        // `request_logging` reads `MatchedPath` from the request extensions
+        // before calling `next.run`; the inner handler reads the very same
+        // extension. axum inserts `MatchedPath` during routing (before any
+        // `Router::layer` middleware runs), so asserting the handler sees the
+        // template pins the exact value `request_logging` forwards to
+        // `record_http_request`. Before the fix the concrete path
+        // (`/api/models/aliases/some-free-text-alias`) was used verbatim.
+        use axum::extract::MatchedPath;
+
+        async fn echo_matched_path(matched: MatchedPath) -> String {
+            matched.as_str().to_string()
+        }
+
+        let app: Router = Router::new()
+            .route("/api/models/aliases/{alias}", get(echo_matched_path))
+            .layer(axum::middleware::from_fn(request_logging));
+
+        let req = Request::get("/api/models/aliases/some-free-text-alias")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::str::from_utf8(&body).unwrap(),
+            "/api/models/aliases/{alias}",
+            "request_logging must observe the route template, not the free-text param"
+        );
     }
 
     /// Regression for #4860: the inline login page must redirect to `/`

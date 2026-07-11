@@ -202,6 +202,16 @@ async fn dispatch_pending<K: AcpKernel>(
         }
     };
 
+    // SECURITY (#3313 H2 enforcement): the modal never offers "Allow
+    // always" for a high-risk tool, but a misbehaving / compromised ACP
+    // client can echo `option_id = "allow_always"` anyway, and
+    // `decision_from_outcome` derives `remember` purely from that
+    // client-returned id. Re-check `high_risk` here so a persisted
+    // `(agent, tool)` grant can never be installed for a high-risk tool
+    // regardless of what the client sends — the suppression lives in the
+    // decision path, not only in the option list.
+    let remember = sanitize_remember(remember, high_risk);
+
     // Persist "always" choices so future tool requests for the same
     // (agent_id, tool_name) skip the editor entirely. Done before the
     // resolve so the cache is populated by the time any concurrent
@@ -262,6 +272,14 @@ fn decision_from_outcome(outcome: RequestPermissionOutcome) -> (ApprovalDecision
             (ApprovalDecision::Denied, false)
         }
     }
+}
+
+/// Drop a `remember` ("always") flag for high-risk tools. Called after
+/// [`decision_from_outcome`] so an echoed `allow_always` / `reject_always`
+/// option id from the client can never persist a blanket grant that the
+/// modal deliberately withheld (#3313 H2).
+fn sanitize_remember(remember: bool, high_risk: bool) -> bool {
+    remember && !high_risk
 }
 
 /// Tools where a one-click "Allow always" would grant the agent
@@ -336,6 +354,35 @@ mod tests {
         assert_eq!(
             decision_from_outcome(outcome("frobnicate")),
             (ApprovalDecision::Denied, false)
+        );
+    }
+
+    #[test]
+    fn high_risk_allow_always_never_persists_even_if_client_echoes_it() {
+        // A compromised / misbehaving ACP client can echo the
+        // "allow_always" option id for a high-risk tool even though the
+        // modal never offered it. decision_from_outcome trusts the id and
+        // returns remember = true; the dispatch path must strip it.
+        let (decision, remember) = decision_from_outcome(outcome("allow_always"));
+        assert_eq!(decision, ApprovalDecision::Approved);
+        assert!(remember, "outcome parser trusts the echoed id");
+
+        let high_risk = is_high_risk_tool("shell_exec");
+        assert!(high_risk);
+        assert!(
+            !sanitize_remember(remember, high_risk),
+            "high-risk allow_always must not persist a grant"
+        );
+    }
+
+    #[test]
+    fn low_risk_allow_always_still_persists() {
+        let (_decision, remember) = decision_from_outcome(outcome("allow_always"));
+        let high_risk = is_high_risk_tool("file_read");
+        assert!(!high_risk);
+        assert!(
+            sanitize_remember(remember, high_risk),
+            "low-risk allow_always keeps the friction-reduction UX"
         );
     }
 }
