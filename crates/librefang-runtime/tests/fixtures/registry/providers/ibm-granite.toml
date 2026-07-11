@@ -1,0 +1,18 @@
+# ibm-granite — auto-generated from OpenRouter API
+
+[provider]
+id = "ibm-granite"
+display_name = "Ibm Granite"
+api_key_env = "WATSONX_API_KEY"
+base_url = "https://us-south.ml.cloud.ibm.com/ml/v1"
+key_required = true
+
+[[models]]
+id = "granite-4.0-h-micro"
+display_name = "IBM: Granite 4.0 Micro"
+tier = "fast"
+context_window = 131000
+max_output_tokens = 16384
+input_cost_per_m = 0.017
+output_cost_per_m = 0.11
+supports_streaming = true

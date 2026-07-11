@@ -183,7 +183,10 @@ type CardProps = {
 
 const ModelCard = memo(function ModelCard({ m, hidden, onOpen, onSettings, onToggleHidden, onDelete, pendingDelete }: CardProps) {
   const { t } = useTranslation();
-  const isCustom = m.tier === "custom";
+  // A live-detected CLI model (source: "cli_config") is tier "custom" but is
+  // NOT a user-added custom model — it has no persisted custom entry, so its
+  // delete button would always 404. Only treat genuine custom models as deletable.
+  const isCustom = m.tier === "custom" && m.source !== "cli_config";
   const free = m.input_cost_per_m === 0 && m.output_cost_per_m === 0;
 
   const formatCost = (cost?: number) => {

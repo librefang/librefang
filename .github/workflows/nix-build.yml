@@ -31,7 +31,9 @@ jobs:
   nix-build:
     name: nix build (${{ matrix.package }})
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Cold builds are the norm here: the Rust CI lanes churn through the repo's 10 GB Actions cache quota daily, so the /nix/store cache below is usually evicted before the next run and each leg rebuilds the full crane deps + workspace closure from scratch.
+    # A cold librefang-cli leg takes ~80-95 minutes (it was still compiling workspace crates when a 60-minute limit cancelled it), so 120 covers a cold build with margin while still catching a genuinely hung one.
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:

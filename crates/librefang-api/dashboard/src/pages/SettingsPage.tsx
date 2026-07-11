@@ -101,6 +101,8 @@ export function SettingsPage() {
 
   const languageOptions = useMemo(() => [
     { value: "en" as const, icon: Globe, label: "English" },
+    { value: "ko" as const, icon: Globe, label: "한국어" },
+    { value: "uk" as const, icon: Globe, label: "Українська" },
     { value: "zh" as const, icon: Globe, label: "中文" },
   ], []);
 

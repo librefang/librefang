@@ -60,21 +60,69 @@ librefang start
 # librefang init
 ```
 
-<details>
+<details open>
 <summary><strong>Homebrew</strong></summary>
+
+> 🎉 **LibreFang ist jetzt in [homebrew-core](https://github.com/Homebrew/homebrew-core/pull/290413)!**
+> Am 2026-07-08 in den offiziellen Homebrew-Tap aufgenommen — die CLI lässt sich ohne Einrichtung und ohne Tap installieren.
+
+```bash
+brew install librefang              # CLI (stable) — offizielles homebrew-core
+```
+
+Die Desktop-App und die Vorabversions-Kanäle werden weiterhin über den LibreFang-Tap veröffentlicht:
 
 ```bash
 brew tap librefang/tap
-brew install librefang              # CLI (stable)
 brew install --cask librefang       # Desktop (stable)
-# Beta/RC channels also available:
-# brew install librefang-beta       # or librefang-rc
-# brew install --cask librefang-rc  # or librefang-beta
+# Beta/RC-Kanäle:
+# brew install librefang-beta       # oder librefang-rc
+# brew install --cask librefang-rc  # oder librefang-beta
 ```
 
 </details>
 
-<details>
+<details open>
+<summary><strong>Arch Linux (pacman)</strong></summary>
+
+> Die AUR-Kontoregistrierung ist vorübergehend nicht verfügbar.
+> Daher veröffentlicht LibreFang signierte Pakete derzeit über sein offizielles pacman-Repository.
+
+```bash
+# LibreFang-Paketsignaturschlüssel importieren und lokal als vertrauenswürdig markieren
+curl -fsSL https://packages.librefang.ai/librefang.gpg -o /tmp/librefang.gpg
+sudo pacman-key --add /tmp/librefang.gpg
+sudo pacman-key --finger 2C325B0F88706ED99C45E216DD09DC7D3E70E1E9
+sudo pacman-key --lsign-key 2C325B0F88706ED99C45E216DD09DC7D3E70E1E9
+```
+
+Das Repository zu `/etc/pacman.conf` hinzufügen:
+
+```ini
+[librefang]
+Server = https://packages.librefang.ai/arch/$arch
+```
+
+`librefang-bin` und `librefang-desktop-bin` sind voneinander unabhängige Pakete.
+Installieren Sie nur das Paket für die gewünschte Benutzeroberfläche.
+
+#### CLI, Daemon und Web-Dashboard
+
+```bash
+sudo pacman -Syu librefang-bin
+```
+
+#### Desktop-App (nur x86_64)
+
+```bash
+sudo pacman -Syu librefang-desktop-bin
+```
+
+Details zu Paketen und aarch64-Unterstützung finden Sie in der [Arch-Repository-Dokumentation](../packaging/arch-repo/README.md).
+
+</details>
+
+<details open>
 <summary><strong>Docker</strong></summary>
 
 ```bash
@@ -83,7 +131,7 @@ docker run -p 4545:4545 ghcr.io/librefang/librefang
 
 </details>
 
-<details>
+<details open>
 <summary><strong>Cloud-Deployment</strong></summary>
 
 [![Deploy Hub](https://img.shields.io/badge/Deploy%20Hub-000?style=for-the-badge&logo=rocket)](https://deploy.librefang.ai) [![Fly.io](https://img.shields.io/badge/Fly.io-purple?style=for-the-badge&logo=fly.io)](https://deploy.librefang.ai) [![Render](https://img.shields.io/badge/Render-46E3B7?style=for-the-badge&logo=render)](https://render.com/deploy?repo=https://github.com/librefang/librefang) [![Railway](https://img.shields.io/badge/Railway-0B0D0E?style=for-the-badge&logo=railway)](https://railway.app/template/librefang) [![GCP](https://img.shields.io/badge/GCP-4285F4?style=for-the-badge&logo=googlecloud)](../deploy/gcp/README.md)

@@ -53,12 +53,12 @@ impl CodexCliDriver {
     /// Create a new Codex CLI driver.
     ///
     /// `cli_path` overrides the CLI binary path; defaults to `"codex"` on PATH.
-    /// `skip_permissions` adds `--full-auto` to the spawned command so that the CLI
-    /// runs non-interactively (required for daemon mode).
+    /// `skip_permissions` adds `--sandbox workspace-write` to the spawned command
+    /// so that the CLI runs non-interactively (required for daemon mode).
     pub fn new(cli_path: Option<String>, skip_permissions: bool) -> Self {
         if skip_permissions {
             warn!(
-                "Codex CLI driver: --full-auto enabled. \
+                "Codex CLI driver: workspace-write sandbox enabled. \
                  The CLI will not prompt for tool approvals. \
                  LibreFang's own capability/RBAC system enforces access control."
             );
@@ -124,10 +124,14 @@ impl CodexCliDriver {
 
     /// Build the CLI arguments for a given request.
     pub fn build_args(&self, prompt: &str, model: &str) -> Vec<String> {
-        let mut args = vec!["exec".to_string()];
+        // LibreFang can run as a desktop app or daemon whose current directory
+        // is not a Git repository. Codex otherwise rejects non-interactive
+        // execution before processing the prompt.
+        let mut args = vec!["exec".to_string(), "--skip-git-repo-check".to_string()];
 
         if self.skip_permissions {
-            args.push("--full-auto".to_string());
+            args.push("--sandbox".to_string());
+            args.push("workspace-write".to_string());
         }
 
         // Always skip the git-repo trust check — the daemon workspace is not
@@ -168,21 +172,18 @@ impl CodexCliDriver {
         parts.join("\n\n")
     }
 
-    /// Map a model ID like "codex-cli/o4-mini" to CLI --model flag value.
+    /// Map a model ID like "codex-cli/o4-mini" to the CLI `--model` flag; returns `None` for a bare provider id so the CLI uses its own configured model.
     fn model_flag(model: &str) -> Option<String> {
-        let stripped = model.strip_prefix("codex-cli/").unwrap_or(model);
-        match stripped {
-            "o4-mini" => Some("o4-mini".to_string()),
-            "o3" => Some("o3".to_string()),
-            "gpt-4.1" => Some("gpt-4.1".to_string()),
-            // GPT-5.5 family (Codex CLI native models, April 2026)
-            "gpt-5.5" => Some("gpt-5.5".to_string()),
-            "gpt-5.5-pro" => Some("gpt-5.5-pro".to_string()),
-            // "codex-latest" is a rolling alias that always points to the
-            // newest Codex CLI model; currently resolves to gpt-5.5.
-            "codex-latest" => Some("gpt-5.5".to_string()),
-            _ => Some(stripped.to_string()),
+        let stripped = model.strip_prefix("codex-cli/").unwrap_or(model).trim();
+        if stripped.is_empty() || stripped == "codex-cli" {
+            return None;
         }
+        // "codex-latest" is a rolling alias that always points to the
+        // newest Codex CLI model; currently resolves to gpt-5.5.
+        if stripped == "codex-latest" {
+            return Some("gpt-5.5".to_string());
+        }
+        Some(stripped.to_string())
     }
 
     /// Strip ANSI CSI escape sequences (e.g. `\x1b[1m` … `\x1b[0m`) from a
@@ -396,12 +397,18 @@ pub fn codex_cli_available() -> bool {
 
 /// Check if Codex CLI credentials exist.
 fn codex_cli_credentials_exist() -> bool {
-    if let Some(home) = home_dir() {
-        let codex_dir = home.join(".codex");
-        codex_dir.join("auth.json").exists()
-    } else {
-        false
-    }
+    codex_config_dir().is_some_and(|dir| dir.join("auth.json").exists())
+}
+
+/// Resolve the Codex CLI config directory, honouring `CODEX_HOME` exactly as
+/// the Codex CLI does (it overrides `~/.codex`). Keeping this consistent with
+/// the API layer's model detector (which also honours `CODEX_HOME`) means
+/// availability detection and configured-model detection read the same
+/// directory when Codex is relocated via `CODEX_HOME`.
+fn codex_config_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("CODEX_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| home_dir().map(|h| h.join(".codex")))
 }
 
 /// Cross-platform home directory.
@@ -448,23 +455,37 @@ mod tests {
     }
 
     #[test]
-    fn test_build_args_with_full_auto() {
+    fn test_build_args_with_workspace_write_sandbox() {
         let driver = CodexCliDriver::new(None, true);
         let args = driver.build_args("test prompt", "codex-cli/o4-mini");
-        assert_eq!(args.first().map(String::as_str), Some("exec"));
-        assert!(args.contains(&"test prompt".to_string()));
-        assert!(args.contains(&"--full-auto".to_string()));
-        assert!(args.contains(&"--model".to_string()));
-        assert!(args.contains(&"o4-mini".to_string()));
+        assert_eq!(
+            args,
+            [
+                "exec",
+                "--skip-git-repo-check",
+                "--sandbox",
+                "workspace-write",
+                "--model",
+                "o4-mini",
+                "test prompt",
+            ]
+        );
     }
 
     #[test]
-    fn test_build_args_without_full_auto() {
+    fn test_build_args_without_workspace_write_sandbox() {
         let driver = CodexCliDriver::new(None, false);
         let args = driver.build_args("test prompt", "codex-cli/o3");
-        assert!(!args.contains(&"--full-auto".to_string()));
-        assert_eq!(args.first().map(String::as_str), Some("exec"));
-        assert!(!args.contains(&"-q".to_string()));
+        assert_eq!(
+            args,
+            [
+                "exec",
+                "--skip-git-repo-check",
+                "--model",
+                "o3",
+                "test prompt",
+            ]
+        );
     }
 
     #[test]
@@ -498,6 +519,34 @@ mod tests {
             CodexCliDriver::model_flag("custom-model"),
             Some("custom-model".to_string())
         );
+        // A user-configured custom model (e.g. DeepSeek via codex-cli) passes
+        // straight through so `--model deepseek-chat` reaches the CLI.
+        assert_eq!(
+            CodexCliDriver::model_flag("codex-cli/deepseek-chat"),
+            Some("deepseek-chat".to_string())
+        );
+    }
+
+    #[test]
+    fn test_model_flag_bare_provider_id_yields_none() {
+        // A bare provider id or empty string means "no explicit model" — the
+        // driver must omit `--model` so the Codex CLI uses the model from its
+        // own ~/.codex/config.toml instead of a forced placeholder.
+        assert_eq!(CodexCliDriver::model_flag("codex-cli"), None);
+        assert_eq!(CodexCliDriver::model_flag("codex-cli/"), None);
+        assert_eq!(CodexCliDriver::model_flag(""), None);
+        assert_eq!(CodexCliDriver::model_flag("  "), None);
+    }
+
+    #[test]
+    fn test_build_args_omits_model_for_bare_provider() {
+        // With no specific model, `--model` must be absent entirely so Codex
+        // honours its own configured model (regression guard for the override
+        // that forced a placeholder onto a DeepSeek-configured Codex CLI).
+        let driver = CodexCliDriver::new(None, false);
+        let args = driver.build_args("hello", "codex-cli");
+        assert_eq!(args, ["exec", "--skip-git-repo-check", "hello"]);
+        assert!(!args.iter().any(|a| a == "--model"));
     }
 
     #[test]

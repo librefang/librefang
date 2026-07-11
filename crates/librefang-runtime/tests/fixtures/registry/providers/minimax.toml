@@ -1,0 +1,220 @@
+# MiniMax — https://minimax.io
+# Models: 14 (4 text + 1 image + 4 audio TTS + 3 video + 2 music)
+# Regions: international (default), china (minimaxi.com)
+#
+# Non-text models are billed per call rather than per token, so
+# input_cost_per_m / output_cost_per_m are set to 0.0 and the actual
+# rate is documented in the inline comment above each entry.
+# Source: https://platform.minimax.io/docs/guides/pricing-paygo
+
+[provider]
+id = "minimax"
+display_name = "MiniMax"
+api_key_env = "MINIMAX_API_KEY"
+base_url = "https://api.minimax.io/v1"
+key_required = true
+media_capabilities = [
+  "image_generation",
+  "text_to_speech",
+  "video_generation",
+  "music_generation",
+]
+
+[provider.regions.china]
+base_url = "https://api.minimaxi.com/v1"
+api_key_env = "MINIMAX_CN_API_KEY"
+
+[[models]]
+id = "MiniMax-M2.7"
+display_name = "MiniMax M2.7"
+tier = "frontier"
+context_window = 204800
+max_output_tokens = 131072
+input_cost_per_m = 0.30
+output_cost_per_m = 1.20
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["minimax-m2.7"]
+
+[[models]]
+id = "MiniMax-M2.7-highspeed"
+display_name = "MiniMax M2.7 Highspeed"
+tier = "smart"
+context_window = 204800
+max_output_tokens = 131072
+input_cost_per_m = 0.30
+output_cost_per_m = 1.20
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["minimax-m2.7-highspeed", "m2.7-highspeed"]
+
+[[models]]
+id = "MiniMax-M2.5"
+display_name = "MiniMax M2.5"
+tier = "frontier"
+context_window = 1048576
+max_output_tokens = 16384
+input_cost_per_m = 1.10
+output_cost_per_m = 4.40
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = ["minimax-m2.5"]
+
+[[models]]
+id = "MiniMax-M2.5-highspeed"
+display_name = "MiniMax M2.5 Highspeed"
+tier = "smart"
+context_window = 1048576
+max_output_tokens = 16384
+input_cost_per_m = 0.80
+output_cost_per_m = 3.20
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = ["minimax-m2.5-highspeed", "m2.5-highspeed"]
+
+# --- Image generation ---
+
+# $0.0035 per image
+[[models]]
+id = "image-01"
+display_name = "MiniMax Image 01"
+tier = "smart"
+modality = "image"
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = false
+supports_vision = false
+supports_streaming = false
+aliases = ["minimax-image"]
+
+# --- Text-to-speech ---
+
+# $100 per 1M characters
+[[models]]
+id = "speech-2.8-hd"
+display_name = "MiniMax Speech 2.8 HD"
+tier = "frontier"
+modality = "audio"
+input_cost_per_m = 100.0
+output_cost_per_m = 0.0
+supports_tools = false
+supports_vision = false
+supports_streaming = true
+aliases = ["minimax-tts-hd", "speech-hd"]
+
+# $60 per 1M characters
+[[models]]
+id = "speech-2.8-turbo"
+display_name = "MiniMax Speech 2.8 Turbo"
+tier = "fast"
+modality = "audio"
+input_cost_per_m = 60.0
+output_cost_per_m = 0.0
+supports_tools = false
+supports_vision = false
+supports_streaming = true
+aliases = ["minimax-tts-turbo", "speech-turbo"]
+
+# $100 per 1M characters
+[[models]]
+id = "speech-2.6-hd"
+display_name = "MiniMax Speech 2.6 HD"
+tier = "smart"
+modality = "audio"
+input_cost_per_m = 100.0
+output_cost_per_m = 0.0
+supports_tools = false
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+# $60 per 1M characters
+[[models]]
+id = "speech-2.6-turbo"
+display_name = "MiniMax Speech 2.6 Turbo"
+tier = "fast"
+modality = "audio"
+input_cost_per_m = 60.0
+output_cost_per_m = 0.0
+supports_tools = false
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+# --- Video generation (Hailuo) ---
+
+# Per-call: $0.19 (768P/6s) up to $0.33 (1080P/6s)
+[[models]]
+id = "MiniMax-Hailuo-2.3-Fast"
+display_name = "Hailuo 2.3 Fast"
+tier = "fast"
+modality = "video"
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+per_call_cost = 0.33
+supports_tools = false
+supports_vision = false
+supports_streaming = false
+aliases = ["hailuo-2.3-fast", "hailuo-fast"]
+
+# Per-call: $0.28 (768P/6s) up to $0.56 (1080P/6s)
+[[models]]
+id = "MiniMax-Hailuo-2.3"
+display_name = "Hailuo 2.3"
+tier = "frontier"
+modality = "video"
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+per_call_cost = 0.56
+supports_tools = false
+supports_vision = false
+supports_streaming = false
+aliases = ["hailuo-2.3", "hailuo"]
+
+# Per-call: $0.10 (512P/6s) up to $0.56 (1080P/6s)
+[[models]]
+id = "MiniMax-Hailuo-02"
+display_name = "Hailuo 02"
+tier = "smart"
+modality = "video"
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+per_call_cost = 0.56
+supports_tools = false
+supports_vision = false
+supports_streaming = false
+aliases = ["hailuo-02"]
+
+# --- Music generation ---
+
+# $0.15 per up-to-5-minute track
+[[models]]
+id = "music-2.6"
+display_name = "MiniMax Music 2.6"
+tier = "frontier"
+modality = "music"
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+per_call_cost = 0.15
+supports_tools = false
+supports_vision = false
+supports_streaming = false
+aliases = ["minimax-music"]
+
+# $0.01 per song
+[[models]]
+id = "lyrics_generation"
+display_name = "MiniMax Lyrics Generation"
+tier = "fast"
+modality = "music"
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+per_call_cost = 0.01
+supports_tools = false
+supports_vision = false
+supports_streaming = false
+aliases = ["minimax-lyrics"]

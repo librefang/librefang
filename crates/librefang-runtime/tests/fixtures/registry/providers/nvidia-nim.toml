@@ -1,0 +1,195 @@
+# NVIDIA NIM — https://build.nvidia.com
+# Models: 14
+
+[provider]
+id = "nvidia-nim"
+display_name = "NVIDIA NIM"
+api_key_env = "NVIDIA_API_KEY"
+base_url = "https://integrate.api.nvidia.com/v1"
+key_required = true
+
+# ── NVIDIA models ────────────────────────────────────────────────
+
+[[models]]
+id = "nvidia/llama-3.1-nemotron-ultra-253b-v1"
+display_name = "Nemotron Ultra 253B"
+tier = "frontier"
+context_window = 128000
+max_output_tokens = 4096
+input_cost_per_m = 0.6
+output_cost_per_m = 1.8
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["nemotron-ultra"]
+
+[[models]]
+id = "nvidia/llama-3.3-nemotron-super-49b-v1.5"
+display_name = "Nemotron Super 49B v1.5"
+tier = "smart"
+context_window = 128000
+max_output_tokens = 4096
+input_cost_per_m = 0.1
+output_cost_per_m = 0.40
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["nemotron-super"]
+
+# ── Meta Llama models ────────────────────────────────────────────
+
+[[models]]
+id = "meta/llama-4-maverick-17b-128e-instruct"
+display_name = "Llama 4 Maverick 128E"
+tier = "frontier"
+context_window = 128000
+max_output_tokens = 4096
+input_cost_per_m = 0.80
+output_cost_per_m = 0.80
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = ["llama4-maverick"]
+
+[[models]]
+id = "meta/llama-4-scout-17b-16e-instruct"
+display_name = "Llama 4 Scout 16E"
+tier = "smart"
+context_window = 128000
+max_output_tokens = 4096
+input_cost_per_m = 0.15
+output_cost_per_m = 0.40
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = ["llama4-scout"]
+
+[[models]]
+id = "meta/llama-3.3-70b-instruct"
+display_name = "Llama 3.3 70B"
+tier = "balanced"
+context_window = 128000
+max_output_tokens = 4096
+input_cost_per_m = 0.10
+output_cost_per_m = 0.10
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["llama-70b"]
+
+# ── Mistral models ───────────────────────────────────────────────
+
+[[models]]
+id = "mistralai/mistral-large-3-675b-instruct-2512"
+display_name = "Mistral Large 3 675B"
+tier = "frontier"
+context_window = 128000
+max_output_tokens = 4096
+input_cost_per_m = 1.50
+output_cost_per_m = 4.50
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["mistral-large-3"]
+
+# ── DeepSeek models ──────────────────────────────────────────────
+
+[[models]]
+id = "deepseek-ai/deepseek-v3.2"
+display_name = "DeepSeek V3.2"
+tier = "frontier"
+context_window = 128000
+max_output_tokens = 8192
+input_cost_per_m = 0.50
+output_cost_per_m = 2.00
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["deepseek-v3"]
+
+# ── Qwen models ──────────────────────────────────────────────────
+
+[[models]]
+id = "qwen/qwen3.5-397b-a17b"
+display_name = "Qwen 3.5 397B MoE"
+tier = "frontier"
+context_window = 128000
+max_output_tokens = 8192
+input_cost_per_m = 0.39
+output_cost_per_m = 2.34
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+supports_thinking = true
+aliases = ["qwen3.5"]
+
+# ── Google Gemma models ──────────────────────────────────────────
+
+[[models]]
+id = "google/gemma-3-27b-it"
+display_name = "Gemma 3 27B"
+tier = "balanced"
+context_window = 128000
+max_output_tokens = 4096
+input_cost_per_m = 0.08
+output_cost_per_m = 0.16
+supports_tools = false
+supports_vision = false
+supports_streaming = true
+aliases = ["gemma"]
+
+# ── Microsoft Phi models ─────────────────────────────────────────
+
+[[models]]
+id = "microsoft/phi-4-multimodal-instruct"
+display_name = "Phi-4 Multimodal"
+tier = "balanced"
+context_window = 128000
+max_output_tokens = 4096
+input_cost_per_m = 0.07
+output_cost_per_m = 0.07
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = ["phi-4"]
+
+[[models]]
+id = "nvidia/nemotron-3-nano-30b-a3b"
+display_name = "Nvidia: Nemotron 3 Nano 30B"
+tier = "fast"
+context_window = 131072
+max_output_tokens = 32768
+input_cost_per_m = 0.05
+output_cost_per_m = 0.2
+supports_streaming = true
+
+[[models]]
+id = "nvidia/nemotron-3-super-120b-a12b"
+display_name = "Nvidia: Nemotron 3 Super 120B"
+tier = "smart"
+context_window = 131072
+max_output_tokens = 32768
+input_cost_per_m = 0.09
+output_cost_per_m = 0.45
+supports_streaming = true
+
+[[models]]
+id = "nvidia/nemotron-nano-12b-v2-vl"
+display_name = "Nvidia: Nemotron Nano 12B V2 VL"
+tier = "fast"
+context_window = 131072
+max_output_tokens = 32768
+input_cost_per_m = 0.2
+output_cost_per_m = 0.6
+supports_vision = true
+supports_streaming = true
+
+[[models]]
+id = "nvidia/nemotron-nano-9b-v2"
+display_name = "Nvidia: Nemotron Nano 9B V2"
+tier = "fast"
+context_window = 131072
+max_output_tokens = 32768
+input_cost_per_m = 0.04
+output_cost_per_m = 0.16
+supports_streaming = true

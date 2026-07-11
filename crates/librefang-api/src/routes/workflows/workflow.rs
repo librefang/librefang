@@ -1537,7 +1537,7 @@ pub async fn save_workflow_as_template(
     if let Err(e) = tokio::fs::create_dir_all(&templates_dir).await {
         warn!("Failed to create templates directory: {e}");
     } else {
-        let toml_path = templates_dir.join(format!("{}.toml", &template.id));
+        let toml_path = templates_dir.join(format!("{}.toml", template.id));
         match toml::to_string_pretty(&template) {
             Ok(toml_str) => {
                 if let Err(e) = tokio::fs::write(&toml_path, toml_str).await {

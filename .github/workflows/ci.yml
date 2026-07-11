@@ -718,6 +718,9 @@ jobs:
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ubuntu-latest
+    env:
+      # Registry fetches in test-booted kernels are non-hermetic (network-dependent test outcomes, one git clone per kernel boot) — see #6404 and the PR #6384 CI failure this switch prevents.
+      LIBREFANG_REGISTRY_OFFLINE: "1"
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -785,6 +788,9 @@ jobs:
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ubuntu-latest
+    env:
+      # Registry fetches in test-booted kernels are non-hermetic (network-dependent test outcomes, one git clone per kernel boot) — see #6404 and the PR #6384 CI failure this switch prevents.
+      LIBREFANG_REGISTRY_OFFLINE: "1"
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -906,6 +912,9 @@ jobs:
     needs: changes
     if: (github.event_name == 'push' || github.event_name == 'merge_group') && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true')
     runs-on: windows-latest
+    env:
+      # Registry fetches in test-booted kernels are non-hermetic (network-dependent test outcomes, one git clone per kernel boot) — see #6404 and the PR #6384 CI failure this switch prevents.
+      LIBREFANG_REGISTRY_OFFLINE: "1"
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -944,6 +953,9 @@ jobs:
     needs: changes
     if: (github.event_name == 'push' || github.event_name == 'merge_group') && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true')
     runs-on: macos-latest
+    env:
+      # Registry fetches in test-booted kernels are non-hermetic (network-dependent test outcomes, one git clone per kernel boot) — see #6404 and the PR #6384 CI failure this switch prevents.
+      LIBREFANG_REGISTRY_OFFLINE: "1"
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7

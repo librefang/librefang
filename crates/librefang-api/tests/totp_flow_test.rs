@@ -156,7 +156,7 @@ async fn setup_returns_secret_uri_qr_and_recovery_codes() {
     assert!(
         qr.starts_with("data:image/png;base64,"),
         "qr_code must be a data: URI, got prefix {:?}",
-        &qr.chars().take(30).collect::<String>()
+        qr.chars().take(30).collect::<String>()
     );
 
     let codes = body["recovery_codes"].as_array().expect("recovery_codes");

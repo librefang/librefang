@@ -1,0 +1,41 @@
+# Z.AI — https://api.z.ai (international front-end of the same Zhipu backend)
+# Models: 2
+#
+# `zai` and `zhipu` (open.bigmodel.cn) point at the same upstream account
+# system but are surfaced as distinct providers in the dashboard. Each now
+# uses its own env so configuring one key doesn't auto-activate both —
+# export the same Zhipu API key value under whichever name(s) you actually
+# use. See librefang/librefang#3282.
+
+[provider]
+id = "zai"
+display_name = "Z.AI"
+api_key_env = "ZAI_API_KEY"
+base_url = "https://api.z.ai/api/paas/v4"
+key_required = true
+
+[[models]]
+id = "zai/glm-5-20250605"
+display_name = "GLM-5 (Z.AI)"
+tier = "frontier"
+context_window = 131072
+max_output_tokens = 16384
+input_cost_per_m = 1.0
+output_cost_per_m = 3.2
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = ["zai-glm-5"]
+
+[[models]]
+id = "zai/glm-4.7"
+display_name = "GLM-4.7 (Z.AI)"
+tier = "smart"
+context_window = 131072
+max_output_tokens = 16384
+input_cost_per_m = 0.6
+output_cost_per_m = 2.2
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = ["zai-glm-4.7"]

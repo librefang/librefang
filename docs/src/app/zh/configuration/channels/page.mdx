@@ -102,8 +102,8 @@ WHATSAPP_WEBHOOK_PORT = "8460"
 # WHATSAPP_WEBHOOK_PATH = "/webhook"
 # WHATSAPP_ALLOWED_USERS = "+15551111,+15552222"
 # WHATSAPP_ACCOUNT_ID = "production"
-# WHATSAPP_DM_POLICY = "respond"          # respond / allowed_only / ignore
-# WHATSAPP_GROUP_POLICY = "all"           # all / mention_only / commands_only / ignore
+# WHATSAPP_DM_POLICY = "respond"          # respond / allowed_only / ignore（仅 Cloud API webhook 模式生效）
+# WHATSAPP_GROUP_POLICY = "all"           # 会被读取但目前两种模式下都不生效
 ```
 
 `WHATSAPP_ACCESS_TOKEN`、`WHATSAPP_VERIFY_TOKEN`（用于 Meta Webhook 订阅握手）、`WHATSAPP_APP_SECRET`（入站 `X-Hub-Signature-256` 的 HMAC 密钥）写入 `~/.librefang/secrets.env`。sidecar 在 `WHATSAPP_WEBHOOK_PORT`（默认 8460）上自己跑 webhook server —— Meta 后台填的 Webhook 订阅 URL 变成 `https://<host>:<WHATSAPP_WEBHOOK_PORT><WHATSAPP_WEBHOOK_PATH>`。
@@ -573,7 +573,7 @@ channel_type = "wechat"
 | 旧的 override | 现在对应的 sidecar 写法 |
 |---|---|
 | `model`、`system_prompt` | 在 agent（`agent.toml`）上设置而不是按通道 —— sidecar 把每个入站都路由到同一个 agent。 |
-| `dm_policy`、`group_policy` | 写到 `[sidecar_channels.env]` 块里的 `*_DM_POLICY` / `*_GROUP_POLICY` 环境变量（Telegram / Discord / Slack / WhatsApp / Teams 五个 sidecar 都识别这套）。 |
+| `dm_policy`、`group_policy` | 移到了 agent 上：写在 `agent.toml [channel_overrides]` 里 —— channel bridge 在每次派发时强制执行，`allowed_only` 的用户白名单由 `[[users]]` channel bindings（RBAC）背书。它们不是 sidecar 环境变量：只有 WhatsApp sidecar 读 `WHATSAPP_DM_POLICY`（仅 Cloud API webhook 模式生效），`WHATSAPP_GROUP_POLICY` 会被读取但目前不生效，Telegram / Discord / Slack / Teams 四个 sidecar 完全不读 `*_DM_POLICY` / `*_GROUP_POLICY`。 |
 | `rate_limit_per_minute`、`rate_limit_per_user` | Sidecar 自己按平台限流；要更严的话，在 sidecar 前面套反向代理。 |
 | `output_format` | `[[sidecar_channels]]` 没暴露这个 knob；需要特定输出格式的 agent 应在 agent 侧切换。 |
 | `disable_commands`、`allowed_commands`、`blocked_commands` | 在 agent 清单（`agent.toml`）的命令策略区块设置 —— 跨通道统一生效。 |

@@ -60,21 +60,69 @@ librefang start
 # librefang init
 ```
 
-<details>
+<details open>
 <summary><strong>Homebrew</strong></summary>
+
+> 🎉 **LibreFang が [homebrew-core](https://github.com/Homebrew/homebrew-core/pull/290413) に登録されました！**
+> 2026-07-08 に公式 Homebrew に採用されました — tap 不要、追加設定なしで CLI をインストールできます。
+
+```bash
+brew install librefang              # CLI (stable) — 公式 homebrew-core
+```
+
+デスクトップ版とプレリリースチャンネルは引き続き LibreFang tap から配布されます：
 
 ```bash
 brew tap librefang/tap
-brew install librefang              # CLI (stable)
 brew install --cask librefang       # Desktop (stable)
-# Beta/RC channels also available:
-# brew install librefang-beta       # or librefang-rc
-# brew install --cask librefang-rc  # or librefang-beta
+# Beta/RC チャンネル：
+# brew install librefang-beta       # または librefang-rc
+# brew install --cask librefang-rc  # または librefang-beta
 ```
 
 </details>
 
-<details>
+<details open>
+<summary><strong>Arch Linux (pacman)</strong></summary>
+
+> AUR のアカウント登録は一時的に利用できません。
+> そのため、LibreFang は現在、公式 pacman リポジトリを通じて署名済みパッケージを公開しています。
+
+```bash
+# LibreFang パッケージ署名鍵をインポートし、ローカルで信頼する
+curl -fsSL https://packages.librefang.ai/librefang.gpg -o /tmp/librefang.gpg
+sudo pacman-key --add /tmp/librefang.gpg
+sudo pacman-key --finger 2C325B0F88706ED99C45E216DD09DC7D3E70E1E9
+sudo pacman-key --lsign-key 2C325B0F88706ED99C45E216DD09DC7D3E70E1E9
+```
+
+リポジトリを `/etc/pacman.conf` に追加します：
+
+```ini
+[librefang]
+Server = https://packages.librefang.ai/arch/$arch
+```
+
+`librefang-bin` と `librefang-desktop-bin` は独立したパッケージです。
+必要なインターフェースのパッケージだけをインストールしてください。
+
+#### CLI、デーモン、Web ダッシュボード
+
+```bash
+sudo pacman -Syu librefang-bin
+```
+
+#### デスクトップアプリ（x86_64 のみ）
+
+```bash
+sudo pacman -Syu librefang-desktop-bin
+```
+
+パッケージの詳細と aarch64 のサポートについては、[Arch リポジトリのドキュメント](../packaging/arch-repo/README.md)を参照してください。
+
+</details>
+
+<details open>
 <summary><strong>Docker</strong></summary>
 
 ```bash
@@ -83,7 +131,7 @@ docker run -p 4545:4545 ghcr.io/librefang/librefang
 
 </details>
 
-<details>
+<details open>
 <summary><strong>クラウドデプロイ</strong></summary>
 
 [![Deploy Hub](https://img.shields.io/badge/Deploy%20Hub-000?style=for-the-badge&logo=rocket)](https://deploy.librefang.ai) [![Fly.io](https://img.shields.io/badge/Fly.io-purple?style=for-the-badge&logo=fly.io)](https://deploy.librefang.ai) [![Render](https://img.shields.io/badge/Render-46E3B7?style=for-the-badge&logo=render)](https://render.com/deploy?repo=https://github.com/librefang/librefang) [![Railway](https://img.shields.io/badge/Railway-0B0D0E?style=for-the-badge&logo=railway)](https://railway.app/template/librefang) [![GCP](https://img.shields.io/badge/GCP-4285F4?style=for-the-badge&logo=googlecloud)](../deploy/gcp/README.md)

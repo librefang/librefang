@@ -577,7 +577,7 @@ fn draw_send_modal(f: &mut Frame, area: Rect, state: &CommsState) {
     );
     f.render_widget(
         Paragraph::new(Span::styled(
-            format!("  {}█", &state.send_from),
+            format!("  {}█", state.send_from),
             Style::default().fg(theme::TEXT),
         )),
         rows[1],
@@ -591,7 +591,7 @@ fn draw_send_modal(f: &mut Frame, area: Rect, state: &CommsState) {
     );
     f.render_widget(
         Paragraph::new(Span::styled(
-            format!("  {}█", &state.send_to),
+            format!("  {}█", state.send_to),
             Style::default().fg(theme::TEXT),
         )),
         rows[3],
@@ -605,7 +605,7 @@ fn draw_send_modal(f: &mut Frame, area: Rect, state: &CommsState) {
     );
     f.render_widget(
         Paragraph::new(Span::styled(
-            format!("  {}█", &state.send_msg),
+            format!("  {}█", state.send_msg),
             Style::default().fg(theme::TEXT),
         )),
         rows[5],
@@ -662,7 +662,7 @@ fn draw_task_modal(f: &mut Frame, area: Rect, state: &CommsState) {
     );
     f.render_widget(
         Paragraph::new(Span::styled(
-            format!("  {}█", &state.task_title),
+            format!("  {}█", state.task_title),
             Style::default().fg(theme::TEXT),
         )),
         rows[1],
@@ -676,7 +676,7 @@ fn draw_task_modal(f: &mut Frame, area: Rect, state: &CommsState) {
     );
     f.render_widget(
         Paragraph::new(Span::styled(
-            format!("  {}█", &state.task_desc),
+            format!("  {}█", state.task_desc),
             Style::default().fg(theme::TEXT),
         )),
         rows[3],
@@ -690,7 +690,7 @@ fn draw_task_modal(f: &mut Frame, area: Rect, state: &CommsState) {
     );
     f.render_widget(
         Paragraph::new(Span::styled(
-            format!("  {}█", &state.task_assign),
+            format!("  {}█", state.task_assign),
             Style::default().fg(theme::TEXT),
         )),
         rows[5],

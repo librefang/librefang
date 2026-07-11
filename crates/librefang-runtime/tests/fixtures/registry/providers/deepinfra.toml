@@ -1,0 +1,21 @@
+# DeepInfra — https://deepinfra.com
+# Serverless open-model inference (Llama, Mistral, Qwen, etc.)
+
+[provider]
+id = "deepinfra"
+display_name = "DeepInfra"
+api_key_env = "DEEPINFRA_API_KEY"
+base_url = "https://api.deepinfra.com/v1/openai"
+key_required = true
+
+[[models]]
+id = "Qwen/Qwen2.5-72B-Instruct"
+display_name = "Qwen 2.5 72B Instruct"
+tier = "balanced"
+context_window = 32768
+max_output_tokens = 8192
+input_cost_per_m = 0.35
+output_cost_per_m = 0.4
+supports_tools = true
+supports_vision = false
+supports_streaming = true

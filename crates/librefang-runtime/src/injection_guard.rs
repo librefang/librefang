@@ -20,23 +20,9 @@
 /// A set of invisible / zero-width unicode code points that are meaningless in
 /// normal human text but are frequently used to smuggle hidden instructions.
 ///
-/// Kept in sync with `librefang-skills::verify::INVISIBLE_CHARS` and the
-/// `INVISIBLE_PROMPT_CHARS` copies in
-/// `librefang-runtime::prompt_builder` / `librefang-kernel::kernel::prompt_context`.
-/// Covers zero-width / joiner code points, bidi marks / embeddings / overrides /
-/// isolates, and the text-variation selectors (U+FE00–U+FE0F).
-const INVISIBLE_CHARS: &[char] = &[
-    // Zero-width & joiner code points
-    '\u{00AD}', '\u{034F}', '\u{115F}', '\u{1160}', '\u{17B4}', '\u{17B5}', '\u{180E}', '\u{200B}',
-    '\u{200C}', '\u{200D}', '\u{2060}', '\u{2061}', '\u{2062}', '\u{2063}', '\u{2064}', '\u{3164}',
-    '\u{FEFF}', '\u{FFA0}', //
-    // Bidi marks / embeddings / overrides / isolates
-    '\u{061C}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}',
-    '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}', //
-    // Variation selectors (text-injection hiding)
-    '\u{FE00}', '\u{FE01}', '\u{FE02}', '\u{FE03}', '\u{FE04}', '\u{FE05}', '\u{FE06}', '\u{FE07}',
-    '\u{FE08}', '\u{FE09}', '\u{FE0A}', '\u{FE0B}', '\u{FE0C}', '\u{FE0D}', '\u{FE0E}', '\u{FE0F}',
-];
+/// Aliases the single source of truth `librefang_types::text::INVISIBLE_FORMAT_CHARS`,
+/// so this scanner strips exactly the same code points as the skill verifier and the prompt-builder sanitizers with no risk of the copies drifting apart.
+const INVISIBLE_CHARS: &[char] = librefang_types::text::INVISIBLE_FORMAT_CHARS;
 
 /// Text patterns that strongly indicate a prompt injection attempt.
 ///

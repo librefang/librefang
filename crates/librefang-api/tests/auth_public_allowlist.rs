@@ -48,13 +48,8 @@ impl Drop for RouterHarness {
 async fn boot_router_with_api_key(api_key: &str) -> RouterHarness {
     let tmp = tempfile::tempdir().expect("tempdir");
 
-    // Populate the registry cache so the kernel boots without network access.
-    librefang_kernel::registry_sync::sync_registry(
-        tmp.path(),
-        librefang_kernel::registry_sync::DEFAULT_CACHE_TTL_SECS,
-        "",
-        None,
-    );
+    // Seed the pinned registry fixture so the kernel boots with content, offline.
+    librefang_kernel::registry_sync::seed_registry_fixture_for_tests(tmp.path());
 
     let config = KernelConfig {
         home_dir: tmp.path().to_path_buf(),
@@ -92,12 +87,7 @@ async fn boot_router_with_api_key(api_key: &str) -> RouterHarness {
 /// enabled here (enabling it would require `LIBREFANG_STATE_SECRET`).
 async fn boot_router_strict_reads() -> RouterHarness {
     let tmp = tempfile::tempdir().expect("tempdir");
-    librefang_kernel::registry_sync::sync_registry(
-        tmp.path(),
-        librefang_kernel::registry_sync::DEFAULT_CACHE_TTL_SECS,
-        "",
-        None,
-    );
+    librefang_kernel::registry_sync::seed_registry_fixture_for_tests(tmp.path());
 
     let config = KernelConfig {
         home_dir: tmp.path().to_path_buf(),
@@ -267,6 +257,7 @@ const REGISTERED_GET_ROUTES: &[RouteEntry] = &[
     re("/dashboard/manifest.json", Expect::AlwaysPublic),
     re("/dashboard/sw.js", Expect::AlwaysPublic),
     re("/locales/en.json", Expect::AlwaysPublic),
+    re("/locales/ko.json", Expect::AlwaysPublic),
     // GitHub Copilot OAuth must now require auth — pre-fix it was
     // an unauthenticated POST + GET prefix that allowed a hostile
     // pop-under to hijack GITHUB_TOKEN via localhost (audit:
@@ -644,12 +635,7 @@ async fn auth_providers_open_mode_returns_names_only() {
     );
 
     let tmp = tempfile::tempdir().expect("tempdir");
-    librefang_kernel::registry_sync::sync_registry(
-        tmp.path(),
-        librefang_kernel::registry_sync::DEFAULT_CACHE_TTL_SECS,
-        "",
-        None,
-    );
+    librefang_kernel::registry_sync::seed_registry_fixture_for_tests(tmp.path());
     let config = KernelConfig {
         home_dir: tmp.path().to_path_buf(),
         data_dir: tmp.path().join("data"),

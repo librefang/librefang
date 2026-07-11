@@ -60,21 +60,68 @@ librefang start
 # librefang init
 ```
 
-<details>
+<details open>
 <summary><strong>Homebrew</strong></summary>
+
+> 🎉 **LibreFang 已进入 [homebrew-core](https://github.com/Homebrew/homebrew-core/pull/290413)！**
+> 2026-07-08 正式合入官方 Homebrew 仓库——安装 CLI 无需额外配置，也无需再 tap。
+
+```bash
+brew install librefang              # CLI (stable) — 官方 homebrew-core
+```
+
+桌面版和预发布渠道仍通过 LibreFang tap 发布：
 
 ```bash
 brew tap librefang/tap
-brew install librefang              # CLI (stable)
 brew install --cask librefang       # Desktop (stable)
-# Beta/RC channels also available:
-# brew install librefang-beta       # or librefang-rc
-# brew install --cask librefang-rc  # or librefang-beta
+# Beta/RC 渠道：
+# brew install librefang-beta       # 或 librefang-rc
+# brew install --cask librefang-rc  # 或 librefang-beta
 ```
 
 </details>
 
-<details>
+<details open>
+<summary><strong>Arch Linux (pacman)</strong></summary>
+
+> AUR 账户注册目前暂时不可用，因此 LibreFang 目前通过官方 pacman 仓库发布已签名的软件包。
+
+```bash
+# 导入并在本地信任 LibreFang 软件包签名密钥
+curl -fsSL https://packages.librefang.ai/librefang.gpg -o /tmp/librefang.gpg
+sudo pacman-key --add /tmp/librefang.gpg
+sudo pacman-key --finger 2C325B0F88706ED99C45E216DD09DC7D3E70E1E9
+sudo pacman-key --lsign-key 2C325B0F88706ED99C45E216DD09DC7D3E70E1E9
+```
+
+将仓库添加到 `/etc/pacman.conf`：
+
+```ini
+[librefang]
+Server = https://packages.librefang.ai/arch/$arch
+```
+
+`librefang-bin` 和 `librefang-desktop-bin` 是相互独立的软件包。
+只需安装所需界面对应的软件包。
+
+#### CLI、守护进程和 Web Dashboard
+
+```bash
+sudo pacman -Syu librefang-bin
+```
+
+#### 桌面应用（仅支持 x86_64）
+
+```bash
+sudo pacman -Syu librefang-desktop-bin
+```
+
+有关软件包详情和 aarch64 支持，请参阅 [Arch 仓库文档](../packaging/arch-repo/README.md)。
+
+</details>
+
+<details open>
 <summary><strong>Docker</strong></summary>
 
 ```bash
@@ -83,7 +130,7 @@ docker run -p 4545:4545 ghcr.io/librefang/librefang
 
 </details>
 
-<details>
+<details open>
 <summary><strong>云部署</strong></summary>
 
 [![Deploy Hub](https://img.shields.io/badge/Deploy%20Hub-000?style=for-the-badge&logo=rocket)](https://deploy.librefang.ai) [![Fly.io](https://img.shields.io/badge/Fly.io-purple?style=for-the-badge&logo=fly.io)](https://deploy.librefang.ai) [![Render](https://img.shields.io/badge/Render-46E3B7?style=for-the-badge&logo=render)](https://render.com/deploy?repo=https://github.com/librefang/librefang) [![Railway](https://img.shields.io/badge/Railway-0B0D0E?style=for-the-badge&logo=railway)](https://railway.app/template/librefang) [![GCP](https://img.shields.io/badge/GCP-4285F4?style=for-the-badge&logo=googlecloud)](../deploy/gcp/README.md)

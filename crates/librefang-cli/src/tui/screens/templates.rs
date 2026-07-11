@@ -341,7 +341,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
                         Style::default().fg(theme::CYAN),
                     ),
                     Span::styled(
-                        format!(" {:<14}", &localized_cat),
+                        format!(" {:<14}", localized_cat),
                         Style::default().fg(theme::YELLOW),
                     ),
                     Span::styled(

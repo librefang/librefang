@@ -708,6 +708,40 @@ fn test_spawn_with_unknown_parent_fails_closed() {
     kernel.shutdown();
 }
 
+/// #6398: the global `[thinking]` backfill is suppressed only for models the
+/// catalog positively marks as non-reasoning.
+/// Unknown/custom models keep the historical backfill so explicit operator
+/// setups are never silently degraded; a known `supports_thinking = false`
+/// model no longer inherits the global budget (which the OpenAI-compat
+/// driver would now translate into a rejected `reasoning_effort` param).
+#[test]
+fn global_thinking_backfill_gated_on_catalog_capability() {
+    use librefang_runtime::model_catalog::ModelCatalog;
+    use librefang_types::model_catalog::ModelCatalogEntry;
+
+    let thinker = ModelCatalogEntry {
+        id: "openai/o4".to_string(),
+        provider: "openai".to_string(),
+        supports_thinking: true,
+        ..Default::default()
+    };
+    let plain = ModelCatalogEntry {
+        id: "openai/gpt-4o".to_string(),
+        provider: "openai".to_string(),
+        supports_thinking: false,
+        ..Default::default()
+    };
+    let catalog = ModelCatalog::from_entries(vec![thinker, plain], Vec::new());
+
+    use super::manifest_helpers::global_thinking_backfill_allowed;
+    assert!(global_thinking_backfill_allowed(&catalog, "openai/o4"));
+    assert!(!global_thinking_backfill_allowed(&catalog, "openai/gpt-4o"));
+    assert!(
+        global_thinking_backfill_allowed(&catalog, "totally-unknown-model"),
+        "an unknown model must keep the historical backfill"
+    );
+}
+
 /// Regression: switching an agent's provider via `set_agent_model` must
 /// clear any stale per-agent `api_key_env` / `base_url` overrides. Before
 /// the fix, `update_model_and_provider` only touched `model.provider` and
@@ -856,6 +890,8 @@ fn test_hand_activation_does_not_seed_runtime_tool_filters() {
     let tmp = tempfile::tempdir().unwrap();
     let home_dir = tmp.path().join("librefang-kernel-hand-test");
     std::fs::create_dir_all(&home_dir).unwrap();
+    // Seed the pinned registry fixture so the apitester hand definition exists under home/registry/hands — hermetic under LIBREFANG_REGISTRY_OFFLINE.
+    librefang_runtime::registry_sync::seed_registry_fixture_for_tests(&home_dir);
 
     let config = KernelConfig {
         home_dir: home_dir.clone(),
@@ -897,6 +933,8 @@ fn test_hand_reactivation_rebuilds_same_runtime_profile() {
     let tmp = tempfile::tempdir().unwrap();
     let home_dir = tmp.path().join("librefang-kernel-reactivation-test");
     std::fs::create_dir_all(&home_dir).unwrap();
+    // Seed the pinned registry fixture so the apitester hand definition exists under home/registry/hands — hermetic under LIBREFANG_REGISTRY_OFFLINE.
+    librefang_runtime::registry_sync::seed_registry_fixture_for_tests(&home_dir);
 
     let config = KernelConfig {
         home_dir: home_dir.clone(),
@@ -1010,6 +1048,8 @@ fn reactivate_builds_from_hand_toml_not_override() {
     let tmp = tempfile::tempdir().unwrap();
     let home_dir = tmp.path().join("librefang-kernel-reactivation-hand-toml");
     std::fs::create_dir_all(&home_dir).unwrap();
+    // Seed the pinned registry fixture so the apitester hand definition exists under home/registry/hands — hermetic under LIBREFANG_REGISTRY_OFFLINE.
+    librefang_runtime::registry_sync::seed_registry_fixture_for_tests(&home_dir);
 
     let config = KernelConfig {
         home_dir: home_dir.clone(),
@@ -3381,6 +3421,8 @@ fn hand_runtime_override_survives_restart_via_activate_hand_with_id() {
     let tmp = tempfile::tempdir().unwrap();
     let home_dir = tmp.path().join("librefang-kernel-hand-override-restart");
     std::fs::create_dir_all(&home_dir).unwrap();
+    // Seed the pinned registry fixture so the apitester hand definition exists under home/registry/hands — hermetic under LIBREFANG_REGISTRY_OFFLINE.
+    librefang_runtime::registry_sync::seed_registry_fixture_for_tests(&home_dir);
 
     // ── Boot 1: activate apitester, apply override, persist, shutdown ──
     let override_cfg = librefang_hands::HandAgentRuntimeOverride {
@@ -3650,6 +3692,8 @@ fn deactivate_hand_removes_hand_agent_rows_from_sqlite() {
     let tmp = tempfile::tempdir().unwrap();
     let home_dir = tmp.path().join("librefang-kernel-deactivate-gc");
     std::fs::create_dir_all(&home_dir).unwrap();
+    // Seed the pinned registry fixture so the apitester hand definition exists under home/registry/hands — hermetic under LIBREFANG_REGISTRY_OFFLINE.
+    librefang_runtime::registry_sync::seed_registry_fixture_for_tests(&home_dir);
 
     let config = KernelConfig {
         home_dir: home_dir.clone(),
@@ -3923,6 +3967,8 @@ fn clear_hand_agent_runtime_override_resets_manifest_and_state() {
     let tmp = tempfile::tempdir().unwrap();
     let home_dir = tmp.path().join("librefang-kernel-hand-clear");
     std::fs::create_dir_all(&home_dir).unwrap();
+    // Seed the pinned registry fixture so the apitester hand definition exists under home/registry/hands — hermetic under LIBREFANG_REGISTRY_OFFLINE.
+    librefang_runtime::registry_sync::seed_registry_fixture_for_tests(&home_dir);
 
     let config = KernelConfig {
         home_dir: home_dir.clone(),
@@ -4046,6 +4092,8 @@ fn update_hand_agent_runtime_override_merges_partial_updates_in_state() {
     let tmp = tempfile::tempdir().unwrap();
     let home_dir = tmp.path().join("librefang-kernel-hand-merge");
     std::fs::create_dir_all(&home_dir).unwrap();
+    // Seed the pinned registry fixture so the apitester hand definition exists under home/registry/hands — hermetic under LIBREFANG_REGISTRY_OFFLINE.
+    librefang_runtime::registry_sync::seed_registry_fixture_for_tests(&home_dir);
 
     let config = KernelConfig {
         home_dir: home_dir.clone(),

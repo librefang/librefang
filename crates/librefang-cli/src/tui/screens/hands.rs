@@ -309,7 +309,7 @@ fn draw_marketplace(f: &mut Frame, area: Rect, state: &mut HandsState) {
                     other => other.to_string(),
                 };
                 ListItem::new(Line::from(vec![
-                    Span::raw(format!("  {:<4}", &h.icon)),
+                    Span::raw(format!("  {:<4}", h.icon)),
                     Span::styled(
                         format!("{:<16}", widgets::truncate(&h.name, 15)),
                         Style::default().fg(theme::CYAN),

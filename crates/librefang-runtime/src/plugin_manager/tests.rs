@@ -5,7 +5,8 @@ use super::registry::{
 };
 use super::*;
 
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+// Crate-wide env lock — module-local statics don't exclude env-touching tests in other modules; see test_env.rs.
+use crate::test_env::ENV_LOCK;
 
 #[test]
 fn test_plugins_dir() {

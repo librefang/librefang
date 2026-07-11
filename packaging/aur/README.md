@@ -58,3 +58,26 @@ sed -n '1,120p' pkg/librefang-desktop-bin/usr/share/applications/LibreFang.deskt
 
 Only commit the AUR source files.
 Do not commit downloaded sources, `src/`, `pkg/`, or `*.pkg.tar.*` outputs.
+
+## Automated publishing on release
+
+`release.yml` publishes these packages to AUR on every tag via three jobs (`sync_aur_bin`, `sync_aur_desktop`, `sync_aur_docker`).
+Each job runs `publish-to-aur.sh` inside an `archlinux:base-devel` container, which takes the committed files here as the source of truth and derives only the per-release values: it bumps `pkgver` (encoding the tag's first `-` as `_`), resets `pkgrel` to `1`, sets `_desktop_ver` from the actual `LibreFang_<bundle-ver>_amd64.deb` asset name for the desktop package, re-pins the `ghcr.io/librefang/librefang:<version>` tag inside the Docker helper and env, then regenerates `sha256sums` (`updpkgsums`) and `.SRCINFO` (`makepkg --printsrcinfo`) before pushing to `ssh://aur@aur.archlinux.org/<package>.git`.
+
+The committed `pkgver` / `sha256sums` / `.SRCINFO` here are not bumped per release; they are a working baseline for local `makepkg` runs.
+The release-correct values live in the AUR repositories, regenerated on each tag.
+
+The automation is inert until a maintainer configures the secrets — when `AUR_SSH_PRIVATE_KEY` is absent the jobs no-op with a notice.
+
+### One-time maintainer bootstrap
+
+1. Create the three AUR repositories under the AUR account that will own them — push an initial commit (or let the first release populate them):
+
+   - `ssh://aur@aur.archlinux.org/librefang-bin.git`
+   - `ssh://aur@aur.archlinux.org/librefang-desktop-bin.git`
+   - `ssh://aur@aur.archlinux.org/librefang-docker.git`
+
+2. Generate a dedicated CI keypair, register the public half on that AUR account, and add the secrets (`AUR_SSH_PRIVATE_KEY` and the optional `AUR_KNOWN_HOSTS` / `AUR_GIT_NAME` / `AUR_GIT_EMAIL`).
+   See `.github/SECRETS.md` for the exact commands and rotation policy.
+
+3. Validate end-to-end with `workflow_dispatch` on `release.yml` (`channel=current`, `tag=<an existing release tag>`) before the next real release.

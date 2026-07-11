@@ -79,6 +79,49 @@ fn boot() -> Harness {
     }
 }
 
+/// Boots a harness whose `default_model` wires claude-code CLI-profile
+/// rotation at `profile_dir`, so `list_models` / `get_model` resolve the
+/// model from `<profile_dir>/settings.json` deterministically — no process
+/// env mutation, no shared FS, safe under parallel test execution.
+fn boot_with_claude_profile(profile_dir: &str) -> Harness {
+    let dir = profile_dir.to_string();
+    let test = TestAppState::with_builder(
+        MockKernelBuilder::new()
+            .with_config(move |cfg| {
+                cfg.default_model = librefang_types::config::DefaultModelConfig {
+                    provider: "claude-code".to_string(),
+                    model: "sonnet".to_string(),
+                    api_key_env: String::new(),
+                    base_url: None,
+                    message_timeout_secs: 300,
+                    extra_params: std::collections::BTreeMap::new(),
+                    cli_profile_dirs: vec![dir.clone()],
+                };
+            })
+            .with_catalog_seed(test_catalog_baseline()),
+    );
+    let state = test.state.clone();
+    let app = Router::new()
+        .nest("/api", routes::providers::router())
+        .with_state(state.clone());
+    Harness {
+        app,
+        _state: state,
+        _test: test,
+    }
+}
+
+/// The model the detector resolves: `ANTHROPIC_MODEL` env wins over the profile
+/// `settings.json` (matching the CLI's own precedence), so the assertion stays
+/// deterministic whether or not the test runner exports `ANTHROPIC_MODEL`.
+fn expected_claude_model(settings_model: &str) -> String {
+    std::env::var("ANTHROPIC_MODEL")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| settings_model.to_string())
+}
+
 async fn json_request(
     h: &Harness,
     method: Method,
@@ -147,6 +190,68 @@ async fn get_model_unknown_id_returns_404() {
     let (status, body) = json_request(&h, Method::GET, "/api/models/__no_such_model__", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(body.get("error").is_some() || body.get("message").is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn list_models_surfaces_cli_profile_configured_model() {
+    // A claude-code profile dir pinning a distinctive model in its settings.json.
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("settings.json"),
+        r#"{"model": "test-cli-detected-model-xyz"}"#,
+    )
+    .unwrap();
+    let h = boot_with_claude_profile(&tmp.path().to_string_lossy());
+
+    let (status, body) =
+        json_request(&h, Method::GET, "/api/models?provider=claude-code", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let rows = body["models"].as_array().unwrap();
+    // Wiring guard: a provider-filtered response must contain only that
+    // provider's rows — i.e. the synthesized-row loop honours `provider_filter`
+    // and does not leak codex/gemini/qwen rows into a claude-code query.
+    assert!(
+        rows.iter().all(|m| m["provider"] == "claude-code"),
+        "every row under ?provider=claude-code must be claude-code: {rows:?}"
+    );
+    // The configured model is surfaced as a cli_config-sourced row.
+    let expected = expected_claude_model("test-cli-detected-model-xyz");
+    let synth = rows
+        .iter()
+        .find(|m| m["source"] == "cli_config")
+        .expect("a cli_config-sourced claude-code row must be present");
+    assert_eq!(synth["id"], format!("claude-code/{expected}"));
+    assert_eq!(synth["tier"], "custom");
+    // Shape parity with catalog rows: image-cost keys present (null).
+    assert!(synth.get("image_input_cost_per_m").is_some());
+    assert!(synth.get("image_output_cost_per_m").is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn get_model_resolves_cli_detected_id() {
+    // The id list_models advertises for a CLI-detected model must also resolve
+    // via GET /api/models/{id} — list and detail agree on advertised ids.
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("settings.json"),
+        r#"{"model": "test-cli-detected-model-xyz"}"#,
+    )
+    .unwrap();
+    let h = boot_with_claude_profile(&tmp.path().to_string_lossy());
+
+    let expected = expected_claude_model("test-cli-detected-model-xyz");
+    let (status, body) = json_request(
+        &h,
+        Method::GET,
+        &format!("/api/models/claude-code/{expected}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["id"], format!("claude-code/{expected}"));
+    assert_eq!(body["source"], "cli_config");
+    // get_model rows carry an `overrides` object like catalog rows.
+    assert!(body.get("overrides").is_some());
 }
 
 // ---------------------------------------------------------------------------

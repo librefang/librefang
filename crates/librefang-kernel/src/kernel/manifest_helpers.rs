@@ -82,10 +82,21 @@ pub(super) fn manifest_to_capabilities(manifest: &AgentManifest) -> Vec<Capabili
     caps
 }
 
-/// Apply global budget defaults to an agent's resource quota.
+/// Whether the global `[thinking]` config may be backfilled onto a manifest for `model`.
 ///
-/// When the global budget config specifies limits and the agent still has
-/// the built-in defaults, override them so agents respect the user's config.
+/// Backfill is suppressed only when the catalog knows the model and marks it `supports_thinking = false` — an unknown/custom model keeps the historical backfill so explicit operator setups are never silently degraded (#6398).
+/// This bounds the blast radius of a global `[thinking]` block: with the OpenAI-compat driver now emitting `reasoning_effort` for a configured budget, backfilling onto a known non-reasoning model (e.g. `gpt-4o`) would turn every request into a parameter error where it previously was a silent no-op.
+/// Explicit `manifest.thinking` and the per-call override below are deliberately not gated — they are direct user intent.
+pub(super) fn global_thinking_backfill_allowed(
+    catalog: &librefang_runtime::model_catalog::ModelCatalog,
+    model: &str,
+) -> bool {
+    catalog
+        .find_model(model)
+        .map(|m| catalog.effective_capabilities(m).supports_thinking)
+        .unwrap_or(true)
+}
+
 /// Apply a per-call deep-thinking override to a manifest clone.
 ///
 /// - `Some(true)` — ensure the manifest has a `ThinkingConfig` (inserting the
@@ -110,6 +121,10 @@ pub(super) fn apply_thinking_override(
     }
 }
 
+/// Apply global budget defaults to an agent's resource quota.
+///
+/// When the global budget config specifies limits and the agent still has
+/// the built-in defaults, override them so agents respect the user's config.
 pub(super) fn apply_budget_defaults(
     budget: &librefang_types::config::BudgetConfig,
     resources: &mut ResourceQuota,

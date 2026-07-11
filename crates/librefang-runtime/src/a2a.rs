@@ -847,10 +847,7 @@ pub fn canonicalize_a2a_url(url: &str) -> Option<String> {
     // (http/https/ws/wss/ftp/file) on parse, so this is mostly a no-op,
     // but it stays correct if a future url crate version stops doing that
     // and is the right pattern for non-special schemes.
-    let host_owned = match parsed.host_str() {
-        Some(h) => h.to_ascii_lowercase(),
-        None => return None,
-    };
+    let host_owned = parsed.host_str()?.to_ascii_lowercase();
     let _ = parsed.set_host(Some(&host_owned));
     // Drop default ports so `https://x.com` and `https://x.com:443` collapse.
     if let Some(port) = parsed.port() {

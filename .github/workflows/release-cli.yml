@@ -602,7 +602,11 @@ jobs:
 
   cli_pypi:
     name: CLI / PyPI
-    if: ${{ inputs.include_pypi }}
+    # Opt-in re-publish, and only for stable/LTS tags — never beta/rc.
+    # Mirrors the guard on release.yml's cli_pypi: the `librefang` PyPI project has a 10 GB total-size quota that per-platform CLI binary wheels exhaust when pre-releases are published too.
+    # A manual rebuild must not re-bloat it.
+    # A tag is a pre-release when it carries any `-suffix` except `-lts`.
+    if: ${{ inputs.include_pypi && (!contains(inputs.tag, '-') || endsWith(inputs.tag, '-lts')) }}
     needs: [cli_mac, cli_linux, cli_musl, cli_windows]
     runs-on: ubuntu-latest
     environment: release-pypi

@@ -114,22 +114,22 @@ Env vars for each channel are listed in their respective setup sections below.
 
 - **Agent-level** in `agent.toml` — applies only to that specific agent on every channel. Add a top-level `[channel_overrides]` section.
 
-**Resolution order** (post-migration): agent-level → sidecar env var → built-in default. Whichever sets the field wins.
+**Resolution order** (post-migration): agent-level → built-in default. Whichever sets the field wins.
+(Sidecar env vars are not part of this chain — only the WhatsApp sidecar reads a `WHATSAPP_DM_POLICY`, and it filters inbound before the kernel ever sees the message.)
 
 ```toml
 # agent.toml — per-agent override (e.g. "this agent answers every DM")
 [channel_overrides]
-dm_policy = "always"
-group_policy = "trigger_only"
+dm_policy = "respond"
+group_policy = "mention_only"
 group_trigger_patterns = ["(?i)\\bmy-bot\\b"]
 ```
 
 ```toml
-# config.toml — channel-level overrides (HISTORICAL — no longer
-# accepted). Pre-#5463, every agent on that channel inherited these
-# defaults. The block is shown for migration reference only; set the
-# equivalent on the agent (`agent.toml [channel_overrides]`) or on
-# the sidecar (`[sidecar_channels.env]` env vars like `*_DM_POLICY`).
+# config.toml — channel-level overrides (HISTORICAL — no longer accepted).
+# Pre-#5463, every agent on that channel inherited these defaults.
+# The block is shown for migration reference only; set the equivalent on the agent (`agent.toml [channel_overrides]`).
+# dm_policy / group_policy live there too — the channel bridge enforces them; among the sidecar env vars only WhatsApp reads a `WHATSAPP_DM_POLICY`.
 [channels.discord.overrides]
 model = "gemini-2.5-flash"
 system_prompt = "You are a concise Discord assistant. Keep replies under 200 words."
@@ -258,10 +258,11 @@ The retired in-process Rust adapter delivered `Image`, `Voice`, `Video`, `Audio`
 
 ## WhatsApp DM / Group Policies
 
-After the sidecar migration (`librefang.sidecar.adapters.whatsapp`), the DM and group routing policies are configured via env vars on the `[[sidecar_channels]]` block:
+After the sidecar migration (`librefang.sidecar.adapters.whatsapp`), the DM routing policy is configured via env vars on the `[[sidecar_channels]]` block:
 
 - `WHATSAPP_DM_POLICY`: `respond` (default) / `allowed_only` / `ignore`. `allowed_only` cross-references `WHATSAPP_ALLOWED_USERS`.
-- `WHATSAPP_GROUP_POLICY`: `all` (default) / `mention_only` / `commands_only` / `ignore`. `mention_only` looks for `WHATSAPP_BOT_PHONE` (with / without `@` + `+` strip) or `WHATSAPP_BOT_NAME` anywhere in the message text, case-insensitive.
+  Enforced in **Cloud API webhook mode only** — in Web/QR (Baileys) mode the gateway POSTs inbound directly to the REST API, bypassing the sidecar filter.
+- `WHATSAPP_GROUP_POLICY`: accepted (`all` / `mention_only` / `commands_only` / `ignore`) but **currently has no effect in either mode** — Cloud API webhooks treat every inbound as a DM, and Web/QR mode bypasses the sidecar filter entirely.
 
 Voice / image / file outbound is supported in **Cloud API mode** (audio link, image link + caption, document link + filename, location) via the standard sidecar `Content` variants. **Web/QR (Baileys) mode** degrades non-text content to text (voice URL → `(Voice message: <url>)`, image without caption → `(Image — not supported in Web mode)`) matching the Rust adapter's gateway-mode fallback at `whatsapp.rs:493-519`.
 

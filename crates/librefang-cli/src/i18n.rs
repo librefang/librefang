@@ -7,8 +7,9 @@ use unic_langid::LanguageIdentifier;
 const EN_FTL: &str = include_str!("../locales/en/main.ftl");
 const ZH_CN_FTL: &str = include_str!("../locales/zh-CN/main.ftl");
 const UK_FTL: &str = include_str!("../locales/uk/main.ftl");
+const KO_FTL: &str = include_str!("../locales/ko/main.ftl");
 
-pub const SUPPORTED_LANGUAGES: &[&str] = &["en", "zh-CN", "uk"];
+pub const SUPPORTED_LANGUAGES: &[&str] = &["en", "zh-CN", "uk", "ko"];
 pub use librefang_types::i18n::DEFAULT_LANGUAGE;
 
 thread_local! {
@@ -44,6 +45,7 @@ impl I18n {
         let source = match language {
             "zh-CN" => ZH_CN_FTL,
             "uk" => UK_FTL,
+            "ko" => KO_FTL,
             _ => EN_FTL,
         };
         let resource = FluentResource::try_new(source.to_string())
@@ -201,6 +203,12 @@ mod tests {
     fn renders_ukrainian_translation() {
         init("uk");
         assert_eq!(t("label-dashboard"), "Панель приладів");
+    }
+
+    #[test]
+    fn renders_korean_translation() {
+        init("ko");
+        assert_eq!(t("label-dashboard"), "대시보드");
     }
 
     #[test]

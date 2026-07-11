@@ -1,0 +1,28 @@
+# aion-labs — auto-generated from OpenRouter API
+
+[provider]
+id = "aion-labs"
+display_name = "Aion Labs"
+api_key_env = "AION_LABS_API_KEY"
+base_url = "https://api.aionlabs.ai/v1"
+key_required = true
+
+[[models]]
+id = "aion-2.0"
+display_name = "AionLabs: Aion-2.0"
+tier = "smart"
+context_window = 131072
+max_output_tokens = 32768
+input_cost_per_m = 0.8
+output_cost_per_m = 1.6
+supports_streaming = true
+
+[[models]]
+id = "aion-rp-llama-3.1-8b"
+display_name = "AionLabs: Aion-RP 1.0 (8B)"
+tier = "smart"
+context_window = 32768
+max_output_tokens = 32768
+input_cost_per_m = 0.8
+output_cost_per_m = 1.6
+supports_streaming = true

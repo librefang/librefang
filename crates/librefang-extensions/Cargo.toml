@@ -22,6 +22,8 @@ rustls-native-certs = { workspace = true }
 axum = { workspace = true }
 zeroize = { workspace = true }
 rand = { workspace = true }
+# aes-gcm 0.11 no longer re-exports OsRng from aes_gcm::aead; import directly.
+rand_core = { version = "0.6", features = ["getrandom"] }
 sha2 = { workspace = true }
 hmac = { workspace = true }
 subtle = { workspace = true }

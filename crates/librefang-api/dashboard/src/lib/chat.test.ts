@@ -1,12 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
+  applyForeignTerminalFrame,
   asText,
   extractAssistantHistoryParts,
   formatMeta,
+  isTerminalFrameType,
   normalizeRole,
+  terminalFrameOwner,
   normalizeToolOutput,
 } from "./chat";
 import type { ContentBlock } from "../api";
+import type { TerminalFrame, TerminalRoutableMessage } from "./chat";
 
 describe("chat utilities", () => {
   it("normalizes API message roles", () => {
@@ -170,5 +174,97 @@ describe("extractAssistantHistoryParts", () => {
       text: "[object Object]",
       thinking: "",
     });
+  });
+});
+
+describe("terminalFrameOwner (#6390)", () => {
+  it("treats a matching echoed id as the current turn", () => {
+    expect(terminalFrameOwner("bot-1", "bot-1")).toBe("current");
+  });
+
+  it("routes a different echoed id to the foreign turn that owns it", () => {
+    // The misbind race: turn A's late `response` arrives while turn B's listener is active — it must NOT be treated as B's terminal frame.
+    expect(terminalFrameOwner("bot-A", "bot-B")).toBe("foreign");
+  });
+
+  it("keeps legacy behavior when the daemon echoes no id", () => {
+    expect(terminalFrameOwner(undefined, "bot-1")).toBe("current");
+    expect(terminalFrameOwner(null, "bot-1")).toBe("current");
+    expect(terminalFrameOwner("", "bot-1")).toBe("current");
+    expect(terminalFrameOwner(42, "bot-1")).toBe("current");
+  });
+});
+
+describe("isTerminalFrameType (#6390)", () => {
+  it("matches exactly the frames that end a turn's lifecycle", () => {
+    expect(isTerminalFrameType("response")).toBe(true);
+    expect(isTerminalFrameType("silent_complete")).toBe(true);
+    expect(isTerminalFrameType("error")).toBe(true);
+  });
+
+  it("leaves streaming and lifecycle frames on the normal path", () => {
+    for (const t of ["text_delta", "thinking_delta", "typing", "tool_start", "tool_end", "tool_result", "command_result", undefined]) {
+      expect(isTerminalFrameType(t)).toBe(false);
+    }
+  });
+});
+
+describe("applyForeignTerminalFrame (#6390)", () => {
+  // The exact misbind scenario: bubble A is a previous turn awaiting its
+  // delayed terminal frame; bubble B is the current turn, mid-stream, whose
+  // listener now receives A's frame. B must never be disturbed by A's frame.
+  const bubbleA: TerminalRoutableMessage = { id: "bot-A", content: "partial A", isStreaming: true };
+  const bubbleB: TerminalRoutableMessage = { id: "bot-B", content: "streaming B", isStreaming: true };
+
+  it("patches the owning bubble with a foreign `response` and leaves the current turn's bubble untouched", () => {
+    const frame: TerminalFrame = {
+      type: "response",
+      message_id: "bot-A",
+      content: "full answer A",
+      output_tokens: 20,
+      input_tokens: 5,
+      cost_usd: 0.002,
+      memories_saved: ["m1"],
+      memories_used: ["m2"],
+      thinking: "reasoned A",
+    };
+    const next = applyForeignTerminalFrame([bubbleA, bubbleB], frame);
+    expect(next[0].content).toBe("full answer A");
+    expect(next[0].isStreaming).toBe(false);
+    expect(next[0].tokens).toEqual({ output: 20, input: 5 });
+    expect(next[0].cost_usd).toBe(0.002);
+    expect(next[0].memories_saved).toEqual(["m1"]);
+    expect(next[0].memories_used).toEqual(["m2"]);
+    expect(next[0].thinking).toBe("reasoned A");
+    // B is returned by reference — the newer turn's bubble and stream are never rewritten or re-rendered.
+    expect(next[1]).toBe(bubbleB);
+  });
+
+  it("keeps the owning bubble's prior content when the foreign `response` carries none", () => {
+    const next = applyForeignTerminalFrame([bubbleA], { type: "response", message_id: "bot-A", content: "" });
+    expect(next[0].content).toBe("partial A");
+    expect(next[0].isStreaming).toBe(false);
+  });
+
+  it("removes only the owning bubble on a foreign `silent_complete`", () => {
+    const next = applyForeignTerminalFrame([bubbleA, bubbleB], { type: "silent_complete", message_id: "bot-A" });
+    expect(next.map(m => m.id)).toEqual(["bot-B"]);
+    expect(next[0]).toBe(bubbleB);
+  });
+
+  it("marks only the owning bubble on a foreign `error`, defaulting the message", () => {
+    const withMsg = applyForeignTerminalFrame([bubbleA, bubbleB], { type: "error", message_id: "bot-A", content: "boom" });
+    expect(withMsg[0].error).toBe("boom");
+    expect(withMsg[0].isStreaming).toBe(false);
+    expect(withMsg[1]).toBe(bubbleB);
+
+    const noMsg = applyForeignTerminalFrame([bubbleA], { type: "error", message_id: "bot-A" });
+    expect(noMsg[0].error).toBe("WebSocket error");
+  });
+
+  it("is a no-op when the frame's owner is not in the list", () => {
+    const next = applyForeignTerminalFrame([bubbleA, bubbleB], { type: "response", message_id: "bot-missing", content: "x" });
+    expect(next[0]).toBe(bubbleA);
+    expect(next[1]).toBe(bubbleB);
   });
 });

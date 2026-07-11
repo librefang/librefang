@@ -24,9 +24,10 @@ const JA_FTL: &str = include_str!("../locales/ja/errors.ftl");
 const DE_FTL: &str = include_str!("../locales/de/errors.ftl");
 const FR_FTL: &str = include_str!("../locales/fr/errors.ftl");
 const UK_FTL: &str = include_str!("../locales/uk/errors.ftl");
+const KO_FTL: &str = include_str!("../locales/ko/errors.ftl");
 
 /// All languages supported by the error translation system.
-pub const SUPPORTED_LANGUAGES: &[&str] = &["en", "zh-CN", "es", "ja", "de", "fr", "uk"];
+pub const SUPPORTED_LANGUAGES: &[&str] = &["en", "zh-CN", "es", "ja", "de", "fr", "uk", "ko"];
 
 /// The default language used when no match is found.
 pub const DEFAULT_LANGUAGE: &str = "en";
@@ -40,6 +41,7 @@ fn ftl_source(lang: &str) -> &'static str {
         "de" => DE_FTL,
         "fr" => FR_FTL,
         "uk" => UK_FTL,
+        "ko" => KO_FTL,
         _ => EN_FTL,
     }
 }
@@ -295,7 +297,7 @@ mod tests {
 
     #[test]
     fn fallback_to_english_for_unsupported_language() {
-        let t = ErrorTranslator::new("ko");
+        let t = ErrorTranslator::new("it");
         assert_eq!(t.language(), "en");
         assert_eq!(t.t("api-error-agent-not-found"), "Agent not found");
     }
@@ -325,7 +327,7 @@ mod tests {
 
     #[test]
     fn resolve_language_unsupported() {
-        assert_eq!(resolve_language("ko"), "en");
+        assert_eq!(resolve_language("it"), "en");
         assert_eq!(resolve_language("ar"), "en");
     }
 
@@ -344,7 +346,7 @@ mod tests {
 
     #[test]
     fn parse_accept_language_unsupported_fallback() {
-        assert_eq!(parse_accept_language("ko,ar"), "en");
+        assert_eq!(parse_accept_language("it,ar"), "en");
     }
 
     #[test]

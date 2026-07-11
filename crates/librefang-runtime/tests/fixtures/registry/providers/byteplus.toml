@@ -1,0 +1,185 @@
+# BytePlus ModelArk — https://www.byteplus.com/en/product/ModelArk
+# International edition of Volcano Engine (VolcEngine).
+# Models: 11 (6 text + 2 image + 3 video)
+#
+# ⚠️  BILLING — READ BEFORE USE
+# This provider points at the **standard** ModelArk inference endpoint
+# (`/api/v3`). Calls here are billed **per-token / per-call against your
+# ModelArk USD balance**. They DO NOT consume your Coding Plan
+# subscription quota.
+#
+# If you have a Coding Plan subscription and want calls to count against
+# it, use `byteplus_coding` (Anthropic protocol, friendly model
+# aliases) — see byteplus-coding.toml. The official BytePlus docs
+# explicitly warn against using `/api/v3` for Coding Plan workloads:
+#   https://docs.byteplus.com/en/docs/ModelArk/1928261
+#
+# Use this `byteplus` provider when you want:
+#   - Image generation (Seedream 4.5, Seedream 5.0 Lite)
+#   - Video generation (Seedance 1.5 Pro, Dreamina Seedance 2.0 / 2.0 Fast)
+#   - Versioned text-model snapshots (e.g. `seed-2-0-pro-260328`)
+#   …none of which exist on the Coding Plan endpoint.
+#
+# Pricing below is the standard real-time tier (a discounted batch tier
+# exists at ~half the rate; image/video billed per-call or per-token in
+# their own units, see comments above each model).
+
+[provider]
+id = "byteplus"
+display_name = "BytePlus ModelArk"
+api_key_env = "BYTEPLUS_API_KEY"
+base_url = "https://ark.ap-southeast.bytepluses.com/api/v3"
+key_required = true
+media_capabilities = ["image_generation", "video_generation"]
+
+# ── Text models ────────────────────────────────────────────────────────
+
+[[models]]
+id = "seed-2-0-pro-260328"
+display_name = "Seed 2.0 Pro"
+tier = "frontier"
+context_window = 262144
+max_output_tokens = 16384
+input_cost_per_m = 1.00
+output_cost_per_m = 6.00
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+supports_thinking = true
+aliases = ["seed-pro", "seed-2-pro"]
+
+[[models]]
+id = "seed-2-0-mini-260215"
+display_name = "Seed 2.0 Mini"
+tier = "fast"
+context_window = 262144
+max_output_tokens = 16384
+input_cost_per_m = 0.20
+output_cost_per_m = 0.80
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = ["seed-mini", "seed-2-mini"]
+
+[[models]]
+id = "seed-2-0-code-preview-260328"
+display_name = "Seed 2.0 Code (preview)"
+tier = "smart"
+context_window = 262144
+max_output_tokens = 16384
+input_cost_per_m = 1.00
+output_cost_per_m = 6.00
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["seed-code", "seed-2-code"]
+
+[[models]]
+id = "glm-4-7-251222"
+display_name = "GLM-4.7"
+tier = "smart"
+context_window = 204800
+max_output_tokens = 16384
+input_cost_per_m = 0.60
+output_cost_per_m = 2.20
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["glm-4.7"]
+
+[[models]]
+id = "deepseek-v3-2-251201"
+display_name = "DeepSeek V3.2"
+tier = "smart"
+context_window = 131072
+max_output_tokens = 8192
+input_cost_per_m = 0.56
+output_cost_per_m = 0.84
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["deepseek-v3.2"]
+
+[[models]]
+id = "gpt-oss-120b-250805"
+display_name = "GPT-OSS 120B"
+tier = "smart"
+context_window = 131072
+max_output_tokens = 8192
+input_cost_per_m = 0.10
+output_cost_per_m = 0.50
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["gpt-oss-120b"]
+
+# ── Image generation models ────────────────────────────────────────────
+# Billed per-piece (not per-token). Real prices in comment above each entry.
+
+# $0.0400 per image
+[[models]]
+id = "seedream-4-5-251128"
+display_name = "Seedream 4.5"
+tier = "frontier"
+modality = "image"
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = false
+supports_vision = false
+supports_streaming = false
+aliases = ["seedream-4.5"]
+
+# $0.0350 per image (Dola-Seedream-5.0-lite)
+[[models]]
+id = "seedream-5-0-260128"
+display_name = "Seedream 5.0 Lite"
+tier = "frontier"
+modality = "image"
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = false
+supports_vision = false
+supports_streaming = false
+aliases = ["seedream-5.0-lite", "seedream-5.0"]
+
+# ── Video generation models ────────────────────────────────────────────
+# Billed per-K tokens (encoded video duration). Real per-K rates in comment.
+
+# $0.0024/K (with audio) / $0.0012/K (without audio); with-cache half the rate
+[[models]]
+id = "seedance-1-5-pro-251215"
+display_name = "Seedance 1.5 Pro"
+tier = "frontier"
+modality = "video"
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = false
+supports_vision = true
+supports_streaming = false
+aliases = ["seedance-1.5-pro"]
+
+# $0.0070-$0.0077/K (input without video) / $0.0043-$0.0047/K (input with video)
+[[models]]
+id = "dreamina-seedance-2-0-260128"
+display_name = "Dreamina Seedance 2.0"
+tier = "frontier"
+modality = "video"
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = false
+supports_vision = true
+supports_streaming = false
+aliases = ["dreamina-seedance-2.0"]
+
+# $0.0056/K (input without video) / $0.0033/K (input with video)
+[[models]]
+id = "dreamina-seedance-2-0-fast-260128"
+display_name = "Dreamina Seedance 2.0 Fast"
+tier = "fast"
+modality = "video"
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = false
+supports_vision = true
+supports_streaming = false
+aliases = ["dreamina-seedance-2.0-fast"]

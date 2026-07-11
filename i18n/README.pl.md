@@ -60,21 +60,69 @@ librefang start
 # librefang init
 ```
 
-<details>
+<details open>
 <summary><strong>Homebrew</strong></summary>
+
+> 🎉 **LibreFang jest już w [homebrew-core](https://github.com/Homebrew/homebrew-core/pull/290413)!**
+> Przyjęty do oficjalnego tap Homebrew 2026-07-08 — zainstaluj CLI bez konfiguracji i bez tap.
+
+```bash
+brew install librefang              # CLI (stable) — oficjalne homebrew-core
+```
+
+Aplikacja desktopowa i kanały przedpremierowe są nadal publikowane przez tap LibreFang:
 
 ```bash
 brew tap librefang/tap
-brew install librefang              # CLI (stable)
 brew install --cask librefang       # Desktop (stable)
-# Beta/RC channels also available:
-# brew install librefang-beta       # or librefang-rc
-# brew install --cask librefang-rc  # or librefang-beta
+# Kanały Beta/RC:
+# brew install librefang-beta       # lub librefang-rc
+# brew install --cask librefang-rc  # lub librefang-beta
 ```
 
 </details>
 
-<details>
+<details open>
+<summary><strong>Arch Linux (pacman)</strong></summary>
+
+> Rejestracja kont AUR jest tymczasowo niedostępna.
+> Dlatego LibreFang publikuje obecnie podpisane pakiety za pośrednictwem oficjalnego repozytorium pacman.
+
+```bash
+# Zaimportuj klucz podpisywania pakietów LibreFang i oznacz go lokalnie jako zaufany
+curl -fsSL https://packages.librefang.ai/librefang.gpg -o /tmp/librefang.gpg
+sudo pacman-key --add /tmp/librefang.gpg
+sudo pacman-key --finger 2C325B0F88706ED99C45E216DD09DC7D3E70E1E9
+sudo pacman-key --lsign-key 2C325B0F88706ED99C45E216DD09DC7D3E70E1E9
+```
+
+Dodaj repozytorium do `/etc/pacman.conf`:
+
+```ini
+[librefang]
+Server = https://packages.librefang.ai/arch/$arch
+```
+
+`librefang-bin` i `librefang-desktop-bin` są niezależnymi pakietami.
+Zainstaluj tylko pakiet dla potrzebnego interfejsu.
+
+#### CLI, daemon i panel internetowy
+
+```bash
+sudo pacman -Syu librefang-bin
+```
+
+#### Aplikacja desktopowa (tylko x86_64)
+
+```bash
+sudo pacman -Syu librefang-desktop-bin
+```
+
+Szczegóły pakietów i obsługi aarch64 znajdują się w [dokumentacji repozytorium Arch](../packaging/arch-repo/README.md).
+
+</details>
+
+<details open>
 <summary><strong>Docker</strong></summary>
 
 ```bash
@@ -83,7 +131,7 @@ docker run -p 4545:4545 ghcr.io/librefang/librefang
 
 </details>
 
-<details>
+<details open>
 <summary><strong>Wdrożenie w Chmurze (Cloud Deploy)</strong></summary>
 
 [![Deploy Hub](https://img.shields.io/badge/Deploy%20Hub-000?style=for-the-badge&logo=rocket)](https://deploy.librefang.ai) [![Fly.io](https://img.shields.io/badge/Fly.io-purple?style=for-the-badge&logo=fly.io)](https://deploy.librefang.ai) [![Render](https://img.shields.io/badge/Render-46E3B7?style=for-the-badge&logo=render)](https://render.com/deploy?repo=https://github.com/librefang/librefang) [![Railway](https://img.shields.io/badge/Railway-0B0D0E?style=for-the-badge&logo=railway)](https://railway.app/template/librefang) [![GCP](https://img.shields.io/badge/GCP-4285F4?style=for-the-badge&logo=googlecloud)](../deploy/gcp/README.md)

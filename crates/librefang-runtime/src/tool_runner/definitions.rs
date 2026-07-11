@@ -13,7 +13,7 @@ use librefang_types::tool::ToolDefinition;
 use std::sync::OnceLock;
 
 #[allow(dead_code)]
-mod tool_name {
+pub(crate) mod tool_name {
     pub const FILE_READ: &str = "file_read";
     pub const FILE_WRITE: &str = "file_write";
     pub const FILE_LIST: &str = "file_list";

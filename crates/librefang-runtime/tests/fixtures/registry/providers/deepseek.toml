@@ -1,0 +1,71 @@
+# DeepSeek — https://deepseek.com
+# Models: 4
+
+[provider]
+id = "deepseek"
+display_name = "DeepSeek"
+api_key_env = "DEEPSEEK_API_KEY"
+base_url = "https://api.deepseek.com/v1"
+key_required = true
+
+[[models]]
+id = "deepseek-v4-pro"
+display_name = "DeepSeek V4 Pro"
+tier = "frontier"
+context_window = 1000000
+max_output_tokens = 384000
+input_cost_per_m = 0.435
+output_cost_per_m = 0.87
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+supports_thinking = true
+aliases = ["deepseek-v4", "deepseek-pro"]
+
+[[models]]
+id = "deepseek-v4-flash"
+display_name = "DeepSeek V4 Flash"
+tier = "smart"
+context_window = 1000000
+max_output_tokens = 384000
+input_cost_per_m = 0.14
+output_cost_per_m = 0.28
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+supports_thinking = true
+# Thinking mode is on by default and the API rejects multi-turn requests
+# where assistant turns containing tool_calls don't echo back the original
+# reasoning_content. See librefang/librefang#4842.
+reasoning_echo_policy = "echo"
+aliases = ["deepseek-flash"]
+
+[[models]]
+id = "deepseek-chat"
+display_name = "DeepSeek V3"
+tier = "smart"
+context_window = 64000
+max_output_tokens = 8192
+input_cost_per_m = 0.32
+output_cost_per_m = 0.89
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["deepseek", "deepseek-v3"]
+
+[[models]]
+id = "deepseek-reasoner"
+display_name = "DeepSeek R1"
+tier = "frontier"
+context_window = 64000
+max_output_tokens = 8192
+input_cost_per_m = 0.55
+output_cost_per_m = 2.19
+supports_tools = false
+supports_vision = false
+supports_streaming = true
+supports_thinking = true
+# R1 returns reasoning_content in responses but the API rejects multi-turn
+# requests that carry it on previous assistant messages — drivers must strip.
+reasoning_echo_policy = "strip"
+aliases = ["deepseek-r1"]

@@ -114,21 +114,22 @@ MASTODON_INSTANCE_URL = "https://mastodon.social"
 
 - **Agent 级** 在 `agent.toml` —— 只对该 agent 在所有通道上生效。加顶层 `[channel_overrides]` 段。
 
-**解析顺序**（迁移后）：agent 级 → sidecar env → 内置默认。哪一层设了哪一层赢。
+**解析顺序**（迁移后）：agent 级 → 内置默认。哪一层设了哪一层赢。
+（sidecar 环境变量不在这条链上 —— 只有 WhatsApp sidecar 读 `WHATSAPP_DM_POLICY`，且它在消息到达内核之前就在 sidecar 侧过滤。）
 
 ```toml
 # agent.toml —— 每个 agent 自己的覆盖（比如 "这个 agent 永远回 DM"）
 [channel_overrides]
-dm_policy = "always"
-group_policy = "trigger_only"
+dm_policy = "respond"
+group_policy = "mention_only"
 group_trigger_patterns = ["(?i)\\bmy-bot\\b"]
 ```
 
 ```toml
 # config.toml —— 通道级覆盖（历史 —— 已不再被识别）。
-# #5463 之前，使用该通道的每个 agent 都继承下面这套默认。保留只为
-# 迁移对照参考；新写法把等价值设在 agent 上（`agent.toml [channel_overrides]`）
-# 或写到 sidecar 的 `[sidecar_channels.env]` 环境变量（如 `*_DM_POLICY`）。
+# #5463 之前，使用该通道的每个 agent 都继承下面这套默认。
+# 保留只为迁移对照参考；新写法把等价值设在 agent 上（`agent.toml [channel_overrides]`）。
+# dm_policy / group_policy 也写在那里 —— 由 channel bridge 强制执行；sidecar 环境变量里只有 WhatsApp 会读 `WHATSAPP_DM_POLICY`。
 [channels.discord.overrides]
 model = "gemini-2.5-flash"
 system_prompt = "You are a concise Discord assistant. Keep replies under 200 words."
@@ -257,10 +258,11 @@ Feishu 之前会静默删掉传入文本里的 `@_user_N` 占位符。Feishu ada
 
 ## WhatsApp DM / 群消息策略
 
-迁移到 sidecar（`librefang.sidecar.adapters.whatsapp`）后，DM / 群组策略改通过 `[[sidecar_channels]]` 块上的环境变量配置：
+迁移到 sidecar（`librefang.sidecar.adapters.whatsapp`）后，DM 策略改通过 `[[sidecar_channels]]` 块上的环境变量配置：
 
 - `WHATSAPP_DM_POLICY`：`respond`（默认）/ `allowed_only` / `ignore`。`allowed_only` 与 `WHATSAPP_ALLOWED_USERS` 配合使用。
-- `WHATSAPP_GROUP_POLICY`：`all`（默认）/ `mention_only` / `commands_only` / `ignore`。`mention_only` 模式下检查文本是否包含 `WHATSAPP_BOT_PHONE`（带/不带 `@`、去 `+`）或 `WHATSAPP_BOT_NAME`，大小写不敏感。
+  **仅 Cloud API webhook 模式生效** —— Web/QR（Baileys）模式下 gateway 直接把入站 POST 给 REST API，绕过 sidecar 过滤。
+- `WHATSAPP_GROUP_POLICY`：会被读取（`all` / `mention_only` / `commands_only` / `ignore`），但**目前两种模式下都不生效** —— Cloud API webhook 把所有入站都当 DM 处理，Web/QR 模式则完全绕过 sidecar 过滤。
 
 **Cloud API 模式** 出站支持 voice / image / file / location（通过标准 sidecar `Content` 变体）。**Web/QR（Baileys）模式** 把非文本内容降级为文本（voice URL → `(Voice message: <url>)`、无标题 image → `(Image — not supported in Web mode)`），对应原 Rust 适配器 `whatsapp.rs:493-519` 的 gateway-mode fallback。
 

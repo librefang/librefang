@@ -23,20 +23,27 @@ uar-driver = ["dep:universal-agent-runtime"]
 #   conflict with librefang's own `rusqlite`/`libsqlite3-sys` versions.
 # * `surreal-backend` is enabled explicitly so UAR uses embedded SurrealDB
 #   (RocksDB) for persistence — fully self-contained, no external services.
-# * 2026-06-17: tried bumping the in-process link to UAR `main` (rev 0f9385d4) —
-#   which ships the new standalone `universal-agent-runtime` Axum+gRPC binary (the
-#   "sidecar" option) — but REVERTED. UAR `main` fetches its `kreuzberg` submodule
-#   over private SSH (`ssh://git@github.com/GQAdonis/kreuzberg.git`); the
-#   `sync-gqadonis-745b4c1` branch exists precisely to rewrite those submodule URLs
-#   to public HTTPS so CI can resolve them without a deploy key. Pointing at `main`
-#   breaks `cargo` dep-resolution on every CI lane (fmt/clippy/test/build), not just
-#   the daemon. **To bump the in-process UAR, first cut a fresh `sync-gqadonis-<sha>`
-#   branch in GQAdonis/universal-agent-runtime that rebases the new UAR onto the
-#   .gitmodules→HTTPS fix, then point here at that branch.**
+# * Upstream UAR (Prometheus-AGS) declares its `prometheus-skill-system` and
+#   `prometheus-entity-management` submodules with `git@github.com:` SSH URLs.
+#   Cargo resolves UAR as a git dependency on CI runners that carry no SSH deploy
+#   key, so pointing straight at Prometheus-AGS breaks dep-resolution on every
+#   lane (fmt/clippy/test/build), not just the daemon — this was tried on
+#   2026-06-17 and reverted. The `sync-gqadonis-<sha>` branches in
+#   GQAdonis/universal-agent-runtime exist precisely to rebase upstream UAR onto
+#   a .gitmodules→HTTPS rewrite (all three submodule repos are public, so plain
+#   HTTPS resolves without credentials).
+#   **To bump the in-process UAR, cut a fresh `sync-gqadonis-<sha>` branch that
+#   rebases the new UAR onto that .gitmodules fix, then point `rev` here at it.**
+#   Pin by `rev`, not `branch`: UAR runs a `build.rs`, and a moving branch makes
+#   the build non-reproducible and lets an unrelated UAR push break our CI.
+# * 2026-07-11: bumped 745b4c1 → 8c7377a1 (rebased as 0cd664ce). Carries
+#   surrealdb =3.2.1 — which must match the workspace pin verbatim, since cargo
+#   cannot unify two exact `=` pins on the same crate — plus the newer liter-llm
+#   rev d8223de.
 #   This SSH-submodule fragility is itself another reason to migrate UAR to a
 #   supervised SIDECAR (a prebuilt binary sidesteps the whole submodule fetch).
 #   See docs/architecture/uar-sidecar-assessment.md.
-universal-agent-runtime = { git = "https://github.com/GQAdonis/universal-agent-runtime.git", branch = "sync-gqadonis-745b4c1", optional = true, default-features = false, features = ["surreal-backend"] }
+universal-agent-runtime = { git = "https://github.com/GQAdonis/universal-agent-runtime.git", rev = "0cd664ce52a19556ae273f231d3e0e3578aba40a", optional = true, default-features = false, features = ["surreal-backend"] }
 
 librefang-types = { path = "../librefang-types" }
 librefang-llm-driver = { path = "../librefang-llm-driver" }

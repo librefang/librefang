@@ -481,7 +481,7 @@ function isStylingLiteral(text: string): boolean {
 
 function isAllowedHardcodedText(text: string, kind: string): boolean {
   if (isTechnicalLiteral(text)) return true;
-  if (["English", "Українська", "中文", "简体中文"].includes(text)) return true;
+  if (["English", "Українська", "中文", "简体中文", "한국어"].includes(text)) return true;
   if (["Telegram", "Slack", "Discord", "Signal"].includes(text)) return true;
   if (["CLI N/A"].includes(text)) return true;
   if (kind === "jsx-attr:placeholder" && /^e\.g\. [\w./:"{}* -]+$/.test(text)) {

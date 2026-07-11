@@ -47,6 +47,10 @@ config.toml
 *.cert
 *.p12
 *.pfx
+# AUR CI deploy key pair (OpenSSH key has no extension, so *.pem / *.key miss it).
+# Lives at the repo root for local AUR publishing; never commit it.
+/aur_ci
+/aur_ci.pub
 
 # Runtime artifacts
 collector_hand_state.json

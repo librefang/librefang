@@ -186,7 +186,7 @@ jobs:
 
       - name: Build and bundle Tauri desktop app
         if: runner.os != 'macOS' || env.APPLE_SIGNING_IDENTITY == ''
-        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -196,13 +196,13 @@ jobs:
           releaseName: "${{ inputs.tag }}"
           releaseDraft: false
           prerelease: false
-          includeUpdaterJson: true
+          uploadUpdaterJson: true
           projectPath: crates/librefang-desktop
           args: ${{ matrix.platform.args }}
 
       - name: Build and bundle Tauri desktop app (signed macOS)
         if: runner.os == 'macOS' && env.APPLE_SIGNING_IDENTITY != ''
-        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -216,7 +216,7 @@ jobs:
           releaseName: "${{ inputs.tag }}"
           releaseDraft: false
           prerelease: false
-          includeUpdaterJson: true
+          uploadUpdaterJson: true
           projectPath: crates/librefang-desktop
           args: ${{ matrix.platform.args }}
 
@@ -321,14 +321,19 @@ jobs:
               desc_suffix=" (${channel} channel)"
             fi
 
-            local conflicts=""
+            # Casks allow only ONE conflicts_with stanza, so collect the other
+            # channels into a single array literal instead of one stanza each.
+            local conflict_items=""
             for other in "${ALL_CHANNELS[@]}"; do
               [ "$other" = "$channel" ] && continue
               local other_name="librefang"
               [ "$other" != "stable" ] && other_name="librefang-${other}"
-              conflicts="${conflicts}
-            conflicts_with cask: \"${other_name}\""
+              [ -n "$conflict_items" ] && conflict_items="${conflict_items}, "
+              conflict_items="${conflict_items}\"${other_name}\""
             done
+            local conflicts=""
+            [ -n "$conflict_items" ] && conflicts="
+            conflicts_with cask: [${conflict_items}]"
 
             local livecheck=""
             if [ "$channel" = "stable" ]; then

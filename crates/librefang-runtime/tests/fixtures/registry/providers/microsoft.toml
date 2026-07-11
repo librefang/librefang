@@ -1,0 +1,34 @@
+# microsoft — auto-generated from OpenRouter API
+#
+# This entry is GitHub Models / Azure AI Inference (https://models.inference.ai.azure.com),
+# distinct from the `github-copilot` IDE-subscription product even though both
+# physically accept a GitHub Personal Access Token. Each now has its own env so
+# users with only one product configured don't see the other appear in the model
+# picker. See librefang/librefang#3278.
+
+[provider]
+id = "microsoft"
+display_name = "Microsoft"
+api_key_env = "GITHUB_MODELS_TOKEN"
+base_url = "https://models.inference.ai.azure.com"
+key_required = true
+
+[[models]]
+id = "phi-4"
+display_name = "Microsoft: Phi 4"
+tier = "fast"
+context_window = 16384
+max_output_tokens = 16384
+input_cost_per_m = 0.065
+output_cost_per_m = 0.14
+supports_streaming = true
+
+[[models]]
+id = "wizardlm-2-8x22b"
+display_name = "WizardLM-2 8x22B"
+tier = "smart"
+context_window = 65535
+max_output_tokens = 8000
+input_cost_per_m = 0.62
+output_cost_per_m = 0.62
+supports_streaming = true
