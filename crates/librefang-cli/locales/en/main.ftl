@@ -1227,6 +1227,8 @@ desktop-install-error-copy-appimage = Failed to copy AppImage: { $error }
 desktop-install-error-http = HTTP request failed: { $error }
 desktop-install-error-create = Cannot create { $path }: { $error }
 desktop-install-error-write = Write error: { $error }
+desktop-install-error-too-large = downloaded installer exceeds the { $limit } MiB safety limit (observed at least { $bytes } bytes); aborting
+desktop-install-gatekeeper-notice = macOS may ask you to confirm opening LibreFang on first launch; this is Gatekeeper verifying the app's notarization.
 
 maintenance-error-github-request = GitHub request failed: { $error }
 maintenance-error-github-status = GitHub API returned { $status }

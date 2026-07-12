@@ -403,6 +403,8 @@ desktop-install-error-copy-appimage = 复制 AppImage 失败：{ $error }
 desktop-install-error-http = HTTP 请求失败：{ $error }
 desktop-install-error-create = 无法创建 { $path }：{ $error }
 desktop-install-error-write = 写入错误：{ $error }
+desktop-install-error-too-large = 下载的安装程序超过 { $limit } MiB 安全上限（已观测到至少 { $bytes } 字节）；已中止
+desktop-install-gatekeeper-notice = macOS 首次启动时可能会要求你确认打开 LibreFang；这是 Gatekeeper 在验证应用的公证签名。
 
 maintenance-error-github-request = GitHub 请求失败：{ $error }
 maintenance-error-github-status = GitHub API 返回了 { $status }

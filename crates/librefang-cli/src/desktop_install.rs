@@ -287,14 +287,14 @@ fn copy_capped<R: Read, W: Write>(
 }
 
 /// Error message for an installer download that exceeds [`MAX_INSTALLER_BYTES`].
-/// Rendered as a plain string rather than a Fluent key: adding a new i18n
-/// message would require touching the locale bundles, which are outside the
-/// scope of this safety fix.
 fn too_large_error(observed_bytes: u64) -> String {
-    format!(
-        "downloaded installer exceeds the {} MiB safety limit (observed at least {} bytes); aborting",
-        MAX_INSTALLER_BYTES / (1024 * 1024),
-        observed_bytes
+    let limit_mib = MAX_INSTALLER_BYTES / (1024 * 1024);
+    i18n::t_args(
+        "desktop-install-error-too-large",
+        &[
+            ("limit", &limit_mib.to_string()),
+            ("bytes", &observed_bytes.to_string()),
+        ],
     )
 }
 
@@ -478,9 +478,7 @@ fn install_macos_dmg(dmg_path: &Path) -> Result<PathBuf, String> {
     // build passes Gatekeeper silently, while a tampered one is blocked. The
     // trade-off is that macOS may show a confirmation dialog on first launch,
     // which we surface below so the user knows it is expected.
-    ui::hint(
-        "macOS may ask you to confirm opening LibreFang on first launch; this is Gatekeeper verifying the app's notarization.",
-    );
+    ui::hint(&i18n::t("desktop-install-gatekeeper-notice"));
 
     Ok(PathBuf::from(
         "/Applications/LibreFang.app/Contents/MacOS/LibreFang",
