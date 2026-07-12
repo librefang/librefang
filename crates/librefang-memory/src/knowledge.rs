@@ -126,6 +126,24 @@ impl KnowledgeStore {
 
     /// Query the knowledge graph with a pattern.
     pub fn query_graph(&self, pattern: GraphPattern) -> LibreFangResult<Vec<GraphMatch>> {
+        self.query_graph_scoped(pattern, None)
+    }
+
+    /// Query the knowledge graph with a pattern, optionally scoped to a
+    /// single agent's triples.
+    ///
+    /// When `agent_id` is `Some`, an `AND r.agent_id = ?` predicate is
+    /// appended so the caller only sees that agent's relations.
+    /// The entity JOINs already tie `s`/`t` to `r.agent_id`, so scoping the
+    /// relation side scopes all three tables.
+    /// This is the ACL boundary for the per-agent relations read endpoint:
+    /// the write path (`add_entity`/`add_relation`) keys every row on
+    /// `agent_id`, so an unscoped read leaked every agent's graph.
+    pub fn query_graph_scoped(
+        &self,
+        pattern: GraphPattern,
+        agent_id: Option<&str>,
+    ) -> LibreFangResult<Vec<GraphMatch>> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
 
         let mut sql = String::from(
@@ -158,6 +176,11 @@ impl KnowledgeStore {
             params.push(Box::new(target.clone()));
             params.push(Box::new(target.clone()));
             idx += 2;
+        }
+        if let Some(agent_id) = agent_id {
+            sql.push_str(&format!(" AND r.agent_id = ?{idx}"));
+            params.push(Box::new(agent_id.to_string()));
+            idx += 1;
         }
         let _ = idx;
 
@@ -630,5 +653,131 @@ mod tests {
             "corrupt relation properties must surface as Serialization, not be silently defaulted; \
              got: {res:?}"
         );
+    }
+
+    /// Security regression: `query_graph_scoped` must confine results to a
+    /// single agent so the per-agent relations HTTP endpoint cannot leak
+    /// another agent's triples. The write path keys every entity/relation on
+    /// `agent_id`, but the unscoped `query_graph` returned all agents' rows.
+    #[test]
+    fn query_graph_scoped_isolates_relations_by_agent() {
+        let store = setup();
+
+        // Agent A: a private triple (Alice works at Acme).
+        store
+            .add_entity(
+                Entity {
+                    id: "alice_a".to_string(),
+                    entity_type: EntityType::Person,
+                    name: "Alice".to_string(),
+                    properties: HashMap::new(),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+                "agent-a",
+            )
+            .unwrap();
+        store
+            .add_entity(
+                Entity {
+                    id: "acme_a".to_string(),
+                    entity_type: EntityType::Organization,
+                    name: "Acme Corp".to_string(),
+                    properties: HashMap::new(),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+                "agent-a",
+            )
+            .unwrap();
+        store
+            .add_relation(
+                Relation {
+                    source: "alice_a".to_string(),
+                    relation: RelationType::WorksAt,
+                    target: "acme_a".to_string(),
+                    properties: HashMap::new(),
+                    confidence: 0.95,
+                    created_at: Utc::now(),
+                },
+                "agent-a",
+            )
+            .unwrap();
+
+        // Agent B: a different private triple (Bob works at Globex).
+        store
+            .add_entity(
+                Entity {
+                    id: "bob_b".to_string(),
+                    entity_type: EntityType::Person,
+                    name: "Bob".to_string(),
+                    properties: HashMap::new(),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+                "agent-b",
+            )
+            .unwrap();
+        store
+            .add_entity(
+                Entity {
+                    id: "globex_b".to_string(),
+                    entity_type: EntityType::Organization,
+                    name: "Globex".to_string(),
+                    properties: HashMap::new(),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+                "agent-b",
+            )
+            .unwrap();
+        store
+            .add_relation(
+                Relation {
+                    source: "bob_b".to_string(),
+                    relation: RelationType::WorksAt,
+                    target: "globex_b".to_string(),
+                    properties: HashMap::new(),
+                    confidence: 0.95,
+                    created_at: Utc::now(),
+                },
+                "agent-b",
+            )
+            .unwrap();
+
+        let pattern = || GraphPattern {
+            source: None,
+            relation: None,
+            target: None,
+            max_depth: 1,
+        };
+
+        // Scoped to B: only Bob→Globex, never Alice→Acme.
+        let b_matches = store
+            .query_graph_scoped(pattern(), Some("agent-b"))
+            .unwrap();
+        assert_eq!(
+            b_matches.len(),
+            1,
+            "agent B must see exactly its own triple"
+        );
+        assert_eq!(b_matches[0].source.name, "Bob");
+        assert_eq!(b_matches[0].target.name, "Globex");
+        assert!(
+            !b_matches.iter().any(|m| m.source.name == "Alice"),
+            "agent B must never receive agent A's relations"
+        );
+
+        // Scoped to A: only Alice→Acme.
+        let a_matches = store
+            .query_graph_scoped(pattern(), Some("agent-a"))
+            .unwrap();
+        assert_eq!(a_matches.len(), 1);
+        assert_eq!(a_matches[0].source.name, "Alice");
+
+        // Unscoped still returns both — proves the scoping predicate, not a
+        // storage artifact, is what isolates the two agents.
+        let all = store.query_graph(pattern()).unwrap();
+        assert_eq!(all.len(), 2, "unscoped query returns every agent's triples");
     }
 }

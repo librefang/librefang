@@ -23,6 +23,17 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, error, warn};
 
+/// Upper bound on how many candidate rows the in-process (SQLite) semantic
+/// recall scans and cosine re-ranks when a query embedding is supplied.
+///
+/// The candidate SELECT for the embedding path is ordered by a
+/// similarity-neutral key (`created_at`), NOT by recency, so the true nearest
+/// neighbor is never excluded just because it was last accessed long ago (see
+/// the `fetch_limit` / `ORDER BY` logic in `recall_impl`). This cap only bounds
+/// the brute-force scan for very large stores; deployments that exceed it
+/// should attach an external `VectorStore` backend.
+const MAX_BRUTEFORCE_CANDIDATES: usize = 5000;
+
 /// Semantic store backed by SQLite with optional vector search.
 ///
 /// When a [`VectorStore`] backend is provided, vector similarity search in
@@ -172,6 +183,29 @@ impl SemanticStore {
             ],
         )
         .map_err(LibreFangError::memory)?;
+
+        // Release the pooled connection before the (potentially blocking)
+        // external vector-store write so a single-connection pool is never
+        // held across it.
+        drop(conn);
+
+        // Mirror the write into an external vector backend when one is attached
+        // (config.toml: vector_backend = "http"). The default SQLite path
+        // leaves vector_store = None, so this is a no-op there. Without it the
+        // external store is write-blind: every embedding recall against it
+        // hydrates zero ids and silently returns empty. Uses the same
+        // async->sync bridge as recall_via_vector_store.
+        if let (Some(vs), Some(emb)) = (&self.vector_store, embedding) {
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(vs.insert(
+                    &id.0.to_string(),
+                    emb,
+                    content,
+                    metadata.clone(),
+                ))
+            })?;
+        }
+
         Ok(id)
     }
 
@@ -242,8 +276,13 @@ impl SemanticStore {
 
         // Build SQL: fetch candidates (broader than limit for vector re-ranking)
         let fetch_limit = if query_embedding.is_some() {
-            // Fetch more candidates for vector search re-ranking
-            (limit * 10).max(100)
+            // Cosine re-ranking (below) decides final relevance, so the
+            // candidate set must NOT be pre-filtered by recency — an old,
+            // rarely-accessed memory can still be the nearest neighbor. Scan a
+            // large, similarity-neutral window bounded by
+            // MAX_BRUTEFORCE_CANDIDATES rather than the 100 most-recently
+            // accessed rows, which silently dropped relevant older memories.
+            (limit * 10).max(MAX_BRUTEFORCE_CANDIDATES)
         } else {
             limit
         };
@@ -367,7 +406,16 @@ impl SemanticStore {
             let _ = param_idx;
         }
 
-        sql.push_str(" ORDER BY confidence DESC, accessed_at DESC, access_count DESC");
+        if query_embedding.is_some() {
+            // Similarity-neutral candidate ordering: recency (accessed_at) must
+            // not decide which rows reach cosine re-ranking, or an
+            // old-but-relevant memory outside the recency window is silently
+            // dropped. `created_at DESC` only breaks ties when the store is
+            // larger than the cap.
+            sql.push_str(" ORDER BY created_at DESC");
+        } else {
+            sql.push_str(" ORDER BY confidence DESC, accessed_at DESC, access_count DESC");
+        }
         sql.push_str(&format!(" LIMIT {fetch_limit}"));
 
         let mut stmt = conn.prepare(&sql).map_err(LibreFangError::memory)?;
@@ -410,6 +458,7 @@ impl SemanticStore {
             .map_err(LibreFangError::memory)?;
 
         let mut fragments = Vec::new();
+        let mut candidate_count = 0usize;
         for row_result in rows {
             let (
                 id_str,
@@ -427,6 +476,7 @@ impl SemanticStore {
                 image_embedding_bytes,
                 modality_str,
             ) = row_result.map_err(LibreFangError::memory)?;
+            candidate_count += 1;
 
             let id = uuid::Uuid::parse_str(&id_str)
                 .map(MemoryId)
@@ -512,10 +562,14 @@ impl SemanticStore {
             });
             fragments.truncate(limit);
             debug!(
-                "Vector recall: {} results from {} candidates",
+                "Vector recall: {} results from {candidate_count} candidates",
                 fragments.len(),
-                fetch_limit
             );
+            if candidate_count >= fetch_limit {
+                debug!(
+                    "Vector recall candidate scan hit the cap ({fetch_limit}); the true nearest neighbor may lie beyond it — attach an external VectorStore backend for large stores"
+                );
+            }
         }
 
         // Drop the prepared SELECT explicitly so `conn` is no
@@ -774,6 +828,56 @@ impl SemanticStore {
             rusqlite::params![bytes, id.0.to_string()],
         )
         .map_err(LibreFangError::memory)?;
+
+        // Mirror the re-embedding into an external vector backend when one is
+        // attached (config.toml: vector_backend = "http"). `VectorStore::insert`
+        // is an upsert, so re-inserting with the same id and the NEW embedding
+        // replaces the stale vector. Without this the external store keeps the
+        // OLD embedding after a content re-embed and `recall_via_vector_store`
+        // ranks against it — the same write-blindness the `remember` path fixes,
+        // on the update side. The default SQLite path leaves vector_store = None,
+        // so this is a no-op there.
+        if let Some(vs) = &self.vector_store {
+            let row = conn.query_row(
+                "SELECT content, metadata FROM memories WHERE id = ?1 AND deleted = 0",
+                rusqlite::params![id.0.to_string()],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            );
+            // Release the pooled connection before the (potentially blocking)
+            // external vector-store write so a single-connection pool is never
+            // held across it (mirrors the `remember` path).
+            drop(conn);
+            let (content, meta_str) = match row {
+                Ok(v) => v,
+                // Row gone (deleted between UPDATE and this read) — nothing to
+                // mirror; the embedding write above is harmless.
+                Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(()),
+                Err(e) => return Err(LibreFangError::memory(e)),
+            };
+            // Match the recall path: refuse to disguise a corrupt metadata blob
+            // as empty. Skip the mirror with a loud log rather than upserting
+            // wrong metadata; the SQLite embedding update still stands.
+            match serde_json::from_str::<HashMap<String, serde_json::Value>>(&meta_str) {
+                Ok(metadata) => {
+                    tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(vs.insert(
+                            &id.0.to_string(),
+                            embedding,
+                            &content,
+                            metadata,
+                        ))
+                    })?;
+                }
+                Err(e) => {
+                    error!(
+                        memory_id = %id.0,
+                        error = %e,
+                        "update_embedding: metadata column unparseable, skipping external \
+                         vector-store mirror (embedding recall may stay stale for this id)"
+                    );
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1727,6 +1831,260 @@ mod tests {
         );
         assert_eq!(results[0].agent_id, agent_a);
         assert_eq!(results[0].content, "Alpha secret for agent A");
+    }
+
+    /// A VectorStore backend that records every `insert` it receives and can
+    /// answer `search` over what it was given — models a real external store
+    /// (e.g. Qdrant over HTTP) closely enough to prove the write path reaches
+    /// it.
+    struct RecordingVectorStore {
+        inserted: std::sync::Mutex<Vec<(String, Vec<f32>)>>,
+    }
+
+    #[async_trait]
+    impl VectorStore for RecordingVectorStore {
+        async fn insert(
+            &self,
+            id: &str,
+            embedding: &[f32],
+            _payload: &str,
+            _metadata: HashMap<String, serde_json::Value>,
+        ) -> LibreFangResult<()> {
+            // Upsert by id, matching the trait contract ("Insert or update")
+            // and a real backend (e.g. Qdrant): a re-insert for the same id
+            // replaces the stored vector rather than accumulating duplicates.
+            let mut guard = self.inserted.lock().unwrap();
+            if let Some(existing) = guard.iter_mut().find(|(rid, _)| rid == id) {
+                existing.1 = embedding.to_vec();
+            } else {
+                guard.push((id.to_string(), embedding.to_vec()));
+            }
+            Ok(())
+        }
+
+        async fn search(
+            &self,
+            query_embedding: &[f32],
+            limit: usize,
+            _filter: Option<MemoryFilter>,
+        ) -> LibreFangResult<Vec<VectorSearchResult>> {
+            let mut scored: Vec<VectorSearchResult> = self
+                .inserted
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|(id, emb)| {
+                    cosine_similarity(query_embedding, emb).map(|score| VectorSearchResult {
+                        id: id.clone(),
+                        payload: String::new(),
+                        score,
+                        metadata: HashMap::new(),
+                    })
+                })
+                .collect();
+            scored.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            scored.truncate(limit);
+            Ok(scored)
+        }
+
+        async fn delete(&self, _id: &str) -> LibreFangResult<()> {
+            Ok(())
+        }
+
+        async fn get_embeddings(
+            &self,
+            _ids: &[&str],
+        ) -> LibreFangResult<HashMap<String, Vec<f32>>> {
+            Ok(HashMap::new())
+        }
+
+        fn backend_name(&self) -> &str {
+            "recording-test"
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn remember_writes_through_to_external_vector_store() {
+        // Regression: with an external vector backend attached, `remember`
+        // must push the embedding to that backend. Pre-fix the write path only
+        // touched SQLite, so the external store stayed empty and every
+        // embedding recall against it silently returned nothing.
+        let mut store = setup();
+        let vs = Arc::new(RecordingVectorStore {
+            inserted: std::sync::Mutex::new(Vec::new()),
+        });
+        store.set_vector_store(vs.clone());
+
+        let agent_id = AgentId::new();
+        let embedding = vec![1.0_f32, 0.0, 0.0];
+        let id = store
+            .remember_with_embedding(
+                agent_id,
+                "Rust is great",
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+                Some(&embedding),
+                None,
+                None,
+                Default::default(),
+            )
+            .unwrap();
+
+        // The external backend must have received the insert.
+        {
+            let inserted = vs.inserted.lock().unwrap();
+            assert_eq!(
+                inserted.len(),
+                1,
+                "remember must write through to the external vector store"
+            );
+            assert_eq!(inserted[0].0, id.0.to_string());
+        }
+
+        // And the memory must be recallable through the vector-store path.
+        let query = vec![1.0_f32, 0.0, 0.0];
+        let results = store
+            .recall_with_embedding("", 5, None, Some(&query))
+            .unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "memory written through must be recallable via the vector backend"
+        );
+        assert_eq!(results[0].content, "Rust is great");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn update_embedding_writes_through_to_external_vector_store() {
+        // Regression: a content re-embed (`update_embedding`) must mirror the
+        // NEW vector to the external backend too. Pre-fix only `remember` wrote
+        // through, so after an update the external store kept the OLD embedding
+        // and `recall_via_vector_store` ranked against a stale vector — a query
+        // matching the new content failed to surface the memory.
+        let mut store = setup();
+        let vs = Arc::new(RecordingVectorStore {
+            inserted: std::sync::Mutex::new(Vec::new()),
+        });
+        store.set_vector_store(vs.clone());
+
+        let agent_id = AgentId::new();
+        let old = vec![1.0_f32, 0.0, 0.0];
+        let id = store
+            .remember_with_embedding(
+                agent_id,
+                "cats are great",
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+                Some(&old),
+                None,
+                None,
+                Default::default(),
+            )
+            .unwrap();
+
+        // Re-embed with an orthogonal vector, as a content update would.
+        let new = vec![0.0_f32, 1.0, 0.0];
+        store.update_embedding(id, &new).unwrap();
+
+        // The external backend must have received the NEW embedding for this id
+        // (a second upsert), not just the original from `remember`.
+        {
+            let inserted = vs.inserted.lock().unwrap();
+            let last_for_id = inserted
+                .iter()
+                .rev()
+                .find(|(rid, _)| *rid == id.0.to_string())
+                .expect("update must write through to the external vector store");
+            assert_eq!(
+                last_for_id.1, new,
+                "external store must hold the re-embedded vector, not the stale one"
+            );
+        }
+
+        // And a query matching the NEW vector must recall the memory via the
+        // vector-store path (proves the stale vector was actually replaced).
+        let results = store
+            .recall_with_embedding("", 5, None, Some(&new))
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].content, "cats are great");
+    }
+
+    #[test]
+    fn vector_recall_considers_old_unaccessed_memories_not_just_recent_window() {
+        // Regression: cosine re-ranking must scan a similarity-neutral
+        // candidate window, not the N most-recently-accessed rows. An old,
+        // rarely-accessed memory that is the true nearest neighbor must still
+        // be recalled. Pre-fix the candidate SELECT used
+        // `ORDER BY confidence DESC, accessed_at DESC LIMIT 100`, so the target
+        // below (oldest accessed_at) fell outside the window and was never
+        // cosine-ranked.
+        let store = setup();
+        let agent_id = AgentId::new();
+
+        // The single best semantic match, stored first and then marked as
+        // accessed long ago so it falls outside any recency-ordered window.
+        let target_emb = vec![1.0_f32, 0.0, 0.0];
+        let target_id = store
+            .remember_with_embedding(
+                agent_id,
+                "old but highly relevant memory",
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+                Some(&target_emb),
+                None,
+                None,
+                Default::default(),
+            )
+            .unwrap();
+        {
+            let conn = store.pool.get().unwrap();
+            conn.execute(
+                "UPDATE memories SET accessed_at = ?1 WHERE id = ?2",
+                rusqlite::params!["2000-01-01T00:00:00+00:00", target_id.0.to_string()],
+            )
+            .unwrap();
+        }
+
+        // Flood the store with more recently-accessed, poorly-matching
+        // memories so the target is pushed outside the old 100-row recency
+        // window.
+        let filler_emb = vec![0.0_f32, 1.0, 0.0];
+        for i in 0..120 {
+            store
+                .remember_with_embedding(
+                    agent_id,
+                    &format!("unrelated filler memory {i}"),
+                    MemorySource::Conversation,
+                    "episodic",
+                    HashMap::new(),
+                    Some(&filler_emb),
+                    None,
+                    None,
+                    Default::default(),
+                )
+                .unwrap();
+        }
+
+        let query = vec![1.0_f32, 0.0, 0.0];
+        let results = store
+            .recall_with_embedding("", 5, None, Some(&query))
+            .unwrap();
+
+        assert!(
+            results.iter().any(|r| r.id == target_id),
+            "the old-but-most-relevant memory must be recalled, got: {:?}",
+            results.iter().map(|r| &r.content).collect::<Vec<_>>()
+        );
+        // It is the exact nearest neighbor, so it must rank first.
+        assert_eq!(results[0].id, target_id);
     }
 
     #[test]

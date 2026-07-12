@@ -314,6 +314,23 @@ pub async fn create_approval(
     )
 }
 
+/// Process-global lock serializing the per-approval TOTP replay
+/// check-and-record so two concurrent `approve_request` calls cannot both
+/// pass the `is_totp_code_used` gate with the same single-use code before
+/// either records it (TOCTOU).
+///
+/// `record_totp_code_used_for` upserts (`ON CONFLICT(code_hash) DO UPDATE`)
+/// and therefore always succeeds, so it cannot itself act as an atomic claim.
+/// Holding this lock across the check -> verify -> record region makes the
+/// sequence atomic and guarantees a single valid code authorizes exactly one
+/// approval, restoring the #3359 replay and #3360 single-use-per-action
+/// invariants under concurrency (mirrors the recovery-code path, which is made
+/// atomic kernel-side via `vault_recovery_codes_mutex`).
+///
+/// The critical section is fully synchronous — no `.await` runs while the
+/// guard is held — so a `std::sync::Mutex` is the correct primitive here.
+static TOTP_REPLAY_CLAIM_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// POST /api/approvals/{id}/approve — Approve a pending request.
 ///
 /// When TOTP is enabled, the request body must include a `totp_code` field.
@@ -418,6 +435,15 @@ pub async fn approve_request(
                             .into_response();
                         }
                     };
+                    // Serialize the replay check-and-record below so two
+                    // concurrent approvals cannot both consume the same
+                    // single-use code (see `TOTP_REPLAY_CLAIM_LOCK`). The guard
+                    // is dropped at the end of this `else` block — before the
+                    // async `resolve_tool_approval` call — and every path
+                    // between here and the record is synchronous.
+                    let _totp_claim_guard = TOTP_REPLAY_CLAIM_LOCK
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
                     // Replay-prevention check (#3359): reject a code that was
                     // already used within the last 60 seconds (two TOTP windows).
                     if state.kernel.approvals().is_totp_code_used(code) {
@@ -545,7 +571,12 @@ pub async fn approve_request(
             ),
         )
             .into_response(),
-        Err(e) => ApiErrorResponse::bad_request(e.to_string()).into_json_tuple().into_response(),
+        // #3541 parity with `reject_request`/`modify_request`: route the typed
+        // `KernelOpError` through the central status-code map so a missing or
+        // expired id yields 404 (AgentNotFound), a disabled gate 503
+        // (Unavailable/ShuttingDown), and an internal failure 500 — instead of
+        // collapsing every failure mode to 400.
+        Err(e) => ApiErrorResponse::from(e).into_response(),
     }
 }
 

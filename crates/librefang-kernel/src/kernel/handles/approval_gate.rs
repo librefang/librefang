@@ -447,6 +447,15 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
             .map_err(|msg| {
                 if msg.contains("not found") {
                     kernel_handle::KernelOpError::AgentNotFound(request_id.to_string())
+                } else if msg.contains("TOTP code required") || msg.starts_with("Already ") {
+                    // Client-side conditions surfaced by `ApprovalManager::resolve`:
+                    // a missing second factor ("TOTP code required …") and a
+                    // double-resolve ("Already {decision} by …") are 4xx, not 500.
+                    // Map to `InvalidInput` (400) so the typed status mapping
+                    // (`api::error::kernel_op_status`) does not turn a client error
+                    // into a server error — this preserves the pre-#3541 400 for
+                    // these cases while keeping the not-found→404 classification.
+                    kernel_handle::KernelOpError::InvalidInput(msg)
                 } else {
                     kernel_handle::KernelOpError::Internal(msg)
                 }
