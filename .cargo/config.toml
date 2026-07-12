@@ -1,2 +1,12 @@
 [alias]
 xtask = "run --package xtask --"
+
+[env]
+# The agent-loop integration/recovery tests build very large async state
+# machines; in debug builds a single such future can exceed the default
+# libtest per-test-thread stack (2 MiB) and abort with a stack overflow on
+# some hosts and CI runners. Raise the minimum thread stack so these heavy
+# async tests run reliably. This does not affect the release binary's own
+# threads (production spawns the agent loop on adequately-sized runtime/worker
+# threads); it only widens the floor for cargo-spawned test threads.
+RUST_MIN_STACK = "16777216"
