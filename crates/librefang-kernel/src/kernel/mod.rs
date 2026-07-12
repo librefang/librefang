@@ -1122,8 +1122,8 @@ impl LibreFangKernel {
             // no source TOML, no custom API key, and saved provider == old default
             // The built-in assistant is excluded because users can explicitly select its model in the dashboard.
             // Provider equality alone cannot distinguish that choice from a legacy resolved default.
-            // When `old_model` is set (intra-provider free-model migration) the stored model must also match,
-            // so an agent deliberately pinned to a different model on the same provider is left alone.
+            // When `old_model` is set (intra-provider free-model migration) the stored model must also match.
+            // Under this condition, an agent deliberately pinned to a different model on the same provider is left alone.
             let is_stale_dashboard_default = entry.name != "assistant"
                 && entry.source_toml_path.is_none()
                 && entry.manifest.model.api_key_env.is_none()

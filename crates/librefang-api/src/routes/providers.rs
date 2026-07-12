@@ -2434,11 +2434,19 @@ pub async fn set_default_provider(
             }
         };
         if let Some(ref model_id) = user_model {
-            if name == "openrouter" && catalog.is_model_available(&name, model_id) == Some(false) {
-                return ApiErrorResponse::bad_request(format!(
-                    "Model '{model_id}' is not available from provider '{name}'"
-                ))
-                .into_json_tuple();
+            if name == "openrouter" {
+                let openrouter_catalog_is_fresh = !catalog.live_provider_models_are_stale(
+                    "openrouter",
+                    librefang_kernel::model_catalog::OPENROUTER_MODEL_CATALOG_TTL,
+                );
+                if openrouter_catalog_is_fresh
+                    && catalog.is_model_available(&name, model_id) == Some(false)
+                {
+                    return ApiErrorResponse::bad_request(format!(
+                        "Model '{model_id}' is not available from provider '{name}'"
+                    ))
+                    .into_json_tuple();
+                }
             }
         }
         let model_id = user_model.or_else(|| catalog.automatic_default_model_for_provider(&name));

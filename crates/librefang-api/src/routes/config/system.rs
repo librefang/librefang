@@ -110,7 +110,9 @@ pub async fn quick_init(State(state): State<Arc<AppState>>) -> axum::response::R
         ("groq".to_string(), "GROQ_API_KEY".to_string())
     };
 
-    // Resolve default model from the kernel's live catalog rather than a throwaway `ModelCatalog::default()`, so a first-run auto-detect of `openrouter` (via `OPENROUTER_API_KEY`) picks a model consistent with the live catalog instead of only ever the checked-in build snapshot (#6384).
+    // Resolve the default model from the kernel's live catalog rather than a throwaway `ModelCatalog::default()`.
+    // This ensures a first-run auto-detect of `openrouter` (via `OPENROUTER_API_KEY`) picks a model consistent with the live catalog instead of only ever the checked-in build snapshot (#6384).
+    // Note that the background refresh is asynchronous and won't complete in this window, so the very first resolution will still resolve from the embedded build snapshot.
     crate::openrouter_catalog::refresh_if_missing_in_background(&state.kernel);
     let model = state
         .kernel
