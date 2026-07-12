@@ -2114,20 +2114,27 @@ impl ProactiveMemory for ProactiveMemoryStore {
         // Update content in-place (preserves ID, agent, scope, access stats)
         self.semantic.update_content(mid, content, Some(metadata))?;
 
-        // Re-embed the updated content so vector search stays accurate
+        // Re-embed the updated content so vector search stays accurate. A
+        // failure here leaves the stored vector pointing at the OLD content
+        // while the row now holds the NEW content — a silently stale index
+        // that returns the wrong memory for a semantic query. The content
+        // write above is already committed, but we must not report
+        // unqualified success (`Ok(true)`) with a known-stale vector: surface
+        // the error so the caller knows the update did not fully land and can
+        // retry (a retry re-commits the content and re-embeds). Returning
+        // `Ok(false)` is not an option — the API maps it to `404 Not Found`,
+        // which is wrong for a row that does exist and was written.
         if let Some(ref embed_fn) = self.embedding {
-            match embed_fn.embed_one(content).await {
-                Ok(vec) => {
-                    if let Err(e) = self.semantic.update_embedding(mid, &vec) {
-                        tracing::warn!("Failed to update embedding for memory {memory_id}: {e}");
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to compute embedding for updated memory {memory_id}: {e}"
-                    );
-                }
-            }
+            let vec = embed_fn.embed_one(content).await.map_err(|e| {
+                LibreFangError::Internal(format!(
+                    "memory {memory_id} content updated but re-embedding failed (stored vector is stale): {e}"
+                ))
+            })?;
+            self.semantic.update_embedding(mid, &vec).map_err(|e| {
+                LibreFangError::Internal(format!(
+                    "memory {memory_id} content updated but embedding write failed (stored vector is stale): {e}"
+                ))
+            })?;
         }
 
         let _ = user_id; // KV mirror removed; semantic.update_content is authoritative.
@@ -3852,6 +3859,58 @@ mod tests {
         // But add_with_decision UPDATE preserves history
         let count = store.count(&agent_id, None).unwrap();
         assert!(count >= 1);
+    }
+
+    /// Regression: `update()` commits the new content, then re-embeds. If the
+    /// re-embed fails the stored vector still points at the OLD content — a
+    /// silently stale index. Pre-fix the failure was swallowed with a `warn!`
+    /// and the method returned `Ok(true)`, reporting unqualified success on a
+    /// stale vector. It must surface the failure instead so the caller knows
+    /// the update did not fully land.
+    #[tokio::test]
+    async fn update_surfaces_error_when_reembedding_fails() {
+        struct FailingEmbedding;
+        #[async_trait]
+        impl EmbeddingFn for FailingEmbedding {
+            async fn embed_one(
+                &self,
+                _text: &str,
+            ) -> librefang_types::error::LibreFangResult<Vec<f32>> {
+                Err(librefang_types::error::LibreFangError::Internal(
+                    "embedding backend unavailable".to_string(),
+                ))
+            }
+        }
+
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let store = ProactiveMemoryStore::with_default_config(Arc::new(substrate))
+            .with_embedding(Arc::new(FailingEmbedding));
+        let agent_id = AgentId::new().to_string();
+
+        // `add` / `search` swallow embed failures and fall back to text, so
+        // the memory is created and findable despite the failing embedder.
+        store
+            .add(
+                &[serde_json::json!({"role": "user", "content": "I prefer dark mode always"})],
+                &agent_id,
+            )
+            .await
+            .unwrap();
+        let results = store.search("dark mode", &agent_id, 10).await.unwrap();
+        assert!(
+            !results.is_empty(),
+            "memory must be findable via text fallback"
+        );
+        let mem_id = results[0].id.clone();
+
+        let err = store
+            .update(&mem_id, &agent_id, "I prefer light mode now")
+            .await
+            .expect_err("re-embed failure must surface as Err, not Ok(true)");
+        assert!(
+            err.to_string().contains("stale"),
+            "error must flag the stored vector as stale, got: {err}"
+        );
     }
 
     #[tokio::test]

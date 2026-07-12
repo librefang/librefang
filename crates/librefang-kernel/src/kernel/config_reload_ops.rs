@@ -131,7 +131,11 @@ impl LibreFangKernel {
             let mut new_aux = librefang_runtime::aux_client::AuxClient::new(
                 new_config_arc,
                 Arc::clone(&self.llm.default_driver),
-            );
+            )
+            // Re-thread the current model-catalog snapshot so aux resolution
+            // keeps reaching catalog-only custom providers after a reload
+            // (matches boot-time wiring; #5755 parity for side tasks).
+            .with_model_catalog(self.llm.model_catalog.load_full());
             if let Some(store) = self.metering.engine.exhaustion_store() {
                 new_aux = new_aux.with_exhaustion_store(store);
             }

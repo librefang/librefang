@@ -382,6 +382,21 @@ pub struct AuditLog {
     /// `entries` mutex — important because the setter is called from
     /// boot before any append-path contention exists.
     max_in_memory_entries: AtomicUsize,
+    /// Running count of rows currently persisted in the `audit_entries`
+    /// table — the authoritative population `verify_integrity` compares
+    /// the external anchor's `seq` against. It is NOT the same as
+    /// `entries.len()`: the soft cap in `record_with_context` drains the
+    /// oldest in-memory entries without deleting the corresponding DB
+    /// rows, so `entries.len()` tracks the (bounded) in-memory window
+    /// while this counts every row still on disk. Seeded from the row
+    /// count loaded in `with_db`, incremented on every successful INSERT,
+    /// and decremented by the exact number of rows `trim()` / `prune()`
+    /// DELETE. Using `entries.len()` for the anchor `seq` desynced it from
+    /// the DB after a soft-cap eviction and raised a spurious "audit
+    /// anchor mismatch" on the next restart, because the reload
+    /// repopulates the full window. Every mutation and read happens under
+    /// the `entries` mutex, so `Relaxed` ordering is sufficient.
+    persisted_rows: AtomicUsize,
 }
 
 /// Per-trim summary returned by [`AuditLog::trim`].
@@ -429,6 +444,7 @@ impl AuditLog {
             anchor_path: None,
             chain_anchor: Mutex::new(None),
             max_in_memory_entries: AtomicUsize::new(0),
+            persisted_rows: AtomicUsize::new(0),
         }
     }
 
@@ -675,6 +691,9 @@ impl AuditLog {
             anchor_path: None,
             chain_anchor: Mutex::new(recovered_anchor),
             max_in_memory_entries: AtomicUsize::new(0),
+            // Every loaded row is a persisted row; at boot the in-memory
+            // window and the DB population are identical.
+            persisted_rows: AtomicUsize::new(count),
         };
 
         // Verify chain integrity on load. Logged at WARN: the message itself
@@ -887,6 +906,16 @@ impl AuditLog {
         entries.push(entry);
         *tip = hash.clone();
 
+        // The row is now committed to SQLite (or this is pure in-memory
+        // mode, where memory IS the store), so it counts toward the
+        // persisted population that anchors the external witness. This
+        // is deliberately BEFORE the soft-cap drain below: the drain
+        // shrinks the in-memory window but leaves the DB rows in place,
+        // so `persisted_rows` must keep counting them.
+        if self.db.is_some() {
+            self.persisted_rows.fetch_add(1, Ordering::Relaxed);
+        }
+
         // Soft cap: if the in-memory buffer grew beyond the configured
         // ceiling (1.5× `max_in_memory_entries` when set, otherwise the
         // hard `MAX_AUDIT_ENTRIES` default), drain the oldest prefix.
@@ -914,14 +943,19 @@ impl AuditLog {
         }
 
         // Advance the external anchor so a later DB rewrite is detectable.
-        // The anchor stores the post-push count so `verify_integrity`
-        // can compare it directly against `entries.len()`. Failures are
-        // logged but not propagated — the entry is already in SQLite,
-        // and refusing the append because of a filesystem hiccup would
-        // lose an audit record, which is strictly worse than an anchor
-        // that trails by one tick.
+        // The anchor stores the persisted-row count — NOT `entries.len()`
+        // — so `verify_integrity` compares it against the population that
+        // survives a restart. The soft-cap drain above can shrink
+        // `entries.len()` below the DB row count; writing the shrunken
+        // in-memory length here would desync the anchor `seq` from the
+        // rows `with_db` reloads and raise a spurious "audit anchor
+        // mismatch" on the next boot. Failures are logged but not
+        // propagated — the entry is already in SQLite, and refusing the
+        // append because of a filesystem hiccup would lose an audit
+        // record, which is strictly worse than an anchor that trails by
+        // one tick.
         if let Some(ref anchor_path) = self.anchor_path {
-            let count = entries.len() as u64;
+            let count = self.persisted_rows.load(Ordering::Relaxed) as u64;
             if let Err(e) = Self::write_anchor(anchor_path, count, &hash) {
                 tracing::warn!(
                     path = ?anchor_path,
@@ -1006,16 +1040,21 @@ impl AuditLog {
             match Self::read_anchor(anchor_path) {
                 Ok(Some(record)) => {
                     let current_tip = expected_prev.clone(); // hash of last entry
-                    let current_len = entries.len() as u64;
-                    // `seq` in the anchor is the number of entries at
-                    // the time it was last written. For an append-only
-                    // log this must match `entries.len()` once the
-                    // chain is up to date.
-                    if record.seq != current_len || record.hash != current_tip {
+                                                             // `seq` in the anchor is the number of rows persisted
+                                                             // at the time it was last written. Compare it against
+                                                             // the persisted-row count, NOT `entries.len()`: the
+                                                             // soft cap in `record_with_context` drains the
+                                                             // in-memory window without deleting DB rows, so
+                                                             // `entries.len()` under-counts the population a restart
+                                                             // reloads. Using it here would raise a spurious anchor
+                                                             // mismatch after the next boot even though the chain is
+                                                             // intact.
+                    let persisted = self.persisted_rows.load(Ordering::Relaxed) as u64;
+                    if record.seq != persisted || record.hash != current_tip {
                         return Err(format!(
                             "audit anchor mismatch: anchor says seq={} tip={} \
-                             but DB has len={} tip={}",
-                            record.seq, record.hash, current_len, current_tip
+                             but DB has rows={} tip={}",
+                            record.seq, record.hash, persisted, current_tip
                         ));
                     }
                 }
@@ -1214,15 +1253,26 @@ impl AuditLog {
         if let Some(ref db) = self.db {
             match db.get() {
                 Ok(conn) => {
-                    if let Err(e) = conn.execute(
+                    match conn.execute(
                         "DELETE FROM audit_entries WHERE seq < ?1",
                         rusqlite::params![first_survivor_seq as i64],
                     ) {
-                        tracing::error!(
-                            "Audit trim DELETE failed ({e}); keeping the in-memory window \
-                             consistent with the DB — retrying on the next trim tick"
-                        );
-                        return TrimReport::default();
+                        // Decrement the persisted-row count by the rows the
+                        // DELETE actually removed — not `drop_count`, which
+                        // only counts in-memory survivors. A prior soft-cap
+                        // eviction can leave DB rows below the in-memory
+                        // window, so `seq < first_survivor_seq` may delete
+                        // more rows than were held in memory.
+                        Ok(deleted) => {
+                            self.persisted_rows.fetch_sub(deleted, Ordering::Relaxed);
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "Audit trim DELETE failed ({e}); keeping the in-memory window \
+                                 consistent with the DB — retrying on the next trim tick"
+                            );
+                            return TrimReport::default();
+                        }
                     }
                 }
                 Err(e) => {
@@ -1246,15 +1296,15 @@ impl AuditLog {
         entries.drain(..drop_count);
 
         // Refresh the external anchor file so its `seq` column tracks
-        // the new (post-trim) `entries.len()`. The tip hash itself does
-        // NOT change — trimming a prefix never moves the tail — but the
-        // seq does, and `verify_integrity` insists they agree. Failing
-        // to rewrite the anchor here would surface as a spurious
+        // the new (post-trim) persisted-row count. The tip hash itself
+        // does NOT change — trimming a prefix never moves the tail — but
+        // the count does, and `verify_integrity` insists they agree.
+        // Failing to rewrite the anchor here would surface as a spurious
         // "audit anchor mismatch" on the very next verification.
         if let Some(ref anchor_path) = self.anchor_path {
-            let new_len = entries.len() as u64;
+            let new_count = self.persisted_rows.load(Ordering::Relaxed) as u64;
             let tip = self.tip.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            if let Err(e) = Self::write_anchor(anchor_path, new_len, &tip) {
+            if let Err(e) = Self::write_anchor(anchor_path, new_count, &tip) {
                 tracing::warn!(
                     path = ?anchor_path,
                     "Failed to refresh audit anchor after trim: {e}"
@@ -1324,15 +1374,25 @@ impl AuditLog {
         if let Some(ref db) = self.db {
             match db.get() {
                 Ok(conn) => {
-                    if let Err(e) = conn.execute(
+                    match conn.execute(
                         "DELETE FROM audit_entries WHERE seq < ?1",
                         rusqlite::params![first_survivor_seq as i64],
                     ) {
-                        tracing::error!(
-                            "Audit prune DELETE failed ({e}); keeping the in-memory window \
-                             consistent with the DB — retrying on the next prune"
-                        );
-                        return 0;
+                        // Decrement by the rows actually removed (see the
+                        // matching note in `trim`): a prior soft-cap
+                        // eviction can leave DB rows below the in-memory
+                        // window, so the DELETE may remove more rows than
+                        // `drop_count`.
+                        Ok(deleted) => {
+                            self.persisted_rows.fetch_sub(deleted, Ordering::Relaxed);
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "Audit prune DELETE failed ({e}); keeping the in-memory window \
+                                 consistent with the DB — retrying on the next prune"
+                            );
+                            return 0;
+                        }
                     }
                 }
                 Err(e) => {
@@ -1361,11 +1421,13 @@ impl AuditLog {
 
         // Refresh the external anchor file's `seq` column so the next
         // verify_integrity() does not trip the "anchor seq mismatch"
-        // guard. Tip itself does not move (we only drop a prefix).
+        // guard. The seq tracks the persisted-row count, not
+        // `entries.len()` (see the note in `record_with_context`). Tip
+        // itself does not move (we only drop a prefix).
         if let Some(ref anchor_path) = self.anchor_path {
-            let new_len = entries.len() as u64;
+            let new_count = self.persisted_rows.load(Ordering::Relaxed) as u64;
             let tip = self.tip.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            if let Err(e) = Self::write_anchor(anchor_path, new_len, &tip) {
+            if let Err(e) = Self::write_anchor(anchor_path, new_count, &tip) {
                 tracing::warn!(
                     path = ?anchor_path,
                     "Failed to refresh audit anchor after prune: {e}"

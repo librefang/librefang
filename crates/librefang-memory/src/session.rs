@@ -1327,12 +1327,30 @@ impl SessionStore {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let cutoff = Utc::now() - chrono::Duration::days(i64::from(retention_days));
         let cutoff_str = cutoff.to_rfc3339();
-        let deleted = conn
+        // Clear the FTS index rows for the same selector first, then the
+        // sessions rows, inside one transaction. `search_sessions` reads
+        // `sessions_fts` without joining `sessions`, so a session row deleted
+        // without its FTS row leaves the content searchable — the same
+        // privacy regression `delete_session` (#3548) guards against. The FTS
+        // DELETE must run before the sessions DELETE so its subquery can still
+        // resolve the ids being removed.
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(LibreFangError::memory)?;
+        tx.execute(
+            "DELETE FROM sessions_fts WHERE session_id IN (
+                SELECT id FROM sessions WHERE updated_at < ?1
+            )",
+            rusqlite::params![cutoff_str],
+        )
+        .map_err(|e| LibreFangError::memory_msg(format!("FTS delete failed: {e}")))?;
+        let deleted = tx
             .execute(
                 "DELETE FROM sessions WHERE updated_at < ?1",
                 rusqlite::params![cutoff_str],
             )
             .map_err(LibreFangError::memory)?;
+        tx.commit().map_err(LibreFangError::memory)?;
         Ok(deleted as u64)
     }
 
@@ -1348,19 +1366,33 @@ impl SessionStore {
         // Single-query approach using window functions (SQLite 3.25+).
         // ROW_NUMBER partitions by agent and ranks by recency; rows beyond
         // the limit are deleted in one pass — no N+1 per-agent queries.
-        let deleted = conn
+        //
+        // The `sessions_fts` index rows for the same over-limit selector must
+        // be cleared too, in one transaction — otherwise the deleted content
+        // stays searchable via `search_sessions` (which reads `sessions_fts`
+        // without joining `sessions`). The FTS DELETE runs first so its
+        // subquery can still resolve the ids being removed.
+        let over_limit_selector = "SELECT id FROM (
+                    SELECT id, ROW_NUMBER() OVER (
+                        PARTITION BY agent_id ORDER BY updated_at DESC
+                    ) AS rn
+                    FROM sessions
+                ) WHERE rn > ?1";
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(LibreFangError::memory)?;
+        tx.execute(
+            &format!("DELETE FROM sessions_fts WHERE session_id IN ({over_limit_selector})"),
+            rusqlite::params![max_per_agent],
+        )
+        .map_err(|e| LibreFangError::memory_msg(format!("FTS delete failed: {e}")))?;
+        let deleted = tx
             .execute(
-                "DELETE FROM sessions WHERE id IN (
-                    SELECT id FROM (
-                        SELECT id, ROW_NUMBER() OVER (
-                            PARTITION BY agent_id ORDER BY updated_at DESC
-                        ) AS rn
-                        FROM sessions
-                    ) WHERE rn > ?1
-                )",
+                &format!("DELETE FROM sessions WHERE id IN ({over_limit_selector})"),
                 rusqlite::params![max_per_agent],
             )
             .map_err(LibreFangError::memory)?;
+        tx.commit().map_err(LibreFangError::memory)?;
 
         Ok(deleted as u64)
     }
@@ -1391,13 +1423,28 @@ impl SessionStore {
         let placeholders = std::iter::repeat_n("?", live_agent_ids.len())
             .collect::<Vec<_>>()
             .join(",");
-        let sql = format!("DELETE FROM sessions WHERE agent_id NOT IN ({placeholders})");
-        let deleted = conn
+        // Clear the FTS index rows for the orphan agents in the same
+        // transaction — `sessions_fts` carries `agent_id`, so the same
+        // `NOT IN` selector applies directly. Without this the deleted
+        // agents' content stays searchable through `search_sessions`, which
+        // reads `sessions_fts` without joining `sessions` (see #3501 /
+        // `execute_session_agent_deletes`). The FTS DELETE runs first so it
+        // is not affected by the sessions rows already being gone.
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(LibreFangError::memory)?;
+        tx.execute(
+            &format!("DELETE FROM sessions_fts WHERE agent_id NOT IN ({placeholders})"),
+            rusqlite::params_from_iter(live_agent_ids.iter().map(|id| id.0.to_string())),
+        )
+        .map_err(|e| LibreFangError::memory_msg(format!("FTS delete failed: {e}")))?;
+        let deleted = tx
             .execute(
-                &sql,
+                &format!("DELETE FROM sessions WHERE agent_id NOT IN ({placeholders})"),
                 rusqlite::params_from_iter(live_agent_ids.iter().map(|id| id.0.to_string())),
             )
             .map_err(LibreFangError::memory)?;
+        tx.commit().map_err(LibreFangError::memory)?;
 
         Ok(deleted as u64)
     }
@@ -2413,6 +2460,127 @@ mod tests {
         // max_per_agent=0 should be a no-op
         let deleted = store.cleanup_excess_sessions(0).unwrap();
         assert_eq!(deleted, 0);
+    }
+
+    /// The retention-cleanup paths must clear the matching `sessions_fts`
+    /// rows in the same transaction as the `sessions` rows.
+    /// `search_sessions` reads `sessions_fts` without joining `sessions`, so
+    /// a session deleted without its FTS row leaves its content searchable —
+    /// the same privacy regression `delete_session` / `delete_agent_sessions`
+    /// guard against. Pre-fix each cleanup ran a bare `DELETE FROM sessions`
+    /// and the FTS rows became searchable orphans.
+    #[test]
+    fn test_cleanup_expired_sessions_clears_fts() {
+        let store = setup();
+        let agent_id = AgentId::new();
+
+        let mut session = store.create_session(agent_id).unwrap();
+        let needle = "expirednoncexyz789";
+        session.messages.push(Message::user(needle));
+        store.save_session(&session).unwrap();
+
+        // Backdate past the retention window without touching the FTS row.
+        {
+            let conn = store.pool.get().expect("session pool get");
+            let old_date = (Utc::now() - chrono::Duration::days(60)).to_rfc3339();
+            conn.execute(
+                "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+                rusqlite::params![old_date, session.id.0.to_string()],
+            )
+            .unwrap();
+        }
+        assert!(
+            !store
+                .search_sessions(needle, Some(&agent_id))
+                .unwrap()
+                .is_empty(),
+            "FTS index must be populated before cleanup"
+        );
+
+        let deleted = store.cleanup_expired_sessions(30).unwrap();
+        assert_eq!(deleted, 1);
+
+        let post = store.search_sessions(needle, Some(&agent_id)).unwrap();
+        assert!(
+            post.is_empty(),
+            "cleanup_expired_sessions must not leave orphan FTS rows"
+        );
+    }
+
+    #[test]
+    fn test_cleanup_excess_sessions_clears_fts() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let old_needle = "excessoldnonce111";
+        let new_needle = "excessnewnonce222";
+
+        let mut s_old = store.create_session(agent_id).unwrap();
+        s_old.messages.push(Message::user(old_needle));
+        store.save_session(&s_old).unwrap();
+        let mut s_new = store.create_session(agent_id).unwrap();
+        s_new.messages.push(Message::user(new_needle));
+        store.save_session(&s_new).unwrap();
+
+        // Make s_old the older session by `updated_at` so the keep-newest-1
+        // policy evicts exactly it.
+        {
+            let conn = store.pool.get().expect("session pool get");
+            let old_date = (Utc::now() - chrono::Duration::days(1)).to_rfc3339();
+            conn.execute(
+                "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+                rusqlite::params![old_date, s_old.id.0.to_string()],
+            )
+            .unwrap();
+        }
+
+        let deleted = store.cleanup_excess_sessions(1).unwrap();
+        assert_eq!(deleted, 1);
+
+        assert!(
+            store
+                .search_sessions(old_needle, Some(&agent_id))
+                .unwrap()
+                .is_empty(),
+            "cleanup_excess_sessions must not leave orphan FTS rows for the evicted session"
+        );
+        assert!(
+            !store
+                .search_sessions(new_needle, Some(&agent_id))
+                .unwrap()
+                .is_empty(),
+            "the retained session must stay searchable"
+        );
+    }
+
+    #[test]
+    fn test_cleanup_orphan_sessions_clears_fts() {
+        let store = setup();
+        let live = AgentId::new();
+        let orphan = AgentId::new();
+        let needle = "orphannoncedef456";
+
+        let mut s = store.create_session(orphan).unwrap();
+        s.messages.push(Message::user(needle));
+        store.save_session(&s).unwrap();
+        // A live session keeps the live set non-empty (empty set is a no-op).
+        store.create_session(live).unwrap();
+
+        assert!(
+            !store
+                .search_sessions(needle, Some(&orphan))
+                .unwrap()
+                .is_empty(),
+            "FTS index must be populated before cleanup"
+        );
+
+        let deleted = store.cleanup_orphan_sessions(&[live]).unwrap();
+        assert_eq!(deleted, 1);
+
+        let post = store.search_sessions(needle, Some(&orphan)).unwrap();
+        assert!(
+            post.is_empty(),
+            "cleanup_orphan_sessions must not leave orphan FTS rows"
+        );
     }
 
     #[test]

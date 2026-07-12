@@ -277,7 +277,12 @@ impl LibreFangKernel {
                 String,
             )> = vec![(
                 primary.clone(),
-                agent_provider.clone(),
+                // Empty model name: the primary slot keeps the request's own
+                // model field as-is. A non-empty middle element is a per-slot
+                // model OVERRIDE (FallbackDriver rewrites `req.model` with it),
+                // so the provider name here would clobber the primary model and
+                // force it to 404. Mirrors the boot.rs primary slot.
+                String::new(),
                 agent_provider.clone(),
             )];
             for fb in &effective_fallbacks {
@@ -606,6 +611,67 @@ key_required = true
         assert_eq!(
             resolved_no_explicit, "OTHER_CUSTOM_PROVIDER_API_KEY",
             "no explicit + no catalog must fall back to convention"
+        );
+    }
+
+    /// Regression: the FallbackDriver primary slot built by `resolve_driver`
+    /// must carry an EMPTY model name, not the provider name. The middle tuple
+    /// element is a per-slot model OVERRIDE — `FallbackDriver` rewrites
+    /// `req.model` with it whenever it is non-empty. Setting it to the provider
+    /// string ("anthropic"/"openai"/…) clobbers the agent's primary model, so
+    /// the primary request 404s and silently fails over. This mirrors the exact
+    /// primary-slot construction in `resolve_driver` above.
+    #[tokio::test]
+    async fn fallback_primary_slot_preserves_request_model() {
+        use librefang_types::message::{ContentBlock, StopReason, TokenUsage};
+        use std::sync::Mutex;
+
+        // Records the model each dispatch actually saw.
+        struct RecordingDriver(Arc<Mutex<Option<String>>>);
+        #[async_trait]
+        impl LlmDriver for RecordingDriver {
+            async fn complete(
+                &self,
+                req: CompletionRequest,
+            ) -> Result<CompletionResponse, LlmError> {
+                *self.0.lock().unwrap() = Some(req.model.clone());
+                Ok(CompletionResponse {
+                    content: vec![ContentBlock::Text {
+                        text: "ok".to_string(),
+                        provider_metadata: None,
+                    }],
+                    stop_reason: StopReason::EndTurn,
+                    tool_calls: vec![],
+                    usage: TokenUsage::default(),
+                    actual_provider: None,
+                    actual_model: None,
+                })
+            }
+        }
+
+        let seen = Arc::new(Mutex::new(None));
+        let primary = Arc::new(RecordingDriver(Arc::clone(&seen)));
+        let agent_provider = "anthropic".to_string();
+
+        // Exact shape of the primary slot in `resolve_driver`.
+        let chain: Vec<(Arc<dyn LlmDriver>, String, String)> = vec![(
+            primary as Arc<dyn LlmDriver>,
+            String::new(),
+            agent_provider.clone(),
+        )];
+        let fb =
+            librefang_runtime::drivers::fallback::FallbackDriver::with_models_and_providers(chain);
+
+        let req = CompletionRequest {
+            model: "claude-sonnet-4-5".to_string(),
+            ..Default::default()
+        };
+        fb.complete(req).await.expect("primary serves");
+
+        assert_eq!(
+            seen.lock().unwrap().as_deref(),
+            Some("claude-sonnet-4-5"),
+            "primary slot must leave req.model unchanged, not overwrite it with the provider name"
         );
     }
 }

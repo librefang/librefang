@@ -128,14 +128,28 @@ impl LibreFangKernel {
         // tail is materialized later (after per-role manifest cloning) via
         // `apply_settings_block_to_manifest` — keep this block aligned with the
         // env-var allowlist only.
+        // SECURITY: the passthrough list is assembled entirely from
+        // attacker-controllable HAND.toml `[[requires]]` / settings names, and
+        // is later materialized into the child's env from the daemon's LIVE
+        // environment. Filter every candidate through the shared secret
+        // blocklist so a marketplace hand cannot exfiltrate daemon secrets
+        // (`LIBREFANG_VAULT_KEY`, `ANTHROPIC_API_KEY`, …) by naming them here.
+        // `sandbox_command` re-checks defensively at spawn time.
         let resolved_settings_env: Vec<String> =
             librefang_hands::resolve_settings(&def.settings, &instance.config).env_vars;
-        let mut allowed_env = resolved_settings_env;
+        let mut allowed_env: Vec<String> = resolved_settings_env
+            .into_iter()
+            .filter(|v| !librefang_runtime::subprocess_sandbox::is_blocked_env_var(v))
+            .collect();
         for req in &def.requires {
             match req.requirement_type {
                 librefang_hands::RequirementType::ApiKey
                 | librefang_hands::RequirementType::EnvVar
-                    if !req.check_value.is_empty() && !allowed_env.contains(&req.check_value) =>
+                    if !req.check_value.is_empty()
+                        && !allowed_env.contains(&req.check_value)
+                        && !librefang_runtime::subprocess_sandbox::is_blocked_env_var(
+                            &req.check_value,
+                        ) =>
                 {
                     allowed_env.push(req.check_value.clone());
                 }

@@ -46,7 +46,7 @@ impl LibreFangKernel {
             }
         }
 
-        let all_builtins = if cfg.browser.enabled {
+        let mut all_builtins = if cfg.browser.enabled {
             builtin_tool_definitions()
         } else {
             // When built-in browser is disabled (replaced by an external
@@ -56,6 +56,13 @@ impl LibreFangKernel {
                 .filter(|t| !t.name.starts_with("browser_"))
                 .collect()
         };
+
+        // Canvas / A2UI tool is opt-in (`[canvas] enabled`, default false).
+        // When disabled, strip `canvas_present` so it is neither advertised to
+        // the LLM nor dispatchable — mirroring the browser gate above.
+        if !cfg.canvas.enabled {
+            all_builtins.retain(|t| t.name != "canvas_present");
+        }
 
         // Look up agent entry for profile, skill/MCP allowlists, and declared tools
         let entry = self.agents.registry.get(agent_id);
@@ -1702,6 +1709,50 @@ mod tests {
 
     fn agent(uuid_str: &str) -> AgentId {
         AgentId(uuid::Uuid::parse_str(uuid_str).unwrap())
+    }
+
+    // ── canvas.enabled gate over the `canvas_present` builtin ───────────────
+
+    fn kernel_with_canvas(enabled: bool) -> (LibreFangKernel, tempfile::TempDir) {
+        let dir = tempdir().unwrap();
+        let home = dir.path().to_path_buf();
+        std::fs::create_dir_all(home.join("data")).unwrap();
+        let cfg = KernelConfig {
+            home_dir: home.clone(),
+            data_dir: home.join("data"),
+            canvas: librefang_types::config::CanvasConfig {
+                enabled,
+                ..Default::default()
+            },
+            ..KernelConfig::default()
+        };
+        let k = LibreFangKernel::boot_with_config(cfg).expect("kernel should boot");
+        (k, dir)
+    }
+
+    /// With `[canvas] enabled = false` (the default), the opt-in `canvas_present`
+    /// tool must not be advertised to the LLM.
+    #[test]
+    fn canvas_present_absent_when_canvas_disabled() {
+        let (kernel, _dir) = kernel_with_canvas(false);
+        let tools = kernel.available_tools(AgentId::new());
+        assert!(
+            !tools.iter().any(|t| t.name == "canvas_present"),
+            "canvas_present must be filtered out when [canvas] enabled = false"
+        );
+        kernel.shutdown();
+    }
+
+    /// With `[canvas] enabled = true`, the tool is present in the tool list.
+    #[test]
+    fn canvas_present_available_when_canvas_enabled() {
+        let (kernel, _dir) = kernel_with_canvas(true);
+        let tools = kernel.available_tools(AgentId::new());
+        assert!(
+            tools.iter().any(|t| t.name == "canvas_present"),
+            "canvas_present must be advertised when [canvas] enabled = true"
+        );
+        kernel.shutdown();
     }
 
     // ── build_reviewer_candidate ────────────────────────────────────────────

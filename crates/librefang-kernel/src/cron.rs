@@ -205,11 +205,36 @@ impl CronScheduler {
         // observable from `last_status` instead of mutating live state
         // at boot.
         let now = Utc::now();
-        for entry in self.jobs.iter() {
-            let meta = entry.value();
+        for mut entry in self.jobs.iter_mut() {
+            let meta = entry.value_mut();
             if !meta.job.enabled {
                 continue;
             }
+
+            // Re-validate deserialized jobs through the same path used by
+            // `add_job` / `update_job`. A persisted file can carry a schedule
+            // that no longer passes validation — a hand-edited JSON, or a job
+            // written by an older daemon before a rule existed. In particular
+            // an `Every { every_secs: 0 }` divides by zero in
+            // `warn_missed_fires` and would crash-loop boot, so quarantine any
+            // structurally invalid schedule by disabling it here (kept
+            // observable via `last_status`) rather than letting it run or
+            // crash. A past `At` time also fails `validate` but is the normal
+            // missed-one-shot case — handled by `warn_missed_fires` /
+            // `due_jobs` — so we do not disable purely on that.
+            if !matches!(meta.job.schedule, CronSchedule::At { .. }) {
+                if let Err(reason) = meta.job.validate(0) {
+                    warn!(
+                        job_id = %meta.job.id,
+                        agent = %meta.job.agent_id,
+                        %reason,
+                        "Cron: persisted job failed re-validation at load; disabling"
+                    );
+                    meta.job.enabled = false;
+                    continue;
+                }
+            }
+
             if let CronSchedule::Cron { expr, .. } = &meta.job.schedule {
                 if compute_next_run_after_opt(&meta.job.schedule, now).is_none() {
                     warn!(
@@ -620,7 +645,10 @@ impl CronScheduler {
                     let overdue_secs = (now - next_run).num_seconds();
                     // Estimate how many fires were skipped based on schedule interval.
                     let interval_secs: i64 = match &meta.job.schedule {
-                        CronSchedule::Every { every_secs } => *every_secs as i64,
+                        // Clamp to >= 1: a persisted `every_secs == 0` would
+                        // otherwise divide by zero below and panic, crash-looping
+                        // boot (`warn_missed_fires` runs unconditionally at startup).
+                        CronSchedule::Every { every_secs } => (*every_secs as i64).max(1),
                         CronSchedule::At { .. } => overdue_secs, // one-shot: effectively 1 missed fire
                         CronSchedule::Cron { .. } => {
                             // For cron expressions, approximate with the gap between
@@ -630,7 +658,11 @@ impl CronScheduler {
                             (hypothetical_next - next_run).num_seconds().max(1)
                         }
                     };
-                    let missed_count = (overdue_secs / interval_secs).max(1);
+                    // `interval_secs.max(1)` is defense-in-depth: every arm
+                    // above already produces >= 1, but guarding the divisor
+                    // here keeps this line panic-free regardless of how the
+                    // interval was derived.
+                    let missed_count = (overdue_secs / interval_secs.max(1)).max(1);
                     if missed_count > 1 {
                         warn!(
                             agent_id = %meta.job.agent_id,
@@ -3246,6 +3278,47 @@ mod tests {
             !logs.contains("coalesced") && !logs.contains("missed"),
             "disabled jobs must be silent; got:\n{logs}"
         );
+    }
+
+    #[test]
+    fn test_persisted_every_zero_disabled_at_load_and_warn_missed_fires_no_panic() {
+        // A persisted `Every { every_secs: 0 }` (hand-edited JSON or a job
+        // written by an older daemon before the min-interval rule existed)
+        // divides by zero in `warn_missed_fires`, which runs unconditionally
+        // at boot and would crash-loop startup. `load` must quarantine such a
+        // job by disabling it, and `warn_missed_fires` must never panic on
+        // one even if it is enabled.
+        let tmp = tempfile::tempdir().unwrap();
+        let agent = AgentId::new();
+
+        // `add_job` rejects `every_secs == 0`, so write the corrupt meta
+        // straight into the map and persist it to simulate a bad file.
+        {
+            let sched = CronScheduler::new(tmp.path(), 100);
+            let mut job = make_job(agent);
+            job.schedule = CronSchedule::Every { every_secs: 0 };
+            job.next_run = Some(Utc::now() - Duration::seconds(600));
+            sched.jobs.insert(job.id, JobMeta::new(job, false));
+            sched.persist().unwrap();
+        }
+
+        // Reload: the invalid job is quarantined (disabled), not left live.
+        let sched = CronScheduler::new(tmp.path(), 100);
+        assert_eq!(sched.load().unwrap(), 1);
+        let jobs = sched.list_jobs(agent);
+        assert_eq!(jobs.len(), 1);
+        assert!(
+            !jobs[0].enabled,
+            "persisted Every{{every_secs:0}} must be disabled at load"
+        );
+
+        // Even if such a job is enabled, warn_missed_fires must not panic.
+        let id = jobs[0].id;
+        if let Some(mut meta) = sched.jobs.get_mut(&id) {
+            meta.job.enabled = true;
+            meta.job.next_run = Some(Utc::now() - Duration::seconds(600));
+        }
+        sched.warn_missed_fires(); // must not divide by zero
     }
 
     #[test]

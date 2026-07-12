@@ -408,13 +408,15 @@ pub(crate) fn init_git_if_missing(librefang_dir: &std::path::Path) {
         return;
     }
 
-    // Write .gitignore for sensitive/temporary files
-    let gitignore = librefang_dir.join(".gitignore");
-    if !gitignore.exists() {
-        let _ = std::fs::write(
-            &gitignore,
-            "secrets.env\nvault.enc\ndaemon.json\nlogs/\ncache/\nregistry/\ndata/\nbackups/\n*.db\n*.db-shm\n*.db-wal\n",
+    // Write / reconcile .gitignore before committing. init_vault_if_missing has
+    // already created vault.enc by now, so a `git add -A` that runs against a
+    // .gitignore not excluding the sensitive files would commit secrets. Only
+    // commit once we can guarantee those files are excluded.
+    if !ensure_gitignore_excludes_secrets(librefang_dir) {
+        tracing::warn!(
+            "skipping initial git commit: .gitignore does not exclude sensitive files (vault.enc, secrets.env, daemon.json, *.db)"
         );
+        return;
     }
 
     // Initial commit
@@ -426,6 +428,94 @@ pub(crate) fn init_git_if_missing(librefang_dir: &std::path::Path) {
         .args(["commit", "-q", "-m", "chore: initial librefang config"])
         .current_dir(librefang_dir)
         .status();
+}
+
+/// Sensitive/temporary entries the `~/.librefang/.gitignore` must carry so the
+/// initial config commit never captures secrets or local state.
+const GITIGNORE_ENTRIES: &[&str] = &[
+    "secrets.env",
+    "vault.enc",
+    "daemon.json",
+    "logs/",
+    "cache/",
+    "registry/",
+    "data/",
+    "backups/",
+    "*.db",
+    "*.db-shm",
+    "*.db-wal",
+];
+
+/// The subset of entries that MUST be excluded before any commit is allowed.
+/// If the .gitignore cannot be guaranteed to exclude these, the caller skips
+/// `git add -A` / commit rather than leaking credentials into version control.
+const GITIGNORE_REQUIRED: &[&str] = &["secrets.env", "vault.enc", "daemon.json", "*.db"];
+
+/// Ensure `~/.librefang/.gitignore` excludes every sensitive pattern.
+///
+/// Returns `true` only when all required patterns are guaranteed excluded.
+/// A fresh .gitignore is written with the full entry set; a pre-existing one is
+/// reconciled by appending any missing entries (a stale file is never trusted
+/// blindly). Any I/O error is surfaced (not swallowed) as `false` so the caller
+/// refuses to commit.
+pub(crate) fn ensure_gitignore_excludes_secrets(librefang_dir: &std::path::Path) -> bool {
+    let gitignore = librefang_dir.join(".gitignore");
+
+    if !gitignore.exists() {
+        let contents = GITIGNORE_ENTRIES
+            .iter()
+            .map(|e| format!("{e}\n"))
+            .collect::<String>();
+        if let Err(e) = std::fs::write(&gitignore, contents) {
+            tracing::warn!("failed to write .gitignore: {e}");
+            return false;
+        }
+        return true;
+    }
+
+    // A .gitignore already exists — reconcile it so a stale file that predates
+    // vault.enc / daemon.json still excludes them.
+    let existing = match std::fs::read_to_string(&gitignore) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("failed to read existing .gitignore: {e}");
+            return false;
+        }
+    };
+    let present: std::collections::HashSet<&str> = existing.lines().map(str::trim).collect();
+    let missing: Vec<&str> = GITIGNORE_ENTRIES
+        .iter()
+        .copied()
+        .filter(|e| !present.contains(e))
+        .collect();
+    if !missing.is_empty() {
+        let mut updated = existing;
+        if !updated.is_empty() && !updated.ends_with('\n') {
+            updated.push('\n');
+        }
+        for entry in &missing {
+            updated.push_str(entry);
+            updated.push('\n');
+        }
+        if let Err(e) = std::fs::write(&gitignore, &updated) {
+            tracing::warn!("failed to reconcile .gitignore: {e}");
+            return false;
+        }
+    }
+
+    // Confirm the required secret patterns are now excluded before we allow a
+    // commit; if a re-read fails, err on the side of not committing.
+    match std::fs::read_to_string(&gitignore) {
+        Ok(final_content) => {
+            let lines: std::collections::HashSet<&str> =
+                final_content.lines().map(str::trim).collect();
+            GITIGNORE_REQUIRED.iter().all(|p| lines.contains(p))
+        }
+        Err(e) => {
+            tracing::warn!("failed to re-read .gitignore: {e}");
+            false
+        }
+    }
 }
 
 /// Quick init: no prompts, auto-detect, write config + .env, print next steps.
@@ -657,6 +747,44 @@ pub(crate) fn write_config_if_missing(
                 "init-error-write-config-example",
                 &[("error", &e.to_string())],
             ));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ensure_gitignore_reconciles_stale_file_before_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        // A pre-existing .gitignore that predates vault/daemon and lacks the
+        // sensitive entries — the historical bug staged vault.enc anyway.
+        std::fs::write(dir.path().join(".gitignore"), "logs/\ncache/\n").unwrap();
+
+        let ok = ensure_gitignore_excludes_secrets(dir.path());
+        assert!(ok, "reconciliation must guarantee secrets are excluded");
+
+        let contents = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+        let lines: std::collections::HashSet<&str> = contents.lines().map(str::trim).collect();
+        for required in GITIGNORE_REQUIRED {
+            assert!(
+                lines.contains(required),
+                "missing sensitive pattern {required} after reconciliation"
+            );
+        }
+        // Pre-existing entries are preserved.
+        assert!(lines.contains("logs/"));
+    }
+
+    #[test]
+    fn ensure_gitignore_writes_full_set_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(ensure_gitignore_excludes_secrets(dir.path()));
+        let contents = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+        let lines: std::collections::HashSet<&str> = contents.lines().map(str::trim).collect();
+        for entry in GITIGNORE_ENTRIES {
+            assert!(lines.contains(entry), "fresh .gitignore missing {entry}");
         }
     }
 }

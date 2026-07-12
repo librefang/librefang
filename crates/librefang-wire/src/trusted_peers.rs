@@ -112,22 +112,33 @@ impl TrustedPeers {
             std::fs::create_dir_all(parent)?;
         }
         let content = serde_json::to_string_pretty(&self.store)?;
-        std::fs::write(&self.store_path, content)?;
+        // DATA-INTEGRITY: write atomically. A plain truncate-in-place write
+        // can leave a half-written trusted_peers.json if the process crashes
+        // mid-write; the next `load()` then fails to deserialize and peer
+        // bind refuses to start (fail-closed), bricking OFP startup. Write to
+        // a sibling `.tmp` first, tighten perms on it, then rename into place
+        // — rename is atomic on the same filesystem, so a reader/loader ever
+        // sees either the old complete file or the new complete file.
+        let tmp_path = self.store_path.with_extension("json.tmp");
+        std::fs::write(&tmp_path, content)?;
         // SECURITY (#3873): Tighten file perms to 0600 on Unix. The store
         // contains every pubkey/fingerprint we trust — leakage doesn't
         // forge signatures (pubkeys are public) but is reconnaissance
         // value, exposing which nodes this daemon federates with.
         // Mirrors the policy `keys.rs::PeerKeyManager` applies to
-        // `peer_keypair.json`. Best-effort; failure here is non-fatal.
+        // `peer_keypair.json`. Applied to the temp file before rename so the
+        // final file is never briefly world-readable. Best-effort;
+        // failure here is non-fatal.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            if let Ok(meta) = std::fs::metadata(&self.store_path) {
+            if let Ok(meta) = std::fs::metadata(&tmp_path) {
                 let mut perms = meta.permissions();
                 perms.set_mode(0o600);
-                let _ = std::fs::set_permissions(&self.store_path, perms);
+                let _ = std::fs::set_permissions(&tmp_path, perms);
             }
         }
+        std::fs::rename(&tmp_path, &self.store_path)?;
         Ok(())
     }
 
@@ -236,5 +247,78 @@ impl TrustedPeers {
             .values()
             .filter(|p| p.mode == TrustMode::Legacy && p.last_verified < five_minutes_ago)
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn save_then_load_round_trips() {
+        let dir = std::env::temp_dir().join(format!(
+            "librefang-trusted-peers-roundtrip-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut peers = TrustedPeers::new(dir.clone());
+        peers
+            .trust_peer(
+                "node-a".to_string(),
+                "pubkey-a".to_string(),
+                Some("Node A".to_string()),
+                Some("127.0.0.1:1234".to_string()),
+            )
+            .unwrap();
+
+        let mut reloaded = TrustedPeers::new(dir.clone());
+        reloaded.load().unwrap();
+        let peer = reloaded.get("node-a").expect("peer persisted");
+        assert!(peer.is_secure());
+        assert_eq!(peer.public_key.as_deref(), Some("pubkey-a"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn save_does_not_leave_a_torn_file() {
+        // A good store already exists on disk. If `save()` truncated in place
+        // and then failed mid-write, the store would be corrupt and the next
+        // `load()` would error. The atomic temp+rename guarantees the store
+        // path always deserializes; verify a fresh loader reads a complete
+        // file after a save, and that no leftover `.json.tmp` remains.
+        let dir = std::env::temp_dir().join(format!(
+            "librefang-trusted-peers-atomic-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut peers = TrustedPeers::new(dir.clone());
+        peers
+            .add(TrustedPeer::new_legacy(
+                "node-legacy".to_string(),
+                Some("10.0.0.1:9999".to_string()),
+            ))
+            .unwrap();
+        // A second save overwrites the existing good file via rename.
+        peers
+            .add(TrustedPeer::new_legacy("node-legacy-2".to_string(), None))
+            .unwrap();
+
+        let store_path = dir.join("trusted_peers.json");
+        let tmp_path = store_path.with_extension("json.tmp");
+        assert!(!tmp_path.exists(), "temp file must be renamed away");
+
+        let content = std::fs::read_to_string(&store_path).unwrap();
+        // The on-disk file is always a fully serializable store.
+        serde_json::from_str::<TrustedPeersStore>(&content).expect("store deserializes");
+
+        let mut reloaded = TrustedPeers::new(dir.clone());
+        reloaded.load().unwrap();
+        assert!(reloaded.get("node-legacy").is_some());
+        assert!(reloaded.get("node-legacy-2").is_some());
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
