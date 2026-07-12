@@ -1422,7 +1422,12 @@ impl LibreFangKernel {
             std::sync::Arc::new(config.clone()),
             Arc::clone(&driver),
         )
-        .with_exhaustion_store(exhaustion_store.clone());
+        .with_exhaustion_store(exhaustion_store.clone())
+        // Thread the model-catalog snapshot so aux resolution can reach
+        // catalog-only custom providers' `api_key_env` / `base_url` (#5755
+        // parity for side tasks); without it a custom cheap-tier provider
+        // never initialises and side tasks bill the primary.
+        .with_model_catalog(std::sync::Arc::new(model_catalog.clone()));
         // Pre-parse `config.toml` once at boot so the per-message hot path
         // never has to re-read it (#3722). Errors here are non-fatal — the
         // skill config injection layer treats a missing/invalid file as an

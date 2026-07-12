@@ -503,6 +503,23 @@ pub async fn create_alias(
             .into_json_tuple();
     }
 
+    // Persist to disk. If the save fails, roll back the in-memory add so the
+    // catalog stays consistent with what's on disk — otherwise the caller
+    // sees "created" now but the alias vanishes on the next daemon restart.
+    let aliases_path = state.kernel.home_dir().join("aliases.toml");
+    if let Err(e) = state
+        .kernel
+        .model_catalog_load()
+        .save_aliases(&aliases_path)
+    {
+        tracing::warn!("Failed to persist aliases: {e}");
+        let alias_for_rollback = alias.clone();
+        state.kernel.model_catalog_update(&mut move |catalog| {
+            catalog.remove_alias(&alias_for_rollback);
+        });
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
+    }
+
     (
         StatusCode::CREATED,
         Json(serde_json::json!({
@@ -519,13 +536,34 @@ pub async fn delete_alias(
     State(state): State<Arc<AppState>>,
     Path(alias): Path<String>,
 ) -> impl IntoResponse {
+    // Snapshot the mapped model ID before removing so we can restore it if
+    // the subsequent persist fails — keeps the in-memory catalog consistent
+    // with disk across failure paths.
+    let mut snapshot: Option<String> = None;
     let mut removed = false;
     state.kernel.model_catalog_update(&mut |catalog| {
+        snapshot = catalog.list_aliases().get(&alias.to_lowercase()).cloned();
         removed = catalog.remove_alias(&alias);
     });
     if !removed {
         return ApiErrorResponse::not_found(format!("Alias '{}' not found", alias))
             .into_json_tuple();
+    }
+
+    let aliases_path = state.kernel.home_dir().join("aliases.toml");
+    if let Err(e) = state
+        .kernel
+        .model_catalog_load()
+        .save_aliases(&aliases_path)
+    {
+        tracing::warn!("Failed to persist aliases: {e}");
+        if let Some(model_id) = snapshot {
+            let alias_for_rollback = alias.clone();
+            state.kernel.model_catalog_update(&mut move |catalog| {
+                catalog.add_alias(&alias_for_rollback, &model_id);
+            });
+        }
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
 
     (StatusCode::NO_CONTENT, Json(serde_json::json!(null)))

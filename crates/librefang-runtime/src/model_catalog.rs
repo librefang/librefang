@@ -1363,6 +1363,22 @@ impl ModelCatalog {
         Ok(())
     }
 
+    /// Save the alias map to an `aliases.toml` file in the format read at boot.
+    ///
+    /// Serialises the full alias map (both user-added and model-registered
+    /// aliases) so `create_alias` / `delete_alias` survive a daemon restart.
+    /// Round-trips through [`AliasesCatalogFile`], the same struct the boot
+    /// loader deserialises in `from_sources` and `load_cached_catalog`.
+    pub fn save_aliases(&self, path: &std::path::Path) -> Result<(), String> {
+        let file = AliasesCatalogFile {
+            aliases: self.aliases.clone(),
+        };
+        let toml = toml::to_string_pretty(&file)
+            .map_err(|e| format!("Failed to serialize aliases: {e}"))?;
+        std::fs::write(path, toml).map_err(|e| format!("Failed to write aliases file: {e}"))?;
+        Ok(())
+    }
+
     /// Load a single TOML catalog file and merge its contents into the catalog.
     ///
     /// The file may contain an optional `[provider]` section and a `[[models]]`

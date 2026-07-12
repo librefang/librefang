@@ -532,9 +532,43 @@ pub(crate) async fn dashboard_login(
                         }))
                         .into_response();
                     }
+                    // Brute-force lockout gate (mirror of the approval path in
+                    // routes/approvals.rs): reject before verifying if the
+                    // shared "api_admin" identity is locked out. Without this
+                    // the 6-digit login TOTP could be brute-forced with a known
+                    // password, bounded only by the generic per-IP limiter.
+                    if state.kernel.approvals().is_totp_locked_out("api_admin") {
+                        return (
+                            axum::http::StatusCode::UNAUTHORIZED,
+                            axum::response::Json(serde_json::json!({
+                                "ok": false,
+                                "error": "Too many failed TOTP attempts. Try again later.",
+                            })),
+                        )
+                            .into_response();
+                    }
                     // Replay-prevention check (#3359): reject a code already used
                     // in the last 60 seconds.
                     if state.kernel.approvals().is_totp_code_used(totp_code) {
+                        // Atomic check + record (#3584) preserves fail-secure on
+                        // DB persist failure (#3372): Err(false) = DB write
+                        // dropped, so reject with 500; Err(true) = already locked
+                        // out, fall through to the "already used" response so the
+                        // lockout state is not leaked here.
+                        if let Err(false) = state
+                            .kernel
+                            .approvals()
+                            .check_and_record_totp_failure("api_admin")
+                        {
+                            return (
+                                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                axum::response::Json(serde_json::json!({
+                                    "ok": false,
+                                    "error": "Failed to persist TOTP failure counter",
+                                })),
+                            )
+                                .into_response();
+                        }
                         return (
                             axum::http::StatusCode::UNAUTHORIZED,
                             axum::response::Json(serde_json::json!({
@@ -554,9 +588,55 @@ pub(crate) async fn dashboard_login(
                     {
                         Ok(true) => {
                             // Mark code as used so it cannot be replayed.
-                            state.kernel.approvals().record_totp_code_used(totp_code);
+                            // Fail-secure (#3372 parity): if the DB write fails
+                            // the code is NOT in the replay table and could be
+                            // reused, so reject with 500 rather than logging in.
+                            if state
+                                .kernel
+                                .approvals()
+                                .record_totp_code_used_for(totp_code, Some("login"))
+                                .is_err()
+                            {
+                                return (
+                                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                    axum::response::Json(serde_json::json!({
+                                        "ok": false,
+                                        "error": "Failed to persist TOTP used-code record",
+                                    })),
+                                )
+                                    .into_response();
+                            }
                         }
                         Ok(false) => {
+                            // Fail-secure: atomically check lockout + record the
+                            // failure (#3372/#3584), mirroring the approval path.
+                            match state
+                                .kernel
+                                .approvals()
+                                .check_and_record_totp_failure("api_admin")
+                            {
+                                Err(true) => {
+                                    return (
+                                        axum::http::StatusCode::UNAUTHORIZED,
+                                        axum::response::Json(serde_json::json!({
+                                            "ok": false,
+                                            "error": "Too many failed TOTP attempts. Try again later.",
+                                        })),
+                                    )
+                                        .into_response();
+                                }
+                                Err(false) => {
+                                    return (
+                                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                        axum::response::Json(serde_json::json!({
+                                            "ok": false,
+                                            "error": "Failed to persist TOTP failure counter",
+                                        })),
+                                    )
+                                        .into_response();
+                                }
+                                Ok(()) => {}
+                            }
                             return (
                                 axum::http::StatusCode::UNAUTHORIZED,
                                 axum::response::Json(serde_json::json!({
@@ -3410,5 +3490,163 @@ mod evaluate_bind_auth_safety_tests {
         // "warn loudly" variant.
         let r = evaluate_bind_auth_safety(&addr("0.0.0.0:4545"), true, true);
         assert_eq!(r, BindAuthCheck::Ok);
+    }
+}
+
+#[cfg(test)]
+mod dashboard_login_totp_lockout_tests {
+    use super::*;
+    use librefang_types::approval::SecondFactor;
+    use librefang_types::config::{DefaultModelConfig, KernelConfig};
+    use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    const DASH_USER: &str = "admin";
+    const DASH_PASS: &str = "correct horse battery staple";
+
+    /// Produce `count` 6-digit codes that are guaranteed NOT to match the
+    /// enrolled secret in the current TOTP window (or the adjacent windows a
+    /// clock skew during the test could land in), so every login attempt takes
+    /// the wrong-code (`Ok(false)`) branch deterministically.
+    fn wrong_codes(secret_base32: &str, issuer: &str, count: usize) -> Vec<String> {
+        use totp_rs::{Algorithm, Secret, TOTP};
+        let raw = Secret::Encoded(secret_base32.to_string())
+            .to_bytes()
+            .expect("decode base32 secret");
+        let totp = TOTP::new(
+            Algorithm::SHA1,
+            6,
+            1,
+            30,
+            raw,
+            Some(issuer.to_string()),
+            String::new(),
+        )
+        .expect("totp init");
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut forbidden = std::collections::HashSet::new();
+        for dt in [-60i64, -30, 0, 30, 60] {
+            let t = (now as i64 + dt).max(0) as u64;
+            forbidden.insert(totp.generate(t));
+        }
+        let mut out = Vec::new();
+        let mut n = 0u32;
+        while out.len() < count {
+            let candidate = format!("{n:06}");
+            if !forbidden.contains(&candidate) {
+                out.push(candidate);
+            }
+            n += 1;
+        }
+        out
+    }
+
+    async fn login_with_totp(
+        state: &Arc<AppState>,
+        totp_code: &str,
+    ) -> (axum::http::StatusCode, serde_json::Value) {
+        let body = serde_json::json!({
+            "username": DASH_USER,
+            "password": DASH_PASS,
+            "totp_code": totp_code,
+        });
+        let addr: std::net::SocketAddr = "127.0.0.1:5000".parse().unwrap();
+        let resp = super::dashboard_login(
+            axum::extract::State(state.clone()),
+            axum::extract::ConnectInfo(addr),
+            axum::http::HeaderMap::new(),
+            axum::Json(body),
+        )
+        .await;
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, value)
+    }
+
+    /// Repeated wrong TOTP codes on the dashboard login path must trip the
+    /// shared brute-force lockout (mirroring the approval path), not be treated
+    /// as an unbounded stream of merely-"invalid" codes. Before the fix the
+    /// login block never called the lockout guard, so this attempt count would
+    /// keep returning "Invalid TOTP code" forever.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dashboard_login_locks_out_after_repeated_wrong_totp_codes() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        librefang_kernel::registry_sync::seed_registry_fixture_for_tests(tmp.path());
+        let mut config = KernelConfig {
+            home_dir: tmp.path().to_path_buf(),
+            data_dir: tmp.path().join("data"),
+            api_key: "secret-token".to_string(),
+            dashboard_user: DASH_USER.to_string(),
+            dashboard_pass: DASH_PASS.to_string(),
+            default_model: DefaultModelConfig {
+                provider: "ollama".to_string(),
+                model: "test-model".to_string(),
+                api_key_env: "OLLAMA_API_KEY".to_string(),
+                base_url: None,
+                message_timeout_secs: 300,
+                extra_params: std::collections::BTreeMap::new(),
+                cli_profile_dirs: Vec::new(),
+            },
+            ..KernelConfig::default()
+        };
+        config.approval.second_factor = SecondFactor::Login;
+        config.approval.totp_issuer = "LibreFang".to_string();
+        let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("kernel boots"));
+        kernel.clone().set_self_handle();
+        let addr: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let (_app, state) = build_router(kernel, addr).await;
+
+        // Enroll + confirm a TOTP secret so the login second-factor gate runs.
+        let (secret, _uri, _qr) = state
+            .kernel
+            .approvals()
+            .new_totp_secret("LibreFang", DASH_USER)
+            .expect("generate totp secret");
+        state
+            .kernel
+            .vault_set("totp_secret", &secret)
+            .expect("persist totp secret");
+        state
+            .kernel
+            .vault_set("totp_confirmed", "true")
+            .expect("persist totp confirmed flag");
+
+        let issuer = state.kernel.approvals().policy().totp_issuer.clone();
+        // TOTP_MAX_FAILURES is 5 — five wrong codes, then one more to observe
+        // the lockout response.
+        let codes = wrong_codes(&secret, &issuer, 6);
+
+        // The first five wrong codes are each rejected as invalid and counted.
+        for code in codes.iter().take(5) {
+            let (status, body) = login_with_totp(&state, code).await;
+            assert_eq!(
+                status,
+                axum::http::StatusCode::UNAUTHORIZED,
+                "wrong code should be rejected; body: {body:?}"
+            );
+            assert_eq!(
+                body["error"], "Invalid TOTP code",
+                "expected invalid-code response; body: {body:?}"
+            );
+        }
+
+        // The sixth attempt must now hit the lockout gate instead of the
+        // generic invalid-code branch.
+        let (status, body) = login_with_totp(&state, &codes[5]).await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::UNAUTHORIZED,
+            "locked-out login should be unauthorized; body: {body:?}"
+        );
+        assert_eq!(
+            body["error"], "Too many failed TOTP attempts. Try again later.",
+            "dashboard login must lock out after repeated TOTP failures; body: {body:?}"
+        );
     }
 }

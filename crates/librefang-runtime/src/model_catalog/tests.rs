@@ -882,6 +882,43 @@ fn test_remove_alias() {
     assert!(catalog.remove_alias("UPPER-ALIAS"));
 }
 
+/// A user-added alias created via `add_alias` must survive a daemon restart:
+/// `save_aliases` writes `aliases.toml` in the format the boot loader reads,
+/// and reloading the on-disk catalog restores the alias. Before the persist
+/// path existed, `create_alias` mutated only the in-memory catalog and the
+/// alias vanished on the next `ModelCatalog::new_from_dir` load.
+#[test]
+fn add_alias_then_save_and_reload_restores_alias() {
+    let tmp = tempfile::tempdir().unwrap();
+    let providers_dir = tmp.path().join("providers");
+    std::fs::create_dir_all(&providers_dir).unwrap();
+    std::fs::write(
+        providers_dir.join("prov.toml"),
+        r#"[provider]
+id = "openai"
+display_name = "OpenAI"
+api_key_env = "OPENAI_API_KEY"
+base_url = "https://api.openai.com"
+"#,
+    )
+    .unwrap();
+
+    // `new_from_dir` reads aliases.toml from the parent of `providers_dir`.
+    let aliases_path = tmp.path().join("aliases.toml");
+
+    let mut catalog = ModelCatalog::new_from_dir(&providers_dir);
+    assert!(catalog.add_alias("my-alias", "gpt-4o"));
+    catalog.save_aliases(&aliases_path).unwrap();
+
+    // Reload from disk — simulating a daemon restart.
+    let reloaded = ModelCatalog::new_from_dir(&providers_dir);
+    assert_eq!(
+        reloaded.resolve_alias("my-alias"),
+        Some("gpt-4o"),
+        "alias must persist across reload once save_aliases has run"
+    );
+}
+
 #[test]
 fn test_new_providers_in_catalog() {
     let catalog = test_catalog();

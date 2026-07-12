@@ -2111,6 +2111,16 @@ impl WorkflowEngine {
             let to_remove = self.runs.len() - Self::MAX_RETAINED_RUNS;
             for (id, _) in evictable.into_iter().take(to_remove) {
                 self.runs.remove(&id);
+                // Drop the per-run auxiliary maps alongside the run itself.
+                // These are keyed by run id and only ever removed on the
+                // terminal-cleanup path (`cancel_notify` at the retry-loop
+                // exit, `operator_resume_notify` when an operator gate
+                // resolves). A run evicted here may never have hit that path
+                // (e.g. a Pending-then-Cancelled run, or one evicted in the
+                // cleanup race window), so without this the Arc<Notify>
+                // entries would leak and grow without bound under churn.
+                self.cancel_notify.remove(&id);
+                self.operator_resume_notify.remove(&id);
                 debug!(run_id = %id, "Evicted old workflow run");
             }
         }
@@ -10897,6 +10907,57 @@ prompt_template = "do {{x}}"
             all_runs.len() <= 200,
             "cancelled runs over the cap must be evictable, retained {} (cap 200)",
             all_runs.len()
+        );
+    }
+
+    /// Regression: evicting a terminal run must also drop its per-run
+    /// `cancel_notify` (and `operator_resume_notify`) entry. Each
+    /// `create_run` seats a fresh `Arc<Notify>` in `cancel_notify`; if the
+    /// eviction loop only removes from `runs`, a Pending-then-Cancelled run
+    /// evicted before the terminal-cleanup path runs orphans its notify
+    /// entry forever, so the auxiliary map grows past the run cap.
+    #[tokio::test(flavor = "current_thread")]
+    async fn evicting_terminal_run_drops_cancel_notify_entry() {
+        let engine = WorkflowEngine::new();
+        let wf = Workflow {
+            id: WorkflowId::new(),
+            name: "evict-notify-test".to_string(),
+            description: "".to_string(),
+            steps: vec![WorkflowStep {
+                name: "s".to_string(),
+                agent: StepAgent::ByName {
+                    name: "a".to_string(),
+                },
+                prompt_template: "x".to_string(),
+                mode: StepMode::Sequential,
+                timeout_secs: 1,
+                error_mode: ErrorMode::Fail,
+                output_var: None,
+                inherit_context: None,
+                depends_on: vec![],
+                session_mode: None,
+            }],
+            created_at: Utc::now(),
+            layout: None,
+            total_timeout_secs: None,
+            input_schema: None,
+        };
+        let wf_id = engine.register(wf).await;
+
+        for _ in 0..250usize {
+            let run_id = engine
+                .create_run(wf_id, "x".to_string())
+                .await
+                .expect("create_run");
+            engine.cancel_run(run_id).await.expect("cancel_run");
+        }
+
+        // The notify map must track the runs map — it must not grow past the
+        // retention cap even though every create seated a fresh entry.
+        assert!(
+            engine.cancel_notify.len() <= 200,
+            "cancel_notify must not outgrow the run cap, retained {} (cap 200)",
+            engine.cancel_notify.len()
         );
     }
 

@@ -860,6 +860,62 @@ fn test_record_soft_cap_default_falls_back_to_hard_cap() {
 }
 
 #[test]
+fn soft_cap_eviction_keeps_anchor_seq_synced_across_restart() {
+    // Regression: the soft cap in `record_with_context` drains the
+    // oldest in-memory entries WITHOUT deleting the persisted DB rows.
+    // The anchor `seq` used to be written from the shrunken
+    // `entries.len()`, so it desynced from the DB population — on the
+    // next boot `with_db` reloads every row, `entries.len()` exceeds the
+    // anchor `seq`, and `verify_integrity` raised a spurious "audit
+    // anchor mismatch" even though the chain was intact.
+    let (log, pool, anchor_path) = setup_anchored_log();
+
+    // Soft cap = 4 × 3 / 2 = 6, so appending 12 entries forces the
+    // append path to evict the oldest in-memory prefix several times
+    // while every row stays in SQLite.
+    log.set_max_in_memory_entries(4);
+    for i in 0..12 {
+        log.record(
+            "agent-1",
+            AuditAction::RoleChange,
+            format!("event #{i}"),
+            "ok",
+        );
+    }
+
+    // The in-memory window is bounded by the soft cap, but the DB holds
+    // every row.
+    assert!(
+        log.len() <= 6,
+        "soft cap should bound the in-memory window, got {}",
+        log.len()
+    );
+    let db_rows: i64 = pool
+        .get()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM audit_entries", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(db_rows, 12, "all rows must remain persisted after eviction");
+
+    // Even on the live log the anchor must already track the persisted
+    // population, not the shrunken in-memory window.
+    assert!(
+        log.verify_integrity().is_ok(),
+        "live verify must pass after soft-cap eviction"
+    );
+
+    // Simulate a daemon restart: reopen against the same DB + anchor.
+    // `with_db` reloads all 12 rows; the anchor `seq` must match.
+    drop(log);
+    let reopened = AuditLog::with_db_anchored(pool.clone(), anchor_path.clone());
+    assert_eq!(reopened.len(), 12, "restart reloads every persisted row");
+    assert!(
+        reopened.verify_integrity().is_ok(),
+        "restart after soft-cap eviction must not raise a spurious anchor mismatch"
+    );
+}
+
+#[test]
 fn test_default_config_is_no_op() {
     let log = AuditLog::new();
     log.record("agent-1", AuditAction::ToolInvoke, "x", "ok");

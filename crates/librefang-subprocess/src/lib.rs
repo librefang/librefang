@@ -31,7 +31,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, Command};
 use tokio::sync::{oneshot, Mutex};
 use tracing::{debug, warn};
@@ -206,9 +206,31 @@ impl SubprocessTransport {
         if let Some(stderr) = stderr {
             let label = label.clone();
             tokio::spawn(async move {
-                let mut lines = BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    debug!(target: "subprocess_transport", label = %label, "{line}");
+                // Drain stderr with the same bounded primitive as the reply
+                // reader: a child that streams stderr without a newline cannot
+                // grow the daemon's memory without bound. 64 KiB per line is
+                // ample for log lines; an over-cap line is skipped rather than
+                // buffered.
+                const STDERR_MAX_LINE_BYTES: usize = 64 * 1024;
+                let mut reader = BufReader::new(stderr);
+                let mut buf: Vec<u8> = Vec::new();
+                loop {
+                    match read_capped_line(&mut reader, &mut buf, STDERR_MAX_LINE_BYTES).await {
+                        Ok(Line::Data(line)) => {
+                            debug!(target: "subprocess_transport", label = %label, "{line}");
+                        }
+                        Ok(Line::Eof) => break,
+                        Ok(Line::TooLong) => {
+                            warn!(
+                                label = %label,
+                                cap = STDERR_MAX_LINE_BYTES,
+                                "subprocess transport: stderr line exceeded cap; \
+                                 dropping stderr drain"
+                            );
+                            break;
+                        }
+                        Err(_) => break,
+                    }
                 }
             });
         }
@@ -509,6 +531,27 @@ while True:
     sys.stdout.write(json.dumps({"id": req["id"], "ok": {"echo": req.get("method")}}) + "\n")
     sys.stdout.flush()
 "#;
+
+    // The stderr drain uses `read_capped_line` with a 64 KiB cap, so a child
+    // that streams stderr without a newline surfaces as `Line::TooLong` at the
+    // cap instead of buffering without bound. Feed a reader more bytes than the
+    // cap with no `\n` and assert the accumulation stops at the cap.
+    #[tokio::test]
+    async fn stderr_drain_caps_unterminated_line() {
+        let cap = 64 * 1024;
+        // Twice the cap, no newline anywhere.
+        let payload = vec![b'x'; cap * 2];
+        let mut reader = BufReader::new(&payload[..]);
+        let mut buf: Vec<u8> = Vec::new();
+        let outcome = read_capped_line(&mut reader, &mut buf, cap).await.unwrap();
+        assert!(
+            matches!(outcome, Line::TooLong),
+            "an unterminated over-cap stderr line must surface as TooLong"
+        );
+        // The buffer never grew past the cap — the unbounded-memory risk of
+        // `.lines()` / `next_line()` is gone.
+        assert!(buf.len() <= cap, "buffer must not exceed the cap");
+    }
 
     #[tokio::test]
     async fn request_roundtrips_and_matches_by_id() {
