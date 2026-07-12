@@ -16,6 +16,7 @@ use futures::StreamExt;
 use librefang_types::agent::AgentId;
 use librefang_types::config::{
     AutoRouteStrategy, ChannelOverrides, DmPolicy, GroupPolicy, OutputFormat, PrefixStyle,
+    TypingMode,
 };
 use librefang_types::message::ContentBlock;
 use regex::{Regex, RegexSet};
@@ -2514,6 +2515,16 @@ fn is_group_command(message: &ChannelMessage) -> bool {
         || matches!(&message.content, ChannelContent::Text(text) if text.starts_with('/'))
 }
 
+/// Whether the resolved channel override disables typing indicators entirely.
+///
+/// `TypingMode::Never` is the documented privacy setting: it suppresses the
+/// `send_typing` call at every dispatch site.
+/// Any other mode — including the default `Instant` and an unset override —
+/// still sends the indicator.
+fn typing_indicator_suppressed(typing_mode: Option<TypingMode>) -> bool {
+    matches!(typing_mode, Some(TypingMode::Never))
+}
+
 /// Check whether a built-in slash command is permitted on this channel.
 ///
 /// Precedence: `disable_commands` > `allowed_commands` (whitelist) >
@@ -4387,8 +4398,10 @@ async fn dispatch_message(
                 .await;
                 return;
             }
-            if let Err(e) = adapter.send_typing(&message.sender).await {
-                debug!(adapter = adapter.name(), error = %e, "send_typing failed (best-effort)");
+            if !typing_indicator_suppressed(overrides.as_ref().and_then(|o| o.typing_mode)) {
+                if let Err(e) = adapter.send_typing(&message.sender).await {
+                    debug!(adapter = adapter.name(), error = %e, "send_typing failed (best-effort)");
+                }
             }
 
             let strategy = router.broadcast_strategy();
@@ -4564,8 +4577,10 @@ async fn dispatch_message(
     }
 
     // Send typing indicator (best-effort)
-    if let Err(e) = adapter.send_typing(&message.sender).await {
-        debug!(adapter = adapter.name(), error = %e, "send_typing failed (best-effort)");
+    if !typing_indicator_suppressed(overrides.as_ref().and_then(|o| o.typing_mode)) {
+        if let Err(e) = adapter.send_typing(&message.sender).await {
+            debug!(adapter = adapter.name(), error = %e, "send_typing failed (best-effort)");
+        }
     }
 
     // Lifecycle reaction: ⏳ Queued → 🤔 Thinking → ✅ Done / ❌ Error
@@ -6434,8 +6449,10 @@ async fn dispatch_with_blocks(
         j.record(entry).await;
     }
 
-    if let Err(e) = adapter.send_typing(&message.sender).await {
-        debug!(adapter = adapter.name(), error = %e, "send_typing failed (best-effort)");
+    if !typing_indicator_suppressed(overrides.and_then(|o| o.typing_mode)) {
+        if let Err(e) = adapter.send_typing(&message.sender).await {
+            debug!(adapter = adapter.name(), error = %e, "send_typing failed (best-effort)");
+        }
     }
 
     // Lifecycle reaction: ⏳ Queued → 🤔 Thinking → ✅ Done / ❌ Error
@@ -7145,6 +7162,33 @@ mod tests {
             ..Default::default()
         };
         assert!(!is_command_allowed("start", Some(&ov)));
+    }
+
+    #[test]
+    fn test_typing_mode_never_suppresses_indicator() {
+        // TypingMode::Never is the documented privacy setting — it must skip
+        // the send_typing call at every dispatch site.
+        let never = ChannelOverrides {
+            typing_mode: Some(TypingMode::Never),
+            ..Default::default()
+        };
+        assert!(typing_indicator_suppressed(never.typing_mode));
+
+        // Every other mode — and an unset override — still sends.
+        for mode in [
+            TypingMode::Instant,
+            TypingMode::Message,
+            TypingMode::Thinking,
+        ] {
+            let ov = ChannelOverrides {
+                typing_mode: Some(mode),
+                ..Default::default()
+            };
+            assert!(!typing_indicator_suppressed(ov.typing_mode));
+        }
+        let default = ChannelOverrides::default();
+        assert!(!typing_indicator_suppressed(default.typing_mode));
+        assert!(!typing_indicator_suppressed(None));
     }
 
     #[test]

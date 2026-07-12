@@ -846,6 +846,30 @@ pub async fn update_agent_budget(
         );
     }
 
+    // Validate each provided cost cap at the boundary. `update_resources`
+    // and the downstream budget gate treat a cap as "unlimited" whenever it
+    // is not strictly positive, so a NaN / infinite / negative value would
+    // silently disable the quota — and it is persisted to disk via
+    // `save_agent`, so the bad value survives restarts. Reject it with a 400
+    // instead, mirroring the global / per-user / per-provider cap validators
+    // above (`parse_cap`, `update_user_budget`, `update_provider_budget`).
+    for (field, value) in [
+        ("max_cost_per_hour_usd", hourly),
+        ("max_cost_per_day_usd", daily),
+        ("max_cost_per_month_usd", monthly),
+    ] {
+        if let Some(n) = value {
+            if n.is_nan() || n.is_infinite() || n < 0.0 {
+                return crate::extensions::with_agent_id(
+                    agent_id,
+                    ApiErrorResponse::bad_request(format!(
+                        "{field} must be a finite, non-negative number (got {n})"
+                    )),
+                );
+            }
+        }
+    }
+
     // Capture OLD per-agent caps BEFORE the in-memory mutation so the
     // audit row can carry an old→new diff for forensics. `None` here
     // means the agent vanished between the path-parse and the snapshot,

@@ -7,6 +7,7 @@ use librefang_types::config::DockerSandboxConfig;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::time::Duration;
+use tokio::io::AsyncReadExt;
 use tracing::{debug, error, warn};
 
 /// SECURITY: Allowlist of Linux capabilities considered safe to grant back
@@ -326,6 +327,41 @@ pub async fn create_sandbox(
     })
 }
 
+/// Drain a reader into a Vec capped at `cap` bytes, continuing to read to
+/// EOF so the underlying pipe never blocks the child. Returns the captured
+/// (capped) bytes, the true total observed, and whether truncation occurred.
+///
+/// Mirrors `LocalBackend::read_capped` in
+/// `librefang-runtime/src/tool_exec_backend.rs`; kept module-level so the
+/// streaming cap can be exercised by a deterministic regression test without
+/// a live Docker daemon.
+async fn read_capped<R: AsyncReadExt + Unpin>(
+    r: &mut R,
+    cap: usize,
+) -> std::io::Result<(Vec<u8>, usize, bool)> {
+    let mut buf = Vec::with_capacity(std::cmp::min(cap, 8 * 1024));
+    let mut total = 0usize;
+    let mut truncated = false;
+    let mut chunk = [0u8; 8 * 1024];
+    loop {
+        let n = r.read(&mut chunk).await?;
+        if n == 0 {
+            break;
+        }
+        total = total.saturating_add(n);
+        if buf.len() < cap {
+            let take = std::cmp::min(n, cap - buf.len());
+            buf.extend_from_slice(&chunk[..take]);
+            if take < n {
+                truncated = true;
+            }
+        } else {
+            truncated = true;
+        }
+    }
+    Ok((buf, total, truncated))
+}
+
 /// Execute a command inside an existing sandbox container.
 pub async fn exec_in_sandbox(
     container: &SandboxContainer,
@@ -353,29 +389,66 @@ pub async fn exec_in_sandbox(
 
     debug!(container = %container.container_id, "Executing in Docker sandbox");
 
-    let output = tokio::time::timeout(timeout, cmd.output())
-        .await
-        .map_err(|_| format!("Docker exec timed out after {}s", timeout.as_secs()))?
+    // Spawn + stream so a runaway in-container command (`yes`,
+    // `head -c 20G /dev/zero`, …) can't OOM-kill the daemon by emitting
+    // more bytes than the cap before truncation runs. `cmd.output()`
+    // buffered the ENTIRE stdout/stderr into host memory first; instead
+    // we drain each pipe into a Vec capped at `max_output`, then keep
+    // draining to EOF (counting the true total) so the pipe never blocks
+    // the child. Mirrors `LocalBackend::read_capped` in
+    // `librefang-runtime/src/tool_exec_backend.rs`. `kill_on_drop(true)`
+    // (set above) SIGKILLs the child if the timeout drops this future.
+    let max_output = 50_000usize;
+
+    let mut child = cmd
+        .spawn()
         .map_err(|e| format!("Docker exec failed: {e}"))?;
+    let mut stdout_pipe = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Docker exec: child stdout pipe missing".to_string())?;
+    let mut stderr_pipe = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Docker exec: child stderr pipe missing".to_string())?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let exit_code = output.status.code().unwrap_or(-1);
+    let stdout_fut = read_capped(&mut stdout_pipe, max_output);
+    let stderr_fut = read_capped(&mut stderr_pipe, max_output);
+    let wait_fut = child.wait();
 
-    // Truncate large outputs (char-boundary safe to avoid UTF-8 panics)
-    let max_output = 50_000;
-    let stdout = if stdout.len() > max_output {
-        let safe_end = self::helpers::safe_truncate_str(&stdout, max_output);
-        format!("{}... [truncated, {} total bytes]", safe_end, stdout.len())
-    } else {
-        stdout
+    let combined = async move {
+        let ((stdout_res, stderr_res), wait_res) =
+            tokio::join!(async { tokio::join!(stdout_fut, stderr_fut) }, wait_fut);
+        let (stdout_buf, stdout_total, stdout_trunc) =
+            stdout_res.map_err(|e| format!("Docker exec stdout read: {e}"))?;
+        let (stderr_buf, stderr_total, stderr_trunc) =
+            stderr_res.map_err(|e| format!("Docker exec stderr read: {e}"))?;
+        let status = wait_res.map_err(|e| format!("Docker exec wait: {e}"))?;
+        Ok::<_, String>((
+            stdout_buf,
+            stdout_total,
+            stdout_trunc,
+            stderr_buf,
+            stderr_total,
+            stderr_trunc,
+            status,
+        ))
     };
-    let stderr = if stderr.len() > max_output {
-        let safe_end = self::helpers::safe_truncate_str(&stderr, max_output);
-        format!("{}... [truncated, {} total bytes]", safe_end, stderr.len())
-    } else {
-        stderr
-    };
+
+    let (stdout_buf, stdout_total, stdout_trunc, stderr_buf, stderr_total, stderr_trunc, status) =
+        tokio::time::timeout(timeout, combined)
+            .await
+            .map_err(|_| format!("Docker exec timed out after {}s", timeout.as_secs()))??;
+
+    let mut stdout = String::from_utf8_lossy(&stdout_buf).into_owned();
+    let mut stderr = String::from_utf8_lossy(&stderr_buf).into_owned();
+    if stdout_trunc {
+        stdout.push_str(&format!("... [truncated, {stdout_total} total bytes]"));
+    }
+    if stderr_trunc {
+        stderr.push_str(&format!("... [truncated, {stderr_total} total bytes]"));
+    }
+    let exit_code = status.code().unwrap_or(-1);
 
     Ok(ExecResult {
         stdout,
@@ -512,9 +585,29 @@ const BLOCKED_MOUNT_PATHS: &[&str] = &[
     "/sys",
     "/dev",
     "/var/run/docker.sock",
+    // On systemd hosts `/var/run` is a symlink to `/run`, so the real
+    // Docker socket path is `/run/docker.sock`; block both the socket
+    // and the `/run` runtime dir that shadows it (host-root escape).
+    "/run/docker.sock",
+    "/run",
     "/root",
     "/boot",
 ];
+
+/// Component-aware path containment: `path` is inside `prefix` only when it
+/// EQUALS `prefix` or the matched prefix is followed by a path separator.
+///
+/// Raw `str::starts_with` over-blocks (`"/development"` matched `"/dev"`) and
+/// under-specifies containment; matching on component boundaries fixes both.
+/// A trailing slash on `prefix` (e.g. a user-configured `"/data/secrets/"`)
+/// is normalised away so it does not cause a false negative.
+fn path_is_within(path: &str, prefix: &str) -> bool {
+    let prefix = prefix.strip_suffix('/').unwrap_or(prefix);
+    match path.strip_prefix(prefix) {
+        Some(rest) => rest.is_empty() || rest.starts_with('/'),
+        None => false,
+    }
+}
 
 /// Validate a bind mount path for security.
 ///
@@ -541,7 +634,7 @@ pub fn validate_bind_mount(path: &str, blocked: &[String]) -> Result<(), String>
 
     // Check default blocked paths
     for blocked_path in BLOCKED_MOUNT_PATHS {
-        if path.starts_with(blocked_path) {
+        if path_is_within(path, blocked_path) {
             return Err(format!(
                 "Bind mount to '{blocked_path}' is blocked for security"
             ));
@@ -550,7 +643,7 @@ pub fn validate_bind_mount(path: &str, blocked: &[String]) -> Result<(), String>
 
     // Check user-configured blocked paths
     for bp in blocked {
-        if path.starts_with(bp.as_str()) {
+        if path_is_within(path, bp.as_str()) {
             return Err(format!("Bind mount to '{bp}' is blocked by configuration"));
         }
     }
@@ -592,7 +685,7 @@ pub fn validate_bind_mount(path: &str, blocked: &[String]) -> Result<(), String>
 
     let canonical_str = canonical.to_string_lossy();
     for blocked_path in BLOCKED_MOUNT_PATHS {
-        if canonical_str.starts_with(blocked_path) {
+        if path_is_within(&canonical_str, blocked_path) {
             return Err(format!(
                 "Bind mount resolves to blocked path via symlink: {} → {}",
                 path, canonical_str
@@ -601,7 +694,7 @@ pub fn validate_bind_mount(path: &str, blocked: &[String]) -> Result<(), String>
     }
     // Also check user-configured blocked paths against resolved path
     for bp in blocked {
-        if canonical_str.starts_with(bp.as_str()) {
+        if path_is_within(&canonical_str, bp.as_str()) {
             return Err(format!(
                 "Bind mount resolves to blocked path via symlink: {} → {}",
                 path, canonical_str
@@ -893,6 +986,81 @@ mod tests {
         let blocked = vec!["/data/secrets".to_string()];
         assert!(validate_bind_mount("/data/secrets/vault", &blocked).is_err());
         assert!(validate_bind_mount("/data/public", &blocked).is_ok());
+    }
+
+    /// Audit (LOW security): on systemd hosts `/var/run` is a symlink to
+    /// `/run`, so the real Docker socket path `/run/docker.sock` must be
+    /// blocked too — otherwise a bind mount of it hands the sandbox
+    /// host-root. `/run` itself is blocked as it shadows the socket.
+    #[test]
+    fn test_validate_bind_mount_blocks_run_docker_sock() {
+        assert!(validate_bind_mount("/run/docker.sock", &[]).is_err());
+        assert!(validate_bind_mount("/run", &[]).is_err());
+        assert!(validate_bind_mount("/run/user/1000", &[]).is_err());
+    }
+
+    /// Audit (LOW correctness): component-aware containment must not
+    /// over-block a sibling path that merely shares a textual prefix with
+    /// a blocked path. `/development` is NOT inside `/dev`, and
+    /// `/rundir` is NOT inside `/run`.
+    #[test]
+    fn test_validate_bind_mount_sibling_prefix_not_blocked() {
+        assert!(validate_bind_mount("/development", &[]).is_ok());
+        assert!(validate_bind_mount("/development/src", &[]).is_ok());
+        assert!(validate_bind_mount("/rundir", &[]).is_ok());
+        // Exact blocked path and a true child of it still reject.
+        assert!(validate_bind_mount("/dev", &[]).is_err());
+        assert!(validate_bind_mount("/dev/null", &[]).is_err());
+    }
+
+    /// Audit (correctness): a trailing slash on a user-configured blocked
+    /// path must still match its children (no false negative).
+    #[test]
+    fn test_validate_bind_mount_custom_blocked_trailing_slash() {
+        let blocked = vec!["/data/secrets/".to_string()];
+        assert!(validate_bind_mount("/data/secrets/vault", &blocked).is_err());
+        assert!(validate_bind_mount("/data/secretstore", &blocked).is_ok());
+    }
+
+    /// Audit (HIGH panic-dos): the streaming reader caps at `cap` bytes
+    /// while still draining to EOF, so an unbounded producer cannot buffer
+    /// its full output into host memory. Without the cap the captured
+    /// buffer would grow to the full ~200 KB the child emits.
+    #[tokio::test]
+    async fn test_read_capped_bounds_unbounded_output() {
+        // Emit far more than the cap: 200 KB of 'A'.
+        let payload = 200_000usize;
+        let mut child = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("head -c {payload} /dev/zero | tr '\\0' A"))
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn producer");
+        let mut pipe = child.stdout.take().expect("stdout pipe");
+        let cap = 50_000usize;
+        let (buf, total, truncated) = read_capped(&mut pipe, cap).await.expect("read");
+        let _ = child.wait().await;
+        assert_eq!(buf.len(), cap, "captured buffer must be capped at {cap}");
+        assert!(truncated, "producer exceeding the cap must set truncated");
+        assert_eq!(total, payload, "true total must count every byte drained");
+    }
+
+    /// The cap must NOT truncate output that fits: small outputs pass
+    /// through whole with `truncated == false`.
+    #[tokio::test]
+    async fn test_read_capped_passes_small_output() {
+        let mut child = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("printf hello")
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn producer");
+        let mut pipe = child.stdout.take().expect("stdout pipe");
+        let (buf, total, truncated) = read_capped(&mut pipe, 50_000).await.expect("read");
+        let _ = child.wait().await;
+        assert_eq!(&buf, b"hello");
+        assert_eq!(total, 5);
+        assert!(!truncated);
     }
 
     #[test]

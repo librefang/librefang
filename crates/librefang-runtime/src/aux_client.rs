@@ -40,6 +40,7 @@
 //! means the metering layer sees them. The aux client never bypasses the
 //! billing pipeline — it just picks a cheaper model.
 
+use crate::model_catalog::ModelCatalog;
 use librefang_llm_driver::exhaustion::ProviderExhaustionStore;
 use librefang_llm_driver::{DriverConfig, LlmDriver};
 use librefang_llm_drivers::drivers::{
@@ -75,6 +76,17 @@ pub struct AuxClient {
     /// exhaustion view so a slot that 429'd on the primary path is also
     /// skipped on aux paths within the back-off window — and vice versa.
     exhaustion_store: Option<ProviderExhaustionStore>,
+    /// Snapshot of the runtime model catalog. Custom providers added via
+    /// the dashboard "Add provider" flow or `registry/providers/*.toml`
+    /// store their `api_key_env` / `base_url` **only** in the catalog, not
+    /// in `[provider_api_keys]` / `[provider_urls]`. Consulting the catalog
+    /// here mirrors the primary path's `resolve_non_default_api_key_env` /
+    /// `lookup_provider_url` (#5755 / #5807) so a cheap-tier custom provider
+    /// actually initialises instead of silently falling through to the
+    /// expensive primary. `None` when no catalog was wired (tests and the
+    /// `with_primary_only` compressor path), which preserves the historical
+    /// convention-only resolution exactly.
+    model_catalog: Option<Arc<ModelCatalog>>,
 }
 
 impl AuxClient {
@@ -90,6 +102,7 @@ impl AuxClient {
             kernel_config: config,
             primary,
             exhaustion_store: None,
+            model_catalog: None,
         }
     }
 
@@ -104,6 +117,7 @@ impl AuxClient {
             kernel_config: Arc::new(KernelConfig::default()),
             primary,
             exhaustion_store: None,
+            model_catalog: None,
         }
     }
 
@@ -114,6 +128,21 @@ impl AuxClient {
     /// the same store the metering engine was wired with.
     pub fn with_exhaustion_store(mut self, store: ProviderExhaustionStore) -> Self {
         self.exhaustion_store = Some(store);
+        self
+    }
+
+    /// Attach a model-catalog snapshot so provider key/URL resolution can
+    /// consult catalog-only custom providers (dashboard "Add provider" /
+    /// `registry/providers/*.toml`). Without this the aux client resolves
+    /// keys by convention + `[provider_api_keys]` and URLs by
+    /// `[provider_urls]` only, so a custom cheap-tier provider whose
+    /// `api_key_env` / `base_url` live solely in the catalog never
+    /// initialises and the side task silently bills the primary. The
+    /// snapshot is refreshed whenever the aux client is rebuilt (boot and
+    /// `POST /api/config/reload`), matching the `kernel_config` snapshot's
+    /// lifecycle. Cheap-clone — pass `model_catalog.load_full()`.
+    pub fn with_model_catalog(mut self, catalog: Arc<ModelCatalog>) -> Self {
+        self.model_catalog = Some(catalog);
         self
     }
 
@@ -224,7 +253,7 @@ impl AuxClient {
         let driver_cfg = DriverConfig {
             provider: provider.to_string(),
             api_key,
-            base_url: self.kernel_config.provider_urls.get(provider).cloned(),
+            base_url: self.resolve_base_url(provider),
             vertex_ai: self.kernel_config.vertex_ai.clone(),
             azure_openai: self.kernel_config.azure_openai.clone(),
             skip_permissions: true,
@@ -258,11 +287,67 @@ impl AuxClient {
     /// `create_driver` will see no key and most likely fail; the caller
     /// then skips the slot.
     fn resolve_api_key(&self, provider: &str) -> Option<String> {
-        let env_var = self.kernel_config.resolve_api_key_env(provider);
+        let env_var = self.resolve_api_key_env(provider);
         if env_var.is_empty() {
             return None;
         }
         std::env::var(&env_var).ok().filter(|v| !v.is_empty())
+    }
+
+    /// Resolve the env-var name that holds `provider`'s API key.
+    ///
+    /// Precedence mirrors the primary path's
+    /// `LibreFangKernel::resolve_non_default_api_key_env` (#5755 / #5807):
+    ///   1. Operator-explicit `[provider_api_keys]` / `[auth_profiles]` in
+    ///      `config.toml` — always wins so an operator can pin a custom
+    ///      provider's key to a specific env var.
+    ///   2. Model-catalog `api_key_env` (dashboard "Add provider" flow or
+    ///      `registry/providers/*.toml`) — needed for custom providers whose
+    ///      env var deviates from the `<PROVIDER>_API_KEY` convention.
+    ///   3. Convention fallback via `KernelConfig::resolve_api_key_env`.
+    fn resolve_api_key_env(&self, provider: &str) -> String {
+        if self.kernel_config.provider_api_keys.contains_key(provider)
+            || self.kernel_config.auth_profiles.contains_key(provider)
+        {
+            return self.kernel_config.resolve_api_key_env(provider);
+        }
+        self.catalog_api_key_env(provider)
+            .unwrap_or_else(|| self.kernel_config.resolve_api_key_env(provider))
+    }
+
+    /// Catalog-declared `api_key_env` for `provider`, if any and non-empty.
+    fn catalog_api_key_env(&self, provider: &str) -> Option<String> {
+        self.model_catalog
+            .as_ref()?
+            .get_provider(provider)
+            .and_then(|p| {
+                if p.api_key_env.is_empty() {
+                    None
+                } else {
+                    Some(p.api_key_env.clone())
+                }
+            })
+    }
+
+    /// Resolve `provider`'s base URL, mirroring the primary path's
+    /// `LibreFangKernel::lookup_provider_url`: operator-explicit
+    /// `[provider_urls]` in `config.toml` wins, then the model-catalog
+    /// `base_url` (populated by the dashboard "Add provider" flow or the
+    /// registry) so a custom cheap-tier provider reaches its own endpoint.
+    fn resolve_base_url(&self, provider: &str) -> Option<String> {
+        if let Some(url) = self.kernel_config.provider_urls.get(provider) {
+            return Some(url.clone());
+        }
+        self.model_catalog
+            .as_ref()?
+            .get_provider(provider)
+            .and_then(|p| {
+                if p.base_url.is_empty() {
+                    None
+                } else {
+                    Some(p.base_url.clone())
+                }
+            })
     }
 }
 
@@ -579,6 +664,81 @@ mod tests {
             "explicit-but-uninitialisable chain still ends at primary"
         );
         assert!(res2.resolved.is_empty());
+    }
+
+    /// A catalog-only custom cheap-tier provider (no `[provider_api_keys]`
+    /// / `[provider_urls]` entry) must resolve its `api_key_env` and
+    /// `base_url` from the model catalog, mirroring the primary path's
+    /// `resolve_non_default_api_key_env` / `lookup_provider_url` (#5755 /
+    /// #5807). Without the catalog wired the resolver falls back to the
+    /// `<PROVIDER>_API_KEY` convention and no base URL — which is exactly
+    /// the bug that made a custom aux provider silently never initialise
+    /// and billed the primary instead.
+    #[test]
+    fn catalog_only_custom_provider_resolves_key_env_and_base_url() {
+        use crate::model_catalog::ModelCatalog;
+        use librefang_types::model_catalog::ProviderInfo;
+
+        // Non-conventional env var name proves the value came from the
+        // catalog, not the `MYCUSTOM_API_KEY` convention fallback.
+        let catalog = ModelCatalog::from_entries(
+            vec![],
+            vec![ProviderInfo {
+                id: "mycustom".to_string(),
+                api_key_env: "MYCUSTOM_SECRET_TOKEN".to_string(),
+                base_url: "https://custom.example/v1".to_string(),
+                ..Default::default()
+            }],
+        );
+
+        let primary = MarkerDriver::new("primary");
+        let cfg = KernelConfig::default();
+        let aux = AuxClient::new(Arc::new(cfg), primary).with_model_catalog(Arc::new(catalog));
+
+        assert_eq!(
+            aux.resolve_api_key_env("mycustom"),
+            "MYCUSTOM_SECRET_TOKEN",
+            "catalog api_key_env must win over the naming convention"
+        );
+        assert_eq!(
+            aux.resolve_base_url("mycustom"),
+            Some("https://custom.example/v1".to_string()),
+            "catalog base_url must be consulted when [provider_urls] has none"
+        );
+    }
+
+    /// Operator-explicit `[provider_api_keys]` / `[provider_urls]` still
+    /// win over the catalog — the operator can pin a custom provider's
+    /// key/URL and the catalog must not shadow it (#5807 precedence).
+    #[test]
+    fn operator_explicit_config_overrides_catalog() {
+        use crate::model_catalog::ModelCatalog;
+        use librefang_types::model_catalog::ProviderInfo;
+
+        let catalog = ModelCatalog::from_entries(
+            vec![],
+            vec![ProviderInfo {
+                id: "mycustom".to_string(),
+                api_key_env: "CATALOG_TOKEN".to_string(),
+                base_url: "https://catalog.example/v1".to_string(),
+                ..Default::default()
+            }],
+        );
+
+        let mut cfg = KernelConfig::default();
+        cfg.provider_api_keys
+            .insert("mycustom".to_string(), "OPERATOR_TOKEN".to_string());
+        cfg.provider_urls
+            .insert("mycustom".to_string(), "https://op.example".to_string());
+
+        let primary = MarkerDriver::new("primary");
+        let aux = AuxClient::new(Arc::new(cfg), primary).with_model_catalog(Arc::new(catalog));
+
+        assert_eq!(aux.resolve_api_key_env("mycustom"), "OPERATOR_TOKEN");
+        assert_eq!(
+            aux.resolve_base_url("mycustom"),
+            Some("https://op.example".to_string())
+        );
     }
 
     #[test]

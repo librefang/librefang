@@ -211,12 +211,19 @@ fn user_role_allows_request(role: UserRole, method: &axum::http::Method, path: &
         let agent_message = path.starts_with("/api/agents/")
             && (path.ends_with("/message") || path.ends_with("/message/stream"));
         let agent_clone = path.starts_with("/api/agents/") && path.ends_with("/clone");
+        // Anchor the approval suffixes to the `/api/approvals/` prefix. These
+        // suffixes are meant only for tool-call approval actions; left
+        // unanchored they also match `/api/skills/pending/{id}/approve` and
+        // `/api/a2a/agents/{id}/approve`, neither of which has an in-handler
+        // role check, so a User bearer could approve pending skills and trust
+        // A2A agents (privilege escalation).
         let approval_action = path == "/api/approvals/batch"
-            || path.ends_with("/approve")
-            || path.ends_with("/approve_all")
-            || path.ends_with("/reject")
-            || path.ends_with("/reject_all")
-            || path.ends_with("/modify");
+            || (path.starts_with("/api/approvals/")
+                && (path.ends_with("/approve")
+                    || path.ends_with("/approve_all")
+                    || path.ends_with("/reject")
+                    || path.ends_with("/reject_all")
+                    || path.ends_with("/modify")));
         return agent_message || agent_clone || approval_action;
     }
 
@@ -1862,6 +1869,40 @@ mod tests {
             assert!(
                 !user_role_allows_request(UserRole::User, &post, path),
                 "User must NOT be allowed to POST {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_user_role_approval_suffixes_anchored_to_approvals_prefix() {
+        // The `/approve`, `/reject`, `/modify`, … suffixes are meant only for
+        // tool-call approval actions under `/api/approvals/`. Left unanchored
+        // they also matched `/api/skills/pending/{id}/approve` and
+        // `/api/a2a/agents/{id}/approve`, neither of which has an in-handler
+        // role check — a User bearer could approve pending skills and trust
+        // A2A agents (privilege escalation).
+        let post = axum::http::Method::POST;
+        for path in [
+            "/api/skills/pending/x/approve",
+            "/api/skills/pending/x/reject",
+            "/api/a2a/agents/x/approve",
+            "/api/a2a/agents/x/reject",
+        ] {
+            assert!(
+                !user_role_allows_request(UserRole::User, &post, path),
+                "User must NOT be allowed to POST {path}"
+            );
+        }
+        // Genuine tool-call approval actions stay allowed for User.
+        for path in [
+            "/api/approvals/x/approve",
+            "/api/approvals/batch",
+            "/api/approvals/session/sess-1/approve_all",
+            "/api/approvals/x/modify",
+        ] {
+            assert!(
+                user_role_allows_request(UserRole::User, &post, path),
+                "User must be allowed to POST {path}"
             );
         }
     }

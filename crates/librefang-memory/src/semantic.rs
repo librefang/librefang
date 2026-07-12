@@ -587,12 +587,29 @@ impl SemanticStore {
                 .map_err(LibreFangError::memory)?;
             ordered_ids.push(mem_id);
         }
-        let mut by_id = self.get_by_ids_batch(&ordered_ids, false)?;
+        let mut by_id = self.get_by_ids_batch(
+            &ordered_ids,
+            false,
+            filter.as_ref().and_then(|f| f.peer_id.as_deref()),
+        )?;
         let mut fragments: Vec<MemoryFragment> = Vec::with_capacity(ordered_ids.len());
         for mem_id in &ordered_ids {
             if let Some(frag) = by_id.remove(mem_id) {
                 fragments.push(frag);
             }
+        }
+
+        // Defense-in-depth (audit: vector-store-hydrate-tenant-filter). The
+        // external VectorStore backend is untrusted — a misbehaving or
+        // compromised backend can return ids belonging to another agent /
+        // scope / source than the caller's filter requested, and
+        // `get_by_ids_batch` only enforces `deleted = 0` (plus peer_id, passed
+        // above) at the SQL layer. Re-apply the caller's MemoryFilter to the
+        // hydrated fragments so tenant isolation never depends on the backend
+        // honouring the filter. This mirrors the WHERE clauses `recall_impl`
+        // pushes into SQLite for the fields carried by MemoryFragment.
+        if let Some(ref f) = filter {
+            fragments.retain(|frag| fragment_matches_filter(frag, f));
         }
 
         // Update access counts — see note on the SQLite-path
@@ -621,6 +638,7 @@ impl SemanticStore {
         &self,
         ids: &[MemoryId],
         include_deleted: bool,
+        peer_id: Option<&str>,
     ) -> LibreFangResult<HashMap<MemoryId, MemoryFragment>> {
         if ids.is_empty() {
             return Ok(HashMap::new());
@@ -631,18 +649,31 @@ impl SemanticStore {
         } else {
             " AND deleted = 0"
         };
+        // Enforce peer isolation in SQL when the caller filters by peer, so an
+        // untrusted vector backend returning another peer's id never hydrates
+        // (MemoryFragment does not carry peer_id, so this cannot be re-checked
+        // after hydration — it must be a query-time predicate). Mirrors the
+        // `peer_id = ?` clause in `recall_impl`.
+        let peer_clause = if peer_id.is_some() {
+            " AND peer_id = ?"
+        } else {
+            ""
+        };
         let placeholders = std::iter::repeat_n("?", ids.len())
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(
             "SELECT id, agent_id, content, source, scope, confidence, metadata, created_at, accessed_at, access_count, embedding, image_url, image_embedding, modality
-             FROM memories WHERE id IN ({placeholders}){deleted_clause}",
+             FROM memories WHERE id IN ({placeholders}){deleted_clause}{peer_clause}",
         );
         let id_strs: Vec<String> = ids.iter().map(|m| m.0.to_string()).collect();
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> = id_strs
+        let mut param_refs: Vec<&dyn rusqlite::types::ToSql> = id_strs
             .iter()
             .map(|s| s as &dyn rusqlite::types::ToSql)
             .collect();
+        if let Some(ref p) = peer_id {
+            param_refs.push(p as &dyn rusqlite::types::ToSql);
+        }
 
         let mut stmt = conn.prepare(&sql).map_err(LibreFangError::memory)?;
         let rows = stmt
@@ -984,6 +1015,51 @@ fn embedding_to_bytes(embedding: &[f32]) -> Vec<u8> {
         bytes.extend_from_slice(&val.to_le_bytes());
     }
     bytes
+}
+
+/// Re-apply a [`MemoryFilter`]'s tenant / scope predicates to an already
+/// hydrated fragment.
+///
+/// Used by `recall_via_vector_store` as defense in depth: the external vector
+/// backend is untrusted, so tenant isolation must not rely on it honouring the
+/// filter it was handed. Mirrors the SQL WHERE clauses `recall_impl` pushes
+/// into SQLite for the fields carried by [`MemoryFragment`] (`agent_id`,
+/// `scope`, `min_confidence`, `source`, `after`, `before`). `peer_id` is
+/// enforced in the hydration query (`get_by_ids_batch`) rather than here,
+/// because `MemoryFragment` does not carry `peer_id`.
+fn fragment_matches_filter(frag: &MemoryFragment, f: &MemoryFilter) -> bool {
+    if let Some(agent_id) = f.agent_id {
+        if frag.agent_id != agent_id {
+            return false;
+        }
+    }
+    if let Some(ref scope) = f.scope {
+        if &frag.scope != scope {
+            return false;
+        }
+    }
+    if let Some(min_conf) = f.min_confidence {
+        if frag.confidence < min_conf {
+            return false;
+        }
+    }
+    if let Some(ref source) = f.source {
+        if &frag.source != source {
+            return false;
+        }
+    }
+    // SQLite path uses strict `>`/`<` bounds; keep the same semantics.
+    if let Some(ref after) = f.after {
+        if frag.created_at <= *after {
+            return false;
+        }
+    }
+    if let Some(ref before) = f.before {
+        if frag.created_at >= *before {
+            return false;
+        }
+    }
+    true
 }
 
 /// Deserialize embedding from bytes.
@@ -1519,6 +1595,138 @@ mod tests {
         let results = store.recall("coffee", 10, Some(f)).unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].content.starts_with("Bob"));
+    }
+
+    /// A VectorStore backend that ignores the MemoryFilter it is handed and
+    /// returns every id it was seeded with — modelling a misbehaving or
+    /// compromised external backend. Used to prove tenant isolation does not
+    /// depend on the backend honouring the filter.
+    struct LeakyVectorStore {
+        ids: Vec<String>,
+    }
+
+    #[async_trait]
+    impl VectorStore for LeakyVectorStore {
+        async fn insert(
+            &self,
+            _id: &str,
+            _embedding: &[f32],
+            _payload: &str,
+            _metadata: HashMap<String, serde_json::Value>,
+        ) -> LibreFangResult<()> {
+            Ok(())
+        }
+
+        async fn search(
+            &self,
+            _query_embedding: &[f32],
+            _limit: usize,
+            _filter: Option<MemoryFilter>,
+        ) -> LibreFangResult<Vec<VectorSearchResult>> {
+            // Deliberately ignore `_filter` and leak every seeded id.
+            Ok(self
+                .ids
+                .iter()
+                .map(|id| VectorSearchResult {
+                    id: id.clone(),
+                    payload: String::new(),
+                    score: 1.0,
+                    metadata: HashMap::new(),
+                })
+                .collect())
+        }
+
+        async fn delete(&self, _id: &str) -> LibreFangResult<()> {
+            Ok(())
+        }
+
+        async fn get_embeddings(
+            &self,
+            _ids: &[&str],
+        ) -> LibreFangResult<HashMap<String, Vec<f32>>> {
+            Ok(HashMap::new())
+        }
+
+        fn backend_name(&self) -> &str {
+            "leaky-test"
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn recall_via_vector_store_reapplies_filter_against_leaky_backend() {
+        // Defense-in-depth regression: even when the external VectorStore
+        // returns ids for a different agent / peer than the filter requested,
+        // the hydration path must re-enforce the MemoryFilter so no
+        // cross-tenant content leaks.
+        let mut store = setup();
+        let agent_a = AgentId::new();
+        let agent_b = AgentId::new();
+
+        let id_a = store
+            .remember_with_embedding_and_peer(
+                agent_a,
+                "Alpha secret for agent A",
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+                None,
+                None,
+                None,
+                Default::default(),
+                Some("user-A"),
+            )
+            .unwrap();
+        let id_b = store
+            .remember(
+                agent_b,
+                "Beta secret for agent B",
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+            )
+            .unwrap();
+        let id_a_peer_b = store
+            .remember_with_embedding_and_peer(
+                agent_a,
+                "Alpha content but a different peer",
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+                None,
+                None,
+                None,
+                Default::default(),
+                Some("user-B"),
+            )
+            .unwrap();
+
+        // Backend leaks all three ids regardless of the filter.
+        store.set_vector_store(Arc::new(LeakyVectorStore {
+            ids: vec![
+                id_a.0.to_string(),
+                id_b.0.to_string(),
+                id_a_peer_b.0.to_string(),
+            ],
+        }));
+
+        // Recall as agent A / peer user-A. Only the matching fragment must
+        // survive hydration; agent B's row and agent A's other-peer row are
+        // filtered out despite the backend returning them.
+        let mut filter = MemoryFilter::agent(agent_a);
+        filter.peer_id = Some("user-A".into());
+        let query = [0.1_f32, 0.2, 0.3];
+        let results = store
+            .recall_with_embedding("secret", 10, Some(filter), Some(&query))
+            .unwrap();
+
+        assert_eq!(
+            results.len(),
+            1,
+            "leaky backend must not bypass tenant isolation, got: {:?}",
+            results.iter().map(|r| &r.content).collect::<Vec<_>>()
+        );
+        assert_eq!(results[0].agent_id, agent_a);
+        assert_eq!(results[0].content, "Alpha secret for agent A");
     }
 
     #[test]

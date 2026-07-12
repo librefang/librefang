@@ -25,6 +25,60 @@ use std::time::Duration;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Connection-establishment timeout.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Maximum size (bytes) of a remote response body we will buffer before
+/// deserializing. The 30s request timeout alone does not bound memory: a
+/// misbehaving or hostile backend can stream a slow, unbounded body and OOM
+/// the daemon. 64 MiB is far above any realistic batch of search hits /
+/// embeddings while still capping the blast radius.
+const MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Read a response body into memory, refusing to buffer more than
+/// [`MAX_RESPONSE_BYTES`].
+///
+/// Mirrors the streaming cap in `librefang-runtime`'s `web_fetch`: an honest
+/// `Content-Length` is rejected up front, and the chunk loop enforces the true
+/// ceiling for chunked / mis-declared responses (where `content_length()` is
+/// `None`). This is what makes the cap hold against a server that omits or
+/// lies about the header.
+async fn read_capped_body(mut resp: reqwest::Response) -> LibreFangResult<Vec<u8>> {
+    if let Some(len) = resp.content_length() {
+        if len > MAX_RESPONSE_BYTES {
+            return Err(LibreFangError::Internal(format!(
+                "HTTP vector response too large: {len} bytes (max {MAX_RESPONSE_BYTES})"
+            )));
+        }
+    }
+    let mut body: Vec<u8> = Vec::new();
+    loop {
+        match resp.chunk().await {
+            Ok(Some(chunk)) => {
+                if body.len() as u64 + chunk.len() as u64 > MAX_RESPONSE_BYTES {
+                    return Err(LibreFangError::Internal(format!(
+                        "HTTP vector response too large: exceeds max {MAX_RESPONSE_BYTES} bytes (server omitted or misreported Content-Length)"
+                    )));
+                }
+                body.extend_from_slice(&chunk);
+            }
+            Ok(None) => break,
+            Err(e) => {
+                return Err(LibreFangError::Internal(format!(
+                    "HTTP vector response read failed: {e}"
+                )));
+            }
+        }
+    }
+    Ok(body)
+}
+
+/// Read a (capped) error-response body as a lossy UTF-8 string for inclusion
+/// in an error message. Bounded by [`read_capped_body`] so an error path
+/// cannot be used to force an unbounded read either.
+async fn read_capped_error_text(resp: reqwest::Response) -> String {
+    read_capped_body(resp)
+        .await
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default()
+}
 
 /// Build the reqwest client with bounded connect and total request time so a
 /// backend that accepts the TCP connection but never responds cannot pin a
@@ -127,7 +181,7 @@ impl VectorStore for HttpVectorStore {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
+            let text = read_capped_error_text(resp).await;
             return Err(LibreFangError::Internal(format!(
                 "HTTP vector insert returned {status}: {text}"
             )));
@@ -156,15 +210,14 @@ impl VectorStore for HttpVectorStore {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
+            let text = read_capped_error_text(resp).await;
             return Err(LibreFangError::Internal(format!(
                 "HTTP vector search returned {status}: {text}"
             )));
         }
 
-        let items: Vec<SearchResponseItem> = resp
-            .json()
-            .await
+        let body = read_capped_body(resp).await?;
+        let items: Vec<SearchResponseItem> = serde_json::from_slice(&body)
             .map_err(|e| LibreFangError::Internal(format!("HTTP vector search parse: {e}")))?;
 
         Ok(items
@@ -190,7 +243,7 @@ impl VectorStore for HttpVectorStore {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
+            let text = read_capped_error_text(resp).await;
             return Err(LibreFangError::Internal(format!(
                 "HTTP vector delete returned {status}: {text}"
             )));
@@ -213,13 +266,14 @@ impl VectorStore for HttpVectorStore {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
+            let text = read_capped_error_text(resp).await;
             return Err(LibreFangError::Internal(format!(
                 "HTTP vector get_embeddings returned {status}: {text}"
             )));
         }
 
-        let map: HashMap<String, Vec<f32>> = resp.json().await.map_err(|e| {
+        let body = read_capped_body(resp).await?;
+        let map: HashMap<String, Vec<f32>> = serde_json::from_slice(&body).map_err(|e| {
             LibreFangError::Internal(format!("HTTP vector get_embeddings parse: {e}"))
         })?;
         Ok(map)
@@ -286,6 +340,53 @@ mod tests {
         assert!(
             result.is_err(),
             "hung backend must surface an Err from the bounded client"
+        );
+    }
+
+    /// A backend that declares a body far larger than `MAX_RESPONSE_BYTES`
+    /// must be rejected on the `Content-Length` fast path rather than
+    /// buffered into memory. Without the cap, `resp.json()` / `resp.text()`
+    /// would read the whole body and let a hostile backend OOM the daemon.
+    #[tokio::test]
+    async fn search_rejects_oversized_response_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let addr = listener.local_addr().expect("local addr");
+        let _srv = tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                // Best-effort drain of the request so the client finishes
+                // sending before we respond.
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                // Declare a body one byte past the cap. The Content-Length
+                // fast path must reject before any body is read, so we never
+                // actually send the body.
+                let headers = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                    MAX_RESPONSE_BYTES + 1
+                );
+                let _ = sock.write_all(headers.as_bytes()).await;
+                let _ = sock.flush().await;
+                // Hold the socket briefly so the client can read the headers.
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        });
+
+        let store = HttpVectorStore {
+            client: build_client(Duration::from_secs(5), Duration::from_secs(5)),
+            base_url: format!("http://{addr}"),
+        };
+        let err = store
+            .search(&[0.1, 0.2, 0.3], 5, None)
+            .await
+            .expect_err("oversized response must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("too large"),
+            "expected a size-cap error, got: {msg}"
         );
     }
 }

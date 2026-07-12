@@ -776,6 +776,44 @@ async fn update_agent_budget_rejects_unknown_agent_with_404() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn update_agent_budget_rejects_negative_cap_with_400_and_does_not_persist() {
+    let h = boot().await;
+    let quota = ResourceQuota {
+        max_cost_per_hour_usd: 2.0,
+        max_cost_per_day_usd: 20.0,
+        max_cost_per_month_usd: 200.0,
+        ..Default::default()
+    };
+    let id = register_agent(&h.state, "guarded", quota);
+    let path = format!("/api/budget/agents/{id}");
+
+    // A negative cap passes JSON deserialization and `as_f64`, but the
+    // downstream `cap > 0.0` predicate treats it as "unlimited" — so
+    // without validation it would silently disable the quota and persist
+    // to disk. The handler must reject it with 400 instead.
+    let (status, body) = request(
+        &h,
+        Method::PUT,
+        &path,
+        Some(serde_json::json!({"max_cost_per_day_usd": -1.0})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("max_cost_per_day_usd"),
+        "body: {body:?}"
+    );
+
+    // The rejected PUT must not have moved the live daily cap.
+    let (status, body) = request(&h, Method::GET, &path, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["daily"]["limit"], 20.0);
+}
+
 // ---------------------------------------------------------------------------
 // /api/usage and /api/usage/summary — aggregation sanity
 // ---------------------------------------------------------------------------
