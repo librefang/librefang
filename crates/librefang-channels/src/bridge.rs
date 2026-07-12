@@ -2515,14 +2515,6 @@ fn is_group_command(message: &ChannelMessage) -> bool {
         || matches!(&message.content, ChannelContent::Text(text) if text.starts_with('/'))
 }
 
-/// Check whether a built-in slash command is permitted on this channel.
-///
-/// Precedence: `disable_commands` > `allowed_commands` (whitelist) >
-/// `blocked_commands` (blacklist). When no overrides are configured,
-/// everything is allowed (current default behaviour).
-///
-/// Config entries may be written with or without a leading `/` (both
-/// `"agent"` and `"/agent"` match the dispatcher's bare `"agent"` token).
 /// Whether the resolved channel override disables typing indicators entirely.
 ///
 /// `TypingMode::Never` is the documented privacy setting: it suppresses the
@@ -2533,6 +2525,14 @@ fn typing_indicator_suppressed(typing_mode: Option<TypingMode>) -> bool {
     matches!(typing_mode, Some(TypingMode::Never))
 }
 
+/// Check whether a built-in slash command is permitted on this channel.
+///
+/// Precedence: `disable_commands` > `allowed_commands` (whitelist) >
+/// `blocked_commands` (blacklist). When no overrides are configured,
+/// everything is allowed (current default behaviour).
+///
+/// Config entries may be written with or without a leading `/` (both
+/// `"agent"` and `"/agent"` match the dispatcher's bare `"agent"` token).
 fn is_command_allowed(cmd: &str, overrides: Option<&ChannelOverrides>) -> bool {
     let Some(ov) = overrides else { return true };
     if ov.disable_commands {
