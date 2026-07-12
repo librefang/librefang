@@ -8,9 +8,27 @@ use crate::supply_chain;
 use crate::SkillError;
 use reqwest::StatusCode;
 use serde_json::json;
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Read};
 use std::path::{Component, Path, PathBuf};
 use tracing::info;
+
+/// Maximum size of a downloaded release bundle (compressed bytes).
+/// Bounds the in-memory download buffer against a huge release asset.
+const MAX_DOWNLOAD_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Maximum number of entries permitted in a bundle zip.
+/// Guards against an archive with an absurd number of tiny entries.
+const MAX_ENTRIES: usize = 10_000;
+
+/// Maximum uncompressed size of any single zip entry.
+const MAX_ENTRY_UNCOMPRESSED_BYTES: u64 = 128 * 1024 * 1024;
+
+/// Maximum cumulative uncompressed size across all entries in a bundle.
+const MAX_TOTAL_UNCOMPRESSED_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Maximum per-entry uncompressed:compressed ratio before an entry is
+/// treated as a decompression bomb.
+const MAX_COMPRESSION_RATIO: u64 = 100;
 
 fn urlencoded(s: &str) -> String {
     use std::fmt::Write;
@@ -188,10 +206,7 @@ impl MarketplaceClient {
         })?;
 
         info!("Downloading skill {skill_name} {version} from {source_kind}...");
-        let bundle_bytes = self
-            .download_bytes(&download_url)
-            .await
-            .map_err(|e| SkillError::Network(format!("Download bundle: {e}")))?;
+        let bundle_bytes = self.download_bytes(&download_url).await?;
 
         extract_bundle_zip_bytes(&bundle_bytes, &skill_dir)?;
         ensure_skill_manifest(&skill_dir)?;
@@ -323,17 +338,43 @@ impl MarketplaceClient {
         })
     }
 
-    async fn download_bytes(&self, url: &str) -> Result<Vec<u8>, reqwest::Error> {
+    async fn download_bytes(&self, url: &str) -> Result<Vec<u8>, SkillError> {
         let resp = self
             .http
             .get(url)
             .header("Accept", "application/vnd.github+json")
             .send()
-            .await?;
-        resp.error_for_status()?
-            .bytes()
             .await
-            .map(|bytes| bytes.to_vec())
+            .map_err(|e| SkillError::Network(format!("Download request failed: {e}")))?;
+        let mut resp = resp
+            .error_for_status()
+            .map_err(|e| SkillError::Network(format!("Download failed: {e}")))?;
+
+        // Early reject when the server advertises a body larger than the cap.
+        if let Some(len) = resp.content_length() {
+            if len > MAX_DOWNLOAD_BYTES {
+                return Err(SkillError::Network(format!(
+                    "download size {len} bytes exceeds the {MAX_DOWNLOAD_BYTES}-byte limit"
+                )));
+            }
+        }
+
+        // Stream the body chunk-by-chunk so an absent or lying Content-Length
+        // header cannot force an unbounded in-memory buffer.
+        let mut buf: Vec<u8> = Vec::new();
+        while let Some(chunk) = resp
+            .chunk()
+            .await
+            .map_err(|e| SkillError::Network(format!("Download stream failed: {e}")))?
+        {
+            if buf.len() as u64 + chunk.len() as u64 > MAX_DOWNLOAD_BYTES {
+                return Err(SkillError::Network(format!(
+                    "download exceeded the {MAX_DOWNLOAD_BYTES}-byte limit"
+                )));
+            }
+            buf.extend_from_slice(&chunk);
+        }
+        Ok(buf)
     }
 
     async fn github_get_json(
@@ -463,6 +504,13 @@ fn extract_bundle_zip_bytes(bytes: &[u8], skill_dir: &Path) -> Result<(), SkillE
     let mut archive = zip::ZipArchive::new(reader)
         .map_err(|err| SkillError::InvalidManifest(format!("Read bundle zip: {err}")))?;
 
+    if archive.len() > MAX_ENTRIES {
+        return Err(SkillError::SecurityBlocked(format!(
+            "bundle contains {} entries, exceeding the {MAX_ENTRIES}-entry limit",
+            archive.len()
+        )));
+    }
+
     let mut safe_paths = Vec::new();
     for index in 0..archive.len() {
         let file = archive
@@ -474,6 +522,7 @@ fn extract_bundle_zip_bytes(bytes: &[u8], skill_dir: &Path) -> Result<(), SkillE
     }
     let shared_root = detect_shared_root(&safe_paths);
 
+    let mut total_uncompressed: u64 = 0;
     for index in 0..archive.len() {
         let mut file = archive
             .by_index(index)
@@ -500,11 +549,42 @@ fn extract_bundle_zip_bytes(bytes: &[u8], skill_dir: &Path) -> Result<(), SkillE
             std::fs::create_dir_all(parent)?;
         }
 
+        // Early reject on the declared header sizes so an obvious
+        // decompression bomb is caught before any bytes are streamed.
+        let declared = file.size();
+        let compressed = file.compressed_size();
+        if declared > MAX_ENTRY_UNCOMPRESSED_BYTES {
+            return Err(SkillError::SecurityBlocked(format!(
+                "zip entry '{}' declares {declared} uncompressed bytes, exceeding the {MAX_ENTRY_UNCOMPRESSED_BYTES}-byte per-entry limit",
+                relative_path.display()
+            )));
+        }
+        if compressed > 0 && declared / compressed > MAX_COMPRESSION_RATIO {
+            return Err(SkillError::SecurityBlocked(format!(
+                "zip entry '{}' has a compression ratio above {MAX_COMPRESSION_RATIO}:1 (possible decompression bomb)",
+                relative_path.display()
+            )));
+        }
+
+        // Stream to disk with a hard per-entry cap. `std::io::copy` uses a
+        // small internal buffer, so a malicious entry that lied about its
+        // header size cannot allocate its full decompressed length in RAM.
         let mut out_file = std::fs::File::create(&out_path)?;
-        let mut buffer = Vec::new();
-        file.read_to_end(&mut buffer)
-            .map_err(|err| SkillError::Io(std::io::Error::other(err)))?;
-        out_file.write_all(&buffer)?;
+        let mut limited = (&mut file).take(MAX_ENTRY_UNCOMPRESSED_BYTES + 1);
+        let written = std::io::copy(&mut limited, &mut out_file).map_err(SkillError::Io)?;
+        if written > MAX_ENTRY_UNCOMPRESSED_BYTES {
+            let _ = std::fs::remove_file(&out_path);
+            return Err(SkillError::SecurityBlocked(format!(
+                "zip entry '{}' exceeded the {MAX_ENTRY_UNCOMPRESSED_BYTES}-byte per-entry decompression limit",
+                relative_path.display()
+            )));
+        }
+        total_uncompressed = total_uncompressed.saturating_add(written);
+        if total_uncompressed > MAX_TOTAL_UNCOMPRESSED_BYTES {
+            return Err(SkillError::SecurityBlocked(format!(
+                "bundle exceeded the {MAX_TOTAL_UNCOMPRESSED_BYTES}-byte total decompression limit"
+            )));
+        }
     }
 
     Ok(())
@@ -607,6 +687,7 @@ fn ensure_skill_manifest(skill_dir: &Path) -> Result<(), SkillError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     use tempfile::TempDir;
     use zip::write::SimpleFileOptions;
 
@@ -692,5 +773,38 @@ version = "0.1.0"
         extract_bundle_zip_bytes(&bytes, &skill_dir).unwrap();
 
         assert!(skill_dir.join("skill.toml").exists());
+    }
+
+    #[test]
+    fn test_extract_bundle_zip_bytes_rejects_decompression_bomb() {
+        let dir = TempDir::new().unwrap();
+        let zip_path = dir.path().join("bomb.zip");
+
+        // 1 MiB of zeros deflates to a few hundred bytes — a ratio well above
+        // MAX_COMPRESSION_RATIO — modelling a classic decompression bomb.
+        {
+            let file = std::fs::File::create(&zip_path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let options = SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated)
+                .unix_permissions(0o644);
+            zip.start_file("skill.toml", options).unwrap();
+            let chunk = vec![0u8; 64 * 1024];
+            for _ in 0..16 {
+                zip.write_all(&chunk).unwrap();
+            }
+            zip.finish().unwrap();
+        }
+
+        let bytes = std::fs::read(&zip_path).unwrap();
+        let skill_dir = dir.path().join("installed");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+
+        let err = extract_bundle_zip_bytes(&bytes, &skill_dir)
+            .expect_err("decompression bomb must be rejected");
+        assert!(
+            matches!(err, SkillError::SecurityBlocked(_)),
+            "expected SecurityBlocked, got {err:?}"
+        );
     }
 }

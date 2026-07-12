@@ -248,6 +248,31 @@ fn convert_messages(oai_messages: &[OaiMessage]) -> Vec<Message> {
         .collect()
 }
 
+/// Extract the forwarding inputs from the latest user turn.
+///
+/// Returns the flattened text, whether the turn carries any image blocks, and
+/// the structured content blocks (present only when the content is block-form,
+/// so a plain-text turn yields `None` and takes the text-only kernel path).
+/// Only the latest user turn is considered — LibreFang agents keep their own
+/// per-session history, so prior turns are not replayed through this endpoint.
+fn extract_latest_user_input(messages: &[Message]) -> (String, bool, Option<Vec<ContentBlock>>) {
+    match messages
+        .iter()
+        .rev()
+        .find(|m| m.role == Role::User)
+        .map(|m| &m.content)
+    {
+        Some(content) => {
+            let blocks = match content {
+                MessageContent::Blocks(blocks) => Some(blocks.clone()),
+                MessageContent::Text(_) => None,
+            };
+            (content.text_content(), content.has_images(), blocks)
+        }
+        None => (String::new(), false, None),
+    }
+}
+
 // ── Handlers ────────────────────────────────────────────────────────────────
 
 /// POST /v1/chat/completions
@@ -274,16 +299,20 @@ pub async fn chat_completions(
         }
     };
 
-    // Extract the last user message as the input
+    // Extract the latest user turn as the input.
+    //
+    // Only the most recent user message is forwarded: LibreFang agents keep
+    // their own per-session conversation history, so prior user/assistant turns
+    // and system messages in the request are intentionally not replayed here —
+    // the kernel already holds the session context. Any image blocks on that
+    // latest turn ARE threaded through to the kernel (vision) on the
+    // non-streaming path via `content_blocks` below.
     let messages = convert_messages(&req.messages);
-    let last_user_msg = messages
-        .iter()
-        .rev()
-        .find(|m| m.role == Role::User)
-        .map(|m| m.content.text_content())
-        .unwrap_or_default();
+    let (last_user_msg, has_images, content_blocks) = extract_latest_user_input(&messages);
 
-    if last_user_msg.is_empty() {
+    // A user turn that is text-empty AND carries no image is a genuinely empty
+    // request; an image-only turn is valid input for a vision model.
+    if last_user_msg.is_empty() && !has_images {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
@@ -304,6 +333,26 @@ pub async fn chat_completions(
         .as_secs();
 
     if req.stream {
+        // Streaming vision is not yet supported: the streaming kernel entry
+        // point (`send_message_streaming_with_routing`) has no content-blocks
+        // variant, so an image on the latest turn would be silently dropped.
+        // Reject loudly rather than corrupt the request — vision works on the
+        // non-streaming endpoint. Threading images through the streaming path
+        // needs a new kernel method (cross-crate) and is tracked separately.
+        if has_images {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": {
+                        "message": "Image input is not supported with stream=true; send the request without streaming for vision",
+                        "type": "invalid_request_error",
+                        "code": "streaming_vision_unsupported"
+                    }
+                })),
+            )
+                .into_response();
+        }
+
         // Streaming response
         return match stream_response(
             state,
@@ -320,11 +369,18 @@ pub async fn chat_completions(
         };
     }
 
-    // Non-streaming response
+    // Non-streaming response. Thread any parsed content blocks (text + images)
+    // through so vision requests reach the kernel; a text-only turn yields
+    // `content_blocks == None`, matching the previous text-only behaviour.
     let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone();
     match state
         .kernel
-        .send_message_with_handle(agent_id, &last_user_msg, Some(kernel_handle))
+        .send_message_with_handle_and_blocks(
+            agent_id,
+            &last_user_msg,
+            Some(kernel_handle),
+            content_blocks,
+        )
         .await
     {
         Ok(result) => {
@@ -386,6 +442,163 @@ fn streaming_setup_error_response(detail: &str) -> axum::response::Response {
         .into_response()
 }
 
+/// Build a chunk with a delta and optional finish_reason, serialized to JSON.
+fn make_chunk(
+    id: &str,
+    created: u64,
+    model: &str,
+    delta: ChunkDelta,
+    finish_reason: Option<&'static str>,
+) -> String {
+    let chunk = ChatCompletionChunk {
+        id: id.to_string(),
+        object: "chat.completion.chunk",
+        created,
+        model: model.to_string(),
+        choices: vec![ChunkChoice {
+            index: 0,
+            delta,
+            finish_reason,
+        }],
+    };
+    serde_json::to_string(&chunk).unwrap_or_default()
+}
+
+/// Mutable state threaded through the streaming forwarder as it maps
+/// [`StreamEvent`]s onto OpenAI chunk frames.
+struct ForwarderState {
+    /// Monotonic tool_call index across the entire flattened completion (all
+    /// agent-loop iterations). OpenAI clients reconstruct tool calls solely by
+    /// this index, so it must never reset between iterations — resetting it
+    /// makes a later iteration's first tool call collide with an earlier one,
+    /// merging two distinct calls into one garbled entry.
+    tool_index: u32,
+    /// Set once a terminal `stop_reason` (EndTurn / MaxTokens / StopSequence)
+    /// is observed, so the finalizer can tell a graceful end-of-turn apart from
+    /// an aborted stream. `ToolUse` (an inter-iteration boundary) and
+    /// `ContentFiltered` (a provider refusal) are deliberately NOT terminal.
+    saw_terminal: bool,
+}
+
+/// Map one [`StreamEvent`] onto an OpenAI chunk frame, updating `state`.
+///
+/// Returns `None` for events that produce no client-visible chunk
+/// (ContentComplete boundaries, tool-end / thinking / phase events).
+fn stream_event_to_chunk(
+    state: &mut ForwarderState,
+    event: StreamEvent,
+    req_id: &str,
+    created: u64,
+    model: &str,
+) -> Option<String> {
+    match event {
+        StreamEvent::TextDelta { text } => Some(make_chunk(
+            req_id,
+            created,
+            model,
+            ChunkDelta {
+                role: None,
+                content: Some(text),
+                tool_calls: None,
+            },
+            None,
+        )),
+        StreamEvent::ToolUseStart { id, name } => {
+            let idx = state.tool_index;
+            state.tool_index += 1;
+            Some(make_chunk(
+                req_id,
+                created,
+                model,
+                ChunkDelta {
+                    role: None,
+                    content: None,
+                    tool_calls: Some(vec![OaiToolCall {
+                        index: idx,
+                        id: Some(id),
+                        call_type: Some("function"),
+                        function: OaiToolCallFunction {
+                            name: Some(name),
+                            arguments: Some(String::new()),
+                        },
+                    }]),
+                },
+                None,
+            ))
+        }
+        StreamEvent::ToolInputDelta { text } => {
+            // tool_index already incremented past the current tool, so current = index - 1.
+            let idx = state.tool_index.saturating_sub(1);
+            Some(make_chunk(
+                req_id,
+                created,
+                model,
+                ChunkDelta {
+                    role: None,
+                    content: None,
+                    tool_calls: Some(vec![OaiToolCall {
+                        index: idx,
+                        id: None,
+                        call_type: None,
+                        function: OaiToolCallFunction {
+                            name: None,
+                            arguments: Some(text),
+                        },
+                    }]),
+                },
+                None,
+            ))
+        }
+        StreamEvent::ContentComplete { stop_reason, .. } => {
+            // Terminal → mark a clean end-of-turn; wait for channel close to finish.
+            // ToolUse → inter-iteration boundary, more iterations follow (do NOT
+            // reset tool_index — see the field docs). ContentFiltered → refusal.
+            if matches!(
+                stop_reason,
+                StopReason::EndTurn | StopReason::MaxTokens | StopReason::StopSequence
+            ) {
+                state.saw_terminal = true;
+            }
+            None
+        }
+        // ToolUseEnd, ToolExecutionResult, ThinkingDelta, PhaseChange, … — skip.
+        _ => None,
+    }
+}
+
+/// Build the terminal SSE frame once the event channel has closed.
+///
+/// On a clean completion this is the OpenAI `finish_reason: "stop"` chunk; on a
+/// mid-stream failure (the agent loop returned `Err`, its task panicked, or the
+/// stream closed without any terminal marker) it is an OpenAI-style in-band
+/// error frame instead. Headers and HTTP 200 were already flushed when the
+/// first chunk went out, so an in-band error frame is the only way to signal
+/// failure to the client — this matches OpenAI's own streaming-error convention
+/// and prevents a truncated response from being framed as a full success.
+fn finish_or_error_frame(ended_cleanly: bool, req_id: &str, created: u64, model: &str) -> String {
+    if ended_cleanly {
+        make_chunk(
+            req_id,
+            created,
+            model,
+            ChunkDelta {
+                role: None,
+                content: None,
+                tool_calls: None,
+            },
+            Some("stop"),
+        )
+    } else {
+        serde_json::json!({
+            "error": {
+                "message": "upstream error",
+                "type": "server_error"
+            }
+        })
+        .to_string()
+    }
+}
+
 /// Build an SSE stream response for streaming completions.
 async fn stream_response(
     state: Arc<AppState>,
@@ -397,7 +610,12 @@ async fn stream_response(
 ) -> Result<axum::response::Response, String> {
     let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone();
 
-    let (mut rx, _handle) = state
+    // Keep the JoinHandle: it is the only carrier of a mid-stream failure. The
+    // agent loop can error after deltas have already streamed (timeout, content
+    // filter, repeated tool failures); it then returns `Err` on this handle and
+    // drops the StreamEvent sender, which merely closes `rx`. Without inspecting
+    // the handle we could not tell an aborted stream from a clean end-of-turn.
+    let (mut rx, handle) = state
         .kernel
         .clone()
         .send_message_streaming_with_routing(agent_id, message, Some(kernel_handle))
@@ -428,121 +646,42 @@ async fn stream_response(
         )))
         .await;
 
-    // Helper to build a chunk with a delta and optional finish_reason.
-    fn make_chunk(
-        id: &str,
-        created: u64,
-        model: &str,
-        delta: ChunkDelta,
-        finish_reason: Option<&'static str>,
-    ) -> String {
-        let chunk = ChatCompletionChunk {
-            id: id.to_string(),
-            object: "chat.completion.chunk",
-            created,
-            model: model.to_string(),
-            choices: vec![ChunkChoice {
-                index: 0,
-                delta,
-                finish_reason,
-            }],
-        };
-        serde_json::to_string(&chunk).unwrap_or_default()
-    }
-
-    // Spawn forwarder task — streams ALL iterations until the agent loop channel closes.
+    // Spawn forwarder task — streams ALL agent-loop iterations, flattened into
+    // one OpenAI completion, until the event channel closes.
     let req_id = request_id.clone();
     tokio::spawn(async move {
-        // Tracks current tool_call index within each LLM iteration.
-        let mut tool_index: u32 = 0;
+        let mut fwd = ForwarderState {
+            tool_index: 0,
+            saw_terminal: false,
+        };
 
         while let Some(event) = rx.recv().await {
-            let json = match event {
-                StreamEvent::TextDelta { text } => make_chunk(
-                    &req_id,
-                    created,
-                    &agent_name,
-                    ChunkDelta {
-                        role: None,
-                        content: Some(text),
-                        tool_calls: None,
-                    },
-                    None,
-                ),
-                StreamEvent::ToolUseStart { id, name } => {
-                    let idx = tool_index;
-                    tool_index += 1;
-                    make_chunk(
-                        &req_id,
-                        created,
-                        &agent_name,
-                        ChunkDelta {
-                            role: None,
-                            content: None,
-                            tool_calls: Some(vec![OaiToolCall {
-                                index: idx,
-                                id: Some(id),
-                                call_type: Some("function"),
-                                function: OaiToolCallFunction {
-                                    name: Some(name),
-                                    arguments: Some(String::new()),
-                                },
-                            }]),
-                        },
-                        None,
-                    )
-                }
-                StreamEvent::ToolInputDelta { text } => {
-                    // tool_index already incremented past current tool, so current = index - 1
-                    let idx = tool_index.saturating_sub(1);
-                    make_chunk(
-                        &req_id,
-                        created,
-                        &agent_name,
-                        ChunkDelta {
-                            role: None,
-                            content: None,
-                            tool_calls: Some(vec![OaiToolCall {
-                                index: idx,
-                                id: None,
-                                call_type: None,
-                                function: OaiToolCallFunction {
-                                    name: None,
-                                    arguments: Some(text),
-                                },
-                            }]),
-                        },
-                        None,
-                    )
-                }
-                StreamEvent::ContentComplete { stop_reason, .. } => {
-                    // ToolUse → reset tool index for next iteration, do NOT finish.
-                    // EndTurn/MaxTokens/StopSequence → continue, wait for channel close.
-                    if matches!(stop_reason, StopReason::ToolUse) {
-                        tool_index = 0;
-                    }
-                    continue;
-                }
-                // ToolUseEnd, ToolExecutionResult, ThinkingDelta, PhaseChange — skip
-                _ => continue,
+            let Some(json) = stream_event_to_chunk(&mut fwd, event, &req_id, created, &agent_name)
+            else {
+                continue;
             };
             if tx.send(Ok(SseEvent::default().data(json))).await.is_err() {
                 break;
             }
         }
 
-        // Channel closed — agent loop is fully done. Send finish + [DONE].
-        let final_json = make_chunk(
-            &req_id,
-            created,
-            &agent_name,
-            ChunkDelta {
-                role: None,
-                content: None,
-                tool_calls: None,
-            },
-            Some("stop"),
-        );
+        // Channel closed — the agent loop task has finished. Await the handle
+        // (it has already resolved, so this cannot deadlock) to learn whether
+        // the loop erred mid-stream. Emit a clean finish only on a successful
+        // loop that reached a terminal marker; otherwise send an in-band error
+        // frame so the client is not handed truncated output framed as success.
+        let loop_result = handle.await;
+        let ended_cleanly = fwd.saw_terminal && matches!(loop_result, Ok(Ok(_)));
+        if !ended_cleanly {
+            match &loop_result {
+                Ok(Err(e)) => warn!("OpenAI compat: streaming agent error: {e}"),
+                Err(e) => warn!("OpenAI compat: streaming agent task failed to join: {e}"),
+                Ok(Ok(_)) => {
+                    warn!("OpenAI compat: stream closed without a terminal completion marker")
+                }
+            }
+        }
+        let final_json = finish_or_error_frame(ended_cleanly, &req_id, created, &agent_name);
         let _ = tx.send(Ok(SseEvent::default().data(final_json))).await;
         let _ = tx.send(Ok(SseEvent::default().data("[DONE]"))).await;
     });
@@ -816,5 +955,169 @@ mod tests {
         };
         let json_str = serde_json::to_string(&delta).unwrap();
         assert!(!json_str.contains("tool_calls"));
+    }
+
+    // Regression (audit finding 12): the streamed tool_call `index` must be
+    // monotonic across the whole flattened completion. Resetting it at each
+    // agent-loop iteration boundary (`ContentComplete{ToolUse}`) made a later
+    // iteration's first tool call reuse index 0, merging two distinct calls in
+    // the client's accumulator.
+    #[test]
+    fn tool_call_index_is_monotonic_across_iterations() {
+        use librefang_types::message::TokenUsage;
+
+        let mut fwd = ForwarderState {
+            tool_index: 0,
+            saw_terminal: false,
+        };
+        let c1 = stream_event_to_chunk(
+            &mut fwd,
+            StreamEvent::ToolUseStart {
+                id: "call_A".to_string(),
+                name: "search".to_string(),
+            },
+            "req",
+            0,
+            "agent",
+        )
+        .expect("ToolUseStart yields a chunk");
+        // Iteration boundary — must NOT reset the index (was the bug).
+        assert!(stream_event_to_chunk(
+            &mut fwd,
+            StreamEvent::ContentComplete {
+                stop_reason: StopReason::ToolUse,
+                usage: TokenUsage::default(),
+            },
+            "req",
+            0,
+            "agent",
+        )
+        .is_none());
+        let c2 = stream_event_to_chunk(
+            &mut fwd,
+            StreamEvent::ToolUseStart {
+                id: "call_B".to_string(),
+                name: "fetch".to_string(),
+            },
+            "req",
+            0,
+            "agent",
+        )
+        .expect("ToolUseStart yields a chunk");
+
+        let j1: serde_json::Value = serde_json::from_str(&c1).unwrap();
+        let j2: serde_json::Value = serde_json::from_str(&c2).unwrap();
+        assert_eq!(j1["choices"][0]["delta"]["tool_calls"][0]["index"], 0);
+        assert_eq!(j2["choices"][0]["delta"]["tool_calls"][0]["index"], 1);
+        // ToolUse is an inter-iteration boundary, not a terminal completion.
+        assert!(!fwd.saw_terminal);
+    }
+
+    // Regression (audit finding 6): only genuine end-of-turn stop reasons mark
+    // a terminal completion. ToolUse (inter-iteration) and ContentFiltered
+    // (refusal) must NOT, so the finalizer emits an error frame for them.
+    #[test]
+    fn terminal_marker_only_set_on_end_of_turn_reasons() {
+        use librefang_types::message::TokenUsage;
+
+        for (reason, expect_terminal) in [
+            (StopReason::EndTurn, true),
+            (StopReason::MaxTokens, true),
+            (StopReason::StopSequence, true),
+            (StopReason::ToolUse, false),
+            (StopReason::ContentFiltered, false),
+        ] {
+            let mut fwd = ForwarderState {
+                tool_index: 0,
+                saw_terminal: false,
+            };
+            let out = stream_event_to_chunk(
+                &mut fwd,
+                StreamEvent::ContentComplete {
+                    stop_reason: reason,
+                    usage: TokenUsage::default(),
+                },
+                "req",
+                0,
+                "agent",
+            );
+            assert!(out.is_none(), "ContentComplete emits no client chunk");
+            assert_eq!(fwd.saw_terminal, expect_terminal, "reason {reason:?}");
+        }
+    }
+
+    // Regression (audit finding 6): an aborted stream must end with an in-band
+    // error frame, never a bogus `finish_reason:"stop"` that frames truncated
+    // output as a full success.
+    #[test]
+    fn finalizer_emits_error_frame_on_aborted_stream() {
+        let clean = finish_or_error_frame(true, "req", 0, "agent");
+        let cj: serde_json::Value = serde_json::from_str(&clean).unwrap();
+        assert_eq!(cj["choices"][0]["finish_reason"], "stop");
+        assert!(cj.get("error").is_none());
+
+        let aborted = finish_or_error_frame(false, "req", 0, "agent");
+        let aj: serde_json::Value = serde_json::from_str(&aborted).unwrap();
+        assert_eq!(aj["error"]["type"], "server_error");
+        assert!(aj.get("choices").is_none());
+        assert!(!aborted.contains("\"finish_reason\":\"stop\""));
+    }
+
+    // Regression (audit finding 13): an image-only user turn must be accepted
+    // (not rejected as empty) and its image blocks captured for threading to
+    // the kernel; a text+image turn keeps its blocks; a plain-text turn yields
+    // no blocks and takes the text-only path.
+    #[test]
+    fn extract_latest_user_input_handles_images_and_history() {
+        // Image-only turn: no text, but has_images true and blocks present.
+        let image_only = convert_messages(&[OaiMessage {
+            role: "user".to_string(),
+            content: OaiContent::Parts(vec![OaiContentPart::ImageUrl {
+                image_url: OaiImageUrlRef {
+                    url: "data:image/png;base64,iVBORw0KGgo=".to_string(),
+                },
+            }]),
+        }]);
+        let (text, has_images, blocks) = extract_latest_user_input(&image_only);
+        assert!(text.is_empty());
+        assert!(has_images);
+        assert!(matches!(blocks, Some(ref b) if b.len() == 1));
+        // The pre-fix empty-text guard would have 400'd this valid vision request.
+        assert!(!(text.is_empty() && !has_images));
+
+        // Text + image: text extracted, blocks retained.
+        let text_and_image = convert_messages(&[OaiMessage {
+            role: "user".to_string(),
+            content: OaiContent::Parts(vec![
+                OaiContentPart::Text {
+                    text: "what is this?".to_string(),
+                },
+                OaiContentPart::ImageUrl {
+                    image_url: OaiImageUrlRef {
+                        url: "data:image/png;base64,iVBORw0KGgo=".to_string(),
+                    },
+                },
+            ]),
+        }]);
+        let (text, has_images, blocks) = extract_latest_user_input(&text_and_image);
+        assert_eq!(text, "what is this?");
+        assert!(has_images);
+        assert!(matches!(blocks, Some(ref b) if b.len() == 2));
+
+        // Plain text: no blocks, text-only kernel path.
+        let plain = convert_messages(&[
+            OaiMessage {
+                role: "system".to_string(),
+                content: OaiContent::Text("ignored history".to_string()),
+            },
+            OaiMessage {
+                role: "user".to_string(),
+                content: OaiContent::Text("hello".to_string()),
+            },
+        ]);
+        let (text, has_images, blocks) = extract_latest_user_input(&plain);
+        assert_eq!(text, "hello");
+        assert!(!has_images);
+        assert!(blocks.is_none());
     }
 }

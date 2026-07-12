@@ -691,8 +691,36 @@ pub(super) fn resolve_workspace_decl(
                 return None;
             }
             let abs = workspaces_root.join(rel);
+            // Canonicalize `workspaces_root` too, so the containment check
+            // below compares real on-disk locations (symlink-resolved on
+            // both sides). `has_unsafe_relative_components` only inspects
+            // the path string — it rejects `..`, not a symlink component —
+            // so without this check a `path` whose component is a symlink
+            // pointing outside the root (e.g. `agents/<name>/pwn -> /etc`)
+            // would canonicalize to an arbitrary host path and be trusted
+            // as an allowed root. Mirror the `mount` branch's
+            // `starts_with(root)` enforcement.
+            let canon_root = match workspaces_root.canonicalize() {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(
+                        name,
+                        root = %workspaces_root.display(),
+                        "Failed to canonicalize workspaces root: {e}"
+                    );
+                    return None;
+                }
+            };
             match abs.canonicalize() {
-                Ok(p) => Some((p, decl.mode.clone())),
+                Ok(p) if p.starts_with(&canon_root) => Some((p, decl.mode.clone())),
+                Ok(p) => {
+                    tracing::warn!(
+                        name,
+                        path = %p.display(),
+                        "Named workspace path escapes workspaces_root (symlink) — skipped"
+                    );
+                    None
+                }
                 Err(e) => {
                     tracing::warn!(
                         name,
@@ -748,6 +776,42 @@ pub(super) fn resolve_workspace_decl(
     }
 }
 
+/// Return `true` when `abs` (a not-yet-created named-workspace `path`
+/// target derived from `workspaces_root.join(rel)`) would escape the
+/// workspaces root through a symlinked ancestor.
+///
+/// `create_dir_all` follows symlinks, so a component of `abs` that is a
+/// symlink pointing outside the root would otherwise materialize
+/// directories on the host filesystem beyond the confinement boundary.
+/// Walk up to the deepest ancestor of `abs` that currently exists on disk,
+/// canonicalize THAT (resolving every ancestor symlink), and check that the
+/// real location still lives under the canonical `workspaces_root`. The
+/// unresolved suffix is symlink-free by construction — it does not exist yet
+/// — and `..` components were already rejected upstream by
+/// `has_unsafe_relative_components`, so appending it cannot reintroduce an
+/// escape. Fails closed: any inability to canonicalize the root or the
+/// ancestor is treated as an escape.
+fn escapes_workspaces_root(abs: &Path, workspaces_root: &Path) -> bool {
+    let Ok(canon_root) = workspaces_root.canonicalize() else {
+        return true;
+    };
+    let mut ancestor = abs.parent();
+    let deepest_existing = loop {
+        match ancestor {
+            Some(a) if a.exists() => break Some(a),
+            Some(a) => ancestor = a.parent(),
+            None => break None,
+        }
+    };
+    let Some(deepest_existing) = deepest_existing else {
+        return true;
+    };
+    match deepest_existing.canonicalize() {
+        Ok(canon) => !canon.starts_with(&canon_root),
+        Err(_) => true,
+    }
+}
+
 /// Resolve all named workspace declarations and create the directories
 /// for `path` entries. Returns the map of canonical absolute paths with
 /// access modes. Invalid declarations are logged and skipped.
@@ -769,6 +833,26 @@ pub(super) fn ensure_named_workspaces(
         if let (Some(rel), None) = (decl.path.as_ref(), decl.mount.as_ref()) {
             if !(rel.is_absolute() || has_unsafe_relative_components(rel)) {
                 let abs = workspaces_root.join(rel);
+                // Guard against a symlinked ancestor escaping the root before
+                // creating directories: `create_dir_all` follows symlinks, so
+                // a component of `abs` that is a symlink pointing outside the
+                // root would materialize directories on the host filesystem
+                // outside the confinement boundary. Walk to the deepest
+                // existing ancestor of `abs`, canonicalize THAT (resolving any
+                // symlink), and only create when it stays inside the canonical
+                // workspaces root. The same ancestor-walk technique is used in
+                // `resolve_sandbox_path_ext` (workspace_sandbox.rs). The
+                // subsequent `resolve_workspace_decl` re-checks containment on
+                // the fully canonicalized target, so this only prevents the
+                // create side effect — resolution still fails closed.
+                if escapes_workspaces_root(&abs, workspaces_root) {
+                    tracing::warn!(
+                        name,
+                        path = %abs.display(),
+                        "Named workspace path escapes workspaces_root (symlink) — not creating"
+                    );
+                    continue;
+                }
                 if let Err(e) = std::fs::create_dir_all(&abs) {
                     tracing::warn!(
                         name,
@@ -1017,6 +1101,60 @@ mod mount_tests {
         let tmp = tempfile::tempdir().unwrap();
         let decl = WorkspaceDecl::default();
         assert!(resolve_workspace_decl("empty", &decl, tmp.path(), &[]).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_path_rejected_when_symlink_escapes_workspaces_root() {
+        // A `path` component that is a symlink pointing outside the
+        // workspaces root must be rejected: `has_unsafe_relative_components`
+        // only blocks `..` at the string level, so `canonicalize()` would
+        // otherwise follow the link to an arbitrary host path and trust it
+        // as an allowed root (workspace-confinement escape).
+        let tmp = tempfile::tempdir().unwrap();
+        let workspaces_root = tmp.path().join("workspaces");
+        std::fs::create_dir_all(&workspaces_root).unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        // `<workspaces_root>/link -> <outside>`
+        std::os::unix::fs::symlink(&outside, workspaces_root.join("link")).unwrap();
+
+        let decl = decl_path("link", WorkspaceMode::ReadWrite);
+        assert!(
+            resolve_workspace_decl("esc", &decl, &workspaces_root, &[]).is_none(),
+            "symlink escaping workspaces_root must be rejected"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_named_workspaces_does_not_create_through_escaping_symlink() {
+        // `create_dir_all` follows symlinks. A `path` whose ancestor is a
+        // symlink out of the root must not materialize directories on the
+        // host filesystem outside the confinement boundary.
+        let tmp = tempfile::tempdir().unwrap();
+        let workspaces_root = tmp.path().join("workspaces");
+        std::fs::create_dir_all(&workspaces_root).unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        // `<workspaces_root>/link -> <outside>`
+        std::os::unix::fs::symlink(&outside, workspaces_root.join("link")).unwrap();
+
+        let mut decls = HashMap::new();
+        decls.insert(
+            "esc".to_string(),
+            decl_path("link/created_through", WorkspaceMode::ReadWrite),
+        );
+
+        let resolved = ensure_named_workspaces(&workspaces_root, &decls, &[]);
+        assert!(
+            resolved.is_empty(),
+            "escaping named workspace must not resolve"
+        );
+        assert!(
+            !outside.join("created_through").exists(),
+            "no directory may be created through the escaping symlink"
+        );
     }
 
     #[test]

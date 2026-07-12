@@ -1241,6 +1241,8 @@ desktop-install-error-copy-appimage =  Не вдалося скопіювати 
 desktop-install-error-http = HTTP-запит завершився помилкою: { $error }
 desktop-install-error-create = Не вдалося створити { $path }: { $error }
 desktop-install-error-write = Помилка запису: { $error }
+desktop-install-error-too-large = завантажений інсталятор перевищує ліміт безпеки { $limit } МіБ (спостережено щонайменше { $bytes } байт); перервано
+desktop-install-gatekeeper-notice = macOS може попросити підтвердити відкриття LibreFang під час першого запуску; це Gatekeeper перевіряє нотаризацію застосунку.
 
 maintenance-error-github-request = GitHub-запит завершився помилкою: { $error }
 maintenance-error-github-status = GitHub API повернув статус { $status }

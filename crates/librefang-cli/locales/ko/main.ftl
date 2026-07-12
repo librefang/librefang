@@ -1227,6 +1227,8 @@ desktop-install-error-copy-appimage = AppImage 복사 실패: { $error }
 desktop-install-error-http = HTTP 요청 실패: { $error }
 desktop-install-error-create = { $path }을(를) 생성할 수 없습니다: { $error }
 desktop-install-error-write = 쓰기 오류: { $error }
+desktop-install-error-too-large = 다운로드한 설치 파일이 { $limit } MiB 안전 한도를 초과했습니다(최소 { $bytes }바이트 관찰됨). 중단합니다
+desktop-install-gatekeeper-notice = macOS가 첫 실행 시 LibreFang 열기를 확인하도록 요청할 수 있습니다. 이는 Gatekeeper가 앱의 공증을 확인하는 것입니다.
 
 maintenance-error-github-request = GitHub 요청 실패: { $error }
 maintenance-error-github-status = GitHub API가 { $status }을(를) 반환했습니다

@@ -907,6 +907,10 @@ enum McpInner {
         client: reqwest::Client,
         url: String,
         next_id: u64,
+        /// Auth / custom headers applied to every SSE request: config-declared
+        /// static headers plus a cached OAuth bearer token, mirroring the
+        /// Streamable-HTTP path so SSE-transport servers are authenticated too.
+        headers: reqwest::header::HeaderMap,
     },
     /// Built-in HTTP compatibility adapter.
     HttpCompat { client: reqwest::Client },
@@ -1085,7 +1089,9 @@ impl McpConnection {
             McpTransport::Stdio { command, args } => {
                 Self::connect_stdio(command, args, &config.env, roots).await?
             }
-            McpTransport::Sse { url } => Self::connect_sse(url).await?,
+            McpTransport::Sse { url } => {
+                Self::connect_sse(url, &config.headers, config.oauth_provider.as_ref()).await?
+            }
             McpTransport::Http { url } => {
                 // Only advertise local filesystem roots to local servers.
                 // Remote MCP servers (GitHub, Slack, …) don't operate on
@@ -1394,7 +1400,11 @@ impl McpConnection {
 
     // --- SSE transport (JSON-RPC over HTTP POST) ---
 
-    async fn connect_sse(url: &str) -> Result<(McpInner, Option<Vec<rmcp::model::Tool>>), String> {
+    async fn connect_sse(
+        url: &str,
+        headers: &[String],
+        oauth_provider: Option<&std::sync::Arc<dyn crate::mcp_oauth::McpOAuthProvider>>,
+    ) -> Result<(McpInner, Option<Vec<rmcp::model::Tool>>), String> {
         Self::check_ssrf(url, "SSE")?;
 
         let client = librefang_http::proxied_client_builder()
@@ -1402,14 +1412,83 @@ impl McpConnection {
             .build()
             .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
 
+        // Build the header map applied to every SSE request. Without this, the
+        // SSE transport dropped both config-declared auth headers and a cached
+        // OAuth bearer token, so OAuth for SSE servers was silently
+        // non-functional and static credentials never reached the wire.
+        let auth_headers = Self::build_sse_headers(url, headers, oauth_provider).await;
+
         Ok((
             McpInner::Sse {
                 client,
                 url: url.to_string(),
                 next_id: 1,
+                headers: auth_headers,
             },
             None, // Tools discovered later via sse_initialize + sse_discover_tools
         ))
+    }
+
+    /// Build the [`reqwest::header::HeaderMap`] applied to every SSE request:
+    /// operator-declared static headers from `config.headers` plus, when an
+    /// OAuth provider has a cached token for `url`, an
+    /// `Authorization: Bearer <token>` header. This mirrors the header
+    /// injection in [`Self::connect_streamable_http`] so SSE-transport MCP
+    /// servers receive the same authentication as the Streamable-HTTP path.
+    async fn build_sse_headers(
+        url: &str,
+        headers: &[String],
+        oauth_provider: Option<&std::sync::Arc<dyn crate::mcp_oauth::McpOAuthProvider>>,
+    ) -> reqwest::header::HeaderMap {
+        use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION};
+
+        let mut map = HeaderMap::new();
+
+        // Parse config-declared headers (e.g. "Authorization: Bearer <token>",
+        // "X-Api-Key: ..."). Malformed entries are skipped, matching the
+        // Streamable-HTTP header-parse loop.
+        for header_str in headers {
+            if let Some((name, value)) = header_str.split_once(':') {
+                let name = name.trim();
+                let value = value.trim();
+                if let (Ok(hn), Ok(hv)) = (
+                    HeaderName::from_bytes(name.as_bytes()),
+                    HeaderValue::from_str(value),
+                ) {
+                    map.insert(hn, hv);
+                }
+            }
+        }
+
+        // Load a cached OAuth token and inject it as an Authorization header.
+        // A cached token wins over a config-declared Authorization header —
+        // the same precedence the Streamable-HTTP path applies by inserting
+        // the OAuth header after the config headers.
+        if let Some(provider) = oauth_provider {
+            // #3750: distinguish "no token stored" (Ok(None)) from a vault /
+            // I/O / crypto failure (Err). On Err, log the cause and proceed
+            // without a bearer token so the server can surface a 401.
+            match provider.load_token(url).await {
+                Ok(Some(token)) => {
+                    debug!(url = %url, "Injecting cached OAuth token for MCP SSE connection");
+                    if let Ok(hv) = HeaderValue::from_str(&format!("Bearer {token}")) {
+                        map.insert(AUTHORIZATION, hv);
+                    }
+                }
+                Ok(None) => {
+                    debug!(url = %url, "No cached OAuth token for MCP SSE server");
+                }
+                Err(e) => {
+                    warn!(
+                        url = %url,
+                        error = %e,
+                        "OAuth provider load_token failed for SSE; proceeding without bearer token"
+                    );
+                }
+            }
+        }
+
+        map
     }
 
     // --- Streamable HTTP transport (rmcp SDK) ---
@@ -1713,15 +1792,16 @@ impl McpConnection {
         // Extract owned copies of the values we need before any async work,
         // so we don't hold a borrow of `self.inner` across an await point
         // (which would conflict with the concurrent borrow of `self.config`).
-        let (client, url, id) = match &mut self.inner {
+        let (client, url, id, headers) = match &mut self.inner {
             McpInner::Sse {
                 client,
                 url,
                 next_id,
+                headers,
             } => {
                 let id = *next_id;
                 *next_id += 1;
-                (client.clone(), url.clone(), id)
+                (client.clone(), url.clone(), id, headers.clone())
             }
             _ => return Err("sse_send_request called on non-SSE transport".to_string()),
         };
@@ -1738,6 +1818,7 @@ impl McpConnection {
 
         let response = client
             .post(url.as_str())
+            .headers(headers)
             .json(&request)
             .timeout(std::time::Duration::from_secs(timeout_secs))
             .send()
@@ -1800,7 +1881,13 @@ impl McpConnection {
         method: &str,
         params: Option<serde_json::Value>,
     ) -> Result<(), String> {
-        let McpInner::Sse { client, url, .. } = &self.inner else {
+        let McpInner::Sse {
+            client,
+            url,
+            headers,
+            ..
+        } = &self.inner
+        else {
             return Ok(());
         };
 
@@ -1810,7 +1897,12 @@ impl McpConnection {
             "params": params.unwrap_or(serde_json::json!({})),
         });
 
-        let _ = client.post(url.as_str()).json(&notification).send().await;
+        let _ = client
+            .post(url.as_str())
+            .headers(headers.clone())
+            .json(&notification)
+            .send()
+            .await;
         Ok(())
     }
 
@@ -4547,6 +4639,149 @@ mod tests {
         assert!(result.contains("\"source\": \"http_compat\""));
 
         server.await.unwrap();
+    }
+
+    // ── SSE transport auth-header propagation (finding #9) ────────────────
+    //
+    // The SSE transport used to drop both config-declared auth headers and a
+    // cached OAuth bearer token, so OAuth for SSE servers was silently
+    // non-functional and statically-configured credentials never reached the
+    // wire. These tests pin the parity fix with the Streamable-HTTP path.
+
+    /// Mock OAuth provider that returns a fixed token from `load_token`.
+    struct StaticTokenOAuthProvider {
+        token: Option<String>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::mcp_oauth::McpOAuthProvider for StaticTokenOAuthProvider {
+        async fn load_token(
+            &self,
+            _server_url: &str,
+        ) -> Result<Option<String>, crate::mcp_oauth::McpOAuthError> {
+            Ok(self.token.clone())
+        }
+
+        async fn store_tokens(
+            &self,
+            _server_url: &str,
+            _tokens: crate::mcp_oauth::OAuthTokens,
+        ) -> Result<(), crate::mcp_oauth::McpOAuthError> {
+            Ok(())
+        }
+
+        async fn store_oauth_metadata(
+            &self,
+            _server_url: &str,
+            _token_endpoint: &str,
+            _client_id: Option<&str>,
+        ) -> Result<(), crate::mcp_oauth::McpOAuthError> {
+            Ok(())
+        }
+
+        async fn clear_tokens(
+            &self,
+            _server_url: &str,
+        ) -> Result<(), crate::mcp_oauth::McpOAuthError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn build_sse_headers_injects_cached_oauth_bearer_token() {
+        let provider: std::sync::Arc<dyn crate::mcp_oauth::McpOAuthProvider> =
+            std::sync::Arc::new(StaticTokenOAuthProvider {
+                token: Some("sse-oauth-token".to_string()),
+            });
+        let map =
+            McpConnection::build_sse_headers("https://mcp.example.com/sse", &[], Some(&provider))
+                .await;
+        let auth = map
+            .get(reqwest::header::AUTHORIZATION)
+            .expect("SSE transport must carry the cached OAuth bearer token");
+        assert_eq!(auth.to_str().unwrap(), "Bearer sse-oauth-token");
+    }
+
+    #[tokio::test]
+    async fn build_sse_headers_forwards_config_headers() {
+        let map = McpConnection::build_sse_headers(
+            "https://mcp.example.com/sse",
+            &["X-Api-Key: static-secret".to_string()],
+            None,
+        )
+        .await;
+        let key = map
+            .get(reqwest::header::HeaderName::from_static("x-api-key"))
+            .expect("statically-configured header must be forwarded on SSE");
+        assert_eq!(key.to_str().unwrap(), "static-secret");
+    }
+
+    #[tokio::test]
+    async fn sse_transport_sends_configured_auth_header_on_the_wire() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // connect() drives three POSTs over SSE (initialize,
+        // notifications/initialized, tools/list); we answer each with
+        // `Connection: close`, so every request lands on its own connection.
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let server = tokio::spawn(async move {
+            for _ in 0..3 {
+                let (mut stream, _) = match listener.accept().await {
+                    Ok(v) => v,
+                    Err(_) => break,
+                };
+                let mut buffer = vec![0u8; 8192];
+                let bytes = match stream.read(&mut buffer).await {
+                    Ok(b) => b,
+                    Err(_) => break,
+                };
+                let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
+                let _ = tx.send(request);
+
+                // A valid JSON-RPC envelope keeps connect() from erroring; an
+                // id mismatch on tools/list just yields Ok(None), which is fine.
+                let body = r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        });
+
+        let conn = McpConnection::connect(McpServerConfig {
+            name: "sse-auth".to_string(),
+            transport: McpTransport::Sse {
+                url: format!("http://{addr}/sse"),
+            },
+            timeout_secs: 5,
+            env: vec![],
+            headers: vec!["Authorization: Bearer static-sse-token".to_string()],
+            oauth_provider: None,
+            oauth_config: None,
+            taint_scanning: true,
+            taint_policy: None,
+            taint_rule_sets: empty_taint_rule_sets_handle(),
+            roots: vec![],
+        })
+        .await;
+
+        // The initialize POST is the first request the server observed; it must
+        // carry the configured Authorization header.
+        let initialize = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("server must have received the SSE initialize POST");
+        assert!(
+            initialize
+                .to_ascii_lowercase()
+                .contains("authorization: bearer static-sse-token"),
+            "SSE initialize POST must carry the configured Authorization header; got:\n{initialize}"
+        );
+
+        conn.expect("SSE connect should succeed against the stub server");
+        server.abort();
     }
 
     #[test]

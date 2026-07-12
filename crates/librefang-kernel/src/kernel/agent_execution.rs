@@ -387,8 +387,21 @@ impl LibreFangKernel {
         } else {
             match sender_context {
                 Some(ctx) if !ctx.channel.is_empty() && !ctx.use_canonical_session => {
-                    let derived =
-                        SessionId::for_sender_scope(agent_id, &ctx.channel, ctx.chat_id.as_deref());
+                    // Audit: cron-channel-name-not-reserved. Defense-in-depth,
+                    // mirroring the dispatch (`resolve_dispatch_session_id`) and
+                    // streaming resolvers so a raw external `ctx.channel`
+                    // matching a reserved system channel (cron / autonomous /
+                    // webui) cannot collide with the internal system session.
+                    // See `resolve_scope_channel`.
+                    let scope_channel = LibreFangKernel::resolve_scope_channel(
+                        &ctx.channel,
+                        ctx.is_internal_system,
+                    );
+                    let derived = SessionId::for_sender_scope(
+                        agent_id,
+                        &scope_channel,
+                        ctx.chat_id.as_deref(),
+                    );
                     // #3692: surface when the channel branch silently
                     // overrides a non-default manifest `session_mode`.
                     // The `execute_llm_agent` path is reached by

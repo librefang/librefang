@@ -4,6 +4,7 @@
 //! module offers to download the latest release from GitHub and install it
 //! to the platform-standard location.
 
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use crate::i18n;
@@ -11,6 +12,14 @@ use crate::ui;
 
 /// GitHub repository for release assets.
 const GITHUB_REPO: &str = "librefang/librefang";
+
+/// Hard ceiling on the size of a downloaded desktop-app installer.
+/// Legitimate DMG / setup.exe / AppImage assets are tens to low-hundreds of
+/// megabytes; this cap leaves generous headroom while stopping a hostile or
+/// truncated response with no honest `Content-Length` from filling the temp
+/// disk. The download aborts once this many bytes have been written even if
+/// the server never signals EOF.
+const MAX_INSTALLER_BYTES: u64 = 512 * 1024 * 1024;
 
 // ── Discovery ────────────────────────────────────────────────────────────────
 
@@ -223,6 +232,14 @@ fn download_file(url: &str, dest: &Path) -> Result<(), String> {
         .send()
         .map_err(|e| i18n::t_args("desktop-install-error-http", &[("error", &e.to_string())]))?;
 
+    // Reject up front if the server advertises a body larger than the ceiling,
+    // before writing a single byte.
+    if let Some(len) = resp.content_length() {
+        if len > MAX_INSTALLER_BYTES {
+            return Err(too_large_error(len));
+        }
+    }
+
     let mut file = std::fs::File::create(dest).map_err(|e| {
         i18n::t_args(
             "desktop-install-error-create",
@@ -233,9 +250,52 @@ fn download_file(url: &str, dest: &Path) -> Result<(), String> {
         )
     })?;
 
-    resp.copy_to(&mut file)
-        .map_err(|e| i18n::t_args("desktop-install-error-write", &[("error", &e.to_string())]))?;
+    // Bounded streaming copy: even when `Content-Length` is absent or lies,
+    // abort once the written total exceeds the ceiling so a hostile or
+    // truncated response cannot fill the temp disk.
+    copy_capped(&mut resp, &mut file, MAX_INSTALLER_BYTES)?;
     Ok(())
+}
+
+/// Copy from `reader` to `writer`, aborting with an error once more than
+/// `max_bytes` have been read. Returns the number of bytes copied on success.
+/// This is the size-cap enforcement point for [`download_file`], extracted so
+/// it can be exercised directly without a network round-trip.
+fn copy_capped<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    max_bytes: u64,
+) -> Result<u64, String> {
+    let mut buf = [0u8; 64 * 1024];
+    let mut total: u64 = 0;
+    loop {
+        let n = reader.read(&mut buf).map_err(|e| {
+            i18n::t_args("desktop-install-error-write", &[("error", &e.to_string())])
+        })?;
+        if n == 0 {
+            break;
+        }
+        total = total.saturating_add(n as u64);
+        if total > max_bytes {
+            return Err(too_large_error(total));
+        }
+        writer.write_all(&buf[..n]).map_err(|e| {
+            i18n::t_args("desktop-install-error-write", &[("error", &e.to_string())])
+        })?;
+    }
+    Ok(total)
+}
+
+/// Error message for an installer download that exceeds [`MAX_INSTALLER_BYTES`].
+fn too_large_error(observed_bytes: u64) -> String {
+    let limit_mib = MAX_INSTALLER_BYTES / (1024 * 1024);
+    i18n::t_args(
+        "desktop-install-error-too-large",
+        &[
+            ("limit", &limit_mib.to_string()),
+            ("bytes", &observed_bytes.to_string()),
+        ],
+    )
 }
 
 // ── Platform helpers ─────────────────────────────────────────────────────────
@@ -409,10 +469,16 @@ fn install_macos_dmg(dmg_path: &Path) -> Result<PathBuf, String> {
         ));
     }
 
-    // Clear quarantine attribute so the app launches without Gatekeeper dialog
-    let _ = Command::new("xattr")
-        .args(["-rd", "com.apple.quarantine", "/Applications/LibreFang.app"])
-        .status();
+    // Intentionally DO NOT strip `com.apple.quarantine` here. Removing the
+    // quarantine attribute disables Gatekeeper's first-launch notarization /
+    // signature check, which is exactly the OS-level control that would refuse
+    // a tampered or un-notarized bundle. Since the downloaded bytes are not
+    // integrity-verified in-code (no pinned detached signature), leaving
+    // quarantine in place is the last line of defense: a legitimate notarized
+    // build passes Gatekeeper silently, while a tampered one is blocked. The
+    // trade-off is that macOS may show a confirmation dialog on first launch,
+    // which we surface below so the user knows it is expected.
+    ui::hint(&i18n::t("desktop-install-gatekeeper-notice"));
 
     Ok(PathBuf::from(
         "/Applications/LibreFang.app/Contents/MacOS/LibreFang",
@@ -707,6 +773,44 @@ mod tests {
             std::fs::canonicalize(found).unwrap(),
             std::fs::canonicalize(&bundle).unwrap()
         );
+    }
+
+    #[test]
+    fn copy_capped_copies_body_within_limit() {
+        let src = vec![0xABu8; 4096];
+        let mut reader = std::io::Cursor::new(src.clone());
+        let mut out: Vec<u8> = Vec::new();
+
+        let copied =
+            copy_capped(&mut reader, &mut out, 8192).expect("under-limit copy must succeed");
+        assert_eq!(copied, 4096);
+        assert_eq!(out, src);
+    }
+
+    #[test]
+    fn copy_capped_aborts_over_limit() {
+        // Body is larger than the cap: the copy must abort with an error and
+        // must NOT have written the whole body to the sink.
+        let src = vec![0x11u8; 10_000];
+        let mut reader = std::io::Cursor::new(src);
+        let mut out: Vec<u8> = Vec::new();
+
+        let err = copy_capped(&mut reader, &mut out, 4096).expect_err("over-limit copy must fail");
+        assert!(
+            err.contains("safety limit"),
+            "unexpected error message: {err}"
+        );
+        assert!(
+            out.len() <= 4096 + 64 * 1024,
+            "must stop reading once the cap is exceeded, wrote {} bytes",
+            out.len()
+        );
+    }
+
+    #[test]
+    fn too_large_error_reports_the_ceiling() {
+        let msg = too_large_error(MAX_INSTALLER_BYTES + 1);
+        assert!(msg.contains("512 MiB"), "should name the limit: {msg}");
     }
 
     #[test]

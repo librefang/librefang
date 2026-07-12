@@ -29,6 +29,11 @@ const MAX_ESCALATIONS: u8 = 3;
 const TOTP_MAX_FAILURES: u32 = 5;
 /// TOTP lockout duration after max failures.
 const TOTP_LOCKOUT_SECS: u64 = 300;
+/// TOTP time step in seconds (RFC 6238 default).
+const TOTP_STEP_SECS: u64 = 30;
+/// TOTP skew tolerance in steps: a code is accepted while the current step is
+/// within ±`TOTP_SKEW_STEPS` of the code's own step.
+const TOTP_SKEW_STEPS: u8 = 1;
 
 /// Re-export from librefang-types so approval.rs consumers don't need two imports.
 pub use librefang_types::tool::DeferredToolExecution;
@@ -1438,8 +1443,8 @@ impl ApprovalManager {
         let totp = TOTP::new(
             Algorithm::SHA1,
             6,
-            1,
-            30,
+            TOTP_SKEW_STEPS,
+            TOTP_STEP_SECS,
             raw,
             Some(issuer.to_string()),
             String::new(),
@@ -1828,8 +1833,13 @@ impl ApprovalManager {
 
     /// Check whether a TOTP code has already been used within the replay window.
     ///
-    /// The window is 60 seconds (two 30-second TOTP steps) to cover both the
-    /// current step and the immediately preceding one.
+    /// The window is 90 seconds (three 30-second TOTP steps: the current step
+    /// plus one before and one after, matching `TOTP_SKEW_STEPS = 1`). It must
+    /// be at least as wide as the cryptographic acceptance window so a code
+    /// first accepted during its future-skew branch (client clock ahead of the
+    /// server) cannot be replayed after the record has aged out but while the
+    /// code still verifies. Derived as `TOTP_STEP_SECS * (2 * TOTP_SKEW_STEPS + 1)`
+    /// so a future skew change stays consistent with `verify_totp_code_with_issuer`.
     pub fn is_totp_code_used(&self, code: &str) -> bool {
         let Some(db) = &self.audit_db else {
             return false;
@@ -1840,7 +1850,8 @@ impl ApprovalManager {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
-        let window_start = now_unix - 60;
+        let replay_window_secs = TOTP_STEP_SECS as i64 * (2 * TOTP_SKEW_STEPS as i64 + 1);
+        let window_start = now_unix - replay_window_secs;
         conn.query_row(
             "SELECT COUNT(*) FROM totp_used_codes WHERE code_hash = ?1 AND used_at >= ?2",
             rusqlite::params![hash, window_start],
@@ -1852,7 +1863,9 @@ impl ApprovalManager {
 
     /// Record a successfully-verified TOTP code to prevent replay.
     ///
-    /// Also prunes entries older than 120 seconds from the table to keep it small.
+    /// Also prunes entries older than the replay window plus one extra step
+    /// (120 seconds at the current step/skew) from the table to keep it small,
+    /// staying strictly wider than `is_totp_code_used`'s lookup window.
     pub fn record_totp_code_used(&self, code: &str) {
         // Ignore errors for non-action callers (enrollment confirm, revoke) —
         // those flows don't have a structured error path to return a 500.
@@ -1897,8 +1910,11 @@ impl ApprovalManager {
                  bound_to = excluded.bound_to",
             rusqlite::params![hash, now_unix, bound_to],
         )?;
-        // Prune entries older than 120 seconds.
-        let prune_before = now_unix - 120;
+        // Prune entries older than the replay window plus one extra step, so
+        // the prune horizon stays strictly wider than `is_totp_code_used`'s
+        // lookup window even if the step/skew constants change.
+        let prune_before = now_unix
+            - (TOTP_STEP_SECS as i64 * (2 * TOTP_SKEW_STEPS as i64 + 1) + TOTP_STEP_SECS as i64);
         let _ = conn.execute(
             "DELETE FROM totp_used_codes WHERE used_at < ?1",
             rusqlite::params![prune_before],
@@ -3698,6 +3714,38 @@ mod tests {
         // as used. Without this an attacker rewriting the path could replay
         // a captured TOTP request to authorize a higher-impact approval.
         assert!(mgr.is_totp_code_used("987654"));
+    }
+
+    /// Finding #27: the replay-detection window must be at least as wide as the
+    /// cryptographic acceptance window (90 s = three 30-second steps under
+    /// `TOTP_SKEW_STEPS = 1`). A code first accepted during its future-skew
+    /// branch (client clock ahead of the server) is recorded with `used_at` up
+    /// to ~30 s before its own step begins; with the old 60 s lookup window it
+    /// stopped being flagged as used ~30 s before it stopped verifying, leaving
+    /// a replay gap. A record aged 75 s (>60 s, <90 s) must still count as used.
+    #[test]
+    fn finding_27_replay_window_covers_full_skew_acceptance() {
+        let mgr = make_manager_with_db();
+        let hash = ApprovalManager::totp_code_hash("135790");
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        // Simulate a code recorded 75 seconds ago — inside the 90 s acceptance
+        // window but outside the old 60 s replay window.
+        let used_at = now_unix - 75;
+        {
+            let conn = mgr.audit_db.as_ref().unwrap().get().unwrap();
+            conn.execute(
+                "INSERT INTO totp_used_codes (code_hash, used_at, bound_to)
+                 VALUES (?1, ?2, ?3)",
+                rusqlite::params![hash, used_at, Option::<&str>::None],
+            )
+            .unwrap();
+        }
+        // With the widened (90 s) window this must be detected as used; the old
+        // 60 s window would have returned false, reopening the replay gap.
+        assert!(mgr.is_totp_code_used("135790"));
     }
 
     /// #5136: `load_totp_lockout` reconstructs `Instant::now() - elapsed`.

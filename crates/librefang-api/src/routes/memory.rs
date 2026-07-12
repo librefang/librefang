@@ -1507,13 +1507,30 @@ pub struct RelationQueryParams {
 )]
 pub async fn memory_query_relations(
     State(state): State<Arc<AppState>>,
-    Path(_agent_id): Path<String>,
+    Path(agent_id): Path<String>,
     Query(params): Query<RelationQueryParams>,
+    request: axum::extract::Request,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
     };
+
+    // Reject empty / whitespace-only agent ids so the scoped query never
+    // degrades into an unscoped scan across every agent's graph.
+    if agent_id.trim().is_empty() {
+        return ApiErrorResponse::bad_request("Agent ID must not be empty").into_json_tuple();
+    }
+
+    // Relations live in the `proactive` namespace — gate the read exactly
+    // like the sibling search/list endpoints so a caller without proactive
+    // read access is denied (and the denial is audited).
+    let guard = guard_for_request(&state, request.extensions());
+    if let librefang_memory::namespace_acl::NamespaceGate::Deny(reason) =
+        guard.check_read("proactive")
+    {
+        return auth_denied(&state, request.extensions(), reason);
+    }
 
     // Parse optional relation type
     let relation_type = params.relation.as_deref().and_then(|r| {
@@ -1527,7 +1544,9 @@ pub async fn memory_query_relations(
         max_depth: 1,
     };
 
-    match store.query_relations(pattern) {
+    // Scope to the path agent id so one agent's endpoint never returns
+    // another agent's triples (the write path is already per-agent).
+    match store.query_relations_for_agent(pattern, &agent_id) {
         Ok(matches) => {
             let results: Vec<serde_json::Value> = matches
                 .iter()
