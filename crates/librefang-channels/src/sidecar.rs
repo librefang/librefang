@@ -654,6 +654,62 @@ fn instance_secret_prefix(name: &str) -> String {
         .collect()
 }
 
+/// Group configured sidecar instance names by their `instance_secret_prefix`
+/// and return every bucket that more than one *distinct* name collapses into.
+///
+/// `instance_secret_prefix` is many-to-one — `bot-1`, `bot.1`, `bot_1` and
+/// `BOT+1` all normalize to `BOT_1` — so two instances whose names collide
+/// share the `<PREFIX>__` per-instance secret namespace in `secrets.env`, and
+/// each child receives the others' `<PREFIX>__KEY` secrets (#6169 follow-up).
+/// An operator relying on per-instance secret isolation would not anticipate
+/// that, so the boot / config-reload path surfaces it (see
+/// `warn_secret_prefix_collisions`).
+///
+/// Returned as `(prefix, sorted distinct names)` pairs, themselves sorted by
+/// prefix, so the output is deterministic for logging and tests.
+fn secret_prefix_collisions(names: &[String]) -> Vec<(String, Vec<String>)> {
+    let mut by_prefix: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+        std::collections::BTreeMap::new();
+    for name in names {
+        by_prefix
+            .entry(instance_secret_prefix(name))
+            .or_default()
+            .insert(name.clone());
+    }
+    by_prefix
+        .into_iter()
+        .filter(|(_, group)| group.len() > 1)
+        .map(|(prefix, group)| (prefix, group.into_iter().collect()))
+        .collect()
+}
+
+/// Emit a targeted WARN for each set of sidecar instance names that collapse
+/// to the same per-instance secret prefix (see [`secret_prefix_collisions`]).
+///
+/// Call this once from the channel-bridge boot / reload loop with the full list
+/// of configured `[[sidecar_channels]]` names. An operator storing
+/// `<PREFIX>__KEY` secrets for per-instance isolation is then told when two
+/// instances share the namespace and would cross-apply each other's secrets,
+/// instead of the token silently leaking from (e.g.) `bot-1` into `bot.1`.
+///
+/// Returns the number of colliding groups so callers and tests can assert the
+/// outcome without standing up a tracing subscriber.
+pub fn warn_secret_prefix_collisions(names: &[String]) -> usize {
+    let collisions = secret_prefix_collisions(names);
+    for (prefix, group) in &collisions {
+        warn!(
+            secret_prefix = %prefix,
+            instances = %group.join(", "),
+            "Sidecar instance names collapse to the same per-instance secret \
+             prefix '{prefix}__' after normalization; each of these instances \
+             receives the others' '{prefix}__KEY' secrets from secrets.env. \
+             Rename the instances so they differ after uppercasing and mapping \
+             non-alphanumeric characters to '_'."
+        );
+    }
+    collisions.len()
+}
+
 fn build_spawn_env(
     home_dir: &Path,
     instance_name: &str,
@@ -3733,6 +3789,46 @@ mod tests {
                 && !got.contains_key("AGENT_B__LIBREFANG_TEST_BSE_LEAK"),
             "agent-b's namespaced secret must not leak into agent-a's child env"
         );
+    }
+
+    #[test]
+    fn secret_prefix_collisions_flag_names_that_collapse_together() {
+        // `bot-1` and `bot.1` both normalize to `BOT_1`, so a `BOT_1__TOKEN`
+        // secret meant for one is cross-applied to the other. The detector must
+        // report the collision; distinct-prefix names must not be flagged.
+        let names = vec![
+            "bot-1".to_string(),
+            "bot.1".to_string(),
+            "agent-a".to_string(),
+            "agent-b".to_string(),
+        ];
+        let collisions = secret_prefix_collisions(&names);
+        assert_eq!(
+            collisions,
+            vec![(
+                "BOT_1".to_string(),
+                vec!["bot-1".to_string(), "bot.1".to_string()],
+            )],
+            "bot-1 and bot.1 collapse to BOT_1; agent-a / agent-b are distinct \
+             (AGENT_A vs AGENT_B) and must not be flagged"
+        );
+        assert_eq!(
+            warn_secret_prefix_collisions(&names),
+            1,
+            "exactly one colliding group is reported"
+        );
+    }
+
+    #[test]
+    fn secret_prefix_collisions_ignore_duplicate_identical_names() {
+        // The same name listed twice is a single instance's prefix, not a
+        // cross-application hazard, so it must not be reported as a collision.
+        let names = vec!["bot-1".to_string(), "bot-1".to_string()];
+        assert!(
+            secret_prefix_collisions(&names).is_empty(),
+            "a repeated identical name is not a prefix collision"
+        );
+        assert_eq!(warn_secret_prefix_collisions(&names), 0);
     }
 
     /// Find python3 or python on PATH.

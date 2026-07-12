@@ -1524,6 +1524,20 @@ impl ProactiveMemoryStore {
         self.knowledge.query_graph(pattern)
     }
 
+    /// Query the knowledge graph for relations matching a pattern, scoped to
+    /// a single agent.
+    ///
+    /// The per-agent relations HTTP endpoint must never leak another agent's
+    /// triples, so it routes through this scoped variant instead of the
+    /// unscoped [`query_relations`].
+    pub fn query_relations_for_agent(
+        &self,
+        pattern: GraphPattern,
+        agent_id: &str,
+    ) -> LibreFangResult<Vec<librefang_types::memory::GraphMatch>> {
+        self.knowledge.query_graph_scoped(pattern, Some(agent_id))
+    }
+
     /// Find duplicate/near-duplicate memories for a user/agent.
     ///
     /// Uses a tiered similarity strategy (mem0-style):

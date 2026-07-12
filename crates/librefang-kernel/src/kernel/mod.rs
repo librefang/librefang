@@ -618,7 +618,14 @@ fn resolve_dispatch_session_id(
     }
     Some(match sender_context {
         Some(ctx) if !ctx.channel.is_empty() && !ctx.use_canonical_session => {
-            SessionId::for_sender_scope(agent_id, &ctx.channel, ctx.chat_id.as_deref())
+            // Audit: cron-channel-name-not-reserved. Defense-in-depth at the
+            // kernel boundary — mirror the streaming resolver so a raw external
+            // `ctx.channel` matching a reserved system channel (cron /
+            // autonomous / webui) cannot collide with the internal system
+            // session. See `resolve_scope_channel`.
+            let scope_channel =
+                LibreFangKernel::resolve_scope_channel(&ctx.channel, ctx.is_internal_system);
+            SessionId::for_sender_scope(agent_id, &scope_channel, ctx.chat_id.as_deref())
         }
         _ => {
             let mode = session_mode_override.unwrap_or(manifest_session_mode);
@@ -628,6 +635,69 @@ fn resolve_dispatch_session_id(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod resolve_dispatch_session_id_scope_tests {
+    use super::*;
+
+    fn ctx_with(channel: &str, is_internal_system: bool) -> SenderContext {
+        SenderContext {
+            channel: channel.to_string(),
+            is_internal_system,
+            ..Default::default()
+        }
+    }
+
+    /// Finding #21: the non-streaming dispatch resolver must apply the same
+    /// reserved-system-channel guard (`resolve_scope_channel`) as the streaming
+    /// path, so an external caller supplying `channel = "cron"` cannot land on
+    /// the internal cron session `SessionId::for_channel(agent, "cron")`.
+    #[test]
+    fn external_reserved_channel_does_not_collide_with_internal_cron_session() {
+        let agent = AgentId::new();
+        let entry = SessionId::new();
+        let internal_cron_sid = SessionId::for_channel(agent, "cron");
+
+        // External caller (is_internal_system = false) with a reserved name is
+        // rewritten to `ext-cron` and must NOT collide with the internal id.
+        let external = resolve_dispatch_session_id(
+            "claude-code",
+            agent,
+            entry,
+            librefang_types::agent::SessionMode::Persistent,
+            Some(&ctx_with("cron", false)),
+            None,
+            None,
+        )
+        .expect("non-wasm/python module must resolve a session id");
+        assert_ne!(
+            external, internal_cron_sid,
+            "external channel=\"cron\" must not share the internal cron session"
+        );
+        assert_eq!(
+            external,
+            SessionId::for_channel(agent, "ext-cron"),
+            "external reserved name must derive the sanitized `ext-cron` session"
+        );
+
+        // Trusted internal system caller keeps deriving the legacy cron id so
+        // existing persistent history stays continuous.
+        let internal = resolve_dispatch_session_id(
+            "claude-code",
+            agent,
+            entry,
+            librefang_types::agent::SessionMode::Persistent,
+            Some(&ctx_with("cron", true)),
+            None,
+            None,
+        )
+        .expect("non-wasm/python module must resolve a session id");
+        assert_eq!(
+            internal, internal_cron_sid,
+            "internal system caller must keep the legacy for_channel(agent, \"cron\") id"
+        );
+    }
 }
 
 /// One in-flight `(agent, session)` loop. Stored in

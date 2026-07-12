@@ -661,6 +661,17 @@ impl McpOAuthProvider for KernelOAuthProvider {
                 &Self::vault_key(server_url, "expires_at"),
                 &expires_at.to_string(),
             )?;
+        } else {
+            // No `expires_in` in this response (finding #10). On the refresh
+            // path a prior exchange may have written a now-past `expires_at`;
+            // leaving it stale would make `is_expired` fire on every request,
+            // forcing a refresh POST per call and burning rotating refresh
+            // tokens. Clear it so the freshly-stored token is treated as
+            // non-expiring, matching the Notion path in `load_token`
+            // ("No expires_at stored — return token as-is"). `vault_remove`
+            // already reports a missing key as `Ok(false)`, so there is no
+            // not-found error to swallow.
+            self.vault_remove(&Self::vault_key(server_url, "expires_at"))?;
         }
 
         debug!(server = %server_url, "MCP OAuth tokens stored in vault");
@@ -1130,6 +1141,82 @@ mod tests {
         unsafe {
             std::env::remove_var("LIBREFANG_VAULT_NO_KEYRING");
         }
+    }
+
+    /// Finding #10: a refresh response that omits `expires_in` (RFC 6749
+    /// makes it OPTIONAL) must clear the stale `expires_at` written by the
+    /// initial exchange. Otherwise `load_token` re-reads a now-worthless
+    /// `expires_at`, `is_expired` fires on every request, and the daemon
+    /// refreshes on each call — burning rotating refresh tokens and
+    /// defeating the single-flight optimization.
+    #[tokio::test]
+    #[serial_test::serial(librefang_vault_key)]
+    async fn refresh_without_expires_in_clears_stale_expires_at() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().to_path_buf();
+        let _vault_key = VaultKeyEnvGuard::set(TEST_VAULT_KEY);
+        let provider = KernelOAuthProvider::new(home);
+        let server_url = "https://example.com/mcp";
+        let expires_at_key = KernelOAuthProvider::vault_key(server_url, "expires_at");
+
+        // Initial code exchange: the provider returns expires_in, so
+        // expires_at is written and the token is on the expiry-checked path.
+        provider
+            .store_tokens(
+                server_url,
+                OAuthTokens {
+                    access_token: "initial-access".to_string(),
+                    refresh_token: Some("rt-1".to_string()),
+                    token_type: "Bearer".to_string(),
+                    expires_in: 3600,
+                    scope: String::new(),
+                },
+            )
+            .await
+            .expect("store initial tokens");
+        assert!(
+            provider
+                .vault_get(&expires_at_key)
+                .expect("vault_get expires_at")
+                .is_some(),
+            "initial exchange with expires_in must write expires_at"
+        );
+
+        // Refresh response omits expires_in (serde default 0). The stale
+        // expires_at from the initial exchange must be cleared, not left
+        // behind — pre-fix store_tokens had no else-branch and left it.
+        provider
+            .store_tokens(
+                server_url,
+                OAuthTokens {
+                    access_token: "refreshed-access".to_string(),
+                    refresh_token: Some("rt-2".to_string()),
+                    token_type: "Bearer".to_string(),
+                    expires_in: 0,
+                    scope: String::new(),
+                },
+            )
+            .await
+            .expect("store refreshed tokens");
+        assert_eq!(
+            provider
+                .vault_get(&expires_at_key)
+                .expect("vault_get expires_at after refresh"),
+            None,
+            "refresh without expires_in must clear the stale expires_at (finding #10)"
+        );
+
+        // With no expires_at stored, load_token returns the refreshed token
+        // directly — no refresh loop, matching the Notion non-expiring path.
+        let loaded = provider
+            .load_token(server_url)
+            .await
+            .expect("load_token after refresh");
+        assert_eq!(
+            loaded,
+            Some("refreshed-access".to_string()),
+            "load_token must return the refreshed access token without refreshing"
+        );
     }
 
     #[test]

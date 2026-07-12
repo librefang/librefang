@@ -687,16 +687,48 @@ fn write_secret_env(path: &Path, key: &str, value: &str) -> Result<(), std::io::
     }
 
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        // SECURITY: create the secrets directory 0o700 from the start so it is
+        // never world-listable, even in the umask window (mirrors the staging
+        // dir hardening in write_update_script).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(parent)?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::create_dir_all(parent)?;
+        }
     }
 
-    std::fs::write(path, lines.join("\n") + "\n")?;
+    let content = lines.join("\n") + "\n";
 
-    // SECURITY: Restrict file permissions on Unix
+    // SECURITY: Create secrets.env with mode 0o600 from the moment it exists,
+    // instead of write-then-chmod. std::fs::write opens O_CREAT under the
+    // default umask (typically 0o644), leaving a window on shared hosts where a
+    // local attacker can race the file open before set_permissions tightens it —
+    // and if the process dies or set_permissions fails in that window the tokens
+    // stay world-readable permanently. Opening with an explicit mode closes the
+    // window; on an upsert rewrite the existing file keeps the 0o600 it was
+    // created with.
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(content.as_bytes())?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, content)?;
     }
 
     Ok(())
@@ -3400,6 +3432,41 @@ mod tests {
         assert!(validate_migration_id("evil\nshell = [\"*\"]").is_err());
         assert!(validate_migration_id("evil\\path").is_err());
         assert!(validate_migration_id("evil\0nul").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_secret_env_is_created_0600_not_world_readable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        // Parent dir does not exist yet — write_secret_env must create it 0o700.
+        let path = dir.path().join("secrets").join("secrets.env");
+
+        write_secret_env(&path, "TELEGRAM_BOT_TOKEN", "123:ABC").unwrap();
+
+        // File must be 0o600 from creation, not world/group readable.
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "secrets.env must be 0o600, got {mode:o}");
+
+        // Parent secrets dir must be 0o700, not world-listable.
+        let dir_mode = std::fs::metadata(path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            dir_mode, 0o700,
+            "secrets dir must be 0o700, got {dir_mode:o}"
+        );
+
+        // An upsert rewrite must preserve the restrictive mode.
+        write_secret_env(&path, "SLACK_BOT_TOKEN", "xoxb-slack").unwrap();
+        let mode2 = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode2, 0o600, "rewrite must preserve 0o600, got {mode2:o}");
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("TELEGRAM_BOT_TOKEN=123:ABC"));
+        assert!(contents.contains("SLACK_BOT_TOKEN=xoxb-slack"));
     }
 
     #[test]

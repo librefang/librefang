@@ -666,6 +666,32 @@ async fn cron_prune_session(
     // fire already wrote to this session (its `set_messages` /
     // `mark_messages_mutated` bumped the counter), our trimmed result is
     // based on a stale snapshot and we drop it; the concurrent writer wins.
+    //
+    // The persistent `(agent, "cron")` message send goes through
+    // `send_message_full` with `session_id_override = None`, which serializes
+    // on `agent_msg_locks[agent_id]` — a DIFFERENT lock namespace than
+    // `prune_lock` (`session_msg_locks[cron_sid]`). Because `save_session` is a
+    // blind last-writer-wins upsert with no storage-level generation CAS, the
+    // in-memory generation re-check below cannot exclude a message-send commit
+    // that lands between it and our write-back while that writer holds only the
+    // agent lock. Acquire `agent_msg_locks[agent_id]` here as the OUTER guard
+    // (before `prune_lock`) so the whole re-check-then-write-back cycle is
+    // mutually exclusive with the persistent-cron send; without it, an appended
+    // cron turn committed in that window would be silently overwritten by our
+    // trim result. Ordering is agent-lock-then-session-lock, matching the
+    // global acquisition order in `send_message_full`; `session_msg_locks[cron_sid]`
+    // is only ever held by the prune itself (no message send uses `cron_sid` as
+    // a `session_id_override`), so no session-then-agent path exists on this
+    // pair and there is no AB-BA cycle. The guard is dropped when this function
+    // returns, before the fire's own `send_message_full` call re-acquires the
+    // agent lock, so there is no self-re-entry on the non-reentrant mutex.
+    let agent_lock = kernel_job
+        .agents
+        .agent_msg_locks
+        .entry(agent_id)
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+    let _agent_g = agent_lock.lock().await;
     let _g = prune_lock.lock().await;
     let mut session = match kernel_job.memory.substrate.get_session(cron_sid) {
         Ok(Some(s)) => s,
@@ -1071,5 +1097,112 @@ mod tests {
         assert_eq!(snapshot, 3);
         assert!(applied, "uncontested single fire must apply its result");
         assert_eq!(gen_counter.load(Ordering::Acquire), 4);
+    }
+
+    /// Structural mirror of finding #22: the persistent `(agent, "cron")`
+    /// message send serializes on `agent_msg_locks[agent_id]`, a DIFFERENT
+    /// lock than the prune's `session_msg_locks[cron_sid]`. Because
+    /// `save_session` is a blind last-writer-wins upsert with no storage-level
+    /// generation CAS, the prune's phase-3 in-memory generation re-check is not
+    /// atomic with its write-back: a message-send commit that lands between the
+    /// re-check and the blind save silently loses its appended turn — unless
+    /// the prune's phase-3 also holds the agent lock.
+    ///
+    /// This reproduces the exact interleaving (send commits inside the prune's
+    /// re-check → write-back window) and asserts the appended cron turn survives
+    /// ONLY when phase 3 holds the agent lock. Like the sibling tests it does
+    /// not construct a full `LibreFangKernel`; it reproduces the two-lock +
+    /// blind-upsert shape of `cron_prune_session` phase 3.
+    async fn prune_phase3_race(hold_agent_lock: bool) -> Vec<String> {
+        // agent_msg_locks[agent_id] and session_msg_locks[cron_sid] analogues.
+        let agent_lock = Arc::new(Mutex::new(()));
+        let session_lock = Arc::new(Mutex::new(()));
+        // "Storage": (messages, generation). Blind last-writer-wins, no
+        // storage-level CAS — exactly like `save_session`.
+        let store = Arc::new(std::sync::Mutex::new((vec!["m0".to_string()], 0u64)));
+
+        // Phase 1 — snapshot under the session lock.
+        let snapshot_gen = {
+            let _s = session_lock.lock().await;
+            store.lock().unwrap().1
+        };
+        // Phase 2 — summarize lock-free; the trim drops the old message.
+        let trimmed: Vec<String> = vec!["m0-summary".to_string()];
+
+        // Coordination so the send commits inside the prune's re-check →
+        // write-back window rather than before it (before it, the generation
+        // CAS would catch the change and drop the trim — the benign outcome).
+        let send_may_go = Arc::new(tokio::sync::Notify::new());
+        let send_done = Arc::new(tokio::sync::Notify::new());
+
+        // The concurrent persistent-cron message send: it serializes on the
+        // agent lock, appends its turn, bumps the generation, and commits.
+        let a_send = agent_lock.clone();
+        let store_send = store.clone();
+        let may = send_may_go.clone();
+        let done = send_done.clone();
+        let send = tokio::spawn(async move {
+            may.notified().await; // wait until the prune is mid-phase-3
+            let _ag = a_send.lock().await; // parks here iff the prune holds it
+            let mut s = store_send.lock().unwrap();
+            s.0.push("cron-turn".to_string());
+            s.1 += 1;
+            drop(s);
+            done.notify_one();
+        });
+
+        // Phase 3 — re-check + write-back. The fix acquires the agent lock
+        // (outer) before the session lock so the send above cannot interleave.
+        let _agent_g = if hold_agent_lock {
+            Some(agent_lock.clone().lock_owned().await)
+        } else {
+            None
+        };
+        let _session_g = session_lock.lock().await;
+        let current = store.lock().unwrap().1;
+        // Let the send attempt its commit now — inside our window.
+        send_may_go.notify_one();
+        if hold_agent_lock {
+            // Fix: we hold the agent lock, so the send is parked and cannot
+            // commit until we release. Give it time to (fail to) run.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        } else {
+            // Buggy shape: no agent lock held, so the send commits now.
+            send_done.notified().await;
+        }
+        if current == snapshot_gen {
+            // Blind overwrite modelling `set_messages` + `save_session`.
+            let mut s = store.lock().unwrap();
+            s.0 = trimmed;
+            s.1 = current + 1;
+        }
+        drop(_session_g);
+        drop(_agent_g);
+
+        send.await.expect("send task panicked");
+        let final_messages = store.lock().unwrap().0.clone();
+        final_messages
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cron_prune_phase3_agent_lock_preserves_appended_turn() {
+        // With the fix (phase 3 holds the agent lock) the send's appended turn
+        // survives the prune's blind write-back.
+        let with_fix = prune_phase3_race(true).await;
+        assert!(
+            with_fix.iter().any(|m| m == "cron-turn"),
+            "appended cron turn was lost despite phase 3 holding the agent lock \
+             (final messages: {with_fix:?})"
+        );
+
+        // Without the agent lock in phase 3 the same interleaving silently
+        // drops the appended turn — this is the bug the fix prevents.
+        let without_fix = prune_phase3_race(false).await;
+        assert!(
+            !without_fix.iter().any(|m| m == "cron-turn"),
+            "expected the pre-fix shape to lose the appended turn, but it \
+             survived (final messages: {without_fix:?}) — the test no longer \
+             reproduces finding #22"
+        );
     }
 }

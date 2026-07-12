@@ -2628,6 +2628,18 @@ pub async fn start_channel_bridge_with_config(
         return (None, Vec::new(), axum::Router::new());
     }
 
+    // #6169 follow-up — warn when two sidecar instance names collapse to the
+    // same per-instance secret prefix after normalization, so an operator
+    // relying on per-instance secret isolation is told the namespaces
+    // cross-apply instead of a `<PREFIX>__KEY` token silently leaking from one
+    // instance into another.
+    let sidecar_names: Vec<String> = sidecar_cfg
+        .sidecar_channels
+        .iter()
+        .map(|s| s.name.clone())
+        .collect();
+    librefang_channels::sidecar::warn_secret_prefix_collisions(&sidecar_names);
+
     let handle = KernelBridgeAdapter {
         kernel: kernel.clone(),
         started_at: Instant::now(),

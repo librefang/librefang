@@ -979,6 +979,12 @@ pub fn create_skill(
             description.len()
         )));
     }
+    // Audit: skill-description-injection-scan. The description is inlined into
+    // the `<available_skills>` prompt block via `sanitize_for_prompt`, so it
+    // must clear the same prompt-injection scan as `prompt_context`. The load
+    // boundary (`registry::scan_loaded_prompt_context`) also scans it; this is
+    // the create-time defense-in-depth layer.
+    validate_prompt_content(description)?;
 
     let skill_dir = skills_dir.join(name);
 
