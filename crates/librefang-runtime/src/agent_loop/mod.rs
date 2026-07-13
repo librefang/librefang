@@ -599,6 +599,14 @@ async fn run_agent_loop_inner(
         .get("sender_chat_id")
         .and_then(|v| v.as_str())
         .map(String::from);
+    // #6443: the bot account / tenant this turn arrived on, stamped by the
+    // kernel from the inbound `SenderContext.account_id`. Threaded into
+    // `channel_send` so it can reject a cross-account (cross-tenant) dispatch.
+    let sender_account_id: Option<String> = manifest
+        .metadata
+        .get(librefang_types::agent::SENDER_ACCOUNT_ID_METADATA_KEY)
+        .and_then(|v| v.as_str())
+        .map(String::from);
     // #5227: chat-qualified scope stamped by the kernel alongside
     // `sender_channel`. Production callers go through `messaging.rs`
     // (`compose_sender_scope` / `for_sender_scope`) which stamps both
@@ -1622,6 +1630,7 @@ async fn run_agent_loop_inner(
                             sender_user_id: sender_user_id.as_deref(),
                             sender_channel: sender_channel.as_deref(),
                             sender_chat_id: sender_chat_id.as_deref(),
+                            sender_account_id: sender_account_id.as_deref(),
                             checkpoint_manager: checkpoint_manager.as_ref(),
                             context_budget: &context_budget,
                             context_engine,

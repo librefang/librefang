@@ -674,6 +674,51 @@ impl ModelCatalog {
         None
     }
 
+    /// Resolve a catalog entry for a manifest's `(provider, model)` pair,
+    /// reconciling the provider-prefix mismatch that OpenRouter (#6423) — and
+    /// any provider whose live catalog ids are stored as `{provider}/{raw_id}`
+    /// — exhibits.
+    ///
+    /// The two agent-creation paths persist the manifest `model` differently:
+    /// boot auto-detect stores the canonical prefixed id
+    /// (`openrouter/tencent/hy3:free`), while the dashboard model-picker
+    /// (`set_agent_model`) strips the `{provider}/` prefix and stores the bare
+    /// `tencent/hy3:free`. The catalog entry is keyed by the prefixed id in
+    /// both cases, so a bare manifest model misses under both
+    /// [`Self::find_model`] (provider-blind) and
+    /// [`Self::find_model_for_provider`] (exact id) — the caller then falls
+    /// back to `UNKNOWN_MODEL_CONTEXT_WINDOW`, producing the wrong context
+    /// denominator and mis-sized budgets.
+    ///
+    /// Resolution order:
+    /// 1. `(provider, model)` exact — already-prefixed manifests, and every
+    ///    provider whose catalog ids are NOT prefixed.
+    /// 2. `(provider, "{provider}/{model}")` — re-qualify a bare manifest model
+    ///    against a prefixed catalog id (the OpenRouter case). Skipped when
+    ///    `model` already carries the `{provider}/` prefix.
+    /// 3. provider-blind [`Self::find_model`] — legacy cross-provider fallback,
+    ///    so no lookup that resolved before this method existed regresses.
+    pub fn find_model_for_manifest(
+        &self,
+        provider: &str,
+        model: &str,
+    ) -> Option<&ModelCatalogEntry> {
+        if provider.is_empty() {
+            return self.find_model(model);
+        }
+        if let Some(entry) = self.find_model_for_provider(provider, model) {
+            return Some(entry);
+        }
+        let prefix = format!("{provider}/").to_lowercase();
+        if !model.to_lowercase().starts_with(&prefix) {
+            let qualified = format!("{provider}/{model}");
+            if let Some(entry) = self.find_model_for_provider(provider, &qualified) {
+                return Some(entry);
+            }
+        }
+        self.find_model(model)
+    }
+
     /// Find a model by its canonical ID, display name, or alias.
     pub fn find_model(&self, id_or_alias: &str) -> Option<&ModelCatalogEntry> {
         let lower = id_or_alias.to_lowercase();

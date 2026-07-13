@@ -651,6 +651,7 @@ impl LibreFangKernel {
         if manifest.thinking.is_none()
             && super::manifest_helpers::global_thinking_backfill_allowed(
                 &self.llm.model_catalog.load(),
+                &manifest.model.provider,
                 &manifest.model.model,
             )
         {
@@ -1031,7 +1032,9 @@ impl LibreFangKernel {
         // 0 so image/audio entries (no context window) fall through to the
         // caller's default rather than poisoning compaction math.
         let ctx_window = Some(self.llm.model_catalog.load()).and_then(|cat| {
-            cat.find_model(&manifest.model.model)
+            // #6423: provider-aware, prefix-reconciling lookup (see
+            // `ModelCatalog::find_model_for_manifest`).
+            cat.find_model_for_manifest(&manifest.model.provider, &manifest.model.model)
                 .map(|m| m.context_window as usize)
                 .filter(|w| *w > 0)
         });
@@ -1039,7 +1042,7 @@ impl LibreFangKernel {
         // Inject model_supports_tools for auto web search augmentation.
         // Refs #4745: honour user capability overrides via effective_capabilities.
         if let Some(supports) = Some(self.llm.model_catalog.load()).and_then(|cat| {
-            cat.find_model(&manifest.model.model)
+            cat.find_model_for_manifest(&manifest.model.provider, &manifest.model.model)
                 .map(|m| cat.effective_capabilities(m).supports_tools)
         }) {
             manifest.metadata.insert(
@@ -1118,6 +1121,17 @@ impl LibreFangKernel {
                     manifest.metadata.insert(
                         "sender_chat_id".to_string(),
                         serde_json::Value::String(cid.clone()),
+                    );
+                }
+            }
+            // #6443: stamp the bot account / tenant the turn arrived on —
+            // mirror `kernel::messaging::send_message_full_inner`. Enables the
+            // runtime's cross-account (cross-tenant) `channel_send` guard.
+            if let Some(ref acct) = ctx.account_id {
+                if !acct.is_empty() {
+                    manifest.metadata.insert(
+                        librefang_types::agent::SENDER_ACCOUNT_ID_METADATA_KEY.to_string(),
+                        serde_json::Value::String(acct.clone()),
                     );
                 }
             }

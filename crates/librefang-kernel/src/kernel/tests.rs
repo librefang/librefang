@@ -706,14 +706,35 @@ fn global_thinking_backfill_gated_on_catalog_capability() {
         supports_thinking: false,
         ..Default::default()
     };
-    let catalog = ModelCatalog::from_entries(vec![thinker, plain], Vec::new());
+    // #6423-class regression: a bare OpenRouter manifest model must still
+    // reconcile against the `{provider}/`-prefixed catalog id instead of
+    // falling through to the permissive "unknown model" default.
+    let openrouter_plain = ModelCatalogEntry {
+        id: "openrouter/some-org/non-reasoning".to_string(),
+        provider: "openrouter".to_string(),
+        supports_thinking: false,
+        ..Default::default()
+    };
+    let catalog = ModelCatalog::from_entries(vec![thinker, plain, openrouter_plain], Vec::new());
 
     use super::manifest_helpers::global_thinking_backfill_allowed;
-    assert!(global_thinking_backfill_allowed(&catalog, "openai/o4"));
-    assert!(!global_thinking_backfill_allowed(&catalog, "openai/gpt-4o"));
+    assert!(global_thinking_backfill_allowed(
+        &catalog,
+        "openai",
+        "openai/o4"
+    ));
+    assert!(!global_thinking_backfill_allowed(
+        &catalog,
+        "openai",
+        "openai/gpt-4o"
+    ));
     assert!(
-        global_thinking_backfill_allowed(&catalog, "totally-unknown-model"),
+        global_thinking_backfill_allowed(&catalog, "openai", "totally-unknown-model"),
         "an unknown model must keep the historical backfill"
+    );
+    assert!(
+        !global_thinking_backfill_allowed(&catalog, "openrouter", "some-org/non-reasoning"),
+        "a bare OpenRouter manifest model must resolve the prefixed catalog entry, not fall back to the permissive unknown-model default"
     );
 }
 

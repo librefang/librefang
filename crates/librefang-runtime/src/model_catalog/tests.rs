@@ -216,6 +216,78 @@ fn test_find_model_for_provider_alias_is_scoped() {
     );
 }
 
+/// #6423: OpenRouter live catalog entries are keyed `openrouter/{raw_id}`, but
+/// the dashboard model-picker (`set_agent_model`) strips the `{provider}/`
+/// prefix before persisting the manifest model. `find_model_for_manifest` must
+/// reconcile the two so a bare manifest model still resolves the prefixed
+/// catalog entry — otherwise the caller falls back to the 8192
+/// unknown-model window (the wrong context denominator this report describes).
+#[test]
+fn test_find_model_for_manifest_reconciles_openrouter_prefix() {
+    let catalog = ModelCatalog::from_entries(
+        vec![
+            ModelCatalogEntry {
+                id: "openrouter/tencent/hy3:free".to_string(),
+                display_name: "Tencent HY3 (free)".to_string(),
+                provider: "openrouter".to_string(),
+                tier: ModelTier::Smart,
+                context_window: 262_144,
+                ..Default::default()
+            },
+            ModelCatalogEntry {
+                id: "claude-sonnet-4-6".to_string(),
+                display_name: "Claude Sonnet 4.6".to_string(),
+                provider: "anthropic".to_string(),
+                tier: ModelTier::Smart,
+                context_window: 200_000,
+                ..Default::default()
+            },
+        ],
+        vec![],
+    );
+
+    // Documents the bug: the old provider-blind lookup misses the prefixed id.
+    assert!(
+        catalog.find_model("tencent/hy3:free").is_none(),
+        "provider-blind find_model must miss the openrouter/-prefixed id",
+    );
+
+    // The fix — bare manifest model + provider resolves the prefixed entry.
+    let bare = catalog
+        .find_model_for_manifest("openrouter", "tencent/hy3:free")
+        .expect("bare OpenRouter manifest model must resolve");
+    assert_eq!(bare.context_window, 262_144);
+
+    // Already-prefixed manifest model (boot auto-detect) resolves too.
+    let prefixed = catalog
+        .find_model_for_manifest("openrouter", "openrouter/tencent/hy3:free")
+        .expect("prefixed OpenRouter manifest model must resolve");
+    assert_eq!(prefixed.context_window, 262_144);
+
+    // A provider whose catalog ids are NOT prefixed still resolves (pass 1).
+    let anthropic = catalog
+        .find_model_for_manifest("anthropic", "claude-sonnet-4-6")
+        .expect("non-prefixed provider must resolve exactly");
+    assert_eq!(anthropic.context_window, 200_000);
+
+    // Empty provider falls back to the provider-blind path.
+    assert!(catalog
+        .find_model_for_manifest("", "claude-sonnet-4-6")
+        .is_some());
+
+    // A genuinely-unknown model still misses, so callers keep their
+    // conservative fallback instead of binding to a wrong entry.
+    assert!(catalog
+        .find_model_for_manifest("openrouter", "does/not-exist")
+        .is_none());
+
+    // Cross-provider guard: the openrouter entry must not resolve under a
+    // different provider even via the re-qualified prefix path.
+    assert!(catalog
+        .find_model_for_manifest("anthropic", "tencent/hy3:free")
+        .is_none());
+}
+
 #[test]
 fn test_resolve_alias() {
     let catalog = test_catalog();

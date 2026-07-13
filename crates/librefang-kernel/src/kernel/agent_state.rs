@@ -39,7 +39,16 @@ impl LibreFangKernel {
         let toml_path = match entry.source_toml_path.clone() {
             Some(p) => p,
             None => {
-                let safe_name = safe_path_component(&entry.name, "agent");
+                // Fall back to the agent's UUID, not the literal "agent" (#6442):
+                // `resolve_workspace_dir` spawns the workspace at
+                // `<workspaces>/<safe_path_component(name, agent_id)>`, so the
+                // fallback here must use the same UUID fallback string. The old
+                // `"agent"` literal made every agent whose name sanitizes to an
+                // empty string (fully Cyrillic / CJK / accented-Latin) collapse
+                // to the shared path `<workspaces>/agent/agent.toml` — distinct
+                // agents overwrote each other and the loader never matched the
+                // real `<workspaces>/<uuid>/` directory.
+                let safe_name = safe_path_component(&entry.name, &agent_id.to_string());
                 self.config
                     .load()
                     .effective_agent_workspaces_dir()
@@ -224,7 +233,10 @@ impl LibreFangKernel {
         })?;
 
         let fallback_toml_path = {
-            let safe_name = safe_path_component(&entry.name, "agent");
+            // UUID fallback, mirroring `resolve_workspace_dir` — see the note in
+            // `persist_manifest_to_disk`. A literal here (#6442) collapses all
+            // non-ASCII names to one shared path.
+            let safe_name = safe_path_component(&entry.name, &agent_id.to_string());
             self.config
                 .load()
                 .effective_agent_workspaces_dir()

@@ -566,6 +566,215 @@ def test_process_sync_account_id_injected():
     assert emitted[0]["params"]["metadata"]["account_id"] == "prod"
 
 
+# ---- #6444: DM detection + was_mentioned --------------------------------
+
+
+def _msg_event(content, event_id="$e1", sender="@alice:m.test"):
+    return {
+        "type": "m.room.message",
+        "event_id": event_id,
+        "sender": sender,
+        "content": content,
+    }
+
+
+def test_process_sync_sets_was_mentioned_when_bot_in_mentions():
+    # An explicit MSC3952 @-mention of THIS bot must set `was_mentioned` — the
+    # only mention signal the group gate reads. Previously never set (#6444).
+    a = _adapter()
+    body = _sync_body([_msg_event({
+        "msgtype": "m.text",
+        "body": "hey @bot can you help",
+        "m.mentions": {"user_ids": ["@bot:matrix.test"]},
+    })])
+    emitted = []
+    a._process_sync_body(body, emitted.append)
+    meta = emitted[0]["params"]["metadata"]
+    assert meta.get("was_mentioned") is True
+    assert meta["mention_names"] == ["@bot:matrix.test"]
+
+
+def test_process_sync_no_was_mentioned_when_other_user_mentioned():
+    # A mention of someone else must NOT set `was_mentioned` (but still
+    # forwards mention_names for multi-agent routing).
+    a = _adapter()
+    body = _sync_body([_msg_event({
+        "msgtype": "m.text",
+        "body": "hey @carol",
+        "m.mentions": {"user_ids": ["@carol:m.test"]},
+    })])
+    emitted = []
+    a._process_sync_body(body, emitted.append)
+    meta = emitted[0]["params"]["metadata"]
+    assert "was_mentioned" not in meta
+    assert meta["mention_names"] == ["@carol:m.test"]
+
+
+def test_process_sync_dm_via_summary_member_count_is_not_group():
+    # A room summary with m.joined_member_count == 2 is a 1:1 DM.
+    a = _adapter()
+    body = {
+        "next_batch": "b1",
+        "rooms": {"join": {"!room:m.test": {
+            "summary": {"m.joined_member_count": 2},
+            "timeline": {"events": [_msg_event(
+                {"msgtype": "m.text", "body": "hi"},
+            )], "limit": 10},
+        }}},
+    }
+    emitted = []
+    a._process_sync_body(body, emitted.append)
+    # `protocol.message` omits `is_group` from params when False (the wire
+    # contract: absent == DM), so a DM is the absence of the key.
+    assert "is_group" not in emitted[0]["params"]
+
+
+def test_process_sync_group_via_summary_member_count_is_group():
+    a = _adapter()
+    body = {
+        "next_batch": "b1",
+        "rooms": {"join": {"!room:m.test": {
+            "summary": {"m.joined_member_count": 5},
+            "timeline": {"events": [_msg_event(
+                {"msgtype": "m.text", "body": "hi all"},
+            )], "limit": 10},
+        }}},
+    }
+    emitted = []
+    a._process_sync_body(body, emitted.append)
+    assert emitted[0]["params"]["is_group"] is True
+
+
+def test_process_sync_dm_via_m_direct_account_data_is_not_group():
+    # The `m.direct` account-data registry marks the room as a DM even with no
+    # summary in this batch.
+    a = _adapter()
+    body = {
+        "next_batch": "b1",
+        "account_data": {"events": [{
+            "type": "m.direct",
+            "content": {"@alice:m.test": ["!room:m.test"]},
+        }]},
+        "rooms": {"join": {"!room:m.test": {
+            "timeline": {"events": [_msg_event(
+                {"msgtype": "m.text", "body": "dm hi"},
+            )], "limit": 10},
+        }}},
+    }
+    emitted = []
+    a._process_sync_body(body, emitted.append)
+    assert "is_group" not in emitted[0]["params"]
+
+
+def test_process_sync_dm_verdict_cached_across_summary_less_syncs():
+    # The summary is sent lazily. Once a room is known to be a DM, a later sync
+    # that omits the summary must NOT flip it back to group.
+    a = _adapter()
+    first = {
+        "next_batch": "b1",
+        "rooms": {"join": {"!room:m.test": {
+            "summary": {"m.joined_member_count": 2},
+            "timeline": {"events": [_msg_event(
+                {"msgtype": "m.text", "body": "one"}, event_id="$e1",
+            )], "limit": 10},
+        }}},
+    }
+    second = {
+        "next_batch": "b2",
+        "rooms": {"join": {"!room:m.test": {
+            "timeline": {"events": [_msg_event(
+                {"msgtype": "m.text", "body": "two"}, event_id="$e2",
+            )], "limit": 10},
+        }}},
+    }
+    emitted = []
+    a._process_sync_body(first, emitted.append)
+    a._process_sync_body(second, emitted.append)
+    assert len(emitted) == 2
+    assert "is_group" not in emitted[0]["params"]
+    assert "is_group" not in emitted[1]["params"]
+
+
+def test_m_direct_is_full_replaced_not_add_only():
+    # #6444 review: m.direct account data is a complete-state event, so a room
+    # dropped from a later m.direct must stop being treated as a DM (add-only
+    # caching would leave it permanently mis-flagged).
+    a = _adapter()
+    first = {
+        "next_batch": "b1",
+        "account_data": {"events": [{
+            "type": "m.direct",
+            "content": {"@alice:m.test": ["!dm-a:m.test", "!dm-b:m.test"]},
+        }]},
+    }
+    a._process_sync_body(first, lambda _e: None)
+    assert a._is_dm_room("!dm-a:m.test")
+    assert a._is_dm_room("!dm-b:m.test")
+
+    # Second m.direct drops !dm-b (e.g. the DM was archived).
+    second = {
+        "next_batch": "b2",
+        "account_data": {"events": [{
+            "type": "m.direct",
+            "content": {"@alice:m.test": ["!dm-a:m.test"]},
+        }]},
+    }
+    a._process_sync_body(second, lambda _e: None)
+    assert a._is_dm_room("!dm-a:m.test")
+    assert not a._is_dm_room("!dm-b:m.test"), "dropped m.direct room must revert to group"
+
+
+def test_seed_dm_rooms_from_server_populates_registry():
+    # #6444 review: after a restart the incremental /sync omits m.direct, so the
+    # producer seeds the DM registry via an explicit account-data GET at startup.
+    a = _adapter()
+    a.user_id = "@bot:matrix.test"
+
+    def _fake_http(url, **_kw):
+        assert "account_data/m.direct" in url
+        return 200, {"@alice:m.test": ["!seeded-dm:m.test"]}, b"", {}
+
+    a._http = _fake_http  # type: ignore[assignment]
+    a._seed_dm_rooms_from_server()
+    assert a._is_dm_room("!seeded-dm:m.test")
+
+    # A DM message in the first post-restart incremental sync (no m.direct, no
+    # summary) is now correctly classified thanks to the seed.
+    body = {
+        "next_batch": "b1",
+        "rooms": {"join": {"!seeded-dm:m.test": {
+            "timeline": {"events": [_msg_event(
+                {"msgtype": "m.text", "body": "hi after restart"},
+            )], "limit": 10},
+        }}},
+    }
+    emitted = []
+    a._process_sync_body(body, emitted.append)
+    assert "is_group" not in emitted[0]["params"]
+
+
+def test_seed_dm_rooms_from_server_tolerates_404():
+    # An account that never set m.direct returns 404 — not an error.
+    a = _adapter()
+    a.user_id = "@bot:matrix.test"
+    a._http = lambda url, **_kw: (404, None, b"", {})  # type: ignore[assignment]
+    a._seed_dm_rooms_from_server()  # must not raise
+    assert not a._is_dm_room("!anything:m.test")
+
+
+def test_dm_rooms_by_count_is_bounded():
+    # #6444 review: the member-count DM set is FIFO-bounded like the sibling
+    # caches, so a bot in many 2-member rooms cannot grow it without limit.
+    a = _adapter()
+    cap = mx.DM_ROOMS_BY_COUNT_CAPACITY
+    for i in range(cap + 50):
+        a._mark_dm_by_count(f"!room-{i}:m.test")
+    assert len(a._dm_rooms_by_count) == cap
+    # Oldest evicted, newest retained.
+    assert "!room-0:m.test" not in a._dm_rooms_by_count
+    assert f"!room-{cap + 49}:m.test" in a._dm_rooms_by_count
+
+
 # ---- reaction lifecycle cache ---------------------------------------
 
 
