@@ -327,6 +327,7 @@ fn make_ctx<'a>(
         sender_id,
         channel: None,
         chat_id: None,
+        sender_account_id: None,
         session_id: None,
         spill_threshold_bytes: 0,
         max_artifact_bytes: 0,

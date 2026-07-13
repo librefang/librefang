@@ -1259,3 +1259,78 @@ mod identity_write_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod non_ascii_fallback_tests {
+    //! Regression tests for #6442: an agent whose display name contains zero
+    //! ASCII alphanumeric / `-` / `_` characters (fully Cyrillic, CJK,
+    //! accented-Latin, …) sanitizes to the empty string. The three fallback
+    //! TOML-path sites (`boot.rs`, `agent_state.rs::persist_manifest_to_disk`,
+    //! `agent_state.rs::reload_agent_from_disk`) previously passed the literal
+    //! `"agent"` as the fallback, collapsing every such agent onto the shared
+    //! path `<workspaces>/agent/agent.toml` — distinct agents overwrote each
+    //! other and the loader never matched the real per-agent directory. The
+    //! fix passes the agent's UUID, mirroring `resolve_workspace_dir` (the
+    //! spawn path), so the fallback matches the directory spawn created and no
+    //! two agents ever collide.
+
+    use super::*;
+
+    #[test]
+    fn all_non_ascii_name_sanitizes_to_the_fallback_verbatim() {
+        // Cyrillic, CJK, and fully-accented Latin all filter to empty.
+        for name in ["Пример", "例子エージェント", " café-über"] {
+            let fallback = "the-fallback";
+            // café-über keeps its ASCII `-` — assert only the all-empty cases.
+            let sanitized = safe_path_component(name, fallback);
+            if name == " café-über" {
+                // Mixed name retains the ASCII slice.
+                assert_eq!(sanitized, "caf-ber");
+            } else {
+                assert_eq!(
+                    sanitized, fallback,
+                    "all-non-ASCII name {name:?} must fall back verbatim",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn distinct_non_ascii_agents_never_collide_on_the_uuid_fallback() {
+        let id_a = AgentId::new();
+        let id_b = AgentId::new();
+        // Two different Cyrillic names, both sanitizing to empty, must not
+        // share a fallback component now that the UUID (not the "agent"
+        // literal) is the fallback string.
+        let comp_a = safe_path_component("Пример", &id_a.to_string());
+        let comp_b = safe_path_component("Образец", &id_b.to_string());
+        assert_eq!(comp_a, id_a.to_string());
+        assert_eq!(comp_b, id_b.to_string());
+        assert_ne!(
+            comp_a, comp_b,
+            "distinct all-non-ASCII agents must resolve to distinct fallback paths"
+        );
+    }
+
+    #[test]
+    fn fallback_matches_the_directory_spawn_created() {
+        // The fallback derivation must reproduce the directory that
+        // `resolve_workspace_dir` (the spawn path) placed the workspace in,
+        // so `agent.toml` auto-discovery finds the real file.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let agent_id = AgentId::new();
+        let name = "Пример"; // all non-ASCII → sanitizes to empty
+
+        let spawn_dir = resolve_workspace_dir(root, None, name, agent_id).unwrap();
+        // The fallback sites join `<agent_workspaces_dir>/<safe>/agent.toml`;
+        // `<safe>` must equal the component spawn used.
+        let fallback_component = safe_path_component(name, &agent_id.to_string());
+        assert_eq!(
+            spawn_dir,
+            root.join(&fallback_component),
+            "fallback component must match the spawned workspace directory"
+        );
+        assert_eq!(fallback_component, agent_id.to_string());
+    }
+}

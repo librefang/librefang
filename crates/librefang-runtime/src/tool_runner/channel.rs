@@ -162,6 +162,11 @@ pub(super) async fn tool_channel_send(
     // no-ops, preserving the existing unrestricted behaviour for those paths.
     sender_channel: Option<&str>,
     sender_chat_id: Option<&str>,
+    // #6443: the bot account / tenant the current turn arrived on. Used to scope
+    // the cross-account dispatch guard. `None` for out-of-band callers (cron,
+    // triggers, API-driven runs) and single-tenant deployments — the guard
+    // no-ops, preserving the existing unrestricted behaviour for those paths.
+    sender_account_id: Option<&str>,
     caller_agent_id: Option<&str>,
     additional_roots: &[&Path],
 ) -> Result<String, String> {
@@ -236,6 +241,40 @@ pub(super) async fn tool_channel_send(
 
     let thread_id = trim_opt_string(input["thread_id"].as_str());
     let account_id = trim_opt_string(input["account_id"].as_str());
+
+    // #6443 cross-account (cross-tenant) dispatch guard. `account_id` selects
+    // which registered bot instance the send routes through. On a multi-tenant
+    // daemon (several bot accounts on one daemon, each with its own
+    // `default_agent` serving a different customer) an agent induced via model
+    // hallucination or prompt injection could otherwise pass a *different*
+    // tenant's `account_id` and silently dispatch content into that customer's
+    // chat — the same trigger class as the #6117 live incident, but a wider
+    // (cross-tenant) blast radius that the #6117 recipient guard does not cover
+    // (it only scrutinises `recipient`, and runs before `account_id` is even
+    // parsed). Mirror the #6117 scoping exactly: only an EXPLICIT `account_id`
+    // is checked, only when the turn's originating account is known, and only
+    // within the SAME channel the turn arrived on (a cross-channel dispatch
+    // stays allowed by the #6117 design, and `account_id` is only comparable
+    // within one channel's namespace). An auto-filled send carries no
+    // `account_id` and already targets the originating account. Out-of-band
+    // callers leave `sender_account_id` `None`, so the guard no-ops for them.
+    if let (Some(explicit_account), Some(turn_account), Some(turn_channel)) =
+        (account_id, sender_account_id, sender_channel)
+    {
+        // Compare account ids case-SENSITIVELY (they are opaque registration
+        // identifiers, like `recipient`); keep the channel match
+        // case-insensitive so the guard still fires when the model varies the
+        // channel's casing.
+        if !turn_account.is_empty()
+            && !turn_channel.is_empty()
+            && turn_channel.eq_ignore_ascii_case(&channel)
+            && explicit_account != turn_account
+        {
+            return Err(format!(
+                "channel_send account_id '{explicit_account}' does not match the current account '{turn_account}' on channel '{channel}'. Cross-account (cross-tenant) dispatch is forbidden — an agent may only send from the bot account its turn arrived on."
+            ));
+        }
+    }
 
     let image_url = input["image_url"].as_str().filter(|s| !s.is_empty());
     let file_url = input["file_url"].as_str().filter(|s| !s.is_empty());

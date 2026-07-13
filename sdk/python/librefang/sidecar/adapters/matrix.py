@@ -781,6 +781,13 @@ class MatrixAdapter(SidecarAdapter):
         self._seen = _SeenSet(
             max_size=SEEN_MESSAGES_MAX, evict=SEEN_MESSAGES_EVICT,
         )
+        # #6444: rooms known to be 1:1 DMs, so `is_group` is accurate instead
+        # of hardcoded True. Populated from two independent /sync signals — the
+        # `m.direct` account-data registry and a room summary
+        # `m.joined_member_count == 2`. Without this every Matrix room (DMs
+        # included) is flagged group, and under the default
+        # `GroupPolicy::MentionOnly` the group gate silently drops all inbound.
+        self._dm_rooms: set[str] = set()
         # Streaming-edit state: stream_id → state dict.
         # Initialized here (not lazily) so concurrent StreamStart calls
         # never race-create separate dicts.
@@ -1066,6 +1073,44 @@ class MatrixAdapter(SidecarAdapter):
             url += f"&since={urllib.parse.quote(self.since_token, safe='')}"
         return url
 
+    def _update_dm_rooms_from_account_data(self, account_data: Any) -> None:
+        """Add every room listed under the account's ``m.direct`` event to
+        the DM cache (#6444). ``m.direct`` maps ``{user_id: [room_id, ...]}``
+        — the canonical per-account registry of 1:1 direct-message rooms.
+        Runs in the single producer thread, so ``_dm_rooms`` needs no lock."""
+        if not isinstance(account_data, dict):
+            return
+        events = account_data.get("events")
+        if not isinstance(events, list):
+            return
+        for ev in events:
+            if not isinstance(ev, dict) or ev.get("type") != "m.direct":
+                continue
+            content = ev.get("content")
+            if not isinstance(content, dict):
+                continue
+            for room_ids in content.values():
+                if isinstance(room_ids, list):
+                    for rid in room_ids:
+                        if isinstance(rid, str) and rid:
+                            self._dm_rooms.add(rid)
+
+    def _update_dm_room_from_summary(self, room_id: str, summary: Any) -> None:
+        """Cache a room's DM/group verdict from its /sync summary (#6444). A
+        joined member count of exactly 2 is a 1:1 DM; more is a group. The
+        summary is sent lazily (only when membership changes), so this updates
+        the cache only when the count is present — a later summary-less sync
+        must not flip a known DM back to group."""
+        if not isinstance(summary, dict):
+            return
+        count = summary.get("m.joined_member_count")
+        if not isinstance(count, int) or isinstance(count, bool):
+            return
+        if count == 2:
+            self._dm_rooms.add(room_id)
+        else:
+            self._dm_rooms.discard(room_id)
+
     def _process_sync_body(
         self, body: dict, emit: Callable[[dict], None],
     ) -> None:
@@ -1077,6 +1122,10 @@ class MatrixAdapter(SidecarAdapter):
         if isinstance(next_batch, str):
             self.since_token = next_batch
             self._persist_since_token()
+        # #6444: refresh the DM-room cache from `m.direct` account data before
+        # walking the timeline, so `is_group` is correct for messages in this
+        # same batch.
+        self._update_dm_rooms_from_account_data(body.get("account_data"))
         rooms = (
             body.get("rooms", {}).get("join", {})
             if isinstance(body.get("rooms"), dict) else {}
@@ -1088,6 +1137,11 @@ class MatrixAdapter(SidecarAdapter):
                 continue
             if not isinstance(room_data, dict):
                 continue
+            # #6444: a room summary with `m.joined_member_count == 2` is a 1:1
+            # DM; > 2 is a group. The summary is sent lazily (only when
+            # membership changes), so cache the verdict — absence on a later
+            # sync must not flip a known DM back to group.
+            self._update_dm_room_from_summary(room_id, room_data.get("summary"))
             timeline = room_data.get("timeline")
             if not isinstance(timeline, dict):
                 continue
@@ -1144,6 +1198,17 @@ class MatrixAdapter(SidecarAdapter):
                         names = [u for u in user_ids if isinstance(u, str) and u]
                         if names:
                             metadata["mention_names"] = names
+                        # #6444: surface mention state in the metadata key the
+                        # group gate actually reads (`was_mentioned`). The gate
+                        # for `GroupPolicy::MentionOnly` ignores `mention_names`,
+                        # so without this an explicit @-mention of this bot
+                        # could never pass the gate. Parity with the Discord and
+                        # Feishu adapters.
+                        if self.user_id in names:
+                            metadata["was_mentioned"] = True
+                # #6444: a 1:1 DM must not take the group path. Hardcoding
+                # is_group=True made the default MentionOnly gate drop every DM.
+                is_group = room_id not in self._dm_rooms
                 ev = protocol.message(
                     user_id=room_id,
                     user_name=sender,
@@ -1151,7 +1216,7 @@ class MatrixAdapter(SidecarAdapter):
                     message_id=event_id,
                     channel_id=room_id,
                     thread_id=thread_id,
-                    is_group=True,
+                    is_group=is_group,
                     metadata=metadata,
                 )
                 emit(ev)

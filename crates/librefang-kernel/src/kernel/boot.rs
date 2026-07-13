@@ -1763,7 +1763,13 @@ impl LibreFangKernel {
                     // Check if TOML on disk is newer/different — if so, update from file
                     let mut entry = entry;
                     let fallback_toml_path = {
-                        let safe_name = safe_path_component(&name, "agent");
+                        // UUID fallback, mirroring `resolve_workspace_dir` — see
+                        // the note in `persist_manifest_to_disk`. The literal
+                        // "agent" (#6442) collapsed every all-non-ASCII name to
+                        // one shared `<workspaces>/agent/agent.toml`, so boot
+                        // re-sync could never find the real per-agent directory
+                        // and two such agents overwrote each other.
+                        let safe_name = safe_path_component(&name, &agent_id.to_string());
                         cfg.effective_agent_workspaces_dir()
                             .join(safe_name)
                             .join("agent.toml")
