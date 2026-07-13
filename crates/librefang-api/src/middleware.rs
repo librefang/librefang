@@ -230,6 +230,18 @@ fn min_role_for_privileged_get(path: &str) -> Option<UserRole> {
     if path.starts_with("/api/agents/") && path.ends_with("/ws") {
         return Some(UserRole::User);
     }
+    // `/api/config/export` returns the raw on-disk config.toml verbatim —
+    // including inline plaintext secrets (the master `api_key`,
+    // `network.shared_secret`, provider/channel credentials) that the sibling
+    // `GET /api/config` redacts. It is a plain GET, so the blanket
+    // "GET is read-only" rule below would hand every authenticated role
+    // (Viewer / User / Admin) the unredacted secrets — and a leaked master
+    // api_key re-presents as `Owner`, a full privilege escalation. Gate it to
+    // Owner, matching the Owner-only gating of the `/api/config[/set|/reload]`
+    // writes whose whole purpose is to keep the bearer token Owner-controlled.
+    if path == "/api/config/export" {
+        return Some(UserRole::Owner);
+    }
     None
 }
 
@@ -1987,6 +1999,33 @@ mod tests {
             UserRole::Viewer,
             &get,
             "/api/agents/abc123"
+        ));
+    }
+
+    /// `/api/config/export` returns the raw config.toml (inline secrets) and is
+    /// a GET, so it must be Owner-gated — otherwise any authenticated
+    /// Viewer / User / Admin could read the master api_key and escalate.
+    #[test]
+    fn test_config_export_is_owner_only() {
+        let get = axum::http::Method::GET;
+        let path = "/api/config/export";
+        assert_eq!(min_role_for_privileged_get(path), Some(UserRole::Owner));
+        for role in [UserRole::Viewer, UserRole::User, UserRole::Admin] {
+            assert!(
+                !user_role_allows_request(role, &get, path),
+                "{role:?} must NOT be able to GET the raw config export (secrets)"
+            );
+        }
+        assert!(
+            user_role_allows_request(UserRole::Owner, &get, path),
+            "Owner may export the raw config"
+        );
+        // The redacted `GET /api/config` stays readable by any role.
+        assert_eq!(min_role_for_privileged_get("/api/config"), None);
+        assert!(user_role_allows_request(
+            UserRole::Viewer,
+            &get,
+            "/api/config"
         ));
     }
 

@@ -1126,12 +1126,13 @@ pub async fn execute_tool_raw(
                 *caller_agent_id,
                 *exec_policy,
                 *dangerous_command_checker,
+                *allowed_env_vars,
             )
             .await
         }
-        "process_poll" => tool_process_poll(input, *process_manager).await,
-        "process_write" => tool_process_write(input, *process_manager).await,
-        "process_kill" => tool_process_kill(input, *process_manager).await,
+        "process_poll" => tool_process_poll(input, *process_manager, *caller_agent_id).await,
+        "process_write" => tool_process_write(input, *process_manager, *caller_agent_id).await,
+        "process_kill" => tool_process_kill(input, *process_manager, *caller_agent_id).await,
         "process_list" => tool_process_list(*process_manager, *caller_agent_id).await,
 
         // Hand tools (curated autonomous capability packages).

@@ -1623,6 +1623,62 @@ fn expand_env_value(val: &str) -> String {
     }
 }
 
+/// Build the safe baseline environment for a hook subprocess.
+///
+/// SECURITY: the daemon's environment is NOT inherited wholesale — only the
+/// same allowlist the non-persistent path (`run_hook_json`) uses:
+/// `PATH` / `HOME` (+ the Windows-safe vars), `LIBREFANG_RUNTIME`, the
+/// runtime passthrough vars, the caller's `allowed_env_vars` minus any
+/// reserved secret (via [`crate::subprocess_sandbox::is_blocked_env_var`]),
+/// and `plugin_env`. Returning the `(key, value)` pairs (rather than mutating
+/// a `Command`) keeps it unit-testable without spawning a subprocess.
+fn hook_baseline_env(runtime: &PluginRuntime, config: &HookConfig) -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> = Vec::new();
+    if let Ok(path) = std::env::var("PATH") {
+        env.push(("PATH".to_string(), path));
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        env.push(("HOME".to_string(), home));
+    }
+    env.push((
+        "LIBREFANG_RUNTIME".to_string(),
+        runtime.label().into_owned(),
+    ));
+    #[cfg(windows)]
+    for var in &[
+        "USERPROFILE",
+        "SYSTEMROOT",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "COMSPEC",
+    ] {
+        if let Ok(val) = std::env::var(var) {
+            env.push((var.to_string(), val));
+        }
+    }
+    for var in runtime_passthrough_vars(runtime.clone()) {
+        if let Ok(val) = std::env::var(var) {
+            env.push((var.to_string(), val));
+        }
+    }
+    // Caller-allowed passthrough — filtered so a malicious plugin manifest
+    // cannot smuggle a reserved secret (`LIBREFANG_VAULT_KEY`,
+    // `ANTHROPIC_API_KEY`, …) back in via its `allowed_env_vars` list.
+    for var in &config.allowed_env_vars {
+        if crate::subprocess_sandbox::is_blocked_env_var(var) {
+            warn!(var = %var, "refusing to pass reserved/secret env var to persistent hook");
+            continue;
+        }
+        if let Ok(val) = std::env::var(var) {
+            env.push((var.clone(), val));
+        }
+    }
+    for (k, v) in &config.plugin_env {
+        env.push((k.clone(), expand_env_value(v)));
+    }
+    env
+}
+
 /// A single persistent hook subprocess with its I/O handles.
 struct PersistentProcess {
     stdin: tokio::process::ChildStdin,
@@ -1731,7 +1787,7 @@ impl HookProcessPool {
         config: &HookConfig,
     ) -> Result<PersistentProcess, PluginRuntimeError> {
         validate_path_traversal(script_path)?;
-        let (launcher, args) = build_command(runtime, script_path)?;
+        let (launcher, args) = build_command(runtime.clone(), script_path)?;
         let mut cmd = tokio::process::Command::new(&launcher);
         cmd.args(&args)
             .stdin(std::process::Stdio::piped())
@@ -1739,14 +1795,19 @@ impl HookProcessPool {
             .stderr(std::process::Stdio::null())
             .kill_on_drop(true);
 
-        // Inject env: start clean then re-add baseline.
+        // SECURITY: wipe the inherited environment, then re-add only the safe
+        // baseline (see `hook_baseline_env`). The previous
+        // `for (k, v) in std::env::vars()` re-added the daemon's ENTIRE
+        // environment — including `LIBREFANG_VAULT_KEY` and provider API keys —
+        // to every persistent hook subprocess, so a plugin that merely set
+        // `[hooks] persistent_subprocess = true` inherited all host credentials
+        // while the default (non-persistent) path allowlists only
+        // PATH / HOME / runtime vars. Per-call `LIBREFANG_AGENT_ID` /
+        // `LIBREFANG_MESSAGE` travel over the JSON-lines stdin protocol, so
+        // they are not needed in the environment here.
         cmd.env_clear();
-        for (k, v) in std::env::vars() {
+        for (k, v) in hook_baseline_env(&runtime, config) {
             cmd.env(k, v);
-        }
-        for (k, v) in &config.plugin_env {
-            let expanded = expand_env_value(v);
-            cmd.env(k, expanded);
         }
         if !config.allow_network {
             cmd.env("no_proxy", "*")

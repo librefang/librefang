@@ -770,17 +770,7 @@ impl ChatGptDriver {
                         if let Some(resp_obj) = event.get("response") {
                             // Extract usage from completed response
                             if let Some(u) = resp_obj.get("usage") {
-                                usage = TokenUsage {
-                                    input_tokens: u
-                                        .get("input_tokens")
-                                        .and_then(|v| v.as_u64())
-                                        .unwrap_or(0),
-                                    output_tokens: u
-                                        .get("output_tokens")
-                                        .and_then(|v| v.as_u64())
-                                        .unwrap_or(0),
-                                    ..Default::default()
-                                };
+                                usage = parse_responses_usage(u);
                             }
                             // Extract stop reason from status. Responses API
                             // surfaces refusals via incomplete_details.reason
@@ -1159,10 +1149,56 @@ impl crate::llm_driver::LlmDriver for ChatGptDriver {
     }
 }
 
+/// Parse a Responses-API `usage` object into a [`TokenUsage`].
+///
+/// The Responses API reports cached prompt tokens under
+/// `input_tokens_details.cached_tokens` (a subset of `input_tokens`),
+/// analogous to the chat-completions `prompt_tokens_details.cached_tokens`
+/// the sibling `openai.rs` driver parses. Threading it into
+/// `cache_read_input_tokens` lets the metering layer apply the cache-read
+/// discount; without it the cached prefix is billed at the full input rate.
+fn parse_responses_usage(u: &serde_json::Value) -> TokenUsage {
+    TokenUsage {
+        input_tokens: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+        output_tokens: u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+        cache_read_input_tokens: u
+            .get("input_tokens_details")
+            .and_then(|d| d.get("cached_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+        ..Default::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use librefang_types::message::{Message, MessageContent, Role};
+
+    /// Regression (#6441 follow-up): the Responses-API usage parse must carry
+    /// `input_tokens_details.cached_tokens` into `cache_read_input_tokens`, or
+    /// cached input is metered at the full (non-cached) rate.
+    #[test]
+    fn parse_responses_usage_reads_cached_tokens() {
+        let u = serde_json::json!({
+            "input_tokens": 40000,
+            "output_tokens": 500,
+            "input_tokens_details": { "cached_tokens": 38000 }
+        });
+        let usage = parse_responses_usage(&u);
+        assert_eq!(usage.input_tokens, 40000);
+        assert_eq!(usage.output_tokens, 500);
+        assert_eq!(
+            usage.cache_read_input_tokens, 38000,
+            "cached prompt tokens must be recorded for the cache-read discount"
+        );
+
+        // Absent details → zero cache-read (no panic, backward compatible).
+        let u2 = serde_json::json!({ "input_tokens": 10, "output_tokens": 2 });
+        let usage2 = parse_responses_usage(&u2);
+        assert_eq!(usage2.cache_read_input_tokens, 0);
+        assert_eq!(usage2.input_tokens, 10);
+    }
 
     #[test]
     fn test_token_cache_empty() {

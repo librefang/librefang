@@ -25,7 +25,7 @@
 //! and lexical (`..` / `.` are folded without touching the filesystem,
 //! since target files may not yet exist).
 
-use crate::tool_classifier::{parallel_safety, ParallelSafety};
+use crate::tool_classifier::{parallel_safety_with_mcp, ParallelSafety};
 use librefang_types::tool::{ToolCall, ToolDefinition};
 use std::path::{Component, Path, PathBuf};
 
@@ -224,6 +224,17 @@ fn find_def<'a>(defs: &'a [ToolDefinition], name: &str) -> Option<&'a ToolDefini
 ///   reserved in the current bucket. Effectively linear for the
 ///   typical N ≤ 16 case.
 pub fn plan_batch(calls: &[ToolCall], defs: &[ToolDefinition]) -> ParallelPlan {
+    plan_batch_with_mcp(calls, defs, None)
+}
+
+/// Like [`plan_batch`] but consulting the operator's MCP parallel-safety
+/// overrides (`mcp_default_safety` / `mcp_readonly_allowlist`) when
+/// classifying each call. See [`parallel_safety_with_mcp`].
+pub fn plan_batch_with_mcp(
+    calls: &[ToolCall],
+    defs: &[ToolDefinition],
+    mcp: Option<&librefang_types::config::ParallelToolsConfig>,
+) -> ParallelPlan {
     if calls.is_empty() {
         return ParallelPlan { groups: vec![] };
     }
@@ -235,7 +246,7 @@ pub fn plan_batch(calls: &[ToolCall], defs: &[ToolDefinition]) -> ParallelPlan {
 
     let safeties: Vec<ParallelSafety> = calls
         .iter()
-        .map(|c| parallel_safety(&c.name, find_def(defs, &c.name)))
+        .map(|c| parallel_safety_with_mcp(&c.name, find_def(defs, &c.name), mcp))
         .collect();
 
     // Any Exclusive call forces the whole batch to serialise.

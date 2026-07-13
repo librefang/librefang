@@ -16,6 +16,7 @@ pub(super) async fn tool_process_start(
     dangerous_command_checker: Option<
         &std::sync::Arc<tokio::sync::RwLock<crate::dangerous_command::DangerousCommandChecker>>,
     >,
+    allowed_env_vars: Option<&[String]>,
 ) -> ToolResult {
     let pm = pm.ok_or(ToolError::Unavailable("Process manager"))?;
     let agent_id = caller_agent_id.ok_or(ToolError::MissingParameter("caller_agent_id"))?;
@@ -94,8 +95,26 @@ pub(super) async fn tool_process_start(
         }
     }
 
+    // Resolve the effective env-passthrough allowlist the same way the
+    // shell_exec dispatch does (dispatch.rs): the caller-provided list, else
+    // the exec policy's `allowed_env_vars`. `ProcessManager::start` scrubs the
+    // daemon environment down to the safe baseline plus these names, so the
+    // spawned child never inherits the vault key / provider secrets.
+    let effective_allowed_env: Vec<String> = allowed_env_vars
+        .map(|v| v.to_vec())
+        .or_else(|| {
+            exec_policy.and_then(|p| {
+                if p.allowed_env_vars.is_empty() {
+                    None
+                } else {
+                    Some(p.allowed_env_vars.clone())
+                }
+            })
+        })
+        .unwrap_or_default();
+
     let proc_id = pm
-        .start(agent_id, command, &args)
+        .start(agent_id, command, &args, &effective_allowed_env)
         .await
         .map_err(ToolError::upstream_msg)?;
     Ok(serde_json::json!({
@@ -109,12 +128,17 @@ pub(super) async fn tool_process_start(
 pub(super) async fn tool_process_poll(
     input: &serde_json::Value,
     pm: Option<&crate::process_manager::ProcessManager>,
+    caller_agent_id: Option<&str>,
 ) -> ToolResult {
     let pm = pm.ok_or(ToolError::Unavailable("Process manager"))?;
+    let agent_id = caller_agent_id.ok_or(ToolError::MissingParameter("caller_agent_id"))?;
     let proc_id = input["process_id"]
         .as_str()
         .ok_or(ToolError::MissingParameter("process_id"))?;
-    let (stdout, stderr) = pm.read(proc_id).await.map_err(ToolError::upstream_msg)?;
+    let (stdout, stderr) = pm
+        .read(proc_id, agent_id)
+        .await
+        .map_err(ToolError::upstream_msg)?;
 
     let stdout_joined = join_with_cap(&stdout, MAX_POLL_OUTPUT_BYTES);
     let stderr_joined = join_with_cap(&stderr, MAX_POLL_OUTPUT_BYTES);
@@ -133,8 +157,10 @@ pub(super) async fn tool_process_poll(
 pub(super) async fn tool_process_write(
     input: &serde_json::Value,
     pm: Option<&crate::process_manager::ProcessManager>,
+    caller_agent_id: Option<&str>,
 ) -> ToolResult {
     let pm = pm.ok_or(ToolError::Unavailable("Process manager"))?;
+    let agent_id = caller_agent_id.ok_or(ToolError::MissingParameter("caller_agent_id"))?;
     let proc_id = input["process_id"]
         .as_str()
         .ok_or(ToolError::MissingParameter("process_id"))?;
@@ -148,7 +174,7 @@ pub(super) async fn tool_process_write(
     } else {
         format!("{data}\n")
     };
-    pm.write(proc_id, &data)
+    pm.write(proc_id, agent_id, &data)
         .await
         .map_err(ToolError::upstream_msg)?;
     Ok(serde_json::json!({
@@ -161,12 +187,16 @@ pub(super) async fn tool_process_write(
 pub(super) async fn tool_process_kill(
     input: &serde_json::Value,
     pm: Option<&crate::process_manager::ProcessManager>,
+    caller_agent_id: Option<&str>,
 ) -> ToolResult {
     let pm = pm.ok_or(ToolError::Unavailable("Process manager"))?;
+    let agent_id = caller_agent_id.ok_or(ToolError::MissingParameter("caller_agent_id"))?;
     let proc_id = input["process_id"]
         .as_str()
         .ok_or(ToolError::MissingParameter("process_id"))?;
-    pm.kill(proc_id).await.map_err(ToolError::upstream_msg)?;
+    pm.kill(proc_id, agent_id)
+        .await
+        .map_err(ToolError::upstream_msg)?;
     Ok(serde_json::json!({
         "status": "killed"
     })
@@ -241,19 +271,19 @@ mod tests {
     #[tokio::test]
     async fn process_tools_without_manager_return_unavailable() {
         assert!(matches!(
-            tool_process_start(&json!({}), None, None, None, None).await,
+            tool_process_start(&json!({}), None, None, None, None, None).await,
             Err(ToolError::Unavailable("Process manager"))
         ));
         assert!(matches!(
-            tool_process_poll(&json!({}), None).await,
+            tool_process_poll(&json!({}), None, None).await,
             Err(ToolError::Unavailable("Process manager"))
         ));
         assert!(matches!(
-            tool_process_write(&json!({}), None).await,
+            tool_process_write(&json!({}), None, None).await,
             Err(ToolError::Unavailable("Process manager"))
         ));
         assert!(matches!(
-            tool_process_kill(&json!({}), None).await,
+            tool_process_kill(&json!({}), None, None).await,
             Err(ToolError::Unavailable("Process manager"))
         ));
         assert!(matches!(
@@ -287,6 +317,7 @@ mod tests {
             Some("agent1"),
             Some(&policy),
             None,
+            None,
         )
         .await;
         assert!(matches!(res, Err(ToolError::PermissionDenied(_))));
@@ -315,6 +346,7 @@ mod tests {
             Some("agent1"),
             Some(&policy),
             None,
+            None,
         )
         .await;
         assert!(matches!(res, Err(ToolError::PermissionDenied(_))));
@@ -337,6 +369,7 @@ mod tests {
             Some("agent1"),
             Some(&policy),
             None,
+            None,
         )
         .await;
         assert!(matches!(res, Err(ToolError::PermissionDenied(_))));
@@ -358,6 +391,7 @@ mod tests {
             Some("agent1"),
             Some(&policy),
             None,
+            None,
         )
         .await;
         assert!(
@@ -368,7 +402,7 @@ mod tests {
         // Cleanup the spawned child.
         let list = pm.list("agent1");
         for p in list {
-            let _ = pm.kill(&p.id).await;
+            let _ = pm.kill(&p.id, "agent1").await;
         }
     }
 

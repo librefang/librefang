@@ -1083,7 +1083,7 @@ mod tests {
         assert!(has_images);
         assert!(matches!(blocks, Some(ref b) if b.len() == 1));
         // The pre-fix empty-text guard would have 400'd this valid vision request.
-        assert!(!(text.is_empty() && !has_images));
+        assert!(!text.is_empty() || has_images);
 
         // Text + image: text extracted, blocks retained.
         let text_and_image = convert_messages(&[OaiMessage {

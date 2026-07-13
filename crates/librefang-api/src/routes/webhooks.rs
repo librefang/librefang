@@ -30,7 +30,24 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Build webhook subscription routes.
-pub fn router() -> axum::Router<Arc<AppState>> {
+///
+/// `trigger_body_limit` sizes a wire-level `RequestBodyLimitLayer` on the
+/// external-trigger endpoints (`/hooks/wake`, `/hooks/agent`) from the
+/// operator's `webhook_triggers.max_payload_bytes`. Without it those routes
+/// only inherited the global `max_request_body_bytes` (default 8 MiB), so the
+/// per-webhook cap silently did nothing and the endpoints were ~128x more
+/// permissive than documented.
+pub fn router(trigger_body_limit: usize) -> axum::Router<Arc<AppState>> {
+    // External-trigger endpoints get their own, tighter body cap. Split into a
+    // sub-router so the layer applies only to `/hooks/*` and not the
+    // `/webhooks/*` CRUD routes (which stay on the global limit). The layer is
+    // preserved through the `.merge()` and the outer `/api` nest.
+    let triggers = axum::Router::new()
+        .route("/hooks/wake", axum::routing::post(webhook_wake))
+        .route("/hooks/agent", axum::routing::post(webhook_agent))
+        .layer(tower_http::limit::RequestBodyLimitLayer::new(
+            trigger_body_limit,
+        ));
     axum::Router::new()
         // Event webhook subscriptions
         .route(
@@ -54,8 +71,7 @@ pub fn router() -> axum::Router<Arc<AppState>> {
         )
         .route("/webhooks/{id}/test", axum::routing::post(test_webhook))
         // External-trigger webhook endpoints (#3749 11/N: moved from system.rs).
-        .route("/hooks/wake", axum::routing::post(webhook_wake))
-        .route("/hooks/agent", axum::routing::post(webhook_agent))
+        .merge(triggers)
 }
 
 // ---------------------------------------------------------------------------

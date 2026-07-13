@@ -160,12 +160,25 @@ impl ReloadPlan {
 // build_reload_plan
 // ---------------------------------------------------------------------------
 
-/// Compare JSON-serialized forms of a field. Returns `true` when the
-/// serialized representations differ (or if one side fails to serialize).
+/// Compare two config fields for a semantic change. Returns `true` when they
+/// differ (or if one side fails to serialize).
+///
+/// Compares canonicalized `serde_json::Value`s, NOT raw JSON strings. Several
+/// reload-classified fields transitively contain `HashMap`s (users,
+/// channel_role_mapping, broadcast routes, audit retention, per-skill env,
+/// …). `serde_json::to_string` serializes a `HashMap` in its per-instance
+/// iteration order, so two content-identical maps built from separate
+/// deserializations (the live config vs the reload candidate) produce
+/// different strings and `field_changed` fired spuriously — emitting a
+/// needless `ReloadAuth` / `restart_required` on every reload for any
+/// multi-entry deployment. `to_value` normalizes every (possibly nested) map
+/// to a `BTreeMap`-backed `Value::Object` (the workspace does not enable
+/// serde_json's `preserve_order`), so semantically-equal configs compare
+/// equal regardless of map iteration order.
 fn field_changed<T: serde::Serialize>(old: &T, new: &T) -> bool {
-    let old_json = serde_json::to_string(old).ok();
-    let new_json = serde_json::to_string(new).ok();
-    old_json != new_json
+    let old_val = serde_json::to_value(old).ok();
+    let new_val = serde_json::to_value(new).ok();
+    old_val != new_val
 }
 
 /// Decide whether two `[external_auth]` snapshots disagree on a field
@@ -1148,6 +1161,41 @@ pub fn should_store_config(mode: ReloadMode, plan: &ReloadPlan) -> bool {
 mod tests {
     use super::*;
     use librefang_types::config::KernelConfig;
+
+    /// Regression (#6441 follow-up): `field_changed` must not report a change
+    /// for two content-identical `HashMap`s that merely iterate in different
+    /// orders. The old `serde_json::to_string` comparison did, producing
+    /// spurious `ReloadAuth` / `restart_required` on every reload for
+    /// multi-entry deployments. `to_value` normalizes map key order, so equal
+    /// content compares equal — while a real value change is still detected.
+    #[test]
+    fn field_changed_ignores_hashmap_iteration_order() {
+        use std::collections::HashMap;
+        // Enough keys that two independently-seeded maps almost never iterate
+        // identically — so a regression to string comparison would fire.
+        let keys = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"];
+        let forward: HashMap<String, String> = keys
+            .iter()
+            .map(|k| (k.to_string(), format!("v-{k}")))
+            .collect();
+        let reversed: HashMap<String, String> = keys
+            .iter()
+            .rev()
+            .map(|k| (k.to_string(), format!("v-{k}")))
+            .collect();
+        assert!(
+            !field_changed(&forward, &reversed),
+            "content-identical maps must not be reported as changed"
+        );
+
+        // A genuine value change is still detected.
+        let mut changed = forward.clone();
+        changed.insert("a".to_string(), "DIFFERENT".to_string());
+        assert!(
+            field_changed(&forward, &changed),
+            "a real value change must be detected"
+        );
+    }
 
     /// Helper: create a default config for diffing.
     fn default_cfg() -> KernelConfig {
