@@ -70,11 +70,16 @@ impl ProcessManager {
     }
 
     /// Start a persistent process. Returns the process ID.
+    ///
+    /// `allowed_env` is the agent's env-passthrough allowlist; the spawned
+    /// child's environment is scrubbed down to the safe baseline plus these
+    /// names (see [`crate::subprocess_sandbox::sandbox_command`]).
     pub async fn start(
         &self,
         agent_id: &str,
         command: &str,
         args: &[String],
+        allowed_env: &[String],
     ) -> Result<ProcessId, String> {
         // Check per-agent limit
         let agent_count = self
@@ -106,6 +111,10 @@ impl ProcessManager {
         cmd.process_group(0);
         #[cfg(windows)]
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+                                         // SECURITY: scrub the daemon environment before spawn, mirroring `tool_shell_exec` (shell.rs:130) and `LocalBackend::run_command`.
+                                         // Without this the child inherits the daemon's full process env — including `LIBREFANG_VAULT_KEY` and provider API keys — which an agent can read straight back via `process_poll` (e.g. `process_start {"command":"env"}` under the default Allowlist, where `env` is a safe_bin).
+                                         // `sandbox_command` `env_clear()`s and re-adds only the safe allowlist + the agent's `allowed_env`.
+        crate::subprocess_sandbox::sandbox_command(&mut cmd, allowed_env);
         let mut child = cmd
             .spawn()
             .map_err(|e| format!("Failed to start process '{}': {}", command, e))?;
@@ -233,11 +242,15 @@ impl ProcessManager {
     }
 
     /// Write data to a process's stdin.
-    pub async fn write(&self, process_id: &str, data: &str) -> Result<(), String> {
-        let mut entry = self
-            .processes
-            .get_mut(process_id)
-            .ok_or_else(|| format!("Process '{}' not found", process_id))?;
+    ///
+    /// Ownership-checked: a process owned by a different agent is reported as
+    /// "not found" so a caller cannot probe or write to another agent's
+    /// process via a guessable `proc_N` id.
+    pub async fn write(&self, process_id: &str, agent_id: &str, data: &str) -> Result<(), String> {
+        let mut entry = match self.processes.get_mut(process_id) {
+            Some(e) if e.agent_id == agent_id => e,
+            _ => return Err(format!("Process '{}' not found", process_id)),
+        };
 
         let proc = entry.value_mut();
         if let Some(stdin) = &mut proc.stdin {
@@ -256,11 +269,19 @@ impl ProcessManager {
     }
 
     /// Read accumulated stdout/stderr (non-blocking drain).
-    pub async fn read(&self, process_id: &str) -> Result<(Vec<String>, Vec<String>), String> {
-        let entry = self
-            .processes
-            .get(process_id)
-            .ok_or_else(|| format!("Process '{}' not found", process_id))?;
+    ///
+    /// Ownership-checked: a process owned by a different agent is reported as
+    /// "not found" so a caller cannot drain another agent's process output
+    /// (which may contain secrets) via a guessable `proc_N` id.
+    pub async fn read(
+        &self,
+        process_id: &str,
+        agent_id: &str,
+    ) -> Result<(Vec<String>, Vec<String>), String> {
+        let entry = match self.processes.get(process_id) {
+            Some(e) if e.agent_id == agent_id => e,
+            _ => return Err(format!("Process '{}' not found", process_id)),
+        };
 
         let mut stdout = entry.stdout_buf.lock().await;
         let mut stderr = entry.stderr_buf.lock().await;
@@ -271,19 +292,39 @@ impl ProcessManager {
         Ok((out_lines, err_lines))
     }
 
-    /// Kill a process.
-    pub async fn kill(&self, process_id: &str) -> Result<(), String> {
+    /// Kill a process the agent owns.
+    ///
+    /// Ownership-checked: `remove_if` deletes the entry only when its
+    /// `agent_id` matches, atomically. A process owned by a different agent
+    /// (or a nonexistent id) is reported as "not found" so a caller cannot
+    /// terminate another agent's process via a guessable `proc_N` id.
+    pub async fn kill(&self, process_id: &str, agent_id: &str) -> Result<(), String> {
+        let (_, mut proc) = self
+            .processes
+            .remove_if(process_id, |_, v| v.agent_id == agent_id)
+            .ok_or_else(|| format!("Process '{}' not found", process_id))?;
+        Self::reap(process_id, &mut proc).await;
+        Ok(())
+    }
+
+    /// Kill a process without an ownership check — for daemon-internal
+    /// sweeps (`cleanup`) that operate across all agents.
+    async fn force_kill(&self, process_id: &str) -> Result<(), String> {
         let (_, mut proc) = self
             .processes
             .remove(process_id)
             .ok_or_else(|| format!("Process '{}' not found", process_id))?;
+        Self::reap(process_id, &mut proc).await;
+        Ok(())
+    }
 
+    /// Terminate an already-removed child (tree-kill then reap).
+    async fn reap(process_id: &str, proc: &mut ManagedProcess) {
         if let Some(pid) = proc.child.id() {
             debug!(process_id, pid, "Killing persistent process");
             let _ = crate::subprocess_sandbox::kill_process_tree(pid, 3000).await;
         }
         let _ = proc.child.kill().await;
-        Ok(())
     }
 
     /// List all processes for an agent.
@@ -315,7 +356,7 @@ impl ProcessManager {
 
         for id in to_remove {
             warn!(process_id = %id, "Cleaning up stale process");
-            let _ = self.kill(&id).await;
+            let _ = self.force_kill(&id).await;
         }
     }
 
@@ -369,7 +410,7 @@ mod tests {
         let pm = ProcessManager::new(5);
 
         let (cmd, args) = long_running_proc();
-        let id = pm.start("agent1", cmd, &args).await.unwrap();
+        let id = pm.start("agent1", cmd, &args, &[]).await.unwrap();
         assert!(id.starts_with("proc_"));
 
         let list = pm.list("agent1");
@@ -377,7 +418,7 @@ mod tests {
         assert_eq!(list[0].agent_id, "agent1");
 
         // Cleanup
-        let _ = pm.kill(&id).await;
+        let _ = pm.kill(&id, "agent1").await;
     }
 
     #[tokio::test]
@@ -385,25 +426,25 @@ mod tests {
         let pm = ProcessManager::new(1);
 
         let (cmd, args) = long_running_proc();
-        let id1 = pm.start("agent1", cmd, &args).await.unwrap();
-        let result = pm.start("agent1", cmd, &args).await;
+        let id1 = pm.start("agent1", cmd, &args, &[]).await.unwrap();
+        let result = pm.start("agent1", cmd, &args, &[]).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("max: 1"));
 
-        let _ = pm.kill(&id1).await;
+        let _ = pm.kill(&id1, "agent1").await;
     }
 
     #[tokio::test]
     async fn test_kill_nonexistent() {
         let pm = ProcessManager::new(5);
-        let result = pm.kill("nonexistent").await;
+        let result = pm.kill("nonexistent", "agent1").await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_read_nonexistent() {
         let pm = ProcessManager::new(5);
-        let result = pm.read("nonexistent").await;
+        let result = pm.read("nonexistent", "agent1").await;
         assert!(result.is_err());
     }
 
@@ -432,7 +473,7 @@ mod tests {
     async fn naturally_exited_process_is_reaped() {
         let pm = ProcessManager::new(5);
         let (cmd, args) = short_lived_proc();
-        let id = pm.start("agent1", cmd, &args).await.unwrap();
+        let id = pm.start("agent1", cmd, &args, &[]).await.unwrap();
         assert_eq!(pm.count(), 1, "entry present right after start");
 
         // The reaper awaits both pipe readers then `child.wait()`; for a
@@ -455,7 +496,7 @@ mod tests {
 
         // A late `kill` of the already-reaped id is a harmless error,
         // not a panic / double-free.
-        assert!(pm.kill(&id).await.is_err());
+        assert!(pm.kill(&id, "agent1").await.is_err());
     }
 
     /// The reaper must not fight an explicit `kill()`: killing a
@@ -465,9 +506,9 @@ mod tests {
     async fn explicit_kill_still_reaps_exactly_once() {
         let pm = ProcessManager::new(5);
         let (cmd, args) = long_running_proc();
-        let id = pm.start("agent1", cmd, &args).await.unwrap();
+        let id = pm.start("agent1", cmd, &args, &[]).await.unwrap();
         assert_eq!(pm.count(), 1);
-        pm.kill(&id).await.unwrap();
+        pm.kill(&id, "agent1").await.unwrap();
 
         // After kill the pipes EOF and the reaper runs; either path
         // converges on count == 0 with no panic.
@@ -478,5 +519,79 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         assert_eq!(pm.count(), 0, "manager must be empty after kill + reap");
+    }
+
+    /// Regression: `ProcessManager::start` must scrub the daemon environment
+    /// before spawning, so a secret in the daemon env never reaches the
+    /// child (which the agent can read back via `process_poll`), while an
+    /// explicitly-allowed var still passes. `sh -c "env; sleep 30"` keeps the
+    /// child alive after `env` prints so the drain does not race the reaper.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn start_scrubs_daemon_env_from_child() {
+        std::env::set_var("LIBREFANG_PM_SECRET_SENTINEL", "leaked-secret-value");
+        std::env::set_var("LIBREFANG_PM_ALLOWED_SENTINEL", "allowed-value");
+        let pm = ProcessManager::new(5);
+        let id = pm
+            .start(
+                "agent1",
+                "sh",
+                &["-c".to_string(), "env; sleep 30".to_string()],
+                &["LIBREFANG_PM_ALLOWED_SENTINEL".to_string()],
+            )
+            .await
+            .unwrap();
+
+        let mut combined = String::new();
+        let mut saw_allowed = false;
+        for _ in 0..100 {
+            if let Ok((out, _err)) = pm.read(&id, "agent1").await {
+                for line in out {
+                    combined.push_str(&line);
+                    combined.push('\n');
+                }
+            }
+            if combined.contains("allowed-value") {
+                saw_allowed = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let _ = pm.kill(&id, "agent1").await;
+        std::env::remove_var("LIBREFANG_PM_SECRET_SENTINEL");
+        std::env::remove_var("LIBREFANG_PM_ALLOWED_SENTINEL");
+
+        assert!(
+            saw_allowed,
+            "explicitly-allowed env var should reach the child"
+        );
+        assert!(
+            !combined.contains("leaked-secret-value"),
+            "daemon secret must NOT leak into the spawned child's environment: {combined}"
+        );
+    }
+
+    /// Regression: `read` / `write` / `kill` are ownership-checked. A
+    /// different agent must not access another agent's process via a
+    /// guessable `proc_N` id — the operations report "not found" and leave
+    /// the victim's process untouched.
+    #[tokio::test]
+    async fn cross_agent_process_access_is_denied() {
+        let pm = ProcessManager::new(5);
+        let (cmd, args) = long_running_proc();
+        let id = pm.start("owner", cmd, &args, &[]).await.unwrap();
+
+        assert!(pm.read(&id, "attacker").await.is_err());
+        assert!(pm.write(&id, "attacker", "data\n").await.is_err());
+        assert!(pm.kill(&id, "attacker").await.is_err());
+        assert_eq!(
+            pm.count(),
+            1,
+            "an unauthorized kill must not remove the owner's process"
+        );
+
+        // The owner still has full access.
+        assert!(pm.read(&id, "owner").await.is_ok());
+        pm.kill(&id, "owner").await.unwrap();
     }
 }

@@ -655,6 +655,19 @@ impl ClawHubClient {
                     let cursor = std::io::Cursor::new(&bytes);
                     match zip::ZipArchive::new(cursor) {
                         Ok(mut archive) => {
+                            // Decompression-bomb / entry-count guards, shared with
+                            // the marketplace bundle extractor (#6441 follow-up):
+                            // previously this path streamed every entry with an
+                            // unbounded `std::io::copy`, so a malicious skill zip
+                            // could exhaust disk / inodes.
+                            if archive.len() > crate::marketplace::MAX_ENTRIES {
+                                return Err(SkillError::SecurityBlocked(format!(
+                                    "skill archive contains {} entries, exceeding the {}-entry limit",
+                                    archive.len(),
+                                    crate::marketplace::MAX_ENTRIES
+                                )));
+                            }
+                            let mut total_uncompressed: u64 = 0;
                             for i in 0..archive.len() {
                                 let mut file = match archive.by_index(i) {
                                     Ok(f) => f,
@@ -681,8 +694,16 @@ impl ClawHubClient {
                                     if let Some(parent) = out_path.parent() {
                                         std::fs::create_dir_all(parent)?;
                                     }
-                                    let mut out_file = std::fs::File::create(&out_path)?;
-                                    std::io::copy(&mut file, &mut out_file)?;
+                                    let declared = file.size();
+                                    let compressed = file.compressed_size();
+                                    crate::marketplace::write_zip_entry_capped(
+                                        &mut file,
+                                        declared,
+                                        compressed,
+                                        &out_path,
+                                        &enclosed_name.display().to_string(),
+                                        &mut total_uncompressed,
+                                    )?;
                                 }
                             }
                             info!(slug, entries = archive.len(), "Extracted skill zip");

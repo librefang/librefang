@@ -740,6 +740,7 @@ impl LibreFangKernel {
                 // Honour the operator's parallel-dispatch setting even for
                 // ephemeral /btw turns; default-off config is a no-op.
                 parallel_tools_config: Some(self.config.load().parallel_tools.clone()),
+                canvas_config: Some(self.config.load().canvas.clone()),
             },
         )
         .await
@@ -1687,6 +1688,7 @@ impl LibreFangKernel {
             compaction_config: None,
             gateway_compression: Some(self.config.load().gateway_compression.clone()),
             parallel_tools_config: Some(self.config.load().parallel_tools.clone()),
+            canvas_config: Some(self.config.load().canvas.clone()),
         };
         self.send_message_streaming_with_sender_and_opts(
             effective_id,
@@ -1883,6 +1885,7 @@ impl LibreFangKernel {
             compaction_config: None,
             gateway_compression: Some(self.config.load().gateway_compression.clone()),
             parallel_tools_config: Some(self.config.load().parallel_tools.clone()),
+            canvas_config: Some(self.config.load().canvas.clone()),
         };
         // INVARIANT: forks must use the canonical session so the parent turn's
         // prompt-cache prefix is reused. Do NOT pass a `session_id_override`
@@ -1962,6 +1965,7 @@ impl LibreFangKernel {
             compaction_config: None,
             gateway_compression: Some(self.config.load().gateway_compression.clone()),
             parallel_tools_config: Some(self.config.load().parallel_tools.clone()),
+            canvas_config: Some(self.config.load().canvas.clone()),
         };
         self.send_message_streaming_with_sender_and_opts(
             agent_id,

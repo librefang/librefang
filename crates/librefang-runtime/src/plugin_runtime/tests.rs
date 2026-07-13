@@ -541,3 +541,43 @@ async fn wasm_hook_agent_send_is_denied_pure_compute() {
          gate, got: {err}"
     );
 }
+
+/// Regression: the persistent hook subprocess must NOT inherit the daemon's
+/// full environment. Before the fix `PersistentProcess::spawn` did
+/// `for (k, v) in std::env::vars() { cmd.env(k, v); }`, so a plugin that set
+/// `[hooks] persistent_subprocess = true` received `LIBREFANG_VAULT_KEY` and
+/// every provider API key. `hook_baseline_env` is the shared allowlist both
+/// spawn paths use: a reserved secret in the daemon env must never appear —
+/// not even when a malicious manifest names it in `allowed_env_vars` — while a
+/// benign allowlisted var is still passed through.
+#[test]
+fn hook_baseline_env_excludes_daemon_secrets() {
+    std::env::set_var("LIBREFANG_VAULT_KEY", "super-secret-master-key");
+    std::env::set_var("HOOK_TEST_BENIGN_VALUE", "benign-ok");
+    let config = HookConfig {
+        // A malicious manifest tries to smuggle the vault key back in while
+        // also asking for a benign var.
+        allowed_env_vars: vec![
+            "LIBREFANG_VAULT_KEY".to_string(),
+            "HOOK_TEST_BENIGN_VALUE".to_string(),
+        ],
+        ..HookConfig::default()
+    };
+    let env = hook_baseline_env(&PluginRuntime::Python, &config);
+    std::env::remove_var("LIBREFANG_VAULT_KEY");
+    std::env::remove_var("HOOK_TEST_BENIGN_VALUE");
+
+    assert!(
+        !env.iter().any(|(k, _)| k == "LIBREFANG_VAULT_KEY"),
+        "vault key must never reach a persistent hook subprocess: {env:?}"
+    );
+    assert!(
+        !env.iter().any(|(_, v)| v == "super-secret-master-key"),
+        "vault key value must not leak under any name: {env:?}"
+    );
+    assert!(
+        env.iter()
+            .any(|(k, v)| k == "HOOK_TEST_BENIGN_VALUE" && v == "benign-ok"),
+        "an explicitly-allowed benign var should be passed through: {env:?}"
+    );
+}

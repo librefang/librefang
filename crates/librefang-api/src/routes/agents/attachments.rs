@@ -7,6 +7,21 @@ const MAX_TEXT_ATTACHMENT_CHARS: usize = 200_000;
 const TEXT_TRUNCATION_MARKER: &str =
     "\n\n[…file truncated at 200K chars; content continues beyond this point…]";
 
+/// Hard cap on a fetched URL attachment's body (bytes). Bounds peak memory
+/// for the streaming download in `resolve_url_attachments`.
+const MAX_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
+
+/// Append `chunk` to `buf` unless doing so would push it past `cap`. Returns
+/// `false` (leaving `buf` unchanged) when the cap would be exceeded, so a
+/// streaming caller can abort before buffering an over-cap body.
+fn push_within_cap(buf: &mut Vec<u8>, chunk: &[u8], cap: usize) -> bool {
+    if buf.len().saturating_add(chunk.len()) > cap {
+        return false;
+    }
+    buf.extend_from_slice(chunk);
+    true
+}
+
 /// Decide whether an attachment looks like a UTF-8 text/code/data file
 /// the LLM can read directly. Browsers don't set `content_type` reliably
 /// for code files (`.rs`, `.py` typically come through as empty or
@@ -335,23 +350,45 @@ pub async fn resolve_url_attachments(
 
         match client.get(&att.url).send().await {
             Ok(resp) if resp.status().is_success() => {
-                match resp.bytes().await {
-                    Ok(data) => {
-                        // Limit to 20MB to prevent OOM
-                        if data.len() > 20 * 1024 * 1024 {
-                            tracing::warn!(url = %att.url, size = data.len(), "Attachment too large, skipping");
-                            continue;
-                        }
-                        let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
-                        blocks.push(librefang_types::message::ContentBlock::Image {
-                            media_type: content_type,
-                            data: b64,
-                        });
-                    }
-                    Err(e) => {
-                        tracing::warn!(url = %att.url, error = %e, "Failed to read attachment body");
+                // Pre-reject an advertised Content-Length over the cap so we
+                // never begin buffering a declared-huge body.
+                if let Some(len) = resp.content_length() {
+                    if len > MAX_ATTACHMENT_BYTES as u64 {
+                        tracing::warn!(url = %att.url, size = len, "Attachment too large (Content-Length), skipping");
+                        continue;
                     }
                 }
+                // Stream chunk-by-chunk with a running cap. `resp.bytes()`
+                // fully buffers the body into memory *before* any size check,
+                // so a lying/absent Content-Length streaming an unbounded body
+                // could OOM the daemon (bounded only by the 30s timeout, i.e.
+                // multiple GB at high bandwidth). Accumulating with an in-loop
+                // cap bounds peak memory to MAX_ATTACHMENT_BYTES regardless of
+                // the server's send rate (mirrors the channels
+                // `fetch_url_bytes_unchecked` defence).
+                let mut resp = resp;
+                let mut data: Vec<u8> = Vec::new();
+                let collected = loop {
+                    match resp.chunk().await {
+                        Ok(Some(chunk)) => {
+                            if !push_within_cap(&mut data, &chunk, MAX_ATTACHMENT_BYTES) {
+                                tracing::warn!(url = %att.url, "Attachment exceeds size cap while streaming, skipping");
+                                break None;
+                            }
+                        }
+                        Ok(None) => break Some(data),
+                        Err(e) => {
+                            tracing::warn!(url = %att.url, error = %e, "Failed to read attachment body");
+                            break None;
+                        }
+                    }
+                };
+                let Some(data) = collected else { continue };
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+                blocks.push(librefang_types::message::ContentBlock::Image {
+                    media_type: content_type,
+                    data: b64,
+                });
             }
             Ok(resp) => {
                 tracing::warn!(url = %att.url, status = %resp.status(), "Attachment download failed");
@@ -376,5 +413,28 @@ fn mime_from_url(url: &str) -> Option<String> {
         "webp" => Some("image/webp".into()),
         "svg" => Some("image/svg+xml".into()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: the streaming attachment fetch must bound peak memory by
+    /// refusing a chunk that would exceed the cap (previously `resp.bytes()`
+    /// buffered the whole body first, enabling remote OOM).
+    #[test]
+    fn push_within_cap_rejects_over_cap_chunk() {
+        let mut buf = Vec::new();
+        assert!(push_within_cap(&mut buf, &[0u8; 8], 10));
+        assert_eq!(buf.len(), 8);
+        // A chunk that would push past the cap is refused and buf is unchanged.
+        assert!(!push_within_cap(&mut buf, &[0u8; 8], 10));
+        assert_eq!(buf.len(), 8, "over-cap chunk must not be appended");
+        // Exactly filling the cap is allowed.
+        assert!(push_within_cap(&mut buf, &[0u8; 2], 10));
+        assert_eq!(buf.len(), 10);
+        // Zero-length chunk at the cap is fine.
+        assert!(push_within_cap(&mut buf, &[], 10));
     }
 }

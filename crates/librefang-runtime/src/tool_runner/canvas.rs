@@ -8,7 +8,7 @@
 //! `ToolError::InvalidParameter` at the tool boundary, preserved verbatim.
 
 use super::error::{ToolError, ToolResult};
-use super::CANVAS_MAX_BYTES;
+use super::{CANVAS_ALLOWED_TAGS, CANVAS_MAX_BYTES};
 use std::path::{Path, PathBuf};
 
 fn escape_html(s: &str) -> String {
@@ -78,8 +78,14 @@ const ALLOWED_TAGS: &[&str] = &[
 
 const VOID_TAGS: &[&str] = &["br", "hr", "img", "col"];
 
-fn is_allowed_tag(name: &str) -> bool {
-    ALLOWED_TAGS.contains(&name)
+fn is_allowed_tag(name: &str, allowed_tags: &[String]) -> bool {
+    if allowed_tags.is_empty() {
+        // Operator did not override `[canvas] allowed_tags` — fall back to the
+        // built-in conservative allowlist (unchanged behaviour).
+        ALLOWED_TAGS.contains(&name)
+    } else {
+        allowed_tags.iter().any(|t| t.eq_ignore_ascii_case(name))
+    }
 }
 
 fn is_void_tag(name: &str) -> bool {
@@ -199,6 +205,17 @@ fn parse_tag_close(html: &str) -> Option<(String, usize)> {
 }
 
 pub fn sanitize_canvas_html(html: &str, max_bytes: usize) -> Result<String, String> {
+    sanitize_canvas_html_with_tags(html, max_bytes, &[])
+}
+
+/// Like [`sanitize_canvas_html`] but with an operator-configured tag
+/// allowlist. An empty `allowed_tags` falls back to the built-in
+/// `ALLOWED_TAGS`; a non-empty list replaces it (case-insensitive).
+pub fn sanitize_canvas_html_with_tags(
+    html: &str,
+    max_bytes: usize,
+    allowed_tags: &[String],
+) -> Result<String, String> {
     if html.is_empty() {
         return Err("Empty HTML content".to_string());
     }
@@ -236,7 +253,7 @@ pub fn sanitize_canvas_html(html: &str, max_bytes: usize) -> Result<String, Stri
             }
             if bytes[pos..].starts_with(b"</") {
                 if let Some((name, consumed)) = parse_tag_close(&html[pos..]) {
-                    if is_allowed_tag(&name) {
+                    if is_allowed_tag(&name, allowed_tags) {
                         result.push_str("</");
                         result.push_str(&name);
                         result.push('>');
@@ -246,7 +263,7 @@ pub fn sanitize_canvas_html(html: &str, max_bytes: usize) -> Result<String, Stri
                 }
             }
             if let Some((name, attrs, consumed)) = parse_tag_open(&html[pos..]) {
-                if is_allowed_tag(&name) {
+                if is_allowed_tag(&name, allowed_tags) {
                     let safe_attrs = strip_dangerous_attrs(&attrs);
                     result.push('<');
                     result.push_str(&name);
@@ -326,12 +343,17 @@ pub(super) async fn tool_canvas_present(
     let title = escape_html(raw_title);
 
     let max_bytes = CANVAS_MAX_BYTES.try_with(|v| *v).unwrap_or(512 * 1024);
+    let allowed_tags = CANVAS_ALLOWED_TAGS
+        .try_with(|t| t.clone())
+        .unwrap_or_default();
     // The sanitizer's validation/security messages are user-facing — map them
     // onto the `html` parameter, keeping the text verbatim.
     let sanitized =
-        sanitize_canvas_html(html, max_bytes).map_err(|reason| ToolError::InvalidParameter {
-            name: "html",
-            reason,
+        sanitize_canvas_html_with_tags(html, max_bytes, &allowed_tags).map_err(|reason| {
+            ToolError::InvalidParameter {
+                name: "html",
+                reason,
+            }
         })?;
 
     let canvas_id = uuid::Uuid::new_v4().to_string();
@@ -406,6 +428,57 @@ mod tests {
                 assert!(reason.contains("Forbidden"));
             }
             other => panic!("expected InvalidParameter, got {other:?}"),
+        }
+    }
+
+    /// Regression (#6441 follow-up): the configured `max_html_bytes` and
+    /// `allowed_tags` must actually take effect. A below-default cap rejects an
+    /// over-cap document, a restrictive allowlist strips otherwise-allowed
+    /// tags, and an empty allowlist falls back to the built-in `ALLOWED_TAGS`.
+    #[test]
+    fn sanitize_honors_custom_max_bytes_and_allowed_tags() {
+        let big = format!("<p>{}</p>", "x".repeat(1000));
+        assert!(
+            sanitize_canvas_html_with_tags(&big, 64, &[]).is_err(),
+            "a below-default max_html_bytes must reject an over-cap document"
+        );
+
+        let html = "<p>hi</p><table><tr><td>x</td></tr></table>";
+        let restricted =
+            sanitize_canvas_html_with_tags(html, 512 * 1024, &["p".to_string()]).unwrap();
+        assert!(restricted.contains("<p>"), "listed tag kept: {restricted}");
+        assert!(
+            !restricted.contains("<table"),
+            "unlisted tag stripped: {restricted}"
+        );
+
+        let builtin = sanitize_canvas_html_with_tags(html, 512 * 1024, &[]).unwrap();
+        assert!(
+            builtin.contains("<table"),
+            "empty allowed_tags falls back to the built-in allowlist: {builtin}"
+        );
+    }
+
+    /// Regression (#6441 follow-up): the scoped `CANVAS_MAX_BYTES` task-local
+    /// must reach `canvas_present` — previously it was never `.scope()`d, so
+    /// the tool always used the hardcoded 512 KiB fallback and the operator's
+    /// `[canvas] max_html_bytes` was silently ignored.
+    #[tokio::test]
+    async fn canvas_present_reads_scoped_config_task_locals() {
+        let input = serde_json::json!({ "html": format!("<p>{}</p>", "x".repeat(2000)) });
+        let fut = tool_canvas_present(&input, None);
+        let res = CANVAS_MAX_BYTES
+            .scope(
+                64usize,
+                CANVAS_ALLOWED_TAGS.scope(std::sync::Arc::new(Vec::<String>::new()), fut),
+            )
+            .await;
+        match res {
+            Err(ToolError::InvalidParameter { name, reason }) => {
+                assert_eq!(name, "html");
+                assert!(reason.contains("too large"), "reason: {reason}");
+            }
+            other => panic!("expected InvalidParameter(too large), got {other:?}"),
         }
     }
 }

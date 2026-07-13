@@ -97,12 +97,24 @@ pub struct WsConnectionGuard {
 
 impl Drop for WsConnectionGuard {
     fn drop(&mut self) {
-        if let Some(entry) = ws_tracker().get(&self.ip) {
-            let prev = entry.value().fetch_sub(1, Ordering::Relaxed);
-            if prev <= 1 {
-                drop(entry);
-                ws_tracker().remove(&self.ip);
-            }
+        // Decrement under the read guard, release it, then remove the entry
+        // ONLY if the counter is still zero — the predicate runs under the
+        // entry's write lock inside `remove_if`. The previous unconditional
+        // `remove(&ip)` decided from a STALE read: between `drop(entry)` and
+        // `remove`, a concurrent `try_acquire_ws_slot` could take the shard
+        // write lock, find the still-present entry, bump it to 1 and hand out
+        // a live guard — then the pending `remove` deleted that live
+        // connection's entry, leaving it untracked and letting a single IP
+        // exceed `max_ws_per_ip`. `remove_if`'s predicate re-checks the count
+        // under the write lock, so a concurrent bump-to-1 makes it false and
+        // the entry is retained (two racing drops to 0 are still fine: the
+        // first deletes, the second finds no entry).
+        let hit_zero = match ws_tracker().get(&self.ip) {
+            Some(entry) => entry.value().fetch_sub(1, Ordering::Relaxed) <= 1,
+            None => false,
+        };
+        if hit_zero {
+            ws_tracker().remove_if(&self.ip, |_, v| v.load(Ordering::Relaxed) == 0);
         }
     }
 }
@@ -2346,6 +2358,40 @@ mod tests {
         // JSON that doesn't have a content field is left as-is (after control-char stripping)
         let json = r#"{"key":"value"}"#;
         assert_eq!(sanitize_user_input(json), r#"{"key":"value"}"#);
+    }
+
+    /// Regression (#6441 follow-up): the per-IP WS slot tracker must keep the
+    /// entry while any guard is alive and only remove it once the count is
+    /// genuinely zero (via `remove_if`). A unique TEST-NET-3 IP isolates this
+    /// from the shared global tracker.
+    #[test]
+    fn ws_slot_tracker_retains_entry_while_connections_live() {
+        let ip: std::net::IpAddr = "203.0.113.7".parse().unwrap();
+        ws_tracker().remove(&ip); // clean slate
+
+        let g1 = try_acquire_ws_slot(ip, 2).expect("first slot");
+        let g2 = try_acquire_ws_slot(ip, 2).expect("second slot");
+        assert!(try_acquire_ws_slot(ip, 2).is_none(), "cap of 2 reached");
+
+        // Dropping one guard leaves the entry present (g2 still live) — the
+        // old unconditional remove could have deleted it under a race.
+        drop(g1);
+        assert!(
+            ws_tracker().get(&ip).is_some(),
+            "entry must survive while another connection is live"
+        );
+        // A freed slot can be re-acquired, but never beyond the cap.
+        let g3 = try_acquire_ws_slot(ip, 2).expect("re-acquire freed slot");
+        assert!(try_acquire_ws_slot(ip, 2).is_none(), "cap still holds at 2");
+
+        drop(g2);
+        drop(g3);
+        // Back to zero → entry removed.
+        let count = ws_tracker()
+            .get(&ip)
+            .map(|e| e.value().load(Ordering::Relaxed))
+            .unwrap_or(0);
+        assert_eq!(count, 0, "count must return to zero after all guards drop");
     }
 
     #[test]

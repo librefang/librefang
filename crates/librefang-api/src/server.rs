@@ -46,7 +46,7 @@ pub const API_VERSIONS: &[(&str, &str)] = &[("v1", "stable")];
 ///
 /// To add v2 in the future, just create `api_v2_routes()`, mount it at `/api/v2`,
 /// and update `API_VERSION_LATEST`.
-fn api_v1_routes() -> Router<Arc<AppState>> {
+fn api_v1_routes(webhook_body_limit: usize) -> Router<Arc<AppState>> {
     Router::new()
         .merge(routes::config::router())
         .merge(routes::agents::router())
@@ -69,7 +69,7 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         .merge(routes::prompts::router())
         .merge(routes::terminal::router())
         .merge(routes::users::router())
-        .merge(routes::webhooks::router())
+        .merge(routes::webhooks::router(webhook_body_limit))
         // Passkey (WebAuthn/FIDO2) login + credential management (#5981)
         .merge(routes::passkey::router())
         // Dashboard credential login (handler defined locally in server.rs)
@@ -1675,10 +1675,23 @@ pub async fn build_router(
     };
     let auth_rl_max_attempts = rl_cfg.auth_rate_limit_per_ip;
 
+    // Per-webhook body cap for the external-trigger endpoints. Sourced from
+    // `webhook_triggers.max_payload_bytes` (default 64 KiB per its doc) so the
+    // documented cap is actually enforced at the wire level instead of only
+    // the global `max_request_body_bytes` (default 8 MiB). Applied both to the
+    // versioned `/api/hooks/*` routes (inside `api_v1_routes`) and the
+    // unversioned `/hooks/*` alias below.
+    let webhook_body_limit = kernel
+        .config_ref()
+        .webhook_triggers
+        .as_ref()
+        .map(|c| c.max_payload_bytes)
+        .unwrap_or(64 * 1024);
+
     // Build the versioned API routes. All /api/* endpoints are defined once
     // in api_v1_routes() and mounted at both /api and /api/v1 for backward
     // compatibility. Future versions (v2, v3) can be added as separate routers.
-    let v1_routes = api_v1_routes();
+    let v1_routes = api_v1_routes(webhook_body_limit);
 
     // Upload routes are defined separately so they can share the auth/rate-limit
     // layers but bypass the *global* `RequestBodyLimitLayer` applied at
@@ -1740,9 +1753,15 @@ pub async fn build_router(
         .nest("/api/v1", v1_routes.clone())
         // Mount the same routes at /api (latest version alias for backward compat)
         .nest("/api", v1_routes)
-        // Webhook trigger endpoints (not versioned — external callers use fixed URLs)
-        .route("/hooks/wake", axum::routing::post(routes::webhook_wake))
-        .route("/hooks/agent", axum::routing::post(routes::webhook_agent))
+        // Webhook trigger endpoints (not versioned — external callers use fixed
+        // URLs). Same per-webhook body cap as the versioned `/api/hooks/*`
+        // routes so `webhook_triggers.max_payload_bytes` is enforced on both.
+        .merge(
+            Router::new()
+                .route("/hooks/wake", axum::routing::post(routes::webhook_wake))
+                .route("/hooks/agent", axum::routing::post(routes::webhook_agent))
+                .layer(RequestBodyLimitLayer::new(webhook_body_limit)),
+        )
         // A2A protocol endpoints + MCP HTTP (protocol-level, not versioned).
         // Apply an explicit body limit (1 MB) to inbound A2A task payloads so
         // that external callers cannot exhaust server memory via oversized JSON
