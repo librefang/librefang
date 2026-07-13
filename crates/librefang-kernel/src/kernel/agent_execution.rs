@@ -370,7 +370,16 @@ impl LibreFangKernel {
         // 3. Session-mode fallback: per-trigger override > agent manifest default.
         //    `use_canonical_session` forces Persistent so the dashboard WS always
         //    persists to `entry.session_id`.
-        let effective_session_id = if let Some(sid) = session_id_override {
+        // Alongside the resolved id, track whether it was freshly minted THIS
+        // call (an ephemeral `SessionId::new()` from the mode-branch `New`).
+        // Only such a session has nothing to reset. The channel branch and an
+        // explicit override both resolve to sessions that persist across
+        // invocations, so keying the reset skip on the requested `session_mode`
+        // was wrong: a channel message to a `session_mode = "new"` agent uses a
+        // persistent `for_sender_scope` session (the channel branch ignores
+        // session_mode) yet was silently excluded from the reset policy.
+        let (effective_session_id, session_freshly_minted) = if let Some(sid) = session_id_override
+        {
             if let Some(existing) = self
                 .memory
                 .substrate
@@ -383,7 +392,7 @@ impl LibreFangKernel {
                     )));
                 }
             }
-            sid
+            (sid, false)
         } else {
             match sender_context {
                 Some(ctx) if !ctx.channel.is_empty() && !ctx.use_canonical_session => {
@@ -434,13 +443,18 @@ impl LibreFangKernel {
                             "session resolved via channel branch"
                         );
                     }
-                    derived
+                    // Channel-derived ids are deterministic and persist across
+                    // messages — subject to the reset policy.
+                    (derived, false)
                 }
                 _ => {
                     let mode = session_mode_override.unwrap_or(entry.manifest.session_mode);
                     match mode {
-                        librefang_types::agent::SessionMode::Persistent => entry.session_id,
-                        librefang_types::agent::SessionMode::New => SessionId::new(),
+                        librefang_types::agent::SessionMode::Persistent => {
+                            (entry.session_id, false)
+                        }
+                        // The only genuinely-ephemeral, freshly-minted case.
+                        librefang_types::agent::SessionMode::New => (SessionId::new(), true),
                     }
                 }
             }
@@ -506,18 +520,19 @@ impl LibreFangKernel {
         //
         // `mode = "off"` (the default) is a no-op — fully backward compatible.
         //
-        // Skip entirely for `session_mode = "new"`: every invocation already
-        // gets a fresh ephemeral session_id, so there is nothing to reset and
-        // we must not touch the `force_session_wipe` / `resume_pending` flags
-        // that belong to the persistent session path.
+        // Skip entirely only when the session was freshly minted THIS call (a
+        // genuinely ephemeral `SessionId::new()`): there is nothing to reset,
+        // and mutating the `force_session_wipe` / `resume_pending` flags would
+        // corrupt state for the persistent session path. A persistent session
+        // — whether channel-derived, an explicit override, or `Persistent`
+        // mode — is always evaluated by the policy (it correctly no-ops on a
+        // just-created session and resets a stale one). Keying this on the
+        // requested `session_mode` was wrong: a channel message to a
+        // `session_mode = "new"` agent runs on a persistent `for_sender_scope`
+        // session yet was silently excluded from the reset policy.
         {
             use crate::session_policy::SessionResetPolicyExt;
-            let effective_mode = session_mode_override.unwrap_or(entry.manifest.session_mode);
-            // `New` mode creates a fresh ephemeral session_id on every call;
-            // there is nothing persistent to reset, and mutating
-            // `force_session_wipe`/`resume_pending` flags would corrupt state
-            // for future persistent-mode invocations.
-            let skip_reset = matches!(effective_mode, librefang_types::agent::SessionMode::New);
+            let skip_reset = session_freshly_minted;
             if !skip_reset {
                 let policy = cfg.session.reset.clone();
                 let last_active: std::time::SystemTime = entry.last_active.into();
@@ -1176,6 +1191,7 @@ impl LibreFangKernel {
             compaction_config: Some(compaction_snapshot),
             gateway_compression: Some(cfg.gateway_compression.clone()),
             parallel_tools_config: Some(cfg.parallel_tools.clone()),
+            canvas_config: Some(cfg.canvas.clone()),
         };
 
         // Build a per-execution MCP pool that includes the agent workspace as

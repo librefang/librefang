@@ -42,6 +42,12 @@ struct Harness {
 /// `system::router`). `system::router` is still merged for the historical
 /// surface that hasn't moved.
 async fn boot_with_webhook(webhook: Option<WebhookTriggerConfig>) -> Harness {
+    // Mirror the production server, which sizes the trigger body-limit layer
+    // from `webhook_triggers.max_payload_bytes`.
+    let trigger_body_limit = webhook
+        .as_ref()
+        .map(|w| w.max_payload_bytes)
+        .unwrap_or(64 * 1024);
     let test = TestAppState::with_builder(MockKernelBuilder::new().with_config(move |cfg| {
         cfg.webhook_triggers = webhook.clone();
     }));
@@ -53,7 +59,7 @@ async fn boot_with_webhook(webhook: Option<WebhookTriggerConfig>) -> Harness {
     let app = Router::new()
         .nest(
             "/api",
-            routes::system::router().merge(routes::webhooks::router()),
+            routes::system::router().merge(routes::webhooks::router(trigger_body_limit)),
         )
         .with_state(state.clone());
     Harness {
@@ -147,7 +153,7 @@ async fn boot_enabled_with_llm(token_env: &str, llm_base_url: String) -> Harness
     let app = Router::new()
         .nest(
             "/api",
-            routes::system::router().merge(routes::webhooks::router()),
+            routes::system::router().merge(routes::webhooks::router(65536)),
         )
         .with_state(state.clone());
     Harness {
@@ -613,4 +619,30 @@ async fn commands_lookup_unknown_returns_404() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
     assert!(body["error"].is_object(), "{body:?}");
+}
+
+/// Regression (#6441 follow-up): `webhook_triggers.max_payload_bytes` must be
+/// enforced at the wire level on `/api/hooks/*`. Before the fix these routes
+/// only inherited the global 8 MiB body cap, so the documented per-webhook cap
+/// was dead config. A body over the configured cap must be rejected with 413.
+#[tokio::test(flavor = "multi_thread")]
+async fn hooks_wake_rejects_body_over_max_payload_bytes() {
+    let token_env = "LIBREFANG_TEST_WEBHOOK_TOKEN_BODYCAP";
+    // A tiny cap so an ordinary payload exceeds it.
+    let h = boot_with_webhook(Some(WebhookTriggerConfig {
+        enabled: true,
+        token_env: token_env.to_string(),
+        max_payload_bytes: 50,
+        rate_limit_per_minute: 30,
+    }))
+    .await;
+    // ~500-byte body, comfortably over the 50-byte cap. The limit layer rejects
+    // it before the handler's token check even runs, so no bearer is needed.
+    let big = serde_json::json!({ "text": "x".repeat(500), "mode": "event" });
+    let (status, _body) = send(&h, Method::POST, "/api/hooks/wake", Some(big), None).await;
+    assert_eq!(
+        status,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "an over-cap webhook body must be rejected with 413"
+    );
 }

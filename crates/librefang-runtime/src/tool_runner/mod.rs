@@ -124,6 +124,9 @@ tokio::task_local! {
     pub(super) static AGENT_CALL_DEPTH: std::cell::Cell<u32>;
     /// Canvas max HTML size in bytes (set from kernel config at loop start).
     pub static CANVAS_MAX_BYTES: usize;
+    /// Canvas allowed-tag override (set from kernel config at loop start).
+    /// Empty → the canvas sanitizer falls back to its hardcoded `ALLOWED_TAGS`.
+    pub static CANVAS_ALLOWED_TAGS: std::sync::Arc<Vec<String>>;
 }
 
 /// Shared `Option<&Arc<dyn KernelHandle>>` -> `&Arc<dyn KernelHandle>` unwrap

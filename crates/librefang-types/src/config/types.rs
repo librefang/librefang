@@ -2032,7 +2032,10 @@ impl Default for TelemetryConfig {
 pub struct PromptIntelligenceConfig {
     /// Enable prompt versioning and A/B testing. Default: false.
     pub enabled: bool,
-    /// Hash prompts using SHA-256 for version identification. Default: true.
+    /// Retained for compatibility; effectively always `true`.
+    /// The SHA-256 `content_hash` is load-bearing — it drives prompt-version dedup and is stored NOT NULL — so it is always computed regardless of this flag.
+    /// Setting it to `false` is ignored and logs a warning at boot.
+    /// Default: true.
     pub hash_prompts: bool,
     /// Maximum number of versions to keep per agent. Default: 50.
     pub max_versions_per_agent: u32,
@@ -6982,15 +6985,13 @@ pub struct ChannelsConfig {
 
     // --- Global file-upload settings ---
     /// Maximum file size in bytes for channel file uploads (bot → server),
-    /// applied uniformly by the Matrix and Telegram adapters before sending
-    /// outbound media (default: 50 MB).
+    /// default 50 MB.
     ///
-    /// Distinct from `file_download_max_bytes` (inbound: server → agent →
-    /// disk). An operator who wants a larger inbound budget but a smaller
-    /// outbound budget — or vice versa — must set both independently. The
-    /// 50 MiB default matches both the Matrix homeserver convention and
-    /// Telegram's bot API ceiling, so omitting the field leaves behaviour
-    /// unchanged from the pre-#4882 hardcoded constants.
+    /// NOTE: this knob is currently NOT enforced.
+    /// It configured the in-process Matrix / Telegram adapters' `with_max_upload_bytes` builders, but those adapters were replaced by out-of-process sidecars in the #5317–#5459 migration (`start_channel_bridge_with_config` no longer consults its config).
+    /// Outbound uploads are instead bounded by the sidecar's own hardcoded cap.
+    /// The kernel logs a WARN at boot when this is set below that effective cap so an operator is not misled into thinking a tighter value took effect; honouring a custom value requires threading it into the sidecar send path (a sidecar-crate change).
+    /// Distinct from `file_download_max_bytes` (inbound: server → agent → disk), which IS enforced.
     #[serde(default = "default_file_upload_max_bytes")]
     pub file_upload_max_bytes: u64,
 }

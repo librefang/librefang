@@ -412,7 +412,13 @@ pub async fn run_agent_loop(
     opts: &LoopOptions,
 ) -> LibreFangResult<AgentLoopResult> {
     let agent_label = manifest.name.clone();
-    let result = run_agent_loop_inner(
+    // Scope the canvas task-locals from the resolved config so `canvas_present`
+    // honours `[canvas] max_html_bytes` / `allowed_tags` instead of always
+    // falling back to its hardcoded defaults (#6441 follow-up). `None` →
+    // `CanvasConfig::default()` (512 KiB, empty allowlist → built-in tags).
+    let canvas_cfg = opts.canvas_config.clone().unwrap_or_default();
+    let canvas_tags = std::sync::Arc::new(canvas_cfg.allowed_tags);
+    let inner = run_agent_loop_inner(
         manifest,
         user_message,
         session,
@@ -441,8 +447,13 @@ pub async fn run_agent_loop(
         context_engine,
         pending_messages,
         opts,
-    )
-    .await;
+    );
+    let result = crate::tool_runner::CANVAS_MAX_BYTES
+        .scope(
+            canvas_cfg.max_html_bytes,
+            crate::tool_runner::CANVAS_ALLOWED_TAGS.scope(canvas_tags, inner),
+        )
+        .await;
     record_agent_loop_exit(&agent_label, &result);
     result
 }
@@ -1695,8 +1706,11 @@ async fn run_agent_loop_inner(
                 if parallel_enabled && total_tool_calls > 1 {
                     let cfg = opts.parallel_tools_config.as_ref().unwrap();
                     let max_concurrent = cfg.max_concurrent as usize;
-                    let plan =
-                        crate::parallel_dispatch::plan_batch(&response.tool_calls, available_tools);
+                    let plan = crate::parallel_dispatch::plan_batch_with_mcp(
+                        &response.tool_calls,
+                        available_tools,
+                        Some(cfg),
+                    );
                     let mut hard_error_hit = false;
                     'groups: for group in &plan.groups {
                         let mut tool_exec_ctx = build_tool_exec_ctx!();

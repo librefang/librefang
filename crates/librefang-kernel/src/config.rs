@@ -174,6 +174,37 @@ pub fn load_config(path: Option<&Path>) -> Result<KernelConfig, String> {
 
                     match root_value.try_into::<KernelConfig>() {
                         Ok(config) => {
+                            // `prompt_intelligence.hash_prompts = false` cannot be
+                            // honoured: the SHA-256 `content_hash` is load-bearing
+                            // (it drives prompt-version dedup and is stored NOT
+                            // NULL), so it is always computed. Surface the ignored
+                            // knob instead of letting it silently no-op.
+                            if !config.prompt_intelligence.hash_prompts {
+                                tracing::warn!(
+                                    "[prompt_intelligence] hash_prompts = false is ignored: \
+                                     the content_hash is required for prompt-version dedup and \
+                                     is always computed. Remove the setting to silence this warning."
+                                );
+                            }
+                            // `channels.file_upload_max_bytes` is dead config
+                            // since the in-process channel adapters moved to
+                            // sidecars (#5317–#5459); it is not threaded into the
+                            // sidecar send path. Warn only when an operator has
+                            // tuned it away from the default so they are not
+                            // misled into thinking a tighter cap took effect.
+                            if config.channels.file_upload_max_bytes
+                                != librefang_types::config::ChannelsConfig::default()
+                                    .file_upload_max_bytes
+                            {
+                                tracing::warn!(
+                                    configured = config.channels.file_upload_max_bytes,
+                                    "[channels] file_upload_max_bytes is currently NOT enforced: \
+                                     the in-process adapters it configured were replaced by \
+                                     out-of-process sidecars. Outbound uploads are bounded by the \
+                                     sidecar's hardcoded cap; honouring this value requires a \
+                                     sidecar-crate change."
+                                );
+                            }
                             // Write migrated config back to disk so future loads skip migration
                             if migrated && file_version < CONFIG_VERSION {
                                 let toml_str = toml::to_string_pretty(&config);

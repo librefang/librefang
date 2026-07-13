@@ -143,9 +143,41 @@ impl ParallelSafety {
 /// 2. Otherwise, project the [`ToolApprovalClass`] computed by
 ///    [`classify_tool`] via [`ParallelSafety::from_approval_class`].
 pub fn parallel_safety(name: &str, definition: Option<&ToolDefinition>) -> ParallelSafety {
+    parallel_safety_with_mcp(name, definition, None)
+}
+
+/// Like [`parallel_safety`] but consulting the operator's
+/// [`ParallelToolsConfig`](librefang_types::config::ParallelToolsConfig) MCP
+/// overrides. Resolution order:
+///
+/// 1. Explicit `metadata.parallel_safety` schema annotation (author-declared;
+///    wins over operator config, as before).
+/// 2. `mcp_readonly_allowlist` membership → [`ParallelSafety::ReadOnly`]
+///    (per the field's "regardless of `mcp_default_safety`" contract).
+/// 3. `mcp__`-prefixed tool with no annotation → `mcp_default_safety`.
+/// 4. Fallback to the name/annotation heuristic ([`classify_tool`]).
+///
+/// Without this, an unannotated `mcp__server__tool` fell straight through to
+/// `Unknown` → `WriteShared`, so `mcp_default_safety` / `mcp_readonly_allowlist`
+/// were silently ignored and read-only MCP calls never parallelised.
+pub fn parallel_safety_with_mcp(
+    name: &str,
+    definition: Option<&ToolDefinition>,
+    mcp: Option<&librefang_types::config::ParallelToolsConfig>,
+) -> ParallelSafety {
     if let Some(def) = definition {
         if let Some(explicit) = explicit_parallel_safety_from_schema(&def.input_schema) {
             return explicit;
+        }
+    }
+    if let Some(cfg) = mcp {
+        if cfg.mcp_readonly_allowlist.iter().any(|n| n == name) {
+            return ParallelSafety::ReadOnly;
+        }
+        if name.starts_with("mcp__") {
+            if let Some(class) = ParallelSafety::from_snake_case(&cfg.mcp_default_safety) {
+                return class;
+            }
         }
     }
     ParallelSafety::from_approval_class(classify_tool(name, definition))
@@ -548,5 +580,58 @@ mod tests {
             // as_str and the serde wire form must agree.
             assert_eq!(json, format!("\"{}\"", v.as_str()));
         }
+    }
+
+    /// Regression (#6441 follow-up): the operator's MCP parallel-safety
+    /// overrides must actually be consulted. Without them an unannotated
+    /// `mcp__server__tool` falls through to `Unknown` → `WriteShared`, so a
+    /// read-only MCP call never parallelises.
+    #[test]
+    fn parallel_safety_honours_mcp_overrides() {
+        use librefang_types::config::ParallelToolsConfig;
+
+        // Baseline: no config → unannotated mcp tool is WriteShared (unchanged).
+        assert_eq!(
+            parallel_safety_with_mcp("mcp__db__query", None, None),
+            ParallelSafety::WriteShared
+        );
+
+        let cfg = ParallelToolsConfig {
+            enabled: true,
+            mcp_readonly_allowlist: vec!["mcp__db__query".to_string()],
+            mcp_default_safety: "write_shared".to_string(),
+            ..Default::default()
+        };
+        // Allowlisted name → ReadOnly regardless of mcp_default_safety.
+        assert_eq!(
+            parallel_safety_with_mcp("mcp__db__query", None, Some(&cfg)),
+            ParallelSafety::ReadOnly
+        );
+
+        let cfg_ro = ParallelToolsConfig {
+            enabled: true,
+            mcp_default_safety: "read_only".to_string(),
+            ..Default::default()
+        };
+        // Any mcp__ tool (no annotation, not allowlisted) picks up the default.
+        assert_eq!(
+            parallel_safety_with_mcp("mcp__github__list", None, Some(&cfg_ro)),
+            ParallelSafety::ReadOnly
+        );
+        // A non-mcp tool is unaffected by the mcp default.
+        assert_eq!(
+            parallel_safety_with_mcp("brand_new_tool", None, Some(&cfg_ro)),
+            ParallelSafety::WriteShared
+        );
+
+        // An explicit schema annotation still wins over the mcp config.
+        let def = def_with_schema(serde_json::json!({
+            "type": "object",
+            "metadata": { "parallel_safety": "exclusive" }
+        }));
+        assert_eq!(
+            parallel_safety_with_mcp("mcp__db__query", Some(&def), Some(&cfg)),
+            ParallelSafety::Exclusive
+        );
     }
 }

@@ -18,17 +18,68 @@ const MAX_DOWNLOAD_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Maximum number of entries permitted in a bundle zip.
 /// Guards against an archive with an absurd number of tiny entries.
-const MAX_ENTRIES: usize = 10_000;
+/// `pub(crate)` so the ClawHub/Skillhub install path shares the same caps
+/// (single source of truth — see [`write_zip_entry_capped`]).
+pub(crate) const MAX_ENTRIES: usize = 10_000;
 
 /// Maximum uncompressed size of any single zip entry.
-const MAX_ENTRY_UNCOMPRESSED_BYTES: u64 = 128 * 1024 * 1024;
+pub(crate) const MAX_ENTRY_UNCOMPRESSED_BYTES: u64 = 128 * 1024 * 1024;
 
 /// Maximum cumulative uncompressed size across all entries in a bundle.
-const MAX_TOTAL_UNCOMPRESSED_BYTES: u64 = 512 * 1024 * 1024;
+pub(crate) const MAX_TOTAL_UNCOMPRESSED_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Maximum per-entry uncompressed:compressed ratio before an entry is
 /// treated as a decompression bomb.
-const MAX_COMPRESSION_RATIO: u64 = 100;
+pub(crate) const MAX_COMPRESSION_RATIO: u64 = 100;
+
+/// Stream one zip entry to `out_path` with decompression-bomb guards, shared
+/// by both skill-install zip extractors (marketplace bundles and
+/// ClawHub/Skillhub skills) so the caps cannot drift between them.
+///
+/// Rejects (with [`SkillError::SecurityBlocked`], removing any partial file)
+/// when the entry's declared size exceeds the per-entry cap, its
+/// uncompressed:compressed ratio exceeds [`MAX_COMPRESSION_RATIO`], the
+/// streamed bytes exceed the per-entry cap (defeats a lying header via a
+/// bounded `take`), or the running `total_uncompressed` exceeds the bundle
+/// cap. `std::io::copy` streams through a small buffer, so a bomb cannot
+/// allocate its full decompressed length in RAM. The caller passes
+/// `declared_size` / `compressed_size` (from the zip header) and a mutable
+/// running total.
+pub(crate) fn write_zip_entry_capped<R: std::io::Read>(
+    entry: &mut R,
+    declared_size: u64,
+    compressed_size: u64,
+    out_path: &Path,
+    entry_label: &str,
+    total_uncompressed: &mut u64,
+) -> Result<(), SkillError> {
+    if declared_size > MAX_ENTRY_UNCOMPRESSED_BYTES {
+        return Err(SkillError::SecurityBlocked(format!(
+            "zip entry '{entry_label}' declares {declared_size} uncompressed bytes, exceeding the {MAX_ENTRY_UNCOMPRESSED_BYTES}-byte per-entry limit"
+        )));
+    }
+    if compressed_size > 0 && declared_size / compressed_size > MAX_COMPRESSION_RATIO {
+        return Err(SkillError::SecurityBlocked(format!(
+            "zip entry '{entry_label}' has a compression ratio above {MAX_COMPRESSION_RATIO}:1 (possible decompression bomb)"
+        )));
+    }
+    let mut out_file = std::fs::File::create(out_path)?;
+    let mut limited = entry.take(MAX_ENTRY_UNCOMPRESSED_BYTES + 1);
+    let written = std::io::copy(&mut limited, &mut out_file).map_err(SkillError::Io)?;
+    if written > MAX_ENTRY_UNCOMPRESSED_BYTES {
+        let _ = std::fs::remove_file(out_path);
+        return Err(SkillError::SecurityBlocked(format!(
+            "zip entry '{entry_label}' exceeded the {MAX_ENTRY_UNCOMPRESSED_BYTES}-byte per-entry decompression limit"
+        )));
+    }
+    *total_uncompressed = total_uncompressed.saturating_add(written);
+    if *total_uncompressed > MAX_TOTAL_UNCOMPRESSED_BYTES {
+        return Err(SkillError::SecurityBlocked(format!(
+            "bundle exceeded the {MAX_TOTAL_UNCOMPRESSED_BYTES}-byte total decompression limit"
+        )));
+    }
+    Ok(())
+}
 
 fn urlencoded(s: &str) -> String {
     use std::fmt::Write;
@@ -549,42 +600,18 @@ fn extract_bundle_zip_bytes(bytes: &[u8], skill_dir: &Path) -> Result<(), SkillE
             std::fs::create_dir_all(parent)?;
         }
 
-        // Early reject on the declared header sizes so an obvious
-        // decompression bomb is caught before any bytes are streamed.
+        // Stream to disk with the shared decompression-bomb guards (declared
+        // size, ratio, bounded `take`, running total).
         let declared = file.size();
         let compressed = file.compressed_size();
-        if declared > MAX_ENTRY_UNCOMPRESSED_BYTES {
-            return Err(SkillError::SecurityBlocked(format!(
-                "zip entry '{}' declares {declared} uncompressed bytes, exceeding the {MAX_ENTRY_UNCOMPRESSED_BYTES}-byte per-entry limit",
-                relative_path.display()
-            )));
-        }
-        if compressed > 0 && declared / compressed > MAX_COMPRESSION_RATIO {
-            return Err(SkillError::SecurityBlocked(format!(
-                "zip entry '{}' has a compression ratio above {MAX_COMPRESSION_RATIO}:1 (possible decompression bomb)",
-                relative_path.display()
-            )));
-        }
-
-        // Stream to disk with a hard per-entry cap. `std::io::copy` uses a
-        // small internal buffer, so a malicious entry that lied about its
-        // header size cannot allocate its full decompressed length in RAM.
-        let mut out_file = std::fs::File::create(&out_path)?;
-        let mut limited = (&mut file).take(MAX_ENTRY_UNCOMPRESSED_BYTES + 1);
-        let written = std::io::copy(&mut limited, &mut out_file).map_err(SkillError::Io)?;
-        if written > MAX_ENTRY_UNCOMPRESSED_BYTES {
-            let _ = std::fs::remove_file(&out_path);
-            return Err(SkillError::SecurityBlocked(format!(
-                "zip entry '{}' exceeded the {MAX_ENTRY_UNCOMPRESSED_BYTES}-byte per-entry decompression limit",
-                relative_path.display()
-            )));
-        }
-        total_uncompressed = total_uncompressed.saturating_add(written);
-        if total_uncompressed > MAX_TOTAL_UNCOMPRESSED_BYTES {
-            return Err(SkillError::SecurityBlocked(format!(
-                "bundle exceeded the {MAX_TOTAL_UNCOMPRESSED_BYTES}-byte total decompression limit"
-            )));
-        }
+        write_zip_entry_capped(
+            &mut file,
+            declared,
+            compressed,
+            &out_path,
+            &relative_path.display().to_string(),
+            &mut total_uncompressed,
+        )?;
     }
 
     Ok(())
@@ -696,6 +723,59 @@ mod tests {
         let config = MarketplaceConfig::default();
         assert!(config.registry_url.contains("github"));
         assert_eq!(config.github_org, "librefang-skills");
+    }
+
+    /// Regression (#6441 follow-up): the shared zip-entry writer — used by both
+    /// the marketplace and ClawHub/Skillhub install paths — must reject
+    /// decompression bombs (oversized declared header, high compression ratio)
+    /// while still writing a normal entry.
+    #[test]
+    fn write_zip_entry_capped_blocks_bombs() {
+        let dir = TempDir::new().unwrap();
+
+        // Oversized declared header → blocked before any bytes are streamed.
+        let mut total = 0u64;
+        let mut src = &b"tiny"[..];
+        let err = write_zip_entry_capped(
+            &mut src,
+            MAX_ENTRY_UNCOMPRESSED_BYTES + 1,
+            1,
+            &dir.path().join("big"),
+            "big",
+            &mut total,
+        )
+        .unwrap_err();
+        assert!(matches!(err, SkillError::SecurityBlocked(_)), "got {err:?}");
+
+        // High compression ratio (declared within the per-entry cap) → blocked.
+        let mut src = &b"tiny"[..];
+        let err = write_zip_entry_capped(
+            &mut src,
+            1_000_000,
+            100, // ratio 10_000:1
+            &dir.path().join("ratio"),
+            "ratio",
+            &mut total,
+        )
+        .unwrap_err();
+        assert!(matches!(err, SkillError::SecurityBlocked(_)), "got {err:?}");
+
+        // A normal small entry writes and advances the running total.
+        let mut src = &b"hello world"[..];
+        write_zip_entry_capped(
+            &mut src,
+            11,
+            11,
+            &dir.path().join("ok.txt"),
+            "ok.txt",
+            &mut total,
+        )
+        .expect("a normal entry must be written");
+        assert_eq!(total, 11, "running total must track written bytes");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("ok.txt")).unwrap(),
+            "hello world"
+        );
     }
 
     #[test]

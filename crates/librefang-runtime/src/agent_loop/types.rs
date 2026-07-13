@@ -177,6 +177,16 @@ pub struct LoopOptions {
     /// and other call-paths that don't need it. Kernel populates this
     /// from `KernelConfig.gateway_compression`.
     pub gateway_compression: Option<librefang_types::config::GatewayCompressionConfig>,
+    /// Canvas tool configuration (`[canvas]` in config.toml).
+    ///
+    /// When `Some`, the loop scopes the `CANVAS_MAX_BYTES` /
+    /// `CANVAS_ALLOWED_TAGS` task-locals from it so `canvas_present` honours
+    /// the operator's `max_html_bytes` and `allowed_tags`. When `None` (the
+    /// default and the test path) the canvas tool falls back to its hardcoded
+    /// 512 KiB cap and built-in tag allowlist.
+    ///
+    /// Kernel populates this from `KernelConfig.canvas`.
+    pub canvas_config: Option<librefang_types::config::CanvasConfig>,
 }
 
 /// Result of an agent loop execution.

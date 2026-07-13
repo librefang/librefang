@@ -3914,6 +3914,29 @@ async fn dispatch_message(
     // as normal text forwarded to the agent.
     if let ChannelContent::Command { ref name, ref args } = message.content {
         if is_command_allowed(name, overrides.as_ref()) {
+            // RBAC: authorize the sender BEFORE dispatching a privileged
+            // slash-command. Commands are handled and `return` here — above the
+            // chat-path `authorize_channel_user` gate near the bottom of this
+            // fn — so without this an unauthorized user (rejected on any normal
+            // message when RBAC / an allowlist is configured) could still
+            // `/approve` pending tool calls, spawn/switch agents, reset another
+            // user's session, or run control-plane commands. The gate is a
+            // no-op when RBAC is disabled, so open deployments are unaffected.
+            // (#6441 follow-up)
+            if let Err(denied) = handle
+                .authorize_channel_user(ct_str, sender_user_id(message), "chat")
+                .await
+            {
+                send_response(
+                    adapter,
+                    &message.sender,
+                    format!("Access denied: {denied}"),
+                    thread_id,
+                    output_format,
+                )
+                .await;
+                return;
+            }
             // Special-case /agents: send an inline keyboard with one button per agent.
             if name == "agents" {
                 let agents = handle.list_agents().await.unwrap_or_default();
@@ -4309,6 +4332,25 @@ async fn dispatch_message(
 
         if crate::commands::is_channel_command(cmd) {
             if is_command_allowed(cmd, overrides.as_ref()) {
+                // RBAC: authorize the sender before dispatching a slash-command
+                // embedded in text / reconstructed from a button, mirroring the
+                // typed-command path above. Without this the same bypass lets an
+                // unauthorized user run privileged commands. No-op when RBAC is
+                // disabled. (#6441 follow-up)
+                if let Err(denied) = handle
+                    .authorize_channel_user(ct_str, sender_user_id(message), "chat")
+                    .await
+                {
+                    send_response(
+                        adapter,
+                        &message.sender,
+                        format!("Access denied: {denied}"),
+                        thread_id,
+                        output_format,
+                    )
+                    .await;
+                    return;
+                }
                 // Special-case /agents: send an inline keyboard with one button per agent.
                 if cmd == "agents" {
                     let agents = handle.list_agents().await.unwrap_or_default();

@@ -40,6 +40,18 @@ const DEFAULT_RATE_LIMIT_SLEEP_MS: u64 = 2_000;
 /// to the next one in the chain.
 const MAX_RATE_LIMIT_RETRIES: usize = 2;
 
+/// Upper bound on an in-loop rate-limit backoff before we give up on the
+/// current provider and fail over to the next chain entry instead of sleeping.
+///
+/// A provider's `Retry-After` (or the shared rate guard's persisted RPH
+/// lockout) can be minutes-to-an-hour. Sleeping it verbatim here would stall
+/// the turn for that long before failover — defeating the fallback chain's
+/// whole purpose — so any backoff over this cap short-circuits to the next
+/// provider (matching the streaming path and the sibling `FallbackDriver`,
+/// which never sleep on rate limits). Short backoffs (the 2 s default, small
+/// `Retry-After` hints) still sleep-and-retry the same provider.
+const MAX_RATE_LIMIT_SLEEP_MS: u64 = 10_000;
+
 // ---------------------------------------------------------------------------
 // Entry type
 // ---------------------------------------------------------------------------
@@ -179,6 +191,22 @@ impl FallbackChain {
                             }
                             _ => self.rate_limit_sleep_ms,
                         };
+
+                        // A backoff longer than the cap means the provider wants
+                        // a real cooldown (a large `Retry-After` or a persisted
+                        // RPH lockout). Don't stall the turn sleeping it —
+                        // fail over to the next chain entry now.
+                        if sleep_ms > MAX_RATE_LIMIT_SLEEP_MS {
+                            warn!(
+                                provider = %entry.provider_name,
+                                model = %entry.model_override,
+                                sleep_ms,
+                                cap_ms = MAX_RATE_LIMIT_SLEEP_MS,
+                                reason = ?reason,
+                                "FallbackChain: rate-limit backoff exceeds cap; failing over immediately instead of sleeping"
+                            );
+                            return Err(e);
+                        }
 
                         warn!(
                             provider = %entry.provider_name,
@@ -737,6 +765,56 @@ mod tests {
         let err = chain.complete(test_request()).await.unwrap_err();
         // ContextTooLong must propagate without reaching p2
         assert_eq!(err.failover_reason(), FailoverReason::ContextTooLong);
+    }
+
+    struct BigRetryAfterDriver {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl LlmDriver for BigRetryAfterDriver {
+        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // A 1-hour Retry-After, as the shared rate guard emits for an RPH
+            // lockout.
+            Err(LlmError::RateLimited {
+                retry_after_ms: 3_600_000,
+                message: None,
+            })
+        }
+    }
+
+    /// Regression (#6441 follow-up): a huge `Retry-After` must NOT be slept
+    /// verbatim on the non-streaming path. The chain fails over to the next
+    /// provider immediately — one call to the primary, no retry-sleep loop —
+    /// matching the streaming path and the sibling `FallbackDriver`. Under the
+    /// old code this test would hang ~2h (two ~1h sleeps) before failover; the
+    /// 5 s timeout asserts the fix.
+    #[tokio::test]
+    async fn huge_retry_after_fails_over_immediately() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let chain = FallbackChain::new(vec![
+            entry(
+                Arc::new(BigRetryAfterDriver {
+                    calls: calls.clone(),
+                }),
+                "p1",
+            ),
+            entry(Arc::new(OkDriver("fallback")), "p2"),
+        ]);
+        let r = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            chain.complete(test_request()),
+        )
+        .await
+        .expect("chain must fail over quickly, not sleep the 1h Retry-After")
+        .unwrap();
+        assert_eq!(r.text(), "fallback");
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "primary must be tried once then failed over (no retry-sleep loop)"
+        );
     }
 
     #[tokio::test]
