@@ -652,6 +652,7 @@ impl LibreFangKernel {
         if manifest.thinking.is_none()
             && super::manifest_helpers::global_thinking_backfill_allowed(
                 &self.llm.model_catalog.load(),
+                &manifest.model.provider,
                 &manifest.model.model,
             )
         {

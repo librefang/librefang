@@ -87,12 +87,14 @@ pub(super) fn manifest_to_capabilities(manifest: &AgentManifest) -> Vec<Capabili
 /// Backfill is suppressed only when the catalog knows the model and marks it `supports_thinking = false` — an unknown/custom model keeps the historical backfill so explicit operator setups are never silently degraded (#6398).
 /// This bounds the blast radius of a global `[thinking]` block: with the OpenAI-compat driver now emitting `reasoning_effort` for a configured budget, backfilling onto a known non-reasoning model (e.g. `gpt-4o`) would turn every request into a parameter error where it previously was a silent no-op.
 /// Explicit `manifest.thinking` and the per-call override below are deliberately not gated — they are direct user intent.
+/// Provider-aware, prefix-reconciling lookup (mirrors `ModelCatalog::find_model_for_manifest`, #6423): a bare OpenRouter manifest model must still resolve the prefixed catalog entry, or this falls back to the permissive "unknown model" default and silently backfills thinking config onto a model that does not support it.
 pub(super) fn global_thinking_backfill_allowed(
     catalog: &librefang_runtime::model_catalog::ModelCatalog,
+    provider: &str,
     model: &str,
 ) -> bool {
     catalog
-        .find_model(model)
+        .find_model_for_manifest(provider, model)
         .map(|m| catalog.effective_capabilities(m).supports_thinking)
         .unwrap_or(true)
 }
