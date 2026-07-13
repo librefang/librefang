@@ -73,6 +73,15 @@ pub struct ToolExecContext<'a> {
     /// call sites; the deferred payload falls back to `sender_id` in
     /// that case.
     pub chat_id: Option<&'a str>,
+    /// The bot account / tenant instance the originating turn arrived on
+    /// (`metadata["account_id"]`, stamped kernel-side from the inbound
+    /// message). Threaded so `channel_send` can reject a cross-account
+    /// (cross-tenant) dispatch — an explicit `account_id` targeting a
+    /// *different* registered bot instance than the turn came in on (#6443).
+    /// `None` for out-of-band callers (cron, triggers, API-driven tool runs)
+    /// and single-tenant deployments that never stamp an account — the guard
+    /// no-ops in that case, preserving the existing unrestricted behaviour.
+    pub sender_account_id: Option<&'a str>,
     /// LibreFang `SessionId` the tool call belongs to. When `Some`, the
     /// `file_read` / `file_write` builtins consult
     /// `kernel.acp_fs_client(session_id)` and route through the editor's
@@ -201,6 +210,7 @@ pub async fn execute_tool_raw(
         // by the MCP dispatch arm to populate `CallerContext.chat_id`
         // (#5699), so it's a real binding.
         chat_id,
+        sender_account_id,
         session_id,
         spill_threshold_bytes,
         max_artifact_bytes,
@@ -1111,6 +1121,9 @@ pub async fn execute_tool_raw(
                 // cross-chat dispatch guard can scope its recipient check.
                 *channel,
                 *chat_id,
+                // #6443: thread the turn's originating account so the
+                // cross-account (cross-tenant) dispatch guard can fire.
+                *sender_account_id,
                 *caller_agent_id,
                 &extra_refs,
             )
@@ -1429,6 +1442,12 @@ pub async fn execute_tool_raw(
 /// `allowed_tools` enforces capability-based security: if provided, only
 /// tools in the list may execute. This prevents an LLM from hallucinating
 /// tool names outside the agent's capability grants.
+// `execute_tool` keeps its historical positional signature so external callers
+// (librefang-api tool-run routes) and the ~57 unit tests stay untouched; it
+// forwards to `execute_tool_with_sender_account` with `sender_account_id =
+// None` (out-of-band callers are unrestricted, matching the cron/trigger no-op
+// in the cross-chat guard). Only the in-process agent loop threads the stamped
+// account through, the same way #6117 threaded `chat_id`.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_tool(
     tool_use_id: &str,
@@ -1463,6 +1482,83 @@ pub async fn execute_tool(
     available_tools: Option<&[ToolDefinition]>,
     spill_threshold_bytes: u64,
     max_artifact_bytes: u64,
+) -> ToolResult {
+    execute_tool_with_sender_account(
+        tool_use_id,
+        tool_name,
+        input,
+        kernel,
+        allowed_tools,
+        caller_agent_id,
+        skill_registry,
+        allowed_skills,
+        mcp_connections,
+        web_ctx,
+        browser_ctx,
+        allowed_env_vars,
+        workspace_root,
+        media_engine,
+        media_drivers,
+        exec_policy,
+        tts_engine,
+        docker_config,
+        process_manager,
+        process_registry,
+        sender_id,
+        channel,
+        chat_id,
+        checkpoint_manager,
+        interrupt,
+        session_id,
+        dangerous_command_checker,
+        available_tools,
+        spill_threshold_bytes,
+        max_artifact_bytes,
+        None,
+    )
+    .await
+}
+
+/// Account-aware variant of [`execute_tool`]. Identical except it also carries
+/// `sender_account_id` — the bot account / tenant the originating turn arrived
+/// on — so the `channel_send` cross-account dispatch guard (#6443) can fire.
+/// The in-process agent loop calls this directly with the stamped account;
+/// every other caller uses the [`execute_tool`] shim with `None`.
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_tool_with_sender_account(
+    tool_use_id: &str,
+    tool_name: &str,
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    allowed_tools: Option<&[String]>,
+    caller_agent_id: Option<&str>,
+    skill_registry: Option<&SkillRegistry>,
+    allowed_skills: Option<&[String]>,
+    mcp_connections: Option<&tokio::sync::Mutex<Vec<mcp::McpConnection>>>,
+    web_ctx: Option<&WebToolsContext>,
+    browser_ctx: Option<&crate::browser::BrowserManager>,
+    allowed_env_vars: Option<&[String]>,
+    workspace_root: Option<&Path>,
+    media_engine: Option<&crate::media_understanding::MediaEngine>,
+    media_drivers: Option<&crate::media::MediaDriverCache>,
+    exec_policy: Option<&librefang_types::config::ExecPolicy>,
+    tts_engine: Option<&crate::tts::TtsEngine>,
+    docker_config: Option<&librefang_types::config::DockerSandboxConfig>,
+    process_manager: Option<&crate::process_manager::ProcessManager>,
+    process_registry: Option<&crate::process_registry::ProcessRegistry>,
+    sender_id: Option<&str>,
+    channel: Option<&str>,
+    chat_id: Option<&str>,
+    checkpoint_manager: Option<&Arc<crate::checkpoint_manager::CheckpointManager>>,
+    interrupt: Option<crate::interrupt::SessionInterrupt>,
+    session_id: Option<&str>,
+    dangerous_command_checker: Option<
+        &Arc<tokio::sync::RwLock<crate::dangerous_command::DangerousCommandChecker>>,
+    >,
+    available_tools: Option<&[ToolDefinition]>,
+    spill_threshold_bytes: u64,
+    max_artifact_bytes: u64,
+    sender_account_id: Option<&str>,
 ) -> ToolResult {
     // Normalize the tool name through compat mappings so LLM-hallucinated aliases
     // (e.g. "fs-write" → "file_write") resolve to the canonical LibreFang name.
@@ -1629,6 +1725,9 @@ pub async fn execute_tool(
                 sender_id: sender_id.map(|s| s.to_string()),
                 channel: channel.map(|c| c.to_string()),
                 chat_id: chat_id.map(|c| c.to_string()),
+                // #6443: persist the originating account so an approved,
+                // deferred channel_send still enforces the cross-account guard.
+                account_id: sender_account_id.map(|s| s.to_string()),
                 workspace_root: workspace_root.map(|p| p.to_path_buf()),
                 // When the user gate demanded approval, hand-tagged agents
                 // must NOT auto-approve — see kernel `submit_tool_approval`.
@@ -1696,6 +1795,7 @@ pub async fn execute_tool(
         sender_id,
         channel,
         chat_id,
+        sender_account_id,
         session_id: parsed_session_id,
         spill_threshold_bytes,
         max_artifact_bytes,

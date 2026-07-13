@@ -363,7 +363,10 @@ impl LibreFangKernel {
             .llm
             .model_catalog
             .load()
-            .find_model(&entry.manifest.model.model)
+            // #6423: provider-aware, prefix-reconciling lookup — a bare
+            // OpenRouter manifest model (`tencent/hy3:free`) must still match
+            // the prefixed catalog id (`openrouter/tencent/hy3:free`).
+            .find_model_for_manifest(&entry.manifest.model.provider, &entry.manifest.model.model)
             .map(|m| m.context_window as usize)
             .filter(|w| *w > 0)
             .unwrap_or(200_000);
@@ -530,7 +533,7 @@ impl LibreFangKernel {
 
         // Resolve context window with the same precedence chain the agent loop uses:
         // 1. agent.toml `model.context_window` explicit override
-        // 2. ModelCatalog lookup (provider-aware, filters out 0)
+        // 2. ModelCatalog lookup (provider-aware, prefix-reconciling, filters out 0)
         // 3. Persisted session value (authoritative only when catalog has no entry)
         // 4. Conservative fallback (8192) — matches UNKNOWN_MODEL_CONTEXT_WINDOW (#3349)
         let context_window: usize = entry
@@ -543,7 +546,14 @@ impl LibreFangKernel {
                 self.llm
                     .model_catalog
                     .load()
-                    .find_model(&entry.manifest.model.model)
+                    // #6423: was a provider-blind `find_model`, which missed the
+                    // `openrouter/`-prefixed catalog id for a bare manifest model
+                    // and fell through to UNKNOWN_MODEL_CONTEXT_WINDOW (8192) —
+                    // the wrong context denominator this report describes.
+                    .find_model_for_manifest(
+                        &entry.manifest.model.provider,
+                        &entry.manifest.model.model,
+                    )
                     .map(|m| m.context_window as usize)
                     .filter(|w| *w > 0)
             })

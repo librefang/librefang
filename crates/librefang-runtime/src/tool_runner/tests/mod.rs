@@ -253,6 +253,7 @@ async fn test_tool_channel_send_blocks_secret_in_text_message() {
         Some("test_user_id"),
         None,
         None,
+        None, // sender_account_id
         None,
         &[],
     )
@@ -283,6 +284,7 @@ async fn test_tool_channel_send_blocks_secret_in_image_caption() {
         Some("test_user_id"),
         None,
         None,
+        None, // sender_account_id
         None,
         &[],
     )
@@ -313,6 +315,7 @@ async fn test_tool_channel_send_blocks_secret_in_poll_question() {
         Some("test_user_id"),
         None,
         None,
+        None, // sender_account_id
         None,
         &[],
     )
@@ -346,6 +349,7 @@ async fn test_tool_channel_send_auto_fills_recipient_from_sender_id() {
         Some("12345_telegram"),
         None,
         None,
+        None, // sender_account_id
         None,
         &[],
     )
@@ -370,9 +374,19 @@ async fn test_tool_channel_send_requires_recipient_without_sender_id() {
         // recipient intentionally omitted
         "message": "Hello!",
     });
-    let err = tool_channel_send(&input, Some(&kernel), None, None, None, None, None, &[])
-        .await
-        .expect_err("channel_send must require recipient without sender_id");
+    let err = tool_channel_send(
+        &input,
+        Some(&kernel),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &[],
+    )
+    .await
+    .expect_err("channel_send must require recipient without sender_id");
     assert!(
         err.contains("Missing 'recipient'"),
         "Expected missing recipient error, got: {err}"
@@ -412,6 +426,7 @@ async fn channel_send_explicit_mismatch_same_channel_is_blocked() {
         Some("owner-jid"), // sender_id
         Some("whatsapp"),  // sender_channel
         None,              // sender_chat_id (DM: falls back to sender_id)
+        None, // #6443 sender_account_id — these #6117 tests exercise the recipient guard, not the account guard
         Some("agent-x"),
         &[],
     )
@@ -436,6 +451,7 @@ async fn channel_send_explicit_match_same_channel_passes_guard() {
         Some("owner-jid"),
         Some("whatsapp"),
         None,
+        None, // #6443 sender_account_id — these #6117 tests exercise the recipient guard, not the account guard
         Some("agent-x"),
         &[],
     )
@@ -465,6 +481,7 @@ async fn channel_send_group_reply_to_chat_id_passes_guard() {
         Some("speaker-42"), // individual speaker
         Some("telegram"),
         Some("group-123"), // conversation id (the group)
+        None, // #6443 sender_account_id — these #6117 tests exercise the recipient guard, not the account guard
         Some("agent-x"),
         &[],
     )
@@ -493,6 +510,7 @@ async fn channel_send_different_channel_passes_guard() {
         Some("owner-jid"),
         Some("whatsapp"), // inbound channel differs from the send channel
         None,
+        None, // #6443 sender_account_id — these #6117 tests exercise the recipient guard, not the account guard
         Some("agent-x"),
         &[],
     )
@@ -521,6 +539,7 @@ async fn channel_send_out_of_band_no_peer_scope_passes_guard() {
         None, // no sender_id
         None, // no sender_channel
         None, // no sender_chat_id
+        None, // #6443 sender_account_id — these #6117 tests exercise the recipient guard, not the account guard
         Some("agent-x"),
         &[],
     )
@@ -551,6 +570,7 @@ async fn channel_send_explicit_case_variant_is_blocked() {
         Some("owner-jid"),
         Some("whatsapp"),
         None,
+        None, // #6443 sender_account_id — these #6117 tests exercise the recipient guard, not the account guard
         Some("agent-x"),
         &[],
     )
@@ -576,12 +596,205 @@ async fn channel_send_empty_chat_id_falls_back_to_sender_id_guard() {
         Some("owner-jid"),
         Some("whatsapp"),
         Some(""), // empty chat_id must fall back to sender_id, not disable the guard
+        None, // #6443 sender_account_id — these #6117 tests exercise the recipient guard, not the account guard
         Some("agent-x"),
         &[],
     )
     .await
     .expect_err("empty chat_id must still enforce via sender_id fallback");
     assert!(err.contains(GUARD_MSG), "expected guard error, got: {err}");
+}
+
+// ── #6443 cross-account (cross-tenant) dispatch guard ──────────────────────
+//
+// `account_id` selects which registered bot instance a send routes through. On
+// a multi-tenant daemon an agent must only send from the account its turn
+// arrived on. The guard mirrors the #6117 recipient guard's scoping: it fires
+// only for an EXPLICIT `account_id`, only when the turn's originating account is
+// known (`sender_account_id`), and only within the SAME channel. As above,
+// `guard_kernel()` has no working transport, so a send that passes the guard
+// fails later with a generic error — assertions key on the account guard's
+// distinctive message.
+
+const ACCOUNT_GUARD_MSG: &str = "Cross-account (cross-tenant) dispatch is forbidden";
+
+#[tokio::test]
+async fn channel_send_explicit_account_mismatch_same_channel_is_blocked() {
+    let kernel = guard_kernel();
+    // Turn arrived on bot-a; the model targets a different tenant's account.
+    // No explicit `recipient`, so the #6117 recipient guard is a no-op and we
+    // isolate the account guard.
+    let input = serde_json::json!({
+        "channel": "telegram",
+        "account_id": "bot-b",
+        "message": "cross-tenant leak",
+    });
+    let err = tool_channel_send(
+        &input,
+        Some(&kernel),
+        None,
+        Some("owner"),    // sender_id (recipient auto-fills to this)
+        Some("telegram"), // sender_channel
+        None,             // sender_chat_id (DM)
+        Some("bot-a"),    // sender_account_id — the turn's originating account
+        Some("agent-x"),
+        &[],
+    )
+    .await
+    .expect_err("cross-account dispatch must be blocked");
+    assert!(
+        err.contains(ACCOUNT_GUARD_MSG),
+        "expected account guard error, got: {err}"
+    );
+    assert!(err.contains("bot-b") && err.contains("bot-a"));
+}
+
+#[tokio::test]
+async fn channel_send_matching_account_passes_guard() {
+    let kernel = guard_kernel();
+    let input = serde_json::json!({
+        "channel": "telegram",
+        "account_id": "bot-a",
+        "message": "same account, legit",
+    });
+    let err = tool_channel_send(
+        &input,
+        Some(&kernel),
+        None,
+        Some("owner"),
+        Some("telegram"),
+        None,
+        Some("bot-a"),
+        Some("agent-x"),
+        &[],
+    )
+    .await
+    .expect_err("send fails at the transport mock, not the guard");
+    assert!(
+        !err.contains(ACCOUNT_GUARD_MSG),
+        "matching account must pass the guard: {err}"
+    );
+}
+
+#[tokio::test]
+async fn channel_send_no_explicit_account_passes_guard() {
+    // An auto-filled send carries no account_id and already routes to the
+    // originating account — the guard must not fire.
+    let kernel = guard_kernel();
+    let input = serde_json::json!({
+        "channel": "telegram",
+        "message": "reply on my own account",
+    });
+    let err = tool_channel_send(
+        &input,
+        Some(&kernel),
+        None,
+        Some("owner"),
+        Some("telegram"),
+        None,
+        Some("bot-a"),
+        Some("agent-x"),
+        &[],
+    )
+    .await
+    .expect_err("send fails at the transport mock, not the guard");
+    assert!(
+        !err.contains(ACCOUNT_GUARD_MSG),
+        "no explicit account_id must pass the guard: {err}"
+    );
+}
+
+#[tokio::test]
+async fn channel_send_cross_account_different_channel_passes_guard() {
+    // A different-channel dispatch stays allowed (the #6117 design): account_id
+    // on another channel is in a different namespace, not comparable to the
+    // turn's account, so the guard does not fire.
+    let kernel = guard_kernel();
+    let input = serde_json::json!({
+        "channel": "email",
+        "account_id": "bot-b",
+        "recipient": "someone@example.com",
+        "message": "cross-channel is fine",
+    });
+    let err = tool_channel_send(
+        &input,
+        Some(&kernel),
+        None,
+        Some("owner"),
+        Some("telegram"), // turn arrived on telegram / bot-a
+        None,
+        Some("bot-a"),
+        Some("agent-x"),
+        &[],
+    )
+    .await
+    .expect_err("send fails at the transport mock, not the guard");
+    assert!(
+        !err.contains(ACCOUNT_GUARD_MSG),
+        "different-channel dispatch must pass the account guard: {err}"
+    );
+}
+
+#[tokio::test]
+async fn channel_send_account_out_of_band_passes_guard() {
+    // Out-of-band callers (cron, triggers, API-driven runs) carry no
+    // sender_account_id — the guard no-ops, preserving unrestricted behaviour.
+    let kernel = guard_kernel();
+    let input = serde_json::json!({
+        "channel": "telegram",
+        "account_id": "bot-b",
+        "recipient": "anyone",
+        "message": "scheduled broadcast",
+    });
+    let err = tool_channel_send(
+        &input,
+        Some(&kernel),
+        None,
+        None, // no sender_id
+        None, // no sender_channel
+        None, // no sender_chat_id
+        None, // no sender_account_id
+        Some("agent-x"),
+        &[],
+    )
+    .await
+    .expect_err("send fails at the transport mock, not the guard");
+    assert!(
+        !err.contains(ACCOUNT_GUARD_MSG),
+        "out-of-band send must pass the account guard: {err}"
+    );
+}
+
+#[tokio::test]
+async fn channel_send_cross_account_blocked_on_embedded_channel() {
+    // WhatsApp-style adapters stamp `sender_channel = "whatsapp:<jid>"` (#5227)
+    // while `channel_send` targets the bare `"whatsapp"`. The guard compares
+    // base channel types, so the embedded conversation id must not disable it —
+    // otherwise the cross-account guard is a no-op on exactly the multi-account
+    // WhatsApp deployments it protects (#6443 review finding).
+    let kernel = guard_kernel();
+    let input = serde_json::json!({
+        "channel": "whatsapp",
+        "account_id": "bot-b",
+        "message": "cross-tenant via embedded channel",
+    });
+    let err = tool_channel_send(
+        &input,
+        Some(&kernel),
+        None,
+        Some("owner-jid"),
+        Some("whatsapp:!room:hs"), // sender_channel embeds the room jid
+        None,
+        Some("bot-a"),
+        Some("agent-x"),
+        &[],
+    )
+    .await
+    .expect_err("cross-account dispatch must be blocked despite the embedded channel");
+    assert!(
+        err.contains(ACCOUNT_GUARD_MSG),
+        "base-channel match must still fire the guard on an embedded channel: {err}"
+    );
 }
 
 // ── agent_send conversation_key routing tests ─────────────────────────────
@@ -1311,6 +1524,7 @@ async fn test_channel_send_mirrors_to_channel_owner_session() {
         Some("99999"),
         None,
         None,
+        None, // sender_account_id
         Some("caller-agent-id"),
         &[],
     )
@@ -1364,6 +1578,7 @@ async fn test_channel_send_mirrors_when_caller_is_channel_owner() {
         Some("42"),
         None,
         None,
+        None, // sender_account_id
         Some("same-agent"),
         &[],
     )
@@ -1404,6 +1619,7 @@ async fn test_channel_send_succeeds_even_when_mirror_fails() {
         Some("77"),
         None,
         None,
+        None, // sender_account_id
         Some("caller-id"),
         &[],
     )

@@ -170,6 +170,16 @@ pub struct DeferredToolExecution {
     /// emitted the field; in-process non-channel sources).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_id: Option<String>,
+    /// The bot account / tenant the original message arrived on
+    /// (`SenderContext.account_id`, stamped from the inbound adapter
+    /// config name). Threaded through so an approved, deferred
+    /// `channel_send` still enforces the cross-account (cross-tenant)
+    /// dispatch guard (#6443) rather than silently bypassing it on the
+    /// approval-resume path. `None` for out-of-band / single-tenant
+    /// sources and for pre-existing rows persisted before this field
+    /// existed — the guard no-ops in that case, matching the live path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
     pub workspace_root: Option<std::path::PathBuf>,
     /// `true` when the approval was demanded by the per-user RBAC gate
     /// (`UserToolGate::NeedsApproval`) rather than the standard
@@ -1362,6 +1372,7 @@ mod tests {
             sender_id: Some("user-123".to_string()),
             channel: Some("telegram".to_string()),
             chat_id: Some("group-456".to_string()),
+            account_id: None,
             workspace_root: Some(std::path::PathBuf::from("/tmp")),
             force_human: false,
             session_id: None,

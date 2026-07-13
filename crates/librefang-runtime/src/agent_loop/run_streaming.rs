@@ -227,6 +227,12 @@ async fn run_agent_loop_streaming_inner(
         .get("sender_chat_id")
         .and_then(|v| v.as_str())
         .map(String::from);
+    // #6443: bot account / tenant this turn arrived on — see `run_agent_loop`.
+    let sender_account_id: Option<String> = manifest
+        .metadata
+        .get(librefang_types::agent::SENDER_ACCOUNT_ID_METADATA_KEY)
+        .and_then(|v| v.as_str())
+        .map(String::from);
     // #5227: see `run_agent_loop` for the rationale; same fallback to
     // `sender_channel` keeps non-kernel callers behaving as they did
     // before the chat-scope helper landed.
@@ -1298,6 +1304,7 @@ async fn run_agent_loop_streaming_inner(
                             sender_user_id: sender_user_id.as_deref(),
                             sender_channel: sender_channel.as_deref(),
                             sender_chat_id: sender_chat_id.as_deref(),
+                            sender_account_id: sender_account_id.as_deref(),
                             checkpoint_manager: checkpoint_manager.as_ref(),
                             context_budget: &context_budget,
                             context_engine,

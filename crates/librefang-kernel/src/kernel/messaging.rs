@@ -644,7 +644,10 @@ impl LibreFangKernel {
         let driver = self.resolve_driver(&manifest)?;
 
         let ctx_window = Some(self.llm.model_catalog.load()).and_then(|cat| {
-            cat.find_model(&manifest.model.model)
+            // #6423: provider-aware, prefix-reconciling lookup so a bare
+            // OpenRouter manifest model resolves the prefixed catalog id
+            // instead of falling back to the 8192 unknown-model window.
+            cat.find_model_for_manifest(&manifest.model.provider, &manifest.model.model)
                 .map(|m| m.context_window as usize)
                 .filter(|w| *w > 0)
         });
@@ -656,7 +659,7 @@ impl LibreFangKernel {
         // must respect that override or the runtime behaviour diverges from
         // what the dashboard shows.
         if let Some(supports) = Some(self.llm.model_catalog.load()).and_then(|cat| {
-            cat.find_model(&manifest.model.model)
+            cat.find_model_for_manifest(&manifest.model.provider, &manifest.model.model)
                 .map(|m| cat.effective_capabilities(m).supports_tools)
         }) {
             manifest.metadata.insert(
@@ -2358,7 +2361,8 @@ impl LibreFangKernel {
         // 0 so image/audio entries (no context window) fall through to the
         // caller's default rather than poisoning compaction math.
         let ctx_window = Some(self.llm.model_catalog.load()).and_then(|cat| {
-            cat.find_model(&entry.manifest.model.model)
+            // #6423: provider-aware, prefix-reconciling lookup (streaming path).
+            cat.find_model_for_manifest(&entry.manifest.model.provider, &entry.manifest.model.model)
                 .map(|m| m.context_window as usize)
                 .filter(|w| *w > 0)
         });
@@ -2391,7 +2395,7 @@ impl LibreFangKernel {
         // Inject model_supports_tools for auto web search augmentation.
         // Refs #4745: honour user capability overrides via effective_capabilities.
         if let Some(supports) = Some(self.llm.model_catalog.load()).and_then(|cat| {
-            cat.find_model(&manifest.model.model)
+            cat.find_model_for_manifest(&manifest.model.provider, &manifest.model.model)
                 .map(|m| cat.effective_capabilities(m).supports_tools)
         }) {
             manifest.metadata.insert(
@@ -2405,6 +2409,7 @@ impl LibreFangKernel {
         if manifest.thinking.is_none()
             && super::manifest_helpers::global_thinking_backfill_allowed(
                 &self.llm.model_catalog.load(),
+                &manifest.model.provider,
                 &manifest.model.model,
             )
         {
@@ -2663,6 +2668,18 @@ impl LibreFangKernel {
                     manifest.metadata.insert(
                         "sender_chat_id".to_string(),
                         serde_json::Value::String(cid.clone()),
+                    );
+                }
+            }
+            // #6443: stamp the bot account / tenant the turn arrived on so the
+            // runtime can reject a cross-account (cross-tenant) `channel_send`.
+            // Empty account ids are dropped — an empty stamp would disable the
+            // guard (it treats `None`/empty as "account unknown").
+            if let Some(ref acct) = ctx.account_id {
+                if !acct.is_empty() {
+                    manifest.metadata.insert(
+                        librefang_types::agent::SENDER_ACCOUNT_ID_METADATA_KEY.to_string(),
+                        serde_json::Value::String(acct.clone()),
                     );
                 }
             }

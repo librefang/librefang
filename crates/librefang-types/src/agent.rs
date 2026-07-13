@@ -10,6 +10,15 @@ use uuid::Uuid;
 /// Metadata key for stable prefix mode flag.
 pub const STABLE_PREFIX_MODE_METADATA_KEY: &str = "stable_prefix_mode";
 
+/// Metadata key carrying the bot account / tenant the current turn arrived on
+/// (#6443). The kernel stamps it from `SenderContext.account_id`; the runtime
+/// agent loop reads it and threads it into the `channel_send` cross-account
+/// (cross-tenant) dispatch guard. Canonicalized as a shared constant — unlike
+/// the sibling `sender_*` literals — because it is load-bearing for a security
+/// boundary: a typo divergence between the stamp and read sites would silently
+/// disable the guard with the whole test suite still green.
+pub const SENDER_ACCOUNT_ID_METADATA_KEY: &str = "sender_account_id";
+
 /// Stable namespace for deriving deterministic [`UserId`] values from
 /// [`UserConfig::name`]. Generated once and frozen — changing this constant
 /// rotates every existing `UserId` and breaks audit-log correlation across
