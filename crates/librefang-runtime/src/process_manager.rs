@@ -111,14 +111,9 @@ impl ProcessManager {
         cmd.process_group(0);
         #[cfg(windows)]
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-                                         // SECURITY: scrub the daemon environment before spawn, mirroring
-                                         // `tool_shell_exec` (shell.rs:130) and `LocalBackend::run_command`.
-                                         // Without this the child inherits the daemon's full process env —
-                                         // including `LIBREFANG_VAULT_KEY` and provider API keys — which an
-                                         // agent can read straight back via `process_poll` (e.g.
-                                         // `process_start {"command":"env"}` under the default Allowlist,
-                                         // where `env` is a safe_bin). `sandbox_command` `env_clear()`s and
-                                         // re-adds only the safe allowlist + the agent's `allowed_env`.
+                                         // SECURITY: scrub the daemon environment before spawn, mirroring `tool_shell_exec` (shell.rs:130) and `LocalBackend::run_command`.
+                                         // Without this the child inherits the daemon's full process env — including `LIBREFANG_VAULT_KEY` and provider API keys — which an agent can read straight back via `process_poll` (e.g. `process_start {"command":"env"}` under the default Allowlist, where `env` is a safe_bin).
+                                         // `sandbox_command` `env_clear()`s and re-adds only the safe allowlist + the agent's `allowed_env`.
         crate::subprocess_sandbox::sandbox_command(&mut cmd, allowed_env);
         let mut child = cmd
             .spawn()

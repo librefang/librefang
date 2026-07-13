@@ -230,15 +230,9 @@ fn min_role_for_privileged_get(path: &str) -> Option<UserRole> {
     if path.starts_with("/api/agents/") && path.ends_with("/ws") {
         return Some(UserRole::User);
     }
-    // `/api/config/export` returns the raw on-disk config.toml verbatim —
-    // including inline plaintext secrets (the master `api_key`,
-    // `network.shared_secret`, provider/channel credentials) that the sibling
-    // `GET /api/config` redacts. It is a plain GET, so the blanket
-    // "GET is read-only" rule below would hand every authenticated role
-    // (Viewer / User / Admin) the unredacted secrets — and a leaked master
-    // api_key re-presents as `Owner`, a full privilege escalation. Gate it to
-    // Owner, matching the Owner-only gating of the `/api/config[/set|/reload]`
-    // writes whose whole purpose is to keep the bearer token Owner-controlled.
+    // `/api/config/export` returns the raw on-disk config.toml verbatim — including inline plaintext secrets (the master `api_key`, `network.shared_secret`, provider/channel credentials) that the sibling `GET /api/config` redacts.
+    // It is a plain GET, so the blanket "GET is read-only" rule below would hand every authenticated role (Viewer / User / Admin) the unredacted secrets — and a leaked master api_key re-presents as `Owner`, a full privilege escalation.
+    // Gate it to Owner, matching the Owner-only gating of the `/api/config[/set|/reload]` writes whose whole purpose is to keep the bearer token Owner-controlled.
     if path == "/api/config/export" {
         return Some(UserRole::Owner);
     }

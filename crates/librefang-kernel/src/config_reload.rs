@@ -160,21 +160,13 @@ impl ReloadPlan {
 // build_reload_plan
 // ---------------------------------------------------------------------------
 
-/// Compare two config fields for a semantic change. Returns `true` when they
-/// differ (or if one side fails to serialize).
+/// Compare two config fields for a semantic change.
+/// Returns `true` when they differ (or if one side fails to serialize).
 ///
-/// Compares canonicalized `serde_json::Value`s, NOT raw JSON strings. Several
-/// reload-classified fields transitively contain `HashMap`s (users,
-/// channel_role_mapping, broadcast routes, audit retention, per-skill env,
-/// …). `serde_json::to_string` serializes a `HashMap` in its per-instance
-/// iteration order, so two content-identical maps built from separate
-/// deserializations (the live config vs the reload candidate) produce
-/// different strings and `field_changed` fired spuriously — emitting a
-/// needless `ReloadAuth` / `restart_required` on every reload for any
-/// multi-entry deployment. `to_value` normalizes every (possibly nested) map
-/// to a `BTreeMap`-backed `Value::Object` (the workspace does not enable
-/// serde_json's `preserve_order`), so semantically-equal configs compare
-/// equal regardless of map iteration order.
+/// Compares canonicalized `serde_json::Value`s, NOT raw JSON strings.
+/// Several reload-classified fields transitively contain `HashMap`s (users, channel_role_mapping, broadcast routes, audit retention, per-skill env, …).
+/// `serde_json::to_string` serializes a `HashMap` in its per-instance iteration order, so two content-identical maps built from separate deserializations (the live config vs the reload candidate) produce different strings and `field_changed` fired spuriously — emitting a needless `ReloadAuth` / `restart_required` on every reload for any multi-entry deployment.
+/// `to_value` normalizes every (possibly nested) map to a `BTreeMap`-backed `Value::Object` (the workspace does not enable serde_json's `preserve_order`), so semantically-equal configs compare equal regardless of map iteration order.
 fn field_changed<T: serde::Serialize>(old: &T, new: &T) -> bool {
     let old_val = serde_json::to_value(old).ok();
     let new_val = serde_json::to_value(new).ok();
