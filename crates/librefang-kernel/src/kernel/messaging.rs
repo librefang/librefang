@@ -2678,7 +2678,7 @@ impl LibreFangKernel {
             if let Some(ref acct) = ctx.account_id {
                 if !acct.is_empty() {
                     manifest.metadata.insert(
-                        "sender_account_id".to_string(),
+                        librefang_types::agent::SENDER_ACCOUNT_ID_METADATA_KEY.to_string(),
                         serde_json::Value::String(acct.clone()),
                     );
                 }

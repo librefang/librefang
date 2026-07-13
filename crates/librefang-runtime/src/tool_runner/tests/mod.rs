@@ -765,6 +765,38 @@ async fn channel_send_account_out_of_band_passes_guard() {
     );
 }
 
+#[tokio::test]
+async fn channel_send_cross_account_blocked_on_embedded_channel() {
+    // WhatsApp-style adapters stamp `sender_channel = "whatsapp:<jid>"` (#5227)
+    // while `channel_send` targets the bare `"whatsapp"`. The guard compares
+    // base channel types, so the embedded conversation id must not disable it —
+    // otherwise the cross-account guard is a no-op on exactly the multi-account
+    // WhatsApp deployments it protects (#6443 review finding).
+    let kernel = guard_kernel();
+    let input = serde_json::json!({
+        "channel": "whatsapp",
+        "account_id": "bot-b",
+        "message": "cross-tenant via embedded channel",
+    });
+    let err = tool_channel_send(
+        &input,
+        Some(&kernel),
+        None,
+        Some("owner-jid"),
+        Some("whatsapp:!room:hs"), // sender_channel embeds the room jid
+        None,
+        Some("bot-a"),
+        Some("agent-x"),
+        &[],
+    )
+    .await
+    .expect_err("cross-account dispatch must be blocked despite the embedded channel");
+    assert!(
+        err.contains(ACCOUNT_GUARD_MSG),
+        "base-channel match must still fire the guard on an embedded channel: {err}"
+    );
+}
+
 // ── agent_send conversation_key routing tests ─────────────────────────────
 //
 // Verify that tool_agent_send routes to the correct KernelHandle method

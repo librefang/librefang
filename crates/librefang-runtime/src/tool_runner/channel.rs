@@ -123,6 +123,15 @@ fn trim_opt_string(val: Option<&str>) -> Option<&str> {
     val.map(str::trim).filter(|s| !s.is_empty())
 }
 
+/// The base channel *type*, stripping any `:<suffix>` an adapter embeds. The
+/// WhatsApp gateway stamps `sender_channel = "whatsapp:<jid>"` (#5227) while a
+/// `channel_send` targets the bare `"whatsapp"`; the #6443 cross-account guard
+/// compares base types so the embedding does not silently disable it. Channels
+/// with no colon are returned unchanged.
+fn channel_base(channel: &str) -> &str {
+    channel.split(':').next().unwrap_or(channel)
+}
+
 /// Resolve the `channel_send` target.
 ///
 /// An explicit `recipient` wins. Otherwise the send replies to the current
@@ -261,13 +270,18 @@ pub(super) async fn tool_channel_send(
     if let (Some(explicit_account), Some(turn_account), Some(turn_channel)) =
         (account_id, sender_account_id, sender_channel)
     {
-        // Compare account ids case-SENSITIVELY (they are opaque registration
-        // identifiers, like `recipient`); keep the channel match
-        // case-insensitive so the guard still fires when the model varies the
-        // channel's casing.
+        // Compare the BASE channel type, not the raw stamped string. Adapters
+        // that embed the conversation id in the channel (the WhatsApp gateway
+        // stamps `sender_channel = "whatsapp:<jid>"`, see #5227) would otherwise
+        // never equal the bare `channel = "whatsapp"` a `channel_send` targets,
+        // silently disabling this guard for exactly the multi-account WhatsApp
+        // deployments it must protect. Stripping the `:<suffix>` keeps the
+        // same-channel-type scoping while surviving the embedding. Account ids
+        // are compared case-SENSITIVELY (opaque registration identifiers, like
+        // `recipient`); the channel match stays case-insensitive.
         if !turn_account.is_empty()
             && !turn_channel.is_empty()
-            && turn_channel.eq_ignore_ascii_case(&channel)
+            && channel_base(turn_channel).eq_ignore_ascii_case(channel_base(&channel))
             && explicit_account != turn_account
         {
             return Err(format!(

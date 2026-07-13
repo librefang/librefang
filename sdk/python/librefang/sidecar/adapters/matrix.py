@@ -174,6 +174,11 @@ INITIAL_BACKOFF_SECS = 1.0
 SEEN_MESSAGES_MAX = 10_000
 SEEN_MESSAGES_EVICT = 5_000
 
+# #6444: FIFO cap for the member-count-derived DM set. The `m.direct` set is
+# naturally bounded by the account's DM registry; the count==2 heuristic set is
+# not, so it is bounded like the sibling `_seen` / `_phase_reactions` caches.
+DM_ROOMS_BY_COUNT_CAPACITY = 1024
+
 
 def _parse_retry_after(resp_hdrs: dict, *, default_secs: float) -> float:
     """Backwards-compat wrapper around
@@ -782,12 +787,23 @@ class MatrixAdapter(SidecarAdapter):
             max_size=SEEN_MESSAGES_MAX, evict=SEEN_MESSAGES_EVICT,
         )
         # #6444: rooms known to be 1:1 DMs, so `is_group` is accurate instead
-        # of hardcoded True. Populated from two independent /sync signals — the
-        # `m.direct` account-data registry and a room summary
-        # `m.joined_member_count == 2`. Without this every Matrix room (DMs
-        # included) is flagged group, and under the default
-        # `GroupPolicy::MentionOnly` the group gate silently drops all inbound.
-        self._dm_rooms: set[str] = set()
+        # of hardcoded True. Without this every Matrix room (DMs included) is
+        # flagged group, and under the default `GroupPolicy::MentionOnly` the
+        # group gate silently drops all inbound. Two independent sources, kept
+        # separate so each honours its own lifecycle:
+        #   `_dm_rooms_direct` — the canonical `m.direct` account-data registry,
+        #     seeded once at startup (see `_seed_dm_rooms_from_server`, so a
+        #     post-restart resume from `since_token` — whose incremental /sync
+        #     omits `m.direct` for unchanged rooms — still knows its DMs) and
+        #     FULL-REPLACED on every later `m.direct` event, so a room removed
+        #     from the registry stops being treated as a DM.
+        #   `_dm_rooms_by_count` — the `m.joined_member_count == 2` heuristic,
+        #     add-on-2 / discard-on-other, FIFO-bounded like the sibling caches.
+        # `_is_dm_room` unions the two. `_dm_rooms_by_count` is a plain dict
+        # used as an insertion-ordered set (Python 3.7+) so the FIFO cap can
+        # evict the oldest entry.
+        self._dm_rooms_direct: set[str] = set()
+        self._dm_rooms_by_count: dict[str, None] = {}
         # Streaming-edit state: stream_id → state dict.
         # Initialized here (not lazily) so concurrent StreamStart calls
         # never race-create separate dicts.
@@ -1073,43 +1089,96 @@ class MatrixAdapter(SidecarAdapter):
             url += f"&since={urllib.parse.quote(self.since_token, safe='')}"
         return url
 
+    def _is_dm_room(self, room_id: str) -> bool:
+        """True when the room is a known 1:1 DM by either signal (#6444)."""
+        return room_id in self._dm_rooms_direct or room_id in self._dm_rooms_by_count
+
+    @staticmethod
+    def _extract_m_direct_rooms(content: Any) -> set[str]:
+        """Flatten an ``m.direct`` event content (``{user_id: [room_id, ...]}``)
+        into the set of DM room ids it lists."""
+        rooms: set[str] = set()
+        if isinstance(content, dict):
+            for room_ids in content.values():
+                if isinstance(room_ids, list):
+                    for rid in room_ids:
+                        if isinstance(rid, str) and rid:
+                            rooms.add(rid)
+        return rooms
+
     def _update_dm_rooms_from_account_data(self, account_data: Any) -> None:
-        """Add every room listed under the account's ``m.direct`` event to
-        the DM cache (#6444). ``m.direct`` maps ``{user_id: [room_id, ...]}``
-        — the canonical per-account registry of 1:1 direct-message rooms.
-        Runs in the single producer thread, so ``_dm_rooms`` needs no lock."""
+        """FULL-REPLACE the ``m.direct`` DM set from a /sync ``account_data``
+        block (#6444). ``m.direct`` account data is a complete-state event
+        (``{user_id: [room_id, ...]}``), so a room dropped from the registry
+        must stop being treated as a DM — hence replace, not add. Absent an
+        ``m.direct`` event this sync (the common incremental case) the existing
+        set is left intact. Runs in the single producer thread, so the sets
+        need no lock."""
         if not isinstance(account_data, dict):
             return
         events = account_data.get("events")
         if not isinstance(events, list):
             return
+        latest: Optional[set[str]] = None
         for ev in events:
-            if not isinstance(ev, dict) or ev.get("type") != "m.direct":
-                continue
-            content = ev.get("content")
-            if not isinstance(content, dict):
-                continue
-            for room_ids in content.values():
-                if isinstance(room_ids, list):
-                    for rid in room_ids:
-                        if isinstance(rid, str) and rid:
-                            self._dm_rooms.add(rid)
+            if isinstance(ev, dict) and ev.get("type") == "m.direct":
+                latest = self._extract_m_direct_rooms(ev.get("content"))
+        if latest is not None:
+            self._dm_rooms_direct = latest
+
+    def _mark_dm_by_count(self, room_id: str) -> None:
+        """Record a member-count-derived DM, FIFO-bounded to
+        ``DM_ROOMS_BY_COUNT_CAPACITY`` like the sibling caches."""
+        self._dm_rooms_by_count.pop(room_id, None)
+        self._dm_rooms_by_count[room_id] = None
+        while len(self._dm_rooms_by_count) > DM_ROOMS_BY_COUNT_CAPACITY:
+            # Evict the oldest (insertion-ordered dict).
+            self._dm_rooms_by_count.pop(next(iter(self._dm_rooms_by_count)))
 
     def _update_dm_room_from_summary(self, room_id: str, summary: Any) -> None:
         """Cache a room's DM/group verdict from its /sync summary (#6444). A
-        joined member count of exactly 2 is a 1:1 DM; more is a group. The
-        summary is sent lazily (only when membership changes), so this updates
-        the cache only when the count is present — a later summary-less sync
-        must not flip a known DM back to group."""
+        joined member count of exactly 2 is a 1:1 DM (per issue #6444's
+        heuristic; Matrix has no hard DM concept and a 2-member room is
+        conventionally direct); more is a group. The summary is sent lazily, so
+        this updates the cache only when the count is present — a later
+        summary-less sync must not flip a known DM back to group."""
         if not isinstance(summary, dict):
             return
         count = summary.get("m.joined_member_count")
         if not isinstance(count, int) or isinstance(count, bool):
             return
         if count == 2:
-            self._dm_rooms.add(room_id)
+            self._mark_dm_by_count(room_id)
         else:
-            self._dm_rooms.discard(room_id)
+            self._dm_rooms_by_count.pop(room_id, None)
+
+    def _seed_dm_rooms_from_server(self) -> None:
+        """Fetch the ``m.direct`` account data once at producer startup and seed
+        the DM set (#6444). A daemon restart resumes /sync from the persisted
+        ``since_token``, and that incremental response omits ``m.direct`` for
+        unchanged rooms — so without this seed every established DM would be
+        misclassified as a group (and dropped under the default MentionOnly
+        policy) until its membership next changes. Best-effort: any failure
+        leaves the set empty and the running /sync stream repopulates it as
+        signals arrive."""
+        if not self.user_id:
+            return
+        url = (
+            f"{self.homeserver_url}/_matrix/client/v3/user/"
+            f"{urllib.parse.quote(self.user_id, safe='')}"
+            f"/account_data/m.direct"
+        )
+        try:
+            status, parsed, _raw, _hdrs = self._http(
+                url, headers=self._auth_headers(),
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warn("matrix m.direct seed failed", error=str(e))
+            return
+        # 404 = the account has never set m.direct; not an error.
+        if status == 200 and isinstance(parsed, dict):
+            self._dm_rooms_direct = self._extract_m_direct_rooms(parsed)
+            log.info("matrix DM rooms seeded", count=len(self._dm_rooms_direct))
 
     def _process_sync_body(
         self, body: dict, emit: Callable[[dict], None],
@@ -1208,7 +1277,7 @@ class MatrixAdapter(SidecarAdapter):
                             metadata["was_mentioned"] = True
                 # #6444: a 1:1 DM must not take the group path. Hardcoding
                 # is_group=True made the default MentionOnly gate drop every DM.
-                is_group = room_id not in self._dm_rooms
+                is_group = not self._is_dm_room(room_id)
                 ev = protocol.message(
                     user_id=room_id,
                     user_name=sender,
@@ -1235,6 +1304,10 @@ class MatrixAdapter(SidecarAdapter):
             try:
                 whoami = self._validate()
                 log.info("matrix authenticated", user_id=whoami)
+                # #6444: seed the DM registry before the sync loop so DMs are
+                # classified correctly on the first post-restart incremental
+                # sync (which omits m.direct for unchanged rooms).
+                self._seed_dm_rooms_from_server()
                 break
             except Exception as e:  # noqa: BLE001
                 log.warn(

@@ -604,7 +604,7 @@ async fn run_agent_loop_inner(
     // `channel_send` so it can reject a cross-account (cross-tenant) dispatch.
     let sender_account_id: Option<String> = manifest
         .metadata
-        .get("sender_account_id")
+        .get(librefang_types::agent::SENDER_ACCOUNT_ID_METADATA_KEY)
         .and_then(|v| v.as_str())
         .map(String::from);
     // #5227: chat-qualified scope stamped by the kernel alongside

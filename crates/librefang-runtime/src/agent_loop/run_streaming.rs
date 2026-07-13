@@ -230,7 +230,7 @@ async fn run_agent_loop_streaming_inner(
     // #6443: bot account / tenant this turn arrived on — see `run_agent_loop`.
     let sender_account_id: Option<String> = manifest
         .metadata
-        .get("sender_account_id")
+        .get(librefang_types::agent::SENDER_ACCOUNT_ID_METADATA_KEY)
         .and_then(|v| v.as_str())
         .map(String::from);
     // #5227: see `run_agent_loop` for the rationale; same fallback to

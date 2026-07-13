@@ -733,11 +733,7 @@ fn global_thinking_backfill_gated_on_catalog_capability() {
         "an unknown model must keep the historical backfill"
     );
     assert!(
-        !global_thinking_backfill_allowed(
-            &catalog,
-            "openrouter",
-            "some-org/non-reasoning"
-        ),
+        !global_thinking_backfill_allowed(&catalog, "openrouter", "some-org/non-reasoning"),
         "a bare OpenRouter manifest model must resolve the prefixed catalog entry, not fall back to the permissive unknown-model default"
     );
 }

@@ -695,6 +695,86 @@ def test_process_sync_dm_verdict_cached_across_summary_less_syncs():
     assert "is_group" not in emitted[1]["params"]
 
 
+def test_m_direct_is_full_replaced_not_add_only():
+    # #6444 review: m.direct account data is a complete-state event, so a room
+    # dropped from a later m.direct must stop being treated as a DM (add-only
+    # caching would leave it permanently mis-flagged).
+    a = _adapter()
+    first = {
+        "next_batch": "b1",
+        "account_data": {"events": [{
+            "type": "m.direct",
+            "content": {"@alice:m.test": ["!dm-a:m.test", "!dm-b:m.test"]},
+        }]},
+    }
+    a._process_sync_body(first, lambda _e: None)
+    assert a._is_dm_room("!dm-a:m.test")
+    assert a._is_dm_room("!dm-b:m.test")
+
+    # Second m.direct drops !dm-b (e.g. the DM was archived).
+    second = {
+        "next_batch": "b2",
+        "account_data": {"events": [{
+            "type": "m.direct",
+            "content": {"@alice:m.test": ["!dm-a:m.test"]},
+        }]},
+    }
+    a._process_sync_body(second, lambda _e: None)
+    assert a._is_dm_room("!dm-a:m.test")
+    assert not a._is_dm_room("!dm-b:m.test"), "dropped m.direct room must revert to group"
+
+
+def test_seed_dm_rooms_from_server_populates_registry():
+    # #6444 review: after a restart the incremental /sync omits m.direct, so the
+    # producer seeds the DM registry via an explicit account-data GET at startup.
+    a = _adapter()
+    a.user_id = "@bot:matrix.test"
+
+    def _fake_http(url, **_kw):
+        assert "account_data/m.direct" in url
+        return 200, {"@alice:m.test": ["!seeded-dm:m.test"]}, b"", {}
+
+    a._http = _fake_http  # type: ignore[assignment]
+    a._seed_dm_rooms_from_server()
+    assert a._is_dm_room("!seeded-dm:m.test")
+
+    # A DM message in the first post-restart incremental sync (no m.direct, no
+    # summary) is now correctly classified thanks to the seed.
+    body = {
+        "next_batch": "b1",
+        "rooms": {"join": {"!seeded-dm:m.test": {
+            "timeline": {"events": [_msg_event(
+                {"msgtype": "m.text", "body": "hi after restart"},
+            )], "limit": 10},
+        }}},
+    }
+    emitted = []
+    a._process_sync_body(body, emitted.append)
+    assert "is_group" not in emitted[0]["params"]
+
+
+def test_seed_dm_rooms_from_server_tolerates_404():
+    # An account that never set m.direct returns 404 — not an error.
+    a = _adapter()
+    a.user_id = "@bot:matrix.test"
+    a._http = lambda url, **_kw: (404, None, b"", {})  # type: ignore[assignment]
+    a._seed_dm_rooms_from_server()  # must not raise
+    assert not a._is_dm_room("!anything:m.test")
+
+
+def test_dm_rooms_by_count_is_bounded():
+    # #6444 review: the member-count DM set is FIFO-bounded like the sibling
+    # caches, so a bot in many 2-member rooms cannot grow it without limit.
+    a = _adapter()
+    cap = mx.DM_ROOMS_BY_COUNT_CAPACITY
+    for i in range(cap + 50):
+        a._mark_dm_by_count(f"!room-{i}:m.test")
+    assert len(a._dm_rooms_by_count) == cap
+    # Oldest evicted, newest retained.
+    assert "!room-0:m.test" not in a._dm_rooms_by_count
+    assert f"!room-{cap + 49}:m.test" in a._dm_rooms_by_count
+
+
 # ---- reaction lifecycle cache ---------------------------------------
 
 
