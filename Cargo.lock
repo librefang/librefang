@@ -4442,6 +4442,7 @@ dependencies = [
  "jsonwebtoken",
  "libc",
  "librefang-acp",
+ "librefang-api",
  "librefang-channels",
  "librefang-extensions",
  "librefang-hands",

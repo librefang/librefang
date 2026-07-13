@@ -103,8 +103,8 @@ async fn refresh_now(kernel: &Arc<dyn KernelApi>) -> Result<usize, String> {
 }
 
 /// Helper function to clear the rate-limiting attempts cache during integration testing to prevent sequential port reuse contamination (#6384).
-/// Marked `#[doc(hidden)]` as this is only intended for test cleanup.
-#[doc(hidden)]
+/// Only exposed when compiling for tests with the `test-util` feature enabled.
+#[cfg(feature = "test-util")]
 pub fn clear_refresh_attempts() {
     REFRESH_ATTEMPTS.clear();
 }

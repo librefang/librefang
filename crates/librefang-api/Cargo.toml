@@ -79,6 +79,22 @@ tracing-opentelemetry = { workspace = true, optional = true }
 metrics = { workspace = true, optional = true }
 metrics-exporter-prometheus = { workspace = true, optional = true }
 
+[dev-dependencies]
+librefang-api = { path = ".", features = ["test-util"] }
+tempfile = { workspace = true }
+uuid = { workspace = true }
+http-body-util = "0.1"
+librefang-testing = { path = "../librefang-testing" }
+# tool-exec backend integration test (#3332)
+librefang-runtime = { path = "../librefang-runtime" }
+totp-rs = { workspace = true }
+# OIDC `sub` claim enforcement integration test (#5128): generates RSA
+# keypairs in-process, signs JWTs with `jsonwebtoken`, and serves the
+# resulting JWKS over a local axum listener so `validate_jwt_cached` can
+# be driven end-to-end without a live identity provider.
+rsa = { workspace = true }
+wiremock = "0.6"
+
 [features]
 # Default = telemetry only. Channel adapters all run as out-of-process
 # sidecars (`librefang.sidecar.adapters.*` in the SDK) — the historical
@@ -95,6 +111,9 @@ telemetry = [
     "dep:metrics",
     "dep:metrics-exporter-prometheus",
 ]
+
+# Expose test-only utilities and seams to integration tests
+test-util = []
 
 # `channel-*` / `core-channels` / `all-channels` /
 # `all-channels-no-email` / `mini` removed — every channel adapter
@@ -128,21 +147,6 @@ windows-sys = { version = "0.61", features = [
 # PATH instead of invoking it by bare name (refs #5667).
 chrono = { workspace = true }
 which = { workspace = true }
-
-[dev-dependencies]
-tempfile = { workspace = true }
-uuid = { workspace = true }
-http-body-util = "0.1"
-librefang-testing = { path = "../librefang-testing" }
-# tool-exec backend integration test (#3332)
-librefang-runtime = { path = "../librefang-runtime" }
-totp-rs = { workspace = true }
-# OIDC `sub` claim enforcement integration test (#5128): generates RSA
-# keypairs in-process, signs JWTs with `jsonwebtoken`, and serves the
-# resulting JWKS over a local axum listener so `validate_jwt_cached` can
-# be driven end-to-end without a live identity provider.
-rsa = { workspace = true }
-wiremock = "0.6"
 
 [lints]
 workspace = true

@@ -13,7 +13,7 @@ The live catalog data is cached with a Time-To-Live (TTL) to avoid excessive API
 
 - **Lazy loading:** A refresh is triggered in the background on startup or when the catalog is read.
 - **Failures and cooldown:** If a fetch fails or is rate-limited, the system falls back to the embedded snapshot and enforces a 60-second retry cooldown.
-- **Concurrent requests:** Concurrent callers await the same single, atomic background refresh task.
+- **Concurrent requests:** Concurrent callers within the cooldown window are rejected immediately and reuse existing cached data; only one refresh proceeds per 60-second window.
 
 ## Default Model Sync and Migration
 
