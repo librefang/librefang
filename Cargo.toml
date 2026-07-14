@@ -155,7 +155,7 @@ agent-client-protocol-tokio = "=0.11.1"
 tokio-util = { version = "0.7", features = ["compat"] }
 
 # WebSocket client (for Discord/Slack gateway)
-tokio-tungstenite = { version = "0.29.0", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 url = "2"
 urlencoding = "2"
 
