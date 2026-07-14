@@ -11128,7 +11128,9 @@ fn sync_default_model_agents_with_old_model_spares_agents_on_other_models() {
 }
 
 #[test]
+#[serial_test::serial(librefang_vault_key)]
 fn set_agent_model_rejects_only_against_a_fresh_openrouter_catalog() {
+    let _env = set_test_env("OPENROUTER_API_KEY", "");
     let tmp = tempfile::tempdir().unwrap();
     let config = KernelConfig {
         home_dir: tmp.path().to_path_buf(),

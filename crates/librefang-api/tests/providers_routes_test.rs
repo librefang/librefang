@@ -920,9 +920,8 @@ async fn set_default_openrouter_uses_free_snapshot_when_live_refresh_fails() {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    librefang_api::openrouter_catalog::clear_refresh_attempts();
-
     let server = MockServer::start().await;
+    librefang_api::openrouter_catalog::clear_refresh_attempts(&server.uri());
     Mock::given(method("GET"))
         .and(path("/models"))
         .respond_with(ResponseTemplate::new(429))
@@ -1048,6 +1047,9 @@ async fn set_first_openrouter_key_uses_free_snapshot_when_live_models_are_rate_l
 
     const OPENROUTER_TEST_ENV: &str = "LIBREFANG_TEST_OPENROUTER_KEY_6384";
     const CURRENT_TEST_ENV: &str = "LIBREFANG_TEST_CURRENT_KEY_6384";
+
+    librefang_api::secrets_env::remove_env_var_guarded(CURRENT_TEST_ENV).await;
+    librefang_api::secrets_env::remove_env_var_guarded("OPENAI_API_KEY").await;
 
     let server = MockServer::start().await;
     Mock::given(method("GET"))
