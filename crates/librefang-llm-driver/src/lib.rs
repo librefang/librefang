@@ -380,6 +380,11 @@ pub struct CompletionRequest {
     /// Forwarded as `x-librefang-current-chat-id` so the bridge can rehydrate `ToolExecContext::chat_id`; the cross-chat guard compares the outbound `recipient` against this value (with `sender_user_id` as DM fallback) so legitimate group replies pass.
     /// `None` out-of-band.
     pub sender_chat_id: Option<String>,
+    /// Bot account / tenant the inbound turn arrived on (the adapter config name, e.g. a WhatsApp bot registration id).
+    ///
+    /// Forwarded by subprocess drivers as `x-librefang-current-account-id` so the bridge can rehydrate the account scope and the `channel_send` cross-account (cross-tenant) guard can reject an explicit `account_id` that differs from the turn's account on the same channel (#6443) — parity with the in-process agent loop, which threads the same value through `execute_tool_with_sender_account`.
+    /// `None` out-of-band (cron, triggers, compaction, routing probes) and on single-tenant deployments; the guard no-ops on `None`.
+    pub sender_account_id: Option<String>,
     /// How the OpenAI-compat driver should handle `reasoning_content` on
     /// historical assistant turns for this request's model.
     ///
