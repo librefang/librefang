@@ -86,20 +86,72 @@ fn run_cargo_outdated(root: &Path) -> Result<bool, Box<dyn std::error::Error>> {
     Ok(status.success())
 }
 
-fn run_pnpm_audit(dir: &Path, label: &str) -> bool {
+/// npm retired the legacy audit endpoints (`/-/npm/v1/security/audits`,
+/// `…/audits/quick`); they now answer HTTP 410 with a body telling callers to
+/// migrate to the bulk advisory endpoint. pnpm v10 still calls the legacy path,
+/// so `pnpm audit` exits non-zero even when there is no advisory to report.
+/// Detect that failure mode so an audit-infrastructure outage does not read as a
+/// dependency vulnerability. Real advisories still surface through the normal
+/// non-zero exit and are NOT matched here.
+fn is_audit_endpoint_retired(output: &str) -> bool {
+    let out = output.to_ascii_lowercase();
+    out.contains("err_pnpm_audit_bad_response")
+        || out.contains("endpoint is being retired")
+        || (out.contains("audit") && out.contains("responded with 410"))
+}
+
+/// Outcome of a single `pnpm audit` invocation, distinguishing a genuine
+/// advisory finding from the audit service being unreachable.
+enum PnpmAuditOutcome {
+    /// pnpm reported no advisories (or the directory has no manifest).
+    Clean,
+    /// pnpm reported one or more advisories — a real dependency issue.
+    Vulnerable,
+    /// The audit could not run (retired endpoint / network); not a vulnerability.
+    Skipped,
+}
+
+fn run_pnpm_audit(dir: &Path, label: &str) -> PnpmAuditOutcome {
     if !dir.join("package.json").exists() {
-        return true;
+        return PnpmAuditOutcome::Clean;
     }
 
     println!("--- pnpm audit: {} ---", label);
     // --prod: devDependencies (vite, esbuild) never ship to users; their advisories are not runtime exposures.
-    let status = Command::new("pnpm")
+    let result = Command::new("pnpm")
         .args(["audit", "--prod"])
         .current_dir(dir)
-        .status();
+        .output();
+
+    let output = match result {
+        Ok(o) => o,
+        Err(e) => {
+            println!("  pnpm audit could not be spawned: {e}");
+            println!();
+            return PnpmAuditOutcome::Vulnerable;
+        }
+    };
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    print!("{combined}");
     println!();
 
-    status.map(|s| s.success()).unwrap_or(false)
+    if output.status.success() {
+        PnpmAuditOutcome::Clean
+    } else if is_audit_endpoint_retired(&combined) {
+        println!(
+            "  ⚠ pnpm audit endpoint unavailable (npm retired the legacy audit API); \
+             skipping — not counted as a vulnerability."
+        );
+        println!();
+        PnpmAuditOutcome::Skipped
+    } else {
+        PnpmAuditOutcome::Vulnerable
+    }
 }
 
 pub fn run(args: DepsArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -143,8 +195,9 @@ pub fn run(args: DepsArgs) -> Result<(), Box<dyn std::error::Error>> {
                 (root.join("docs"), "docs"),
             ];
             for (dir, label) in &web_dirs {
-                if !run_pnpm_audit(dir, label) {
-                    issues += 1;
+                match run_pnpm_audit(dir, label) {
+                    PnpmAuditOutcome::Clean | PnpmAuditOutcome::Skipped => {}
+                    PnpmAuditOutcome::Vulnerable => issues += 1,
                 }
             }
         } else {
@@ -159,5 +212,65 @@ pub fn run(args: DepsArgs) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         println!("All clean.");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Verbatim body npm returns for both retired audit endpoints (HTTP 410),
+    // as surfaced by pnpm v10 in CI.
+    const RETIRED_410: &str = "\
+ ERR_PNPM_AUDIT_BAD_RESPONSE  The audit endpoint (at \
+https://registry.npmjs.org/-/npm/v1/security/audits/quick) responded with 410: \
+{\"error\":\"This endpoint is being retired. Use the bulk advisory endpoint instead. \
+See the following docs for more info: https://api-docs.npmjs.com/#tag/Audit\"}. \
+Fallback endpoint (at https://registry.npmjs.org/-/npm/v1/security/audits) responded \
+with 410: {\"error\":\"This endpoint is being retired.\"}";
+
+    #[test]
+    fn retired_endpoint_410_is_classified_as_outage() {
+        assert!(is_audit_endpoint_retired(RETIRED_410));
+    }
+
+    #[test]
+    fn retired_detection_is_case_insensitive() {
+        assert!(is_audit_endpoint_retired(&RETIRED_410.to_uppercase()));
+    }
+
+    #[test]
+    fn only_the_fallback_endpoint_410_still_counts_as_outage() {
+        // The single-endpoint variant (docs dir) has no "/quick" line.
+        let single = " ERR_PNPM_AUDIT_BAD_RESPONSE  The audit endpoint (at \
+https://registry.npmjs.org/-/npm/v1/security/audits) responded with 410: \
+{\"error\":\"This endpoint is being retired.\"}";
+        assert!(is_audit_endpoint_retired(single));
+    }
+
+    #[test]
+    fn real_advisory_output_is_not_treated_as_outage() {
+        // A genuine `pnpm audit` finding must still fail the build.
+        let advisory = "\
+┌─────────────────────┬────────────────────────────────────────────────────────┐
+│ high                │ Prototype Pollution in some-pkg                        │
+├─────────────────────┼────────────────────────────────────────────────────────┤
+│ Package             │ some-pkg                                               │
+└─────────────────────┴────────────────────────────────────────────────────────┘
+1 vulnerabilities found";
+        assert!(!is_audit_endpoint_retired(advisory));
+    }
+
+    #[test]
+    fn clean_output_is_not_treated_as_outage() {
+        assert!(!is_audit_endpoint_retired("No known vulnerabilities found"));
+    }
+
+    #[test]
+    fn unrelated_410_without_audit_context_is_not_matched() {
+        // A 410 that is not about the audit endpoint must not be swallowed.
+        assert!(!is_audit_endpoint_retired(
+            "GET https://example.com/thing responded with 410"
+        ));
     }
 }
