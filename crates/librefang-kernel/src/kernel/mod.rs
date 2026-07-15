@@ -1778,6 +1778,11 @@ impl LibreFangKernel {
             web_ctx: Some(&self.media.web_ctx),
             browser_ctx: Some(&self.media.browser_ctx),
             allowed_env_vars: deferred.allowed_env_vars.as_deref(),
+            // #6458: restore the provenance captured at defer time so the
+            // resumed execution filters the child env exactly as the live
+            // path would have. Pre-existing payloads without the field
+            // deserialize to the strict `HandDeclared` default.
+            env_allowlist_source: deferred.env_allowlist_source,
             workspace_root: deferred.workspace_root.as_deref(),
             media_engine: Some(&self.media.media_engine),
             media_drivers: Some(&self.media.media_drivers),

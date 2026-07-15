@@ -255,6 +255,7 @@ fn make_ctx<'a>(kernel: &'a Arc<dyn KernelHandle>, caller: Option<&'a str>) -> T
         web_ctx: None,
         browser_ctx: None,
         allowed_env_vars: None,
+        env_allowlist_source: librefang_types::config::EnvAllowlistSource::HandDeclared,
         workspace_root: None as Option<&Path>,
         media_engine: None,
         media_drivers: None,

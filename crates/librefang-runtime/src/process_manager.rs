@@ -80,6 +80,7 @@ impl ProcessManager {
         command: &str,
         args: &[String],
         allowed_env: &[String],
+        env_source: crate::subprocess_sandbox::EnvAllowlistSource,
     ) -> Result<ProcessId, String> {
         // Check per-agent limit
         let agent_count = self
@@ -114,7 +115,7 @@ impl ProcessManager {
                                          // SECURITY: scrub the daemon environment before spawn, mirroring `tool_shell_exec` (shell.rs:130) and `LocalBackend::run_command`.
                                          // Without this the child inherits the daemon's full process env — including `LIBREFANG_VAULT_KEY` and provider API keys — which an agent can read straight back via `process_poll` (e.g. `process_start {"command":"env"}` under the default Allowlist, where `env` is a safe_bin).
                                          // `sandbox_command` `env_clear()`s and re-adds only the safe allowlist + the agent's `allowed_env`.
-        crate::subprocess_sandbox::sandbox_command(&mut cmd, allowed_env);
+        crate::subprocess_sandbox::sandbox_command(&mut cmd, allowed_env, env_source);
         let mut child = cmd
             .spawn()
             .map_err(|e| format!("Failed to start process '{}': {}", command, e))?;
@@ -410,7 +411,16 @@ mod tests {
         let pm = ProcessManager::new(5);
 
         let (cmd, args) = long_running_proc();
-        let id = pm.start("agent1", cmd, &args, &[]).await.unwrap();
+        let id = pm
+            .start(
+                "agent1",
+                cmd,
+                &args,
+                &[],
+                crate::subprocess_sandbox::EnvAllowlistSource::HandDeclared,
+            )
+            .await
+            .unwrap();
         assert!(id.starts_with("proc_"));
 
         let list = pm.list("agent1");
@@ -426,8 +436,25 @@ mod tests {
         let pm = ProcessManager::new(1);
 
         let (cmd, args) = long_running_proc();
-        let id1 = pm.start("agent1", cmd, &args, &[]).await.unwrap();
-        let result = pm.start("agent1", cmd, &args, &[]).await;
+        let id1 = pm
+            .start(
+                "agent1",
+                cmd,
+                &args,
+                &[],
+                crate::subprocess_sandbox::EnvAllowlistSource::HandDeclared,
+            )
+            .await
+            .unwrap();
+        let result = pm
+            .start(
+                "agent1",
+                cmd,
+                &args,
+                &[],
+                crate::subprocess_sandbox::EnvAllowlistSource::HandDeclared,
+            )
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("max: 1"));
 
@@ -473,7 +500,16 @@ mod tests {
     async fn naturally_exited_process_is_reaped() {
         let pm = ProcessManager::new(5);
         let (cmd, args) = short_lived_proc();
-        let id = pm.start("agent1", cmd, &args, &[]).await.unwrap();
+        let id = pm
+            .start(
+                "agent1",
+                cmd,
+                &args,
+                &[],
+                crate::subprocess_sandbox::EnvAllowlistSource::HandDeclared,
+            )
+            .await
+            .unwrap();
         assert_eq!(pm.count(), 1, "entry present right after start");
 
         // The reaper awaits both pipe readers then `child.wait()`; for a
@@ -506,7 +542,16 @@ mod tests {
     async fn explicit_kill_still_reaps_exactly_once() {
         let pm = ProcessManager::new(5);
         let (cmd, args) = long_running_proc();
-        let id = pm.start("agent1", cmd, &args, &[]).await.unwrap();
+        let id = pm
+            .start(
+                "agent1",
+                cmd,
+                &args,
+                &[],
+                crate::subprocess_sandbox::EnvAllowlistSource::HandDeclared,
+            )
+            .await
+            .unwrap();
         assert_eq!(pm.count(), 1);
         pm.kill(&id, "agent1").await.unwrap();
 
@@ -538,6 +583,7 @@ mod tests {
                 "sh",
                 &["-c".to_string(), "env; sleep 30".to_string()],
                 &["LIBREFANG_PM_ALLOWED_SENTINEL".to_string()],
+                crate::subprocess_sandbox::EnvAllowlistSource::HandDeclared,
             )
             .await
             .unwrap();
@@ -579,7 +625,16 @@ mod tests {
     async fn cross_agent_process_access_is_denied() {
         let pm = ProcessManager::new(5);
         let (cmd, args) = long_running_proc();
-        let id = pm.start("owner", cmd, &args, &[]).await.unwrap();
+        let id = pm
+            .start(
+                "owner",
+                cmd,
+                &args,
+                &[],
+                crate::subprocess_sandbox::EnvAllowlistSource::HandDeclared,
+            )
+            .await
+            .unwrap();
 
         assert!(pm.read(&id, "attacker").await.is_err());
         assert!(pm.write(&id, "attacker", "data\n").await.is_err());

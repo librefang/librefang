@@ -316,6 +316,7 @@ fn make_ctx<'a>(
         web_ctx: None,
         browser_ctx: None,
         allowed_env_vars: None,
+        env_allowlist_source: librefang_types::config::EnvAllowlistSource::HandDeclared,
         workspace_root: None,
         media_engine: None,
         media_drivers: None,

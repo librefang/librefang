@@ -258,6 +258,10 @@ pub struct LocalBackend {
     /// Allowlisted env vars to pass through to spawned children.
     /// Mirrors the existing `tool_runner.rs` `allowed_env` plumbing.
     allowed_env: Vec<String>,
+    /// Provenance of `allowed_env` — decides whether the secret-name
+    /// heuristic applies on top of the reserved exact-name blocklist when
+    /// the child env is scrubbed (#6458).
+    env_source: crate::subprocess_sandbox::EnvAllowlistSource,
     /// Default per-command timeout when `ExecSpec::limits.timeout` is unset.
     /// Source-of-truth: kernel config / agent manifest. Falls back to
     /// [`LOCAL_DEFAULT_TIMEOUT_SECS`] when constructed via
@@ -266,9 +270,14 @@ pub struct LocalBackend {
 }
 
 impl LocalBackend {
-    pub fn new(allowed_env: Vec<String>, default_timeout: Duration) -> Self {
+    pub fn new(
+        allowed_env: Vec<String>,
+        env_source: crate::subprocess_sandbox::EnvAllowlistSource,
+        default_timeout: Duration,
+    ) -> Self {
         Self {
             allowed_env,
+            env_source,
             default_timeout,
         }
     }
@@ -277,7 +286,11 @@ impl LocalBackend {
     /// legacy [`LOCAL_DEFAULT_TIMEOUT_SECS`] default.
     /// Intended for tests and the resolver fallback.
     pub fn with_defaults() -> Self {
-        Self::new(Vec::new(), Duration::from_secs(LOCAL_DEFAULT_TIMEOUT_SECS))
+        Self::new(
+            Vec::new(),
+            crate::subprocess_sandbox::EnvAllowlistSource::default(),
+            Duration::from_secs(LOCAL_DEFAULT_TIMEOUT_SECS),
+        )
     }
 }
 
@@ -304,7 +317,7 @@ impl ToolExecBackend for LocalBackend {
             c
         };
 
-        crate::subprocess_sandbox::sandbox_command(&mut cmd, &self.allowed_env);
+        crate::subprocess_sandbox::sandbox_command(&mut cmd, &self.allowed_env, self.env_source);
         // Ensure a timed-out child doesn't survive as an orphan. Without
         // this, dropping the `Child` (which `tokio::time::timeout` does
         // when it cancels the read+wait future) leaves the process
@@ -598,10 +611,12 @@ pub fn build_backend(
     agent_id: &str,
     workspace: PathBuf,
     allowed_env: Vec<String>,
+    env_source: crate::subprocess_sandbox::EnvAllowlistSource,
 ) -> Result<Box<dyn ToolExecBackend>, ExecError> {
     match kind {
         BackendKind::Local => Ok(Box::new(LocalBackend::new(
             allowed_env,
+            env_source,
             Duration::from_secs(LOCAL_DEFAULT_TIMEOUT_SECS),
         ))),
         BackendKind::Docker => Ok(Box::new(DockerBackend::new(
@@ -818,6 +833,7 @@ mod tests {
             "agent-1",
             std::env::temp_dir(),
             vec![],
+            crate::subprocess_sandbox::EnvAllowlistSource::HandDeclared,
         )
         .expect("local backend always builds");
         assert_eq!(backend.kind(), BackendKind::Local);
@@ -834,6 +850,7 @@ mod tests {
             "agent-1",
             std::env::temp_dir(),
             vec![],
+            crate::subprocess_sandbox::EnvAllowlistSource::HandDeclared,
         )
         .expect("docker backend builds even when daemon absent");
         assert_eq!(backend.kind(), BackendKind::Docker);
@@ -850,6 +867,7 @@ mod tests {
             "agent-1",
             std::env::temp_dir(),
             vec![],
+            crate::subprocess_sandbox::EnvAllowlistSource::HandDeclared,
         );
         assert!(
             res.is_err(),
@@ -868,6 +886,7 @@ mod tests {
             "agent-1",
             std::env::temp_dir(),
             vec![],
+            crate::subprocess_sandbox::EnvAllowlistSource::HandDeclared,
         );
         assert!(
             res.is_err(),

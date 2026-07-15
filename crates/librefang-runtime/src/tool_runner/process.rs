@@ -17,6 +17,7 @@ pub(super) async fn tool_process_start(
         &std::sync::Arc<tokio::sync::RwLock<crate::dangerous_command::DangerousCommandChecker>>,
     >,
     allowed_env_vars: Option<&[String]>,
+    env_allowlist_source: librefang_types::config::EnvAllowlistSource,
 ) -> ToolResult {
     let pm = pm.ok_or(ToolError::Unavailable("Process manager"))?;
     let agent_id = caller_agent_id.ok_or(ToolError::MissingParameter("caller_agent_id"))?;
@@ -114,7 +115,13 @@ pub(super) async fn tool_process_start(
         .unwrap_or_default();
 
     let proc_id = pm
-        .start(agent_id, command, &args, &effective_allowed_env)
+        .start(
+            agent_id,
+            command,
+            &args,
+            &effective_allowed_env,
+            env_allowlist_source,
+        )
         .await
         .map_err(ToolError::upstream_msg)?;
     Ok(serde_json::json!({
@@ -271,7 +278,16 @@ mod tests {
     #[tokio::test]
     async fn process_tools_without_manager_return_unavailable() {
         assert!(matches!(
-            tool_process_start(&json!({}), None, None, None, None, None).await,
+            tool_process_start(
+                &json!({}),
+                None,
+                None,
+                None,
+                None,
+                None,
+                librefang_types::config::EnvAllowlistSource::HandDeclared,
+            )
+            .await,
             Err(ToolError::Unavailable("Process manager"))
         ));
         assert!(matches!(
@@ -318,6 +334,7 @@ mod tests {
             Some(&policy),
             None,
             None,
+            librefang_types::config::EnvAllowlistSource::HandDeclared,
         )
         .await;
         assert!(matches!(res, Err(ToolError::PermissionDenied(_))));
@@ -347,6 +364,7 @@ mod tests {
             Some(&policy),
             None,
             None,
+            librefang_types::config::EnvAllowlistSource::HandDeclared,
         )
         .await;
         assert!(matches!(res, Err(ToolError::PermissionDenied(_))));
@@ -370,6 +388,7 @@ mod tests {
             Some(&policy),
             None,
             None,
+            librefang_types::config::EnvAllowlistSource::HandDeclared,
         )
         .await;
         assert!(matches!(res, Err(ToolError::PermissionDenied(_))));
@@ -392,6 +411,7 @@ mod tests {
             Some(&policy),
             None,
             None,
+            librefang_types::config::EnvAllowlistSource::HandDeclared,
         )
         .await;
         assert!(

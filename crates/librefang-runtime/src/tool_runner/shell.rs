@@ -36,9 +36,11 @@ async fn kill_child_tree(pid: Option<u32>, reason: &str) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn tool_shell_exec(
     input: &serde_json::Value,
     allowed_env: &[String],
+    env_source: crate::subprocess_sandbox::EnvAllowlistSource,
     workspace_root: Option<&Path>,
     exec_policy: Option<&librefang_types::config::ExecPolicy>,
     interrupt: Option<crate::interrupt::SessionInterrupt>,
@@ -127,7 +129,7 @@ pub(super) async fn tool_shell_exec(
         cmd.current_dir(ws);
     }
 
-    crate::subprocess_sandbox::sandbox_command(&mut cmd, allowed_env);
+    crate::subprocess_sandbox::sandbox_command(&mut cmd, allowed_env, env_source);
 
     #[cfg(windows)]
     cmd.env("PYTHONIOENCODING", "utf-8");
@@ -305,7 +307,17 @@ mod tests {
 
     #[tokio::test]
     async fn shell_exec_missing_command_is_missing_parameter() {
-        let r = tool_shell_exec(&json!({}), &[], None, None, None, None, None).await;
+        let r = tool_shell_exec(
+            &json!({}),
+            &[],
+            crate::subprocess_sandbox::EnvAllowlistSource::HandDeclared,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
         assert!(matches!(r, Err(ToolError::MissingParameter("command"))));
     }
 
@@ -314,6 +326,7 @@ mod tests {
         let r = tool_shell_exec(
             &json!({"command": "echo \"unterminated"}),
             &[],
+            crate::subprocess_sandbox::EnvAllowlistSource::HandDeclared,
             None,
             None,
             None,

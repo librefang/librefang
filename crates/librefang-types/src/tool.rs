@@ -148,6 +148,13 @@ pub struct DeferredToolExecution {
     pub allowed_tools: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_env_vars: Option<Vec<String>>,
+    /// Provenance of `allowed_env_vars` (and the `exec_policy` fallback list),
+    /// captured at defer time so the resume path filters the re-injected env
+    /// exactly as the live path would have (#6458).
+    /// The serde default (`HandDeclared`) keeps payloads persisted before this
+    /// field existed on the strict posture.
+    #[serde(default)]
+    pub env_allowlist_source: crate::config::EnvAllowlistSource,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exec_policy: Option<crate::config::ExecPolicy>,
     pub sender_id: Option<String>,
@@ -1365,6 +1372,7 @@ mod tests {
             input: serde_json::json!({"cmd": "ls -la"}),
             allowed_tools: Some(vec!["shell_exec".to_string()]),
             allowed_env_vars: Some(vec!["OPENAI_API_KEY".to_string()]),
+            env_allowlist_source: crate::config::EnvAllowlistSource::OperatorConfig,
             exec_policy: Some(crate::config::ExecPolicy {
                 mode: crate::config::ExecSecurityMode::Full,
                 ..Default::default()
@@ -1380,6 +1388,19 @@ mod tests {
         let json = serde_json::to_string(&deferred).unwrap();
         let deserialized: DeferredToolExecution = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.agent_id, "agent-1");
+        assert_eq!(
+            deserialized.env_allowlist_source,
+            crate::config::EnvAllowlistSource::OperatorConfig
+        );
+        // Payloads persisted before the field existed must deserialize to the
+        // strict default (#6458).
+        let legacy: DeferredToolExecution =
+            serde_json::from_str(&json.replace(r#""env_allowlist_source":"operator_config","#, ""))
+                .unwrap();
+        assert_eq!(
+            legacy.env_allowlist_source,
+            crate::config::EnvAllowlistSource::HandDeclared
+        );
         assert_eq!(deserialized.tool_use_id, "toolu_abc");
         assert_eq!(deserialized.tool_name, "shell_exec");
         assert_eq!(

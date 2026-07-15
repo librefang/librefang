@@ -51,6 +51,13 @@ pub struct ToolExecContext<'a> {
     pub web_ctx: Option<&'a WebToolsContext>,
     pub browser_ctx: Option<&'a crate::browser::BrowserManager>,
     pub allowed_env_vars: Option<&'a [String]>,
+    /// Provenance of the env allowlist in effect for this call —
+    /// `allowed_env_vars` when `Some`, else the `exec_policy` fallback list.
+    /// `OperatorConfig` only when the calling agent's manifest is
+    /// operator-authored (`!manifest.is_hand`); hand-authored manifests are
+    /// third-party input, so both their passthrough list and their
+    /// `exec_policy` stay on the strict heuristic (#6458).
+    pub env_allowlist_source: librefang_types::config::EnvAllowlistSource,
     pub workspace_root: Option<&'a Path>,
     pub media_engine: Option<&'a crate::media_understanding::MediaEngine>,
     pub media_drivers: Option<&'a crate::media::MediaDriverCache>,
@@ -195,6 +202,7 @@ pub async fn execute_tool_raw(
         web_ctx,
         browser_ctx,
         allowed_env_vars,
+        env_allowlist_source,
         workspace_root,
         media_engine,
         media_drivers,
@@ -953,6 +961,7 @@ pub async fn execute_tool_raw(
             tool_shell_exec(
                 input,
                 effective_allowed_env_vars.unwrap_or(&[]),
+                *env_allowlist_source,
                 *workspace_root,
                 *exec_policy,
                 interrupt.clone(),
@@ -1140,6 +1149,7 @@ pub async fn execute_tool_raw(
                 *exec_policy,
                 *dangerous_command_checker,
                 *allowed_env_vars,
+                *env_allowlist_source,
             )
             .await
         }
@@ -1515,6 +1525,13 @@ pub async fn execute_tool(
         spill_threshold_bytes,
         max_artifact_bytes,
         None,
+        // The only production caller of this shim is the operator API session
+        // path (`routes/tools_sessions.rs`), which passes the operator's own
+        // global `config.toml` exec policy — an operator-authored allowlist.
+        // Hand-agent calls flow through the agent loop, which calls
+        // `execute_tool_with_sender_account` directly with the source derived
+        // from `manifest.is_hand` (#6458).
+        librefang_types::config::EnvAllowlistSource::OperatorConfig,
     )
     .await
 }
@@ -1559,6 +1576,7 @@ pub async fn execute_tool_with_sender_account(
     spill_threshold_bytes: u64,
     max_artifact_bytes: u64,
     sender_account_id: Option<&str>,
+    env_allowlist_source: librefang_types::config::EnvAllowlistSource,
 ) -> ToolResult {
     // Normalize the tool name through compat mappings so LLM-hallucinated aliases
     // (e.g. "fs-write" → "file_write") resolve to the canonical LibreFang name.
@@ -1721,6 +1739,7 @@ pub async fn execute_tool_with_sender_account(
                 input: input.clone(),
                 allowed_tools: allowed_tools.map(|a| a.to_vec()),
                 allowed_env_vars: deferred_allowed_env_vars,
+                env_allowlist_source,
                 exec_policy: exec_policy.cloned(),
                 sender_id: sender_id.map(|s| s.to_string()),
                 channel: channel.map(|c| c.to_string()),
@@ -1784,6 +1803,7 @@ pub async fn execute_tool_with_sender_account(
         web_ctx,
         browser_ctx,
         allowed_env_vars,
+        env_allowlist_source,
         workspace_root,
         media_engine,
         media_drivers,
