@@ -82,15 +82,26 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
             librefang_user: None,
         };
 
-        let default_format =
-            librefang_channels::formatter::default_output_format_for_channel(channel);
-        // wecom migrated to a sidecar; its formatting now happens inside
-        // the Python adapter (`librefang.sidecar.adapters.wecom`) which
-        // wraps every outbound chunk as `msgtype: "markdown"`. The
-        // generic `format_for_channel` path with the Markdown default
-        // (see `default_output_format_for_channel("wecom")`) gives the
-        // sidecar exactly that.
-        let formatted = librefang_channels::formatter::format_for_channel(message, default_format);
+        // #6445: honour a per-channel `output_format` override on the outbound
+        // path too, not only on inbound replies. The sidecar adapter projects
+        // its `[[sidecar_channels]] output_format` into `ChannelOverrides`, so
+        // an agent-initiated `channel_send` / delegation forward formats the
+        // same way a normal reply would. Falls back to the channel default when
+        // the adapter has no override (every non-sidecar adapter, and any
+        // sidecar that did not set the knob).
+        let format = adapter
+            .channel_overrides()
+            .and_then(|ov| ov.output_format)
+            .unwrap_or_else(|| {
+                // wecom migrated to a sidecar; its formatting now happens inside
+                // the Python adapter (`librefang.sidecar.adapters.wecom`) which
+                // wraps every outbound chunk as `msgtype: "markdown"`. The
+                // generic `format_for_channel` path with the Markdown default
+                // (see `default_output_format_for_channel("wecom")`) gives the
+                // sidecar exactly that.
+                librefang_channels::formatter::default_output_format_for_channel(channel)
+            });
+        let formatted = librefang_channels::formatter::format_for_channel(message, format);
 
         let content = librefang_channels::types::ChannelContent::Text(formatted);
 

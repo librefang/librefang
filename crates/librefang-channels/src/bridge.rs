@@ -2576,8 +2576,23 @@ fn should_process_group_message(
     overrides: &ChannelOverrides,
     message: &ChannelMessage,
 ) -> bool {
-    match overrides.group_policy {
-        // #6445: `None` (no group policy configured) processes every group message — byte-identical to the historical whole-struct-absent behaviour — and collapses into the same arm as an explicit `All`.
+    // #6445: `group_trigger_patterns` is only consulted under mention-only
+    // semantics (it widens the mention gate with extra regex triggers). An
+    // operator who set trigger patterns but left `group_policy` unset clearly
+    // wants pattern-gating, so an unset policy WITH patterns resolves to
+    // MentionOnly. An unset policy with NO patterns stays "process all" — the
+    // historical whole-struct-absent behaviour the #6445 fix restores. (Setting
+    // trigger patterns is itself a group-gating decision, so honouring it is not
+    // the silent-materialization footgun #6445 fixed — that was about UNRELATED
+    // fields like `threading` flipping the group gate.)
+    let effective_policy = match overrides.group_policy {
+        None if !overrides.group_trigger_patterns.is_empty() => Some(GroupPolicy::MentionOnly),
+        other => other,
+    };
+    match effective_policy {
+        // `None` here means no group policy AND no trigger patterns — process
+        // every group message, byte-identical to the historical
+        // whole-struct-absent behaviour, same as an explicit `All`.
         None | Some(GroupPolicy::All) => true,
         Some(GroupPolicy::Ignore) => {
             debug!("Ignoring group message on {ct_str} (group_policy=ignore)");
@@ -8120,7 +8135,23 @@ mod tests {
 
     #[test]
     fn test_dm_policy_filtering() {
-        // Test that DmPolicy::Ignore would be checked
+        // The enum `#[default]`s are unchanged and still used by serde when an
+        // explicit value is written, but since #6445 they NO LONGER drive
+        // `ChannelOverrides` gating: an unset policy is `None`, not the enum
+        // default. Assert the load-bearing invariant so a maintainer does not
+        // read this test and conclude the group default is still `MentionOnly`
+        // (re-introducing the materialization footgun #6445 fixed).
+        let ov = librefang_types::config::ChannelOverrides::default();
+        assert_eq!(
+            ov.dm_policy, None,
+            "unset dm_policy must be None, not the enum default"
+        );
+        assert_eq!(
+            ov.group_policy, None,
+            "unset group_policy must be None (process all), not MentionOnly"
+        );
+        // The enum defaults themselves are still what an explicit value falls
+        // back to during deserialization — kept as documentation of that.
         assert_eq!(DmPolicy::default(), DmPolicy::Respond);
         assert_eq!(GroupPolicy::default(), GroupPolicy::MentionOnly);
     }
@@ -10016,6 +10047,41 @@ mod tests {
                 assert!(
                     !should_process_group_message("whatsapp", &explicit_mention_only, &msg),
                     "explicit MentionOnly still gates unmentioned traffic"
+                );
+            });
+        }
+
+        #[test]
+        fn none_group_policy_with_trigger_patterns_still_gates_6445() {
+            // Regression for the code-review finding on the #6445 fix: setting
+            // `group_trigger_patterns` without an explicit `group_policy` is
+            // itself a pattern-gating decision. An unset policy WITH patterns
+            // must resolve to MentionOnly (not fall into the process-all `None`
+            // arm), otherwise the patterns become inert and the bot replies to
+            // every group message — the very silent flip #6445 set out to kill.
+            with_guard_off(|| {
+                let unmatched = group_text_message("hello there, nobody in particular");
+                let patterns_only = ChannelOverrides {
+                    group_trigger_patterns: vec!["(?i)\\bmybot\\b".to_string()],
+                    ..Default::default()
+                };
+                assert!(
+                    !should_process_group_message("whatsapp", &patterns_only, &unmatched),
+                    "patterns set + policy unset must gate like MentionOnly, not process-all"
+                );
+
+                // A message that hits a trigger pattern is still accepted.
+                let matched = group_text_message("hey MyBot, are you there?");
+                assert!(
+                    should_process_group_message("whatsapp", &patterns_only, &matched),
+                    "a trigger-pattern hit must still be accepted under the None+patterns gate"
+                );
+
+                // Sanity: with NO patterns and no policy, process-all still holds.
+                let bare = ChannelOverrides::default();
+                assert!(
+                    should_process_group_message("whatsapp", &bare, &unmatched),
+                    "no policy and no patterns must still process all group messages"
                 );
             });
         }

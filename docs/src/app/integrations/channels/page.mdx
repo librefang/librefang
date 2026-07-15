@@ -235,7 +235,9 @@ The wrap is applied once on every non-streaming success path (`auto_reply`, kern
 
 Signal output defaults to `OutputFormat::PlainText` because `signal-cli` renders Markdown asterisks and underscores literally and leaving them in produced visible noise. The mapping lives in `default_output_format_for_channel("signal")` (`crates/librefang-channels/src/formatter.rs`) and is keyed off the `channel_type` string, so the default still applies after the sidecar migration — the `[[sidecar_channels]]` entry preserves `channel_type = "signal"`.
 
-Per-channel `output_format`, `dm_policy`, `group_policy`, and `threading` overrides are exposed on `[[sidecar_channels]]` as of #6445. Each is optional — an unset field inherits the bridge default and does not materialize a policy you did not write. Agent-level `[channel_overrides]` still takes precedence over these per-channel values.
+Per-channel `output_format`, `dm_policy`, `group_policy`, and `threading` overrides are exposed on `[[sidecar_channels]]` as of #6445.
+Each is optional — an unset field inherits the bridge default and does not materialize a policy you did not write.
+Agent-level `[channel_overrides]` still takes precedence over these per-channel values.
 
 Other channels keep their previous formatter defaults — only Signal flipped.
 

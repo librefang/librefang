@@ -718,7 +718,8 @@ MY_API_TOKEN = "secret"
 | `threading` | bool 或 null | `null` | 为此 sidecar 实例启用线程回复（#6445）。`null` 继承 bridge 默认（关闭）。 |
 | `output_format` | string 或 null | `null` | 此 sidecar 实例的输出格式覆盖（`markdown` / `telegram_html` / `slack_mrkdwn` / `plain_text`）（#6445）。`null` 继承通道默认。 |
 
-未设（`null`）的字段不会投影为任何 override，因此在这里设一个 knob 绝不会连带产生你没写的策略 —— 这正是 #6445 修复的陷阱。agent 级 `agent.toml` 里的 `[channel_overrides]` 仍优先于这些按通道设置的值。
+未设（`null`）的字段不会投影为任何 override，因此在这里设一个 knob 绝不会连带产生你没写的策略 —— 这正是 #6445 修复的陷阱。
+agent 级 `agent.toml` 里的 `[channel_overrides]` 仍优先于这些按通道设置的值。
 
 ---
 

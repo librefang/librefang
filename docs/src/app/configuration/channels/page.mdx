@@ -754,7 +754,8 @@ MY_API_TOKEN = "secret"
 | `threading` | bool or null | `null` | Enable thread replies for this sidecar instance (#6445). `null` inherits the bridge default (off). |
 | `output_format` | string or null | `null` | Output-format override (`markdown` / `telegram_html` / `slack_mrkdwn` / `plain_text`) for this sidecar instance (#6445). `null` inherits the channel default. |
 
-An unset (`null`) field is projected onto no override at all, so setting one knob here never materializes a policy you did not write — the footgun fixed in #6445. Agent-level `[channel_overrides]` in `agent.toml` still takes precedence over these per-channel values.
+An unset (`null`) field is projected onto no override at all, so setting one knob here never materializes a policy you did not write — the footgun fixed in #6445.
+Agent-level `[channel_overrides]` in `agent.toml` still takes precedence over these per-channel values.
 
 ---
 
