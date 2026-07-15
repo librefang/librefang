@@ -147,8 +147,8 @@ usage_footer = "compact"
 |-------|------|---------|-------------|
 | `model` | `Option<String>` | Agent default | Override the LLM model for this channel. |
 | `system_prompt` | `Option<String>` | Agent default | Override the system prompt for this channel. |
-| `dm_policy` | `DmPolicy` | `Respond` | How to handle direct messages. |
-| `group_policy` | `GroupPolicy` | `MentionOnly` | How to handle group/channel messages. |
+| `dm_policy` | `Option<DmPolicy>` | `None` (unset) | How to handle direct messages. `None` applies no DM gating (DMs flow) and does not affect other overrides (#6445). |
+| `group_policy` | `Option<GroupPolicy>` | `None` (unset) | How to handle group/channel messages. `None` processes every group message; an explicit `MentionOnly` gates to @mentions (#6445). |
 | `rate_limit_per_user` | `u32` | `0` (unlimited) | Max messages per minute per user. |
 | `threading` | `bool` | `false` | Send replies as thread responses (platforms that support it). |
 | `output_format` | `Option<OutputFormat>` | `Markdown` | Output format for this channel. |
@@ -235,7 +235,7 @@ The wrap is applied once on every non-streaming success path (`auto_reply`, kern
 
 Signal output defaults to `OutputFormat::PlainText` because `signal-cli` renders Markdown asterisks and underscores literally and leaving them in produced visible noise. The mapping lives in `default_output_format_for_channel("signal")` (`crates/librefang-channels/src/formatter.rs`) and is keyed off the `channel_type` string, so the default still applies after the sidecar migration — the `[[sidecar_channels]]` entry preserves `channel_type = "signal"`.
 
-Per-channel `output_format` overrides are not currently exposed on `[[sidecar_channels]]` (the `overrides` block lived on the in-process per-channel configs like `[channels.signal]` and was removed with them). Agents that need to send Markdown unmodified can flip the format on the agent side.
+Per-channel `output_format`, `dm_policy`, `group_policy`, and `threading` overrides are exposed on `[[sidecar_channels]]` as of #6445. Each is optional — an unset field inherits the bridge default and does not materialize a policy you did not write. Agent-level `[channel_overrides]` still takes precedence over these per-channel values.
 
 Other channels keep their previous formatter defaults — only Signal flipped.
 

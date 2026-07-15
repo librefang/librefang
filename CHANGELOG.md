@@ -110,6 +110,7 @@ _40 PRs from 4 contributors since v2026.6.29._
 
 ### Added
 
+- Expose per-channel `dm_policy`, `group_policy`, `threading`, and `output_format` on `[[sidecar_channels]]`, restoring the channel-level override slot that was lost in the sidecar migration (#6445): each is `Option<_>`, so `overrides_from_sidecar_config` projects only the fields an operator explicitly set and an unset knob never materializes a policy they did not write. Precedence is unchanged — agent-level `[channel_overrides]` still wins over the per-channel value (#6468) (@houko)
 - Surface the model the Codex CLI is configured to run (#6365) (@houko)
 - Complete and proofread dashboard and website translations (#6376) (@houko)
 

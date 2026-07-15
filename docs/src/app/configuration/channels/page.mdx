@@ -609,11 +609,12 @@ The `[channels.<name>.overrides]` sub-table is **no longer recognised**. It live
 | Old override | Sidecar equivalent |
 |---|---|
 | `model`, `system_prompt` | Set on the agent (`agent.toml`) rather than per-channel — sidecars route every inbound to the same agent. |
-| `dm_policy`, `group_policy` | Moved to the agent: set them under `agent.toml [channel_overrides]` — the channel bridge enforces them on every dispatch, and `allowed_only` user gating is backed by `[[users]]` channel bindings (RBAC). They are not sidecar env knobs: only the WhatsApp sidecar reads `WHATSAPP_DM_POLICY` (Cloud API webhook mode only), `WHATSAPP_GROUP_POLICY` is read but currently has no effect, and the Telegram / Discord / Slack / Teams sidecars read no `*_DM_POLICY` / `*_GROUP_POLICY` at all. |
+| `dm_policy`, `group_policy` | Settable per-channel on `[[sidecar_channels]]` directly (#6445), or on the agent under `agent.toml [channel_overrides]` (which takes precedence). The channel bridge enforces them on every dispatch, and `allowed_only` user gating is backed by `[[users]]` channel bindings (RBAC). Distinct from the sidecar env knobs: only the WhatsApp sidecar reads `WHATSAPP_DM_POLICY` (Cloud API webhook mode only), `WHATSAPP_GROUP_POLICY` is read but currently has no effect, and the Telegram / Discord / Slack / Teams sidecars read no `*_DM_POLICY` / `*_GROUP_POLICY` at all. |
 | `rate_limit_per_minute`, `rate_limit_per_user` | Sidecars rate-limit themselves to platform limits; for tighter caps, wrap the sidecar in a reverse proxy. |
-| `output_format` | Not exposed on `[[sidecar_channels]]`. Agents that need a specific output format should flip it on the agent side. |
+| `output_format` | Settable per-channel on `[[sidecar_channels]]` (#6445), or on the agent side; the agent value takes precedence. |
 | `disable_commands`, `allowed_commands`, `blocked_commands` | Set on the agent's manifest (`agent.toml`) under the command-policy section — applies uniformly across channels. |
-| `threading`, `usage_footer`, `typing_mode` | Sidecar defaults (threading where the platform supports it; no usage footer; instant typing). Not configurable per-channel today. |
+| `threading` | Settable per-channel on `[[sidecar_channels]]` (#6445), or on the agent side; the agent value takes precedence. |
+| `usage_footer`, `typing_mode` | Sidecar defaults (no usage footer; instant typing). Not configurable per-channel today. |
 
 The remainder of this section describes the **deleted** override shape — keep for reference; do **not** copy-paste into a current `config.toml`.
 
@@ -642,8 +643,8 @@ blocked_commands = []
 |-------|------|---------|-------------|
 | `model` | string or null | `null` | Model override for this channel. Uses the agent's default model when null. |
 | `system_prompt` | string or null | `null` | System prompt override for this channel. |
-| `dm_policy` | string | `"respond"` | How the bot handles direct messages. See below. |
-| `group_policy` | string | `"mention_only"` | How the bot handles group messages. See below. |
+| `dm_policy` | string or null | `null` | How the bot handles direct messages. See below. `null` (unset) applies no DM gating — DMs flow — and, unlike a written value, does not affect any other override (#6445). |
+| `group_policy` | string or null | `null` | How the bot handles group messages. See below. `null` (unset) applies no group gating — every group message is processed. Before #6445, an unset value silently behaved as `mention_only` whenever any other override field was written. |
 | `rate_limit_per_minute` | u32 | `0` | Global rate limit for this channel (messages per minute). `0` = unlimited. |
 | `rate_limit_per_user` | u32 | `0` | Maximum messages per user per minute. `0` = unlimited. |
 | `threading` | bool | `false` | Enable thread replies (where supported by the platform). |
@@ -748,6 +749,12 @@ MY_API_TOKEN = "secret"
 | `args` | list of strings | `[]` | Arguments to pass to the command. |
 | `env` | map of string to string | `{}` | Extra environment variables to pass to the subprocess. |
 | `channel_type` | string or null | `null` | Channel type identifier. Defaults to `Custom(<name>)` if null. |
+| `dm_policy` | string or null | `null` | Per-channel DM policy (`respond` / `allowed_only` / `ignore`), scoped to this sidecar instance (#6445). `null` inherits the bridge default (DMs flow) and, unlike a written value, leaves every other override untouched. |
+| `group_policy` | string or null | `null` | Per-channel group policy (`all` / `mention_only` / `commands_only` / `ignore`), scoped to this sidecar instance (#6445). `null` inherits the bridge default (process all group messages). |
+| `threading` | bool or null | `null` | Enable thread replies for this sidecar instance (#6445). `null` inherits the bridge default (off). |
+| `output_format` | string or null | `null` | Output-format override (`markdown` / `telegram_html` / `slack_mrkdwn` / `plain_text`) for this sidecar instance (#6445). `null` inherits the channel default. |
+
+An unset (`null`) field is projected onto no override at all, so setting one knob here never materializes a policy you did not write — the footgun fixed in #6445. Agent-level `[channel_overrides]` in `agent.toml` still takes precedence over these per-channel values.
 
 ---
 

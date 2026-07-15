@@ -147,8 +147,8 @@ usage_footer = "compact"
 |------|------|--------|------|
 | `model` | `Option<String>` | Agent 默认值 | 覆盖此通道使用的 LLM 模型。 |
 | `system_prompt` | `Option<String>` | Agent 默认值 | 覆盖此通道的系统提示词。 |
-| `dm_policy` | `DmPolicy` | `Respond` | 如何处理私信。 |
-| `group_policy` | `GroupPolicy` | `MentionOnly` | 如何处理群组/频道消息。 |
+| `dm_policy` | `Option<DmPolicy>` | `None`（未设） | 如何处理私信。`None` 不做任何私聊门控（私聊放行），且不影响其他 override（#6445）。 |
+| `group_policy` | `Option<GroupPolicy>` | `None`（未设） | 如何处理群组/频道消息。`None` 处理每条群消息；显式 `MentionOnly` 才收窄为仅 @提及（#6445）。 |
 | `rate_limit_per_user` | `u32` | `0`（无限制） | 每用户每分钟最大消息数。 |
 | `threading` | `bool` | `false` | 以线程回复形式发送响应（仅限支持的平台）。 |
 | `output_format` | `Option<OutputFormat>` | `Markdown` | 此通道的输出格式。 |
@@ -235,7 +235,7 @@ prefix_agent_name = "BoldBracket"
 
 Signal 默认 `OutputFormat::PlainText`，原因是 `signal-cli` 会把 Markdown 的 `*` 和 `_` 当字面量渲染，保留会产生可见噪音。这个映射写在 `default_output_format_for_channel("signal")` 中（见 `crates/librefang-channels/src/formatter.rs`），按 `channel_type` 字符串匹配；sidecar 迁移后 `[[sidecar_channels]]` 里仍然保留 `channel_type = "signal"`，所以默认值依旧生效。
 
-`[[sidecar_channels]]` 目前不暴露 `output_format` 的逐通道覆盖（原 `overrides` 块挂在 `[channels.signal]` 之类的进程内配置上，已随之一起删除）。如果某个 agent 必须原样发送 Markdown，请在 agent 这一端翻转 format。
+自 #6445 起，`[[sidecar_channels]]` 已暴露 `output_format`、`dm_policy`、`group_policy`、`threading` 的逐通道覆盖。每个字段都是可选的 —— 未设的字段继承 bridge 默认，且不会产生你没写的策略。agent 级 `[channel_overrides]` 仍优先于这些按通道设置的值。
 
 其他通道保留各自的 formatter 默认值——只翻了 Signal。
 
