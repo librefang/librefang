@@ -58,14 +58,29 @@ const BLOCKED_ENV_EXACT: &[&str] = &[
     "AWS_SESSION_TOKEN",
 ];
 
+/// Returns `true` if the env var name is one of the daemon's own reserved
+/// secrets ([`BLOCKED_ENV_EXACT`]) — the vault key and the provider API keys
+/// the daemon itself runs on. These can never be injected into a child
+/// process, no matter who asks: not a hand's passthrough list, and not the
+/// operator's own `exec_policy.allowed_env_vars` (#6458).
+pub fn is_reserved_env_var(name: &str) -> bool {
+    BLOCKED_ENV_EXACT.contains(&name.to_uppercase().as_str())
+}
+
 /// Returns `true` if the env var name is a reserved secret / internal-daemon
 /// variable that must never be exposed to untrusted code — a WASM guest, a
 /// sandboxed subprocess, or a hand-declared env passthrough.
 ///
-/// This is the single source of truth for env filtering across the runtime:
-/// the WASM host `env_read` function, `sandbox_command` below, and the kernel
-/// hand-activation path (`hands_lifecycle`) all funnel through it, so a name
-/// blocked in one place is blocked everywhere.
+/// This is the single source of truth for env filtering of **untrusted**
+/// passthrough sources across the runtime: the WASM host `env_read` function,
+/// the untrusted list in `sandbox_command` below, the kernel hand-activation
+/// path (`hands_lifecycle`), and the plugin hook baseline env all funnel
+/// through it, so a name blocked in one place is blocked everywhere.
+/// Operator-declared names (`exec_policy.allowed_env_vars` in the operator's
+/// own `agent.toml`) are deliberately NOT filtered through this heuristic —
+/// essentially every credential env var contains one of the blocked words, so
+/// applying it there would make the allowlist unable to carry any credential
+/// at all (#6458). They are checked against [`is_reserved_env_var`] only.
 pub fn is_blocked_env_var(name: &str) -> bool {
     let upper = name.to_uppercase();
     // Exact-name check (belt-and-suspenders — all of these also match the
@@ -135,18 +150,38 @@ fn has_word_boundary_substring(haystack: &str, needle: &str) -> bool {
 /// After calling this function the child process will only see:
 /// - The platform-independent safe variables (`SAFE_ENV_VARS`)
 /// - On Windows, the Windows-specific safe variables (`SAFE_ENV_VARS_WINDOWS`)
-/// - Any additional variables the caller explicitly allows via `allowed_env_vars`
+/// - Operator-declared variables from `operator_env_vars`, minus the daemon's
+///   reserved secrets ([`is_reserved_env_var`])
+/// - Untrusted passthrough variables from `untrusted_env_vars`, minus
+///   everything the secret heuristic flags ([`is_blocked_env_var`])
 ///
 /// Variables that are not set in the current process environment are silently
 /// skipped (rather than being set to empty strings).
 ///
-/// SECURITY: caller-allowed names are filtered through [`is_blocked_env_var`]
-/// as a last line of defence. A marketplace hand's attacker-controlled
-/// `HAND.toml` can name arbitrary vars in `[[requires]]`, so even though the
-/// kernel filters that list at assembly time, we re-check here so no caller
-/// can smuggle a reserved secret (`LIBREFANG_VAULT_KEY`, `ANTHROPIC_API_KEY`,
-/// …) from the daemon's live environment into an untrusted child.
-pub fn sandbox_command(cmd: &mut tokio::process::Command, allowed_env_vars: &[String]) {
+/// Returns the names that were requested but refused, so callers can surface
+/// the drop to the agent/operator instead of leaving only a daemon-log WARN
+/// (#6458).
+///
+/// SECURITY — two trust levels (#6458):
+/// - `operator_env_vars` is the operator's own `exec_policy.allowed_env_vars`
+///   from their `agent.toml`. The operator explicitly granted these names, so
+///   the broad credential-word heuristic does not apply — it would otherwise
+///   make the allowlist unable to carry any credential (essentially every
+///   credential name contains KEY/TOKEN/PASSWORD/…), defeating the feature's
+///   purpose. Only the daemon's own reserved secrets
+///   ([`is_reserved_env_var`]: `LIBREFANG_VAULT_KEY`, provider API keys, …)
+///   are refused unconditionally.
+/// - `untrusted_env_vars` is an attacker-controllable passthrough list — a
+///   marketplace hand's `HAND.toml` `[[requires]]` / settings names. The
+///   kernel filters that list at assembly time (`hands_lifecycle`), and we
+///   re-check the full [`is_blocked_env_var`] heuristic here as a last line
+///   of defence so no caller can smuggle a secret-shaped var from the
+///   daemon's live environment into an untrusted child.
+pub fn sandbox_command(
+    cmd: &mut tokio::process::Command,
+    operator_env_vars: &[String],
+    untrusted_env_vars: &[String],
+) -> Vec<String> {
     cmd.env_clear();
 
     // Re-add platform-independent safe vars.
@@ -164,21 +199,42 @@ pub fn sandbox_command(cmd: &mut tokio::process::Command, allowed_env_vars: &[St
         }
     }
 
-    // Re-add caller-specified allowed vars — but never a reserved secret or
-    // internal-daemon var, even if the caller (e.g. an attacker-controlled
-    // HAND.toml passthrough list) explicitly asked for it.
-    for var in allowed_env_vars {
-        if is_blocked_env_var(var) {
+    let mut refused: Vec<String> = Vec::new();
+
+    // Operator-declared allowlist: refuse only the daemon's own reserved
+    // secrets; secret-shaped names the operator deliberately granted pass
+    // through (that is the allowlist's whole purpose — see #6458).
+    for var in operator_env_vars {
+        if is_reserved_env_var(var) {
             tracing::warn!(
                 var = %var,
-                "refusing to inject reserved/secret env var into sandboxed child"
+                "refusing to inject reserved daemon secret into sandboxed child (operator allowlist)"
             );
+            refused.push(var.clone());
             continue;
         }
         if let Ok(val) = std::env::var(var) {
             cmd.env(var, val);
         }
     }
+
+    // Untrusted passthrough list: full heuristic, defence in depth behind the
+    // assembly-time filter in `hands_lifecycle`.
+    for var in untrusted_env_vars {
+        if is_blocked_env_var(var) {
+            tracing::warn!(
+                var = %var,
+                "refusing to inject reserved/secret env var into sandboxed child (untrusted passthrough)"
+            );
+            refused.push(var.clone());
+            continue;
+        }
+        if let Ok(val) = std::env::var(var) {
+            cmd.env(var, val);
+        }
+    }
+
+    refused
 }
 
 /// Validates that an executable path does not contain directory traversal
@@ -1896,7 +1952,7 @@ mod tests {
 
         let allowed = vec![benign.to_string(), secret.to_string(), vault.to_string()];
         let mut cmd = tokio::process::Command::new("true");
-        sandbox_command(&mut cmd, &allowed);
+        let refused = sandbox_command(&mut cmd, &[], &allowed);
 
         let injected: std::collections::HashSet<String> = cmd
             .as_std()
@@ -1923,5 +1979,91 @@ mod tests {
             !injected.contains(vault),
             "reserved daemon secret must be stripped from the child env"
         );
+        assert_eq!(
+            refused,
+            vec![secret.to_string(), vault.to_string()],
+            "refused names must be reported back to the caller"
+        );
+    }
+
+    #[test]
+    fn test_sandbox_command_operator_allowlist_carries_secret_shaped_names() {
+        // Regression #6458: the operator's explicit `exec_policy.allowed_env_vars`
+        // must be able to carry a secret-shaped name (essentially every
+        // credential env var contains KEY/TOKEN/PASSWORD/…) — the broad
+        // heuristic applies only to untrusted passthrough lists. Before the
+        // fix, `MYTOOL_KEYRING_PASSWORD` was silently dropped even when the
+        // operator allowlisted it in their own agent.toml, breaking every
+        // credentialed CLI driven through shell_exec.
+        let secret_shaped = "SANDBOXTEST_OPERATOR_KEYRING_PASSWORD";
+        // SAFETY: name is unique to this test.
+        unsafe {
+            std::env::set_var(secret_shaped, "hunter2");
+        }
+
+        let operator = vec![secret_shaped.to_string()];
+        let mut cmd = tokio::process::Command::new("true");
+        let refused = sandbox_command(&mut cmd, &operator, &[]);
+
+        let injected: std::collections::HashSet<String> = cmd
+            .as_std()
+            .get_envs()
+            .filter_map(|(k, _)| k.to_str().map(|s| s.to_string()))
+            .collect();
+
+        // SAFETY: see set_var above.
+        unsafe {
+            std::env::remove_var(secret_shaped);
+        }
+
+        assert!(
+            injected.contains(secret_shaped),
+            "operator-allowlisted secret-shaped var must be injected"
+        );
+        assert!(refused.is_empty(), "nothing should have been refused");
+    }
+
+    #[test]
+    fn test_sandbox_command_operator_allowlist_never_injects_reserved_daemon_secrets() {
+        // The daemon's own reserved secrets (vault key, provider API keys) are
+        // refused unconditionally — even from the operator's explicit
+        // allowlist. Refusal is by NAME before the env value is ever read, so
+        // the vars need not be set in the test environment (avoids racing
+        // other tests on the shared fixed names).
+        let operator = vec![
+            "LIBREFANG_VAULT_KEY".to_string(),
+            "ANTHROPIC_API_KEY".to_string(),
+        ];
+        let mut cmd = tokio::process::Command::new("true");
+        let refused = sandbox_command(&mut cmd, &operator, &[]);
+
+        let injected: std::collections::HashSet<String> = cmd
+            .as_std()
+            .get_envs()
+            .filter_map(|(k, _)| k.to_str().map(|s| s.to_string()))
+            .collect();
+
+        assert!(!injected.contains("LIBREFANG_VAULT_KEY"));
+        assert!(!injected.contains("ANTHROPIC_API_KEY"));
+        assert_eq!(
+            refused,
+            vec![
+                "LIBREFANG_VAULT_KEY".to_string(),
+                "ANTHROPIC_API_KEY".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_is_reserved_env_var_exact_list_only() {
+        // Reserved = the daemon's own secrets, case-insensitive, exact names.
+        assert!(is_reserved_env_var("LIBREFANG_VAULT_KEY"));
+        assert!(is_reserved_env_var("librefang_vault_key"));
+        assert!(is_reserved_env_var("ANTHROPIC_API_KEY"));
+        // Secret-shaped but not the daemon's own — reserved check must NOT
+        // flag these (the heuristic in `is_blocked_env_var` still does).
+        assert!(!is_reserved_env_var("MYTOOL_KEYRING_PASSWORD"));
+        assert!(!is_reserved_env_var("SOME_CUSTOM_API_KEY"));
+        assert!(!is_reserved_env_var("PATH"));
     }
 }

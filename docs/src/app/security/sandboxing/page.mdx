@@ -298,7 +298,11 @@ leakage of secrets.
 ### Environment Clearing
 
 ```rust
-pub fn sandbox_command(cmd: &mut tokio::process::Command, allowed_env_vars: &[String]) {
+pub fn sandbox_command(
+    cmd: &mut tokio::process::Command,
+    operator_env_vars: &[String],
+    untrusted_env_vars: &[String],
+) -> Vec<String> {
     cmd.env_clear();  // Remove ALL inherited env vars
 
     // Re-add platform-independent safe vars
@@ -312,8 +316,14 @@ pub fn sandbox_command(cmd: &mut tokio::process::Command, allowed_env_vars: &[St
     #[cfg(windows)]
     for var in SAFE_ENV_VARS_WINDOWS { /* ... */ }
 
-    // Re-add caller-specified allowed vars
-    for var in allowed_env_vars { /* ... */ }
+    // Operator-declared vars (exec_policy.allowed_env_vars): refuse only the
+    // daemon's own reserved secrets (vault key, provider API keys)
+    for var in operator_env_vars { /* ... */ }
+
+    // Untrusted passthrough (hand-declared lists): full secret-name heuristic
+    for var in untrusted_env_vars { /* ... */ }
+
+    refused // names that were dropped, surfaced back to the agent
 }
 ```
 
@@ -336,9 +346,10 @@ pub const SAFE_ENV_VARS_WINDOWS: &[&str] = &[
 ];
 ```
 
-Variables not in these lists and not in `allowed_env_vars` are **never**
-passed to the child process.  This means `OPENAI_API_KEY`, `GEMINI_API_KEY`,
-database credentials, and all other secrets are stripped.
+Variables not in these lists and not in one of the allowlists are **never** passed to the child process.
+The two allowlists carry different trust levels (#6458): the operator's own `exec_policy.allowed_env_vars` may carry secret-shaped names (`MYTOOL_KEYRING_PASSWORD`, `FOO_API_TOKEN`, ...) — only the daemon's own reserved secrets (`LIBREFANG_VAULT_KEY`, provider API keys) are refused unconditionally.
+Untrusted passthrough lists (a marketplace hand's `[[requires]]` / settings names) are additionally filtered through the credential-word heuristic, at assembly time and again at spawn time.
+Refused names are returned to the caller and surfaced in the tool output.
 
 ### Executable Path Validation
 
