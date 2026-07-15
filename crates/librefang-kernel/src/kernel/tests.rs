@@ -11131,10 +11131,13 @@ fn sync_default_model_agents_with_old_model_spares_agents_on_other_models() {
 #[serial_test::serial(librefang_vault_key)]
 fn set_agent_model_rejects_only_against_a_fresh_openrouter_catalog() {
     let _env = set_test_env("OPENROUTER_API_KEY", "");
+    let _env_offline = set_test_env("LIBREFANG_REGISTRY_OFFLINE", "1");
     let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    librefang_runtime::registry_sync::seed_registry_fixture_for_tests(&home_dir);
     let config = KernelConfig {
-        home_dir: tmp.path().to_path_buf(),
-        data_dir: tmp.path().join("data"),
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
         ..KernelConfig::default()
     };
     let kernel = LibreFangKernel::boot_with_config(config).expect("kernel should boot");
