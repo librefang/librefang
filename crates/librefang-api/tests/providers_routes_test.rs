@@ -995,6 +995,7 @@ async fn test_openrouter_refreshes_live_models() {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     let server = MockServer::start().await;
+    librefang_api::openrouter_catalog::clear_refresh_attempts(&server.uri());
     Mock::given(method("GET"))
         .and(path("/key"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -1052,6 +1053,7 @@ async fn set_first_openrouter_key_uses_free_snapshot_when_live_models_are_rate_l
     librefang_api::secrets_env::remove_env_var_guarded("OPENAI_API_KEY").await;
 
     let server = MockServer::start().await;
+    librefang_api::openrouter_catalog::clear_refresh_attempts(&server.uri());
     Mock::given(method("GET"))
         .and(path("/key"))
         .and(header("authorization", "Bearer test-openrouter-key"))
@@ -1139,6 +1141,7 @@ async fn resaving_openrouter_key_reports_same_provider_model_migration_separatel
     const OPENROUTER_TEST_ENV: &str = "LIBREFANG_TEST_OPENROUTER_KEY_6384_RESAVE";
 
     let server = MockServer::start().await;
+    librefang_api::openrouter_catalog::clear_refresh_attempts(&server.uri());
     Mock::given(method("GET"))
         .and(path("/key"))
         .and(header("authorization", "Bearer test-openrouter-key"))
@@ -1255,6 +1258,7 @@ async fn first_openrouter_model_request_populates_live_cache() {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     let server = MockServer::start().await;
+    librefang_api::openrouter_catalog::clear_refresh_attempts(&server.uri());
     Mock::given(method("GET"))
         .and(path("/models"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -1303,6 +1307,7 @@ async fn get_openrouter_model_populates_live_cache_before_lookup() {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     let server = MockServer::start().await;
+    librefang_api::openrouter_catalog::clear_refresh_attempts(&server.uri());
     Mock::given(method("GET"))
         .and(path("/models"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -1350,6 +1355,7 @@ async fn unconfigured_openrouter_model_request_does_not_fetch_live_catalog() {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     let server = MockServer::start().await;
+    librefang_api::openrouter_catalog::clear_refresh_attempts(&server.uri());
     Mock::given(method("GET"))
         .and(path("/models"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
