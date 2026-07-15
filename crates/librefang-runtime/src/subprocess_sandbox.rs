@@ -2069,34 +2069,22 @@ mod tests {
 
     #[test]
     fn test_deferred_approval_resume_preserves_env_trust_split() {
-        // #6458 resume-path lock-in. This design carries env-allowlist trust
-        // in *which field* holds the name, not a separate provenance tag: the
-        // operator's list lives in `exec_policy.allowed_env_vars`, the
-        // untrusted passthrough list in `allowed_env_vars`. Both are already
-        // persisted on `DeferredToolExecution`, and the resume path
-        // (`build_deferred_tool_exec_context`) feeds `deferred.exec_policy`
-        // and `deferred.allowed_env_vars` straight back into the same
-        // `tool_shell_exec` / `tool_process_start` code the live path uses —
-        // so no extra persisted field is needed for a resumed `Allow once` to
-        // filter the child env identically. This test pins that end to end:
-        // build a deferred payload, round-trip it through serde (the restart
-        // boundary), then drive `sandbox_command` exactly as the resume path
-        // would and assert the trust split survived.
+        // #6458 resume-path lock-in.
+        // This design carries env-allowlist trust in *which field* holds the name, not a separate provenance tag: the operator's list lives in `exec_policy.allowed_env_vars`, the untrusted passthrough list in `allowed_env_vars`.
+        // Both are already persisted on `DeferredToolExecution`, and the resume path (`build_deferred_tool_exec_context`) feeds `deferred.exec_policy` and `deferred.allowed_env_vars` straight back into the same `tool_shell_exec` / `tool_process_start` code the live path uses — so no extra persisted field is needed for a resumed `Allow once` to filter the child env identically.
+        // This test pins that end to end: build a deferred payload, round-trip it through serde (the restart boundary), then drive `sandbox_command` exactly as the resume path would and assert the trust split survived.
         let operator_secret = "SANDBOXTEST_RESUME_OPERATOR_KEYRING_PASSWORD"; // secret-shaped, operator-granted → must pass
         let untrusted_secret = "SANDBOXTEST_RESUME_HAND_API_TOKEN"; // secret-shaped, hand passthrough → must be refused
         let vault = "LIBREFANG_VAULT_KEY"; // reserved daemon secret → refused from either list
 
-        // SAFETY: all three names are unique to this test (the vault key is
-        // never read from the real environment here — refusal is by name).
+        // SAFETY: all three names are unique to this test (the vault key is never read from the real environment here — refusal is by name).
         unsafe {
             std::env::set_var(operator_secret, "operator-granted");
             std::env::set_var(untrusted_secret, "hand-smuggled");
             std::env::set_var(vault, "daemon-private");
         }
 
-        // `DeferredToolExecution` derives no `Default`, so every field is set
-        // explicitly (the trust-carrying ones — `allowed_env_vars`,
-        // `exec_policy` — plus inert context fields).
+        // `DeferredToolExecution` derives no `Default`, so every field is set explicitly (the trust-carrying ones — `allowed_env_vars`, `exec_policy` — plus inert context fields).
         let deferred = librefang_types::tool::DeferredToolExecution {
             agent_id: "11111111-1111-4111-8111-111111111111".to_string(),
             tool_use_id: "toolu_resume".to_string(),
@@ -2125,9 +2113,7 @@ mod tests {
         let restored: librefang_types::tool::DeferredToolExecution =
             serde_json::from_str(&json).expect("deferred deserializes");
 
-        // Reconstruct the two lists exactly as the resume path does
-        // (`tool_shell_exec`: operator ← exec_policy.allowed_env_vars,
-        // untrusted ← allowed_env_vars).
+        // Reconstruct the two lists exactly as the resume path does (`tool_shell_exec`: operator ← exec_policy.allowed_env_vars, untrusted ← allowed_env_vars).
         let operator_env: Vec<String> = restored
             .exec_policy
             .as_ref()
