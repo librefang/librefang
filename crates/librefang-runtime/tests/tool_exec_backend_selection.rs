@@ -69,6 +69,7 @@ fn build_backend_local_dispatches_to_local_impl() {
         "agent-1",
         std::env::temp_dir(),
         vec![],
+        vec![],
     )
     .expect("local backend always builds");
     assert_eq!(backend.kind(), BackendKind::Local);
@@ -84,6 +85,7 @@ fn build_backend_docker_dispatches_to_docker_impl() {
         &docker_cfg,
         "agent-1",
         std::env::temp_dir(),
+        vec![],
         vec![],
     )
     .expect("docker backend builds even when daemon absent");
@@ -101,6 +103,7 @@ fn build_backend_ssh_without_subtable_or_feature_errors() {
         "agent-1",
         std::env::temp_dir(),
         vec![],
+        vec![],
     );
     assert!(result.is_err());
 }
@@ -115,6 +118,7 @@ fn build_backend_daytona_without_subtable_or_feature_errors() {
         &docker_cfg,
         "agent-1",
         std::env::temp_dir(),
+        vec![],
         vec![],
     );
     assert!(result.is_err());
@@ -142,6 +146,7 @@ async fn end_to_end_local_dispatch_runs_command() {
         &docker_cfg,
         "agent-1",
         std::env::temp_dir(),
+        vec![],
         vec![],
     )
     .expect("local backend always builds");

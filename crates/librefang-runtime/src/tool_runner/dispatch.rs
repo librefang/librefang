@@ -941,18 +941,15 @@ pub async fn execute_tool_raw(
                 }
             }
 
-            let effective_allowed_env_vars = allowed_env_vars.or_else(|| {
-                exec_policy.and_then(|policy| {
-                    if policy.allowed_env_vars.is_empty() {
-                        None
-                    } else {
-                        Some(policy.allowed_env_vars.as_slice())
-                    }
-                })
-            });
+            // #6458: the two env-allowlist sources carry different trust and
+            // are no longer merged (previously the hand list shadowed the
+            // operator's). `allowed_env_vars` (a hand's assembled passthrough
+            // list) is passed as the untrusted list; the operator's trusted
+            // `exec_policy.allowed_env_vars` is derived from `exec_policy`
+            // inside `tool_shell_exec`.
             tool_shell_exec(
                 input,
-                effective_allowed_env_vars.unwrap_or(&[]),
+                allowed_env_vars.unwrap_or(&[]),
                 *workspace_root,
                 *exec_policy,
                 interrupt.clone(),

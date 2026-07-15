@@ -1534,3 +1534,77 @@ async fn test_shell_exec_drains_pipe_above_buffer_size() {
         "expected output between 8 KB and 100 KB, got {len} bytes"
     );
 }
+
+/// Regression for #6458: the operator's explicit `exec_policy.allowed_env_vars`
+/// must be able to carry a secret-shaped name (`*_PASSWORD` / `*_KEY` /
+/// `*_TOKEN` …) through to the shell child. Before the fix, `sandbox_command`
+/// filtered the operator's own allowlist through the credential-word
+/// heuristic, so the variable silently vanished and any credentialed CLI
+/// driven through `shell_exec` failed with a confusing downstream error.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_shell_exec_operator_allowlisted_secret_shaped_env_reaches_child() {
+    let var = "SHELLTEST_OPERATOR_KEYRING_PASSWORD";
+    // SAFETY: name is unique to this test.
+    unsafe {
+        std::env::set_var(var, "hunter2");
+    }
+
+    let policy = librefang_types::config::ExecPolicy {
+        mode: librefang_types::config::ExecSecurityMode::Full,
+        allowed_env_vars: vec![var.to_string()],
+        ..Default::default()
+    };
+
+    let result = super::shell::tool_shell_exec(
+        &serde_json::json!({ "command": format!("printenv {var}") }),
+        &[],
+        None,
+        Some(&policy),
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("shell_exec must succeed");
+
+    // SAFETY: see set_var above.
+    unsafe {
+        std::env::remove_var(var);
+    }
+
+    assert!(
+        result.contains("hunter2"),
+        "operator-allowlisted secret-shaped env var must reach the child, got: {result}"
+    );
+}
+
+/// Companion to the regression above: the daemon's own reserved secrets are
+/// still refused even from the operator's allowlist, and the refusal is
+/// surfaced in the tool output rather than only a daemon-log WARN (#6458).
+#[cfg(unix)]
+#[tokio::test]
+async fn test_shell_exec_reserved_daemon_secret_refused_and_surfaced() {
+    let policy = librefang_types::config::ExecPolicy {
+        mode: librefang_types::config::ExecSecurityMode::Full,
+        allowed_env_vars: vec!["LIBREFANG_VAULT_KEY".to_string()],
+        ..Default::default()
+    };
+
+    let result = super::shell::tool_shell_exec(
+        &serde_json::json!({ "command": "true" }),
+        &[],
+        None,
+        Some(&policy),
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("shell_exec must succeed");
+
+    assert!(
+        result.contains("LIBREFANG_VAULT_KEY"),
+        "the refused reserved name must be surfaced in the tool output, got: {result}"
+    );
+}

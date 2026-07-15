@@ -255,9 +255,13 @@ pub trait ToolExecBackend: Send + Sync {
 /// scrubbing the inherited environment. Always available — no feature
 /// flag, no remote dependencies.
 pub struct LocalBackend {
-    /// Allowlisted env vars to pass through to spawned children.
-    /// Mirrors the existing `tool_runner.rs` `allowed_env` plumbing.
-    allowed_env: Vec<String>,
+    /// Operator-declared env passthrough (`exec_policy.allowed_env_vars`) —
+    /// trusted; only the daemon's reserved secrets are refused (#6458).
+    operator_env: Vec<String>,
+    /// Untrusted env passthrough (a hand's assembled `hand_allowed_env`) —
+    /// the full secret-name heuristic applies.
+    /// Mirrors the existing `tool_runner.rs` env plumbing.
+    untrusted_env: Vec<String>,
     /// Default per-command timeout when `ExecSpec::limits.timeout` is unset.
     /// Source-of-truth: kernel config / agent manifest. Falls back to
     /// [`LOCAL_DEFAULT_TIMEOUT_SECS`] when constructed via
@@ -266,9 +270,14 @@ pub struct LocalBackend {
 }
 
 impl LocalBackend {
-    pub fn new(allowed_env: Vec<String>, default_timeout: Duration) -> Self {
+    pub fn new(
+        operator_env: Vec<String>,
+        untrusted_env: Vec<String>,
+        default_timeout: Duration,
+    ) -> Self {
         Self {
-            allowed_env,
+            operator_env,
+            untrusted_env,
             default_timeout,
         }
     }
@@ -277,7 +286,11 @@ impl LocalBackend {
     /// legacy [`LOCAL_DEFAULT_TIMEOUT_SECS`] default.
     /// Intended for tests and the resolver fallback.
     pub fn with_defaults() -> Self {
-        Self::new(Vec::new(), Duration::from_secs(LOCAL_DEFAULT_TIMEOUT_SECS))
+        Self::new(
+            Vec::new(),
+            Vec::new(),
+            Duration::from_secs(LOCAL_DEFAULT_TIMEOUT_SECS),
+        )
     }
 }
 
@@ -304,7 +317,14 @@ impl ToolExecBackend for LocalBackend {
             c
         };
 
-        crate::subprocess_sandbox::sandbox_command(&mut cmd, &self.allowed_env);
+        // Refused names are WARN-logged inside `sandbox_command`; ExecOutcome
+        // carries the command's verbatim output, so there is no side channel
+        // to surface them here.
+        let _refused_env = crate::subprocess_sandbox::sandbox_command(
+            &mut cmd,
+            &self.operator_env,
+            &self.untrusted_env,
+        );
         // Ensure a timed-out child doesn't survive as an orphan. Without
         // this, dropping the `Child` (which `tokio::time::timeout` does
         // when it cancels the read+wait future) leaves the process
@@ -591,17 +611,24 @@ impl ToolExecBackend for DockerBackend {
 ///
 /// `agent_id` and `workspace` are needed by the Docker adapter; pass
 /// them even if the kind isn't Docker — they're cheap.
+///
+/// `operator_env` / `untrusted_env` are the two env-passthrough allowlists
+/// (operator's `exec_policy.allowed_env_vars` vs. a hand's assembled
+/// passthrough list); see [`crate::subprocess_sandbox::sandbox_command`]
+/// for the trust split (#6458).
 pub fn build_backend(
     kind: BackendKind,
     cfg: &ToolExecConfig,
     docker_cfg: &librefang_types::config::DockerSandboxConfig,
     agent_id: &str,
     workspace: PathBuf,
-    allowed_env: Vec<String>,
+    operator_env: Vec<String>,
+    untrusted_env: Vec<String>,
 ) -> Result<Box<dyn ToolExecBackend>, ExecError> {
     match kind {
         BackendKind::Local => Ok(Box::new(LocalBackend::new(
-            allowed_env,
+            operator_env,
+            untrusted_env,
             Duration::from_secs(LOCAL_DEFAULT_TIMEOUT_SECS),
         ))),
         BackendKind::Docker => Ok(Box::new(DockerBackend::new(
@@ -818,6 +845,7 @@ mod tests {
             "agent-1",
             std::env::temp_dir(),
             vec![],
+            vec![],
         )
         .expect("local backend always builds");
         assert_eq!(backend.kind(), BackendKind::Local);
@@ -834,6 +862,7 @@ mod tests {
             "agent-1",
             std::env::temp_dir(),
             vec![],
+            vec![],
         )
         .expect("docker backend builds even when daemon absent");
         assert_eq!(backend.kind(), BackendKind::Docker);
@@ -849,6 +878,7 @@ mod tests {
             &docker_cfg,
             "agent-1",
             std::env::temp_dir(),
+            vec![],
             vec![],
         );
         assert!(
@@ -867,6 +897,7 @@ mod tests {
             &docker_cfg,
             "agent-1",
             std::env::temp_dir(),
+            vec![],
             vec![],
         );
         assert!(

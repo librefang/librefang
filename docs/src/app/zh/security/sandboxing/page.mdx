@@ -292,7 +292,11 @@ fn safe_resolve_parent(path: &str) -> Result<std::path::PathBuf, serde_json::Val
 ### 环境清除
 
 ```rust
-pub fn sandbox_command(cmd: &mut tokio::process::Command, allowed_env_vars: &[String]) {
+pub fn sandbox_command(
+    cmd: &mut tokio::process::Command,
+    operator_env_vars: &[String],
+    untrusted_env_vars: &[String],
+) -> Vec<String> {
     cmd.env_clear();  // Remove ALL inherited env vars
 
     // Re-add platform-independent safe vars
@@ -306,8 +310,14 @@ pub fn sandbox_command(cmd: &mut tokio::process::Command, allowed_env_vars: &[St
     #[cfg(windows)]
     for var in SAFE_ENV_VARS_WINDOWS { /* ... */ }
 
-    // Re-add caller-specified allowed vars
-    for var in allowed_env_vars { /* ... */ }
+    // Operator-declared vars (exec_policy.allowed_env_vars): refuse only the
+    // daemon's own reserved secrets (vault key, provider API keys)
+    for var in operator_env_vars { /* ... */ }
+
+    // Untrusted passthrough (hand-declared lists): full secret-name heuristic
+    for var in untrusted_env_vars { /* ... */ }
+
+    refused // names that were dropped, surfaced back to the agent
 }
 ```
 
@@ -330,9 +340,10 @@ pub const SAFE_ENV_VARS_WINDOWS: &[&str] = &[
 ];
 ```
 
-不在这些列表中且不在 `allowed_env_vars` 中的变量**永远不会**传递给
-子进程。这意味着 `OPENAI_API_KEY`、`GEMINI_API_KEY`、数据库凭据以及
-所有其他密钥都会被清除。
+不在这些列表中且不在任一 allowlist 中的变量**永远不会**传递给子进程。
+两个 allowlist 的信任级别不同（#6458）：operator 自己的 `exec_policy.allowed_env_vars` 可以携带形如密钥的名称（`MYTOOL_KEYRING_PASSWORD`、`FOO_API_TOKEN` 等），只有 daemon 自身的保留密钥（`LIBREFANG_VAULT_KEY`、provider API key）会被无条件拒绝。
+不可信的透传列表（marketplace hand 的 `[[requires]]` / settings 名称）还会额外经过凭证词启发式过滤，在装配时与 spawn 时各检查一次。
+被拒绝的名称会返回给调用方并透出到工具输出中。
 
 ### 可执行文件路径验证
 
