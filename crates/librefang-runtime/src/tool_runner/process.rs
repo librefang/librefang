@@ -95,33 +95,34 @@ pub(super) async fn tool_process_start(
         }
     }
 
-    // Resolve the effective env-passthrough allowlist the same way the
-    // shell_exec dispatch does (dispatch.rs): the caller-provided list, else
-    // the exec policy's `allowed_env_vars`. `ProcessManager::start` scrubs the
-    // daemon environment down to the safe baseline plus these names, so the
-    // spawned child never inherits the vault key / provider secrets.
-    let effective_allowed_env: Vec<String> = allowed_env_vars
-        .map(|v| v.to_vec())
-        .or_else(|| {
-            exec_policy.and_then(|p| {
-                if p.allowed_env_vars.is_empty() {
-                    None
-                } else {
-                    Some(p.allowed_env_vars.clone())
-                }
-            })
-        })
+    // Resolve the env-passthrough allowlists the same way the shell_exec
+    // dispatch does (dispatch.rs). #6458: the two sources carry different
+    // trust levels and are passed separately — the operator's own
+    // `exec_policy.allowed_env_vars` is refused only the daemon's reserved
+    // secrets, while the caller-provided list (a hand's assembled
+    // passthrough) gets the full secret-name heuristic.
+    // `ProcessManager::start` scrubs the daemon environment down to the safe
+    // baseline plus these names, so the spawned child never inherits the
+    // vault key / provider secrets.
+    let operator_env: Vec<String> = exec_policy
+        .map(|p| p.allowed_env_vars.clone())
         .unwrap_or_default();
+    let untrusted_env: Vec<String> = allowed_env_vars.map(|v| v.to_vec()).unwrap_or_default();
 
-    let proc_id = pm
-        .start(agent_id, command, &args, &effective_allowed_env)
+    let (proc_id, refused_env) = pm
+        .start(agent_id, command, &args, &operator_env, &untrusted_env)
         .await
         .map_err(ToolError::upstream_msg)?;
-    Ok(serde_json::json!({
+    let mut resp = serde_json::json!({
         "process_id": proc_id,
         "status": "started"
-    })
-    .to_string())
+    });
+    // Surface refused env names to the agent — a daemon-log WARN alone makes
+    // the downstream CLI failure near-impossible to diagnose (#6458).
+    if !refused_env.is_empty() {
+        resp["env_vars_not_injected"] = serde_json::json!(refused_env);
+    }
+    Ok(resp.to_string())
 }
 
 /// Read accumulated stdout/stderr from a process (non-blocking drain).

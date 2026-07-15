@@ -36,9 +36,13 @@ async fn kill_child_tree(pid: Option<u32>, reason: &str) {
     }
 }
 
+/// `untrusted_env` is the attacker-controllable passthrough list (a hand's
+/// assembled `hand_allowed_env`); the operator's own trusted allowlist is
+/// derived from `exec_policy.allowed_env_vars` internally. The two carry
+/// different trust levels in `sandbox_command` (#6458).
 pub(super) async fn tool_shell_exec(
     input: &serde_json::Value,
-    allowed_env: &[String],
+    untrusted_env: &[String],
     workspace_root: Option<&Path>,
     exec_policy: Option<&librefang_types::config::ExecPolicy>,
     interrupt: Option<crate::interrupt::SessionInterrupt>,
@@ -127,7 +131,11 @@ pub(super) async fn tool_shell_exec(
         cmd.current_dir(ws);
     }
 
-    crate::subprocess_sandbox::sandbox_command(&mut cmd, allowed_env);
+    let operator_env: &[String] = exec_policy
+        .map(|p| p.allowed_env_vars.as_slice())
+        .unwrap_or(&[]);
+    let refused_env =
+        crate::subprocess_sandbox::sandbox_command(&mut cmd, operator_env, untrusted_env);
 
     #[cfg(windows)]
     cmd.env("PYTHONIOENCODING", "utf-8");
@@ -216,8 +224,20 @@ pub(super) async fn tool_shell_exec(
                 crate::artifact_store::DEFAULT_MAX_ARTIFACT_BYTES,
             );
 
+            // Surface refused env names to the agent — with only the daemon-log
+            // WARN, a credentialed CLI's downstream failure is near-impossible
+            // to diagnose from the agent's side (#6458).
+            let env_note = if refused_env.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "\nNote: reserved env var(s) not passed to the child process: {}\n",
+                    refused_env.join(", ")
+                )
+            };
+
             Ok(format!(
-                "Exit code: {exit_code}\n\nSTDOUT:\n{stdout_str}\nSTDERR:\n{stderr_str}"
+                "Exit code: {exit_code}\n\nSTDOUT:\n{stdout_str}\nSTDERR:\n{stderr_str}{env_note}"
             ))
         }
         Err(e) => Err(e),
