@@ -835,6 +835,9 @@ async fn run_agent_loop_streaming_inner(
             sender_user_id: sender_user_id.clone(),
             sender_channel: sender_channel.clone(),
             sender_chat_id: sender_chat_id.clone(),
+            // #6443: same forwarding for the turn's bot account so the bridge
+            // path enforces the cross-account guard too.
+            sender_account_id: sender_account_id.clone(),
             reasoning_echo_policy,
         };
         // The stripped-tools request has been built; restore tools for any

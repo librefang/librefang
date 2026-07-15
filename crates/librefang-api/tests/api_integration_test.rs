@@ -2710,6 +2710,41 @@ async fn call_mcp_channel_send(
     resp.json().await.expect("mcp body parse")
 }
 
+/// #6443 bridge parity: `channel_send` with an explicit `account_id`, routed through `/mcp` with the turn's account scope forwarded on `X-LibreFang-Current-Account-Id` (plus the #6117 peer scope so the recipient guard context matches the in-process path).
+async fn call_mcp_channel_send_with_account(
+    server: &TestServer,
+    agent_id: &str,
+    explicit_account: &str,
+    account_header: Option<&str>,
+) -> serde_json::Value {
+    let client = reqwest::Client::new();
+    let mut req = client
+        .post(format!("{}/mcp", server.base_url))
+        .header("X-LibreFang-Agent-Id", agent_id)
+        .header("X-LibreFang-Current-Peer-Jid", "owner-jid")
+        .header("X-LibreFang-Current-Channel", "whatsapp")
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "channel_send",
+                "arguments": {
+                    "channel": "whatsapp",
+                    "recipient": "owner-jid",
+                    "message": "hi",
+                    "account_id": explicit_account,
+                },
+            },
+        }));
+    if let Some(account) = account_header {
+        req = req.header("X-LibreFang-Current-Account-Id", account);
+    }
+    let resp = req.send().await.expect("mcp request send");
+    assert_eq!(resp.status(), 200);
+    resp.json().await.expect("mcp body parse")
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_mcp_http_channel_send_cross_chat_guard_uses_peer_headers() {
     let server = start_test_server().await;
@@ -2752,6 +2787,59 @@ async fn test_mcp_http_channel_send_cross_chat_guard_uses_peer_headers() {
     assert!(
         !content.contains("Cross-chat dispatch is forbidden"),
         "without peer headers the guard must not fire: {content}"
+    );
+}
+
+/// #6443: a `channel_send` with an explicit `account_id` routed through the `/mcp` bridge must honour the cross-account guard using the account scope forwarded on `X-LibreFang-Current-Account-Id`.
+/// Before the parity fix `mcp_http` never read the header (the driver never sent it), so a subprocess-driver agent could dispatch through another tenant's bot account even though the in-process path (#6449) already rejected it.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_mcp_http_channel_send_cross_account_guard_uses_account_header() {
+    let server = start_test_server().await;
+    let client = reqwest::Client::new();
+    let spawn = client
+        .post(format!("{}/api/agents", server.base_url))
+        .json(&serde_json::json!({"manifest_toml": MCP_CHANNEL_MANIFEST}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(spawn.status(), 201);
+    let agent_id = spawn.json::<serde_json::Value>().await.unwrap()["agent_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Turn arrived on `tenant-a`; the model explicitly targets `tenant-b` on
+    // the SAME channel → the guard must reject it before any send.
+    let body =
+        call_mcp_channel_send_with_account(&server, &agent_id, "tenant-b", Some("tenant-a")).await;
+    let content = body["result"]["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        body["result"]["isError"].as_bool().unwrap_or(false),
+        "cross-account send must be an error: {content}"
+    );
+    assert!(
+        content.contains("Cross-account (cross-tenant) dispatch is forbidden"),
+        "expected the cross-account guard message, got: {content}"
+    );
+
+    // Matching account → the guard passes; the failure — if any — must NOT be
+    // the guard's (the test kernel has no real whatsapp adapter registered).
+    let body =
+        call_mcp_channel_send_with_account(&server, &agent_id, "tenant-a", Some("tenant-a")).await;
+    let content = body["result"]["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        !content.contains("Cross-account (cross-tenant) dispatch is forbidden"),
+        "matching account must not trip the guard: {content}"
+    );
+
+    // No account header (external MCP client / out-of-band turn): the guard
+    // no-ops even for an explicit foreign account, preserving pre-parity
+    // behaviour for clients that never carried account scope.
+    let body = call_mcp_channel_send_with_account(&server, &agent_id, "tenant-b", None).await;
+    let content = body["result"]["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        !content.contains("Cross-account (cross-tenant) dispatch is forbidden"),
+        "without the account header the guard must not fire: {content}"
     );
 }
 
