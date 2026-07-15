@@ -343,6 +343,10 @@ impl ClaudeCodeDriver {
         peer_jid: Option<&str>,
         peer_channel: Option<&str>,
         peer_chat_id: Option<&str>,
+        // #6443: bot account / tenant the current turn arrived on. Forwarded so
+        // `/mcp` can also enforce the cross-account `channel_send` guard.
+        // `None` out-of-band and on single-tenant deployments.
+        peer_account_id: Option<&str>,
     ) -> std::io::Result<PathBuf> {
         let path =
             std::env::temp_dir().join(format!("librefang-mcp-{}.json", uuid::Uuid::new_v4()));
@@ -383,6 +387,8 @@ impl ClaudeCodeDriver {
         insert_nonempty("X-LibreFang-Current-Peer-Jid", peer_jid);
         insert_nonempty("X-LibreFang-Current-Channel", peer_channel);
         insert_nonempty("X-LibreFang-Current-Chat-Id", peer_chat_id);
+        // #6443: account scope for the cross-account guard.
+        insert_nonempty("X-LibreFang-Current-Account-Id", peer_account_id);
 
         let mut server = serde_json::json!({
             "type": "http",
@@ -905,6 +911,7 @@ impl LlmDriver for ClaudeCodeDriver {
                     request.sender_user_id.as_deref(),
                     request.sender_channel.as_deref(),
                     request.sender_chat_id.as_deref(),
+                    request.sender_account_id.as_deref(),
                 ) {
                     Ok(path) => prepared.mcp_config_path = Some(path),
                     Err(e) => {
@@ -1196,6 +1203,7 @@ impl LlmDriver for ClaudeCodeDriver {
                     request.sender_user_id.as_deref(),
                     request.sender_channel.as_deref(),
                     request.sender_chat_id.as_deref(),
+                    request.sender_account_id.as_deref(),
                 ) {
                     Ok(path) => prepared.mcp_config_path = Some(path),
                     Err(e) => {
@@ -3217,7 +3225,7 @@ mod tests {
             api_key: Some("secret-key".to_string()),
         };
         let path =
-            ClaudeCodeDriver::write_mcp_config(&bridge, Some("agent-1234"), None, None, None)
+            ClaudeCodeDriver::write_mcp_config(&bridge, Some("agent-1234"), None, None, None, None)
                 .unwrap();
         let written = std::fs::read_to_string(&path).unwrap();
         let _ = std::fs::remove_file(&path);
@@ -3238,7 +3246,8 @@ mod tests {
             base_url: "http://127.0.0.1:4545".to_string(),
             api_key: Some("secret-key".to_string()),
         };
-        let path = ClaudeCodeDriver::write_mcp_config(&bridge, None, None, None, None).unwrap();
+        let path =
+            ClaudeCodeDriver::write_mcp_config(&bridge, None, None, None, None, None).unwrap();
         let written = std::fs::read_to_string(&path).unwrap();
         let _ = std::fs::remove_file(&path);
         let cfg: serde_json::Value = serde_json::from_str(&written).unwrap();
@@ -3262,6 +3271,7 @@ mod tests {
             Some("owner-jid"),
             Some("whatsapp"),
             Some("group-123"),
+            Some("bot-account-a"),
         )
         .unwrap();
         let written = std::fs::read_to_string(&path).unwrap();
@@ -3271,6 +3281,8 @@ mod tests {
         assert_eq!(headers["X-LibreFang-Current-Peer-Jid"], "owner-jid");
         assert_eq!(headers["X-LibreFang-Current-Channel"], "whatsapp");
         assert_eq!(headers["X-LibreFang-Current-Chat-Id"], "group-123");
+        // #6443: account scope rides the same connection.
+        assert_eq!(headers["X-LibreFang-Current-Account-Id"], "bot-account-a");
     }
 
     #[test]
@@ -3283,7 +3295,7 @@ mod tests {
             api_key: Some("k".to_string()),
         };
         let path =
-            ClaudeCodeDriver::write_mcp_config(&bridge, Some("agent-1234"), None, None, None)
+            ClaudeCodeDriver::write_mcp_config(&bridge, Some("agent-1234"), None, None, None, None)
                 .unwrap();
         let written = std::fs::read_to_string(&path).unwrap();
         let _ = std::fs::remove_file(&path);
@@ -3292,6 +3304,7 @@ mod tests {
         assert!(headers.get("X-LibreFang-Current-Peer-Jid").is_none());
         assert!(headers.get("X-LibreFang-Current-Channel").is_none());
         assert!(headers.get("X-LibreFang-Current-Chat-Id").is_none());
+        assert!(headers.get("X-LibreFang-Current-Account-Id").is_none());
     }
 
     #[test]
@@ -3304,7 +3317,8 @@ mod tests {
             base_url: "http://127.0.0.1:4545".to_string(),
             api_key: None,
         };
-        let path = ClaudeCodeDriver::write_mcp_config(&bridge, None, None, None, None).unwrap();
+        let path =
+            ClaudeCodeDriver::write_mcp_config(&bridge, None, None, None, None, None).unwrap();
         let written = std::fs::read_to_string(&path).unwrap();
         let _ = std::fs::remove_file(&path);
         let cfg: serde_json::Value = serde_json::from_str(&written).unwrap();

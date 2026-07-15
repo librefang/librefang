@@ -1434,6 +1434,11 @@ pub async fn mcp_http(
     let current_peer_jid = header_str("x-librefang-current-peer-jid");
     let current_channel = header_str("x-librefang-current-channel");
     let current_chat_id = header_str("x-librefang-current-chat-id");
+    // #6443: the bot account / tenant the spawning turn arrived on, forwarded
+    // the same way. Rehydrated so the `channel_send` cross-account guard has
+    // parity with the in-process agent-loop path; absent header → `None` →
+    // the guard no-ops (out-of-band and external MCP clients, as before).
+    let current_account_id = header_str("x-librefang-current-account-id");
 
     // Check if this is a tools/call that needs real execution
     let method = request["method"].as_str().unwrap_or("");
@@ -1512,7 +1517,7 @@ pub async fn mcp_http(
         } else {
             None
         };
-        let result = librefang_kernel::tool_runner::execute_tool(
+        let result = librefang_kernel::tool_runner::execute_tool_with_sender_account(
             "mcp-http",
             tool_name,
             &arguments,
@@ -1543,6 +1548,7 @@ pub async fn mcp_http(
             None, // available_tools (lazy-load pool not applicable to MCP bridge)
             cfg.tool_results.spill_threshold_bytes,
             cfg.tool_results.max_artifact_bytes,
+            current_account_id.as_deref(), // sender_account_id (X-LibreFang-Current-Account-Id, #6443)
         )
         .await;
 
