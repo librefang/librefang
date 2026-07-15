@@ -2577,11 +2577,15 @@ fn should_process_group_message(
     message: &ChannelMessage,
 ) -> bool {
     match overrides.group_policy {
-        GroupPolicy::Ignore => {
+        // #6445: `None` (no group policy configured) processes every group
+        // message — byte-identical to the historical whole-struct-absent
+        // behaviour — and collapses into the same arm as an explicit `All`.
+        None | Some(GroupPolicy::All) => true,
+        Some(GroupPolicy::Ignore) => {
             debug!("Ignoring group message on {ct_str} (group_policy=ignore)");
             false
         }
-        GroupPolicy::CommandsOnly => {
+        Some(GroupPolicy::CommandsOnly) => {
             if !is_group_command(message) {
                 debug!(
                     "Ignoring non-command group message on {ct_str} (group_policy=commands_only)"
@@ -2590,7 +2594,7 @@ fn should_process_group_message(
             }
             true
         }
-        GroupPolicy::MentionOnly => {
+        Some(GroupPolicy::MentionOnly) => {
             let was_mentioned = message
                 .metadata
                 .get("was_mentioned")
@@ -2677,7 +2681,6 @@ fn should_process_group_message(
             );
             true
         }
-        GroupPolicy::All => true,
     }
 }
 
@@ -3847,7 +3850,7 @@ async fn dispatch_message(
             // Reply-intent precheck: lightweight LLM classification for group
             // messages when group_policy is "all" and precheck is enabled.
             // Skipped for mentions and commands (already filtered above).
-            if ov.reply_precheck && matches!(ov.group_policy, GroupPolicy::All) {
+            if ov.reply_precheck && matches!(ov.group_policy, Some(GroupPolicy::All)) {
                 let text = text_content(message).unwrap_or("");
                 let sender = &message.sender.display_name;
                 let model = ov.reply_precheck_model.as_deref();
@@ -3877,14 +3880,17 @@ async fn dispatch_message(
         } else {
             // DM
             match ov.dm_policy {
-                DmPolicy::Ignore => {
+                Some(DmPolicy::Ignore) => {
                     debug!("Ignoring DM on {ct_str} (dm_policy=ignore)");
                     return;
                 }
-                DmPolicy::AllowedOnly => {
+                Some(DmPolicy::AllowedOnly) => {
                     // Rely on RBAC authorize_channel_user below
                 }
-                DmPolicy::Respond => {}
+                // `None` (no DM policy configured) or an explicit `Respond`
+                // both process the DM — matching the historical
+                // whole-struct-absent behaviour (#6445).
+                Some(DmPolicy::Respond) | None => {}
             }
         }
     }
@@ -6380,7 +6386,7 @@ async fn media_dispatch_allowed(
             // classify an empty string: group_policy=all is opt-in to respond
             // broadly, and bare media always reached the agent before the media
             // gate existed, so proceeding preserves that behavior.
-            if ov.reply_precheck && matches!(ov.group_policy, GroupPolicy::All) {
+            if ov.reply_precheck && matches!(ov.group_policy, Some(GroupPolicy::All)) {
                 let text = extracted_user_text(&message.content).unwrap_or_default();
                 if !text.trim().is_empty() {
                     let sender = &message.sender.display_name;
@@ -6412,14 +6418,15 @@ async fn media_dispatch_allowed(
         } else {
             // DM
             match ov.dm_policy {
-                DmPolicy::Ignore => {
+                Some(DmPolicy::Ignore) => {
                     debug!("Ignoring DM on {ct_str} (dm_policy=ignore)");
                     return false;
                 }
-                DmPolicy::AllowedOnly => {
+                Some(DmPolicy::AllowedOnly) => {
                     // Rely on RBAC authorize_channel_user in dispatch_with_blocks
                 }
-                DmPolicy::Respond => {}
+                // `None` or explicit `Respond` both process the DM (#6445).
+                Some(DmPolicy::Respond) | None => {}
             }
         }
     }
@@ -8187,7 +8194,7 @@ mod tests {
             // Fix 2: under mention_only with no mention/trigger, the same gate
             // the text path runs drops this media message.
             let overrides = ChannelOverrides {
-                group_policy: GroupPolicy::MentionOnly,
+                group_policy: Some(GroupPolicy::MentionOnly),
                 ..Default::default()
             };
             assert!(
@@ -8197,7 +8204,7 @@ mod tests {
 
             // And an explicit `ignore` group policy drops it unconditionally.
             let ignore_overrides = ChannelOverrides {
-                group_policy: GroupPolicy::Ignore,
+                group_policy: Some(GroupPolicy::Ignore),
                 ..Default::default()
             };
             assert!(
@@ -8271,6 +8278,7 @@ mod tests {
         with_guard_off_locked(|| {
             let message = group_text_message("hello MyAgent");
             let overrides = ChannelOverrides {
+                group_policy: Some(GroupPolicy::MentionOnly),
                 group_trigger_patterns: vec!["(?i)\\bmyagent\\b".to_string()],
                 ..Default::default()
             };
@@ -8285,6 +8293,7 @@ mod tests {
         with_guard_off_locked(|| {
             let message = group_text_message("hello myagenttt");
             let overrides = ChannelOverrides {
+                group_policy: Some(GroupPolicy::MentionOnly),
                 group_trigger_patterns: vec!["(?i)\\bmyagent\\b".to_string()],
                 ..Default::default()
             };
@@ -8299,6 +8308,7 @@ mod tests {
         with_guard_off_locked(|| {
             let message = group_text_message("bot please reply");
             let overrides = ChannelOverrides {
+                group_policy: Some(GroupPolicy::MentionOnly),
                 group_trigger_patterns: vec!["(".to_string(), "(?i)\\bbot\\b".to_string()],
                 ..Default::default()
             };
@@ -8315,7 +8325,10 @@ mod tests {
             message
                 .metadata
                 .insert("was_mentioned".to_string(), serde_json::Value::Bool(true));
-            let overrides = ChannelOverrides::default();
+            let overrides = ChannelOverrides {
+                group_policy: Some(GroupPolicy::MentionOnly),
+                ..Default::default()
+            };
             assert!(should_process_group_message(
                 "telegram", &overrides, &message
             ));
@@ -9914,7 +9927,7 @@ mod tests {
                 let mut msg = group_text_message("Caterina, chiedi al Signore il pagamento");
                 inject_roster(&mut msg, &["Caterina", "Ambrogio"], "Ambrogio");
                 let overrides = ChannelOverrides {
-                    group_policy: GroupPolicy::MentionOnly,
+                    group_policy: Some(GroupPolicy::MentionOnly),
                     group_trigger_patterns: vec!["Signore".to_string()],
                     ..Default::default()
                 };
@@ -9928,7 +9941,7 @@ mod tests {
                 let mut msg = group_text_message("Signore, conferma il prossimo appuntamento");
                 inject_roster(&mut msg, &["Caterina", "Ambrogio"], "Ambrogio");
                 let overrides = ChannelOverrides {
-                    group_policy: GroupPolicy::MentionOnly,
+                    group_policy: Some(GroupPolicy::MentionOnly),
                     group_trigger_patterns: vec!["Signore".to_string()],
                     ..Default::default()
                 };
@@ -9945,7 +9958,7 @@ mod tests {
                 let mut msg = group_text_message("ciao a tutti, come va?");
                 inject_roster(&mut msg, &["Caterina", "Ambrogio"], "Ambrogio");
                 let overrides = ChannelOverrides {
-                    group_policy: GroupPolicy::MentionOnly,
+                    group_policy: Some(GroupPolicy::MentionOnly),
                     group_trigger_patterns: vec!["Signore".to_string()],
                     ..Default::default()
                 };
@@ -9961,7 +9974,7 @@ mod tests {
                 msg.metadata
                     .insert("was_mentioned".to_string(), json!(true));
                 let overrides = ChannelOverrides {
-                    group_policy: GroupPolicy::MentionOnly,
+                    group_policy: Some(GroupPolicy::MentionOnly),
                     ..Default::default()
                 };
                 assert!(should_process_group_message("whatsapp", &overrides, &msg));
@@ -9975,12 +9988,44 @@ mod tests {
             with_guard_off(|| {
                 let msg = group_text_message("Caterina, chiedi al Signore il pagamento");
                 let overrides = ChannelOverrides {
-                    group_policy: GroupPolicy::MentionOnly,
+                    group_policy: Some(GroupPolicy::MentionOnly),
                     group_trigger_patterns: vec!["(?i)\\bSignore\\b".to_string()],
                     ..Default::default()
                 };
                 // Legacy behavior: substring matches → returns true.
                 assert!(should_process_group_message("whatsapp", &overrides, &msg));
+            });
+        }
+
+        #[test]
+        fn none_group_policy_processes_all_but_some_mention_only_gates_6445() {
+            // The exact #6445 divergence: an override struct with only an
+            // unrelated field set (`threading`) leaves `group_policy` at `None`,
+            // which must process every group message — identical to the
+            // historical whole-struct-absent behaviour. The pre-fix bug
+            // materialized `group_policy = MentionOnly` here and silently
+            // dropped this unmentioned message.
+            with_guard_off(|| {
+                let msg = group_text_message("hello there, nobody in particular");
+                let unrelated_field_only = ChannelOverrides {
+                    threading: true,
+                    ..Default::default()
+                };
+                assert!(
+                    should_process_group_message("whatsapp", &unrelated_field_only, &msg),
+                    "group_policy=None must process all — writing `threading` must not flip gating"
+                );
+
+                // An explicit MentionOnly still gates the same unmentioned
+                // message out, so the fix does not weaken configured gating.
+                let explicit_mention_only = ChannelOverrides {
+                    group_policy: Some(GroupPolicy::MentionOnly),
+                    ..Default::default()
+                };
+                assert!(
+                    !should_process_group_message("whatsapp", &explicit_mention_only, &msg),
+                    "explicit MentionOnly still gates unmentioned traffic"
+                );
             });
         }
     }
