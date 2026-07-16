@@ -267,6 +267,79 @@ async fn audit_query_filters_by_user_name_resolves_to_uuid() {
     }
 }
 
+/// Per-user stratification (#6461): with events recorded for two distinct
+/// users, `?user=<who>` must return *only* that user's rows — never the
+/// other user's — and each user's full set. The querying admin (`Carol`)
+/// is a third identity with no seeded entries, so the filter cannot
+/// accidentally pass by matching the caller. Seed shape (see
+/// `seed_audit_entries`): Alice → 2 rows (ToolInvoke + PermissionDenied),
+/// Bob → 1 row (ToolInvoke).
+#[tokio::test(flavor = "multi_thread")]
+async fn audit_query_stratifies_by_user_returns_only_matching_user_events() {
+    let h = build_audit_harness("any-key", vec![("Carol", "admin", "carol-admin-key")]);
+    seed_audit_entries(&h.state);
+
+    let alice = UserId::from_name("Alice").to_string();
+    let bob = UserId::from_name("Bob").to_string();
+
+    // Sanity: the unfiltered admin view sees both users' rows, so a
+    // narrowed result below is a real filter effect and not an empty log.
+    let (status, bytes) =
+        send_get(h.app.clone(), "/api/audit/query", Some("carol-admin-key")).await;
+    assert_eq!(status, StatusCode::OK);
+    let all = body_json(&bytes);
+    let all_entries = all["items"].as_array().expect("items[]");
+    assert!(
+        all_entries.iter().any(|e| e["user_id"] == alice)
+            && all_entries.iter().any(|e| e["user_id"] == bob),
+        "unfiltered query must contain both users' rows; got {all}"
+    );
+
+    // ?user=Alice → exactly Alice's two rows, none of Bob's.
+    let (status, bytes) = send_get(
+        h.app.clone(),
+        "/api/audit/query?user=Alice",
+        Some("carol-admin-key"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let body = body_json(&bytes);
+    let alice_entries = body["items"].as_array().expect("items[]");
+    assert_eq!(
+        alice_entries.len(),
+        2,
+        "?user=Alice must return exactly Alice's two seeded rows; got {body}"
+    );
+    for e in alice_entries {
+        assert_eq!(
+            e["user_id"], alice,
+            "every returned row must be Alice's, never Bob's; got {e}"
+        );
+    }
+
+    // ?user=Bob → exactly Bob's single row, none of Alice's.
+    let (status, bytes) = send_get(
+        h.app.clone(),
+        "/api/audit/query?user=Bob",
+        Some("carol-admin-key"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let body = body_json(&bytes);
+    let bob_entries = body["items"].as_array().expect("items[]");
+    assert_eq!(
+        bob_entries.len(),
+        1,
+        "?user=Bob must return exactly Bob's single seeded row; got {body}"
+    );
+    for e in bob_entries {
+        assert_eq!(
+            e["user_id"], bob,
+            "every returned row must be Bob's, never Alice's; got {e}"
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn audit_query_rejects_malformed_time_bounds_with_400() {
     let h = build_audit_harness("any-key", vec![("Alice", "admin", "alice-admin-key")]);

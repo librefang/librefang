@@ -316,6 +316,7 @@ pub async fn get_mcp_server(
 )]
 pub async fn add_mcp_server(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     // Two accepted shapes:
@@ -427,11 +428,14 @@ pub async fn add_mcp_server(
         async move { kernel.connect_mcp_servers().await },
     );
 
-    state.kernel.audit().record(
+    let user_id = api_user.as_ref().map(|u| u.0.user_id);
+    state.kernel.audit().record_with_context(
         "system",
         librefang_kernel::audit::AuditAction::ConfigChange,
         format!("mcp_server added: {name}"),
         "completed",
+        user_id,
+        Some("api".to_string()),
     );
 
     (
@@ -466,6 +470,7 @@ pub async fn update_mcp_server(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(mut body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
@@ -519,11 +524,14 @@ pub async fn update_mcp_server(
         async move { kernel.connect_mcp_servers().await },
     );
 
-    state.kernel.audit().record(
+    let user_id = api_user.as_ref().map(|u| u.0.user_id);
+    state.kernel.audit().record_with_context(
         "system",
         librefang_kernel::audit::AuditAction::ConfigChange,
         format!("mcp_server updated: {name}"),
         "completed",
+        user_id,
+        Some("api".to_string()),
     );
 
     (
@@ -552,6 +560,7 @@ pub async fn patch_mcp_server_taint(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(body): Json<PatchMcpTaintRequest>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
@@ -600,11 +609,14 @@ pub async fn patch_mcp_server_taint(
         async move { kernel.connect_mcp_servers().await },
     );
 
-    state.kernel.audit().record(
+    let user_id = api_user.as_ref().map(|u| u.0.user_id);
+    state.kernel.audit().record_with_context(
         "system",
         librefang_kernel::audit::AuditAction::ConfigChange,
         format!("mcp_server taint updated: {name}"),
         "completed",
+        user_id,
+        Some("api".to_string()),
     );
 
     (
@@ -633,6 +645,7 @@ pub async fn delete_mcp_server(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     // Ensure the entry exists in the effective set (file + DB overlay, #6113),
@@ -707,11 +720,14 @@ pub async fn delete_mcp_server(
         .await
         .retain(|c| c.name() != name);
 
-    state.kernel.audit().record(
+    let user_id = api_user.as_ref().map(|u| u.0.user_id);
+    state.kernel.audit().record_with_context(
         "system",
         librefang_kernel::audit::AuditAction::ConfigChange,
         format!("mcp_server removed: {name}"),
         "completed",
+        user_id,
+        Some("api".to_string()),
     );
 
     (
