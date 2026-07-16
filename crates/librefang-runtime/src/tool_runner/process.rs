@@ -4,7 +4,7 @@
 //! as part of #3576 (ToolError migration).
 
 use super::error::{ToolError, ToolResult};
-use crate::kernel_handle::{AgentControl, KernelHandle};
+use crate::kernel_handle::KernelHandle;
 use crate::process_manager::{ProcessCompletionSink, ProcessOutcome};
 use librefang_types::agent::{AgentId, SessionId};
 use librefang_types::task::{TaskId, TaskKind, TaskStatus};
