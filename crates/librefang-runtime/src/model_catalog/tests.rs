@@ -829,6 +829,33 @@ fn openrouter_automatic_default_never_selects_paid_model() {
 }
 
 #[test]
+fn test_embedded_openrouter_snapshot_is_valid() {
+    let body: serde_json::Value = serde_json::from_str(OPENROUTER_BUILD_SNAPSHOT)
+        .expect("Embedded OpenRouter models snapshot must be valid JSON");
+    let snapshot = parse_openrouter_model_entries(&body);
+    assert!(
+        !snapshot.is_empty(),
+        "Embedded OpenRouter snapshot must contain at least one model"
+    );
+
+    for model in &snapshot {
+        assert!(
+            model.id.starts_with("openrouter/"),
+            "Model ID must start with prefix: {}",
+            model.id
+        );
+        assert!(
+            !model.display_name.is_empty(),
+            "Model display name must not be empty"
+        );
+        assert!(
+            model.context_window > 0,
+            "Model context window must be positive"
+        );
+    }
+}
+
+#[test]
 fn openrouter_free_predicate_includes_auto_router() {
     assert!(is_free_openrouter_model("openrouter/openrouter/free"));
     assert!(is_free_openrouter_model("openrouter/qwen/qwen3-8b:free"));
