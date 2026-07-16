@@ -102,13 +102,33 @@ fn marker_present(line: &str, marker: &str) -> bool {
 }
 
 /// Build the per-iteration prompt that frames the goal for the agent.
-pub fn build_goal_prompt(goal: &Goal, iteration: u32, max_iterations: u32) -> String {
+pub fn build_goal_prompt(
+    goal: &Goal,
+    iteration: u32,
+    max_iterations: u32,
+    has_verifier: bool,
+) -> String {
+    let loop_section = if has_verifier {
+        "\n\n## Loop Engineering Mode\n\
+         You are part of an autonomous loop (Generator + Verifier).\n\
+         - Your output will be sent to a verifier agent for judgment.\n\
+         - If the verifier rejects your work, you will retry automatically.\n\
+         - Use `file_read`/`file_write` to maintain `.loop/state.md` for memory across iterations.\n\
+         - For complex tasks, spawn sub-agents with `agent_spawn` and delegate with `agent_send`.\n\
+         - Never grade your own work — the verifier is the final judge.\n\
+         - Track progress in `.loop/state.md` under ## Tasks / ## Learnings / ## Decisions."
+    } else {
+        "\n\n## Autonomous Mode\n\
+         Use `file_read`/`file_write` to maintain `.loop/state.md` for memory across iterations.\n\
+         For complex tasks, spawn sub-agents with `agent_spawn` and delegate with `agent_send`."
+    };
     format!(
         "[LONG-HORIZON GOAL] You are autonomously pursuing a goal across multiple turns.\n\
          Goal: {title}\n\
          Description: {description}\n\
          Current progress: {progress}%\n\
-         Iteration: {iter} of {max}\n\n\
+         Iteration: {iter} of {max}\n\
+         {loop}\n\
          Take the next concrete action toward completing this goal. When you finish a \
          step, end your reply with a line `GOAL_PROGRESS: <0-100>` reflecting overall \
          completion. Add a line `GOAL_DONE` once the goal is fully achieved, or \
@@ -122,6 +142,7 @@ pub fn build_goal_prompt(goal: &Goal, iteration: u32, max_iterations: u32) -> St
         progress = goal.progress,
         iter = iteration + 1,
         max = max_iterations,
+        loop = loop_section,
     )
 }
 
@@ -597,7 +618,11 @@ async fn run_loop<F, Fut>(
             break GoalRunPhase::MaxIterationsReached;
         }
 
-        let prompt = build_goal_prompt(&goal, iteration, max_iterations);
+        let has_verifier = {
+            let s = state.lock().await;
+            s.verify_agent_id.is_some()
+        };
+        let prompt = build_goal_prompt(&goal, iteration, max_iterations, has_verifier);
         debug!(goal_id = %goal_id, iteration, "Goal run: sending tick");
 
         match send_message(agent_id, prompt).await {
