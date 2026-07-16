@@ -968,6 +968,7 @@ function useChatMessages(
         activeTurnsRef.current[sendAgentId] = turn;
 
         const resetFallbackTimer = () => {
+          if (turn.responded) return;
           if (turn.fallbackTimer) clearTimeout(turn.fallbackTimer);
           turn.fallbackTimer = setTimeout(() => {
             if (!turn.responded) {
@@ -1123,11 +1124,12 @@ function useChatMessages(
               updateAgentMessages(sendAgentId, prev => prev.map(m =>
                 m.id === botMsg.id ? { ...m, isStreaming: false, error, errorCode } : m
               ));
-              // A server `error` frame is terminal: ws.rs emits it only after streaming setup fails or the agent task has completed with an error.
-              // Retrying the same turn over HTTP 30 seconds later both duplicates work and replaces the structured WS error with the HTTP route's string, which used to misclassify budget/rate limits as context exhaustion.
-              // Transport drops still use the separate onDrop fallback path.
+              // Stop automatic transport fallback immediately so a socket drop cannot replay the failed turn over HTTP.
+              // Keep the listener briefly so a defensive late response for this `message_id` can still replace the error without resending the request.
               finishTurnIfCurrent(sendAgentId, botMsg.id);
-              cleanup();
+              turn.responded = true;
+              if (turn.fallbackTimer) clearTimeout(turn.fallbackTimer);
+              turn.fallbackTimer = setTimeout(cleanup, 30_000);
             } else if (data.type === "response") {
               const rafHandle = rafHandleRef.current.get(botMsg.id);
               if (rafHandle !== undefined) cancelAnimationFrame(rafHandle);
@@ -1720,7 +1722,7 @@ function CompactionSummaryBanner({ summary, isCompacting }: { summary: string | 
   );
 }
 
-const CONTEXT_LIMIT_CODES = new Set(["context_length_exceeded", "context_overflow"]);
+const CONTEXT_LIMIT_CODES = new Set(["context_length_exceeded"]);
 const SEMANTIC_ERROR_CODE = /^[a-z][a-z0-9_-]*$/;
 const GENERIC_HTTP_ERROR_CODE = /^http_\d+$/;
 

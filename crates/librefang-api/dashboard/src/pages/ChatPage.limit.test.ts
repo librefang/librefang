@@ -46,7 +46,10 @@ describe("isContextLimitError", () => {
     expect(isContextLimitError("Rate limited", "context_length_exceeded")).toBe(true);
     expect(isContextLimitError("Context is full", "budget_exceeded")).toBe(false);
     expect(isContextLimitError("Context is full", "rate_limited")).toBe(false);
+    expect(isContextLimitError("Context is full", "agent_not_found")).toBe(false);
+    expect(isContextLimitError("Context is full", "session_agent_mismatch")).toBe(false);
     expect(isContextLimitError("Context is full", "message_delivery_failed")).toBe(false);
+    expect(isContextLimitError("Context is full", "context_overflow")).toBe(false);
     expect(isContextLimitError("Tool output is too long", "format_error")).toBe(false);
   });
 
