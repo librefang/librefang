@@ -237,7 +237,8 @@ Signal output defaults to `OutputFormat::PlainText` because `signal-cli` renders
 
 Per-channel `output_format`, `dm_policy`, `group_policy`, and `threading` overrides are exposed on `[[sidecar_channels]]` as of #6445.
 Each is optional — an unset field inherits the bridge default and does not materialize a policy you did not write.
-Agent-level `[channel_overrides]` still takes precedence over these per-channel values, and that precedence is whole-struct, not per-field: an agent manifest that declares `[channel_overrides]` at all replaces this sidecar's four fields entirely, even the ones the agent table itself leaves unset — so an agent overriding only `model` will silently drop a sidecar-level `group_policy = "ignore"` back to unset. Set the same policy under the agent's `[channel_overrides]` too if it must hold regardless of what else the agent overrides.
+Agent-level `[channel_overrides]` still takes precedence over these per-channel values, and that precedence is whole-struct, not per-field: an agent manifest that declares `[channel_overrides]` at all replaces this sidecar's four fields entirely, even the ones the agent table itself leaves unset — so an agent overriding only `model` will silently drop a sidecar-level `group_policy = "ignore"` back to unset.
+Set the same policy under the agent's `[channel_overrides]` too if it must hold regardless of what else the agent overrides.
 
 Other channels keep their previous formatter defaults — only Signal flipped.
 
