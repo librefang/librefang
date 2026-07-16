@@ -6677,6 +6677,53 @@
             }
           }
         }
+      },
+      "put": {
+        "tags": [
+          "hands"
+        ],
+        "summary": "PUT /api/hands/{hand_id}/manifest — Overwrite the hand's HAND.toml.",
+        "description": "Admin/config-mutation endpoint — sits behind the authenticated middleware\nlike every other hand write (never added to the `is_public` allowlist).\n\nThe body is `{ \"toml_content\": \"<HAND.toml text>\" }`, matching\n`POST /api/hands/install`. The content is validated by parsing it into a\n`HandDefinition` before anything is written: invalid TOML (or an `id` that\nno longer matches the hand being edited) is rejected with `400` and the\non-disk file is left untouched. On success the file is persisted and the\nin-memory definitions are hot-reloaded from disk, so the next activation\nand the dashboard listing pick up the change; a hand instance that is\nalready active keeps its old manifest until it is deactivated and\nreactivated. Editing a built-in (registry) hand takes effect immediately\nbut is overwritten on the next registry sync.",
+        "operationId": "update_hand_manifest",
+        "parameters": [
+          {
+            "name": "hand_id",
+            "in": "path",
+            "description": "Hand ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "HAND.toml updated; returns the reloaded HandDefinition",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid TOML, id mismatch, or blocked by the supply-chain audit"
+          },
+          "404": {
+            "description": "Hand not found"
+          }
+        }
       }
     },
     "/api/hands/{hand_id}/secret": {

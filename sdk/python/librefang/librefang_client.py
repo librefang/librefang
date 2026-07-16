@@ -605,6 +605,9 @@ class _HandsResource(_Resource):
     def get_hand_manifest(self, hand_id: str):
         return self._c._request("GET", f"/api/hands/{hand_id}/manifest")
 
+    def update_hand_manifest(self, hand_id: str, **data):
+        return self._c._request("PUT", f"/api/hands/{hand_id}/manifest", data)
+
     def set_hand_secret(self, hand_id: str, **data):
         return self._c._request("POST", f"/api/hands/{hand_id}/secret", data)
 
