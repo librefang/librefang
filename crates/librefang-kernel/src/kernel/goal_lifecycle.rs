@@ -24,7 +24,14 @@ impl LibreFangKernel {
     /// complete, the iteration cap (`max_iterations`, default
     /// [`DEFAULT_GOAL_MAX_ITERATIONS`]) is reached, an operator stops it, or the
     /// kernel shuts down.
-    pub fn goal_run_start(&self, goal_id: GoalId, agent_id: AgentId, max_iterations: Option<u32>) {
+    pub fn goal_run_start(
+        &self,
+        goal_id: GoalId,
+        agent_id: AgentId,
+        max_iterations: Option<u32>,
+        verify_agent_id: Option<AgentId>,
+        verify_max_retries: Option<u32>,
+    ) {
         let max = max_iterations.unwrap_or(DEFAULT_GOAL_MAX_ITERATIONS).max(1);
         let substrate = self.substrate_ref().clone();
 
@@ -42,9 +49,6 @@ impl LibreFangKernel {
         let send = move |aid: AgentId, msg: String| {
             let k = kernel.clone();
             async move {
-                // Trusted internal system path — reuse the autonomous-channel
-                // sentinel so the RBAC resolver applies the system carve-out
-                // (see background_lifecycle.rs).
                 let sender = SenderContext {
                     channel: SYSTEM_CHANNEL_AUTONOMOUS.to_string(),
                     user_id: aid.to_string(),
@@ -59,9 +63,15 @@ impl LibreFangKernel {
             }
         };
 
-        self.workflows
-            .goal_runner
-            .start(goal_id, agent_id, max, substrate, send);
+        self.workflows.goal_runner.start(
+            goal_id,
+            agent_id,
+            max,
+            substrate,
+            send,
+            verify_agent_id,
+            verify_max_retries,
+        );
     }
 
     /// Stop an active goal run. Returns whether a run was stopped.

@@ -104,6 +104,13 @@ pub struct Goal {
     /// Optional agent assigned to this goal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<AgentId>,
+    /// Optional verifier agent that judges output quality after each
+    /// iteration. When set, the goal runner sends the generator's output
+    /// to this agent for verification before accepting progress. Part of
+    /// the Loop Engineering pattern: "Never let an agent grade its own
+    /// work."
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify_agent_id: Option<AgentId>,
     /// When the goal was created.
     pub created_at: DateTime<Utc>,
     /// When the goal was last updated.
@@ -208,6 +215,14 @@ pub struct GoalRunState {
     /// Last error message, if the most recent tick failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    /// Optional verifier agent that judges output quality after each
+    /// iteration. When set, the runner sends generator output to this
+    /// agent for verification before accepting progress.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify_agent_id: Option<AgentId>,
+    /// Max verification retries per iteration before blocking (default 3).
+    #[serde(default)]
+    pub verify_max_retries: u32,
     /// When the run started.
     pub started_at: DateTime<Utc>,
     /// When the most recent tick completed.
