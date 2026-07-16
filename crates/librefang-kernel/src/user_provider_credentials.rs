@@ -189,7 +189,7 @@ mod tests {
     fn provider_names_filter_by_user_sort_and_exclude_other_namespaces() {
         let alice = UserId::from_name("alice");
         let bob = UserId::from_name("bob");
-        let owned = vec![
+        let owned = [
             user_provider_vault_key(alice, "openai"),
             user_provider_vault_key(alice, "anthropic"),
             user_provider_vault_key(bob, "gemini"),
