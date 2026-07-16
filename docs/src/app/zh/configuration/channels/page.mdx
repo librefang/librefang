@@ -719,7 +719,8 @@ MY_API_TOKEN = "secret"
 | `output_format` | string 或 null | `null` | 此 sidecar 实例的输出格式覆盖（`markdown` / `telegram_html` / `slack_mrkdwn` / `plain_text`）（#6445）。`null` 继承通道默认。 |
 
 未设（`null`）的字段不会投影为任何 override，因此在这里设一个 knob 绝不会连带产生你没写的策略 —— 这正是 #6445 修复的陷阱。
-agent 级 `agent.toml` 里的 `[channel_overrides]` 仍优先于这些按通道设置的值。
+agent 级 `agent.toml` 里的 `[channel_overrides]` 仍优先于这些按通道设置的值，且这个优先级是整表替换，不是逐字段合并：只要 agent 清单里声明了 `[channel_overrides]` 表，就会整体替换掉这个 sidecar 的 `dm_policy` / `group_policy` / `threading` / `output_format`，哪怕 agent 表里根本没写这些字段。
+如果一个 agent 的 `[channel_overrides]` 只写了 `model`，什么都不写别的，那 sidecar 级设置的 `group_policy = "ignore"` 会被静默打回未设状态（变为处理所有群消息）—— 如果这个策略无论 agent 覆盖了什么都必须保持生效，就把它也写进该 agent 的 `[channel_overrides]` 里。
 
 ---
 

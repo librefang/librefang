@@ -755,7 +755,8 @@ MY_API_TOKEN = "secret"
 | `output_format` | string or null | `null` | Output-format override (`markdown` / `telegram_html` / `slack_mrkdwn` / `plain_text`) for this sidecar instance (#6445). `null` inherits the channel default. |
 
 An unset (`null`) field is projected onto no override at all, so setting one knob here never materializes a policy you did not write — the footgun fixed in #6445.
-Agent-level `[channel_overrides]` in `agent.toml` still takes precedence over these per-channel values.
+Agent-level `[channel_overrides]` in `agent.toml` still takes precedence over these per-channel values, and that precedence is whole-struct, not per-field: if the agent manifest declares a `[channel_overrides]` table at all, it replaces this sidecar's `dm_policy` / `group_policy` / `threading` / `output_format` entirely, even for the fields the agent table itself leaves unset.
+An agent whose `[channel_overrides]` table sets only `model` (nothing else) will silently drop a sidecar-level `group_policy = "ignore"` back to unset (process all group messages) — set the same policy under the agent's `[channel_overrides]` too if it must hold regardless of what else the agent overrides.
 
 ---
 

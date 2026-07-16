@@ -237,7 +237,8 @@ Signal 默认 `OutputFormat::PlainText`，原因是 `signal-cli` 会把 Markdown
 
 自 #6445 起，`[[sidecar_channels]]` 已暴露 `output_format`、`dm_policy`、`group_policy`、`threading` 的逐通道覆盖。
 每个字段都是可选的 —— 未设的字段继承 bridge 默认，且不会产生你没写的策略。
-agent 级 `[channel_overrides]` 仍优先于这些按通道设置的值。
+agent 级 `[channel_overrides]` 仍优先于这些按通道设置的值，且这个优先级是整表替换而非逐字段合并：只要 agent 清单声明了 `[channel_overrides]`，就会整体替换掉这个 sidecar 的四个字段，哪怕 agent 表里没写那些字段——例如某 agent 只覆盖了 `model`，也会把 sidecar 级的 `group_policy = "ignore"` 静默打回未设状态。
+如果某个策略必须无视 agent 覆盖了什么都继续生效，就把它也写进该 agent 的 `[channel_overrides]` 里。
 
 其他通道保留各自的 formatter 默认值——只翻了 Signal。
 
