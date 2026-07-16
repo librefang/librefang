@@ -132,6 +132,24 @@ impl LibreFangKernel {
             };
         let agent_provider = &resolved_provider_str;
 
+        // Governance: org-wide provider allowlist (issue #6459). Fail-closed —
+        // when a non-empty `[providers] allowed` list does not contain the
+        // resolved provider, refuse to build ANY driver for this agent turn.
+        // This runs before every construction branch below (CLI-profile
+        // rotation, credential pool, single-key, boot-default fallback) so a
+        // disallowed provider can never reach a live driver. Read live from
+        // `self.config.load()`, so an operator's allowlist edit takes effect on
+        // the next turn after a config swap.
+        if !cfg.providers.is_provider_allowed(agent_provider) {
+            warn!(
+                provider = %agent_provider,
+                allowed = ?cfg.providers.allowed,
+                "LLM provider blocked by org-wide allowlist ([providers] allowed)"
+            );
+            let reason = cfg.providers.rejection_reason(agent_provider);
+            return Err(LibreFangError::CapabilityDenied(reason).into());
+        }
+
         let has_custom_key = manifest.model.api_key_env.is_some();
         let has_custom_url = manifest.model.base_url.is_some();
 
@@ -295,6 +313,17 @@ impl LibreFangKernel {
                 } else {
                     fb.provider.clone()
                 };
+                // Governance allowlist (issue #6459): never add a disallowed
+                // provider to the fallback chain. Fail-closed skip + WARN,
+                // mirroring the init-failure skip below.
+                if !cfg.providers.is_provider_allowed(&fb_provider) {
+                    warn!(
+                        provider = %fb_provider,
+                        allowed = ?cfg.providers.allowed,
+                        "Fallback LLM provider blocked by org-wide allowlist; skipping slot"
+                    );
+                    continue;
+                }
                 let fb_api_key = if let Some(env) = &fb.api_key_env {
                     std::env::var(env).ok()
                 } else {
@@ -672,6 +701,75 @@ key_required = true
             seen.lock().unwrap().as_deref(),
             Some("claude-sonnet-4-5"),
             "primary slot must leave req.model unchanged, not overwrite it with the provider name"
+        );
+    }
+
+    /// #6459 — `resolve_driver` enforces the org-wide provider allowlist
+    /// fail-closed at driver resolution time: an empty allowlist allows any
+    /// provider, a non-empty allowlist rejects a disallowed provider with a
+    /// governance error before any driver is constructed, and permits a
+    /// listed one.
+    #[test]
+    fn resolve_driver_enforces_provider_allowlist() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().to_path_buf();
+        let data_dir = home.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::create_dir_all(home.join("skills")).unwrap();
+        std::fs::create_dir_all(home.join("workspaces").join("agents")).unwrap();
+        std::fs::create_dir_all(home.join("workspaces").join("hands")).unwrap();
+        let registry_dir = home.join("registry");
+        std::fs::create_dir_all(&registry_dir).unwrap();
+        std::fs::write(registry_dir.join(".sync_marker"), "").unwrap();
+
+        let config = KernelConfig {
+            home_dir: home.clone(),
+            data_dir: data_dir.clone(),
+            network_enabled: false,
+            memory: MemoryConfig {
+                sqlite_path: Some(data_dir.join("test.db")),
+                ..Default::default()
+            },
+            ..KernelConfig::default()
+        };
+        let kernel = LibreFangKernel::boot_with_config(config).expect("kernel boot");
+
+        // Swap only the allowlist on the live ArcSwap config, mirroring what a
+        // `POST /api/config/reload` does — the field is read live per turn.
+        let set_allowlist = |allowed: &[&str]| {
+            let mut cfg = (*kernel.config.load_full()).clone();
+            cfg.providers.allowed = allowed.iter().map(|s| s.to_string()).collect();
+            kernel.config.store(std::sync::Arc::new(cfg));
+        };
+
+        // Empty allowlist → no restriction: a default agent resolves.
+        set_allowlist(&[]);
+        assert!(
+            kernel.resolve_driver(&AgentManifest::default()).is_ok(),
+            "empty allowlist must allow everything"
+        );
+
+        // Non-empty allowlist that excludes the requested provider →
+        // fail-closed rejection before any driver is constructed.
+        set_allowlist(&["ollama"]);
+        let mut disallowed = AgentManifest::default();
+        disallowed.model.provider = "anthropic".to_string();
+        let err = kernel
+            .resolve_driver(&disallowed)
+            .expect_err("disallowed provider must be rejected");
+        assert!(
+            err.to_string().contains("allowlist"),
+            "rejection must be a governance error, got: {err}"
+        );
+
+        // The same allowlist permits the listed provider. `ollama` is a local
+        // provider (no API key required), so the driver builds
+        // deterministically regardless of the test environment's env vars.
+        let mut allowed = AgentManifest::default();
+        allowed.model.provider = "ollama".to_string();
+        assert!(
+            kernel.resolve_driver(&allowed).is_ok(),
+            "listed provider must resolve"
         );
     }
 }

@@ -248,6 +248,20 @@ impl AuxClient {
     /// `[provider_api_keys]` mapping (and isn't a local provider) — the
     /// caller treats that as "skip this slot, try the next one".
     fn build_driver(&self, provider: &str) -> Result<Arc<dyn LlmDriver>, String> {
+        // Governance: org-wide provider allowlist (issue #6459). Fail-closed —
+        // a disallowed cheap-tier provider is skipped (Err → the caller tries
+        // the next slot, exactly like a missing credential) and logged for the
+        // operator. Keeps the aux/cheap-tier path from routing around the same
+        // allowlist the primary path enforces in `resolve_driver`.
+        if !self.kernel_config.providers.is_provider_allowed(provider) {
+            warn!(
+                %provider,
+                allowed = ?self.kernel_config.providers.allowed,
+                "Aux LLM provider blocked by org-wide allowlist; skipping slot"
+            );
+            return Err(self.kernel_config.providers.rejection_reason(provider));
+        }
+
         let api_key = self.resolve_api_key(provider);
 
         let driver_cfg = DriverConfig {
