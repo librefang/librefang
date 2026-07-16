@@ -7,7 +7,7 @@
 //! Server → Client: `{"type":"typing","state":"start|tool|stop"}`
 //! Server → Client: `{"type":"text_delta","content":"..."}`
 //! Server → Client: `{"type":"response","content":"...","input_tokens":N,"output_tokens":N,"iterations":N}`
-//! Server → Client: `{"type":"error","content":"..."}`
+//! Server → Client: `{"type":"error","content":"...","code":"..."}` (`code` is present for classified agent/LLM failures)
 //! Server → Client: `{"type":"agents_updated","agents":[...]}`
 //! Server → Client: `{"type":"silent_complete"}` (agent chose NO_REPLY)
 //! Server → Client: `{"type":"canvas","canvas_id":"...","html":"...","title":"..."}`
@@ -1461,13 +1461,14 @@ async fn handle_text_message(
                                 }),
                             )
                             .await?;
-                            let user_msg = classify_streaming_error(&e);
+                            let user_error = classify_streaming_error(&e);
                             send_json_or_close(
                                 sender,
                                 &stamp_message_id(
                                     serde_json::json!({
                                         "type": "error",
-                                        "content": user_msg,
+                                        "content": user_error.message,
+                                        "code": user_error.code,
                                     }),
                                     message_id.as_deref(),
                                 ),
@@ -1510,13 +1511,14 @@ async fn handle_text_message(
                         }),
                     )
                     .await?;
-                    let user_msg = classify_streaming_error(&e);
+                    let user_error = classify_streaming_error(&e);
                     send_json_or_close(
                         sender,
                         &stamp_message_id(
                             serde_json::json!({
                                 "type": "error",
-                                "content": user_msg,
+                                "content": user_error.message,
+                                "code": user_error.code,
                             }),
                             message_id.as_deref(),
                         ),
@@ -2035,22 +2037,40 @@ fn sanitize_text(s: &str) -> String {
 ///
 /// Uses the proper LLM error classifier from `librefang_kernel::llm_errors`
 /// for comprehensive 20-provider coverage with actionable advice.
-// Accepts any `Display` error so this module does not have to depend on
-// `librefang_kernel::error::KernelError` directly. Keeping the API↔kernel
-// boundary thin (see #3744) — the function only ever formats the error.
-fn classify_streaming_error(err: &dyn std::fmt::Display) -> String {
+// Accepts any `Display` error so this module does not have to depend on `librefang_kernel::error::KernelError` directly.
+// Keeping the API↔kernel boundary thin (see #3744) — the function only ever formats and classifies the error for the WebSocket protocol.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ClassifiedStreamingError {
+    message: String,
+    code: &'static str,
+}
+
+fn streaming_error(message: impl Into<String>, code: &'static str) -> ClassifiedStreamingError {
+    ClassifiedStreamingError {
+        message: message.into(),
+        code,
+    }
+}
+
+fn classify_streaming_error(err: &dyn std::fmt::Display) -> ClassifiedStreamingError {
     let inner = format!("{err}");
 
     // Check for agent-specific errors first (not LLM errors)
     if inner.contains("Agent not found") {
-        return "Agent not found. It may have been stopped or deleted.".to_string();
+        return streaming_error(
+            "Agent not found. It may have been stopped or deleted.",
+            "agent_not_found",
+        );
     }
     // Internal usage-budget cap (LibreFangError::QuotaExceeded), distinct from a
     // provider 429/billing error that merely contains the word "quota". Match the
     // exact thiserror Display prefix so provider strings fall through to the
     // classifier below (RateLimit / Billing), not this branch.
     if inner.contains("Resource quota exceeded:") {
-        return "Usage budget reached for this window. This is a spending/usage cap, not a full context window \u{2014} /compact will NOT help. Wait for the limit window (hourly/daily/monthly) to reset, or raise the [budget] limits in config.toml.".to_string();
+        return streaming_error(
+            "Usage budget reached for this window. This is a token, cost, or tool-call cap, not a full context window \u{2014} /compact will NOT help. Wait for the relevant window to reset, or raise the matching agent resource limit in its manifest or the matching [budget] limit in config.toml.",
+            "budget_exceeded",
+        );
     }
 
     // Use the LLM error classifier for everything else
@@ -2061,44 +2081,49 @@ fn classify_streaming_error(err: &dyn std::fmt::Display) -> String {
     // includes a redacted excerpt of the raw error (issue #493 fix), so we
     // use it as the base and only override for cases that need extra context.
     match classified.category {
-        llm_errors::LlmErrorCategory::ContextOverflow => {
-            "Context is full. Try /compact or /new.".to_string()
-        }
+        llm_errors::LlmErrorCategory::ContextOverflow => streaming_error(
+            "Context is full. Try /compact or /new.",
+            "context_length_exceeded",
+        ),
         llm_errors::LlmErrorCategory::RateLimit => {
-            if let Some(delay_ms) = classified.suggested_delay_ms {
+            let message = if let Some(delay_ms) = classified.suggested_delay_ms {
                 let secs = (delay_ms / 1000).max(1);
                 format!("Rate limited. Wait ~{secs}s and try again.")
             } else {
                 "Rate limited. Wait a moment and try again.".to_string()
-            }
+            };
+            streaming_error(message, "rate_limited")
         }
-        llm_errors::LlmErrorCategory::Billing => {
-            format!("Billing issue. {}", classified.sanitized_message)
-        }
+        llm_errors::LlmErrorCategory::Billing => streaming_error(
+            format!("Billing issue. {}", classified.sanitized_message),
+            "billing_error",
+        ),
         llm_errors::LlmErrorCategory::Auth => {
             // Show the actual error detail so users can diagnose (issue #493).
             // The sanitized_message already redacts secrets.
-            classified.sanitized_message.clone()
+            streaming_error(classified.sanitized_message.clone(), "auth_error")
         }
         llm_errors::LlmErrorCategory::ModelNotFound => {
-            if inner.contains("localhost:11434") || inner.contains("ollama") {
+            let message = if inner.contains("localhost:11434") || inner.contains("ollama") {
                 "Model not found on Ollama. Run `ollama pull <model>` first. Use /model to see options.".to_string()
             } else {
                 format!(
                     "{}. Use /model to see options.",
                     classified.sanitized_message
                 )
-            }
+            };
+            streaming_error(message, "model_not_found")
         }
         llm_errors::LlmErrorCategory::Format => {
             // Claude Code CLI errors have actionable messages — pass them through
-            if inner.contains("Claude Code CLI") || inner.contains("claude auth") {
+            let message = if inner.contains("Claude Code CLI") || inner.contains("claude auth") {
                 classified.raw_message.clone()
             } else {
                 classified.sanitized_message.clone()
-            }
+            };
+            streaming_error(message, "format_error")
         }
-        _ => classified.sanitized_message,
+        _ => streaming_error(classified.sanitized_message, "llm_error"),
     }
 }
 
@@ -2288,8 +2313,9 @@ mod tests {
     #[test]
     fn test_classify_streaming_error_accepts_any_display() {
         // A plain &str (not a KernelError) is sufficient.
-        let msg = classify_streaming_error(&"Agent not found");
-        assert!(msg.contains("Agent not found"));
+        let error = classify_streaming_error(&"Agent not found");
+        assert!(error.message.contains("Agent not found"));
+        assert_eq!(error.code, "agent_not_found");
 
         // A custom Display impl also works.
         struct E;
@@ -2298,8 +2324,9 @@ mod tests {
                 f.write_str("Resource quota exceeded: example")
             }
         }
-        let msg = classify_streaming_error(&E);
-        assert!(msg.to_lowercase().contains("usage budget"));
+        let error = classify_streaming_error(&E);
+        assert!(error.message.to_lowercase().contains("usage budget"));
+        assert_eq!(error.code, "budget_exceeded");
     }
 
     #[test]
@@ -2308,13 +2335,16 @@ mod tests {
         // honest usage-budget message that does NOT recommend /compact or /new,
         // because those clear context / the in-memory token tracker, not the
         // persisted cost/usage windows that raised this error.
-        let msg = classify_streaming_error(
+        let error = classify_streaming_error(
             &"Resource quota exceeded: Global hourly budget exceeded: $5 / $5",
         );
-        assert!(msg.contains("Usage budget"));
+        assert!(error.message.contains("Usage budget"));
+        assert!(error.message.contains("agent resource limit"));
+        assert!(error.message.contains("[budget] limit"));
         // It mentions /compact only to steer the user away from it, never as a remedy.
-        assert!(msg.contains("/compact will NOT help"));
-        assert!(!msg.contains("/new"));
+        assert!(error.message.contains("/compact will NOT help"));
+        assert!(!error.message.contains("/new"));
+        assert_eq!(error.code, "budget_exceeded");
     }
 
     #[test]
@@ -2322,16 +2352,27 @@ mod tests {
         // A provider 429 that merely contains the word "quota" must NOT be
         // hijacked by the internal-budget branch; it falls through to the LLM
         // classifier and is reported as a rate limit.
-        let msg = classify_streaming_error(&"API error (429): You exceeded your current quota");
-        assert!(msg.contains("Rate limited"));
-        assert!(!msg.contains("Usage budget"));
+        let error = classify_streaming_error(&"API error (429): You exceeded your current quota");
+        assert!(error.message.contains("Rate limited"));
+        assert!(!error.message.contains("Usage budget"));
+        assert_eq!(error.code, "rate_limited");
     }
 
     #[test]
     fn test_classify_streaming_error_provider_billing() {
         // A provider 402/billing error maps to the Billing branch.
-        let msg = classify_streaming_error(&"API error (402): billing");
-        assert!(msg.contains("Billing issue"));
+        let error = classify_streaming_error(&"API error (402): billing");
+        assert!(error.message.contains("Billing issue"));
+        assert_eq!(error.code, "billing_error");
+    }
+
+    #[test]
+    fn test_classify_streaming_error_context_overflow_has_structured_code() {
+        let error = classify_streaming_error(
+            &"API error (400): This model's maximum context length is 8192 tokens",
+        );
+        assert_eq!(error.message, "Context is full. Try /compact or /new.");
+        assert_eq!(error.code, "context_length_exceeded");
     }
 
     #[test]
