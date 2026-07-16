@@ -8745,6 +8745,100 @@ async fn vault_cache_reuses_unlocked_handle_across_calls() {
     kernel.shutdown();
 }
 
+/// Per-user LLM provider credentials (#6460): a user-scoped provider key is
+/// stored encrypted in the vault, reads back verbatim for its owner, stays
+/// isolated across users / providers, and — through the shared resolution
+/// helper — takes precedence over the daemon-global credential. A provider
+/// with no user-scoped key falls back to the global credential, so global-only
+/// behaviour is unchanged. Listing surfaces provider names only, never the
+/// secret value.
+///
+/// Same `serial_test::serial(librefang_vault_key)` group as every other
+/// vault-key-touching test in this crate because `LIBREFANG_VAULT_KEY` and
+/// `LIBREFANG_VAULT_NO_KEYRING` are process-global.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial(librefang_vault_key)]
+async fn per_user_provider_key_beats_global_and_falls_back() {
+    use crate::user_provider_credentials::resolve_provider_credential;
+
+    const TEST_VAULT_KEY_B64: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+    let _vault_key = set_test_env("LIBREFANG_VAULT_KEY", TEST_VAULT_KEY_B64);
+    let _no_keyring = set_test_env("LIBREFANG_VAULT_NO_KEYRING", "1");
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let alice = librefang_types::agent::UserId::from_name("alice");
+    let bob = librefang_types::agent::UserId::from_name("bob");
+
+    // Store Alice's own OpenAI key (encrypted at rest in the vault).
+    kernel
+        .set_user_provider_key(alice, "openai", "sk-alice-openai")
+        .expect("store user-scoped provider key");
+
+    // Round-trips verbatim for the owner...
+    assert_eq!(
+        kernel.get_user_provider_key(alice, "openai").as_deref(),
+        Some("sk-alice-openai"),
+    );
+    // ...and is isolated per user and per provider.
+    assert_eq!(kernel.get_user_provider_key(bob, "openai"), None);
+    assert_eq!(kernel.get_user_provider_key(alice, "anthropic"), None);
+
+    // Resolution order: the user-scoped key beats the daemon-global key.
+    let global = Some("sk-global-openai".to_string());
+    assert_eq!(
+        resolve_provider_credential(
+            kernel.get_user_provider_key(alice, "openai"),
+            global.clone(),
+        ),
+        Some("sk-alice-openai".to_string()),
+        "user-scoped key must win over the daemon-global key",
+    );
+
+    // Fallback: a provider with no user-scoped key uses the global credential,
+    // so global-only behaviour is unchanged.
+    assert_eq!(
+        resolve_provider_credential(
+            kernel.get_user_provider_key(alice, "anthropic"),
+            global.clone(),
+        ),
+        global,
+        "provider without a user-scoped key must fall back to the global credential",
+    );
+
+    // Listing surfaces provider NAMES only, never the secret values.
+    kernel
+        .set_user_provider_key(alice, "anthropic", "sk-alice-anthropic")
+        .expect("store second user-scoped provider key");
+    let names = kernel.list_user_provider_keys(alice);
+    assert_eq!(names, vec!["anthropic".to_string(), "openai".to_string()]);
+    for name in &names {
+        assert!(
+            !name.contains("sk-alice"),
+            "list must expose provider names only, never secret values",
+        );
+    }
+
+    // Removal drops only the targeted (user, provider) pair.
+    assert!(kernel.remove_user_provider_key(alice, "openai").unwrap());
+    assert_eq!(kernel.get_user_provider_key(alice, "openai"), None);
+    assert_eq!(
+        kernel.list_user_provider_keys(alice),
+        vec!["anthropic".to_string()],
+    );
+
+    kernel.shutdown();
+}
+
 /// Regression test for the kernel install façade introduced in #3295: the
 /// HTTP install path historically opened `vault.enc` and ran the Argon2id
 /// KDF on every request. After the refactor, `Kernel::install_integration`

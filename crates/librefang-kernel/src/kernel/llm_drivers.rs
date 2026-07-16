@@ -106,6 +106,32 @@ impl LibreFangKernel {
         &self,
         manifest: &AgentManifest,
     ) -> KernelResult<Arc<dyn LlmDriver>> {
+        // Owner-agnostic entry point — every current call site. Delegates with
+        // no owner, so credential resolution is byte-identical to the historical
+        // env-var / credential-pool behaviour. Owner-aware dispatch (per-user
+        // provider credentials, #6460) goes through `resolve_driver_for_owner`;
+        // wiring the human owner of a turn in from request context is a
+        // follow-up (see the PR's Deferred section).
+        self.resolve_driver_for_owner(manifest, None)
+    }
+
+    /// Resolve the LLM driver for an agent turn on behalf of an optional human
+    /// owner.
+    ///
+    /// Credential precedence (#6460): when `owner` is `Some` and that user has
+    /// stored their own provider key for the resolved provider (see
+    /// [`crate::user_provider_credentials`]), that user-scoped key wins over
+    /// the daemon-global credential — both the credential pool and the env-var
+    /// key. When `owner` is `None`, or the user has no key for the provider,
+    /// resolution is identical to the historical behaviour.
+    ///
+    /// An agent that pins an explicit `api_key_env` in its manifest is treated
+    /// as an operator-level override and is NOT shadowed by a user-scoped key.
+    pub(crate) fn resolve_driver_for_owner(
+        &self,
+        manifest: &AgentManifest,
+        owner: Option<librefang_types::agent::UserId>,
+    ) -> KernelResult<Arc<dyn LlmDriver>> {
         let cfg = self.config.load();
 
         // Use the effective default model: hot-reloaded override takes priority
@@ -205,6 +231,17 @@ impl LibreFangKernel {
                 .unwrap_or_else(|| DriverConfig::default().max_retries),
         };
 
+        // Per-user provider credential (#6460): resolve the human owner's own
+        // key for this provider, if any. A user-scoped key takes precedence
+        // over BOTH the credential pool and the env-var global key (and
+        // bypasses the pool below). Skipped when the agent pinned an explicit
+        // `api_key_env` — that operator-level override wins.
+        let user_scoped_key: Option<String> = if has_custom_key {
+            None
+        } else {
+            owner.and_then(|uid| self.get_user_provider_key(uid, agent_provider))
+        };
+
         // Check for a credential pool for this provider.
         // When the pool exists and the agent didn't set a custom API key,
         // create a PooledDriver that acquires keys from the pool on every
@@ -212,8 +249,9 @@ impl LibreFangKernel {
         // PooledDriver returns a 503 which triggers fallback to the next
         // provider (handled by FallbackDriver below).
         // When the agent explicitly sets a custom API key env var, skip the
-        // pool and use the agent-specified key directly.
-        let pool_opt = if has_custom_key {
+        // pool and use the agent-specified key directly. A user-scoped key
+        // (above) likewise bypasses the daemon-global pool.
+        let pool_opt = if has_custom_key || user_scoped_key.is_some() {
             None
         } else {
             self.llm
@@ -232,7 +270,11 @@ impl LibreFangKernel {
         } else {
             // No credential pool — resolve a single API key the traditional
             // way.
-            let api_key = if has_custom_key {
+            let api_key = if let Some(user_key) = user_scoped_key {
+                // #6460: the human owner's own provider key wins over the
+                // daemon-global env-var credential.
+                Some(user_key)
+            } else if has_custom_key {
                 manifest
                     .model
                     .api_key_env
