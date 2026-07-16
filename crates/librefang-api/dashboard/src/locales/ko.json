@@ -2658,7 +2658,7 @@
     "export_markdown": "마크다운으로 내보내기",
     "new_session": "새 세션",
     "limit_reached_title": "대화 길이 제한에 도달했습니다.",
-    "limit_reached_desc": "이 세션이 모델의 컨텍스트 창 또는 공급자 길이/할당량 제한에 도달했으므로 에이전트가 여기서 계속할 수 없습니다. 계속하려면 새 세션을 시작하세요.",
+    "limit_reached_desc": "이 세션이 모델의 컨텍스트 창 또는 공급자의 입력 길이 제한에 도달했으므로 에이전트가 여기서 계속할 수 없습니다. 계속하려면 새 세션을 시작하세요.",
     "limit_reached_action": "새 세션 시작",
     "search_providers": "검색 공급자...",
     "select_provider": "제공업체 선택",

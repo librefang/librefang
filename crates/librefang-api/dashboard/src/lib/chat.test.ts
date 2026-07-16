@@ -241,9 +241,12 @@ describe("applyForeignTerminalFrame (#6390)", () => {
   });
 
   it("keeps the owning bubble's prior content when the foreign `response` carries none", () => {
-    const next = applyForeignTerminalFrame([bubbleA], { type: "response", message_id: "bot-A", content: "" });
+    const erroredBubble = { ...bubbleA, error: "old error", errorCode: "rate_limited" };
+    const next = applyForeignTerminalFrame([erroredBubble], { type: "response", message_id: "bot-A", content: "" });
     expect(next[0].content).toBe("partial A");
     expect(next[0].isStreaming).toBe(false);
+    expect(next[0].error).toBeUndefined();
+    expect(next[0].errorCode).toBeUndefined();
   });
 
   it("removes only the owning bubble on a foreign `silent_complete`", () => {
@@ -253,8 +256,14 @@ describe("applyForeignTerminalFrame (#6390)", () => {
   });
 
   it("marks only the owning bubble on a foreign `error`, defaulting the message", () => {
-    const withMsg = applyForeignTerminalFrame([bubbleA, bubbleB], { type: "error", message_id: "bot-A", content: "boom" });
+    const withMsg = applyForeignTerminalFrame([bubbleA, bubbleB], {
+      type: "error",
+      message_id: "bot-A",
+      content: "boom",
+      code: "rate_limited",
+    });
     expect(withMsg[0].error).toBe("boom");
+    expect(withMsg[0].errorCode).toBe("rate_limited");
     expect(withMsg[0].isStreaming).toBe(false);
     expect(withMsg[1]).toBe(bubbleB);
 

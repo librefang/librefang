@@ -177,6 +177,7 @@ export interface TerminalRoutableMessage {
   content: string;
   isStreaming?: boolean;
   error?: string;
+  errorCode?: string;
   tokens?: { input?: number; output?: number };
   cost_usd?: number;
   memories_saved?: string[];
@@ -190,6 +191,7 @@ export interface TerminalFrame {
   type: "response" | "silent_complete" | "error";
   message_id: string;
   content?: string;
+  code?: string;
   output_tokens?: number;
   input_tokens?: number;
   cost_usd?: number;
@@ -226,13 +228,20 @@ export function applyForeignTerminalFrame<M extends TerminalRoutableMessage>(
             memories_used: frame.memories_used,
             thinking: typeof frame.thinking === "string" ? frame.thinking : m.thinking,
             thinkingCollapsed: m.thinkingCollapsed ?? true,
+            error: undefined,
+            errorCode: undefined,
           }
         : m,
     );
   }
   return messages.map((m): M =>
     m.id === owner
-      ? { ...m, isStreaming: false, error: frame.content || "WebSocket error" }
+      ? {
+          ...m,
+          isStreaming: false,
+          error: frame.content || "WebSocket error",
+          errorCode: frame.code,
+        }
       : m,
   );
 }
