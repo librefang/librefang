@@ -17,6 +17,7 @@ struct RecordingChannelAdapter {
     name: String,
     channel_type: ChannelType,
     sent: Arc<std::sync::Mutex<Vec<String>>>,
+    overrides: Option<librefang_types::config::ChannelOverrides>,
 }
 
 impl RecordingChannelAdapter {
@@ -25,6 +26,19 @@ impl RecordingChannelAdapter {
             name: channel_type.to_string(),
             channel_type: ChannelType::Custom(channel_type.to_string()),
             sent: Arc::new(std::sync::Mutex::new(Vec::new())),
+            overrides: None,
+        }
+    }
+
+    /// Same as [`Self::new`] but carries a per-adapter `channel_overrides()`
+    /// (#6445 — e.g. a sidecar's `[[sidecar_channels]] output_format`).
+    fn with_overrides(
+        channel_type: &str,
+        overrides: librefang_types::config::ChannelOverrides,
+    ) -> Self {
+        Self {
+            overrides: Some(overrides),
+            ..Self::new(channel_type)
         }
     }
 }
@@ -37,6 +51,10 @@ impl ChannelAdapter for RecordingChannelAdapter {
 
     fn channel_type(&self) -> ChannelType {
         self.channel_type.clone()
+    }
+
+    fn channel_overrides(&self) -> Option<librefang_types::config::ChannelOverrides> {
+        self.overrides.clone()
     }
 
     async fn start(
@@ -247,6 +265,68 @@ async fn test_notify_escalated_approval_prefers_request_route_to() {
         !sent[0].contains("policy-recipient")
             && !sent[0].contains("agent-rule-recipient")
             && !sent[0].contains("global-recipient")
+    );
+
+    kernel.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_send_channel_message_honours_adapter_output_format_override_6445() {
+    // #6445: `send_channel_message` must consult the adapter's own
+    // `channel_overrides().output_format` (e.g. a sidecar's
+    // `[[sidecar_channels]] output_format`) rather than only the
+    // channel-type default, so an agent-initiated `channel_send` formats
+    // the same way a normal reply would.
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    // No override: the "test" channel type falls back to the generic
+    // `Markdown` default (`default_output_format_for_channel`), which
+    // passes markdown syntax through unchanged.
+    let plain_adapter = Arc::new(RecordingChannelAdapter::new("test"));
+    let plain_sent = plain_adapter.sent.clone();
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("test".to_string(), plain_adapter);
+    kernel
+        .send_channel_message("test", "user-1", "**hi**", None, None)
+        .await
+        .expect("send should succeed");
+    assert_eq!(
+        plain_sent.lock().unwrap().clone(),
+        vec!["user-1:**hi**".to_string()],
+        "no override must keep the channel-type default formatting"
+    );
+
+    // Explicit `output_format` override: must win over the channel default.
+    let override_adapter = Arc::new(RecordingChannelAdapter::with_overrides(
+        "test-override",
+        librefang_types::config::ChannelOverrides {
+            output_format: Some(librefang_types::config::OutputFormat::PlainText),
+            ..Default::default()
+        },
+    ));
+    let override_sent = override_adapter.sent.clone();
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("test-override".to_string(), override_adapter);
+    kernel
+        .send_channel_message("test-override", "user-2", "**hi**", None, None)
+        .await
+        .expect("send should succeed");
+    assert_eq!(
+        override_sent.lock().unwrap().clone(),
+        vec!["user-2:hi".to_string()],
+        "an adapter-carried output_format override must be honoured on the outbound path"
     );
 
     kernel.shutdown();
