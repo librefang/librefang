@@ -174,6 +174,11 @@ fn commands_serialize_to_corpus() {
                     channel_id: "c1".into(),
                     message_id: "55".into(),
                     reaction: "👍".into(),
+                    // Empty `phase` / `None` `tool_name` are skipped on the
+                    // wire, so the enriched struct still serializes to the
+                    // legacy emoji-only corpus frame (#6451).
+                    phase: String::new(),
+                    tool_name: None,
                 },
             },
         ),
@@ -256,4 +261,49 @@ fn commands_serialize_to_corpus() {
         let want = read_corpus(&format!("commands/{name}"));
         assert_eq!(got, want, "commands/{name}: serialize != corpus");
     }
+}
+
+/// #6451: a `tool_use` reaction serializes the enriched `phase` +
+/// `tool_name` fields (so a reaction consumer can render a live step
+/// list), while an empty `phase` / absent `tool_name` are dropped from
+/// the wire (backward-compatible with the emoji-only frame).
+#[test]
+fn reaction_serializes_phase_and_tool_name_when_present() {
+    let cmd = SidecarCommand::Reaction {
+        params: SidecarReactionParams {
+            channel_id: "c1".into(),
+            message_id: "55".into(),
+            reaction: "\u{2699}\u{FE0F}".into(),
+            phase: "tool_use".into(),
+            tool_name: Some("web_fetch".into()),
+        },
+    };
+    let got = serde_json::to_value(&cmd).unwrap();
+    assert_eq!(
+        got,
+        serde_json::json!({
+            "method": "reaction",
+            "params": {
+                "channel_id": "c1",
+                "message_id": "55",
+                "reaction": "\u{2699}\u{FE0F}",
+                "phase": "tool_use",
+                "tool_name": "web_fetch",
+            }
+        })
+    );
+
+    // A non-tool phase drops `tool_name` but keeps `phase`.
+    let thinking = SidecarCommand::Reaction {
+        params: SidecarReactionParams {
+            channel_id: "c1".into(),
+            message_id: "55".into(),
+            reaction: "\u{1F914}".into(),
+            phase: "thinking".into(),
+            tool_name: None,
+        },
+    };
+    let got = serde_json::to_value(&thinking).unwrap();
+    assert_eq!(got["params"].get("tool_name"), None);
+    assert_eq!(got["params"]["phase"], "thinking");
 }

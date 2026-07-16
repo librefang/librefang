@@ -522,6 +522,15 @@ pub struct Reaction {
     pub channel_id: String,
     pub message_id: String,
     pub reaction: String,
+    /// Lifecycle phase tag (`queued` / `thinking` / `tool_use` /
+    /// `streaming` / `done` / `error`) carried alongside the emoji so a
+    /// reaction consumer can render a live step list (#6451). Absent on
+    /// the legacy emoji-only frame — defaults to empty.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub phase: String,
+    /// Tool being executed, present for the `tool_use` phase only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
