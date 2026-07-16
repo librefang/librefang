@@ -2037,9 +2037,8 @@ fn sanitize_text(s: &str) -> String {
 ///
 /// Uses the proper LLM error classifier from `librefang_kernel::llm_errors`
 /// for comprehensive 20-provider coverage with actionable advice.
-// Accepts any `Display` error so this module does not have to depend on
-// `librefang_kernel::error::KernelError` directly. Keeping the API↔kernel
-// boundary thin (see #3744) — the function only ever formats and classifies the error for the WebSocket protocol.
+// Accepts any `Display` error so this module does not have to depend on `librefang_kernel::error::KernelError` directly.
+// Keeping the API↔kernel boundary thin (see #3744) — the function only ever formats and classifies the error for the WebSocket protocol.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ClassifiedStreamingError {
     message: String,
