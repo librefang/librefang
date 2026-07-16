@@ -1099,6 +1099,10 @@ pub(super) async fn execute_single_tool_call_core(
             // #6443: thread the turn's originating account for the
             // cross-account dispatch guard in `channel_send`.
             ctx.sender_account_id,
+            // #6463: system-internal forks (auto_dream, proactive memory)
+            // set this so their `memory_*` tool calls bypass the RBAC guest
+            // gate instead of hitting NeedsApproval every cycle.
+            ctx.opts.system_call,
         ),
     )
     .await

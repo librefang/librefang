@@ -49,11 +49,12 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
         tool_name: &str,
         sender_id: Option<&str>,
         channel: Option<&str>,
+        system_call: bool,
     ) -> librefang_types::user_policy::UserToolGate {
         // The synthetic `"cron"` and `"autonomous"` channels are the only
-        // two the kernel treats as system-internal. Both are synthesised
-        // by the kernel itself for daemon-driven calls that have no
-        // user-facing sender:
+        // two the kernel treats as system-internal by *channel*. Both are
+        // synthesised by the kernel itself for daemon-driven calls that
+        // have no user-facing sender:
         //   - `"cron"` — `kernel/mod.rs::start_periodic_loops` cron tick
         //     (~line 11950) for `[[cron_jobs]]` fires.
         //   - `"autonomous"` — `start_continuous_autonomous_loop`
@@ -65,18 +66,28 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
         // autonomous tool call falls into `guest_gate` → NeedsApproval
         // and floods the approval queue when RBAC is enabled.
         //
+        // The `system_call` argument is the channel-less counterpart:
+        // system-internal forks (auto_dream, proactive memory) run through
+        // `run_forked_agent_streaming` on the parent's canonical session
+        // with a `None` sender context, so they have no synthetic channel
+        // to match here. They flag themselves via `LoopOptions.system_call`
+        // instead, which the runtime dispatch forwards as this argument
+        // (#6463). Either signal — the flag OR one of the two system
+        // channels — bypasses the per-user gate.
+        //
         // Earlier drafts also matched `"system"` / `"internal"` and
         // treated `(None, None)` as system, but neither sentinel is
         // synthesised anywhere in the codebase, and the `(None, None)`
         // shortcut silently re-opened the H7 fail-open at the trait
         // boundary the AuthManager unit tests were written to close
         // (PR #3205 review item #1). Both have been removed: an
-        // unattributed inbound now goes through the guest gate so
-        // RBAC fails closed end-to-end.
-        let system_call = matches!(
-            channel,
-            Some(c) if c == SYSTEM_CHANNEL_CRON || c == SYSTEM_CHANNEL_AUTONOMOUS
-        );
+        // unattributed inbound (no flag, no system channel) now goes
+        // through the guest gate so RBAC fails closed end-to-end.
+        let system_call = system_call
+            || matches!(
+                channel,
+                Some(c) if c == SYSTEM_CHANNEL_CRON || c == SYSTEM_CHANNEL_AUTONOMOUS
+            );
         self.security
             .auth
             .resolve_user_tool_decision(tool_name, sender_id, channel, system_call)

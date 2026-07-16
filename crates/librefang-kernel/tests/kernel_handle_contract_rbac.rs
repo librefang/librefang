@@ -31,7 +31,8 @@ async fn test_resolve_user_tool_decision_default_allow_for_unconfigured_user() {
     let (kernel, _tmp) = boot();
     let kh: &dyn KernelHandle = &kernel;
 
-    let gate = kh.resolve_user_tool_decision("any_tool", Some("unknown_user"), Some("telegram"));
+    let gate =
+        kh.resolve_user_tool_decision("any_tool", Some("unknown_user"), Some("telegram"), false);
     assert_eq!(
         gate,
         UserToolGate::Allow,
@@ -64,19 +65,21 @@ async fn test_resolve_user_tool_decision_uses_sender_and_channel_policy() {
     )]);
     let kh: &dyn KernelHandle = &kernel;
 
-    let matched = kh.resolve_user_tool_decision("shell_exec", Some("111"), Some("telegram"));
+    let matched = kh.resolve_user_tool_decision("shell_exec", Some("111"), Some("telegram"), false);
     assert!(
         matches!(matched, UserToolGate::Deny { .. }),
         "bound Telegram sender must receive the configured deny, got {matched:?}"
     );
 
-    let unknown = kh.resolve_user_tool_decision("shell_exec", Some("guest"), Some("telegram"));
+    let unknown =
+        kh.resolve_user_tool_decision("shell_exec", Some("guest"), Some("telegram"), false);
     assert!(
         matches!(unknown, UserToolGate::NeedsApproval { .. }),
         "unknown sender must use the guest gate instead of Bob's deny, got {unknown:?}"
     );
 
-    let wrong_channel = kh.resolve_user_tool_decision("shell_exec", Some("111"), Some("discord"));
+    let wrong_channel =
+        kh.resolve_user_tool_decision("shell_exec", Some("111"), Some("discord"), false);
     assert!(
         matches!(wrong_channel, UserToolGate::NeedsApproval { .. }),
         "same sender id on a different channel must not match Bob's Telegram policy, got {wrong_channel:?}"
