@@ -797,6 +797,121 @@ impl HandRegistry {
         Ok(stored)
     }
 
+    /// Overwrite an **existing** hand's on-disk `HAND.toml` with new content.
+    ///
+    /// This is the edit counterpart to
+    /// [`install_from_content_persisted`](Self::install_from_content_persisted)
+    /// — that one refuses an id that is already registered, this one requires
+    /// it. Steps:
+    ///
+    /// 1. Require the hand to already be registered (`NotFound` otherwise).
+    /// 2. Parse + validate the new content into a [`HandDefinition`] (with
+    ///    base-template resolution, matching the reload path). Invalid TOML is
+    ///    rejected via [`HandError::TomlParse`] **before** anything touches
+    ///    disk, so a broken edit never clobbers the good file.
+    /// 3. Reject a changed `id` — the on-disk directory is keyed by id, so a
+    ///    rename would orphan the old directory and desync the registry.
+    /// 4. Run the shared supply-chain audit on a staged copy (the manifest's
+    ///    agent `system_prompt`s are caller-supplied, the same boundary the
+    ///    install path scans).
+    /// 5. Write the file back to whichever on-disk location the hand loads
+    ///    from (the read-only `registry/hands/<id>/` copy when present, else
+    ///    the user-writable `workspaces/<id>/` copy), then reload definitions
+    ///    from disk so the in-memory [`HandDefinition`] (and any `SKILL.md`)
+    ///    refresh.
+    ///
+    /// Note that a hand instance already spawned keeps its old manifest until
+    /// it is deactivated and reactivated — this refreshes the *definition*,
+    /// which is what the next activation (and the dashboard listing) reads.
+    /// Editing a built-in (registry) hand takes effect immediately but is
+    /// overwritten on the next registry sync; persistent edits should target
+    /// user-installed hands.
+    ///
+    /// Returns the reloaded [`HandDefinition`].
+    pub fn update_manifest_persisted(
+        &self,
+        home_dir: &std::path::Path,
+        hand_id: &str,
+        toml_content: &str,
+    ) -> HandResult<HandDefinition> {
+        if !self.definitions.contains_key(hand_id) {
+            return Err(HandError::NotFound(hand_id.to_string()));
+        }
+
+        // 1. Parse + validate first — no disk writes until the content is known
+        //    to be a well-formed HandDefinition.
+        let agents_dir = resolve_agents_dir(home_dir);
+        let def = parse_hand_toml_with_agents_dir(
+            toml_content,
+            "",
+            HashMap::new(),
+            agents_dir.as_deref(),
+        )?;
+
+        // 2. Renaming a hand via edit is not supported: the on-disk directory
+        //    and the registry key are both keyed by id.
+        if def.id != hand_id {
+            return Err(HandError::Config(format!(
+                "HAND.toml `id` ('{}') must match the hand being edited ('{hand_id}'); \
+                 renaming a hand via edit is not supported",
+                def.id
+            )));
+        }
+
+        // 3. Supply-chain audit on a staged copy (the same scanner every
+        //    persisted install crosses). Stage → scan → discard; the real
+        //    write happens below only if the scan clears.
+        let staging = home_dir
+            .join(".staging")
+            .join(format!("hands-edit-{hand_id}-{}", Uuid::new_v4()));
+        let scan_result = (|| -> HandResult<()> {
+            std::fs::create_dir_all(&staging)?;
+            std::fs::write(staging.join("HAND.toml"), toml_content)?;
+            if let Err(violations) = librefang_skills::supply_chain::scan(&staging) {
+                let detail = violations
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return Err(HandError::SecurityBlocked(format!(
+                    "Hand '{hand_id}' failed supply-chain audit: {detail}"
+                )));
+            }
+            Ok(())
+        })();
+        let _ = std::fs::remove_dir_all(&staging);
+        scan_result?;
+
+        // 4. Write to the location the hand actually loads from. `scan_hands_dir`
+        //    scans `registry/hands/` before `workspaces/` and drops duplicate
+        //    ids, so a built-in must be written back into its registry copy for
+        //    the edit to win on reload. A hand with no on-disk file (installed
+        //    programmatically) falls back to the workspaces copy, which the
+        //    reload below then picks up.
+        let registry_path = home_dir
+            .join("registry")
+            .join("hands")
+            .join(hand_id)
+            .join("HAND.toml");
+        let target = if registry_path.exists() {
+            registry_path
+        } else {
+            home_dir.join("workspaces").join(hand_id).join("HAND.toml")
+        };
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&target, toml_content)?;
+
+        // 5. Refresh in-memory definitions (and any SKILL.md) from disk.
+        self.reload_from_disk(home_dir);
+
+        info!(hand = %hand_id, path = %target.display(), "Updated hand manifest");
+
+        self.get_definition(hand_id)
+            .ok_or_else(|| HandError::NotFound(hand_id.to_string()))
+    }
+
     /// Download a hand from the remote marketplace, run the supply-chain audit
     /// on the bundle, then install it under `<home_dir>/workspaces/<id>/`.
     ///

@@ -397,6 +397,69 @@ pub async fn get_hand_manifest(
         .into_response()
 }
 
+/// PUT /api/hands/{hand_id}/manifest — Overwrite the hand's HAND.toml.
+///
+/// Admin/config-mutation endpoint — sits behind the authenticated middleware
+/// like every other hand write (never added to the `is_public` allowlist).
+///
+/// The body is `{ "toml_content": "<HAND.toml text>" }`, matching
+/// `POST /api/hands/install`. The content is validated by parsing it into a
+/// `HandDefinition` before anything is written: invalid TOML (or an `id` that
+/// no longer matches the hand being edited) is rejected with `400` and the
+/// on-disk file is left untouched. On success the file is persisted and the
+/// in-memory definitions are hot-reloaded from disk, so the next activation
+/// and the dashboard listing pick up the change; a hand instance that is
+/// already active keeps its old manifest until it is deactivated and
+/// reactivated. Editing a built-in (registry) hand takes effect immediately
+/// but is overwritten on the next registry sync.
+#[utoipa::path(
+    put,
+    path = "/api/hands/{hand_id}/manifest",
+    tag = "hands",
+    params(
+        ("hand_id" = String, Path, description = "Hand ID"),
+    ),
+    request_body = crate::types::JsonObject,
+    responses(
+        (status = 200, description = "HAND.toml updated; returns the reloaded HandDefinition", body = crate::types::JsonObject),
+        (status = 400, description = "Invalid TOML, id mismatch, or blocked by the supply-chain audit"),
+        (status = 404, description = "Hand not found"),
+    )
+)]
+pub async fn update_hand_manifest(
+    State(state): State<Arc<AppState>>,
+    Path(hand_id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let toml_content = body["toml_content"].as_str().unwrap_or("");
+    if toml_content.trim().is_empty() {
+        return ApiErrorResponse::bad_request("Missing toml_content field").into_json_tuple();
+    }
+
+    let home_dir = state.kernel.home_dir().to_path_buf();
+    match state
+        .kernel
+        .hands()
+        .update_manifest_persisted(&home_dir, &hand_id, toml_content)
+    {
+        Ok(def) => {
+            state.kernel.invalidate_hand_route_cache();
+            // Return the reloaded canonical `HandDefinition` so dashboard /
+            // SDK callers can `setQueryData` without a follow-up GET — same
+            // contract as `install_hand`.
+            let body = serde_json::to_value(&def).unwrap_or(serde_json::Value::Null);
+            (StatusCode::OK, Json(body))
+        }
+        Err(librefang_hands::HandError::NotFound(id)) => {
+            ApiErrorResponse::not_found(format!("Hand not found: {id}")).into_json_tuple()
+        }
+        // Invalid TOML, id mismatch, and a failed supply-chain audit are all
+        // caller-fixable input problems — surface the message at 400 so the
+        // editor can show it inline.
+        Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
+    }
+}
+
 /// POST /api/hands/{hand_id}/check-deps — Re-check dependency status for a hand.
 #[utoipa::path(
     post,

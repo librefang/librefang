@@ -1130,6 +1130,7 @@
     "view_manifest": "View HAND.toml",
     "manifest_title": "HAND.toml — {{name}}",
     "manifest_error": "Failed to load HAND.toml",
+    "manifest_saved": "HAND.toml saved",
     "running_now": "Running Now",
     "activate": "Activate",
     "deactivate": "Deactivate",

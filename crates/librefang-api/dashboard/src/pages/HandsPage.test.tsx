@@ -41,6 +41,7 @@ vi.mock("../lib/mutations/hands", () => ({
   useUninstallHand: vi.fn(),
   useSetHandSecret: vi.fn(() => ({ mutateAsync: vi.fn(), isPending: false })),
   useUpdateHandSettings: vi.fn(() => ({ mutate: vi.fn(), isPending: false })),
+  useUpdateHandManifest: vi.fn(() => ({ mutateAsync: vi.fn(), isPending: false })),
 }));
 
 vi.mock("../lib/mutations/schedules", () => ({

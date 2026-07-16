@@ -153,7 +153,7 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
         .route("/hands/{hand_id}", axum::routing::get(get_hand))
         .route(
             "/hands/{hand_id}/manifest",
-            axum::routing::get(get_hand_manifest),
+            axum::routing::get(get_hand_manifest).put(update_hand_manifest),
         )
         .route(
             "/hands/{hand_id}/activate",

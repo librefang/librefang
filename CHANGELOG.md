@@ -7,6 +7,10 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ## [Unreleased]
 
+### Added
+
+- Edit `HAND.toml` online from the Hands panel: the read-only manifest viewer now has an Edit / Save / Cancel affordance backed by a new authenticated `PUT /api/hands/{id}/manifest` that validates the submitted TOML by parsing it into a `HandDefinition` (rejecting invalid TOML or a changed `id` with a 400 and leaving the on-disk file untouched), runs the same supply-chain audit as the install path, persists the file to whichever on-disk copy the hand loads from, and hot-reloads the in-memory definitions — an already-active hand instance keeps its old manifest until it is deactivated and reactivated, and edits to a built-in (registry) hand are overwritten on the next registry sync (#6478) (@houko)
+
 ### Changed
 
 - Thread `CanvasConfig.max_html_bytes` / `allowed_tags` into the canvas tool: the `CANVAS_MAX_BYTES` task-local was never `.scope()`d and `allowed_tags` was read nowhere, so both operator knobs were dead config and the tool always used the hardcoded 512 KiB cap + built-in tag allowlist; the agent loop now scopes both task-locals from the resolved config (kernel-populated `LoopOptions.canvas_config`), and an empty `allowed_tags` still falls back to the built-in list (#6446) (@houko)
