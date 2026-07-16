@@ -1721,12 +1721,8 @@ function CompactionSummaryBanner({ summary, isCompacting }: { summary: string | 
 }
 
 const CONTEXT_LIMIT_CODES = new Set(["context_length_exceeded", "context_overflow"]);
-const NON_CONTEXT_LIMIT_CODES = new Set([
-  "budget_exceeded",
-  "quota_exceeded",
-  "rate_limited",
-  "billing_error",
-]);
+const SEMANTIC_ERROR_CODE = /^[a-z][a-z0-9_-]*$/;
+const GENERIC_HTTP_ERROR_CODE = /^http_\d+$/;
 
 // Backward compatibility for daemons that predate structured WS error codes.
 const CONTEXT_LIMIT_PATTERNS = [
@@ -1740,12 +1736,16 @@ const CONTEXT_LIMIT_PATTERNS = [
   "max context",
   // Canonical phrase the kernel collapses provider context-overflow errors to.
   "context is full",
-  "too long",
-  "too_long",
+  "input_too_long",
+  "prompt_too_long",
+  "request_too_long",
   "string too long",
   "prompt is too long",
   "input is too long",
-  "exceeds the maximum",
+  "request is too long",
+  "request too long",
+  "exceeds the maximum allowed tokens",
+  "exceeds maximum context",
   "reduce the length",
 ];
 
@@ -1772,9 +1772,14 @@ export function isContextLimitError(
   code?: string | null,
 ): boolean {
   if (code) {
-    const normalizedCode = code.toLowerCase();
+    const normalizedCode = code.trim().toLowerCase();
     if (CONTEXT_LIMIT_CODES.has(normalizedCode)) return true;
-    if (NON_CONTEXT_LIMIT_CODES.has(normalizedCode)) return false;
+    // A daemon-supplied semantic code is authoritative: only explicit context codes may show the context banner.
+    // Generic HTTP_<status> codes and legacy flat error strings still use the text fallback for compatibility with older daemons.
+    if (
+      SEMANTIC_ERROR_CODE.test(normalizedCode) &&
+      !GENERIC_HTTP_ERROR_CODE.test(normalizedCode)
+    ) return false;
   }
   if (!text) return false;
   const lowered = text.toLowerCase();

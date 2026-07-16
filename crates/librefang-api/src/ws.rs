@@ -2068,7 +2068,7 @@ fn classify_streaming_error(err: &dyn std::fmt::Display) -> ClassifiedStreamingE
     // classifier below (RateLimit / Billing), not this branch.
     if inner.contains("Resource quota exceeded:") {
         return streaming_error(
-            "Usage budget reached for this window. This is a spending/usage cap, not a full context window \u{2014} /compact will NOT help. Wait for the limit window (hourly/daily/monthly) to reset, or raise the [budget] limits in config.toml.",
+            "Usage budget reached for this window. This is a token, cost, or tool-call cap, not a full context window \u{2014} /compact will NOT help. Wait for the relevant window to reset, or raise the matching agent resource limit in its manifest or the matching [budget] limit in config.toml.",
             "budget_exceeded",
         );
     }
@@ -2339,6 +2339,8 @@ mod tests {
             &"Resource quota exceeded: Global hourly budget exceeded: $5 / $5",
         );
         assert!(error.message.contains("Usage budget"));
+        assert!(error.message.contains("agent resource limit"));
+        assert!(error.message.contains("[budget] limit"));
         // It mentions /compact only to steer the user away from it, never as a remedy.
         assert!(error.message.contains("/compact will NOT help"));
         assert!(!error.message.contains("/new"));
