@@ -82,13 +82,9 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
             librefang_user: None,
         };
 
-        // #6445: honour a per-channel `output_format` override on the outbound
-        // path too, not only on inbound replies. The sidecar adapter projects
-        // its `[[sidecar_channels]] output_format` into `ChannelOverrides`, so
-        // an agent-initiated `channel_send` / delegation forward formats the
-        // same way a normal reply would. Falls back to the channel default when
-        // the adapter has no override (every non-sidecar adapter, and any
-        // sidecar that did not set the knob).
+        // #6445: honour a per-channel `output_format` override on the outbound path too, not only on inbound replies.
+        // The sidecar adapter projects its `[[sidecar_channels]] output_format` into `ChannelOverrides`, so an agent-initiated `channel_send` / delegation forward formats the same way a normal reply would.
+        // Falls back to the channel default when the adapter has no override (every non-sidecar adapter, and any sidecar that did not set the knob).
         let format = adapter
             .channel_overrides()
             .and_then(|ov| ov.output_format)

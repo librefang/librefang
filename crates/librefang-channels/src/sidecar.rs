@@ -1469,10 +1469,9 @@ fn overrides_from_sidecar_config(
     let coalesce_ms = config.message_coalesce_window_ms;
 
     let has_command_policy = policy != SidecarCommandPolicy::Allow;
-    // #6445: a sidecar may now carry behavioural overrides too. Any one of
-    // them being set must produce an override struct, otherwise the new knobs
-    // would be inert. When nothing at all is set we still return `None` so a
-    // plain sidecar contributes no override and the bridge keeps falling back.
+    // #6445: a sidecar may now carry behavioural overrides too.
+    // Any one of them being set must produce an override struct, otherwise the new knobs would be inert.
+    // When nothing at all is set we still return `None` so a plain sidecar contributes no override and the bridge keeps falling back.
     let has_behavioural = config.dm_policy.is_some()
         || config.group_policy.is_some()
         || config.threading.is_some()
@@ -1523,11 +1522,8 @@ fn overrides_from_sidecar_config(
     // pre-migration `[[channels.telegram]]` field operators knew (#4441).
     ov.message_debounce_ms = coalesce_ms;
 
-    // #6445: project ONLY the behavioural fields the operator explicitly set,
-    // so an unset knob stays at the `ChannelOverrides::default()` value (which
-    // is now `None` for the policies — no gating) rather than materializing a
-    // concrete default. This is the whole point of the fix: a sidecar that
-    // sets only `group_policy` must not also flip `dm_policy`.
+    // #6445: project ONLY the behavioural fields the operator explicitly set, so an unset knob stays at the `ChannelOverrides::default()` value (which is now `None` for the policies — no gating) rather than materializing a concrete default.
+    // This is the whole point of the fix: a sidecar that sets only `group_policy` must not also flip `dm_policy`.
     if let Some(p) = config.dm_policy {
         ov.dm_policy = Some(p);
     }
@@ -3240,10 +3236,7 @@ mod tests {
     #[test]
     fn overrides_projects_only_set_behavioural_fields_6445() {
         use librefang_types::config::{DmPolicy, GroupPolicy};
-        // A sidecar that sets only `group_policy` must project exactly that,
-        // leaving `dm_policy` at `None` — not the pre-#6445 materialized
-        // `Respond`/`MentionOnly` default that would have gated every other
-        // channel behaviour the operator never touched.
+        // A sidecar that sets only `group_policy` must project exactly that, leaving `dm_policy` at `None` — not the pre-#6445 materialized `Respond`/`MentionOnly` default that would have gated every other channel behaviour the operator never touched.
         let c = cfg_json(serde_json::json!({
             "name": "bot",
             "command": "python3",
@@ -3279,9 +3272,7 @@ mod tests {
 
     #[test]
     fn overrides_threading_only_yields_override_6445() {
-        // A single behavioural knob (threading) must produce an override even
-        // with the command policy at its allow default and no coalescing —
-        // otherwise the new knob would be inert.
+        // A single behavioural knob (threading) must produce an override even with the command policy at its allow default and no coalescing — otherwise the new knob would be inert.
         let c = cfg_json(serde_json::json!({
             "name": "bot",
             "command": "python3",
@@ -3296,8 +3287,7 @@ mod tests {
 
     #[test]
     fn overrides_none_when_nothing_set_even_with_new_fields_6445() {
-        // A plain sidecar with none of the behavioural knobs set still yields
-        // no override (the widened guard must not fire on all-None).
+        // A plain sidecar with none of the behavioural knobs set still yields no override (the widened guard must not fire on all-None).
         let c = cfg_json(serde_json::json!({
             "name": "telegram",
             "command": "python3",

@@ -2491,26 +2491,24 @@ pub struct SidecarChannelConfig {
     /// guessing a recipient. Set it to the owner / home chat to opt in.
     #[serde(default)]
     pub default_conversation: Option<String>,
-    /// Per-channel DM policy for this sidecar instance (#6445). `None` (the
-    /// default) inherits the bridge default — DMs flow — and, crucially, is
-    /// distinct from an explicit value so setting only one behavioural knob
-    /// here does not materialize a policy the operator never wrote. Projected
-    /// onto `ChannelOverrides.dm_policy` only when `Some`.
+    /// Per-channel DM policy for this sidecar instance (#6445).
+    /// `None` (the default) inherits the bridge default — DMs flow — and, crucially, is distinct from an explicit value so setting only one behavioural knob here does not materialize a policy the operator never wrote.
+    /// Projected onto `ChannelOverrides.dm_policy` only when `Some`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dm_policy: Option<DmPolicy>,
-    /// Per-channel group policy for this sidecar instance (#6445). `None` (the
-    /// default) inherits the bridge default — every group message is processed.
+    /// Per-channel group policy for this sidecar instance (#6445).
+    /// `None` (the default) inherits the bridge default — every group message is processed.
     /// Projected onto `ChannelOverrides.group_policy` only when `Some`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_policy: Option<GroupPolicy>,
-    /// Enable thread replies for this sidecar instance (#6445). `None` (the
-    /// default) inherits the bridge default (off). Projected onto
-    /// `ChannelOverrides.threading` only when `Some`.
+    /// Enable thread replies for this sidecar instance (#6445).
+    /// `None` (the default) inherits the bridge default (off).
+    /// Projected onto `ChannelOverrides.threading` only when `Some`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threading: Option<bool>,
-    /// Output-format override for this sidecar instance (#6445). `None` (the
-    /// default) inherits the channel default. Projected onto
-    /// `ChannelOverrides.output_format` only when `Some`.
+    /// Output-format override for this sidecar instance (#6445).
+    /// `None` (the default) inherits the channel default.
+    /// Projected onto `ChannelOverrides.output_format` only when `Some`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_format: Option<OutputFormat>,
 }
