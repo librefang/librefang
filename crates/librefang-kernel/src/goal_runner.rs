@@ -604,12 +604,72 @@ async fn run_loop<F, Fut>(
             Ok(reply) => {
                 rate_limit_streak = 0;
                 let parsed = parse_tick(&reply);
-                let new_status = if parsed.done {
+
+                // Verifier loop: if a verifier agent is configured, run it
+                // against this iteration's output before accepting progress.
+                let verify_id = {
+                    let s = state.lock().await;
+                    s.verify_agent_id
+                };
+                let max_retries = {
+                    let s = state.lock().await;
+                    s.verify_max_retries.max(1)
+                };
+                let mut passes_verification = true;
+                if let Some(vid) = verify_id {
+                    let mut retries = 0;
+                    loop {
+                        let verdict_prompt = format!(
+                            "Verify this output against the goal. Reply with exactly one line:\n\
+                             VERDICT: PASS|FAIL|NEEDS_REWORK\n\
+                             REASON: <one sentence>\n\n\
+                             Goal: {title}\n\
+                             Output:\n{reply}",
+                            title = goal.title,
+                        );
+                        match send_message(vid, verdict_prompt).await {
+                            Ok(verdict) => {
+                                let upper = verdict.to_ascii_uppercase();
+                                if upper.contains("VERDICT: PASS") || upper.contains("VERDICT:PASS")
+                                {
+                                    info!(goal_id = %goal_id, iteration, retries,
+                                          "Verifier: PASS");
+                                    break; // passes
+                                }
+                                retries += 1;
+                                if retries >= max_retries {
+                                    warn!(goal_id = %goal_id, iteration, retries,
+                                          verdict = %verdict.trim(),
+                                          "Verifier: max retries exceeded");
+                                    passes_verification = false;
+                                    break;
+                                }
+                                info!(goal_id = %goal_id, iteration, retries,
+                                      verdict = %verdict.trim(),
+                                      "Verifier: retrying");
+                                // Loop back — will call send_message(agent_id) again
+                            }
+                            Err(e) => {
+                                warn!(goal_id = %goal_id, verifier = %vid,
+                                      error = %e, "Verifier call failed");
+                                retries += 1;
+                                if retries >= max_retries {
+                                    passes_verification = false;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let new_status = if parsed.done && passes_verification {
                     Some(GoalStatus::Completed)
+                } else if !passes_verification {
+                    Some(GoalStatus::InProgress) // keep going, verifier blocked this iteration
                 } else {
                     Some(GoalStatus::InProgress)
                 };
-                let new_progress = if parsed.done {
+                let new_progress = if parsed.done && passes_verification {
                     Some(100)
                 } else {
                     parsed.progress
@@ -1101,6 +1161,8 @@ mod tests {
                 max_iterations: 10,
                 last_progress: 0,
                 last_error: None,
+                verify_agent_id: None,
+                verify_max_retries: 0,
                 started_at: Utc::now(),
                 updated_at: Utc::now(),
             }))
