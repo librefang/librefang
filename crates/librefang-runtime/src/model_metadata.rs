@@ -283,7 +283,7 @@ fn synthesize_entry(
         max_output_tokens,
         input_cost_per_m: 0.0,
         output_cost_per_m: 0.0,
-        pricing_known: true,
+        pricing_known: false,
         image_input_cost_per_m: None,
         image_output_cost_per_m: None,
         supports_tools: false,
