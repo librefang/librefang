@@ -221,6 +221,16 @@ pub async fn start_goal_run(
         .and_then(|v| v.as_u64())
         .map(|n| n as u32);
 
+    let verify_agent_id = goal["verify_agent_id"]
+        .as_str()
+        .and_then(|s| s.parse::<uuid::Uuid>().ok())
+        .map(AgentId);
+    let verify_max_retries = body
+        .as_ref()
+        .and_then(|b| b.0.get("verify_max_retries"))
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32);
+
     // Flip the goal to in_progress so the dashboard reflects the active run.
     //
     // The `Result` is deliberately not fatal — unlike the read above, this write is cosmetic.
@@ -255,9 +265,13 @@ pub async fn start_goal_run(
         );
     }
 
-    state
-        .kernel
-        .start_goal_run(goal_id, agent_id, max_iterations);
+    state.kernel.start_goal_run(
+        goal_id,
+        agent_id,
+        max_iterations,
+        verify_agent_id,
+        verify_max_retries,
+    );
     let run = state.kernel.goal_run_state(goal_id);
     (
         StatusCode::OK,
