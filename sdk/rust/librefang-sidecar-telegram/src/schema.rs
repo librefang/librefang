@@ -20,6 +20,40 @@ pub fn telegram_schema() -> Schema {
                 FieldType::Bool,
             )
             .advanced(),
+            Field::new("TELEGRAM_STREAMING", "Streaming", FieldType::Bool).advanced(),
         ],
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Guards the docs <-> schema drift the `--describe` form depends on: the
+    // dashboard configure form renders exactly the fields this function emits,
+    // so a var documented as a `--describe` field (see
+    // docs/src/app/architecture/rust-telegram-sidecar/page.mdx) must appear
+    // here or the toggle silently never shows. Lives inline because this is a
+    // binary-only crate and `telegram_schema` is not exported to a lib target.
+    #[test]
+    fn schema_declares_expected_fields() {
+        let schema = telegram_schema();
+        assert_eq!(schema.name, "telegram");
+
+        let bot_token = schema
+            .fields
+            .iter()
+            .find(|f| f.key == "TELEGRAM_BOT_TOKEN")
+            .expect("schema must declare TELEGRAM_BOT_TOKEN");
+        assert_eq!(bot_token.field_type, FieldType::Secret);
+        assert!(bot_token.required);
+
+        let streaming = schema
+            .fields
+            .iter()
+            .find(|f| f.key == "TELEGRAM_STREAMING")
+            .expect("schema must declare TELEGRAM_STREAMING");
+        assert_eq!(streaming.field_type, FieldType::Bool);
+        assert!(streaming.advanced);
+    }
 }
