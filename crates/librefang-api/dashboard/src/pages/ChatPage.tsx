@@ -8,7 +8,7 @@ import { useNavigate, useSearch } from "@tanstack/react-router";
 import { buildAuthenticatedWebSocket } from "../api";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ApprovalItem, SessionListItem, ModelItem, AgentTool, AgentItem } from "../api";
-import { clearAgentHistory } from "../lib/http/client";
+import { ApiError, clearAgentHistory } from "../lib/http/client";
 import { useFullConfig } from "../lib/queries/config";
 import { useMediaProviders } from "../lib/queries/media";
 import { useModels } from "../lib/queries/models";
@@ -84,6 +84,7 @@ interface ChatMessage {
   timestamp: Date;
   isStreaming?: boolean;
   error?: string;
+  errorCode?: string;
   tokens?: { input?: number; output?: number };
   cost_usd?: number;
   memories_saved?: string[];
@@ -506,7 +507,7 @@ function useChatMessages(
       const idx = prev.findIndex(m => m.id === msgId);
       if (idx === -1) return prev;
       const next = prev.slice();
-      next[idx] = { ...next[idx], content: buffered, error: undefined };
+      next[idx] = { ...next[idx], content: buffered, error: undefined, errorCode: undefined };
       return next;
     });
   }, [updateAgentMessages]);
@@ -900,6 +901,8 @@ function useChatMessages(
                 memories_used: response.memories_used,
                 thinking: response.thinking ?? m.thinking,
                 thinkingCollapsed: m.thinkingCollapsed ?? true,
+                error: undefined,
+                errorCode: undefined,
               }
             : m
         );
@@ -935,8 +938,9 @@ function useChatMessages(
         }
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : "Unknown error";
+        const errorCode = err instanceof ApiError ? err.code : undefined;
         updateAgentMessages(sendAgentId, prev => prev.map(m =>
-          m.id === botMsg.id ? { ...m, isStreaming: false, error: errorMsg } : m
+          m.id === botMsg.id ? { ...m, isStreaming: false, error: errorMsg, errorCode } : m
         ));
       } finally {
         finishTurnIfCurrent(sendAgentId, botMsg.id);
@@ -964,6 +968,7 @@ function useChatMessages(
         activeTurnsRef.current[sendAgentId] = turn;
 
         const resetFallbackTimer = () => {
+          if (turn.responded) return;
           if (turn.fallbackTimer) clearTimeout(turn.fallbackTimer);
           turn.fallbackTimer = setTimeout(() => {
             if (!turn.responded) {
@@ -1115,25 +1120,16 @@ function useChatMessages(
               if (tRaf !== undefined) cancelAnimationFrame(tRaf);
               flushThinkingContent(sendAgentId, botMsg.id);
               const error = data.content || "WebSocket error";
+              const errorCode = typeof data.code === "string" ? data.code : undefined;
               updateAgentMessages(sendAgentId, prev => prev.map(m =>
-                m.id === botMsg.id ? { ...m, isStreaming: false, error } : m
+                m.id === botMsg.id ? { ...m, isStreaming: false, error, errorCode } : m
               ));
-              // Release the loading flag so the send button re-enables and the
-              // "streaming" badge drops — the user just saw an error and
-              // should be able to retry immediately (#2745). Keep the WS
-              // listener + recovery fallback timer alive in case the agent
-              // does send a late `response` event; those handlers operate on
-              // the same botMsg.id and will overwrite the error state if
-              // recovery actually happens.
+              // Stop automatic transport fallback immediately so a socket drop cannot replay the failed turn over HTTP.
+              // Keep the listener briefly so a defensive late response for this `message_id` can still replace the error without resending the request.
               finishTurnIfCurrent(sendAgentId, botMsg.id);
-              // Don't cleanup the listener immediately — the agent may recover
-              // and send a final response. Shorten the inactivity window to
-              // 30s so the WS doesn't stay half-open forever if the failure
-              // is terminal.
+              turn.responded = true;
               if (turn.fallbackTimer) clearTimeout(turn.fallbackTimer);
-              turn.fallbackTimer = setTimeout(() => {
-                if (!turn.responded) { cleanup(); sendViaHttp(); }
-              }, 30_000);
+              turn.fallbackTimer = setTimeout(cleanup, 30_000);
             } else if (data.type === "response") {
               const rafHandle = rafHandleRef.current.get(botMsg.id);
               if (rafHandle !== undefined) cancelAnimationFrame(rafHandle);
@@ -1159,6 +1155,8 @@ function useChatMessages(
                       memories_used: data.memories_used,
                       thinking: typeof data.thinking === "string" ? data.thinking : m.thinking,
                       thinkingCollapsed: m.thinkingCollapsed ?? true,
+                      error: undefined,
+                      errorCode: undefined,
                     }
                   : m
               );
@@ -1261,10 +1259,8 @@ function useChatMessages(
     ));
     const pendingBotId = latestTurnRef.current[targetId];
     if (pendingBotId) finishTurnIfCurrent(targetId, pendingBotId);
-    // Tear down the in-flight WS turn: mark responded, clear the 180s/30s
-    // watchdog, and detach the message listener. Without this the watchdog
-    // would fire after the backend aborts (WS goes silent) and re-send the
-    // stopped message over HTTP (#2787 review).
+    // Tear down the in-flight WS turn: mark responded, clear the inactivity watchdog, and detach the message listener.
+    // Without this the watchdog would fire after the backend aborts (WS goes silent) and re-send the stopped message over HTTP (#2787 review).
     const turn = activeTurnsRef.current[targetId];
     if (turn) {
       turn.responded = true;
@@ -1726,7 +1722,11 @@ function CompactionSummaryBanner({ summary, isCompacting }: { summary: string | 
   );
 }
 
-// No structured context-exhaustion signal exists on the chat surface; match the daemon / provider error string instead.
+const CONTEXT_LIMIT_CODES = new Set(["context_length_exceeded"]);
+const SEMANTIC_ERROR_CODE = /^[a-z][a-z0-9_-]*$/;
+const GENERIC_HTTP_ERROR_CODE = /^http_\d+$/;
+
+// Backward compatibility for daemons that predate structured WS error codes.
 const CONTEXT_LIMIT_PATTERNS = [
   "context window",
   "context_window",
@@ -1738,30 +1738,54 @@ const CONTEXT_LIMIT_PATTERNS = [
   "max context",
   // Canonical phrase the kernel collapses provider context-overflow errors to.
   "context is full",
-  "too long",
-  "too_long",
+  "input_too_long",
+  "prompt_too_long",
+  "request_too_long",
   "string too long",
   "prompt is too long",
   "input is too long",
-  "maximum tokens",
-  "max tokens",
-  "max_tokens",
-  "token limit",
-  "exceeds the maximum",
+  "request is too long",
+  "request too long",
+  "exceeds the maximum allowed tokens",
+  "exceeds maximum context",
   "reduce the length",
-  "quota",
-  "rate limit",
-  "rate_limit",
-  "429",
 ];
 
-// A spending / usage-budget cap that a new session can't clear; its wording contains "context window", so suppress the banner for it rather than give wrong advice.
-const USAGE_BUDGET_PATTERNS = ["usage budget", "spending/usage cap", "/compact will not help"];
+// Explicit non-context failures from older WS/HTTP surfaces.
+// These must win over positive substring matches because a budget message may explain that it is "not a full context window".
+const NON_CONTEXT_LIMIT_PATTERNS = [
+  "usage budget",
+  "spending/usage cap",
+  "/compact will not help",
+  "resource quota exceeded",
+  "budget exceeded",
+  "token limit would be exceeded",
+  "token burst limit",
+  "rate limit",
+  "rate_limit",
+  "rate limited",
+  "too many requests",
+  "http 429",
+  "exceeded your quota",
+];
 
-export function isContextLimitError(text: string | undefined | null): boolean {
+export function isContextLimitError(
+  text: string | undefined | null,
+  code?: string | null,
+): boolean {
+  if (code) {
+    const normalizedCode = code.trim().toLowerCase();
+    if (CONTEXT_LIMIT_CODES.has(normalizedCode)) return true;
+    // A daemon-supplied semantic code is authoritative: only explicit context codes may show the context banner.
+    // Generic HTTP_<status> codes and legacy flat error strings still use the text fallback for compatibility with older daemons.
+    if (
+      SEMANTIC_ERROR_CODE.test(normalizedCode) &&
+      !GENERIC_HTTP_ERROR_CODE.test(normalizedCode)
+    ) return false;
+  }
   if (!text) return false;
   const lowered = text.toLowerCase();
-  if (USAGE_BUDGET_PATTERNS.some((p) => lowered.includes(p))) return false;
+  if (NON_CONTEXT_LIMIT_PATTERNS.some((p) => lowered.includes(p))) return false;
   return CONTEXT_LIMIT_PATTERNS.some((p) => lowered.includes(p));
 }
 
@@ -3102,7 +3126,7 @@ export function ChatPage() {
   const limitReached = useMemo(() => {
     if (isStreaming) return false;
     const last = messages[messages.length - 1];
-    return !!last && last.role === "assistant" && isContextLimitError(last.error);
+    return !!last && last.role === "assistant" && isContextLimitError(last.error, last.errorCode);
   }, [messages, isStreaming]);
 
   // Bug #3849: Track message count changes to announce new messages to screen

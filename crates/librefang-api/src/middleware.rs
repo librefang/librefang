@@ -1728,6 +1728,7 @@ pub async fn auth(
 }
 
 const LOGIN_PAGE_HTML: &str = include_str!("login_page.html");
+const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'sha256-TDA4xCzDRyoMM+fopfpKCyivlfu44tSPBzidGFvUgNM='; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' ws://localhost:* ws://127.0.0.1:* wss://localhost:* wss://127.0.0.1:*; font-src 'self' https://fonts.gstatic.com; media-src 'self' blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'";
 
 /// Security headers middleware — applied to ALL API responses.
 pub async fn security_headers(request: Request<Body>, next: Next) -> Response<Body> {
@@ -1736,17 +1737,13 @@ pub async fn security_headers(request: Request<Body>, next: Next) -> Response<Bo
     headers.insert("x-content-type-options", "nosniff".parse().unwrap());
     headers.insert("x-frame-options", "DENY".parse().unwrap());
     headers.insert("x-xss-protection", "1; mode=block".parse().unwrap());
-    // All JS/CSS is bundled inline — only external resource is Google Fonts.
-    // SECURITY: 'unsafe-eval' removed from script-src (#3732). 'unsafe-inline'
-    // removed from script-src as well; the bundled SPA does not need it.
-    // 'unsafe-inline' is kept in style-src only because the React/Vite bundle
-    // injects CSS-in-JS style tags at runtime and removing it would break the
-    // dashboard UI until a nonce-based approach is wired through the build.
+    // Dashboard JavaScript is served from self.
+    // The exact hash permits only the static inline submit handler in login_page.html.
+    // SECURITY: 'unsafe-eval' and script-src 'unsafe-inline' remain forbidden (#3732).
+    // 'unsafe-inline' remains in style-src because the React/Vite bundle injects CSS-in-JS style tags at runtime.
     headers.insert(
         "content-security-policy",
-        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' ws://localhost:* ws://127.0.0.1:* wss://localhost:* wss://127.0.0.1:*; font-src 'self' https://fonts.gstatic.com; media-src 'self' blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'"
-            .parse()
-            .unwrap(),
+        CONTENT_SECURITY_POLICY.parse().unwrap(),
     );
     headers.insert(
         "referrer-policy",
@@ -3672,6 +3669,73 @@ mod tests {
         assert!(
             !html.contains("target = '/dashboard/';"),
             "login page must not redirect to /dashboard/ — that path 404s (#4860)"
+        );
+    }
+
+    /// The `/dashboard` login page depends on its inline submit handler.
+    /// The CSP must allow its exact hash without permitting arbitrary inline JavaScript.
+    #[tokio::test]
+    async fn dashboard_login_page_script_is_allowed_by_csp_hash() {
+        use base64::Engine as _;
+        use sha2::{Digest, Sha256};
+
+        let auth_state = AuthState {
+            api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            dashboard_auth_enabled: true,
+            user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            require_auth_for_reads: true,
+            allow_no_auth: false,
+            audit_log: None,
+        };
+        let app = Router::new()
+            .route("/dashboard", get(|| async { "dashboard shell" }))
+            .layer(axum::middleware::from_fn_with_state(auth_state, auth))
+            .layer(axum::middleware::from_fn(security_headers));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/dashboard")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let csp = response
+            .headers()
+            .get("content-security-policy")
+            .and_then(|value| value.to_str().ok())
+            .expect("login response must carry a CSP header")
+            .to_string();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html = std::str::from_utf8(&body).unwrap();
+        let script = html
+            .split_once("<script>")
+            .and_then(|(_, rest)| rest.split_once("</script>"))
+            .map(|(script, _)| script)
+            .expect("login page must contain its submit handler");
+        let digest = Sha256::digest(script.as_bytes());
+        let encoded = base64::engine::general_purpose::STANDARD.encode(digest);
+        let hash_source = format!("'sha256-{encoded}'");
+
+        assert!(
+            csp.split(';')
+                .find(|directive| directive.trim_start().starts_with("script-src "))
+                .is_some_and(|directive| directive
+                    .split_ascii_whitespace()
+                    .any(|source| source == hash_source.as_str())),
+            "script-src must allow the exact inline login handler hash"
+        );
+        assert!(
+            !csp.split(';')
+                .find(|directive| directive.trim_start().starts_with("script-src "))
+                .is_some_and(|directive| directive.contains("'unsafe-inline'")),
+            "script-src must not allow arbitrary inline JavaScript"
         );
     }
 }
