@@ -188,6 +188,74 @@ async fn complete_delegation_task_injects_signal_with_delegation_kind() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn complete_process_task_injects_signal_with_process_kind() {
+    // #6471: a background process registered via `TaskKind::Process { pid }`
+    // completes the same way as workflow / delegation kinds — the terminal
+    // status (with the exit code + output tail payload the process tool
+    // builds) is injected into the originating session.
+    let kernel = LibreFangKernel::boot_with_config(test_config("process-inject")).unwrap();
+    let agent_id = AgentId(Uuid::new_v4());
+    let session_id = SessionId(Uuid::new_v4());
+    let mut rx = attach_injection_receiver(&kernel, agent_id, session_id);
+
+    let handle =
+        kernel.register_async_task(agent_id, session_id, TaskKind::Process { pid: 4242 }, None);
+    assert_eq!(kernel.pending_async_task_count(), 1);
+
+    let payload = json!({ "pid": 4242, "exit_code": 0, "output": "build done\n" });
+    let delivered = kernel
+        .complete_async_task(handle.id, TaskStatus::Completed(payload.clone()))
+        .await
+        .expect("complete_async_task ok");
+    assert!(delivered, "live receiver should accept the signal");
+
+    // Delete-on-delivery holds for the Process kind too.
+    assert_eq!(kernel.pending_async_task_count(), 0);
+    assert!(kernel.lookup_async_task(handle.id).is_none());
+
+    let signal = rx
+        .try_recv()
+        .expect("TaskCompleted signal should be queued");
+    match signal {
+        AgentLoopSignal::TaskCompleted { event } => {
+            assert_eq!(event.handle.id, handle.id);
+            match event.handle.kind {
+                TaskKind::Process { pid } => assert_eq!(pid, 4242),
+                other => panic!("expected Process kind in injected event, got {other:?}"),
+            }
+            match event.status {
+                TaskStatus::Completed(value) => assert_eq!(value, payload),
+                other => panic!("expected Completed status, got {other:?}"),
+            }
+        }
+        other => panic!("expected AgentLoopSignal::TaskCompleted, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn register_dedupes_process_kind_by_pid() {
+    // Two registrations for the same live OS pid share one handle so the
+    // completion event can never orphan a phantom second entry (mirrors the
+    // workflow run_id / delegation prompt_hash dedupe).
+    let kernel = LibreFangKernel::boot_with_config(test_config("process-dedupe")).unwrap();
+    let agent_id = AgentId(Uuid::new_v4());
+    let session_id = SessionId(Uuid::new_v4());
+
+    let first =
+        kernel.register_async_task(agent_id, session_id, TaskKind::Process { pid: 99 }, None);
+    let second =
+        kernel.register_async_task(agent_id, session_id, TaskKind::Process { pid: 99 }, None);
+    assert_eq!(first.id, second.id, "same pid must share the handle");
+    assert_eq!(kernel.pending_async_task_count(), 1);
+
+    // A different pid is a distinct process → distinct handle.
+    let other =
+        kernel.register_async_task(agent_id, session_id, TaskKind::Process { pid: 100 }, None);
+    assert_ne!(first.id, other.id);
+    assert_eq!(kernel.pending_async_task_count(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn complete_with_no_attached_receiver_still_removes_entry() {
     // Boot WITHOUT calling `set_self_handle` — emulates a kernel
     // mid-boot where the Arc has not been wrapped yet. The wake-idle

@@ -4,10 +4,63 @@
 //! as part of #3576 (ToolError migration).
 
 use super::error::{ToolError, ToolResult};
+use crate::kernel_handle::{AgentControl, KernelHandle};
+use crate::process_manager::{ProcessCompletionSink, ProcessOutcome};
+use librefang_types::agent::{AgentId, SessionId};
+use librefang_types::task::{TaskId, TaskKind, TaskStatus};
+use std::sync::Arc;
 
 const MAX_POLL_OUTPUT_BYTES: usize = 256 * 1024;
 
+/// Completion sink that routes a finished background process's outcome
+/// through the kernel's async-task tracker (#4983 / #6471). Holds only the
+/// abstract [`KernelHandle`] so the runtime keeps no direct kernel
+/// dependency.
+struct KernelHandleProcessSink {
+    kernel: Arc<dyn KernelHandle>,
+    task_id: TaskId,
+    pid: u32,
+}
+
+#[async_trait::async_trait]
+impl ProcessCompletionSink for KernelHandleProcessSink {
+    async fn on_process_finished(&self, outcome: ProcessOutcome) {
+        let status = process_outcome_to_status(self.pid, &outcome);
+        if let Err(e) = self.kernel.complete_async_task(self.task_id, status).await {
+            tracing::warn!(
+                task_id = %self.task_id,
+                pid = self.pid,
+                error = %e,
+                "process_start: failed to inject process completion event"
+            );
+        }
+    }
+}
+
+/// Build the terminal [`TaskStatus`] for a finished background process.
+/// Pure (no kernel) so the completion payload shape is unit-testable.
+fn process_outcome_to_status(pid: u32, outcome: &ProcessOutcome) -> TaskStatus {
+    if outcome.cancelled {
+        TaskStatus::Cancelled
+    } else {
+        TaskStatus::Completed(serde_json::json!({
+            "pid": pid,
+            "exit_code": outcome.exit_code,
+            "output": outcome.output_tail,
+        }))
+    }
+}
+
 /// Start a long-running process (REPL, server, watcher).
+///
+/// When the tool call sets `notify_on_completion: true` and full caller
+/// context is available (kernel handle + parseable caller agent id +
+/// session id), the process is registered on the async-task tracker as a
+/// [`TaskKind::Process`]; its completion (natural exit or kill) injects a
+/// `TaskCompletionEvent` back into the originating session (#6471). Absent
+/// the flag or the context, the process is started untracked exactly as
+/// before.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn tool_process_start(
     input: &serde_json::Value,
     pm: Option<&crate::process_manager::ProcessManager>,
@@ -17,6 +70,9 @@ pub(super) async fn tool_process_start(
         &std::sync::Arc<tokio::sync::RwLock<crate::dangerous_command::DangerousCommandChecker>>,
     >,
     allowed_env_vars: Option<&[String]>,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    session_id: Option<SessionId>,
+    chat_id: Option<&str>,
 ) -> ToolResult {
     let pm = pm.ok_or(ToolError::Unavailable("Process manager"))?;
     let agent_id = caller_agent_id.ok_or(ToolError::MissingParameter("caller_agent_id"))?;
@@ -109,8 +165,54 @@ pub(super) async fn tool_process_start(
         .unwrap_or_default();
     let untrusted_env: Vec<String> = allowed_env_vars.map(|v| v.to_vec()).unwrap_or_default();
 
+    // Opt-in completion tracking (#6471). Only arm it when the flag is set
+    // AND every piece of context the tracker keys delivery on is present:
+    // the kernel handle, a parseable caller agent id, and the originating
+    // session. Missing any → start untracked, mirroring the workflow /
+    // delegation "no session, no tracking" fallback.
+    let notify = input["notify_on_completion"].as_bool().unwrap_or(false);
+    let tracker: Option<(Arc<dyn KernelHandle>, AgentId, SessionId, Option<String>)> = if notify {
+        match (
+            kernel,
+            caller_agent_id.and_then(|a| a.parse::<AgentId>().ok()),
+            session_id,
+        ) {
+            (Some(k), Some(aid), Some(sid)) => {
+                Some((k.clone(), aid, sid, chat_id.map(str::to_string)))
+            }
+            _ => {
+                tracing::debug!(
+                    "process_start: notify_on_completion set but caller context incomplete; starting untracked"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let (proc_id, refused_env) = pm
-        .start(agent_id, command, &args, &operator_env, &untrusted_env)
+        .start_tracked(
+            agent_id,
+            command,
+            &args,
+            &operator_env,
+            &untrusted_env,
+            move |pid| {
+                let (kernel, aid, sid, chat) = tracker?;
+                // Registration is synchronous and happens before the reaper
+                // is spawned, so there is no race between spawn and
+                // completion. `register_async_task` returns `None` for handles
+                // without a tracker (mocks) → no sink.
+                let handle =
+                    kernel.register_async_task(aid, sid, TaskKind::Process { pid }, chat)?;
+                Some(Arc::new(KernelHandleProcessSink {
+                    kernel,
+                    task_id: handle.id,
+                    pid,
+                }) as Arc<dyn ProcessCompletionSink>)
+            },
+        )
         .await
         .map_err(ToolError::upstream_msg)?;
     let mut resp = serde_json::json!({
@@ -272,7 +374,7 @@ mod tests {
     #[tokio::test]
     async fn process_tools_without_manager_return_unavailable() {
         assert!(matches!(
-            tool_process_start(&json!({}), None, None, None, None, None).await,
+            tool_process_start(&json!({}), None, None, None, None, None, None, None, None).await,
             Err(ToolError::Unavailable("Process manager"))
         ));
         assert!(matches!(
@@ -319,6 +421,9 @@ mod tests {
             Some(&policy),
             None,
             None,
+            None,
+            None,
+            None,
         )
         .await;
         assert!(matches!(res, Err(ToolError::PermissionDenied(_))));
@@ -348,6 +453,9 @@ mod tests {
             Some(&policy),
             None,
             None,
+            None,
+            None,
+            None,
         )
         .await;
         assert!(matches!(res, Err(ToolError::PermissionDenied(_))));
@@ -371,6 +479,9 @@ mod tests {
             Some(&policy),
             None,
             None,
+            None,
+            None,
+            None,
         )
         .await;
         assert!(matches!(res, Err(ToolError::PermissionDenied(_))));
@@ -391,6 +502,9 @@ mod tests {
             Some(&pm),
             Some("agent1"),
             Some(&policy),
+            None,
+            None,
+            None,
             None,
             None,
         )
@@ -452,5 +566,61 @@ mod tests {
         let result = join_with_cap(&lines, 102);
         assert!(result.truncated);
         assert!(result.text.is_char_boundary(result.text.len()));
+    }
+
+    // ── process completion payload (#6471) ──────────────────────────────
+
+    #[test]
+    fn process_outcome_completed_payload_shape() {
+        let status = process_outcome_to_status(
+            4242,
+            &ProcessOutcome {
+                exit_code: Some(0),
+                cancelled: false,
+                output_tail: "build done\n".to_string(),
+            },
+        );
+        match status {
+            TaskStatus::Completed(v) => {
+                assert_eq!(v["pid"], serde_json::json!(4242));
+                assert_eq!(v["exit_code"], serde_json::json!(0));
+                assert_eq!(v["output"], serde_json::json!("build done\n"));
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn process_outcome_cancelled_maps_to_cancelled_status() {
+        let status = process_outcome_to_status(
+            7,
+            &ProcessOutcome {
+                exit_code: None,
+                cancelled: true,
+                output_tail: String::new(),
+            },
+        );
+        assert!(matches!(status, TaskStatus::Cancelled));
+    }
+
+    #[test]
+    fn process_outcome_null_exit_code_serializes() {
+        // A non-cancelled process whose exit code could not be collected
+        // still produces a well-formed payload with a JSON null exit_code.
+        let status = process_outcome_to_status(
+            9,
+            &ProcessOutcome {
+                exit_code: None,
+                cancelled: false,
+                output_tail: "partial".to_string(),
+            },
+        );
+        match status {
+            TaskStatus::Completed(v) => {
+                assert_eq!(v["pid"], serde_json::json!(9));
+                assert!(v["exit_code"].is_null());
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
     }
 }

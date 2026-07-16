@@ -402,6 +402,28 @@ impl kernel_handle::AgentControl for LibreFangKernel {
         kernel_handle::AgentControl::spawn_agent(self, manifest_toml, parent_id).await
     }
 
+    fn register_async_task(
+        &self,
+        agent_id: AgentId,
+        session_id: SessionId,
+        kind: librefang_types::task::TaskKind,
+        chat_id: Option<String>,
+    ) -> Option<librefang_types::task::TaskHandle> {
+        Some(LibreFangKernel::register_async_task(
+            self, agent_id, session_id, kind, chat_id,
+        ))
+    }
+
+    async fn complete_async_task(
+        &self,
+        task_id: librefang_types::task::TaskId,
+        status: librefang_types::task::TaskStatus,
+    ) -> Result<bool, kernel_handle::KernelOpError> {
+        LibreFangKernel::complete_async_task(self, task_id, status)
+            .await
+            .map_err(|e| kernel_handle::KernelOpError::Internal(format!("{e}")))
+    }
+
     fn max_agent_call_depth(&self) -> u32 {
         let cfg = self.config.load();
         cfg.max_agent_call_depth

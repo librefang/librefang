@@ -139,6 +139,43 @@ pub trait AgentControl: Send + Sync {
             .await
     }
 
+    /// Register a background operation on the kernel's async-task tracker
+    /// (#4983) and return the typed handle, or `None` for handles that do
+    /// not back a tracker (mocks / tests). The caller stashes the handle
+    /// and later calls [`complete_async_task`](Self::complete_async_task)
+    /// when the operation terminates, at which point a `TaskCompletionEvent`
+    /// is injected into `session_id`.
+    ///
+    /// This is the runtime-facing surface used by `process_start`'s opt-in
+    /// completion notification (#6471); the delegation / workflow paths call
+    /// the kernel's inherent registration directly since they already run
+    /// kernel-side. Default returns `None` — no tracker, no registration.
+    fn register_async_task(
+        &self,
+        agent_id: librefang_types::agent::AgentId,
+        session_id: librefang_types::agent::SessionId,
+        kind: librefang_types::task::TaskKind,
+        chat_id: Option<String>,
+    ) -> Option<librefang_types::task::TaskHandle> {
+        let _ = (agent_id, session_id, kind, chat_id);
+        None
+    }
+
+    /// Mark a previously [`register_async_task`](Self::register_async_task)-ed
+    /// task terminal and inject its `TaskCompletionEvent` into the
+    /// originating session. Returns `Ok(true)` when the event reached a live
+    /// receiver (mid-turn or wake-idle), `Ok(false)` when the id was unknown
+    /// / already completed. Idempotent. Default is a no-op `Ok(false)` for
+    /// handles without a tracker.
+    async fn complete_async_task(
+        &self,
+        task_id: librefang_types::task::TaskId,
+        status: librefang_types::task::TaskStatus,
+    ) -> Result<bool, KernelOpError> {
+        let _ = (task_id, status);
+        Ok(false)
+    }
+
     /// List all running agents.
     fn list_agents(&self) -> Vec<AgentInfo>;
 
