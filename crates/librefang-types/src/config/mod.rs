@@ -388,10 +388,7 @@ admin_role = "admin"
     fn test_channel_overrides_defaults() {
         let ov = ChannelOverrides::default();
         // #6445: an unset dm/group policy is `None`, NOT the enum default.
-        // `None` gates nothing (DMs flow, all group messages processed),
-        // whereas `Some(GroupPolicy::MentionOnly)` — the old default — silently
-        // dropped non-mention group traffic whenever any single override field
-        // was written.
+        // `None` gates nothing (DMs flow, all group messages processed), whereas `Some(GroupPolicy::MentionOnly)` — the old default — silently dropped non-mention group traffic whenever any single override field was written.
         assert_eq!(ov.dm_policy, None);
         assert_eq!(ov.group_policy, None);
         assert!(ov.group_trigger_patterns.is_empty());
@@ -421,10 +418,8 @@ admin_role = "admin"
 
     #[test]
     fn absent_group_and_dm_policy_deserialize_to_none_6445() {
-        // #6445: writing an unrelated field must NOT materialize a policy the
-        // operator never set. A `[channel_overrides]` table that mentions only
-        // `threading` leaves both policies `None` (no gating), instead of the
-        // pre-fix behaviour where `group_policy` silently became `MentionOnly`.
+        // #6445: writing an unrelated field must NOT materialize a policy the operator never set.
+        // A `[channel_overrides]` table that mentions only `threading` leaves both policies `None` (no gating), instead of the pre-fix behaviour where `group_policy` silently became `MentionOnly`.
         let partial: ChannelOverrides = toml::from_str("threading = true").unwrap();
         assert!(partial.threading);
         assert_eq!(partial.group_policy, None);

@@ -122,19 +122,14 @@ pub struct ChannelOverrides {
     /// System prompt override.
     #[serde(default)]
     pub system_prompt: Option<String>,
-    /// DM policy. `None` means no DM gating is configured — DMs flow, matching
-    /// the historical behaviour when the whole `ChannelOverrides` was absent.
-    /// This must stay distinct from `Some(DmPolicy::Respond)` so that setting an
-    /// unrelated field (e.g. `threading`) does not silently materialize a DM
-    /// policy the operator never wrote (#6445).
+    /// DM policy.
+    /// `None` means no DM gating is configured — DMs flow, matching the historical behaviour when the whole `ChannelOverrides` was absent.
+    /// This must stay distinct from `Some(DmPolicy::Respond)` so that setting an unrelated field (e.g. `threading`) does not silently materialize a DM policy the operator never wrote (#6445).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dm_policy: Option<DmPolicy>,
-    /// Group message policy. `None` means no group gating is configured — every
-    /// group message is processed, matching the historical behaviour when the
-    /// whole `ChannelOverrides` was absent. This must stay distinct from
-    /// `Some(GroupPolicy::MentionOnly)` (the enum default): before #6445,
-    /// writing any single override field silently flipped an unset group policy
-    /// to `MentionOnly` and dropped all non-mention group traffic.
+    /// Group message policy.
+    /// `None` means no group gating is configured — every group message is processed, matching the historical behaviour when the whole `ChannelOverrides` was absent.
+    /// This must stay distinct from `Some(GroupPolicy::MentionOnly)` (the enum default): before #6445, writing any single override field silently flipped an unset group policy to `MentionOnly` and dropped all non-mention group traffic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_policy: Option<GroupPolicy>,
     /// Regex patterns that can trigger a reply in group chats when

@@ -2577,9 +2577,7 @@ fn should_process_group_message(
     message: &ChannelMessage,
 ) -> bool {
     match overrides.group_policy {
-        // #6445: `None` (no group policy configured) processes every group
-        // message — byte-identical to the historical whole-struct-absent
-        // behaviour — and collapses into the same arm as an explicit `All`.
+        // #6445: `None` (no group policy configured) processes every group message — byte-identical to the historical whole-struct-absent behaviour — and collapses into the same arm as an explicit `All`.
         None | Some(GroupPolicy::All) => true,
         Some(GroupPolicy::Ignore) => {
             debug!("Ignoring group message on {ct_str} (group_policy=ignore)");
@@ -3887,9 +3885,7 @@ async fn dispatch_message(
                 Some(DmPolicy::AllowedOnly) => {
                     // Rely on RBAC authorize_channel_user below
                 }
-                // `None` (no DM policy configured) or an explicit `Respond`
-                // both process the DM — matching the historical
-                // whole-struct-absent behaviour (#6445).
+                // `None` (no DM policy configured) or an explicit `Respond` both process the DM — matching the historical whole-struct-absent behaviour (#6445).
                 Some(DmPolicy::Respond) | None => {}
             }
         }
@@ -9999,12 +9995,8 @@ mod tests {
 
         #[test]
         fn none_group_policy_processes_all_but_some_mention_only_gates_6445() {
-            // The exact #6445 divergence: an override struct with only an
-            // unrelated field set (`threading`) leaves `group_policy` at `None`,
-            // which must process every group message — identical to the
-            // historical whole-struct-absent behaviour. The pre-fix bug
-            // materialized `group_policy = MentionOnly` here and silently
-            // dropped this unmentioned message.
+            // The exact #6445 divergence: an override struct with only an unrelated field set (`threading`) leaves `group_policy` at `None`, which must process every group message — identical to the historical whole-struct-absent behaviour.
+            // The pre-fix bug materialized `group_policy = MentionOnly` here and silently dropped this unmentioned message.
             with_guard_off(|| {
                 let msg = group_text_message("hello there, nobody in particular");
                 let unrelated_field_only = ChannelOverrides {
@@ -10016,8 +10008,7 @@ mod tests {
                     "group_policy=None must process all — writing `threading` must not flip gating"
                 );
 
-                // An explicit MentionOnly still gates the same unmentioned
-                // message out, so the fix does not weaken configured gating.
+                // An explicit MentionOnly still gates the same unmentioned message out, so the fix does not weaken configured gating.
                 let explicit_mention_only = ChannelOverrides {
                     group_policy: Some(GroupPolicy::MentionOnly),
                     ..Default::default()
