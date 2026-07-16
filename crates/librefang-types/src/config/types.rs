@@ -137,8 +137,12 @@ pub struct ChannelOverrides {
     #[serde(default)]
     pub group_trigger_patterns: Vec<String>,
     /// Enable LLM-based reply-intent precheck for group messages.
-    /// When true and group_policy is "all", a lightweight classifier decides
-    /// whether to reply before running the full agent loop.
+    /// When true and the group is processed unconditionally — an explicit
+    /// `group_policy = "all"`, or an unset `group_policy` with no
+    /// `group_trigger_patterns` (the #6445 "process all" default) — a lightweight
+    /// classifier decides whether to reply before running the full agent loop.
+    /// Has no effect under mention-only / commands-only / ignore gating, where
+    /// the policy itself already filters group traffic.
     #[serde(default)]
     pub reply_precheck: bool,
     /// Model override for the reply precheck classifier (default: agent's model).

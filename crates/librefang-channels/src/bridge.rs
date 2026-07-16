@@ -2571,6 +2571,32 @@ fn reconstruct_command_text(name: &str, args: &[String]) -> String {
     }
 }
 
+/// Whether the group-message reply-intent precheck (#6445) applies to this
+/// override set.
+///
+/// The precheck is a lightweight LLM classifier that runs only when the bot is
+/// configured to process *every* group message unconditionally — the one place
+/// an intent filter earns its keep.
+/// That "process all" state is reached two ways, which
+/// `should_process_group_message` already collapses into the same `true` arm:
+/// an explicit `group_policy = "all"`, or an unset `group_policy` with no
+/// `group_trigger_patterns` (the historical whole-struct-absent behaviour the
+/// #6445 fix restored).
+/// An unset policy WITH trigger patterns resolves to mention-only gating instead
+/// (the patterns are the gate), so the precheck must stay off there.
+///
+/// Both `dispatch_message` and `media_dispatch_allowed` call this so the two
+/// paths cannot drift — before #6445 they each matched only the literal
+/// `Some(GroupPolicy::All)` and silently skipped the precheck on the common
+/// unset-policy "process all" config.
+fn group_reply_precheck_applies(overrides: &ChannelOverrides) -> bool {
+    match overrides.group_policy {
+        Some(GroupPolicy::All) => true,
+        None => overrides.group_trigger_patterns.is_empty(),
+        _ => false,
+    }
+}
+
 fn should_process_group_message(
     ct_str: &str,
     overrides: &ChannelOverrides,
@@ -3854,9 +3880,10 @@ async fn dispatch_message(
             // to recover. See `dispatch_message` near the journal-record
             // call for the actual drain.
             // Reply-intent precheck: lightweight LLM classification for group
-            // messages when group_policy is "all" and precheck is enabled.
+            // messages processed unconditionally (explicit `group_policy = "all"`
+            // or the unset-policy "process all" path) when precheck is enabled.
             // Skipped for mentions and commands (already filtered above).
-            if ov.reply_precheck && matches!(ov.group_policy, Some(GroupPolicy::All)) {
+            if ov.reply_precheck && group_reply_precheck_applies(ov) {
                 let text = text_content(message).unwrap_or("");
                 let sender = &message.sender.display_name;
                 let model = ov.reply_precheck_model.as_deref();
@@ -6381,16 +6408,18 @@ async fn media_dispatch_allowed(
                 return false;
             }
 
-            // Reply-intent precheck: lightweight LLM classification when
-            // group_policy is "all" and precheck is enabled. This IS run on the
-            // media path for parity with the text path — a deliberate choice, so
-            // a captioned media message does not get a reply where the same text
-            // would have stayed silent. Captionless media has no text to
-            // classify, so we skip the (billed) LLM call and proceed rather than
-            // classify an empty string: group_policy=all is opt-in to respond
-            // broadly, and bare media always reached the agent before the media
-            // gate existed, so proceeding preserves that behavior.
-            if ov.reply_precheck && matches!(ov.group_policy, Some(GroupPolicy::All)) {
+            // Reply-intent precheck: lightweight LLM classification when the
+            // group is processed unconditionally (explicit `group_policy = "all"`
+            // or the unset-policy "process all" path) and precheck is enabled.
+            // This IS run on the media path for parity with the text path — a
+            // deliberate choice, so a captioned media message does not get a
+            // reply where the same text would have stayed silent. Captionless
+            // media has no text to classify, so we skip the (billed) LLM call and
+            // proceed rather than classify an empty string: the unconditional
+            // "process all" mode is opt-in to respond broadly, and bare media
+            // always reached the agent before the media gate existed, so
+            // proceeding preserves that behavior.
+            if ov.reply_precheck && group_reply_precheck_applies(ov) {
                 let text = extracted_user_text(&message.content).unwrap_or_default();
                 if !text.trim().is_empty() {
                     let sender = &message.sender.display_name;
@@ -10068,6 +10097,89 @@ mod tests {
                     "no policy and no patterns must still process all group messages"
                 );
             });
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // #6445 — reply-intent precheck gate follows the "process all" resolution,
+    // not the literal `Some(GroupPolicy::All)`.
+    //
+    // `should_process_group_message` treats an unset `group_policy` (no trigger
+    // patterns) as process-all, identical to explicit `all`. The two
+    // reply-precheck gates (`dispatch_message` text path + `media_dispatch_allowed`)
+    // must resolve the same way, or the common unset-policy config silently loses
+    // its reply-intent filter. `group_reply_precheck_applies` is the shared helper
+    // both gates call; these lock its truth table so the paths cannot drift again.
+    // ---------------------------------------------------------------------
+    mod group_reply_precheck_applies_tests {
+        use super::super::group_reply_precheck_applies;
+        use librefang_types::config::{ChannelOverrides, GroupPolicy};
+
+        #[test]
+        fn explicit_all_applies() {
+            let ov = ChannelOverrides {
+                group_policy: Some(GroupPolicy::All),
+                ..Default::default()
+            };
+            assert!(group_reply_precheck_applies(&ov));
+        }
+
+        #[test]
+        fn unset_policy_without_patterns_applies() {
+            // The #6445 "process all" default: no group_policy, no trigger
+            // patterns. `should_process_group_message` processes every message
+            // here, so the precheck must fire too.
+            let ov = ChannelOverrides::default();
+            assert!(ov.group_policy.is_none());
+            assert!(ov.group_trigger_patterns.is_empty());
+            assert!(
+                group_reply_precheck_applies(&ov),
+                "unset group_policy with no patterns is process-all — precheck must apply, matching explicit `all`"
+            );
+        }
+
+        #[test]
+        fn unset_policy_with_patterns_does_not_apply() {
+            // Trigger patterns without an explicit policy resolve to mention-only
+            // gating inside `should_process_group_message`; the patterns are the
+            // gate, so the process-all precheck must stay off.
+            let ov = ChannelOverrides {
+                group_policy: None,
+                group_trigger_patterns: vec!["(?i)\\bmybot\\b".to_string()],
+                ..Default::default()
+            };
+            assert!(
+                !group_reply_precheck_applies(&ov),
+                "None + patterns is mention-only gating, not process-all"
+            );
+        }
+
+        #[test]
+        fn other_explicit_policies_do_not_apply() {
+            for policy in [
+                GroupPolicy::MentionOnly,
+                GroupPolicy::CommandsOnly,
+                GroupPolicy::Ignore,
+            ] {
+                let ov = ChannelOverrides {
+                    group_policy: Some(policy),
+                    ..Default::default()
+                };
+                assert!(
+                    !group_reply_precheck_applies(&ov),
+                    "precheck must not apply under {policy:?} gating"
+                );
+                // Trigger patterns must not flip a gated policy into process-all.
+                let ov_patterns = ChannelOverrides {
+                    group_policy: Some(policy),
+                    group_trigger_patterns: vec!["(?i)\\bmybot\\b".to_string()],
+                    ..Default::default()
+                };
+                assert!(
+                    !group_reply_precheck_applies(&ov_patterns),
+                    "precheck must not apply under {policy:?} even with trigger patterns"
+                );
+            }
         }
     }
 
