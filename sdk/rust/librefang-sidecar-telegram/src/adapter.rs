@@ -42,9 +42,12 @@ macro_rules! tg_trace {
     ($($arg:tt)*) => { trace(format_args!($($arg)*)) };
 }
 
-/// Whether the streaming send path is advertised as a capability. Reads `TELEGRAM_STREAMING` live on each `capabilities()` call and defaults to enabled. `"0"` / `"false"` / `"no"` / `"off"` (case-insensitive, trimmed) disable it; everything else — including an unset variable — leaves it enabled.
+/// Whether the streaming send path is advertised as a capability.
+/// Reads `TELEGRAM_STREAMING` live on each `capabilities()` call and defaults to enabled.
+/// `"0"` / `"false"` / `"no"` / `"off"` (case-insensitive, trimmed) disable it; everything else — including an unset variable — leaves it enabled.
 ///
-/// When disabled the `"streaming"` capability is dropped, so the daemon routes every send through the plain (non-streaming) path. That trades incremental updates for a single final message, avoiding the visible placeholder flash on fast / short LLM turns.
+/// When disabled the `"streaming"` capability is dropped, so the daemon routes every send through the plain (non-streaming) path.
+/// That trades incremental updates for a single final message, avoiding the visible placeholder flash on fast / short LLM turns.
 fn streaming_enabled() -> bool {
     match std::env::var("TELEGRAM_STREAMING") {
         Ok(v) => !matches!(
@@ -211,8 +214,7 @@ impl SidecarAdapter for TelegramAdapter {
             "interactive".into(),
             "thread".into(),
         ];
-        // `"streaming"` is opt-out via `TELEGRAM_STREAMING`; appended last so the
-        // base capability order stays deterministic.
+        // `"streaming"` is opt-out via `TELEGRAM_STREAMING`; appended last so the base capability order stays deterministic.
         if streaming_enabled() {
             caps.push("streaming".into());
         }
@@ -469,8 +471,7 @@ impl SidecarAdapter for TelegramAdapter {
 mod tests {
     use super::*;
 
-    /// Restores `TELEGRAM_STREAMING` to its pre-test value on drop, so the
-    /// mutation stays contained even if an assertion panics mid-test.
+    /// Restores `TELEGRAM_STREAMING` to its pre-test value on drop, so the mutation stays contained even if an assertion panics mid-test.
     struct EnvGuard(Option<String>);
     impl Drop for EnvGuard {
         fn drop(&mut self) {
@@ -497,9 +498,8 @@ mod tests {
         }
     }
 
-    // `TELEGRAM_STREAMING` is process-global state; this is the only test in the
-    // crate that touches it and every case runs sequentially in one function, so
-    // nothing races with a parallel test. The guard restores the original value.
+    // `TELEGRAM_STREAMING` is process-global state; this is the only test in the crate that touches it and every case runs sequentially in one function, so nothing races with a parallel test.
+    // The guard restores the original value.
     #[test]
     fn streaming_enabled_parsing_and_capability_gate() {
         let _guard = EnvGuard(std::env::var("TELEGRAM_STREAMING").ok());
