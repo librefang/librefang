@@ -754,9 +754,12 @@ key_required = true
         set_allowlist(&["ollama"]);
         let mut disallowed = AgentManifest::default();
         disallowed.model.provider = "anthropic".to_string();
-        let err = kernel
-            .resolve_driver(&disallowed)
-            .expect_err("disallowed provider must be rejected");
+        // `Box<dyn LlmDriver>` is not `Debug`, so `expect_err` (which formats the
+        // Ok value) will not compile — match the error out explicitly instead.
+        let err = match kernel.resolve_driver(&disallowed) {
+            Ok(_) => panic!("disallowed provider must be rejected"),
+            Err(e) => e,
+        };
         assert!(
             err.to_string().contains("allowlist"),
             "rejection must be a governance error, got: {err}"
