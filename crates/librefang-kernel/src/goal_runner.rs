@@ -326,6 +326,8 @@ impl GoalRunner {
         max_iterations: u32,
         substrate: Arc<MemorySubstrate>,
         send_message: F,
+        verify_agent_id: Option<AgentId>,
+        verify_max_retries: Option<u32>,
     ) where
         F: Fn(AgentId, String) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = Result<String, String>> + Send + 'static,
@@ -354,6 +356,8 @@ impl GoalRunner {
             max_iterations,
             last_progress: 0,
             last_error: None,
+            verify_agent_id,
+            verify_max_retries: verify_max_retries.unwrap_or(3),
             started_at: now,
             updated_at: now,
         };
@@ -507,6 +511,8 @@ impl GoalRunner {
                         max_iterations: recovered_row.max_iterations.max(0) as u32,
                         last_progress: recovered_row.last_progress.clamp(0, 100) as u8,
                         last_error: recovered_row.last_error.clone(),
+                        verify_agent_id: None,
+                        verify_max_retries: 0,
                         started_at,
                         updated_at: now,
                     };
@@ -754,6 +760,7 @@ mod tests {
             status: GoalStatus::InProgress,
             progress: 0,
             agent_id: Some(agent_id),
+            verify_agent_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -776,6 +783,8 @@ mod tests {
             max_iterations: 10,
             last_progress: 0,
             last_error: None,
+            verify_agent_id: None,
+            verify_max_retries: 0,
             started_at: Utc::now(),
             updated_at: Utc::now(),
         }));
@@ -820,6 +829,8 @@ mod tests {
             max_iterations: 2,
             last_progress: 0,
             last_error: None,
+            verify_agent_id: None,
+            verify_max_retries: 0,
             started_at: Utc::now(),
             updated_at: Utc::now(),
         }));
@@ -861,6 +872,8 @@ mod tests {
             max_iterations,
             last_progress: 0,
             last_error: None,
+            verify_agent_id: None,
+            verify_max_retries: 0,
             started_at: Utc::now(),
             updated_at: Utc::now(),
         }))
@@ -1316,10 +1329,10 @@ mod tests {
             let sub1 = substrate.clone();
             let sub2 = substrate.clone();
             let h1 = tokio::spawn(async move {
-                r1.start(goal_id, agent_id, 100, sub1, s1);
+                r1.start(goal_id, agent_id, 100, sub1, s1, None, None);
             });
             let h2 = tokio::spawn(async move {
-                r2.start(goal_id, agent_id, 100, sub2, s2);
+                r2.start(goal_id, agent_id, 100, sub2, s2, None, None);
             });
             let _ = tokio::join!(h1, h2);
 
