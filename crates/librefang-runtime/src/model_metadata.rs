@@ -283,7 +283,9 @@ fn synthesize_entry(
         max_output_tokens,
         input_cost_per_m: 0.0,
         output_cost_per_m: 0.0,
-        pricing_known: true,
+        // This layer (L1/L5) only ever resolves context_window / max_output_tokens.
+        // It never observes real pricing, so the zeroed costs above are a placeholder, not a confirmed free tier.
+        pricing_known: false,
         image_input_cost_per_m: None,
         image_output_cost_per_m: None,
         supports_tools: false,
