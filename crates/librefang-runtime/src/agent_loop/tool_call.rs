@@ -1099,10 +1099,7 @@ pub(super) async fn execute_single_tool_call_core(
             // #6443: thread the turn's originating account for the
             // cross-account dispatch guard in `channel_send`.
             ctx.sender_account_id,
-            // #6458: a hand-authored manifest is third-party input, so both
-            // its `hand_allowed_env` passthrough and its `exec_policy`
-            // allowlist stay on the strict secret-name heuristic; an
-            // operator-authored agent.toml allowlist is an intentional grant.
+            // #6458: a hand-authored manifest is third-party input, so both its `hand_allowed_env` passthrough and its `exec_policy` allowlist stay on the strict secret-name heuristic; an operator-authored agent.toml allowlist is an intentional grant.
             if ctx.manifest.is_hand {
                 librefang_types::config::EnvAllowlistSource::HandDeclared
             } else {

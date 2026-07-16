@@ -148,11 +148,8 @@ pub struct DeferredToolExecution {
     pub allowed_tools: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_env_vars: Option<Vec<String>>,
-    /// Provenance of `allowed_env_vars` (and the `exec_policy` fallback list),
-    /// captured at defer time so the resume path filters the re-injected env
-    /// exactly as the live path would have (#6458).
-    /// The serde default (`HandDeclared`) keeps payloads persisted before this
-    /// field existed on the strict posture.
+    /// Provenance of `allowed_env_vars` (and the `exec_policy` fallback list), captured at defer time so the resume path filters the re-injected env exactly as the live path would have (#6458).
+    /// The serde default (`HandDeclared`) keeps payloads persisted before this field existed on the strict posture.
     #[serde(default)]
     pub env_allowlist_source: crate::config::EnvAllowlistSource,
     #[serde(default, skip_serializing_if = "Option::is_none")]

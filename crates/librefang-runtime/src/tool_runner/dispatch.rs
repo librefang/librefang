@@ -51,12 +51,8 @@ pub struct ToolExecContext<'a> {
     pub web_ctx: Option<&'a WebToolsContext>,
     pub browser_ctx: Option<&'a crate::browser::BrowserManager>,
     pub allowed_env_vars: Option<&'a [String]>,
-    /// Provenance of the env allowlist in effect for this call —
-    /// `allowed_env_vars` when `Some`, else the `exec_policy` fallback list.
-    /// `OperatorConfig` only when the calling agent's manifest is
-    /// operator-authored (`!manifest.is_hand`); hand-authored manifests are
-    /// third-party input, so both their passthrough list and their
-    /// `exec_policy` stay on the strict heuristic (#6458).
+    /// Provenance of the env allowlist in effect for this call — `allowed_env_vars` when `Some`, else the `exec_policy` fallback list.
+    /// `OperatorConfig` only when the calling agent's manifest is operator-authored (`!manifest.is_hand`); hand-authored manifests are third-party input, so both their passthrough list and their `exec_policy` stay on the strict heuristic (#6458).
     pub env_allowlist_source: librefang_types::config::EnvAllowlistSource,
     pub workspace_root: Option<&'a Path>,
     pub media_engine: Option<&'a crate::media_understanding::MediaEngine>,
@@ -1525,12 +1521,8 @@ pub async fn execute_tool(
         spill_threshold_bytes,
         max_artifact_bytes,
         None,
-        // The only production caller of this shim is the operator API session
-        // path (`routes/tools_sessions.rs`), which passes the operator's own
-        // global `config.toml` exec policy — an operator-authored allowlist.
-        // Hand-agent calls flow through the agent loop, which calls
-        // `execute_tool_with_sender_account` directly with the source derived
-        // from `manifest.is_hand` (#6458).
+        // The only production caller of this shim is the operator API session path (`routes/tools_sessions.rs`), which passes the operator's own global `config.toml` exec policy — an operator-authored allowlist.
+        // Hand-agent calls flow through the agent loop, which calls `execute_tool_with_sender_account` directly with the source derived from `manifest.is_hand` (#6458).
         librefang_types::config::EnvAllowlistSource::OperatorConfig,
     )
     .await

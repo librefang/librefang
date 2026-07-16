@@ -258,9 +258,7 @@ pub struct LocalBackend {
     /// Allowlisted env vars to pass through to spawned children.
     /// Mirrors the existing `tool_runner.rs` `allowed_env` plumbing.
     allowed_env: Vec<String>,
-    /// Provenance of `allowed_env` — decides whether the secret-name
-    /// heuristic applies on top of the reserved exact-name blocklist when
-    /// the child env is scrubbed (#6458).
+    /// Provenance of `allowed_env` — decides whether the secret-name heuristic applies on top of the reserved exact-name blocklist when the child env is scrubbed (#6458).
     env_source: crate::subprocess_sandbox::EnvAllowlistSource,
     /// Default per-command timeout when `ExecSpec::limits.timeout` is unset.
     /// Source-of-truth: kernel config / agent manifest. Falls back to

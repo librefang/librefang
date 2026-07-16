@@ -2157,32 +2157,19 @@ impl Default for ExecPolicy {
 
 /// Provenance of an env-var allowlist handed to the subprocess sandbox.
 ///
-/// Decides how strictly `subprocess_sandbox::sandbox_command` filters the
-/// caller-supplied `allowed_env_vars` before re-injecting them into a child
-/// process (#6458).
-/// The reserved exact-name blocklist (the daemon's own vault key / provider
-/// keys) applies to BOTH variants; only the broad credential-word heuristic
-/// (`KEY` / `TOKEN` / `PASSWORD` / …) is scoped by provenance.
+/// Decides how strictly `subprocess_sandbox::sandbox_command` filters the caller-supplied `allowed_env_vars` before re-injecting them into a child process (#6458).
+/// The reserved exact-name blocklist (the daemon's own vault key / provider keys) applies to BOTH variants; only the broad credential-word heuristic (`KEY` / `TOKEN` / `PASSWORD` / …) is scoped by provenance.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum EnvAllowlistSource {
-    /// Names the operator wrote into their own configuration — a non-hand
-    /// agent's `exec_policy.allowed_env_vars` (agent.toml) or the global
-    /// `config.toml` exec policy.
-    /// The operator controls both the daemon environment and the allowlist,
-    /// so an explicitly granted secret-shaped name (e.g. `MYTOOL_KEYRING_PASSWORD`)
-    /// is an intentional grant and passes through; only the reserved daemon
-    /// secrets are withheld.
+    /// Names the operator wrote into their own configuration — a non-hand agent's `exec_policy.allowed_env_vars` (agent.toml) or the global `config.toml` exec policy.
+    /// The operator controls both the daemon environment and the allowlist, so an explicitly granted secret-shaped name (e.g. `MYTOOL_KEYRING_PASSWORD`) is an intentional grant and passes through; only the reserved daemon secrets are withheld.
     OperatorConfig,
-    /// Names declared by a third-party artifact — a marketplace hand's
-    /// `[[requires]]` / settings passthrough, or any field of a hand-authored
-    /// agent manifest (including its `exec_policy`).
-    /// Untrusted: the full secret-name heuristic applies so a hand cannot
-    /// exfiltrate secret-shaped vars from the daemon's live environment.
-    /// This is the serde default so that deferred tool executions persisted
-    /// before this field existed resume with the strict posture.
+    /// Names declared by a third-party artifact — a marketplace hand's `[[requires]]` / settings passthrough, or any field of a hand-authored agent manifest (including its `exec_policy`).
+    /// Untrusted: the full secret-name heuristic applies so a hand cannot exfiltrate secret-shaped vars from the daemon's live environment.
+    /// This is the serde default so that deferred tool executions persisted before this field existed resume with the strict posture.
     #[default]
     HandDeclared,
 }

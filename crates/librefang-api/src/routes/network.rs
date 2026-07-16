@@ -1549,10 +1549,7 @@ pub async fn mcp_http(
             cfg.tool_results.spill_threshold_bytes,
             cfg.tool_results.max_artifact_bytes,
             current_account_id.as_deref(), // sender_account_id (X-LibreFang-Current-Account-Id, #6443)
-            // #6458: mirror the agent-loop trust decision — a hand-authored
-            // manifest's env lists stay on the strict heuristic; an
-            // unresolved caller has no env list at all, so the strict
-            // default is a no-op there.
+            // #6458: mirror the agent-loop trust decision — a hand-authored manifest's env lists stay on the strict heuristic; an unresolved caller has no env list at all, so the strict default is a no-op there.
             match caller_entry.as_ref() {
                 Some(e) if !e.manifest.is_hand => {
                     librefang_types::config::EnvAllowlistSource::OperatorConfig

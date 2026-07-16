@@ -97,13 +97,8 @@ pub fn is_blocked_env_var(name: &str) -> bool {
         .any(|sub| upper.ends_with(sub) || has_word_boundary_substring(&upper, sub))
 }
 
-/// Returns `true` if the env var name is one of the reserved daemon secrets
-/// (`BLOCKED_ENV_EXACT`) — the vault key and the daemon's own provider
-/// credentials.
-/// These are unconditionally withheld from every sandboxed child, no matter
-/// who allowlisted them; unlike [`is_blocked_env_var`] this does NOT apply
-/// the credential-word heuristic, so an operator-declared secret-shaped name
-/// (`MYTOOL_KEYRING_PASSWORD`) is not caught by it (#6458).
+/// Returns `true` if the env var name is one of the reserved daemon secrets (`BLOCKED_ENV_EXACT`) — the vault key and the daemon's own provider credentials.
+/// These are unconditionally withheld from every sandboxed child, no matter who allowlisted them; unlike [`is_blocked_env_var`] this does NOT apply the credential-word heuristic, so an operator-declared secret-shaped name (`MYTOOL_KEYRING_PASSWORD`) is not caught by it (#6458).
 pub fn is_reserved_env_var(name: &str) -> bool {
     let upper = name.to_uppercase();
     BLOCKED_ENV_EXACT.contains(&upper.as_str())
@@ -154,23 +149,13 @@ fn has_word_boundary_substring(haystack: &str, needle: &str) -> bool {
 /// Variables that are not set in the current process environment are silently
 /// skipped (rather than being set to empty strings).
 ///
-/// SECURITY: caller-allowed names are re-filtered here as a last line of
-/// defence, scoped by `source` (#6458):
+/// SECURITY: caller-allowed names are re-filtered here as a last line of defence, scoped by `source` (#6458):
 ///
-/// - [`EnvAllowlistSource::HandDeclared`] — the full [`is_blocked_env_var`]
-///   check. A marketplace hand's attacker-controlled `HAND.toml` can name
-///   arbitrary vars in `[[requires]]` (or in a hand-authored manifest's
-///   `exec_policy`), so even though the kernel filters that list at assembly
-///   time, we re-check here so no such caller can smuggle a secret-shaped
-///   var from the daemon's live environment into an untrusted child.
-/// - [`EnvAllowlistSource::OperatorConfig`] — only the reserved exact-name
-///   list ([`is_reserved_env_var`]). The operator's own
-///   `exec_policy.allowed_env_vars` exists precisely to hand a specific
-///   credential to a specific tool; essentially every credential name matches
-///   the broad heuristic, so applying it here made the allowlist unable to
-///   carry a credential at all. The daemon's own secrets
-///   (`LIBREFANG_VAULT_KEY`, `ANTHROPIC_API_KEY`, …) stay blocked
-///   unconditionally.
+/// - [`EnvAllowlistSource::HandDeclared`] — the full [`is_blocked_env_var`] check.
+///   A marketplace hand's attacker-controlled `HAND.toml` can name arbitrary vars in `[[requires]]` (or in a hand-authored manifest's `exec_policy`), so even though the kernel filters that list at assembly time, we re-check here so no such caller can smuggle a secret-shaped var from the daemon's live environment into an untrusted child.
+/// - [`EnvAllowlistSource::OperatorConfig`] — only the reserved exact-name list ([`is_reserved_env_var`]).
+///   The operator's own `exec_policy.allowed_env_vars` exists precisely to hand a specific credential to a specific tool; essentially every credential name matches the broad heuristic, so applying it here made the allowlist unable to carry a credential at all.
+///   The daemon's own secrets (`LIBREFANG_VAULT_KEY`, `ANTHROPIC_API_KEY`, …) stay blocked unconditionally.
 pub fn sandbox_command(
     cmd: &mut tokio::process::Command,
     allowed_env_vars: &[String],
@@ -193,11 +178,8 @@ pub fn sandbox_command(
         }
     }
 
-    // Re-add caller-specified allowed vars — but never a reserved secret or
-    // internal-daemon var, even if the caller (e.g. an attacker-controlled
-    // HAND.toml passthrough list) explicitly asked for it. Hand-declared
-    // lists additionally pass the secret-name heuristic; operator-declared
-    // lists are an intentional grant and skip it (#6458).
+    // Re-add caller-specified allowed vars — but never a reserved secret or internal-daemon var, even if the caller (e.g. an attacker-controlled HAND.toml passthrough list) explicitly asked for it.
+    // Hand-declared lists additionally pass the secret-name heuristic; operator-declared lists are an intentional grant and skip it (#6458).
     for var in allowed_env_vars {
         let blocked = match source {
             EnvAllowlistSource::OperatorConfig => is_reserved_env_var(var),
@@ -1963,14 +1945,9 @@ mod tests {
 
     #[test]
     fn test_sandbox_command_operator_allowlist_passes_secret_shaped_vars() {
-        // Regression for #6458: the operator's own `exec_policy.allowed_env_vars`
-        // is an intentional grant in the operator's agent.toml, not an
-        // attacker-controlled passthrough list. Filtering it through the broad
-        // secret-name heuristic made it impossible to hand any credential to a
-        // `shell_exec` child (essentially every credential name contains KEY /
-        // TOKEN / PASSWORD / …), defeating the feature's only purpose.
-        // Operator-declared names skip the heuristic; the reserved exact-name
-        // blocklist (the daemon's own secrets) still applies unconditionally.
+        // Regression for #6458: the operator's own `exec_policy.allowed_env_vars` is an intentional grant in the operator's agent.toml, not an attacker-controlled passthrough list.
+        // Filtering it through the broad secret-name heuristic made it impossible to hand any credential to a `shell_exec` child (essentially every credential name contains KEY / TOKEN / PASSWORD / …), defeating the feature's only purpose.
+        // Operator-declared names skip the heuristic; the reserved exact-name blocklist (the daemon's own secrets) still applies unconditionally.
         let credential = "SANDBOXTEST_OPERATOR_KEYRING_PASSWORD"; // heuristic match → must pass
         let vault = "LIBREFANG_VAULT_KEY"; // reserved daemon secret → still blocked
 
@@ -2010,10 +1987,7 @@ mod tests {
 
     #[test]
     fn test_is_reserved_env_var_exact_names_only() {
-        // The reserved list blocks by exact (case-insensitive) name and does
-        // NOT apply the credential-word heuristic — that split is what lets an
-        // operator allowlist a secret-shaped var while the daemon's own
-        // secrets stay unreachable from any child.
+        // The reserved list blocks by exact (case-insensitive) name and does NOT apply the credential-word heuristic — that split is what lets an operator allowlist a secret-shaped var while the daemon's own secrets stay unreachable from any child.
         assert!(is_reserved_env_var("LIBREFANG_VAULT_KEY"));
         assert!(is_reserved_env_var("anthropic_api_key"));
         assert!(is_reserved_env_var("GITHUB_TOKEN"));
