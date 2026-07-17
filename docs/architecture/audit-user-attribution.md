@@ -63,6 +63,7 @@ Do **not** try to back-fill a user onto these — there is no correct answer, an
 | **Agent-to-agent**          | `AgentMessage` / `ToolInvoke` from `agent_send` and autonomous-loop turns | `user_id = None`; the acting `agent_id` is the accountable principal, not a user.         |
 | **Agent lifecycle (kernel)**| `AgentSpawn`, `AgentKill`                     | Recorded kernel-side with `user_id = None` today; the initiating API caller is not yet threaded through the `KernelHandle` spawn/kill surface (tracked as a follow-up). |
 | **Channel-inbound (unmapped)** | `AgentMessage` from a channel with no user mapping | `user_id = None`, `channel = Some("<platform>")`; the platform sender lives in the detail / sender fields, not in `user_id`, which is a *LibreFang* user id. |
+| **Manifest signature (kernel)** | `AuthAttempt` on an Ed25519 manifest-signature-verification failure (`POST /api/agents`) | `user_id = None` today: the event is recorded inside the `spawn_agent` idempotency closure (also reached by the bulk-create path), whose actor is frequently automation rather than a single human. Threading the API caller through that shared 3-function path is a follow-up. |
 
 ## Filtering by user
 
