@@ -340,18 +340,21 @@ impl GoalRunner {
     /// goal persistence, and the rate-limit circuit breaker.
     ///
     /// Replaces any existing run for the same goal.
-    pub fn start<F, Fut>(
+    pub fn start<F, Fut, S, Sfut>(
         &self,
         goal_id: GoalId,
         agent_id: AgentId,
         max_iterations: u32,
         substrate: Arc<MemorySubstrate>,
         send_message: F,
+        spawn_sub_agent: S,
         verify_agent_id: Option<AgentId>,
         verify_max_retries: Option<u32>,
     ) where
         F: Fn(AgentId, String) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = Result<String, String>> + Send + 'static,
+        S: Fn(String) -> Sfut + Send + Sync + 'static,
+        Sfut: std::future::Future<Output = Option<AgentId>> + Send + 'static,
     {
         // Hold `start_lock` for the whole stop→gen→spawn→insert sequence so a
         // concurrent `start()` for the same goal cannot observe the empty slot
@@ -402,6 +405,7 @@ impl GoalRunner {
                 max_iterations,
                 substrate,
                 send_message,
+                spawn_sub_agent,
                 loop_state,
                 loop_stop,
                 shutdown_rx,
@@ -572,12 +576,13 @@ impl GoalRunner {
 /// The run loop body. Extracted as a free function so tests can drive it with a
 /// fake `send_message` and an in-memory substrate.
 #[allow(clippy::too_many_arguments)]
-async fn run_loop<F, Fut>(
+async fn run_loop<F, Fut, S, Sfut>(
     goal_id: GoalId,
     agent_id: AgentId,
     max_iterations: u32,
     substrate: Arc<MemorySubstrate>,
     send_message: F,
+    spawn_sub_agent: S,
     state: Arc<Mutex<GoalRunState>>,
     stop: Arc<AtomicBool>,
     mut shutdown_rx: watch::Receiver<bool>,
@@ -585,6 +590,8 @@ async fn run_loop<F, Fut>(
 ) where
     F: Fn(AgentId, String) -> Fut + Send + Sync,
     Fut: std::future::Future<Output = Result<String, String>> + Send,
+    S: Fn(String) -> Sfut + Send + Sync,
+    Sfut: std::future::Future<Output = Option<AgentId>> + Send,
 {
     let mut iteration: u32 = 0;
     let mut rate_limit_streak: u32 = 0;
@@ -643,7 +650,18 @@ async fn run_loop<F, Fut>(
                 let mut passes_verification = true;
                 if let Some(vid) = verify_id {
                     let mut retries = 0;
+                    let mut current_verifier = vid;
                     loop {
+                        // Auto-spawn a fresh reviewer after 2 rejections
+                        // to get an independent second opinion.
+                        if retries == 2 {
+                            if let Some(new_id) = spawn_sub_agent("reviewer".to_string()).await {
+                                info!(goal_id = %goal_id, old_verifier = %current_verifier,
+                                      new_reviewer = %new_id,
+                                      "Auto-spawned fresh reviewer sub-agent");
+                                current_verifier = new_id;
+                            }
+                        }
                         let verdict_prompt = format!(
                             "Verify this output against the goal. Reply with exactly one line:\n\
                              VERDICT: PASS|FAIL|NEEDS_REWORK\n\
@@ -652,7 +670,7 @@ async fn run_loop<F, Fut>(
                              Output:\n{reply}",
                             title = goal.title,
                         );
-                        match send_message(vid, verdict_prompt).await {
+                        match send_message(current_verifier, verdict_prompt).await {
                             Ok(verdict) => {
                                 let upper = verdict.to_ascii_uppercase();
                                 if upper.contains("VERDICT: PASS") || upper.contains("VERDICT:PASS")
@@ -883,6 +901,7 @@ mod tests {
             10,
             substrate.clone(),
             send,
+            |_: String| async { None },
             state.clone(),
             Arc::new(AtomicBool::new(false)),
             rx,
@@ -929,6 +948,7 @@ mod tests {
             2,
             substrate.clone(),
             send,
+            |_: String| async { None },
             state.clone(),
             Arc::new(AtomicBool::new(false)),
             rx,
@@ -982,6 +1002,7 @@ mod tests {
             10,
             substrate.clone(),
             send,
+            |_: String| async { None },
             state.clone(),
             Arc::new(AtomicBool::new(false)),
             rx,
@@ -1018,6 +1039,7 @@ mod tests {
             10,
             substrate.clone(),
             send,
+            |_: String| async { None },
             state.clone(),
             Arc::new(AtomicBool::new(true)),
             rx,
@@ -1051,6 +1073,7 @@ mod tests {
             10,
             substrate.clone(),
             send,
+            |_: String| async { None },
             state.clone(),
             Arc::new(AtomicBool::new(false)),
             rx,
@@ -1085,6 +1108,7 @@ mod tests {
             100,
             substrate.clone(),
             send,
+            |_: String| async { None },
             state.clone(),
             Arc::new(AtomicBool::new(false)),
             rx,
@@ -1148,6 +1172,7 @@ mod tests {
             3,
             substrate.clone(),
             send,
+            |_: String| async { None },
             state.clone(),
             Arc::new(AtomicBool::new(false)),
             rx,
@@ -1203,6 +1228,7 @@ mod tests {
             10,
             substrate.clone(),
             send,
+            |_: String| async { None },
             state.clone(),
             Arc::new(AtomicBool::new(false)),
             rx,
@@ -1416,10 +1442,28 @@ mod tests {
             let sub1 = substrate.clone();
             let sub2 = substrate.clone();
             let h1 = tokio::spawn(async move {
-                r1.start(goal_id, agent_id, 100, sub1, s1, None, None);
+                r1.start(
+                    goal_id,
+                    agent_id,
+                    100,
+                    sub1,
+                    s1,
+                    |_: String| async { None },
+                    None,
+                    None,
+                );
             });
             let h2 = tokio::spawn(async move {
-                r2.start(goal_id, agent_id, 100, sub2, s2, None, None);
+                r2.start(
+                    goal_id,
+                    agent_id,
+                    100,
+                    sub2,
+                    s2,
+                    |_: String| async { None },
+                    None,
+                    None,
+                );
             });
             let _ = tokio::join!(h1, h2);
 
