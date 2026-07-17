@@ -1218,6 +1218,22 @@ def test_build_task_progress_blocks_active_and_done():
     assert "Task failed" in etext.split("\n")[0]
 
 
+def test_build_task_progress_blocks_bounds_long_step_list():
+    # Enough steps that a naive join blows past Slack's 3000-char section limit;
+    # the card must stay under the limit by collapsing older steps into a
+    # summary line while keeping the most recent ones (#6451 review).
+    steps = [("tool_use", f"very_long_tool_name_number_{i:04d}") for i in range(200)]
+    text, blocks = sa._build_task_progress_blocks(steps, "tool_use")
+    assert len(text) <= sa.SLACK_MSG_LIMIT, (
+        f"the progress card must stay under the Slack section limit; got {len(text)}"
+    )
+    # The rendered block carries exactly the bounded text.
+    assert blocks[0]["text"]["text"] == text
+    # Older steps are collapsed into a summary line; the newest step survives.
+    assert "earlier step" in text
+    assert "very_long_tool_name_number_0199" in text
+
+
 @pytest.mark.asyncio
 async def test_phase_single_step_posts_no_card(monkeypatch):
     # A turn that never runs a tool (queued → thinking → done) posts no
