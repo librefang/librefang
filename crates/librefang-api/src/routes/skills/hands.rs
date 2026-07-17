@@ -453,6 +453,11 @@ pub async fn update_hand_manifest(
         Err(librefang_hands::HandError::NotFound(id)) => {
             ApiErrorResponse::not_found(format!("Hand not found: {id}")).into_json_tuple()
         }
+        // A disk write / IO failure is a server-side problem, not caller-fixable
+        // input — surface it as 500 rather than 400.
+        Err(e @ librefang_hands::HandError::Io(_)) => {
+            ApiErrorResponse::internal(format!("{e}")).into_json_tuple()
+        }
         // Invalid TOML, id mismatch, and a failed supply-chain audit are all
         // caller-fixable input problems — surface the message at 400 so the
         // editor can show it inline.
