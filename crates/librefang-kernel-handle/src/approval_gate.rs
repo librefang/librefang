@@ -51,7 +51,7 @@ pub trait ApprovalGate: Send + Sync {
     ///   could authorise; route through the approval queue.
     ///
     /// `system_call` marks a daemon-driven invocation with no attributable
-    /// end user — a system-internal fork (auto_dream, proactive memory) that
+    /// end user — a system-internal fork (currently auto_dream) that
     /// carries a `None` sender context and so cannot resolve to a registered
     /// user. When `true` the real kernel bypasses the per-user gate the same
     /// way the synthetic `"cron"` / `"autonomous"` channels already do, so

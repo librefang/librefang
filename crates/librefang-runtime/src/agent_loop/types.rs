@@ -188,10 +188,11 @@ pub struct LoopOptions {
     /// Kernel populates this from `KernelConfig.canvas`.
     pub canvas_config: Option<librefang_types::config::CanvasConfig>,
     /// When true, this invocation is a **system-internal fork** with no
-    /// attributable end user — e.g. the auto_dream background cycle or the
-    /// proactive-memory extractor, both spawned via
-    /// `LibreFangKernel::run_forked_agent_streaming` with a `None` sender
-    /// context. The runtime forwards this flag to
+    /// attributable end user — currently the auto_dream background cycle,
+    /// spawned via `LibreFangKernel::run_forked_agent_streaming` with a
+    /// `None` sender context. (Any future no-sender fork would set this the
+    /// same way; note the present proactive-memory extractor does *not*
+    /// fork — it calls a standalone extractor — so it is not a caller.) The runtime forwards this flag to
     /// `kernel_handle::ApprovalGate::resolve_user_tool_decision` as
     /// `system_call = true` so the RBAC gate treats the fork as a trusted
     /// internal caller instead of routing its `memory_*` tool calls through

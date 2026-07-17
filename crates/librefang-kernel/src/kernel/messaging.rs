@@ -1893,8 +1893,8 @@ impl LibreFangKernel {
             gateway_compression: Some(self.config.load().gateway_compression.clone()),
             parallel_tools_config: Some(self.config.load().parallel_tools.clone()),
             canvas_config: Some(self.config.load().canvas.clone()),
-            // #6463: this is a system-internal fork (auto_dream background
-            // cycle, proactive-memory extractor) with no attributable end
+            // #6463: this is a system-internal fork (currently only the
+            // auto_dream background cycle) with no attributable end
             // user — it runs on the parent's canonical session with a `None`
             // sender context. Flag it so the runtime forwards
             // `system_call = true` to the RBAC gate and its `memory_*` calls

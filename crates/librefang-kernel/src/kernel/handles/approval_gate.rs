@@ -67,7 +67,7 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
         // and floods the approval queue when RBAC is enabled.
         //
         // The `system_call` argument is the channel-less counterpart:
-        // system-internal forks (auto_dream, proactive memory) run through
+        // system-internal forks (currently only auto_dream) run through
         // `run_forked_agent_streaming` on the parent's canonical session
         // with a `None` sender context, so they have no synthetic channel
         // to match here. They flag themselves via `LoopOptions.system_call`
