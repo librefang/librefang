@@ -224,7 +224,10 @@ fn seed_audit_entries(state: &routes::AppState) {
 /// this PR threaded the caller into — a dropped `Extension<AuthenticatedApiUser>`
 /// would silently zero attribution while every existing filter test (which
 /// seeds rows directly via `record_with_context`) stayed green (#6461 review).
-#[tokio::test]
+// multi_thread: create_user -> persist_users triggers a config reload whose
+// workflow auto-registration uses `block_in_place`, which panics on a
+// single-threaded runtime.
+#[tokio::test(flavor = "multi_thread")]
 async fn audit_attributes_user_management_write_to_the_acting_user() {
     // Alice is an Owner: POST /api/users is Owner-gated (is_owner_only_write),
     // and Owner (3) >= Admin (2) also satisfies the audit-query admin gate.
