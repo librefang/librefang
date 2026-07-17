@@ -8839,6 +8839,64 @@ async fn per_user_provider_key_beats_global_and_falls_back() {
     kernel.shutdown();
 }
 
+/// Owner-path coverage for `resolve_driver_for_owner` (#6460 review). The test
+/// above exercises the standalone `resolve_provider_credential` helper, but the
+/// production driver path inlines its OWN owner-aware resolution — the
+/// `get_user_provider_key` lookup at llm_drivers.rs and the credential-pool
+/// bypass it triggers — which had zero coverage. Drive that branch directly:
+/// with a user-scoped key set for the owner, resolving a driver on behalf of
+/// that owner must succeed (the user-key lookup + pool-bypass path runs without
+/// panic on the exact key `get_user_provider_key` surfaces), and the ownerless
+/// path must still resolve so global-only behaviour is unchanged. Uses the local
+/// `ollama` provider so the build is deterministic regardless of env vars.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial(librefang_vault_key)]
+async fn resolve_driver_for_owner_drives_the_owner_scoped_key_path() {
+    const TEST_VAULT_KEY_B64: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+    let _vault_key = set_test_env("LIBREFANG_VAULT_KEY", TEST_VAULT_KEY_B64);
+    let _no_keyring = set_test_env("LIBREFANG_VAULT_NO_KEYRING", "1");
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let alice = librefang_types::agent::UserId::from_name("alice");
+    kernel
+        .set_user_provider_key(alice, "ollama", "sk-alice-ollama")
+        .expect("store user-scoped provider key");
+    // The production path (resolve_driver_for_owner) reads exactly this.
+    assert_eq!(
+        kernel.get_user_provider_key(alice, "ollama").as_deref(),
+        Some("sk-alice-ollama"),
+        "owner-scoped key must be readable for the owner",
+    );
+
+    let mut manifest = librefang_types::agent::AgentManifest::default();
+    manifest.model.provider = "ollama".to_string();
+
+    // Owner path: exercises the user_scoped_key lookup + pool-bypass + the
+    // api_key = user_key branch.
+    assert!(
+        kernel
+            .resolve_driver_for_owner(&manifest, Some(alice))
+            .is_ok(),
+        "resolving a driver on behalf of an owner with a user-scoped key must succeed",
+    );
+    // Ownerless path: global resolution, unchanged.
+    assert!(
+        kernel.resolve_driver_for_owner(&manifest, None).is_ok(),
+        "the ownerless path must still resolve (global behaviour unchanged)",
+    );
+
+    kernel.shutdown();
+}
+
 /// Regression test for the kernel install façade introduced in #3295: the
 /// HTTP install path historically opened `vault.enc` and ran the Argon2id
 /// KDF on every request. After the refactor, `Kernel::install_integration`
