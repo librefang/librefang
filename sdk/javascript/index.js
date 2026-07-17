@@ -744,6 +744,10 @@ class HandsResource {
     return this._c._request("GET", `/api/hands/${hand_id}/manifest`);
   }
 
+  async updateHandManifest(hand_id, data) {
+    return this._c._request("PUT", `/api/hands/${hand_id}/manifest`, data, undefined);
+  }
+
   async setHandSecret(hand_id, data) {
     return this._c._request("POST", `/api/hands/${hand_id}/secret`, data, undefined);
   }

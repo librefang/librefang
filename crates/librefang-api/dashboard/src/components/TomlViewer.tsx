@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Copy, Download, Loader2 } from "lucide-react";
+import { Copy, Download, Loader2, Pencil } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { Modal } from "./ui/Modal";
 import { useUIStore } from "../lib/store";
@@ -18,11 +18,24 @@ interface TomlViewerProps {
   downloadName?: string;
   /** Surfaced near the buttons when the fetch errored. */
   error?: string | null;
+  /**
+   * When provided, the TOML tab becomes editable: an "Edit" button appears,
+   * and Save invokes this callback with the edited text. Resolving marks the
+   * save successful (edit mode closes); rejecting surfaces the thrown message
+   * inline so a 400 validation error is shown to the user without losing the
+   * draft. Omit for a read-only viewer (the ConfigPage usage). Markdown is
+   * never editable.
+   */
+  onSave?: (text: string) => Promise<void>;
+  /** Save request in flight — disables the editor and shows a spinner. */
+  saving?: boolean;
 }
 
-// Reusable read-only viewer for TOML/Markdown bodies. Used by HandsPage
-// and ConfigPage to show the canonical on-disk representation of a hand
-// or the kernel config without giving up the structured editor surface.
+// Reusable viewer for TOML/Markdown bodies. Read-only by default (used by
+// ConfigPage to show config.toml); when `onSave` is provided the TOML tab
+// gains an inline editor with Save / Cancel (used by HandsPage to edit
+// HAND.toml). The structured editors remain the primary surface — this is the
+// raw escape hatch.
 export function TomlViewer({
   isOpen,
   onClose,
@@ -31,14 +44,22 @@ export function TomlViewer({
   markdown,
   downloadName = "manifest.toml",
   error,
+  onSave,
+  saving = false,
 }: TomlViewerProps) {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
   const [tab, setTab] = useState<"toml" | "markdown">("toml");
   const revokeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Edit state — only meaningful when `onSave` is provided.
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [saveError, setSaveError] = useState<string | null>(null);
+
   const body = tab === "toml" ? toml : markdown;
   const loading = body === undefined && !error;
+  const canEdit = !!onSave && tab === "toml";
 
   useEffect(() => {
     return () => {
@@ -48,22 +69,55 @@ export function TomlViewer({
     };
   }, []);
 
-  const onCopy = useCallback(async () => {
-    if (!body) return;
+  // Reset transient edit state whenever the modal closes so re-opening (for
+  // the same or a different hand) always starts from the read-only view.
+  useEffect(() => {
+    if (!isOpen) {
+      setEditing(false);
+      setSaveError(null);
+    }
+  }, [isOpen]);
+
+  const startEdit = useCallback(() => {
+    setDraft(toml ?? "");
+    setSaveError(null);
+    setEditing(true);
+  }, [toml]);
+
+  const cancelEdit = useCallback(() => {
+    setEditing(false);
+    setSaveError(null);
+  }, []);
+
+  const handleSave = useCallback(async () => {
+    if (!onSave) return;
+    setSaveError(null);
     try {
-      await navigator.clipboard.writeText(body);
+      await onSave(draft);
+      setEditing(false);
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : String(e));
+    }
+  }, [onSave, draft]);
+
+  const onCopy = useCallback(async () => {
+    const text = editing ? draft : body;
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
       addToast(t("toml_viewer.copied"), "success");
     } catch {
       addToast(t("toml_viewer.copy_failed"), "error");
     }
-  }, [body, t, addToast]);
+  }, [editing, draft, body, t, addToast]);
 
   const onDownload = useCallback(() => {
-    if (!body) return;
+    const text = editing ? draft : body;
+    if (!text) return;
     const filename =
       tab === "markdown" ? downloadName.replace(/\.toml$/i, ".md") : downloadName;
     const mime = tab === "markdown" ? "text/markdown" : "text/x-toml";
-    const blob = new Blob([body], { type: mime });
+    const blob = new Blob([text], { type: mime });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -72,7 +126,7 @@ export function TomlViewer({
     a.click();
     document.body.removeChild(a);
     revokeTimeoutRef.current = setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }, [body, tab, downloadName]);
+  }, [editing, draft, body, tab, downloadName]);
 
   return (
     <Modal isOpen={isOpen} onClose={onClose} title={title} size="7xl">
@@ -113,28 +167,69 @@ export function TomlViewer({
             </span>
           )}
           <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={onCopy}
-              disabled={!body}
-              className="text-[10px] font-bold text-text-dim hover:text-brand disabled:opacity-40"
-              title={t("toml_viewer.copy")}
-              aria-label={t("toml_viewer.copy")}
-            >
-              <Copy className="w-3.5 h-3.5" />
-            </button>
-            <button
-              type="button"
-              onClick={onDownload}
-              disabled={!body}
-              className="text-[10px] font-bold text-text-dim hover:text-brand disabled:opacity-40"
-              title={t("toml_viewer.download")}
-              aria-label={t("toml_viewer.download")}
-            >
-              <Download className="w-3.5 h-3.5" />
-            </button>
+            {canEdit && !editing && (
+              <button
+                type="button"
+                onClick={startEdit}
+                disabled={loading || !!error}
+                className="text-[10px] font-bold text-text-dim hover:text-brand disabled:opacity-40 inline-flex items-center gap-1"
+                title={t("common.edit")}
+              >
+                <Pencil className="w-3.5 h-3.5" />
+                {t("common.edit")}
+              </button>
+            )}
+            {editing ? (
+              <>
+                <button
+                  type="button"
+                  onClick={cancelEdit}
+                  disabled={saving}
+                  className="text-[10px] font-bold text-text-dim hover:text-text disabled:opacity-40"
+                >
+                  {t("common.cancel")}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSave}
+                  disabled={saving}
+                  className="text-[10px] font-bold px-2 py-1 rounded bg-brand text-white hover:brightness-110 disabled:opacity-40 inline-flex items-center gap-1"
+                >
+                  {saving && <Loader2 className="w-3 h-3 animate-spin" />}
+                  {saving ? t("common.saving") : t("common.save")}
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  onClick={onCopy}
+                  disabled={!body}
+                  className="text-[10px] font-bold text-text-dim hover:text-brand disabled:opacity-40"
+                  title={t("toml_viewer.copy")}
+                  aria-label={t("toml_viewer.copy")}
+                >
+                  <Copy className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={onDownload}
+                  disabled={!body}
+                  className="text-[10px] font-bold text-text-dim hover:text-brand disabled:opacity-40"
+                  title={t("toml_viewer.download")}
+                  aria-label={t("toml_viewer.download")}
+                >
+                  <Download className="w-3.5 h-3.5" />
+                </button>
+              </>
+            )}
           </div>
         </div>
+        {saveError && (
+          <p className="text-xs text-error rounded-lg border border-error/30 bg-error/5 px-3 py-2 whitespace-pre-wrap">
+            {saveError}
+          </p>
+        )}
         {error ? (
           <p className="text-xs text-error rounded-lg border border-error/30 bg-error/5 px-3 py-2">
             {error}
@@ -144,6 +239,17 @@ export function TomlViewer({
             <Loader2 className="w-3.5 h-3.5 animate-spin" />
             {t("toml_viewer.loading")}
           </div>
+        ) : editing ? (
+          <textarea
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            disabled={saving}
+            spellCheck={false}
+            autoComplete="off"
+            aria-label={t("toml_viewer.tab_toml")}
+            // Modal shell caps at 90vh; 78vh fills it while leaving room for the title bar.
+            className="w-full max-h-[78vh] h-[70vh] resize-none overflow-auto rounded-xl border border-border-subtle bg-main px-3 py-2 text-[11px] font-mono text-text outline-none focus:border-brand disabled:opacity-60"
+          />
         ) : (
           <AnimatePresence mode="wait">
             <motion.div

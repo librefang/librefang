@@ -61,6 +61,7 @@ import {
   useUninstallHand,
   useSetHandSecret,
   useUpdateHandSettings,
+  useUpdateHandManifest,
 } from "../lib/mutations/hands";
 import { usePatchAgent, useUpdateAgentTools } from "../lib/mutations/agents";
 import { useAgentDetail, useAgentTools } from "../lib/queries/agents";
@@ -123,10 +124,12 @@ function HandDetailPanel({
   isPending: boolean;
 }) {
   const { t } = useTranslation();
+  const addToast = useUIStore((s) => s.addToast);
   const isPaused = instance?.status === "paused";
 
   const [showManifest, setShowManifest] = useState(false);
   const manifestQuery = useHandManifestToml(hand.id, showManifest);
+  const updateManifest = useUpdateHandManifest();
 
   const settingsQuery = useHandSettingsQuery(hand.id);
 
@@ -318,6 +321,21 @@ function HandDetailPanel({
               ? (manifestQuery.error as Error).message ?? t("hands.manifest_error")
               : null
           }
+          // Only user-installed hands are editable: built-in (registry) hands
+          // are recreated from the registry on the next sync, so an edit would
+          // silently revert (#6478 review). Offer Save only when is_custom;
+          // otherwise TomlViewer stays read-only.
+          // Editing throws on a 400 validation error; TomlViewer surfaces the
+          // thrown message inline and keeps the draft so the user can fix it.
+          onSave={
+            hand.is_custom
+              ? async (text) => {
+                  await updateManifest.mutateAsync({ handId: hand.id, toml: text });
+                  addToast(t("hands.manifest_saved"), "success");
+                }
+              : undefined
+          }
+          saving={updateManifest.isPending}
         />
       </Suspense>
     </>

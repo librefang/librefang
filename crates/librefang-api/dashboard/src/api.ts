@@ -3588,6 +3588,20 @@ export async function getHandManifestToml(handId: string): Promise<string> {
   return getText(`/api/hands/${encodeURIComponent(handId)}/manifest`);
 }
 
+/** PUT /api/hands/{id}/manifest — overwrite the hand's HAND.toml. The server
+ *  validates the content by parsing it into a HandDefinition and rejects
+ *  invalid TOML (or a changed `id`) with a 400 whose message is surfaced via
+ *  ApiError, leaving the on-disk file untouched. Returns the reloaded
+ *  HandDefinition. */
+export async function updateHandManifestToml(
+  handId: string,
+  tomlContent: string
+): Promise<HandDefinitionItem> {
+  return put<HandDefinitionItem>(`/api/hands/${encodeURIComponent(handId)}/manifest`, {
+    toml_content: tomlContent
+  });
+}
+
 export async function getRawConfigToml(): Promise<string> {
   return getText("/api/config/export");
 }

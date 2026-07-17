@@ -2147,6 +2147,18 @@ impl HandsResource {
         .await
     }
 
+    pub async fn update_hand_manifest(&self, hand_id: &str, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::PUT,
+            &format!("/api/hands/{}/manifest", hand_id),
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
     pub async fn set_hand_secret(&self, hand_id: &str, data: Value) -> Result<Value> {
         do_req(
             &self.client,
