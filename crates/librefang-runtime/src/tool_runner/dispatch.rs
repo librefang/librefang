@@ -1559,8 +1559,8 @@ pub async fn execute_tool_with_sender_account(
     spill_threshold_bytes: u64,
     max_artifact_bytes: u64,
     sender_account_id: Option<&str>,
-    // When true, this is a system-internal fork (auto_dream, proactive
-    // memory) with no attributable end user — forwarded to the RBAC gate as
+    // When true, this is a system-internal fork (currently auto_dream) with
+    // no attributable end user — forwarded to the RBAC gate as
     // `system_call = true` so its `memory_*` calls are not routed through the
     // guest gate once `[[users]]` is configured (#6463). Every user-facing
     // caller passes `false`.
