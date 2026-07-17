@@ -793,7 +793,10 @@ key_required = true
         let rd_loop = this
             .find("for fb in &effective_fallbacks {")
             .expect("resolve_driver must build a fallback chain");
-        let rd_window = 900.min(this.len() - rd_loop);
+        // Wide enough to comfortably span the loop preamble + the gate (the
+        // `is_provider_allowed` check sits deep in the loop body), so a small
+        // edit to the preamble cannot push the token out of the window.
+        let rd_window = 1400.min(this.len() - rd_loop);
         assert!(
             this.get(rd_loop..rd_loop + rd_window)
                 .unwrap_or("")
