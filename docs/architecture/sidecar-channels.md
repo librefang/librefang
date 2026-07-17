@@ -89,6 +89,16 @@ Commands (daemon → subprocess, stdin): `send`, `ready_ack`, `typing`,
 direction) are tolerated, not fatal — that is what lets a new daemon
 send `ready_ack` to an older adapter and vice versa.
 
+The `reaction` command carries the phase-appropriate emoji plus two
+optional structured fields — `phase` (the lifecycle tag: `queued` /
+`thinking` / `tool_use` / `streaming` / `done` / `error`) and
+`tool_name` (set for `tool_use` only). Both are omitted from the frame
+when empty, so a plain reaction is byte-for-byte the legacy
+`{channel_id, message_id, reaction}` shape and an adapter that predates
+the fields ignores them. They let an adapter render a live multi-step
+progress display from the lifecycle instead of only mapping the emoji
+(the `⚙️` tool-use emoji alone drops *which* tool ran). See #6451.
+
 stdout carries only protocol frames. All adapter logging goes to
 stderr (the SDK enforces this).
 
@@ -102,6 +112,41 @@ pre-sidecar behaviour (plain text). `create_webhook_routes` stays
 `None` for sidecars — an `axum::Router` can't cross stdio; an adapter
 that needs inbound HTTP runs its own listener and POSTs events back
 through stdout.
+
+### The AgentPhase lifecycle rides on `reaction`
+
+The generic agent lifecycle — `Queued → Thinking → ToolUse{tool_name}
+→ Streaming → Done/Error` (`AgentPhase` in
+`crates/librefang-channels/src/types.rs`) — is dispatched to adapters
+through `ChannelAdapter::send_reaction` (`bridge.rs`), which the
+sidecar trampoline gates on the **`reaction`** capability. So an
+adapter receives the lifecycle if and only if it declares `reaction`;
+`interactive` gates `send_interactive` only and never carries phase
+events. An adapter wanting a task/step progress display therefore
+reuses the existing `reaction` capability — no new `task_update`
+capability is required, and none was added. The enriched `phase` /
+`tool_name` fields on the `reaction` command (see Protocol above) give
+the adapter the structured detail an emoji alone drops.
+
+Two dispatch details matter for a multi-step display:
+
+- **Non-streaming adapters** (those that do *not* declare `streaming`,
+  e.g. Slack) previously received only `Queued`/`Thinking` up front and
+  `Done`/`Error` at the end; the per-tool `ToolUse{name}` phases were
+  emitted on the streaming path only. The bridge now also extracts the
+  `🔧 tool_name` markers on the non-streaming accumulation path and
+  emits `ToolUse` lifecycle reactions there, so a non-streaming adapter
+  that declares `reaction` sees the full `Thinking → ToolUse… →
+  Done/Error` sequence. Adapters that do not declare `reaction` treat
+  every one of these as a no-op, so the change is inert for them.
+- The **Slack** sidecar (`sdk/python/librefang/sidecar/adapters/slack.py`)
+  is the first consumer: it declares `reaction` and folds the phase
+  stream into an updated-in-place Block Kit card (`chat.update`) that
+  shows the live step list for multi-step turns. Single-step turns (no
+  tool ran) post no card and keep the pre-existing `eyes → check`
+  receipt reactions, which are driven independently by the receive/send
+  hooks — the phase stream never emits emoji reactions on Slack. The
+  card honours the same `SLACK_REACTIONS` opt-out as the receipts.
 
 ## Supervision
 

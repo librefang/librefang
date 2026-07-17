@@ -5,8 +5,8 @@
 //! newline-delimited JSON (one JSON object per line) over stdin/stdout.
 
 use crate::types::{
-    ChannelAdapter, ChannelContent, ChannelMessage, ChannelStatus, ChannelType, ChannelUser,
-    GroupMember, InteractiveMessage, LifecycleReaction, ParticipantRef, TypingEvent,
+    AgentPhase, ChannelAdapter, ChannelContent, ChannelMessage, ChannelStatus, ChannelType,
+    ChannelUser, GroupMember, InteractiveMessage, LifecycleReaction, ParticipantRef, TypingEvent,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -296,11 +296,27 @@ pub struct SidecarTypingCmdParams {
 }
 
 /// `reaction` command params (P0 skeleton — wired in P2).
+///
+/// `reaction` carries the phase-appropriate emoji; `phase` and
+/// `tool_name` (added for the Slack multi-step task display, #6451)
+/// carry the structured lifecycle detail an emoji-only frame drops.
+/// Both are skipped from the wire when empty so a plain phase reaction
+/// serializes to exactly the legacy `{channel_id, message_id, reaction}`
+/// frame — adapters that predate the fields ignore them, adapters that
+/// want a step list read them.
 #[derive(Debug, Serialize)]
 pub struct SidecarReactionParams {
     pub channel_id: String,
     pub message_id: String,
     pub reaction: String,
+    /// Lifecycle phase tag: one of `queued`, `thinking`, `tool_use`,
+    /// `streaming`, `done`, `error` (matches `AgentPhase`'s snake_case
+    /// serde tags). Empty only when a caller constructs a bare reaction.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub phase: String,
+    /// The tool being executed, present for the `tool_use` phase only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
 }
 
 /// `interactive` command params — full button shape.
@@ -1885,11 +1901,24 @@ impl ChannelAdapter for SidecarAdapter {
         if !self.has_cap("reaction") {
             return Ok(());
         }
+        // Project the structured phase onto the wire tag + optional tool
+        // name so a reaction consumer can render a live step list, not
+        // just an emoji (the `⚙️` tool_use emoji alone drops which tool).
+        let (phase, tool_name) = match &reaction.phase {
+            AgentPhase::Queued => ("queued", None),
+            AgentPhase::Thinking => ("thinking", None),
+            AgentPhase::ToolUse { tool_name } => ("tool_use", Some(tool_name.clone())),
+            AgentPhase::Streaming => ("streaming", None),
+            AgentPhase::Done => ("done", None),
+            AgentPhase::Error => ("error", None),
+        };
         self.send_command(&SidecarCommand::Reaction {
             params: SidecarReactionParams {
                 channel_id: user.platform_id.clone(),
                 message_id: message_id.to_string(),
                 reaction: reaction.emoji.clone(),
+                phase: phase.to_string(),
+                tool_name,
             },
         })
         .await
@@ -2694,6 +2723,8 @@ mod tests {
                     channel_id: "c".to_string(),
                     message_id: "m".to_string(),
                     reaction: "👍".to_string(),
+                    phase: String::new(),
+                    tool_name: None,
                 },
             },
             SidecarCommand::Interactive {

@@ -180,7 +180,8 @@ impl ToolPolicy for NoopKernelHandle {}
 #[test]
 fn test_resolve_user_tool_decision_default_allow() {
     let handle = NoopKernelHandle;
-    let result = handle.resolve_user_tool_decision("any_tool", Some("sender"), Some("channel"));
+    let result =
+        handle.resolve_user_tool_decision("any_tool", Some("sender"), Some("channel"), false);
     assert_eq!(result, UserToolGate::Allow);
 }
 

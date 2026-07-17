@@ -5898,6 +5898,7 @@ async fn test_resolve_user_tool_decision_autonomous_bypasses_rbac() {
             "shell_exec",
             None,
             Some(super::SYSTEM_CHANNEL_CRON),
+            false,
         ),
         UserToolGate::Allow,
         "cron carve-out must continue to bypass RBAC for autonomous-class calls"
@@ -5910,6 +5911,7 @@ async fn test_resolve_user_tool_decision_autonomous_bypasses_rbac() {
             "shell_exec",
             None,
             Some(super::SYSTEM_CHANNEL_AUTONOMOUS),
+            false,
         ),
         UserToolGate::Allow,
         "autonomous-tick tool calls must bypass RBAC — without this, RBAC + autonomous \
@@ -5924,6 +5926,7 @@ async fn test_resolve_user_tool_decision_autonomous_bypasses_rbac() {
         "shell_exec",
         Some("999999"),
         Some("telegram"),
+        false,
     );
     assert!(
         !matches!(guest_decision, UserToolGate::Allow),
@@ -5931,6 +5934,153 @@ async fn test_resolve_user_tool_decision_autonomous_bypasses_rbac() {
     );
 
     kernel.shutdown();
+}
+
+/// Issue #6463 regression — a **system-internal fork** (auto_dream
+/// background cycle, proactive-memory extractor) must not have its
+/// `memory_*` tool calls routed through the RBAC guest gate once
+/// `[[users]]` is configured. Such forks run via
+/// `run_forked_agent_streaming` on the parent's canonical session with a
+/// `None` sender context and no synthetic channel, so they signal their
+/// system-internal status through `LoopOptions.system_call`, which the
+/// runtime forwards to [`KernelHandle::resolve_user_tool_decision`] as
+/// `system_call = true`. Without the flag, `resolve_user(None, None)`
+/// fails and the call falls into `guest_gate`, whose allowlist lacks
+/// `memory_store` / `memory_recall` / `memory_list` → `NeedsApproval` on
+/// every dream cycle. This test pins both halves: the system fork is
+/// allowed, and the identical call without the flag still hits the guest
+/// gate (proving the bypass is targeted, not a blanket fail-open).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_resolve_user_tool_decision_system_fork_bypasses_rbac_6463() {
+    use librefang_types::config::UserConfig;
+    use librefang_types::user_policy::UserToolGate;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    // A single Owner user is enough to enable RBAC. The fork carries no
+    // (sender_id, channel), so without the system_call flag it cannot
+    // resolve to this user and falls to the guest gate.
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        users: vec![UserConfig {
+            name: "Owner".to_string(),
+            role: "owner".to_string(),
+            ..Default::default()
+        }],
+        ..KernelConfig::default()
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let kernel = Arc::new(kernel);
+    kernel.set_self_handle();
+
+    // Drive the exact allowlist the dream fork grants — if a future edit
+    // adds a tool to DREAM_ALLOWED_TOOLS this test follows automatically.
+    for &tool in crate::auto_dream::DREAM_ALLOWED_TOOLS {
+        // System-internal fork (system_call = true): allowed even though it
+        // has no attributable (sender_id, channel).
+        assert_eq!(
+            kernel_handle::ApprovalGate::resolve_user_tool_decision(
+                kernel.as_ref(),
+                tool,
+                None,
+                None,
+                true,
+            ),
+            UserToolGate::Allow,
+            "system-internal fork must bypass RBAC for '{tool}' (issue #6463)"
+        );
+
+        // Same call WITHOUT the flag: no user, no system channel → guest
+        // gate, which lists no memory_* tool → NeedsApproval.
+        let guest = kernel_handle::ApprovalGate::resolve_user_tool_decision(
+            kernel.as_ref(),
+            tool,
+            None,
+            None,
+            false,
+        );
+        assert!(
+            matches!(guest, UserToolGate::NeedsApproval { .. }),
+            "a non-system call with no sender must hit the guest gate for '{tool}': got {guest:?}"
+        );
+    }
+
+    kernel.shutdown();
+}
+
+/// `LoopOptions::default()` must be a non-system, user-facing turn.
+/// Only `run_forked_agent_streaming` sets `system_call = true`; a
+/// regression that flips the default would silently bypass RBAC for
+/// every main turn (#6463).
+#[test]
+fn loop_options_default_is_not_system_call_6463() {
+    let opts = librefang_runtime::agent_loop::LoopOptions::default();
+    assert!(
+        !opts.system_call,
+        "LoopOptions::default() must not be a system fork; only \
+         run_forked_agent_streaming sets system_call = true"
+    );
+}
+
+/// `run_forked_agent_streaming` is the ONE construction site that builds a
+/// `LoopOptions` with `system_call: true` — the load-bearing literal that
+/// makes a system-internal fork (currently only the auto_dream background
+/// cycle) bypass the per-user RBAC gate so its `memory_*` calls don't hit
+/// `NeedsApproval` once `[[users]]` is configured (#6463). Two failure
+/// modes are pinned by grepping the source (mirrors
+/// `test_execute_llm_agent_hardcodes_is_fork_false_for_peer_id_invariant`,
+/// which `include_str!`s its sibling source the same way): if a refactor
+/// drops the literal, dream cycles silently regress to flooding the
+/// approval queue; if it spreads to another `LoopOptions` literal on this
+/// path, an ordinary user turn would wrongly bypass the gate.
+#[test]
+fn run_forked_agent_streaming_sets_system_call_true_6463() {
+    let src = include_str!("messaging.rs");
+
+    // Invariant 1: the fork's own `LoopOptions` literal sets
+    // `system_call: true`. Scope the search to the
+    // `run_forked_agent_streaming` body (up to the next method on the
+    // impl) so the assertion is about *this* call site specifically.
+    let fork_start = src
+        .find("pub fn run_forked_agent_streaming")
+        .expect("run_forked_agent_streaming must exist in messaging.rs");
+    let fork_body = {
+        let after = &src[fork_start..];
+        let end = after
+            .find("fn send_message_streaming_with_sender(")
+            .expect("the method following run_forked_agent_streaming must exist");
+        &after[..end]
+    };
+    assert!(
+        fork_body.contains("system_call: true,"),
+        "run_forked_agent_streaming must construct its LoopOptions with \
+         `system_call: true,` so the auto_dream fork bypasses the per-user \
+         RBAC gate (#6463); if this literal disappears, dream cycles \
+         regress to NeedsApproval on every memory_* call once `[[users]]` \
+         is configured."
+    );
+
+    // Invariant 2: no OTHER LoopOptions literal in messaging.rs sets
+    // `system_call: true` — every user-facing construction site passes
+    // `false`; only the system-internal fork is exempt. Comments are
+    // excluded so explanatory prose mentioning the flag does not trip the
+    // count (the same style the peer_id invariant test uses).
+    let system_call_true_lines = src
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .filter(|l| l.contains("system_call: true"))
+        .count();
+    assert_eq!(
+        system_call_true_lines, 1,
+        "exactly one LoopOptions literal in messaging.rs may set \
+         `system_call: true` (the run_forked_agent_streaming fork); a \
+         second occurrence means a user-facing turn is wrongly bypassing \
+         the per-user RBAC gate."
+    );
 }
 
 // ---------------------------------------------------------------------------

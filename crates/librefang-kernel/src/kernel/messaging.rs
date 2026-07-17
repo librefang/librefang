@@ -744,6 +744,8 @@ impl LibreFangKernel {
                 // ephemeral /btw turns; default-off config is a no-op.
                 parallel_tools_config: Some(self.config.load().parallel_tools.clone()),
                 canvas_config: Some(self.config.load().canvas.clone()),
+                // Ephemeral /btw is a user-initiated turn, not a system fork.
+                system_call: false,
             },
         )
         .await
@@ -1692,6 +1694,8 @@ impl LibreFangKernel {
             gateway_compression: Some(self.config.load().gateway_compression.clone()),
             parallel_tools_config: Some(self.config.load().parallel_tools.clone()),
             canvas_config: Some(self.config.load().canvas.clone()),
+            // User-initiated main turn, not a system-internal fork.
+            system_call: false,
         };
         self.send_message_streaming_with_sender_and_opts(
             effective_id,
@@ -1889,6 +1893,16 @@ impl LibreFangKernel {
             gateway_compression: Some(self.config.load().gateway_compression.clone()),
             parallel_tools_config: Some(self.config.load().parallel_tools.clone()),
             canvas_config: Some(self.config.load().canvas.clone()),
+            // #6463: this is a system-internal fork (currently only the
+            // auto_dream background cycle) with no attributable end
+            // user — it runs on the parent's canonical session with a `None`
+            // sender context. Flag it so the runtime forwards
+            // `system_call = true` to the RBAC gate and its `memory_*` calls
+            // bypass the guest gate instead of hitting NeedsApproval on every
+            // dream cycle once `[[users]]` is configured. Mirrors the
+            // cron / autonomous channel carve-out for a path that has no
+            // synthetic channel to match on.
+            system_call: true,
         };
         // INVARIANT: forks must use the canonical session so the parent turn's
         // prompt-cache prefix is reused. Do NOT pass a `session_id_override`
@@ -1969,6 +1983,8 @@ impl LibreFangKernel {
             gateway_compression: Some(self.config.load().gateway_compression.clone()),
             parallel_tools_config: Some(self.config.load().parallel_tools.clone()),
             canvas_config: Some(self.config.load().canvas.clone()),
+            // User-initiated main turn, not a system-internal fork.
+            system_call: false,
         };
         self.send_message_streaming_with_sender_and_opts(
             agent_id,

@@ -1206,6 +1206,9 @@ impl LibreFangKernel {
             gateway_compression: Some(cfg.gateway_compression.clone()),
             parallel_tools_config: Some(cfg.parallel_tools.clone()),
             canvas_config: Some(cfg.canvas.clone()),
+            // `execute_llm_agent` never runs a fork (see the peer_id
+            // invariant test) — always a user-facing / trigger turn.
+            system_call: false,
         };
 
         // Build a per-execution MCP pool that includes the agent workspace as

@@ -115,6 +115,9 @@ fn build_audit_harness(api_key: &str, users: Vec<(&str, &str, &str)>) -> AuditHa
     let app = Router::new()
         .nest("/api", routes::audit::router())
         .nest("/api", routes::system::router())
+        // Mount the users router too so handler-level attribution tests can
+        // drive a real modified write endpoint (#6461).
+        .nest("/api", routes::users::router())
         .layer(axum::middleware::from_fn_with_state(
             api_key_state,
             middleware::auth,
@@ -151,6 +154,35 @@ fn body_json(bytes: &[u8]) -> serde_json::Value {
     serde_json::from_slice(bytes).expect("response body must be valid JSON")
 }
 
+/// Send a JSON POST through the router and return (status, body bytes).
+async fn send_post_json(
+    app: Router,
+    path: &str,
+    bearer: Option<&str>,
+    body: serde_json::Value,
+) -> (StatusCode, Vec<u8>) {
+    let mut builder = Request::builder()
+        .method(Method::POST)
+        .uri(path)
+        .header("content-type", "application/json");
+    if let Some(token) = bearer {
+        builder = builder.header("authorization", format!("Bearer {token}"));
+    }
+    let req = builder
+        .body(Body::from(body.to_string()))
+        .expect("build request");
+    let resp = app.oneshot(req).await.expect("oneshot");
+    let status = resp.status();
+    let bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .expect("collect body")
+        .to_bytes()
+        .to_vec();
+    (status, bytes)
+}
+
 /// Seed a few audit entries with mixed (user, agent, action, channel) so the
 /// filter assertions can prove the right rows survive. We go through the
 /// production `record_with_context` API rather than constructing `AuditEntry`
@@ -183,6 +215,71 @@ fn seed_audit_entries(state: &routes::AppState) {
         "denied",
         Some(alice),
         Some("api".to_string()),
+    );
+}
+
+/// Handler-level attribution: a write through a *modified* handler
+/// (`POST /api/users` → `persist_users`) must land an audit row carrying the
+/// acting user's id, so `?user=<caller>` surfaces it. This guards the handlers
+/// this PR threaded the caller into — a dropped `Extension<AuthenticatedApiUser>`
+/// would silently zero attribution while every existing filter test (which
+/// seeds rows directly via `record_with_context`) stayed green (#6461 review).
+// multi_thread: create_user -> persist_users triggers a config reload whose
+// workflow auto-registration uses `block_in_place`, which panics on a
+// single-threaded runtime.
+#[tokio::test(flavor = "multi_thread")]
+async fn audit_attributes_user_management_write_to_the_acting_user() {
+    // Alice is an Owner: POST /api/users is Owner-gated (is_owner_only_write),
+    // and Owner (3) >= Admin (2) also satisfies the audit-query admin gate.
+    let h = build_audit_harness("admin-key", vec![("Alice", "owner", "alice-key")]);
+
+    // No Alice-attributed rows before the write.
+    let (status, bytes) = send_get(
+        h.app.clone(),
+        "/api/audit/query?user=Alice",
+        Some("alice-key"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body_json(&bytes)["items"]
+            .as_array()
+            .expect("items[]")
+            .len(),
+        0,
+        "no Alice-attributed audit rows should exist before the write"
+    );
+
+    // Alice (owner) creates a user through the real modified handler.
+    let (status, bytes) = send_post_json(
+        h.app.clone(),
+        "/api/users",
+        Some("alice-key"),
+        serde_json::json!({ "name": "newbie-6461", "role": "user" }),
+    )
+    .await;
+    assert!(
+        status.is_success(),
+        "create_user must succeed for an authenticated admin; got {status}: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+
+    // The resulting audit row is attributed to Alice — `?user=Alice` now returns it.
+    let (status, bytes) = send_get(
+        h.app.clone(),
+        "/api/audit/query?user=Alice",
+        Some("alice-key"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let items = body_json(&bytes)["items"]
+        .as_array()
+        .expect("items[]")
+        .clone();
+    assert!(
+        !items.is_empty(),
+        "the user-management write must produce an Alice-attributed audit row; an empty \
+         result means the caller identity was not threaded into record_with_context"
     );
 }
 
@@ -264,6 +361,79 @@ async fn audit_query_filters_by_user_name_resolves_to_uuid() {
     let bob = UserId::from_name("Bob").to_string();
     for e in entries {
         assert_eq!(e["user_id"], bob, "every returned entry must be Bob's");
+    }
+}
+
+/// Per-user stratification (#6461): with events recorded for two distinct
+/// users, `?user=<who>` must return *only* that user's rows — never the
+/// other user's — and each user's full set. The querying admin (`Carol`)
+/// is a third identity with no seeded entries, so the filter cannot
+/// accidentally pass by matching the caller. Seed shape (see
+/// `seed_audit_entries`): Alice → 2 rows (ToolInvoke + PermissionDenied),
+/// Bob → 1 row (ToolInvoke).
+#[tokio::test(flavor = "multi_thread")]
+async fn audit_query_stratifies_by_user_returns_only_matching_user_events() {
+    let h = build_audit_harness("any-key", vec![("Carol", "admin", "carol-admin-key")]);
+    seed_audit_entries(&h.state);
+
+    let alice = UserId::from_name("Alice").to_string();
+    let bob = UserId::from_name("Bob").to_string();
+
+    // Sanity: the unfiltered admin view sees both users' rows, so a
+    // narrowed result below is a real filter effect and not an empty log.
+    let (status, bytes) =
+        send_get(h.app.clone(), "/api/audit/query", Some("carol-admin-key")).await;
+    assert_eq!(status, StatusCode::OK);
+    let all = body_json(&bytes);
+    let all_entries = all["items"].as_array().expect("items[]");
+    assert!(
+        all_entries.iter().any(|e| e["user_id"] == alice)
+            && all_entries.iter().any(|e| e["user_id"] == bob),
+        "unfiltered query must contain both users' rows; got {all}"
+    );
+
+    // ?user=Alice → exactly Alice's two rows, none of Bob's.
+    let (status, bytes) = send_get(
+        h.app.clone(),
+        "/api/audit/query?user=Alice",
+        Some("carol-admin-key"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let body = body_json(&bytes);
+    let alice_entries = body["items"].as_array().expect("items[]");
+    assert_eq!(
+        alice_entries.len(),
+        2,
+        "?user=Alice must return exactly Alice's two seeded rows; got {body}"
+    );
+    for e in alice_entries {
+        assert_eq!(
+            e["user_id"], alice,
+            "every returned row must be Alice's, never Bob's; got {e}"
+        );
+    }
+
+    // ?user=Bob → exactly Bob's single row, none of Alice's.
+    let (status, bytes) = send_get(
+        h.app.clone(),
+        "/api/audit/query?user=Bob",
+        Some("carol-admin-key"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let body = body_json(&bytes);
+    let bob_entries = body["items"].as_array().expect("items[]");
+    assert_eq!(
+        bob_entries.len(),
+        1,
+        "?user=Bob must return exactly Bob's single seeded row; got {body}"
+    );
+    for e in bob_entries {
+        assert_eq!(
+            e["user_id"], bob,
+            "every returned row must be Bob's, never Alice's; got {e}"
+        );
     }
 }
 

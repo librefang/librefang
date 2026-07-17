@@ -4945,6 +4945,24 @@ async fn dispatch_message(
     {
         let mut accumulated = String::new();
         while let Some(delta) = delta_rx.recv().await {
+            // Surface tool invocations as live ToolUse lifecycle phases —
+            // the streaming path (above) already does this from the same
+            // `\n\n🔧 toolname\n\n` markers; mirroring it here lets a
+            // non-streaming adapter that consumes lifecycle reactions
+            // (e.g. the Slack sidecar's multi-step task display, #6451)
+            // build a per-tool step list instead of only Thinking→Done.
+            // Adapters that don't declare the `reaction` capability treat
+            // each of these as a no-op, so this is inert for everyone else.
+            if let Some(name) = extract_tool_marker_name(&delta) {
+                send_lifecycle_reaction(
+                    adapter,
+                    &message.sender,
+                    msg_id,
+                    &AgentPhase::tool_use(&name),
+                    false,
+                )
+                .await;
+            }
             accumulated.push_str(&delta);
         }
         // Status is sent after the text channel fully drains, so awaiting

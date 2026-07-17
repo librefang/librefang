@@ -42,6 +42,22 @@ macro_rules! tg_trace {
     ($($arg:tt)*) => { trace(format_args!($($arg)*)) };
 }
 
+/// Whether the streaming send path is advertised as a capability.
+/// Reads `TELEGRAM_STREAMING` live on each `capabilities()` call and defaults to enabled.
+/// `"0"` / `"false"` / `"no"` / `"off"` (case-insensitive, trimmed) disable it; everything else — including an unset variable — leaves it enabled.
+///
+/// When disabled the `"streaming"` capability is dropped, so the daemon routes every send through the plain (non-streaming) path.
+/// That trades incremental updates for a single final message, avoiding the visible placeholder flash on fast / short LLM turns.
+fn streaming_enabled() -> bool {
+    match std::env::var("TELEGRAM_STREAMING") {
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
+        Err(_) => true,
+    }
+}
+
 pub struct TelegramAdapter {
     client: Arc<BotClient>,
     allowlist: AllowList,
@@ -192,13 +208,17 @@ impl TelegramAdapter {
 #[async_trait]
 impl SidecarAdapter for TelegramAdapter {
     fn capabilities(&self) -> Vec<String> {
-        vec![
+        let mut caps: Vec<String> = vec![
             "typing".into(),
             "reaction".into(),
             "interactive".into(),
             "thread".into(),
-            "streaming".into(),
-        ]
+        ];
+        // `"streaming"` is opt-out via `TELEGRAM_STREAMING`; appended last so the base capability order stays deterministic.
+        if streaming_enabled() {
+            caps.push("streaming".into());
+        }
+        caps
     }
 
     fn header_rules(&self) -> Vec<Value> {
@@ -444,5 +464,87 @@ impl SidecarAdapter for TelegramAdapter {
             // Tiny breather to let other tasks make progress between poll iterations.
             tokio::task::yield_now().await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Restores `TELEGRAM_STREAMING` to its pre-test value on drop, so the mutation stays contained even if an assertion panics mid-test.
+    struct EnvGuard(Option<String>);
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(v) => std::env::set_var("TELEGRAM_STREAMING", v),
+                None => std::env::remove_var("TELEGRAM_STREAMING"),
+            }
+        }
+    }
+
+    fn set_streaming(v: Option<&str>) {
+        match v {
+            Some(v) => std::env::set_var("TELEGRAM_STREAMING", v),
+            None => std::env::remove_var("TELEGRAM_STREAMING"),
+        }
+    }
+
+    fn test_adapter() -> TelegramAdapter {
+        TelegramAdapter {
+            client: Arc::new(BotClient::new("123456:test-token").expect("dummy client")),
+            allowlist: AllowList::from_env_value(None),
+            clear_done_reaction: false,
+            streams: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    // `TELEGRAM_STREAMING` is process-global state; this is the only test in the crate that touches it and every case runs sequentially in one function, so nothing races with a parallel test.
+    // The guard restores the original value.
+    #[test]
+    fn streaming_enabled_parsing_and_capability_gate() {
+        let _guard = EnvGuard(std::env::var("TELEGRAM_STREAMING").ok());
+
+        // Unset defaults to enabled.
+        set_streaming(None);
+        assert!(streaming_enabled(), "unset should default to enabled");
+
+        // Explicit truthy values stay enabled.
+        set_streaming(Some("true"));
+        assert!(streaming_enabled());
+        set_streaming(Some("1"));
+        assert!(streaming_enabled());
+
+        // Disable tokens, case-insensitive and trimmed.
+        for v in ["0", "false", "no", "off", " OFF ", "False", "Off"] {
+            set_streaming(Some(v));
+            assert!(!streaming_enabled(), "{v:?} should disable streaming");
+        }
+
+        // Unknown values fall back to enabled.
+        set_streaming(Some("maybe"));
+        assert!(streaming_enabled(), "unknown value should stay enabled");
+
+        let adapter = test_adapter();
+
+        // Disabled -> "streaming" dropped, the four base capabilities intact.
+        set_streaming(Some("0"));
+        let caps = adapter.capabilities();
+        assert!(
+            !caps.iter().any(|c| c == "streaming"),
+            "streaming must be dropped when disabled"
+        );
+        for base in ["typing", "reaction", "interactive", "thread"] {
+            assert!(
+                caps.iter().any(|c| c == base),
+                "missing base capability {base}"
+            );
+        }
+
+        // Enabled -> "streaming" present again.
+        set_streaming(Some("true"));
+        assert!(
+            adapter.capabilities().iter().any(|c| c == "streaming"),
+            "streaming must be advertised when enabled"
+        );
     }
 }
