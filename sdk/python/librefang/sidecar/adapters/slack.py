@@ -1177,6 +1177,26 @@ def _build_task_progress_blocks(
         icon = _PHASE_STEP_ICON.get(phase, "•") if active else "✓"  # ✓
         lines.append(f"{icon} {_phase_step_label(phase, tool_name)}")
     text = "\n".join(lines)
+    # Slack rejects a section whose text exceeds SLACK_MSG_LIMIT (3000) chars,
+    # which would freeze the progress card on a long or looping turn. Keep the
+    # header plus the most recent steps under the limit, collapsing older steps
+    # into a single summary line (#6451 review).
+    if len(text) > SLACK_MSG_LIMIT:
+        header_line = lines[0]
+        step_lines = lines[1:]
+        budget = SLACK_MSG_LIMIT - len(header_line) - 40
+        kept: list[str] = []
+        for line in reversed(step_lines):
+            if sum(len(x) + 1 for x in kept) + len(line) + 1 > budget:
+                break
+            kept.append(line)
+        kept.reverse()
+        dropped = len(step_lines) - len(kept)
+        summary = [header_line]
+        if dropped > 0:
+            summary.append(f"… {dropped} earlier step{'s' if dropped != 1 else ''}")
+        summary.extend(kept)
+        text = "\n".join(summary)
     blocks = [{
         "type": "section",
         "text": {"type": "mrkdwn", "text": text},
