@@ -156,6 +156,7 @@ use crate::types;
         routes::list_active_hands,
         routes::get_hand,
         routes::get_hand_manifest,
+        routes::update_hand_manifest,
         routes::activate_hand,
         routes::check_hand_deps,
         routes::install_hand_deps,

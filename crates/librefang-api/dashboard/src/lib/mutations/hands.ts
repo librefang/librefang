@@ -8,6 +8,7 @@ import {
   installHandFromMarketplace,
   setHandSecret,
   updateHandSettings,
+  updateHandManifestToml,
   sendHandMessage,
 } from "../http/client";
 import type { HandInstanceItem } from "../../api";
@@ -139,6 +140,20 @@ export function useUpdateHandSettings() {
       // never reappear once the local draft is cleared.
       qc.invalidateQueries({ queryKey: handKeys.settings(variables.handId) });
     },
+  });
+}
+
+// Edit a hand's HAND.toml in place. The definition changes (name /
+// description / agents surface on the hands list and, since hands surface as
+// agents, on the agent space too), so reuse the broad invalidation. The
+// manifest query lives under handKeys.all, so it is refreshed as well and the
+// viewer re-fetches the persisted content on next open.
+export function useUpdateHandManifest() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ handId, toml }: { handId: string; toml: string }) =>
+      updateHandManifestToml(handId, toml),
+    onSuccess: () => invalidateHandAndAgentCaches(qc),
   });
 }
 

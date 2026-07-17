@@ -9,6 +9,10 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ### Added
 
+- Edit `HAND.toml` online from the Hands panel: the read-only manifest viewer now has an Edit / Save / Cancel affordance backed by a new authenticated `PUT /api/hands/{id}/manifest` that validates the submitted TOML by parsing it into a `HandDefinition` (rejecting invalid TOML or a changed `id` with a 400 and leaving the on-disk file untouched), runs the same supply-chain audit as the install path, persists the file to whichever on-disk copy the hand loads from, and hot-reloads the in-memory definitions — an already-active hand instance keeps its old manifest until it is deactivated and reactivated, and edits to a built-in (registry) hand are overwritten on the next registry sync (#6478) (@houko)
+
+### Added
+
 - Slack sidecar multi-step task-progress display: the generic AgentPhase lifecycle (Thinking → ToolUse{name} → Done/Error) now reaches the Slack adapter as `reaction` commands — Slack declares the existing `reaction` capability rather than a new one, since that is the capability `ChannelAdapter::send_reaction` already dispatches the phase lifecycle through — and is rendered as an updated-in-place Block Kit step list via `chat.update` for multi-step turns, while single-step turns keep the prior eyes → white_check_mark receipt reactions (both honour `SLACK_REACTIONS`); the `reaction` command gained optional `phase` / `tool_name` fields (backward-compatible, omitted when empty) carrying the lifecycle detail the emoji alone drops, and the bridge now also emits `ToolUse` phases on the non-streaming dispatch path so a non-streaming adapter that declares `reaction` sees the full `Thinking → ToolUse… → Done/Error` sequence (#6451) (@houko)
 
 ### Changed
