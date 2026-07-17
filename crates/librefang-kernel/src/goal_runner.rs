@@ -60,6 +60,8 @@ pub struct ParsedTick {
     pub done: bool,
     /// The agent signalled it is blocked (`GOAL_BLOCKED`).
     pub blocked: bool,
+    /// The agent captured a learning (`GOAL_LEARNED: <text>`).
+    pub learnings: Vec<String>,
 }
 
 /// Parse an agent reply for `GOAL_PROGRESS:` / `GOAL_DONE` / `GOAL_BLOCKED`
@@ -77,6 +79,11 @@ pub fn parse_tick(reply: &str) -> ParsedTick {
             out.done = true;
         } else if marker_present(&upper, "GOAL_BLOCKED") {
             out.blocked = true;
+        } else if let Some(rest) = upper.strip_prefix("GOAL_LEARNED:") {
+            let learning = rest.trim();
+            if !learning.is_empty() {
+                out.learnings.push(learning.to_string());
+            }
         }
     }
     out
@@ -107,20 +114,34 @@ pub fn build_goal_prompt(
     iteration: u32,
     max_iterations: u32,
     has_verifier: bool,
+    learnings: &[String],
 ) -> String {
     let loop_section = if has_verifier {
         "\n\n## Loop Engineering Mode\n\
          You are part of an autonomous loop (Generator + Verifier).\n\
          - Your output will be sent to a verifier agent for judgment.\n\
          - If the verifier rejects your work, you will retry automatically.\n\
-         - Use `file_read`/`file_write` to maintain `.loop/state.md` for memory across iterations.\n\
          - For complex tasks, spawn sub-agents with `agent_spawn` and delegate with `agent_send`.\n\
          - Never grade your own work — the verifier is the final judge.\n\
-         - Track progress in `.loop/state.md` under ## Tasks / ## Learnings / ## Decisions."
+         - When you discover something reusable (a pattern, a pitfall, a technique),\n\
+           capture it with `GOAL_LEARNED: <one sentence>` so it persists in memory."
     } else {
         "\n\n## Autonomous Mode\n\
-         Use `file_read`/`file_write` to maintain `.loop/state.md` for memory across iterations.\n\
-         For complex tasks, spawn sub-agents with `agent_spawn` and delegate with `agent_send`."
+         For complex tasks, spawn sub-agents with `agent_spawn` and delegate with `agent_send`.\n\
+         When you discover something reusable, capture it with `GOAL_LEARNED: <one sentence>`."
+    };
+    let learnings_block = if learnings.is_empty() {
+        String::new()
+    } else {
+        let recent = learnings.iter().rev().take(6).cloned().collect::<Vec<_>>();
+        format!(
+            "\n\n## Memory (captured learnings from prior iterations)\n{}\n",
+            recent
+                .iter()
+                .map(|l| format!("- {l}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
     };
     format!(
         "[LONG-HORIZON GOAL] You are autonomously pursuing a goal across multiple turns.\n\
@@ -128,6 +149,7 @@ pub fn build_goal_prompt(
          Description: {description}\n\
          Current progress: {progress}%\n\
          Iteration: {iter} of {max}\n\
+         {learnings}\
          {loop}\n\
          Take the next concrete action toward completing this goal. When you finish a \
          step, end your reply with a line `GOAL_PROGRESS: <0-100>` reflecting overall \
@@ -142,6 +164,7 @@ pub fn build_goal_prompt(
         progress = goal.progress,
         iter = iteration + 1,
         max = max_iterations,
+        learnings = learnings_block,
         loop = loop_section,
     )
 }
@@ -595,10 +618,9 @@ async fn run_loop<F, Fut, S, Sfut>(
 {
     let mut iteration: u32 = 0;
     let mut rate_limit_streak: u32 = 0;
-    // True when the loop ends because the kernel is shutting down (vs. an
-    // operator stop, completion, or cap). On shutdown the durable row is left
-    // in its last persisted `Running` shape so the next boot's stale-recovery
-    // sweep can demote it — mirroring how workflow runs survive a restart.
+    // Learnings captured across iterations via `GOAL_LEARNED:` markers.
+    // Persisted to shared memory on loop exit so the agent self-evolves.
+    let mut accumulated_learnings: Vec<String> = Vec::new();
     let mut interrupted_by_shutdown = false;
     let final_phase = loop {
         if stop.load(Ordering::SeqCst) {
@@ -629,13 +651,26 @@ async fn run_loop<F, Fut, S, Sfut>(
             let s = state.lock().await;
             s.verify_agent_id.is_some()
         };
-        let prompt = build_goal_prompt(&goal, iteration, max_iterations, has_verifier);
+        let prompt = build_goal_prompt(
+            &goal,
+            iteration,
+            max_iterations,
+            has_verifier,
+            &accumulated_learnings,
+        );
         debug!(goal_id = %goal_id, iteration, "Goal run: sending tick");
 
         match send_message(agent_id, prompt).await {
             Ok(reply) => {
                 rate_limit_streak = 0;
                 let parsed = parse_tick(&reply);
+                // Collect learnings for self-evolution: accumulate across
+                // iterations so the agent builds a knowledge base as it works.
+                if !parsed.learnings.is_empty() {
+                    accumulated_learnings.extend(parsed.learnings.clone());
+                    info!(goal_id = %goal_id, learnings = ?parsed.learnings,
+                          "Goal run: captured learnings");
+                }
 
                 // Verifier loop: if a verifier agent is configured, run it
                 // against this iteration's output before accepting progress.
@@ -795,6 +830,25 @@ async fn run_loop<F, Fut, S, Sfut>(
     // in place so boot recovery demotes it, exactly as workflow runs do.
     if !interrupted_by_shutdown {
         delete_persisted_run(&store, goal_id);
+    }
+    // Persist captured learnings to shared memory so they survive across
+    // goal runs — the agent self-evolves by reading prior learnings.
+    if !accumulated_learnings.is_empty() {
+        let key = format!("goal_learnings_{goal_id}");
+        if let Err(e) = substrate.structured_set(
+            goals_storage_agent_id(),
+            &key,
+            serde_json::json!({
+                "goal_id": goal_id.to_string(),
+                "learnings": accumulated_learnings,
+                "captured_at": Utc::now().to_rfc3339(),
+            }),
+        ) {
+            warn!(goal_id = %goal_id, error = %e, "Failed to persist goal learnings");
+        } else {
+            info!(goal_id = %goal_id, count = accumulated_learnings.len(),
+                  "Persisted goal learnings to shared memory");
+        }
     }
     info!(goal_id = %goal_id, phase = %final_phase, "Goal run ended");
 }
