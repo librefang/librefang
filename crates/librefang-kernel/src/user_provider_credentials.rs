@@ -101,8 +101,9 @@ impl LibreFangKernel {
     ///
     /// This is the only path that returns the plaintext value, and it is used
     /// solely by the internal driver-resolution path — never by an API
-    /// response.
-    pub fn get_user_provider_key(&self, user_id: UserId, provider: &str) -> Option<String> {
+    /// response. Kept `pub(crate)` so the plaintext getter cannot be reached
+    /// from outside the kernel crate (set/list/remove stay `pub`).
+    pub(crate) fn get_user_provider_key(&self, user_id: UserId, provider: &str) -> Option<String> {
         self.vault_get(&user_provider_vault_key(user_id, provider))
     }
 
