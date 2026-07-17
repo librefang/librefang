@@ -132,6 +132,24 @@ impl LibreFangKernel {
             };
         let agent_provider = &resolved_provider_str;
 
+        // Governance: org-wide provider allowlist (issue #6459). Fail-closed —
+        // when a non-empty `[providers] allowed` list does not contain the
+        // resolved provider, refuse to build ANY driver for this agent turn.
+        // This runs before every construction branch below (CLI-profile
+        // rotation, credential pool, single-key, boot-default fallback) so a
+        // disallowed provider can never reach a live driver. Read live from
+        // `self.config.load()`, so an operator's allowlist edit takes effect on
+        // the next turn after a config swap.
+        if !cfg.providers.is_provider_allowed(agent_provider) {
+            warn!(
+                provider = %agent_provider,
+                allowed = ?cfg.providers.allowed,
+                "LLM provider blocked by org-wide allowlist ([providers] allowed)"
+            );
+            let reason = cfg.providers.rejection_reason(agent_provider);
+            return Err(LibreFangError::CapabilityDenied(reason).into());
+        }
+
         let has_custom_key = manifest.model.api_key_env.is_some();
         let has_custom_url = manifest.model.base_url.is_some();
 
@@ -295,6 +313,17 @@ impl LibreFangKernel {
                 } else {
                     fb.provider.clone()
                 };
+                // Governance allowlist (issue #6459): never add a disallowed
+                // provider to the fallback chain. Fail-closed skip + WARN,
+                // mirroring the init-failure skip below.
+                if !cfg.providers.is_provider_allowed(&fb_provider) {
+                    warn!(
+                        provider = %fb_provider,
+                        allowed = ?cfg.providers.allowed,
+                        "Fallback LLM provider blocked by org-wide allowlist; skipping slot"
+                    );
+                    continue;
+                }
                 let fb_api_key = if let Some(env) = &fb.api_key_env {
                     std::env::var(env).ok()
                 } else {
@@ -672,6 +701,123 @@ key_required = true
             seen.lock().unwrap().as_deref(),
             Some("claude-sonnet-4-5"),
             "primary slot must leave req.model unchanged, not overwrite it with the provider name"
+        );
+    }
+
+    /// #6459 — `resolve_driver` enforces the org-wide provider allowlist
+    /// fail-closed at driver resolution time: an empty allowlist allows any
+    /// provider, a non-empty allowlist rejects a disallowed provider with a
+    /// governance error before any driver is constructed, and permits a
+    /// listed one.
+    #[test]
+    fn resolve_driver_enforces_provider_allowlist() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().to_path_buf();
+        let data_dir = home.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::create_dir_all(home.join("skills")).unwrap();
+        std::fs::create_dir_all(home.join("workspaces").join("agents")).unwrap();
+        std::fs::create_dir_all(home.join("workspaces").join("hands")).unwrap();
+        let registry_dir = home.join("registry");
+        std::fs::create_dir_all(&registry_dir).unwrap();
+        std::fs::write(registry_dir.join(".sync_marker"), "").unwrap();
+
+        let config = KernelConfig {
+            home_dir: home.clone(),
+            data_dir: data_dir.clone(),
+            network_enabled: false,
+            memory: MemoryConfig {
+                sqlite_path: Some(data_dir.join("test.db")),
+                ..Default::default()
+            },
+            ..KernelConfig::default()
+        };
+        let kernel = LibreFangKernel::boot_with_config(config).expect("kernel boot");
+
+        // Swap only the allowlist on the live ArcSwap config, mirroring what a
+        // `POST /api/config/reload` does — the field is read live per turn.
+        let set_allowlist = |allowed: &[&str]| {
+            let mut cfg = (*kernel.config.load_full()).clone();
+            cfg.providers.allowed = allowed.iter().map(|s| s.to_string()).collect();
+            kernel.config.store(std::sync::Arc::new(cfg));
+        };
+
+        // Empty allowlist → no restriction: a default agent resolves.
+        set_allowlist(&[]);
+        assert!(
+            kernel.resolve_driver(&AgentManifest::default()).is_ok(),
+            "empty allowlist must allow everything"
+        );
+
+        // Non-empty allowlist that excludes the requested provider →
+        // fail-closed rejection before any driver is constructed.
+        set_allowlist(&["ollama"]);
+        let mut disallowed = AgentManifest::default();
+        disallowed.model.provider = "anthropic".to_string();
+        // `Box<dyn LlmDriver>` is not `Debug`, so `expect_err` (which formats the
+        // Ok value) will not compile — match the error out explicitly instead.
+        let err = match kernel.resolve_driver(&disallowed) {
+            Ok(_) => panic!("disallowed provider must be rejected"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("allowlist"),
+            "rejection must be a governance error, got: {err}"
+        );
+
+        // The same allowlist permits the listed provider. `ollama` is a local
+        // provider (no API key required), so the driver builds
+        // deterministically regardless of the test environment's env vars.
+        let mut allowed = AgentManifest::default();
+        allowed.model.provider = "ollama".to_string();
+        assert!(
+            kernel.resolve_driver(&allowed).is_ok(),
+            "listed provider must resolve"
+        );
+    }
+
+    /// #6459 / #6484 — regression guard for the fail-closed allowlist gates.
+    /// The allowlist is only a real governance control if EVERY kernel-side
+    /// driver-construction path checks it; a refactor that drops the gate at
+    /// one site silently reopens the bypass. Pin the two kernel gate sites by
+    /// source-grep so their removal fails CI. (The aux/cheap-tier gate lives in
+    /// `librefang-runtime::aux_client` and is guarded in that crate.)
+    #[test]
+    fn provider_allowlist_gates_are_present_at_every_kernel_driver_site() {
+        // resolve_driver's per-slot fallback gate (#6459). A file-wide
+        // `contains()` would be VACUOUS — this file embeds this very test,
+        // whose own source mentions `is_provider_allowed` — so anchor to the
+        // `for fb in &effective_fallbacks` loop with a bounded window that ends
+        // well before this test's source.
+        let this = include_str!("llm_drivers.rs");
+        let rd_loop = this
+            .find("for fb in &effective_fallbacks {")
+            .expect("resolve_driver must build a fallback chain");
+        // Wide enough to comfortably span the loop preamble + the gate (the
+        // `is_provider_allowed` check sits deep in the loop body), so a small
+        // edit to the preamble cannot push the token out of the window.
+        let rd_window = 1400.min(this.len() - rd_loop);
+        assert!(
+            this.get(rd_loop..rd_loop + rd_window)
+                .unwrap_or("")
+                .contains("is_provider_allowed"),
+            "resolve_driver's fallback loop must gate each slot via is_provider_allowed (#6459)"
+        );
+
+        // The boot default_driver fallback chain (#6484): scope the assertion
+        // to the `for fb in &config.fallback_providers` loop so we prove the
+        // gate sits inside that specific loop, not merely elsewhere in boot.rs.
+        // Without it, a failover reaches a disallowed provider through
+        // aux.primary and the CLI-profile / init-failure primary shortcuts.
+        let boot = include_str!("boot.rs");
+        let loop_start = boot
+            .find("for fb in &config.fallback_providers {")
+            .expect("boot.rs must build the default_driver fallback chain");
+        let window = 800.min(boot.len() - loop_start);
+        assert!(
+            boot[loop_start..loop_start + window].contains("is_provider_allowed"),
+            "the boot default_driver fallback loop must gate each slot via \
+             is_provider_allowed (#6484)"
         );
     }
 }

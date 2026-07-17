@@ -855,6 +855,12 @@ pub fn build_reload_plan_with_caps(
             field_changed(&old.default_routing, &new.default_routing),
             "default_routing",
         );
+        // #6459 — the org-wide provider allowlist is read live from
+        // `self.config.load()` by `resolve_driver` on every agent turn, and
+        // the aux client is rebuilt from the swapped config on reload
+        // (`config_reload_ops.rs`). A bare ArcSwap swap therefore makes an
+        // allowlist edit effective on the next turn with no explicit reapply.
+        noop_if_changed(field_changed(&old.providers, &new.providers), "providers");
         noop_if_changed(old.prompt_caching != new.prompt_caching, "prompt_caching");
         noop_if_changed(
             field_changed(&old.prompt_cache, &new.prompt_cache),
@@ -1054,6 +1060,7 @@ pub fn classified_reload_fields() -> std::collections::BTreeSet<&'static str> {
         "prompt_caching",
         "prompt_cache",
         "compaction",
+        "providers",
         "qwen_code_path",
         "cron_session_max_tokens",
         "cron_session_max_messages",
