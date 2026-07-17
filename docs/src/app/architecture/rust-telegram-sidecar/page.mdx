@@ -42,6 +42,7 @@ The dashboard's configure form is populated from the schema the binary serves vi
 | `TELEGRAM_BOT_TOKEN` | secret | yes | BotFather token. Dashboard masks it on display; redacted from every error path. |
 | `ALLOWED_USERS` | list, advanced | no | CSV of numeric user IDs or `@usernames` (case-insensitive). Empty ⇒ open. |
 | `TELEGRAM_CLEAR_DONE_REACTION` | bool, advanced | no | When `true`, the ✅ "done" reaction clears prior reactions instead of stacking. |
+| `TELEGRAM_STREAMING` | bool, advanced | no | Defaults to `true`. Set `0` / `false` / `no` / `off` (case-insensitive) to drop the `streaming` capability, so responses arrive as a single final message instead of a live-edited placeholder — avoids the placeholder flash on fast, short turns. |
 
 ## Capabilities
 
