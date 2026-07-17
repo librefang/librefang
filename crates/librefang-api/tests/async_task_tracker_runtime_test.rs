@@ -30,6 +30,10 @@
 
 use axum::Router;
 use librefang_api::routes::{self, AppState};
+// `register_async_task` / `complete_async_task` are declared on both KernelApi
+// and its `AgentControl` supertrait (#6471), so calls on `dyn KernelApi` are
+// ambiguous (E0034) — select the KernelApi surface explicitly via UFCS below.
+use librefang_kernel::kernel_api::KernelApi;
 use librefang_testing::{MockKernelBuilder, TestAppState};
 use librefang_types::agent::{AgentId, AgentManifest, AsyncTasksConfig};
 use librefang_types::task::{TaskKind, TaskStatus, WorkflowRunId};
@@ -167,7 +171,8 @@ async fn register_and_complete_workflow_task_through_kernel_api() {
     let mut rx = attach_injection_receiver(&h.state, agent_id, session_id);
 
     let run_id = WorkflowRunId(Uuid::new_v4());
-    let handle = h.state.kernel.register_async_task(
+    let handle = KernelApi::register_async_task(
+        &*h.state.kernel,
         agent_id,
         session_id,
         TaskKind::Workflow { run_id },
@@ -176,15 +181,13 @@ async fn register_and_complete_workflow_task_through_kernel_api() {
 
     assert_eq!(h.state.kernel.pending_async_task_count(), 1);
 
-    let delivered = h
-        .state
-        .kernel
-        .complete_async_task(
-            handle.id,
-            TaskStatus::Completed(serde_json::json!({"output": "report.md"})),
-        )
-        .await
-        .expect("complete_async_task ok");
+    let delivered = KernelApi::complete_async_task(
+        &*h.state.kernel,
+        handle.id,
+        TaskStatus::Completed(serde_json::json!({"output": "report.md"})),
+    )
+    .await
+    .expect("complete_async_task ok");
     assert!(delivered, "live receiver should accept the signal");
     assert_eq!(h.state.kernel.pending_async_task_count(), 0);
 
@@ -213,7 +216,8 @@ async fn wake_idle_spawn_when_no_receiver_attached() {
     let agent_id = spawn_agent(&h.state);
     let session_id = librefang_types::agent::SessionId(Uuid::new_v4());
 
-    let handle = h.state.kernel.register_async_task(
+    let handle = KernelApi::register_async_task(
+        &*h.state.kernel,
         agent_id,
         session_id,
         TaskKind::Workflow {
@@ -222,12 +226,10 @@ async fn wake_idle_spawn_when_no_receiver_attached() {
         None,
     );
 
-    let delivered = h
-        .state
-        .kernel
-        .complete_async_task(handle.id, TaskStatus::Cancelled)
-        .await
-        .expect("complete_async_task ok");
+    let delivered =
+        KernelApi::complete_async_task(&*h.state.kernel, handle.id, TaskStatus::Cancelled)
+            .await
+            .expect("complete_async_task ok");
     assert!(
         delivered,
         "wake-idle path with self_handle set reports delivered=true"
@@ -300,7 +302,8 @@ async fn timeout_completion_text_format_is_stable() {
     let mut rx = attach_injection_receiver(&h.state, agent_id, session_id);
 
     let run_id = WorkflowRunId(Uuid::new_v4());
-    let handle = h.state.kernel.register_async_task(
+    let handle = KernelApi::register_async_task(
+        &*h.state.kernel,
         agent_id,
         session_id,
         TaskKind::Workflow { run_id },
@@ -313,12 +316,13 @@ async fn timeout_completion_text_format_is_stable() {
     // drift in either the text format itself or the wrapper format
     // `format_task_completion_text` applies on the wake-idle path.
     let timeout_text = "workflow run timed out after 30s (agent-side default_timeout_secs)";
-    let delivered = h
-        .state
-        .kernel
-        .complete_async_task(handle.id, TaskStatus::Failed(timeout_text.to_string()))
-        .await
-        .expect("complete_async_task ok");
+    let delivered = KernelApi::complete_async_task(
+        &*h.state.kernel,
+        handle.id,
+        TaskStatus::Failed(timeout_text.to_string()),
+    )
+    .await
+    .expect("complete_async_task ok");
     assert!(delivered);
 
     let signal = rx.try_recv().expect("Failed signal queued");
@@ -451,7 +455,8 @@ async fn double_completion_via_appstate_is_a_noop() {
     let session_id = librefang_types::agent::SessionId(Uuid::new_v4());
     let mut rx = attach_injection_receiver(&h.state, agent_id, session_id);
 
-    let handle = h.state.kernel.register_async_task(
+    let handle = KernelApi::register_async_task(
+        &*h.state.kernel,
         agent_id,
         session_id,
         TaskKind::Workflow {
@@ -460,25 +465,20 @@ async fn double_completion_via_appstate_is_a_noop() {
         None,
     );
 
-    let first = h
-        .state
-        .kernel
-        .complete_async_task(
-            handle.id,
-            TaskStatus::Completed(serde_json::json!({"ok": true})),
-        )
-        .await
-        .expect("first complete");
+    let first = KernelApi::complete_async_task(
+        &*h.state.kernel,
+        handle.id,
+        TaskStatus::Completed(serde_json::json!({"ok": true})),
+    )
+    .await
+    .expect("first complete");
     assert!(first);
 
     // Brief settle so the spawned signal lands.
     tokio::time::sleep(Duration::from_millis(10)).await;
     let _first_signal = rx.try_recv().expect("first signal");
 
-    let second = h
-        .state
-        .kernel
-        .complete_async_task(handle.id, TaskStatus::Cancelled)
+    let second = KernelApi::complete_async_task(&*h.state.kernel, handle.id, TaskStatus::Cancelled)
         .await
         .expect("second complete");
     assert!(!second, "second completion is a no-op (id already removed)");
