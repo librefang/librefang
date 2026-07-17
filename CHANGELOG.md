@@ -18,6 +18,7 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 ### Added
 
 - Add opt-in completion notification for `process_start` background processes via the #4983 async-task tracker: a call with `notify_on_completion: true` registers a new `TaskKind::Process { pid }`, and when the process exits on its own or is killed the kernel injects a `TaskCompletionEvent` (exit code + tail of the captured output) back into the originating session, so a long-running process no longer has to be polled to learn it finished — the same delivery path (mid-turn injection / wake-idle) and `[async_tasks]` config that workflow / delegation tracking already use, with no new config surface (#6471) (@houko)
+- Add opt-in completion notification for `process_start` background processes via the #4983 async-task tracker: a call with `notify_on_completion: true` registers a new `TaskKind::Process { pid }`, and when the process exits on its own or is killed the kernel injects a `TaskCompletionEvent` (exit code + tail of the captured output) back into the originating session, so a long-running process no longer has to be polled to learn it finished — reusing the same delivery path (mid-turn injection / wake-idle) as workflow / delegation tracking with no new config surface; note the `[async_tasks]` `default_timeout_secs` auto-kill is deliberately NOT applied to processes (a background server is meant to run indefinitely), only the completion-delivery machinery is shared (#6471) (@houko)
 
 ### Changed
 

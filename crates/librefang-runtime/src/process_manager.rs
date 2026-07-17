@@ -457,11 +457,12 @@ impl ProcessManager {
         // kill) so the agent can distinguish a self-terminated process from
         // one that ran to completion.
         if let Some(sink) = proc.completion_sink.take() {
-            let output_tail = collect_output_tail(&proc.stdout_buf, &proc.stderr_buf).await;
+            // The cancelled outcome carries no output tail — the production sink
+            // discards it for a killed process, so don't pay to collect it here.
             sink.on_process_finished(ProcessOutcome {
                 exit_code: None,
                 cancelled: true,
-                output_tail,
+                output_tail: String::new(),
             })
             .await;
         }
