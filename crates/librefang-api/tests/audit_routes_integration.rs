@@ -226,7 +226,9 @@ fn seed_audit_entries(state: &routes::AppState) {
 /// seeds rows directly via `record_with_context`) stayed green (#6461 review).
 #[tokio::test]
 async fn audit_attributes_user_management_write_to_the_acting_user() {
-    let h = build_audit_harness("admin-key", vec![("Alice", "admin", "alice-key")]);
+    // Alice is an Owner: POST /api/users is Owner-gated (is_owner_only_write),
+    // and Owner (3) >= Admin (2) also satisfies the audit-query admin gate.
+    let h = build_audit_harness("admin-key", vec![("Alice", "owner", "alice-key")]);
 
     // No Alice-attributed rows before the write.
     let (status, bytes) = send_get(
@@ -245,7 +247,7 @@ async fn audit_attributes_user_management_write_to_the_acting_user() {
         "no Alice-attributed audit rows should exist before the write"
     );
 
-    // Alice (admin) creates a user through the real modified handler.
+    // Alice (owner) creates a user through the real modified handler.
     let (status, bytes) = send_post_json(
         h.app.clone(),
         "/api/users",
