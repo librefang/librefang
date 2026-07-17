@@ -434,7 +434,9 @@ pub fn ui_sections_overlay() -> serde_json::Value {
         {"key": "provider_max_retries", "struct_field": "provider_max_retries"},
         {"key": "tool_timeouts", "struct_field": "tool_timeouts"},
         // Background autonomous-loop executor knobs (#5168).
-        {"key": "background", "struct_field": "background"}
+        {"key": "background", "struct_field": "background"},
+        // Org-wide LLM provider allowlist (#6459).
+        {"key": "providers", "struct_field": "providers"}
     ])
 }
 

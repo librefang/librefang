@@ -775,4 +775,36 @@ key_required = true
             "listed provider must resolve"
         );
     }
+
+    /// #6459 / #6484 — regression guard for the fail-closed allowlist gates.
+    /// The allowlist is only a real governance control if EVERY kernel-side
+    /// driver-construction path checks it; a refactor that drops the gate at
+    /// one site silently reopens the bypass. Pin the two kernel gate sites by
+    /// source-grep so their removal fails CI. (The aux/cheap-tier gate lives in
+    /// `librefang-runtime::aux_client` and is guarded in that crate.)
+    #[test]
+    fn provider_allowlist_gates_are_present_at_every_kernel_driver_site() {
+        // resolve_driver's per-slot fallback gate (this file).
+        let this = include_str!("llm_drivers.rs");
+        assert!(
+            this.contains("is_provider_allowed"),
+            "resolve_driver must gate providers via is_provider_allowed (#6459)"
+        );
+
+        // The boot default_driver fallback chain (#6484): scope the assertion
+        // to the `for fb in &config.fallback_providers` loop so we prove the
+        // gate sits inside that specific loop, not merely elsewhere in boot.rs.
+        // Without it, a failover reaches a disallowed provider through
+        // aux.primary and the CLI-profile / init-failure primary shortcuts.
+        let boot = include_str!("boot.rs");
+        let loop_start = boot
+            .find("for fb in &config.fallback_providers {")
+            .expect("boot.rs must build the default_driver fallback chain");
+        let window = 800.min(boot.len() - loop_start);
+        assert!(
+            boot[loop_start..loop_start + window].contains("is_provider_allowed"),
+            "the boot default_driver fallback loop must gate each slot via \
+             is_provider_allowed (#6484)"
+        );
+    }
 }
