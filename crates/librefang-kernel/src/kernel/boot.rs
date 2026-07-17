@@ -669,6 +669,19 @@ impl LibreFangKernel {
             provider_chain.push(config.default_model.provider.clone());
         }
         for fb in &config.fallback_providers {
+            // Governance allowlist (issue #6459): never add a disallowed provider
+            // to the boot default_driver fallback chain. This driver seeds
+            // aux.primary and the CLI-profile / init-failure primary shortcuts, so
+            // an ungated slot here lets a failover reach a disallowed vendor.
+            // Fail-closed skip + WARN, mirroring the per-slot gate in resolve_driver.
+            if !config.providers.is_provider_allowed(&fb.provider) {
+                warn!(
+                    provider = %fb.provider,
+                    allowed = ?config.providers.allowed,
+                    "Fallback LLM provider blocked by org-wide allowlist; skipping slot"
+                );
+                continue;
+            }
             let fb_api_key = if !fb.api_key_env.is_empty() {
                 std::env::var(&fb.api_key_env).ok()
             } else {
