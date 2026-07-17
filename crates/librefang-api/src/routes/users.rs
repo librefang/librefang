@@ -288,6 +288,7 @@ pub async fn get_user(
 )]
 pub async fn create_user(
     State(state): State<Arc<AppState>>,
+    caller: Option<Extension<AuthenticatedApiUser>>,
     Json(req): Json<UserUpsert>,
 ) -> impl IntoResponse {
     if let Err(e) = validate_name(&req.name) {
@@ -342,7 +343,8 @@ pub async fn create_user(
     }
 
     let to_push = new_cfg.clone();
-    match persist_users(&state, move |users| {
+    let caller_uid = caller.as_ref().map(|c| c.0.user_id);
+    match persist_users(&state, caller_uid, move |users| {
         if users.iter().any(|u| u.name == to_push.name) {
             return Err(PersistError::Conflict(format!(
                 "user '{}' already exists",
@@ -377,6 +379,7 @@ pub async fn create_user(
 pub async fn update_user(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
+    caller: Option<Extension<AuthenticatedApiUser>>,
     Json(req): Json<UserUpsert>,
 ) -> impl IntoResponse {
     if let Err(e) = validate_name(&req.name) {
@@ -402,47 +405,54 @@ pub async fn update_user(
 
     let target_existing = name.clone();
     let renamed_to_for_closure = renamed_to.clone();
+    let caller_uid = caller.as_ref().map(|c| c.0.user_id);
     // The closure returns the final `UserConfig` so the response body
     // can serialize the post-merge view (incl. preserved RBAC M3 policy
     // fields). `persist_users` is generic over the closure's `Ok` type,
     // so this avoids the Arc<Mutex> capture pattern earlier drafts used.
-    match persist_users(&state, move |users| -> Result<UserConfig, PersistError> {
-        let idx = users
-            .iter()
-            .position(|u| u.name == target_existing)
-            .ok_or_else(|| PersistError::NotFound(format!("user '{target_existing}' not found")))?;
-        // If renaming, ensure no collision with another existing user.
-        if renamed_to_for_closure != target_existing
-            && users.iter().any(|u| u.name == renamed_to_for_closure)
-        {
-            return Err(PersistError::Conflict(format!(
-                "another user named '{}' already exists",
-                renamed_to_for_closure
-            )));
-        }
-        // RBAC M3 (#3205) + M5 (#3203): preserve per-user `tool_policy`,
-        // `tool_categories`, `memory_access`, `channel_tool_rules`, and
-        // `budget` across the rename/role/binding edit. The M6 dashboard
-        // only exposes name/role/bindings/api_key_hash today; clobbering
-        // the RBAC fields here would silently disable a Viewer's PII
-        // redaction the moment an admin retitles their account. `budget`
-        // is currently set via config.toml (no write endpoint yet, full
-        // per-user enforcement lands in an M5 follow-up), and the same
-        // preserve-across-edit rule applies.
-        let preserved = users[idx].clone();
-        users[idx] = UserConfig {
-            name: renamed_to_for_closure.clone(),
-            role: new_role.clone(),
-            channel_bindings: new_bindings.clone(),
-            api_key_hash: new_api_key_hash.clone(),
-            budget: preserved.budget,
-            tool_policy: preserved.tool_policy,
-            tool_categories: preserved.tool_categories,
-            memory_access: preserved.memory_access,
-            channel_tool_rules: preserved.channel_tool_rules,
-        };
-        Ok(users[idx].clone())
-    })
+    match persist_users(
+        &state,
+        caller_uid,
+        move |users| -> Result<UserConfig, PersistError> {
+            let idx = users
+                .iter()
+                .position(|u| u.name == target_existing)
+                .ok_or_else(|| {
+                    PersistError::NotFound(format!("user '{target_existing}' not found"))
+                })?;
+            // If renaming, ensure no collision with another existing user.
+            if renamed_to_for_closure != target_existing
+                && users.iter().any(|u| u.name == renamed_to_for_closure)
+            {
+                return Err(PersistError::Conflict(format!(
+                    "another user named '{}' already exists",
+                    renamed_to_for_closure
+                )));
+            }
+            // RBAC M3 (#3205) + M5 (#3203): preserve per-user `tool_policy`,
+            // `tool_categories`, `memory_access`, `channel_tool_rules`, and
+            // `budget` across the rename/role/binding edit. The M6 dashboard
+            // only exposes name/role/bindings/api_key_hash today; clobbering
+            // the RBAC fields here would silently disable a Viewer's PII
+            // redaction the moment an admin retitles their account. `budget`
+            // is currently set via config.toml (no write endpoint yet, full
+            // per-user enforcement lands in an M5 follow-up), and the same
+            // preserve-across-edit rule applies.
+            let preserved = users[idx].clone();
+            users[idx] = UserConfig {
+                name: renamed_to_for_closure.clone(),
+                role: new_role.clone(),
+                channel_bindings: new_bindings.clone(),
+                api_key_hash: new_api_key_hash.clone(),
+                budget: preserved.budget,
+                tool_policy: preserved.tool_policy,
+                tool_categories: preserved.tool_categories,
+                memory_access: preserved.memory_access,
+                channel_tool_rules: preserved.channel_tool_rules,
+            };
+            Ok(users[idx].clone())
+        },
+    )
     .await
     {
         Ok(final_cfg) => (StatusCode::OK, Json(UserView::from(&final_cfg))).into_response(),
@@ -466,9 +476,11 @@ pub async fn update_user(
 pub async fn delete_user(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
+    caller: Option<Extension<AuthenticatedApiUser>>,
 ) -> impl IntoResponse {
     let target = name.clone();
-    match persist_users(&state, move |users| {
+    let caller_uid = caller.as_ref().map(|c| c.0.user_id);
+    match persist_users(&state, caller_uid, move |users| {
         let before = users.len();
         users.retain(|u| u.name != target);
         if users.len() == before {
@@ -508,6 +520,7 @@ const BULK_USER_IMPORT_LIMIT: usize = 1000;
 )]
 pub async fn import_users(
     State(state): State<Arc<AppState>>,
+    caller: Option<Extension<AuthenticatedApiUser>>,
     Json(req): Json<BulkImportRequest>,
 ) -> impl IntoResponse {
     // Guard BEFORE allocating any per-row buffer — see DoS note on
@@ -634,7 +647,8 @@ pub async fn import_users(
     }
 
     let payload: Vec<UserConfig> = to_apply.iter().map(|(_, u)| u.clone()).collect();
-    let result = persist_users(&state, move |users| {
+    let caller_uid = caller.as_ref().map(|c| c.0.user_id);
+    let result = persist_users(&state, caller_uid, move |users| {
         for new_u in &payload {
             if let Some(idx) = users.iter().position(|u| u.name == new_u.name) {
                 // RBAC M3 (#3205) + M5 (#3203): preserve existing per-
@@ -759,8 +773,10 @@ pub async fn rotate_user_key(
     // so we never write any plaintext or any reversibly-related material
     // into the audit log; the operator just gets a stable correlation
     // ID for the just-revoked credential.
+    let caller_uid = caller.as_ref().map(|c| c.0.user_id);
     let result = persist_users(
         &state,
+        caller_uid,
         move |users| -> Result<Option<String>, PersistError> {
             let idx = users
                 .iter()
@@ -924,7 +940,11 @@ pub(crate) enum PersistError {
 /// `update_user` uses this to surface the post-merge `UserConfig`
 /// (including preserved RBAC M3 policy fields) without an out-of-band
 /// `Arc<Mutex>` capture.
-pub(crate) async fn persist_users<F, R>(state: &Arc<AppState>, mutate: F) -> Result<R, PersistError>
+pub(crate) async fn persist_users<F, R>(
+    state: &Arc<AppState>,
+    caller: Option<UserId>,
+    mutate: F,
+) -> Result<R, PersistError>
 where
     F: FnOnce(&mut Vec<UserConfig>) -> Result<R, PersistError>,
 {
@@ -1058,11 +1078,15 @@ where
     *user_keys_guard = rebuild_api_user_records(state.as_ref());
     drop(user_keys_guard);
 
-    state.kernel.audit().record(
+    // Attribute the mutation to the caller that reached the user-management
+    // endpoint (RBAC #3054). `None` for loopback / no-auth deployments.
+    state.kernel.audit().record_with_context(
         "system",
         librefang_kernel::audit::AuditAction::ConfigChange,
         "users updated".to_string(),
         "completed",
+        caller,
+        Some("api".to_string()),
     );
 
     Ok(captured)
@@ -1308,6 +1332,7 @@ pub async fn get_user_policy(
 pub async fn update_user_policy(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
+    caller: Option<Extension<AuthenticatedApiUser>>,
     Json(raw): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let body = match raw {
@@ -1376,32 +1401,37 @@ pub async fn update_user_policy(
     }
 
     let target = name.clone();
-    match persist_users(&state, move |users| -> Result<UserConfig, PersistError> {
-        let idx = users
-            .iter()
-            .position(|u| u.name == target)
-            .ok_or_else(|| PersistError::NotFound(format!("user '{target}' not found")))?;
-        match tool_policy_update {
-            FieldUpdate::Absent => {}
-            FieldUpdate::Clear => users[idx].tool_policy = None,
-            FieldUpdate::Set(p) => users[idx].tool_policy = Some(p),
-        }
-        match tool_categories_update {
-            FieldUpdate::Absent => {}
-            FieldUpdate::Clear => users[idx].tool_categories = None,
-            FieldUpdate::Set(c) => users[idx].tool_categories = Some(c),
-        }
-        match memory_access_update {
-            FieldUpdate::Absent => {}
-            FieldUpdate::Clear => users[idx].memory_access = None,
-            FieldUpdate::Set(a) => users[idx].memory_access = Some(a),
-        }
-        match channel_rules_update {
-            FieldUpdate::Absent | FieldUpdate::Clear => {}
-            FieldUpdate::Set(r) => users[idx].channel_tool_rules = r,
-        }
-        Ok(users[idx].clone())
-    })
+    let caller_uid = caller.as_ref().map(|c| c.0.user_id);
+    match persist_users(
+        &state,
+        caller_uid,
+        move |users| -> Result<UserConfig, PersistError> {
+            let idx = users
+                .iter()
+                .position(|u| u.name == target)
+                .ok_or_else(|| PersistError::NotFound(format!("user '{target}' not found")))?;
+            match tool_policy_update {
+                FieldUpdate::Absent => {}
+                FieldUpdate::Clear => users[idx].tool_policy = None,
+                FieldUpdate::Set(p) => users[idx].tool_policy = Some(p),
+            }
+            match tool_categories_update {
+                FieldUpdate::Absent => {}
+                FieldUpdate::Clear => users[idx].tool_categories = None,
+                FieldUpdate::Set(c) => users[idx].tool_categories = Some(c),
+            }
+            match memory_access_update {
+                FieldUpdate::Absent => {}
+                FieldUpdate::Clear => users[idx].memory_access = None,
+                FieldUpdate::Set(a) => users[idx].memory_access = Some(a),
+            }
+            match channel_rules_update {
+                FieldUpdate::Absent | FieldUpdate::Clear => {}
+                FieldUpdate::Set(r) => users[idx].channel_tool_rules = r,
+            }
+            Ok(users[idx].clone())
+        },
+    )
     .await
     {
         Ok(final_cfg) => (StatusCode::OK, Json(UserPolicyView::from(&final_cfg))).into_response(),

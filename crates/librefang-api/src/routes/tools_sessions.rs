@@ -196,6 +196,7 @@ pub async fn invoke_tool(
     Path(name): Path<String>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
     lang: Option<axum::Extension<RequestLanguage>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(input): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let lang_code = super::resolve_lang(lang.as_ref());
@@ -325,11 +326,18 @@ pub async fn invoke_tool(
     } else {
         "ok".to_string()
     };
-    state.kernel.audit().record(
+    // Attribute the direct invocation to the authenticated caller when the
+    // request carried a resolved identity (RBAC #3054). `None` for
+    // loopback / no-auth deployments — matches the userless convention in
+    // docs/architecture/audit-user-attribution.md.
+    let user_id = api_user.as_ref().map(|u| u.0.user_id);
+    state.kernel.audit().record_with_context(
         audit_caller,
         librefang_kernel::audit::AuditAction::ToolInvoke,
         &name,
         audit_outcome,
+        user_id,
+        Some("api".to_string()),
     );
 
     let status = if result.is_error {

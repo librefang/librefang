@@ -261,6 +261,7 @@ fn create_backup_blocking(home_dir: std::path::PathBuf) -> Result<BackupOutcome,
 pub async fn create_backup(
     State(state): State<Arc<AppState>>,
     lang: Option<axum::Extension<RequestLanguage>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
 ) -> impl IntoResponse {
     let home_dir = state.kernel.home_dir().to_path_buf();
 
@@ -312,11 +313,14 @@ pub async fn create_backup(
         outcome.size_bytes,
         outcome.components.len()
     );
-    state.kernel.audit().record(
+    let user_id = api_user.as_ref().map(|u| u.0.user_id);
+    state.kernel.audit().record_with_context(
         "system",
         librefang_kernel::audit::AuditAction::ConfigChange,
         format!("Backup created: {}", outcome.filename),
         "completed",
+        user_id,
+        Some("api".to_string()),
     );
 
     (
@@ -586,6 +590,7 @@ fn restore_backup_blocking(
 pub async fn restore_backup(
     State(state): State<Arc<AppState>>,
     lang: Option<axum::Extension<RequestLanguage>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
@@ -677,11 +682,14 @@ pub async fn restore_backup(
         "Restore from {filename}: {total_restored} files restored, {} errors",
         errors.len()
     );
-    state.kernel.audit().record(
+    let user_id = api_user.as_ref().map(|u| u.0.user_id);
+    state.kernel.audit().record_with_context(
         "system",
         librefang_kernel::audit::AuditAction::ConfigChange,
         format!("Backup restored: {filename} ({total_restored} files)"),
         "completed",
+        user_id,
+        Some("api".to_string()),
     );
 
     (

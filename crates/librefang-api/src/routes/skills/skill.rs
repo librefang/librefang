@@ -773,6 +773,7 @@ pub async fn marketplace_search(
 )]
 pub async fn create_skill(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     if let Some(resp) = reject_if_frozen(&state) {
@@ -815,7 +816,13 @@ pub async fn create_skill(
         Some("dashboard"),
     ) {
         Ok(result) => {
-            audit_evolve(&state, "create", &result.skill_name, &result.message);
+            audit_evolve(
+                &state,
+                api_user.as_ref().map(|u| u.0.user_id),
+                "create",
+                &result.skill_name,
+                &result.message,
+            );
             // Hot-reload skills so the new skill is available immediately
             state.kernel.reload_skills();
 
@@ -1290,6 +1297,7 @@ pub async fn get_supporting_file(
 pub async fn evolve_update_skill(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     if let Some(resp) = reject_if_frozen(&state) {
@@ -1313,7 +1321,13 @@ pub async fn evolve_update_skill(
         Some("dashboard"),
     ) {
         Ok(r) => {
-            audit_evolve(&state, "update", &r.skill_name, changelog);
+            audit_evolve(
+                &state,
+                api_user.as_ref().map(|u| u.0.user_id),
+                "update",
+                &r.skill_name,
+                changelog,
+            );
             state.kernel.reload_skills();
             evolution_ok_response(r)
         }
@@ -1337,6 +1351,7 @@ pub async fn evolve_update_skill(
 pub async fn evolve_patch_skill(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     if let Some(resp) = reject_if_frozen(&state) {
@@ -1366,7 +1381,13 @@ pub async fn evolve_patch_skill(
         Some("dashboard"),
     ) {
         Ok(r) => {
-            audit_evolve(&state, "patch", &r.skill_name, changelog);
+            audit_evolve(
+                &state,
+                api_user.as_ref().map(|u| u.0.user_id),
+                "patch",
+                &r.skill_name,
+                changelog,
+            );
             state.kernel.reload_skills();
             evolution_ok_response(r)
         }
@@ -1388,6 +1409,7 @@ pub async fn evolve_patch_skill(
 pub async fn evolve_rollback_skill(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
 ) -> impl IntoResponse {
     if let Some(resp) = reject_if_frozen(&state) {
         return resp;
@@ -1400,6 +1422,7 @@ pub async fn evolve_rollback_skill(
         Ok(r) => {
             audit_evolve(
                 &state,
+                api_user.as_ref().map(|u| u.0.user_id),
                 "rollback",
                 &r.skill_name,
                 "rolled back to previous version",
@@ -1426,6 +1449,7 @@ pub async fn evolve_rollback_skill(
 pub async fn evolve_delete_skill(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
 ) -> impl IntoResponse {
     if let Some(resp) = reject_if_frozen(&state) {
         return resp;
@@ -1433,7 +1457,13 @@ pub async fn evolve_delete_skill(
     let skills_dir = state.kernel.home_dir().join("skills");
     match librefang_skills::evolution::delete_skill(&skills_dir, &name) {
         Ok(r) => {
-            audit_evolve(&state, "delete", &r.skill_name, &r.message);
+            audit_evolve(
+                &state,
+                api_user.as_ref().map(|u| u.0.user_id),
+                "delete",
+                &r.skill_name,
+                &r.message,
+            );
             state.kernel.reload_skills();
             evolution_ok_response(r)
         }
@@ -1457,6 +1487,7 @@ pub async fn evolve_delete_skill(
 pub async fn evolve_write_file(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     if let Some(resp) = reject_if_frozen(&state) {
@@ -1474,7 +1505,13 @@ pub async fn evolve_write_file(
     };
     match librefang_skills::evolution::write_supporting_file(&skill, path, content) {
         Ok(r) => {
-            audit_evolve(&state, "write_file", &r.skill_name, path);
+            audit_evolve(
+                &state,
+                api_user.as_ref().map(|u| u.0.user_id),
+                "write_file",
+                &r.skill_name,
+                path,
+            );
             state.kernel.reload_skills();
             evolution_ok_response(r)
         }
@@ -1503,6 +1540,7 @@ pub async fn evolve_remove_file(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     Query(params): Query<std::collections::HashMap<String, String>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
 ) -> impl IntoResponse {
     if let Some(resp) = reject_if_frozen(&state) {
         return resp;
@@ -1516,7 +1554,13 @@ pub async fn evolve_remove_file(
     };
     match librefang_skills::evolution::remove_supporting_file(&skill, path) {
         Ok(r) => {
-            audit_evolve(&state, "remove_file", &r.skill_name, path);
+            audit_evolve(
+                &state,
+                api_user.as_ref().map(|u| u.0.user_id),
+                "remove_file",
+                &r.skill_name,
+                path,
+            );
             state.kernel.reload_skills();
             evolution_ok_response(r)
         }

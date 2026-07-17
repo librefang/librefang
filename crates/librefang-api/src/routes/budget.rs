@@ -1301,19 +1301,20 @@ pub async fn update_user_budget(
 
     let new_budget_for_closure = new_budget.clone();
     let user_id_param_for_closure = user_id_param.clone();
-    let result = super::users::persist_users(&state, move |users| {
-        let idx = users
-            .iter()
-            .position(|u| UserId::from_name(&u.name) == target_user_id)
-            .ok_or_else(|| {
-                super::users::PersistError::NotFound(format!(
-                    "no user matches '{user_id_param_for_closure}'"
-                ))
-            })?;
-        users[idx].budget = Some(new_budget_for_closure);
-        Ok(())
-    })
-    .await;
+    let result =
+        super::users::persist_users(&state, api_user_ref.map(|u| u.user_id), move |users| {
+            let idx = users
+                .iter()
+                .position(|u| UserId::from_name(&u.name) == target_user_id)
+                .ok_or_else(|| {
+                    super::users::PersistError::NotFound(format!(
+                        "no user matches '{user_id_param_for_closure}'"
+                    ))
+                })?;
+            users[idx].budget = Some(new_budget_for_closure);
+            Ok(())
+        })
+        .await;
 
     match result {
         Ok(()) => {
@@ -1393,19 +1394,20 @@ pub async fn delete_user_budget(
         .and_then(|u| u.budget.clone());
 
     let user_id_param_for_closure = user_id_param.clone();
-    let result = super::users::persist_users(&state, move |users| {
-        let idx = users
-            .iter()
-            .position(|u| UserId::from_name(&u.name) == target_user_id)
-            .ok_or_else(|| {
-                super::users::PersistError::NotFound(format!(
-                    "no user matches '{user_id_param_for_closure}'"
-                ))
-            })?;
-        users[idx].budget = None;
-        Ok(())
-    })
-    .await;
+    let result =
+        super::users::persist_users(&state, api_user_ref.map(|u| u.user_id), move |users| {
+            let idx = users
+                .iter()
+                .position(|u| UserId::from_name(&u.name) == target_user_id)
+                .ok_or_else(|| {
+                    super::users::PersistError::NotFound(format!(
+                        "no user matches '{user_id_param_for_closure}'"
+                    ))
+                })?;
+            users[idx].budget = None;
+            Ok(())
+        })
+        .await;
 
     match result {
         Ok(()) => {

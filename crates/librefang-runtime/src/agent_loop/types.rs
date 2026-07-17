@@ -187,6 +187,28 @@ pub struct LoopOptions {
     ///
     /// Kernel populates this from `KernelConfig.canvas`.
     pub canvas_config: Option<librefang_types::config::CanvasConfig>,
+    /// When true, this invocation is a **system-internal fork** with no
+    /// attributable end user — currently the auto_dream background cycle,
+    /// spawned via `LibreFangKernel::run_forked_agent_streaming` with a
+    /// `None` sender context. (Any future no-sender fork would set this the
+    /// same way; note the present proactive-memory extractor does *not*
+    /// fork — it calls a standalone extractor — so it is not a caller.) The runtime forwards this flag to
+    /// `kernel_handle::ApprovalGate::resolve_user_tool_decision` as
+    /// `system_call = true` so the RBAC gate treats the fork as a trusted
+    /// internal caller instead of routing its `memory_*` tool calls through
+    /// the guest gate — which returns `NeedsApproval` on every dream cycle
+    /// once `[[users]]` is configured (#6463).
+    ///
+    /// This mirrors the cron / autonomous escape hatch, which reaches the
+    /// same `AuthManager::resolve_user_tool_decision(system_call)` parameter
+    /// via the synthetic `"cron"` / `"autonomous"` channel. Forks have no
+    /// such channel (they inherit the parent's canonical session with a
+    /// `None` sender context), so they signal system-internal status through
+    /// this flag instead.
+    ///
+    /// Defaults to `false`; only the fork path in `run_forked_agent_streaming`
+    /// sets it.
+    pub system_call: bool,
 }
 
 /// Result of an agent loop execution.

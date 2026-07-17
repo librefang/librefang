@@ -1174,3 +1174,165 @@ async def test_on_send_converts_markdown_to_mrkdwn(monkeypatch):
     await a.on_send(_Cmd())
     body = json.loads(fake.calls[0]["body_raw"])
     assert body["text"] == "*Title*\n*bold* <https://e.example|x>"
+
+
+# ---- multi-step task progress (#6451) ------------------------------
+
+
+def _reaction(phase, tool_name=None, channel_id="C01", message_id="T1",
+              emoji="x"):
+    """Build an AgentPhase lifecycle `reaction` command the way the
+    bridge serializes it (channel_id, message_id, emoji, phase,
+    tool_name)."""
+    return sa.protocol.Reaction(channel_id, message_id, emoji, phase,
+                                tool_name)
+
+
+def test_capabilities_include_reaction():
+    # `reaction` is what carries the AgentPhase lifecycle to the adapter;
+    # the existing interactive/thread caps stay declared.
+    assert "reaction" in sa.SlackAdapter.capabilities
+    assert "interactive" in sa.SlackAdapter.capabilities
+    assert "thread" in sa.SlackAdapter.capabilities
+
+
+def test_build_task_progress_blocks_active_and_done():
+    steps = [("thinking", None), ("tool_use", "web_fetch")]
+    text, blocks = sa._build_task_progress_blocks(steps, "tool_use")
+    assert blocks[0]["type"] == "section"
+    assert blocks[0]["text"]["type"] == "mrkdwn"
+    lines = text.split("\n")
+    assert "Working" in lines[0]
+    # Completed thinking step gets a checkmark; the active tool step
+    # keeps its own (non-check) phase icon and shows the tool name.
+    assert lines[1].startswith("✓")
+    assert "Thinking" in lines[1]
+    assert not lines[2].startswith("✓")
+    assert "`web_fetch`" in lines[2]
+    # Terminal render flips the header and marks every step done.
+    dtext, _ = sa._build_task_progress_blocks(steps, "done")
+    assert "Task complete" in dtext.split("\n")[0]
+    for ln in dtext.split("\n")[1:]:
+        assert ln.startswith("✓")
+    etext, _ = sa._build_task_progress_blocks(steps, "error")
+    assert "Task failed" in etext.split("\n")[0]
+
+
+def test_build_task_progress_blocks_bounds_long_step_list():
+    # Enough steps that a naive join blows past Slack's 3000-char section limit;
+    # the card must stay under the limit by collapsing older steps into a
+    # summary line while keeping the most recent ones (#6451 review).
+    steps = [("tool_use", f"very_long_tool_name_number_{i:04d}") for i in range(200)]
+    text, blocks = sa._build_task_progress_blocks(steps, "tool_use")
+    assert len(text) <= sa.SLACK_MSG_LIMIT, (
+        f"the progress card must stay under the Slack section limit; got {len(text)}"
+    )
+    # The rendered block carries exactly the bounded text.
+    assert blocks[0]["text"]["text"] == text
+    # Older steps are collapsed into a summary line; the newest step survives.
+    assert "earlier step" in text
+    assert "very_long_tool_name_number_0199" in text
+
+
+@pytest.mark.asyncio
+async def test_phase_single_step_posts_no_card(monkeypatch):
+    # A turn that never runs a tool (queued → thinking → done) posts no
+    # card — single-step UX stays exactly as before (#6451).
+    fake = _FakeUrlopen([])  # no HTTP expected
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter()
+    await a.on_command(_reaction("queued"))
+    await a.on_command(_reaction("thinking"))
+    await a.on_command(_reaction("done"))
+    assert fake.calls == []
+    # State is cleaned up on the terminal phase.
+    assert a._task_progress == {}
+
+
+@pytest.mark.asyncio
+async def test_phase_multi_step_posts_then_updates_card(monkeypatch):
+    fake = _FakeUrlopen([
+        (200, {"ok": True, "ts": "CARD1"}),  # first tool_use → post
+        (200, {"ok": True}),                 # second tool_use → update
+        (200, {"ok": True}),                 # done → finalize update
+    ])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter()
+    await a.on_command(_reaction("thinking"))
+    await a.on_command(_reaction("tool_use", tool_name="web_fetch"))
+    await a.on_command(_reaction("tool_use", tool_name="read_file"))
+    await a.on_command(_reaction("done"))
+    assert len(fake.calls) == 3
+    assert fake.calls[0]["url"].endswith("/chat.postMessage")
+    assert fake.calls[1]["url"].endswith("/chat.update")
+    assert fake.calls[2]["url"].endswith("/chat.update")
+    # The card threads under the triggering message ts by default.
+    post_body = json.loads(fake.calls[0]["body_raw"])
+    assert post_body["thread_ts"] == "T1"
+    assert any(b["type"] == "section" for b in post_body["blocks"])
+    # Updates target the posted card's ts (returned from the first post).
+    assert json.loads(fake.calls[1]["body_raw"])["ts"] == "CARD1"
+    assert json.loads(fake.calls[2]["body_raw"])["ts"] == "CARD1"
+    # Both tool names survive into the finalized card.
+    final = json.loads(fake.calls[2]["body_raw"])
+    final_text = final["blocks"][0]["text"]["text"]
+    assert "web_fetch" in final_text and "read_file" in final_text
+    assert "Task complete" in final_text
+    # State cleaned up after the terminal phase.
+    assert a._task_progress == {}
+
+
+@pytest.mark.asyncio
+async def test_phase_card_force_flat_omits_thread_ts(monkeypatch):
+    fake = _FakeUrlopen([
+        (200, {"ok": True, "ts": "CARD1"}),  # tool_use → post
+        (200, {"ok": True}),                 # error → finalize
+    ])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter(SLACK_FORCE_FLAT_REPLIES="true")
+    await a.on_command(_reaction("thinking"))
+    await a.on_command(_reaction("tool_use", tool_name="web_fetch"))
+    await a.on_command(_reaction("error"))
+    post_body = json.loads(fake.calls[0]["body_raw"])
+    assert "thread_ts" not in post_body
+    final = json.loads(fake.calls[1]["body_raw"])
+    assert "Task failed" in final["blocks"][0]["text"]["text"]
+
+
+@pytest.mark.asyncio
+async def test_phase_card_suppressed_when_reactions_disabled(monkeypatch):
+    # SLACK_REACTIONS=false silences all processing-state chatter,
+    # including the task-progress card.
+    fake = _FakeUrlopen([])  # no HTTP expected
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter(SLACK_REACTIONS="false")
+    await a.on_command(_reaction("thinking"))
+    await a.on_command(_reaction("tool_use", tool_name="web_fetch"))
+    await a.on_command(_reaction("done"))
+    assert fake.calls == []
+
+
+@pytest.mark.asyncio
+async def test_phase_legacy_emoji_only_reaction_ignored(monkeypatch):
+    # A pre-#6451 reaction command with no `phase` carries nothing we
+    # can render — it must not post a card.
+    fake = _FakeUrlopen([])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter()
+    await a.on_command(_reaction("", emoji="👀"))
+    assert fake.calls == []
+    assert a._task_progress == {}
+
+
+@pytest.mark.asyncio
+async def test_on_command_send_still_routes_to_on_send(monkeypatch):
+    # The on_command override must not break the default Send → on_send
+    # dispatch.
+    fake = _FakeUrlopen([(200, {"ok": True})])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter()
+    a.reactions_enabled = False
+    cmd = sa.protocol.Send("C01", "hi", {"Text": "hi"}, None, {})
+    await a.on_command(cmd)
+    body = json.loads(fake.calls[0]["body_raw"])
+    assert body["channel"] == "C01" and body["text"] == "hi"

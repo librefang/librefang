@@ -1856,6 +1856,7 @@ impl ApprovalGate for ApprovalKernel {
         _tool_name: &str,
         _sender_id: Option<&str>,
         _channel: Option<&str>,
+        _system_call: bool,
     ) -> librefang_types::user_policy::UserToolGate {
         self.user_gate_override
             .clone()
@@ -2084,6 +2085,7 @@ impl ApprovalGate for ForceHumanCapturingKernel {
         _tool_name: &str,
         _sender_id: Option<&str>,
         _channel: Option<&str>,
+        _system_call: bool,
     ) -> librefang_types::user_policy::UserToolGate {
         self.user_gate_override
             .clone()
