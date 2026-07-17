@@ -12,6 +12,11 @@ use std::sync::Arc;
 
 const MAX_POLL_OUTPUT_BYTES: usize = 256 * 1024;
 
+/// Delivery context threaded into the async-task tracker when a `process_start`
+/// opts into completion notification (#6471): the kernel handle plus the
+/// originating agent, session, and optional chat id.
+type ProcessTrackerCtx = (Arc<dyn KernelHandle>, AgentId, SessionId, Option<String>);
+
 /// Completion sink that routes a finished background process's outcome
 /// through the kernel's async-task tracker (#4983 / #6471). Holds only the
 /// abstract [`KernelHandle`] so the runtime keeps no direct kernel
@@ -171,7 +176,7 @@ pub(super) async fn tool_process_start(
     // session. Missing any → start untracked, mirroring the workflow /
     // delegation "no session, no tracking" fallback.
     let notify = input["notify_on_completion"].as_bool().unwrap_or(false);
-    let tracker: Option<(Arc<dyn KernelHandle>, AgentId, SessionId, Option<String>)> = if notify {
+    let tracker: Option<ProcessTrackerCtx> = if notify {
         match (
             kernel,
             caller_agent_id.and_then(|a| a.parse::<AgentId>().ok()),
