@@ -107,7 +107,7 @@ async fn evaluate_tool_call_user_deny_short_circuits() {
     );
 
     let kh: &dyn KernelHandle = &*kernel;
-    let gate = kh.resolve_user_tool_decision("shell_exec", Some("111"), Some("telegram"));
+    let gate = kh.resolve_user_tool_decision("shell_exec", Some("111"), Some("telegram"), false);
     match gate {
         UserToolGate::Deny { reason } => assert!(
             reason.contains("Bob"),
@@ -136,7 +136,7 @@ async fn evaluate_tool_call_both_allow() {
     );
 
     let kh: &dyn KernelHandle = &*kernel;
-    let gate = kh.resolve_user_tool_decision("file_read", Some("111"), Some("telegram"));
+    let gate = kh.resolve_user_tool_decision("file_read", Some("111"), Some("telegram"), false);
     assert_eq!(gate, UserToolGate::Allow);
 }
 
@@ -146,7 +146,7 @@ async fn evaluate_tool_call_user_role_no_allow_list_needs_approval() {
     // so layer 1 yields NeedsRoleEscalation; user role < admin → NeedsApproval.
     let kernel = boot(vec![user("Bob", "user", "111", None, None)], vec![]);
     let kh: &dyn KernelHandle = &*kernel;
-    let gate = kh.resolve_user_tool_decision("shell_exec", Some("111"), Some("telegram"));
+    let gate = kh.resolve_user_tool_decision("shell_exec", Some("111"), Some("telegram"), false);
     assert!(
         matches!(gate, UserToolGate::NeedsApproval { .. }),
         "User role without allow-list must escalate to NeedsApproval, got {gate:?}"
@@ -175,13 +175,13 @@ async fn evaluate_tool_call_user_categories_resolve_against_kernel_groups() {
     );
 
     let kh: &dyn KernelHandle = &*kernel;
-    let gate = kh.resolve_user_tool_decision("shell_exec", Some("111"), Some("telegram"));
+    let gate = kh.resolve_user_tool_decision("shell_exec", Some("111"), Some("telegram"), false);
     assert!(
         matches!(gate, UserToolGate::Deny { .. }),
         "category deny must reach Deny verdict, got {gate:?}"
     );
     // Tool outside the denied group + admin role → Allow (admin self-authorises).
-    let other = kh.resolve_user_tool_decision("file_read", Some("111"), Some("telegram"));
+    let other = kh.resolve_user_tool_decision("file_read", Some("111"), Some("telegram"), false);
     assert_eq!(other, UserToolGate::Allow);
 }
 
@@ -196,14 +196,15 @@ async fn evaluate_tool_call_unrecognised_sender_no_longer_fail_open() {
     let kh: &dyn KernelHandle = &*kernel;
 
     // Recognised sender on bound channel — Owner role bypasses the gate.
-    let owner = kh.resolve_user_tool_decision("shell_exec", Some("1"), Some("telegram"));
+    let owner = kh.resolve_user_tool_decision("shell_exec", Some("1"), Some("telegram"), false);
     assert_eq!(owner, UserToolGate::Allow);
 
     // Unrecognised sender on the same channel falls through to the guest
     // gate — file_read is on the read-only allowlist, shell_exec is not.
-    let safe = kh.resolve_user_tool_decision("file_read", Some("guest42"), Some("telegram"));
+    let safe = kh.resolve_user_tool_decision("file_read", Some("guest42"), Some("telegram"), false);
     assert_eq!(safe, UserToolGate::Allow);
-    let unsafe_ = kh.resolve_user_tool_decision("shell_exec", Some("guest42"), Some("telegram"));
+    let unsafe_ =
+        kh.resolve_user_tool_decision("shell_exec", Some("guest42"), Some("telegram"), false);
     assert!(
         matches!(unsafe_, UserToolGate::NeedsApproval { .. }),
         "unrecognised sender must NOT silently fail-open for shell_exec, got {unsafe_:?}"
@@ -223,24 +224,24 @@ async fn evaluate_tool_call_trait_layer_none_sender_fails_closed() {
     let kh: &dyn KernelHandle = &*kernel;
 
     // (None, None) must NOT fail open — was the regression.
-    let gate = kh.resolve_user_tool_decision("shell_exec", None, None);
+    let gate = kh.resolve_user_tool_decision("shell_exec", None, None, false);
     assert!(
         matches!(gate, UserToolGate::NeedsApproval { .. }),
         "trait layer must fail closed for (None, None), got {gate:?}"
     );
 
     // Read-only safe tool still passes via the guest gate.
-    let safe = kh.resolve_user_tool_decision("file_read", None, None);
+    let safe = kh.resolve_user_tool_decision("file_read", None, None, false);
     assert_eq!(safe, UserToolGate::Allow);
 
     // The cron synthetic channel keeps its system-call carve-out.
-    let cron = kh.resolve_user_tool_decision("shell_exec", None, Some("cron"));
+    let cron = kh.resolve_user_tool_decision("shell_exec", None, Some("cron"), false);
     assert_eq!(cron, UserToolGate::Allow);
 
     // Aspirational sentinels that earlier drafts also matched
     // (`"system"` / `"internal"`) are NOT system-call channels — they
     // are normal unattributed inbounds and must fail closed.
-    let pseudo_system = kh.resolve_user_tool_decision("shell_exec", None, Some("system"));
+    let pseudo_system = kh.resolve_user_tool_decision("shell_exec", None, Some("system"), false);
     assert!(
         matches!(pseudo_system, UserToolGate::NeedsApproval { .. }),
         "channel=\"system\" must NOT be treated as a system call, got {pseudo_system:?}"
@@ -275,7 +276,7 @@ async fn evaluate_tool_call_user_categories_allow_list_short_circuits_for_user_r
     let kh: &dyn KernelHandle = &*kernel;
 
     // In the allowed group → Allow even though user role is below admin.
-    let allowed = kh.resolve_user_tool_decision("file_read", Some("111"), Some("telegram"));
+    let allowed = kh.resolve_user_tool_decision("file_read", Some("111"), Some("telegram"), false);
     assert_eq!(
         allowed,
         UserToolGate::Allow,
@@ -283,7 +284,7 @@ async fn evaluate_tool_call_user_categories_allow_list_short_circuits_for_user_r
     );
 
     // Outside the allow-list → category layer denies (allow-list configured + no match).
-    let denied = kh.resolve_user_tool_decision("shell_exec", Some("111"), Some("telegram"));
+    let denied = kh.resolve_user_tool_decision("shell_exec", Some("111"), Some("telegram"), false);
     assert!(
         matches!(denied, UserToolGate::Deny { .. }),
         "tool outside the allow-list group must hard-deny, got {denied:?}"
@@ -402,7 +403,7 @@ async fn evaluate_tool_call_reload_picks_up_new_policy() {
     let kh: &dyn KernelHandle = &*kernel;
     // Initial: file_read allowed.
     assert_eq!(
-        kh.resolve_user_tool_decision("file_read", Some("111"), Some("telegram")),
+        kh.resolve_user_tool_decision("file_read", Some("111"), Some("telegram"), false),
         UserToolGate::Allow
     );
 
@@ -420,7 +421,7 @@ async fn evaluate_tool_call_reload_picks_up_new_policy() {
     kernel.auth_ref().reload(&new_users, &[]);
 
     // After reload: file_read must now be denied.
-    let gate = kh.resolve_user_tool_decision("file_read", Some("111"), Some("telegram"));
+    let gate = kh.resolve_user_tool_decision("file_read", Some("111"), Some("telegram"), false);
     assert!(
         matches!(gate, UserToolGate::Deny { .. }),
         "after AuthManager reload the new deny must take effect, got {gate:?}"

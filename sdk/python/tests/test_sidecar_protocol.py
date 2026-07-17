@@ -147,6 +147,8 @@ def test_parse_command_all_kinds():
         "params": {"channel_id": "c", "message_id": "m", "reaction": "👍"},
     }))
     assert isinstance(r, Reaction) and r.reaction == "👍"
+    # Legacy emoji-only frame → the #6451 fields default cleanly.
+    assert r.phase == "" and r.tool_name is None
 
     i = parse_command(json.dumps({
         "method": "interactive",
@@ -182,6 +184,22 @@ def test_parse_command_non_object_json_raises_decode_error():
     for bad in ("123", '"a string"', "[1,2,3]", "true", "null"):
         with pytest.raises(json.JSONDecodeError):
             parse_command(bad)
+
+
+def test_parse_command_reaction_carries_phase_and_tool_name():
+    # #6451: the enriched reaction frame carries the lifecycle phase tag
+    # and (for tool_use) the tool name so an adapter can render a step
+    # list, not just an emoji.
+    r = parse_command(json.dumps({
+        "method": "reaction",
+        "params": {
+            "channel_id": "c", "message_id": "m", "reaction": "⚙️",
+            "phase": "tool_use", "tool_name": "web_fetch",
+        },
+    }))
+    assert isinstance(r, Reaction)
+    assert r.phase == "tool_use"
+    assert r.tool_name == "web_fetch"
 
 
 def test_parse_command_stream_start_carries_thread_id():

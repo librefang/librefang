@@ -38,6 +38,13 @@ Behaviour parity with the Rust adapter:
   (matches the Rust ``SLACK_MSG_LIMIT``).
 * **Reactions**: ``eyes`` on receive, ``white_check_mark`` on
   completion (opt-out via ``SLACK_REACTIONS=false``).
+* **Task progress** (#6451): the generic AgentPhase lifecycle
+  (Thinking → ToolUse{name} → Done/Error) reaches the adapter as
+  ``reaction`` commands through the declared ``reaction`` capability
+  and is rendered as an updated-in-place Block Kit step list
+  (``chat.update``) for multi-step turns. Single-step turns post no
+  card and keep just the receipt reactions. Same ``SLACK_REACTIONS``
+  opt-out.
 
 Stdlib-only: HTTPS via ``urllib.request``, WebSocket via a
 hand-rolled RFC 6455 client over ``socket`` + ``ssl`` (same pattern
@@ -380,8 +387,24 @@ class SlackAdapter(SidecarAdapter):
     # The in-process adapter declared no capability strings either —
     # routing rich content (interactive, etc.) is determined per-API
     # call. We declare ``interactive`` so the kernel routes button
-    # interactions back to ``on_command``/``on_send``.
-    capabilities: list = ["interactive", "thread"]
+    # interactions back to ``on_command``/``on_send``, ``thread`` for
+    # threaded replies, and ``reaction`` so the generic AgentPhase
+    # lifecycle (Queued → Thinking → ToolUse{name} → Streaming →
+    # Done/Error) reaches ``on_command`` as ``reaction`` commands. We
+    # repurpose that phase stream into an updated-in-place Block Kit
+    # task-progress card for multi-step turns (#6451) — the eyes/
+    # white_check_mark receipt reactions stay driven by the receive/send
+    # hooks, independent of the lifecycle stream.
+    #
+    # Why ``reaction`` and not a new ``task_update`` capability: the
+    # generic phase lifecycle is dispatched to adapters through
+    # ``ChannelAdapter::send_reaction`` (bridge.rs), which the sidecar
+    # trampoline gates on exactly this capability. ``interactive`` gates
+    # ``send_interactive`` only and never carries phase events, so
+    # reusing it would not deliver the lifecycle. ``reaction`` is already
+    # in the negotiation table and already carries every phase, so no new
+    # capability is required (see docs/architecture/sidecar-channels.md).
+    capabilities: list = ["interactive", "thread", "reaction"]
 
     SCHEMA = Schema(
         name="slack",
@@ -410,7 +433,8 @@ class SlackAdapter(SidecarAdapter):
                   placeholder="false",
                   advanced=True),
             Field("SLACK_REACTIONS",
-                  "Add eyes/check reactions to indicate processing state",
+                  "Show processing-state indicators (eyes/check receipt "
+                  "reactions and the multi-step task-progress card)",
                   "bool",
                   placeholder="true",
                   advanced=True),
@@ -464,12 +488,23 @@ class SlackAdapter(SidecarAdapter):
         # without sends can't grow this without bound.
         self._pending_reactions: dict[tuple[str, str], str] = {}
         self._pending_lock = threading.Lock()
+        # Live task-progress cards keyed by (channel_id, triggering ts).
+        # Populated from the AgentPhase lifecycle `reaction` commands and
+        # rendered as an updated-in-place Block Kit message for
+        # multi-step turns (#6451). Touched only from the serialized
+        # `on_command` reader path, so no lock is required.
+        self._task_progress: dict[tuple[str, str], "_TaskProgress"] = {}
 
     # Capacity cap on the pending-reaction map. The in-process Rust
     # adapter used an unbounded ``RwLock<HashMap>``; we cap to 2k
     # entries here so a flood of inbound messages followed by a hang
     # in the agent loop doesn't grow the map without bound.
     MAX_PENDING_REACTIONS = 2_000
+
+    # Capacity cap on the task-progress map (same rationale as
+    # MAX_PENDING_REACTIONS): a turn that never reaches a terminal phase
+    # must not grow the map without bound.
+    MAX_TASK_PROGRESS = 1_000
 
     # ---- HTTP helpers ------------------------------------------------
 
@@ -618,6 +653,75 @@ class SlackAdapter(SidecarAdapter):
                 err = resp.get("error") or "unknown"
                 # Match Rust fail-open behaviour: log, continue chunking.
                 log.warn("slack chat.postMessage rejected", error=err)
+
+    def _post_blocks(
+        self,
+        channel_id: str,
+        text: str,
+        blocks: list,
+        *,
+        thread_ts: Optional[str] = None,
+    ) -> Optional[str]:
+        """POST a single Block Kit message (no chunking) and return its
+        ``ts`` so the caller can later ``chat.update`` it in place.
+        Returns ``None`` on any transport/API failure — the task-progress
+        card is best-effort UX and must never break the reply path."""
+        payload: dict[str, Any] = {
+            "channel": channel_id,
+            "text": text,
+            "blocks": blocks,
+        }
+        if thread_ts:
+            payload["thread_ts"] = thread_ts
+        if self.unfurl_links is not None:
+            payload["unfurl_links"] = self.unfurl_links
+        body = json.dumps(payload).encode("utf-8")
+        status, resp, raw = self._http(
+            f"{self.api_base}/chat.postMessage",
+            method="POST",
+            body=body,
+            headers=self._auth_headers(content_type=True),
+        )
+        if status >= 300:
+            snippet = raw[:200].decode("utf-8", "replace") if raw else ""
+            log.warn("slack task-progress post transport error",
+                     status=status, body=snippet)
+            return None
+        if isinstance(resp, dict):
+            if resp.get("ok") is not True:
+                log.warn("slack task-progress post rejected",
+                         error=resp.get("error") or "unknown")
+                return None
+            ts = resp.get("ts")
+            return ts if isinstance(ts, str) and ts else None
+        return None
+
+    def _update_blocks(
+        self, channel_id: str, ts: str, text: str, blocks: list,
+    ) -> None:
+        """``chat.update`` an existing Block Kit message in place.
+        Best-effort: a failure just leaves the card at its prior state."""
+        payload = {
+            "channel": channel_id,
+            "ts": ts,
+            "text": text,
+            "blocks": blocks,
+        }
+        body = json.dumps(payload).encode("utf-8")
+        status, resp, raw = self._http(
+            f"{self.api_base}/chat.update",
+            method="POST",
+            body=body,
+            headers=self._auth_headers(content_type=True),
+        )
+        if status >= 300:
+            snippet = raw[:200].decode("utf-8", "replace") if raw else ""
+            log.warn("slack task-progress update transport error",
+                     status=status, body=snippet)
+            return
+        if isinstance(resp, dict) and resp.get("ok") is not True:
+            log.warn("slack task-progress update rejected",
+                     error=resp.get("error") or "unknown")
 
     def _add_reaction(self, channel: str, ts: str, name: str) -> None:
         if not self.reactions_enabled:
@@ -922,6 +1026,182 @@ class SlackAdapter(SidecarAdapter):
                     channel_id, inbound_thread_id,
                 ),
             )
+
+    async def on_command(self, cmd) -> None:
+        """Route lifecycle ``reaction`` commands to the task-progress
+        display; defer everything else (``send`` → ``on_send``) to the
+        base dispatcher."""
+        if isinstance(cmd, protocol.Reaction):
+            await self._on_phase(cmd)
+            return
+        await super().on_command(cmd)
+
+    async def _on_phase(self, cmd) -> None:
+        """Fold one AgentPhase lifecycle ``reaction`` into a live Block
+        Kit task-progress card.
+
+        The card is materialized lazily — only once a turn actually runs
+        a tool (a genuinely multi-step turn). Single-step turns
+        (Queued → Thinking → Done with no ToolUse) post nothing here and
+        keep the pre-#6451 UX: the eyes → white_check_mark receipt
+        reaction driven by the receive/send hooks. Called only from the
+        serialized ``on_command`` reader path, so the state map needs no
+        lock; the Slack Web API calls are offloaded to the executor.
+        """
+        # The progress card is a processing-state indicator, so it honours
+        # the same operator toggle (`SLACK_REACTIONS`) as the eyes/check
+        # receipt reactions — disabling it silences all processing chatter.
+        if not self.reactions_enabled:
+            return
+        phase = (getattr(cmd, "phase", "") or "").strip()
+        if not phase:
+            # Legacy emoji-only reaction (pre-#6451 daemon): no structured
+            # phase to render, and single-step UX is already covered by
+            # the receipt reactions. Ignore.
+            return
+        channel_id = cmd.channel_id
+        message_id = cmd.message_id
+        if not channel_id or not message_id:
+            return
+        key = (channel_id, message_id)
+        terminal = phase in ("done", "error")
+
+        prog = self._task_progress.get(key)
+        if prog is None:
+            if terminal:
+                # Terminal phase with no tracked task = a single-step turn
+                # (no tool ran, so no card was ever posted). Nothing to
+                # finalize.
+                return
+            prog = _TaskProgress()
+            # Bounded insert: evict the oldest entry (insertion-ordered
+            # dict) so a turn that never terminates can't grow the map.
+            if len(self._task_progress) >= self.MAX_TASK_PROGRESS:
+                try:
+                    del self._task_progress[next(iter(self._task_progress))]
+                except StopIteration:
+                    pass
+            self._task_progress[key] = prog
+
+        # Record the step. `queued` is transient and never shown.
+        if phase == "tool_use":
+            prog.steps.append(("tool_use", getattr(cmd, "tool_name", None)))
+        elif phase in ("thinking", "streaming"):
+            # Collapse consecutive duplicates so repeated thinking /
+            # streaming phases don't spam the list.
+            if not prog.steps or prog.steps[-1][0] != phase:
+                prog.steps.append((phase, None))
+
+        # Materialize the card only for multi-step turns (a tool ran), or
+        # keep updating one already posted.
+        has_tool = any(s[0] == "tool_use" for s in prog.steps)
+        if not has_tool and prog.card_ts is None:
+            if terminal:
+                self._task_progress.pop(key, None)
+            return
+
+        text, blocks = _build_task_progress_blocks(prog.steps, phase)
+        loop = asyncio.get_event_loop()
+        if prog.card_ts is None:
+            thread_ts = None if self.force_flat_replies else message_id
+            ts = await loop.run_in_executor(
+                None,
+                lambda: self._post_blocks(
+                    channel_id, text, blocks, thread_ts=thread_ts,
+                ),
+            )
+            prog.card_ts = ts
+        else:
+            card_ts = prog.card_ts
+            await loop.run_in_executor(
+                None,
+                lambda: self._update_blocks(channel_id, card_ts, text, blocks),
+            )
+
+        if terminal:
+            self._task_progress.pop(key, None)
+
+
+class _TaskProgress:
+    """In-flight task-progress state for one agent turn."""
+
+    __slots__ = ("steps", "card_ts")
+
+    def __init__(self) -> None:
+        # Ordered list of (phase, tool_name) steps. `tool_name` is set
+        # only for `tool_use` steps.
+        self.steps: list[tuple[str, Optional[str]]] = []
+        # Slack `ts` of the posted progress card; None until first post.
+        self.card_ts: Optional[str] = None
+
+
+# Per-phase step icon for the live (in-progress) step in the card.
+_PHASE_STEP_ICON = {
+    "thinking": "\U0001f914",   # 🤔
+    "tool_use": "⚙️",  # ⚙️
+    "streaming": "✍️",  # ✍️
+}
+
+
+def _phase_step_label(phase: str, tool_name: Optional[str]) -> str:
+    if phase == "tool_use":
+        return f"`{tool_name}`" if tool_name else "Running a tool"
+    if phase == "thinking":
+        return "Thinking"
+    if phase == "streaming":
+        return "Writing response"
+    return phase
+
+
+def _build_task_progress_blocks(
+    steps: list, current_phase: str,
+) -> tuple[str, list]:
+    """Render the ordered step list into a single-section Block Kit card.
+
+    Returns ``(text, blocks)`` — ``text`` is the mrkdwn fallback Slack
+    shows in notifications, ``blocks`` the rich rendering. Completed
+    steps carry a ``✓``; the active (last, non-terminal) step carries its
+    phase icon so the user sees which step is running right now.
+    """
+    if current_phase == "error":
+        header = "*❌ Task failed*"        # ❌
+    elif current_phase == "done":
+        header = "*✅ Task complete*"      # ✅
+    else:
+        header = "*⏳ Working…*"       # ⏳ Working…
+    terminal = current_phase in ("done", "error")
+    lines = [header]
+    n = len(steps)
+    for i, (phase, tool_name) in enumerate(steps):
+        active = (not terminal) and (i == n - 1)
+        icon = _PHASE_STEP_ICON.get(phase, "•") if active else "✓"  # ✓
+        lines.append(f"{icon} {_phase_step_label(phase, tool_name)}")
+    text = "\n".join(lines)
+    # Slack rejects a section whose text exceeds SLACK_MSG_LIMIT (3000) chars,
+    # which would freeze the progress card on a long or looping turn. Keep the
+    # header plus the most recent steps under the limit, collapsing older steps
+    # into a single summary line (#6451 review).
+    if len(text) > SLACK_MSG_LIMIT:
+        header_line = lines[0]
+        step_lines = lines[1:]
+        budget = SLACK_MSG_LIMIT - len(header_line) - 40
+        kept: list[str] = []
+        for line in reversed(step_lines):
+            if sum(len(x) + 1 for x in kept) + len(line) + 1 > budget:
+                break
+            kept.append(line)
+        kept.reverse()
+        dropped = len(step_lines) - len(kept)
+        summary = [header_line]
+        if dropped > 0:
+            summary.append(f"… {dropped} earlier step{'s' if dropped != 1 else ''}")
+        summary.extend(kept)
+        text = "\n".join(summary)
+    blocks = [{
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": text},
+    }]
+    return text, blocks
 
 
 # Matches one code span — fenced ```...``` or inline `...`.

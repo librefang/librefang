@@ -153,7 +153,7 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
         .route("/hands/{hand_id}", axum::routing::get(get_hand))
         .route(
             "/hands/{hand_id}/manifest",
-            axum::routing::get(get_hand_manifest),
+            axum::routing::get(get_hand_manifest).put(update_hand_manifest),
         )
         .route(
             "/hands/{hand_id}/activate",
@@ -942,14 +942,25 @@ fn evolution_ok_response(
 /// Record a successful skill evolution in the audit trail. All
 /// dashboard-initiated mutations go through this so the audit log has a
 /// tamper-evident record of every `/api/skills/.../evolve/*` action.
-fn audit_evolve(state: &Arc<AppState>, action: &str, skill_name: &str, detail: &str) {
-    state.kernel.audit().record(
+fn audit_evolve(
+    state: &Arc<AppState>,
+    caller: Option<librefang_types::agent::UserId>,
+    action: &str,
+    skill_name: &str,
+    detail: &str,
+) {
+    state.kernel.audit().record_with_context(
         // Dashboard calls don't have an agent_id — use a distinctive
         // actor so audit readers can tell user actions from agent ones.
         "dashboard".to_string(),
         librefang_kernel::audit::AuditAction::AgentMessage,
         format!("skill_evolve:{action}:{skill_name}"),
         detail.to_string(),
+        // Attribute the evolution to the authenticated caller when the
+        // request carried a resolved identity (RBAC #3054). `None` for
+        // loopback / no-auth deployments.
+        caller,
+        Some("api".to_string()),
     );
 }
 

@@ -3672,6 +3672,39 @@ mod tests {
         );
     }
 
+    /// Regression for #6477: the `@media (prefers-color-scheme: light)` block
+    /// must be declared AFTER the base `.card` rule. CSS resolves equal-
+    /// specificity conflicts by source order, so a light override placed
+    /// before the dark base rule loses in light mode — the page background
+    /// turns light while `.card`/`input` keep their dark base values, leaving
+    /// dark heading/label text invisible on a dark card. Assert the ordering
+    /// in the source so the block can never drift back above the base rules.
+    #[test]
+    fn login_page_light_theme_block_follows_base_card_rule() {
+        let html = super::LOGIN_PAGE_HTML;
+        let base_card = html
+            .find(".card {")
+            .expect("login page must define a base `.card` rule");
+        let light_media = html
+            .find("@media (prefers-color-scheme: light)")
+            .expect("login page must define a light-theme media block");
+        assert!(
+            light_media > base_card,
+            "the light-theme media block must come AFTER the base `.card` rule so \
+             its overrides win the cascade in light mode (#6477); found media block \
+             at byte {light_media}, base .card at byte {base_card}"
+        );
+        // The light block must actually re-style the surfaces that carry dark
+        // base values, or light mode leaves unreadable text on a dark card.
+        let light_block = &html[light_media..];
+        for needed in [".card {", "input {", ".sub {", ".foot {"] {
+            assert!(
+                light_block.contains(needed),
+                "light-theme media block must override `{needed}` (#6477)"
+            );
+        }
+    }
+
     /// The `/dashboard` login page depends on its inline submit handler.
     /// The CSP must allow its exact hash without permitting arbitrary inline JavaScript.
     #[tokio::test]

@@ -50,6 +50,15 @@ pub trait ApprovalGate: Send + Sync {
     /// * `NeedsApproval` — user's own role would block, but a higher role
     ///   could authorise; route through the approval queue.
     ///
+    /// `system_call` marks a daemon-driven invocation with no attributable
+    /// end user — a system-internal fork (currently auto_dream) that
+    /// carries a `None` sender context and so cannot resolve to a registered
+    /// user. When `true` the real kernel bypasses the per-user gate the same
+    /// way the synthetic `"cron"` / `"autonomous"` channels already do, so
+    /// these internal `memory_*` calls are not routed through the guest gate
+    /// (which would return `NeedsApproval` on every cycle once `[[users]]` is
+    /// configured — #6463). User-facing dispatch always passes `false`.
+    ///
     /// Default impl returns `Allow` so installations without a real
     /// kernel (test stubs, embedded callers without an `AuthManager`)
     /// keep their pre-M3 behaviour. The real kernel always overrides
@@ -62,8 +71,9 @@ pub trait ApprovalGate: Send + Sync {
         tool_name: &str,
         sender_id: Option<&str>,
         channel: Option<&str>,
+        system_call: bool,
     ) -> librefang_types::user_policy::UserToolGate {
-        let _ = (tool_name, sender_id, channel);
+        let _ = (tool_name, sender_id, channel, system_call);
         librefang_types::user_policy::UserToolGate::Allow
     }
 

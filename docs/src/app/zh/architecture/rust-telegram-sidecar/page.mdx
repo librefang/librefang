@@ -42,6 +42,7 @@ Dashboard 的配置表单由二进制 `--describe` 返回的 schema 渲染，运
 | `TELEGRAM_BOT_TOKEN` | secret | 是 | BotFather 给的 token。Dashboard 显示时会打码；所有错误路径都做了脱敏。 |
 | `ALLOWED_USERS` | list, advanced | 否 | 数字 user ID 或 `@username` 的 CSV（大小写不敏感）。空 ⇒ 开放。 |
 | `TELEGRAM_CLEAR_DONE_REACTION` | bool, advanced | 否 | 为 `true` 时，✅ "done" 反应会清空已有反应而非叠加。 |
+| `TELEGRAM_STREAMING` | bool, advanced | 否 | 默认 `true`。设为 `0` / `false` / `no` / `off`（大小写不敏感）会去掉 `streaming` 能力，回复以单条最终消息一次性送达，而不是实时编辑占位消息——避免快速、简短回合时占位消息的闪现。 |
 
 ## 能力声明
 
