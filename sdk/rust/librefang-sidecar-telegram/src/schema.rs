@@ -29,12 +29,14 @@ pub fn telegram_schema() -> Schema {
 mod tests {
     use super::*;
 
-    // Guards the docs <-> schema drift the `--describe` form depends on: the
-    // dashboard configure form renders exactly the fields this function emits,
-    // so a var documented as a `--describe` field (see
-    // docs/src/app/architecture/rust-telegram-sidecar/page.mdx) must appear
-    // here or the toggle silently never shows. Lives inline because this is a
-    // binary-only crate and `telegram_schema` is not exported to a lib target.
+    // Pins that `telegram_schema()` declares the fields the dashboard
+    // `--describe` configure form renders — including TELEGRAM_STREAMING, which
+    // the docs advertise as a configurable field (see
+    // docs/src/app/architecture/rust-telegram-sidecar/page.mdx); if it were
+    // dropped here the toggle would silently never show. This is a schema-side
+    // presence check, not a docs parser, so the two must be kept in sync by
+    // hand. Lives inline because this is a binary-only crate and
+    // `telegram_schema` is not exported to a lib target.
     #[test]
     fn schema_declares_expected_fields() {
         let schema = telegram_schema();
