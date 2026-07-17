@@ -697,12 +697,13 @@ impl AuthManager {
             return UserToolGate::Allow;
         }
 
-        // Explicit system-internal invocations bypass RBAC. Today the
-        // only caller that sets this flag is the cron dispatcher (via
+        // Explicit system-internal invocations bypass RBAC. Callers that
+        // set this flag today: the cron / autonomous dispatcher (via
         // `LibreFangKernel::resolve_user_tool_decision` matching
-        // `channel == "cron"`); future system-fire sites should be
-        // wired through the same trait method, never by inventing a
-        // new sentinel string here.
+        // `channel == "cron"` / `"autonomous"`) and the auto_dream fork
+        // (via `LoopOptions::system_call`, #6463); future system-fire
+        // sites should be wired through the same trait method, never by
+        // inventing a new sentinel string here.
         if system_call {
             return UserToolGate::Allow;
         }

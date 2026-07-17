@@ -1512,6 +1512,9 @@ pub async fn execute_tool(
         spill_threshold_bytes,
         max_artifact_bytes,
         None,
+        // Out-of-band callers of the positional shim are user-facing / MCP
+        // bridge calls, never system-internal forks (#6463).
+        false,
     )
     .await
 }
@@ -1556,6 +1559,12 @@ pub async fn execute_tool_with_sender_account(
     spill_threshold_bytes: u64,
     max_artifact_bytes: u64,
     sender_account_id: Option<&str>,
+    // When true, this is a system-internal fork (currently auto_dream) with
+    // no attributable end user — forwarded to the RBAC gate as
+    // `system_call = true` so its `memory_*` calls are not routed through the
+    // guest gate once `[[users]]` is configured (#6463). Every user-facing
+    // caller passes `false`.
+    system_call: bool,
 ) -> ToolResult {
     // Normalize the tool name through compat mappings so LLM-hallucinated aliases
     // (e.g. "fs-write" → "file_write") resolve to the canonical LibreFang name.
@@ -1664,7 +1673,7 @@ pub async fn execute_tool_with_sender_account(
         // hard-blocks the call; `NeedsApproval` flips the call into
         // approval-required mode regardless of the global require list;
         // `Allow` defers to the existing approval logic.
-        let user_gate = kh.resolve_user_tool_decision(tool_name, sender_id, channel);
+        let user_gate = kh.resolve_user_tool_decision(tool_name, sender_id, channel, system_call);
         let force_approval = match &user_gate {
             librefang_types::user_policy::UserToolGate::Allow => false,
             librefang_types::user_policy::UserToolGate::Deny { reason } => {
