@@ -98,16 +98,85 @@ impl LibreFangKernel {
             }
         };
 
-        // Learnings callback: the runner already persists to structured KV.
-        // This hook notifies the operator and logs for observability.
+        use librefang_skills::evolution::create_skill;
+
+        // Clone before kernel is consumed by closures below.
+        let goal_id_for_title = goal_id;
+        let goal_title = {
+            let substrate = self.substrate_ref();
+            let arr = substrate
+                .structured_get(
+                    librefang_types::goal::goals_storage_agent_id(),
+                    librefang_types::goal::GOALS_STORAGE_KEY,
+                )
+                .ok()
+                .flatten()
+                .unwrap_or(serde_json::Value::Array(vec![]));
+            if let serde_json::Value::Array(arr) = arr {
+                let target = goal_id_for_title.to_string();
+                arr.into_iter()
+                    .find(|g| g.get("id").and_then(|v| v.as_str()) == Some(target.as_str()))
+                    .and_then(|g| g.get("title").and_then(|v| v.as_str()).map(String::from))
+                    .unwrap_or_else(|| format!("Goal {goal_id_for_title}"))
+            } else {
+                format!("Goal {goal_id_for_title}")
+            }
+        };
+
+        // Learnings callback: persist captured knowledge as an auto-created
+        // skill so the agent self-evolves. Every completed goal leaves behind
+        // a skill that future runs can load.
         let learnings_agent_id = agent_id;
+        let skills_dir = self.home_dir().join("skills");
         let on_learnings = move |learnings: Vec<String>| {
-            tracing::info!(
-                agent = %learnings_agent_id,
-                goal_id = %goal_id,
-                count = learnings.len(),
-                "Goal runner: captured learnings, agent self-evolved"
+            if learnings.is_empty() {
+                return;
+            }
+            let body = format!(
+                "## Learnings from goal run\n\n{}\n\n## Usage\n\
+                 These patterns were discovered during autonomous execution of \
+                 goal `{title}`. Apply them when solving similar tasks.",
+                learnings
+                    .iter()
+                    .enumerate()
+                    .map(|(i, l)| format!("{}. {l}", i + 1))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                title = goal_title,
             );
+            let skill_name = format!(
+                "goal-learned-{}",
+                goal_title
+                    .to_lowercase()
+                    .replace(|c: char| !c.is_alphanumeric(), "-")
+                    .trim_matches('-')
+            );
+            match create_skill(
+                &skills_dir,
+                &skill_name,
+                &format!("Auto-discovered from goal: {goal_title}"),
+                &body,
+                vec!["goal-learned".into(), "auto-evolved".into()],
+                Some("goal-runner"),
+            ) {
+                Ok(result) => {
+                    tracing::info!(
+                        agent = %learnings_agent_id,
+                        goal_id = %goal_id,
+                        count = learnings.len(),
+                        skill = %result.skill_name,
+                        "Goal runner: auto-created skill from captured learnings"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        agent = %learnings_agent_id,
+                        goal_id = %goal_id,
+                        error = %e,
+                        "Goal runner: failed to auto-create skill from learnings"
+                    );
+                }
+            }
         };
 
         self.workflows.goal_runner.start(
