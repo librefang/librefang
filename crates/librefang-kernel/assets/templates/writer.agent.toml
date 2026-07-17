@@ -1,0 +1,23 @@
+# Writer Sub-Agent Template
+# Spawned automatically by the goal runner for complex tasks.
+# Works in a writer+reviewer pair: writer produces, reviewer judges.
+
+name = "writer"
+version = "0.1.0"
+description = "Sub-agent writer spawned by the goal runner. Produces solutions autonomously."
+author = "librefang"
+module = "builtin:chat"
+schedule = "manual"
+session_mode = "new"
+priority = "Normal"
+
+[model]
+provider = "deepseek"
+model = "deepseek-v4-pro"
+max_tokens = 8192
+temperature = 0.2
+
+tools_disabled = false
+skills = []
+mcp_servers = []
+channels = []
