@@ -98,6 +98,18 @@ impl LibreFangKernel {
             }
         };
 
+        // Learnings callback: the runner already persists to structured KV.
+        // This hook notifies the operator and logs for observability.
+        let learnings_agent_id = agent_id;
+        let on_learnings = move |learnings: Vec<String>| {
+            tracing::info!(
+                agent = %learnings_agent_id,
+                goal_id = %goal_id,
+                count = learnings.len(),
+                "Goal runner: captured learnings, agent self-evolved"
+            );
+        };
+
         self.workflows.goal_runner.start(
             goal_id,
             agent_id,
@@ -105,6 +117,7 @@ impl LibreFangKernel {
             substrate,
             send,
             spawn_sub,
+            on_learnings,
             verify_agent_id,
             verify_max_retries,
         );
