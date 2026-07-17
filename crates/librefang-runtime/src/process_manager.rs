@@ -809,6 +809,10 @@ mod tests {
             outcome.cancelled,
             "an explicitly-killed process is cancelled"
         );
+        assert!(
+            outcome.output_tail.is_empty(),
+            "the cancel path carries no output tail — it is discarded for a killed process"
+        );
 
         // Give the natural-exit reaper a chance to run: it must find the
         // entry already removed and NOT fire a second outcome.
