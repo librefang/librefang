@@ -123,6 +123,7 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         goal_id: librefang_types::goal::GoalId,
         agent_id: AgentId,
         max_iterations: Option<u32>,
+        loop_engineering: bool,
         verify_agent_id: Option<AgentId>,
         verify_max_retries: Option<u32>,
     );
@@ -884,6 +885,7 @@ impl KernelApi for LibreFangKernel {
         goal_id: librefang_types::goal::GoalId,
         agent_id: AgentId,
         max_iterations: Option<u32>,
+        loop_engineering: bool,
         verify_agent_id: Option<AgentId>,
         verify_max_retries: Option<u32>,
     ) {
@@ -891,6 +893,7 @@ impl KernelApi for LibreFangKernel {
             goal_id,
             agent_id,
             max_iterations,
+            loop_engineering,
             verify_agent_id,
             verify_max_retries,
         );
