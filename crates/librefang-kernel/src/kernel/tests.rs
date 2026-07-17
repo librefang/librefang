@@ -6026,6 +6026,63 @@ fn loop_options_default_is_not_system_call_6463() {
     );
 }
 
+/// `run_forked_agent_streaming` is the ONE construction site that builds a
+/// `LoopOptions` with `system_call: true` — the load-bearing literal that
+/// makes a system-internal fork (currently only the auto_dream background
+/// cycle) bypass the per-user RBAC gate so its `memory_*` calls don't hit
+/// `NeedsApproval` once `[[users]]` is configured (#6463). Two failure
+/// modes are pinned by grepping the source (mirrors
+/// `test_execute_llm_agent_hardcodes_is_fork_false_for_peer_id_invariant`,
+/// which `include_str!`s its sibling source the same way): if a refactor
+/// drops the literal, dream cycles silently regress to flooding the
+/// approval queue; if it spreads to another `LoopOptions` literal on this
+/// path, an ordinary user turn would wrongly bypass the gate.
+#[test]
+fn run_forked_agent_streaming_sets_system_call_true_6463() {
+    let src = include_str!("messaging.rs");
+
+    // Invariant 1: the fork's own `LoopOptions` literal sets
+    // `system_call: true`. Scope the search to the
+    // `run_forked_agent_streaming` body (up to the next method on the
+    // impl) so the assertion is about *this* call site specifically.
+    let fork_start = src
+        .find("pub fn run_forked_agent_streaming")
+        .expect("run_forked_agent_streaming must exist in messaging.rs");
+    let fork_body = {
+        let after = &src[fork_start..];
+        let end = after
+            .find("fn send_message_streaming_with_sender(")
+            .expect("the method following run_forked_agent_streaming must exist");
+        &after[..end]
+    };
+    assert!(
+        fork_body.contains("system_call: true,"),
+        "run_forked_agent_streaming must construct its LoopOptions with \
+         `system_call: true,` so the auto_dream fork bypasses the per-user \
+         RBAC gate (#6463); if this literal disappears, dream cycles \
+         regress to NeedsApproval on every memory_* call once `[[users]]` \
+         is configured."
+    );
+
+    // Invariant 2: no OTHER LoopOptions literal in messaging.rs sets
+    // `system_call: true` — every user-facing construction site passes
+    // `false`; only the system-internal fork is exempt. Comments are
+    // excluded so explanatory prose mentioning the flag does not trip the
+    // count (the same style the peer_id invariant test uses).
+    let system_call_true_lines = src
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .filter(|l| l.contains("system_call: true"))
+        .count();
+    assert_eq!(
+        system_call_true_lines, 1,
+        "exactly one LoopOptions literal in messaging.rs may set \
+         `system_call: true` (the run_forked_agent_streaming fork); a \
+         second occurrence means a user-facing turn is wrongly bypassing \
+         the per-user RBAC gate."
+    );
+}
+
 // ---------------------------------------------------------------------------
 // approval_agent_display
 // ---------------------------------------------------------------------------
