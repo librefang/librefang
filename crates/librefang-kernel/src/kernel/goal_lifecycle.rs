@@ -10,7 +10,7 @@
 //! `Arc<dyn KernelApi>`.
 
 use librefang_channels::types::SenderContext;
-use librefang_types::agent::AgentId;
+use librefang_types::agent::{AgentId, AgentManifest, ModelConfig, SessionMode};
 use librefang_types::goal::{GoalId, GoalRunState, DEFAULT_GOAL_MAX_ITERATIONS};
 
 use super::{LibreFangKernel, SYSTEM_CHANNEL_AUTONOMOUS};
@@ -46,8 +46,9 @@ impl LibreFangKernel {
             }
         };
 
+        let send_kernel = kernel.clone();
         let send = move |aid: AgentId, msg: String| {
-            let k = kernel.clone();
+            let k = send_kernel.clone();
             async move {
                 let sender = SenderContext {
                     channel: SYSTEM_CHANNEL_AUTONOMOUS.to_string(),
@@ -63,12 +64,47 @@ impl LibreFangKernel {
             }
         };
 
+        // Sub-agent spawn closure for the loop: creates a fresh agent from
+        // the writer template for reviewer duty when the verifier needs a
+        // second opinion.
+        let spawn_kernel = kernel.clone();
+        let spawn_sub = move |task_name: String| {
+            let k = spawn_kernel.clone();
+            async move {
+                let manifest = AgentManifest {
+                    name: format!(
+                        "goal-sub-{}",
+                        uuid::Uuid::new_v4()
+                            .to_string()
+                            .split('-')
+                            .next()
+                            .unwrap_or("x")
+                    ),
+                    version: "0.1.0".into(),
+                    description: format!("Auto-spawned sub-agent: {task_name}"),
+                    author: "goal-runner".into(),
+                    module: "builtin:chat".into(),
+                    schedule: librefang_types::agent::ScheduleMode::Reactive,
+                    session_mode: SessionMode::New,
+                    model: ModelConfig {
+                        provider: "deepseek".into(),
+                        model: "deepseek-v4-pro".into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                // spawn_agent is sync (not async).
+                k.spawn_agent(manifest).ok()
+            }
+        };
+
         self.workflows.goal_runner.start(
             goal_id,
             agent_id,
             max,
             substrate,
             send,
+            spawn_sub,
             verify_agent_id,
             verify_max_retries,
         );
