@@ -199,6 +199,7 @@ pub async fn start_goal_run(
         .and_then(|v| v.as_u64())
         .map(|n| n as u32);
 
+    let loop_engineering = goal["loop_engineering"].as_bool().unwrap_or(false);
     let verify_agent_id = goal["verify_agent_id"]
         .as_str()
         .and_then(|s| s.parse::<uuid::Uuid>().ok())
@@ -237,6 +238,7 @@ pub async fn start_goal_run(
         goal_id,
         agent_id,
         max_iterations,
+        loop_engineering,
         verify_agent_id,
         verify_max_retries,
     );
@@ -302,6 +304,8 @@ pub async fn create_goal(
     }
 
     let agent_id_str = req["agent_id"].as_str().map(|s| s.to_string());
+    let loop_engineering = req["loop_engineering"].as_bool().unwrap_or(false);
+    let verify_agent_id_str = req["verify_agent_id"].as_str().map(|s| s.to_string());
 
     let now = chrono::Utc::now().to_rfc3339();
     let goal_id = uuid::Uuid::new_v4().to_string();
@@ -311,6 +315,7 @@ pub async fn create_goal(
         "description": description,
         "status": status,
         "progress": progress,
+        "loop_engineering": loop_engineering,
         "created_at": now,
         "updated_at": now,
     });
@@ -320,6 +325,9 @@ pub async fn create_goal(
     }
     if let Some(ref aid) = agent_id_str {
         entry["agent_id"] = serde_json::Value::String(aid.clone());
+    }
+    if let Some(ref vid) = verify_agent_id_str {
+        entry["verify_agent_id"] = serde_json::Value::String(vid.clone());
     }
 
     // Atomic read-modify-write under BEGIN IMMEDIATE (#5138). Parent
@@ -497,6 +505,16 @@ pub async fn update_goal_by_id(
                             g.as_object_mut().map(|obj| obj.remove("agent_id"));
                         } else if let Some(aid) = agent_id.as_str() {
                             g["agent_id"] = serde_json::Value::String(aid.to_string());
+                        }
+                    }
+                    if let Some(loop_eng) = req.get("loop_engineering").and_then(|v| v.as_bool()) {
+                        g["loop_engineering"] = serde_json::json!(loop_eng);
+                    }
+                    if let Some(vid) = req.get("verify_agent_id") {
+                        if vid.is_null() {
+                            g.as_object_mut().map(|obj| obj.remove("verify_agent_id"));
+                        } else if let Some(v) = vid.as_str() {
+                            g["verify_agent_id"] = serde_json::Value::String(v.to_string());
                         }
                     }
                     g["updated_at"] = serde_json::Value::String(chrono::Utc::now().to_rfc3339());

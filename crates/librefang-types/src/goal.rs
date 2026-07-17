@@ -104,9 +104,13 @@ pub struct Goal {
     /// Optional agent assigned to this goal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<AgentId>,
+    /// Enable loop engineering mode: verifier, auto-sub-agent spawning,
+    /// GOAL_LEARNED memory, and auto-skill-creation. Default false —
+    /// basic goal loop when off (upstream behavior).
+    #[serde(default)]
+    pub loop_engineering: bool,
     /// Optional verifier agent that judges output quality after each
-    /// iteration. When set, the goal runner sends the generator's output
-    /// to this agent for verification before accepting progress. Part of
+    /// iteration. Only active when `loop_engineering` is true. Part of
     /// the Loop Engineering pattern: "Never let an agent grade its own
     /// work."
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -246,6 +250,8 @@ mod tests {
             status: GoalStatus::Pending,
             progress: 0,
             agent_id: None,
+            loop_engineering: false,
+            verify_agent_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

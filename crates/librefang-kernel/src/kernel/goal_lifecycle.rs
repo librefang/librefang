@@ -29,6 +29,7 @@ impl LibreFangKernel {
         goal_id: GoalId,
         agent_id: AgentId,
         max_iterations: Option<u32>,
+        loop_engineering: bool,
         verify_agent_id: Option<AgentId>,
         verify_max_retries: Option<u32>,
     ) {
@@ -64,13 +65,16 @@ impl LibreFangKernel {
             }
         };
 
-        // Sub-agent spawn closure for the loop: creates a fresh agent from
-        // the writer template for reviewer duty when the verifier needs a
-        // second opinion.
+        // Sub-agent spawn closure for the loop. Gated on loop_engineering
+        // inside the closure body (not via if/else) so both branches
+        // return the same concrete type.
         let spawn_kernel = kernel.clone();
         let spawn_sub = move |task_name: String| {
             let k = spawn_kernel.clone();
             async move {
+                if !loop_engineering {
+                    return None;
+                }
                 let manifest = AgentManifest {
                     name: format!(
                         "goal-sub-{}",
@@ -124,12 +128,11 @@ impl LibreFangKernel {
         };
 
         // Learnings callback: persist captured knowledge as an auto-created
-        // skill so the agent self-evolves. Every completed goal leaves behind
-        // a skill that future runs can load.
+        // skill so the agent self-evolves. Only when loop_engineering is on.
         let learnings_agent_id = agent_id;
         let skills_dir = self.home_dir().join("skills");
         let on_learnings = move |learnings: Vec<String>| {
-            if learnings.is_empty() {
+            if !loop_engineering || learnings.is_empty() {
                 return;
             }
             let body = format!(
@@ -187,6 +190,7 @@ impl LibreFangKernel {
             send,
             spawn_sub,
             on_learnings,
+            loop_engineering,
             verify_agent_id,
             verify_max_retries,
         );

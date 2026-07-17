@@ -372,6 +372,7 @@ impl GoalRunner {
         send_message: F,
         spawn_sub_agent: S,
         on_learnings_captured: L,
+        loop_engineering: bool,
         verify_agent_id: Option<AgentId>,
         verify_max_retries: Option<u32>,
     ) where
@@ -432,6 +433,7 @@ impl GoalRunner {
                 send_message,
                 spawn_sub_agent,
                 on_learnings_captured,
+                loop_engineering,
                 loop_state,
                 loop_stop,
                 shutdown_rx,
@@ -610,6 +612,7 @@ async fn run_loop<F, Fut, S, Sfut, L>(
     send_message: F,
     spawn_sub_agent: S,
     on_learnings_captured: L,
+    loop_engineering: bool,
     state: Arc<Mutex<GoalRunState>>,
     stop: Arc<AtomicBool>,
     mut shutdown_rx: watch::Receiver<bool>,
@@ -652,7 +655,7 @@ async fn run_loop<F, Fut, S, Sfut, L>(
             break GoalRunPhase::MaxIterationsReached;
         }
 
-        let has_verifier = {
+        let has_verifier = loop_engineering && {
             let s = state.lock().await;
             s.verify_agent_id.is_some()
         };
@@ -669,19 +672,21 @@ async fn run_loop<F, Fut, S, Sfut, L>(
             Ok(reply) => {
                 rate_limit_streak = 0;
                 let parsed = parse_tick(&reply);
-                // Collect learnings for self-evolution: accumulate across
-                // iterations so the agent builds a knowledge base as it works.
-                if !parsed.learnings.is_empty() {
+                // Collect learnings for self-evolution (loop_engineering only).
+                if loop_engineering && !parsed.learnings.is_empty() {
                     accumulated_learnings.extend(parsed.learnings.clone());
                     info!(goal_id = %goal_id, learnings = ?parsed.learnings,
                           "Goal run: captured learnings");
                 }
 
-                // Verifier loop: if a verifier agent is configured, run it
+                // Verifier loop: only active when loop_engineering is on
+                // and a verifier agent is configured.
                 // against this iteration's output before accepting progress.
-                let verify_id = {
+                let verify_id = if loop_engineering {
                     let s = state.lock().await;
                     s.verify_agent_id
+                } else {
+                    None
                 };
                 let max_retries = {
                     let s = state.lock().await;
@@ -836,9 +841,8 @@ async fn run_loop<F, Fut, S, Sfut, L>(
     if !interrupted_by_shutdown {
         delete_persisted_run(&store, goal_id);
     }
-    // Persist captured learnings to shared memory so they survive across
-    // goal runs — the agent self-evolves by reading prior learnings.
-    if !accumulated_learnings.is_empty() {
+    // Persist captured learnings to shared memory (loop_engineering only).
+    if loop_engineering && !accumulated_learnings.is_empty() {
         let key = format!("goal_learnings_{goal_id}");
         if let Err(e) = substrate.structured_set(
             goals_storage_agent_id(),
@@ -926,6 +930,7 @@ mod tests {
             status: GoalStatus::InProgress,
             progress: 0,
             agent_id: Some(agent_id),
+            loop_engineering: false,
             verify_agent_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -966,6 +971,7 @@ mod tests {
             send,
             |_: String| async { None },
             |_| {},
+            false, // loop_engineering
             state.clone(),
             Arc::new(AtomicBool::new(false)),
             rx,
@@ -1014,6 +1020,7 @@ mod tests {
             send,
             |_: String| async { None },
             |_| {},
+            false, // loop_engineering
             state.clone(),
             Arc::new(AtomicBool::new(false)),
             rx,
@@ -1069,6 +1076,7 @@ mod tests {
             send,
             |_: String| async { None },
             |_| {},
+            false, // loop_engineering
             state.clone(),
             Arc::new(AtomicBool::new(false)),
             rx,
@@ -1107,6 +1115,7 @@ mod tests {
             send,
             |_: String| async { None },
             |_| {},
+            false, // loop_engineering
             state.clone(),
             Arc::new(AtomicBool::new(true)),
             rx,
@@ -1142,6 +1151,7 @@ mod tests {
             send,
             |_: String| async { None },
             |_| {},
+            false, // loop_engineering
             state.clone(),
             Arc::new(AtomicBool::new(false)),
             rx,
@@ -1178,6 +1188,7 @@ mod tests {
             send,
             |_: String| async { None },
             |_| {},
+            false, // loop_engineering
             state.clone(),
             Arc::new(AtomicBool::new(false)),
             rx,
@@ -1243,6 +1254,7 @@ mod tests {
             send,
             |_: String| async { None },
             |_| {},
+            false, // loop_engineering
             state.clone(),
             Arc::new(AtomicBool::new(false)),
             rx,
@@ -1300,6 +1312,7 @@ mod tests {
             send,
             |_: String| async { None },
             |_| {},
+            false, // loop_engineering
             state.clone(),
             Arc::new(AtomicBool::new(false)),
             rx,
@@ -1521,6 +1534,7 @@ mod tests {
                     s1,
                     |_: String| async { None },
                     |_| {},
+                    false, // loop_engineering
                     None,
                     None,
                 );
@@ -1534,6 +1548,7 @@ mod tests {
                     s2,
                     |_: String| async { None },
                     |_| {},
+                    false, // loop_engineering
                     None,
                     None,
                 );
