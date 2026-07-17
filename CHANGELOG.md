@@ -7,6 +7,10 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ## [Unreleased]
 
+### Added
+
+- Slack sidecar multi-step task-progress display: the generic AgentPhase lifecycle (Thinking → ToolUse{name} → Done/Error) now reaches the Slack adapter as `reaction` commands — Slack declares the existing `reaction` capability rather than a new one, since that is the capability `ChannelAdapter::send_reaction` already dispatches the phase lifecycle through — and is rendered as an updated-in-place Block Kit step list via `chat.update` for multi-step turns, while single-step turns keep the prior eyes → white_check_mark receipt reactions (both honour `SLACK_REACTIONS`); the `reaction` command gained optional `phase` / `tool_name` fields (backward-compatible, omitted when empty) carrying the lifecycle detail the emoji alone drops, and the bridge now also emits `ToolUse` phases on the non-streaming dispatch path so a non-streaming adapter that declares `reaction` sees the full `Thinking → ToolUse… → Done/Error` sequence (#6451) (@houko)
+
 ### Changed
 
 - Thread `CanvasConfig.max_html_bytes` / `allowed_tags` into the canvas tool: the `CANVAS_MAX_BYTES` task-local was never `.scope()`d and `allowed_tags` was read nowhere, so both operator knobs were dead config and the tool always used the hardcoded 512 KiB cap + built-in tag allowlist; the agent loop now scopes both task-locals from the resolved config (kernel-populated `LoopOptions.canvas_config`), and an empty `allowed_tags` still falls back to the built-in list (#6446) (@houko)

@@ -12,7 +12,8 @@ use futures::Stream;
 use librefang_channels::bridge::{BridgeManager, ChannelBridgeHandle};
 use librefang_channels::router::AgentRouter;
 use librefang_channels::types::{
-    ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
+    AgentPhase, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
+    LifecycleReaction,
 };
 use librefang_types::agent::AgentId;
 use librefang_types::config::ChannelOverrides;
@@ -1153,6 +1154,225 @@ async fn test_bridge_non_streaming_adapter_sees_progress_markers() {
         "Expected post-tool prose in reply, got: {:?}",
         sent[0].1
     );
+
+    manager.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// ToolUse lifecycle reaction on the non-streaming-adapter path (#6451)
+// ---------------------------------------------------------------------------
+//
+// The non-streaming-adapter branch of `dispatch_message` mirrors the streaming
+// path: each `\n\n🔧 <tool>\n\n` marker in the accumulated delta stream is
+// surfaced as an `AgentPhase::ToolUse` reaction via `send_reaction`, so a
+// non-streaming adapter that consumes reactions (the Slack sidecar's
+// multi-step task display) can build a per-tool step list.
+// `test_bridge_non_streaming_adapter_sees_progress_markers` above only asserts
+// the marker text lands in the consolidated reply — it never exercises the
+// reaction call. This test records reactions through a non-streaming adapter
+// and asserts the ToolUse phase (carrying the tool name) reaches
+// `send_reaction`.
+
+/// Non-streaming adapter that records every lifecycle reaction it receives.
+/// Mirrors `MockAdapter` (also non-streaming) but captures the reactions the
+/// default no-op `send_reaction` would otherwise drop.
+struct ReactionRecordingAdapter {
+    name: String,
+    channel_type: ChannelType,
+    rx: Mutex<Option<mpsc::Receiver<ChannelMessage>>>,
+    reactions: Arc<Mutex<Vec<LifecycleReaction>>>,
+    shutdown_tx: watch::Sender<bool>,
+}
+
+impl ReactionRecordingAdapter {
+    fn new(name: &str, channel_type: ChannelType) -> (Arc<Self>, mpsc::Sender<ChannelMessage>) {
+        let (tx, rx) = mpsc::channel(256);
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        let a = Arc::new(Self {
+            name: name.to_string(),
+            channel_type,
+            rx: Mutex::new(Some(rx)),
+            reactions: Arc::new(Mutex::new(Vec::new())),
+            shutdown_tx,
+        });
+        (a, tx)
+    }
+
+    fn get_reactions(&self) -> Vec<LifecycleReaction> {
+        self.reactions.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl ChannelAdapter for ReactionRecordingAdapter {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn channel_type(&self) -> ChannelType {
+        self.channel_type.clone()
+    }
+    async fn start(
+        &self,
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        let rx = self
+            .rx
+            .lock()
+            .unwrap()
+            .take()
+            .expect("start() called more than once");
+        Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+    }
+    async fn send(
+        &self,
+        _user: &ChannelUser,
+        _content: ChannelContent,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Ok(())
+    }
+    async fn send_reaction(
+        &self,
+        _user: &ChannelUser,
+        _message_id: &str,
+        reaction: &LifecycleReaction,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.reactions.lock().unwrap().push(reaction.clone());
+        Ok(())
+    }
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let _ = self.shutdown_tx.send(true);
+        Ok(())
+    }
+}
+
+/// Handle whose streaming API emits a tool marker delta in the exact shape
+/// `extract_tool_marker_name` recognizes — a standalone `tx.send` of
+/// `\n\n🔧 <tool>\n\n`, matching the real producer
+/// (`channel_bridge.rs`: `format!("\n\n🔧 {pretty}\n\n")`). `MockProgressHandle`
+/// above deliberately emits a differently-shaped marker (single trailing
+/// newline, backticks) that does NOT match, so it can drive the text-in-reply
+/// assertion but not the reaction assertion.
+struct MockToolReactionHandle {
+    agents: Mutex<Vec<(AgentId, String)>>,
+}
+
+impl MockToolReactionHandle {
+    fn new(agents: Vec<(AgentId, String)>) -> Self {
+        Self {
+            agents: Mutex::new(agents),
+        }
+    }
+}
+
+#[async_trait]
+impl ChannelBridgeHandle for MockToolReactionHandle {
+    async fn send_message(&self, _agent_id: AgentId, message: &str) -> Result<String, String> {
+        Ok(format!("Echo: {message}"))
+    }
+
+    async fn find_agent_by_name(&self, name: &str) -> Result<Option<AgentId>, String> {
+        let agents = self.agents.lock().unwrap();
+        Ok(agents.iter().find(|(_, n)| n == name).map(|(id, _)| *id))
+    }
+
+    async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String> {
+        Ok(self.agents.lock().unwrap().clone())
+    }
+
+    async fn spawn_agent_by_name(&self, _manifest_name: &str) -> Result<AgentId, String> {
+        Err("mock: spawn not implemented".to_string())
+    }
+
+    async fn send_message_streaming_with_sender_status(
+        &self,
+        _agent_id: AgentId,
+        _message: &str,
+        _sender: &librefang_channels::types::SenderContext,
+    ) -> Result<
+        (
+            mpsc::Receiver<String>,
+            tokio::sync::oneshot::Receiver<Result<(), String>>,
+        ),
+        String,
+    > {
+        let (tx, rx) = mpsc::channel(16);
+        let (status_tx, status_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            // Standalone marker delta in the exact shape the api bridge injects
+            // on `ToolUseStart` — must be its own `tx.send` with blank lines on
+            // both sides for `extract_tool_marker_name` to recognize it.
+            let _ = tx.send("\n\n🔧 web_search\n\n".to_string()).await;
+            let _ = tx.send("Found 3 results.".to_string()).await;
+            drop(tx);
+            let _ = status_tx.send(Ok(()));
+        });
+        Ok((rx, status_rx))
+    }
+    fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {}
+}
+
+/// A non-streaming adapter must receive the per-tool `AgentPhase::ToolUse`
+/// reaction (carrying the tool name) followed by the terminal `Done` reaction.
+/// This locks the non-streaming-adapter lifecycle emission that #6451 added so
+/// the Slack sidecar's step list keeps getting per-tool signals.
+#[tokio::test]
+async fn test_non_streaming_adapter_receives_tool_use_reaction() {
+    let agent_id = AgentId::new();
+    let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockToolReactionHandle::new(vec![(
+        agent_id,
+        "tool-user".to_string(),
+    )]));
+    let router = Arc::new(AgentRouter::new());
+    router.set_user_default("user1".to_string(), agent_id);
+
+    let (adapter, tx) = ReactionRecordingAdapter::new("slack-mock", ChannelType::Slack);
+    let adapter_ref = adapter.clone();
+
+    let mut manager = BridgeManager::new(handle.clone(), router);
+    manager.start_adapter(adapter.clone()).await.unwrap();
+
+    tx.send(make_text_msg(
+        ChannelType::Slack,
+        "user1",
+        "search for rust async",
+    ))
+    .await
+    .unwrap();
+
+    // Wait until the ToolUse reaction lands.
+    wait_until("tool_use reaction", || {
+        adapter_ref
+            .get_reactions()
+            .iter()
+            .any(|r| matches!(&r.phase, AgentPhase::ToolUse { .. }))
+    })
+    .await;
+
+    let reactions = adapter_ref.get_reactions();
+    let tool_use = reactions
+        .iter()
+        .find(|r| matches!(&r.phase, AgentPhase::ToolUse { .. }))
+        .expect("a ToolUse reaction should have reached send_reaction");
+    match &tool_use.phase {
+        AgentPhase::ToolUse { tool_name } => {
+            assert_eq!(
+                tool_name, "web_search",
+                "ToolUse reaction must carry the tool name extracted from the marker"
+            );
+        }
+        other => panic!("expected ToolUse phase, got {other:?}"),
+    }
+
+    // The turn still terminates with a Done reaction after the tool phase.
+    wait_until("done reaction", || {
+        adapter_ref
+            .get_reactions()
+            .iter()
+            .any(|r| matches!(&r.phase, AgentPhase::Done))
+    })
+    .await;
 
     manager.stop().await;
 }

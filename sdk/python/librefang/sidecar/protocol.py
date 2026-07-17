@@ -347,6 +347,13 @@ class Reaction:
     channel_id: str
     message_id: str
     reaction: str
+    #: Lifecycle phase tag: ``queued`` / ``thinking`` / ``tool_use`` /
+    #: ``streaming`` / ``done`` / ``error``. Empty on the legacy
+    #: emoji-only frame; carried so an adapter can render a live step
+    #: list from the phase lifecycle (#6451).
+    phase: str = ""
+    #: Tool being executed, present for the ``tool_use`` phase only.
+    tool_name: Optional[str] = None
 
 
 @dataclass
@@ -420,7 +427,8 @@ def parse_command(line: str) -> Command:
         return TypingCmd(p.get("channel_id", ""))
     if method == "reaction":
         return Reaction(p.get("channel_id", ""), p.get("message_id", ""),
-                        p.get("reaction", ""))
+                        p.get("reaction", ""), p.get("phase", ""),
+                        p.get("tool_name"))
     if method == "interactive":
         return Interactive(p.get("channel_id", ""), p.get("message", {}))
     if method == "stream_start":
