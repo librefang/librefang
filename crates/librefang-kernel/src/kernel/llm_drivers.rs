@@ -784,11 +784,21 @@ key_required = true
     /// `librefang-runtime::aux_client` and is guarded in that crate.)
     #[test]
     fn provider_allowlist_gates_are_present_at_every_kernel_driver_site() {
-        // resolve_driver's per-slot fallback gate (this file).
+        // resolve_driver's per-slot fallback gate (#6459). A file-wide
+        // `contains()` would be VACUOUS — this file embeds this very test,
+        // whose own source mentions `is_provider_allowed` — so anchor to the
+        // `for fb in &effective_fallbacks` loop with a bounded window that ends
+        // well before this test's source.
         let this = include_str!("llm_drivers.rs");
+        let rd_loop = this
+            .find("for fb in &effective_fallbacks {")
+            .expect("resolve_driver must build a fallback chain");
+        let rd_window = 900.min(this.len() - rd_loop);
         assert!(
-            this.contains("is_provider_allowed"),
-            "resolve_driver must gate providers via is_provider_allowed (#6459)"
+            this.get(rd_loop..rd_loop + rd_window)
+                .unwrap_or("")
+                .contains("is_provider_allowed"),
+            "resolve_driver's fallback loop must gate each slot via is_provider_allowed (#6459)"
         );
 
         // The boot default_driver fallback chain (#6484): scope the assertion
