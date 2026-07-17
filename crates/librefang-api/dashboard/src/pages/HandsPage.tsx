@@ -321,12 +321,20 @@ function HandDetailPanel({
               ? (manifestQuery.error as Error).message ?? t("hands.manifest_error")
               : null
           }
+          // Only user-installed hands are editable: built-in (registry) hands
+          // are recreated from the registry on the next sync, so an edit would
+          // silently revert (#6478 review). Offer Save only when is_custom;
+          // otherwise TomlViewer stays read-only.
           // Editing throws on a 400 validation error; TomlViewer surfaces the
           // thrown message inline and keeps the draft so the user can fix it.
-          onSave={async (text) => {
-            await updateManifest.mutateAsync({ handId: hand.id, toml: text });
-            addToast(t("hands.manifest_saved"), "success");
-          }}
+          onSave={
+            hand.is_custom
+              ? async (text) => {
+                  await updateManifest.mutateAsync({ handId: hand.id, toml: text });
+                  addToast(t("hands.manifest_saved"), "success");
+                }
+              : undefined
+          }
           saving={updateManifest.isPending}
         />
       </Suspense>
