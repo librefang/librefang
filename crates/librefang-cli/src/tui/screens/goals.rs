@@ -11,6 +11,7 @@ use ratatui::Frame;
 // ── Data types ──────────────────────────────────────────────────────────────
 
 #[derive(Clone, Default)]
+#[allow(dead_code)]
 pub struct GoalInfo {
     pub id: String,
     pub title: String,
@@ -20,6 +21,7 @@ pub struct GoalInfo {
     pub agent_id: Option<String>,
     pub loop_engineering: bool,
     pub verify_agent_id: Option<String>,
+    pub evaluator_model: Option<String>,
     pub run_phase: Option<String>,
     pub run_iteration: Option<u32>,
     pub run_max_iterations: Option<u32>,
@@ -44,6 +46,7 @@ pub struct GoalsState {
     pub create_agent_id: String,
     pub create_loop_engineering: bool,
     pub create_verify_agent_id: String,
+    pub create_evaluator_model: String,
     pub status_msg: String,
     pub confirm_delete: bool,
 }
@@ -58,6 +61,7 @@ pub enum GoalsAction {
         agent_id: String,
         loop_engineering: bool,
         verify_agent_id: String,
+        evaluator_model: String,
     },
     StartRun {
         goal_id: String,
@@ -92,6 +96,7 @@ impl GoalsState {
             create_agent_id: String::new(),
             create_loop_engineering: false,
             create_verify_agent_id: String::new(),
+            create_evaluator_model: String::new(),
             status_msg: String::new(),
             confirm_delete: false,
         }
@@ -213,6 +218,7 @@ impl GoalsState {
                 self.create_agent_id.clear();
                 self.create_loop_engineering = false;
                 self.create_verify_agent_id.clear();
+                self.create_evaluator_model.clear();
             }
             KeyCode::Char('d') if self.list_state.selected().is_some() => {
                 self.confirm_delete = true;
@@ -280,13 +286,14 @@ impl GoalsState {
                 }
             }
             KeyCode::Enter => {
-                if self.create_step >= 4 {
+                if self.create_step >= 5 {
                     let action = GoalsAction::CreateGoal {
                         title: self.create_title.clone(),
                         description: self.create_desc.clone(),
                         agent_id: self.create_agent_id.clone(),
                         loop_engineering: self.create_loop_engineering,
                         verify_agent_id: self.create_verify_agent_id.clone(),
+                        evaluator_model: self.create_evaluator_model.clone(),
                     };
                     self.create_open = false;
                     return action;
@@ -300,7 +307,8 @@ impl GoalsState {
                 0 => self.create_title.push(c),
                 1 => self.create_desc.push(c),
                 2 => self.create_agent_id.push(c),
-                4 => self.create_verify_agent_id.push(c),
+                3 => self.create_verify_agent_id.push(c),
+                4 => self.create_evaluator_model.push(c),
                 _ => {}
             },
             KeyCode::Backspace => match self.create_step {
@@ -313,8 +321,11 @@ impl GoalsState {
                 2 => {
                     self.create_agent_id.pop();
                 }
-                4 => {
+                3 => {
                     self.create_verify_agent_id.pop();
+                }
+                4 => {
+                    self.create_evaluator_model.pop();
                 }
                 _ => {}
             },
@@ -608,17 +619,13 @@ fn draw_create(f: &mut Frame, area: Rect, state: &GoalsState) {
     ));
     f.render_widget(Paragraph::new(Line::from(step_line)), chunks[2]);
 
-    let loop_label = if state.create_loop_engineering {
-        "enabled"
-    } else {
-        "disabled"
-    };
     let (label, value): (&str, &str) = match state.create_step {
         0 => ("Title:", &state.create_title),
         1 => ("Description:", &state.create_desc),
         2 => ("Agent ID:", &state.create_agent_id),
-        3 => ("Loop Engineering:", loop_label),
-        _ => ("Verify Agent ID:", &state.create_verify_agent_id),
+        3 => ("Verify Agent ID:", &state.create_verify_agent_id),
+        4 => ("Evaluator Model:", &state.create_evaluator_model),
+        _ => ("", &state.create_title),
     };
 
     f.render_widget(

@@ -2277,6 +2277,9 @@ pub fn spawn_fetch_goals(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
                                     verify_agent_id: g["verify_agent_id"]
                                         .as_str()
                                         .map(|s| s.to_string()),
+                                    evaluator_model: g["evaluator_model"]
+                                        .as_str()
+                                        .map(|s| s.to_string()),
                                     run_phase: g["run_phase"].as_str().map(|s| s.to_string()),
                                     run_iteration: g["run_iteration"].as_u64().map(|v| v as u32),
                                     run_max_iterations: g["run_max_iterations"]
@@ -2304,6 +2307,7 @@ pub fn spawn_create_goal(
     agent_id: String,
     loop_engineering: bool,
     verify_agent_id: String,
+    evaluator_model: String,
     tx: mpsc::Sender<AppEvent>,
 ) {
     std::thread::spawn(move || match backend {
@@ -2317,6 +2321,9 @@ pub fn spawn_create_goal(
             });
             if !verify_agent_id.is_empty() {
                 body["verify_agent_id"] = serde_json::json!(verify_agent_id);
+            }
+            if !evaluator_model.is_empty() {
+                body["evaluator_model"] = serde_json::json!(evaluator_model);
             }
             match client
                 .post(format!("{base_url}/api/goals"))
