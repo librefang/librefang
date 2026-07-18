@@ -186,10 +186,52 @@ pub async fn start_goal_run(
     {
         Some(u) => AgentId(u),
         None => {
-            return ApiErrorResponse::bad_request(
-                "Assign an agent to this goal before starting a run",
-            )
-            .into_json_tuple();
+            // Auto-spawn a disposable agent for this goal.
+            // The agent lives only for the duration of the goal run.
+            let manifest = librefang_types::agent::AgentManifest {
+                name: format!("goal-{}", &id[..8.min(id.len())]),
+                version: "0.1.0".into(),
+                description: format!(
+                    "Auto-spawned agent for goal: {}",
+                    goal["title"].as_str().unwrap_or(&id)
+                ),
+                author: "goal-runner".into(),
+                module: "builtin:chat".into(),
+                schedule: librefang_types::agent::ScheduleMode::Reactive,
+                session_mode: librefang_types::agent::SessionMode::New,
+                model: librefang_types::agent::ModelConfig {
+                    provider: "deepseek".into(),
+                    model: "deepseek-v4-pro".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            match state.kernel.spawn_agent_typed(manifest) {
+                Ok(aid) => {
+                    // Store the spawned agent ID back in the goal so the
+                    // dashboard shows it and the runner knows who to drive.
+                    let _ = state.kernel.memory_substrate().structured_modify(
+                        goals_shared_agent_id(),
+                        GOALS_KEY,
+                        |cur| {
+                            let mut goals = match cur {
+                                Some(serde_json::Value::Array(a)) => a,
+                                _ => Vec::new(),
+                            };
+                            for g in goals.iter_mut() {
+                                if g["id"].as_str() == Some(id.as_str()) {
+                                    g["agent_id"] = serde_json::Value::String(aid.to_string());
+                                }
+                            }
+                            Ok((serde_json::Value::Array(goals), ()))
+                        },
+                    );
+                    aid
+                }
+                Err(e) => {
+                    return ApiErrorResponse::internal_scrub(e).into_json_tuple();
+                }
+            }
         }
     };
 
