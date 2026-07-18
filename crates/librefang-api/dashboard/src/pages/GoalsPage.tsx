@@ -116,9 +116,9 @@ export function GoalsPage() {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
   const [expandedById, setExpandedById] = useState<Record<string, boolean>>({});
-  const [createDraft, setCreateDraft] = useState({ title: "", description: "", status: "pending" as "pending" | "in_progress" | "completed", progress: 0, parent_id: "", agent_id: "" });
+  const [createDraft, setCreateDraft] = useState({ title: "", description: "", status: "pending" as "pending" | "in_progress" | "completed", progress: 0, parent_id: "", agent_id: "", loop_engineering: false, verify_agent_id: "" });
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [editDraft, setEditDraft] = useState({ title: "", description: "", status: "pending" as "pending" | "in_progress" | "completed", progress: 0 });
+  const [editDraft, setEditDraft] = useState({ title: "", description: "", status: "pending" as "pending" | "in_progress" | "completed", progress: 0, loop_engineering: false, verify_agent_id: "" });
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   const goalsQuery = useGoals();
@@ -157,7 +157,7 @@ export function GoalsPage() {
     try {
       await createMutation.mutateAsync(createDraft);
       addToast(t("common.success"), "success");
-      setCreateDraft({ title: "", description: "", status: "pending", progress: 0, parent_id: "", agent_id: "" });
+      setCreateDraft({ title: "", description: "", status: "pending", progress: 0, parent_id: "", agent_id: "", loop_engineering: false, verify_agent_id: "" });
     } catch (err) {
       addToast(toastErr(err, t("common.error")), "error");
     }
@@ -193,7 +193,9 @@ export function GoalsPage() {
         goal.status === "in_progress" || goal.status === "completed"
           ? goal.status
           : "pending",
-      progress: goal.progress || 0
+      progress: goal.progress || 0,
+      loop_engineering: goal.loop_engineering || false,
+      verify_agent_id: goal.verify_agent_id || "",
     });
   };
 
@@ -421,6 +423,17 @@ export function GoalsPage() {
                 <input id="goal-create-title" value={createDraft.title} onChange={e => setCreateDraft({...createDraft, title: e.target.value})} placeholder={t("goals.goal_title_placeholder")} className={inputClass} />
                 <label htmlFor="goal-create-description" className="sr-only">{t("goals.goal_desc_placeholder")}</label>
                 <textarea id="goal-create-description" value={createDraft.description} onChange={e => setCreateDraft({...createDraft, description: e.target.value})} placeholder={t("goals.goal_desc_placeholder")} className={`${inputClass} resize-none`} rows={3} />
+                <label className="flex items-center gap-2 text-xs text-text-dim cursor-pointer">
+                  <input type="checkbox" checked={createDraft.loop_engineering}
+                    onChange={e => setCreateDraft({...createDraft, loop_engineering: e.target.checked})}
+                    className="rounded" />
+                  Loop Engineering
+                </label>
+                {createDraft.loop_engineering && (
+                  <input value={createDraft.verify_agent_id}
+                    onChange={e => setCreateDraft({...createDraft, verify_agent_id: e.target.value})}
+                    placeholder="Verifier agent ID (optional)" className={inputClass} />
+                )}
                 <Button type="submit" variant="primary" disabled={createMutation.isPending || !createDraft.title.trim()} className="mt-2">
                   {createMutation.isPending ? t("common.loading") : t("goals.create_goal")}
                 </Button>
@@ -457,6 +470,17 @@ export function GoalsPage() {
                             </select>
                             <label htmlFor="goal-edit-progress" className="sr-only">{t("goals.progress")}</label>
                             <input id="goal-edit-progress" type="number" value={editDraft.progress} onChange={e => setEditDraft({...editDraft, progress: Number(e.target.value)})} className={inputClass} min={0} max={100} style={{ width: "80px" }} />
+                            <label className="flex items-center gap-2 text-xs text-text-dim cursor-pointer">
+                              <input type="checkbox" checked={editDraft.loop_engineering}
+                                onChange={e => setEditDraft({...editDraft, loop_engineering: e.target.checked})}
+                                className="rounded" />
+                              Loop Engineering
+                            </label>
+                            {editDraft.loop_engineering && (
+                              <input value={editDraft.verify_agent_id}
+                                onChange={e => setEditDraft({...editDraft, verify_agent_id: e.target.value})}
+                                placeholder="Verifier agent ID (optional)" className={inputClass} />
+                            )}
                             <Button variant="primary" size="sm" onClick={handleSaveEdit}>{t("common.save")}</Button>
                             <Button variant="ghost" size="sm" onClick={() => setEditingId(null)}>{t("common.cancel")}</Button>
                           </div>
@@ -491,6 +515,9 @@ export function GoalsPage() {
                               <Badge variant={status === "completed" ? "success" : status === "in_progress" ? "warning" : "default"} className="shrink-0">
                                 {statusLabel(status)}
                               </Badge>
+                              {r.goal.loop_engineering && (
+                                <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-brand/10 text-brand font-bold shrink-0">Loop</span>
+                              )}
                             </div>
                             <div className="flex items-center gap-1 shrink-0">
                               {status !== "completed" && <GoalRunControl goal={r.goal} />}

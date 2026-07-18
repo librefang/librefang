@@ -2432,8 +2432,8 @@ impl LibreFangKernel {
         // conversation context through async task registration.
         // Mirrors the identical block in send_message_full_inner so
         // the streaming and non-streaming paths stay in sync.
-        if let Some(ref ctx) = sender_context {
-            if let Some(ref cid) = ctx.chat_id {
+        if let Some(ctx) = sender_context {
+            if let Some(cid) = &ctx.chat_id {
                 if !cid.is_empty() {
                     manifest.metadata.insert(
                         "sender_chat_id".to_string(),
