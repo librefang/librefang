@@ -71,6 +71,7 @@ fn format_task_completion_text(event: &TaskCompletionEvent) -> String {
     let kind_str = match &event.handle.kind {
         TaskKind::Workflow { run_id } => format!("workflow (run {run_id})"),
         TaskKind::Delegation { agent_id, .. } => format!("delegation to agent {agent_id}"),
+        TaskKind::Process { pid } => format!("process (pid {pid})"),
     };
     let status_str = match &event.status {
         TaskStatus::Completed(value) => {
@@ -192,6 +193,10 @@ impl LibreFangKernel {
                         prompt_hash: b_hash,
                     },
                 ) => a_agent == b_agent && a_hash == b_hash,
+                // Two registrations for the same live OS pid are the same
+                // background process — share the handle rather than mint a
+                // second entry that would orphan on completion.
+                (TaskKind::Process { pid: a }, TaskKind::Process { pid: b }) => a == b,
                 _ => false,
             };
             if matches {

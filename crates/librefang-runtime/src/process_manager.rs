@@ -3,6 +3,7 @@
 //! Allows agents to start long-running processes (REPLs, servers, watchers),
 //! write to their stdin, read from stdout/stderr, and kill them.
 
+use async_trait::async_trait;
 use dashmap::DashMap;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -12,6 +13,65 @@ use tracing::{debug, warn};
 
 /// Unique process identifier.
 pub type ProcessId = String;
+
+/// Maximum bytes of trailing output handed to a [`ProcessCompletionSink`].
+/// The reaper keeps only the newest bytes so a chatty long-running process
+/// does not ship its entire buffer through the completion event.
+const COMPLETION_OUTPUT_TAIL_BYTES: usize = 4 * 1024;
+
+/// Terminal outcome of a tracked background process, delivered to a
+/// [`ProcessCompletionSink`] the moment the process leaves the registry.
+#[derive(Debug, Clone)]
+pub struct ProcessOutcome {
+    /// Exit code when the process exited on its own; `None` when it was
+    /// terminated by the manager (`process_kill` / idle-cleanup sweep) or
+    /// its status could not be collected.
+    pub exit_code: Option<i32>,
+    /// `true` when the manager terminated the process rather than it
+    /// exiting on its own.
+    pub cancelled: bool,
+    /// Tail of the process's captured stdout+stderr (newest bytes, capped
+    /// at [`COMPLETION_OUTPUT_TAIL_BYTES`]). Empty if the agent already
+    /// drained the buffer via `process_poll`.
+    pub output_tail: String,
+}
+
+/// Notified exactly once when a tracked background process reaches a
+/// terminal state. Defined in the runtime and implemented by the kernel's
+/// async-task tracker (#4983 / #6471) so the runtime never gains a direct
+/// kernel dependency — the same trait-injection pattern used for other
+/// kernel→runtime callbacks.
+#[async_trait]
+pub trait ProcessCompletionSink: Send + Sync {
+    /// Deliver the terminal outcome. Invoked at most once per process,
+    /// from whichever terminal path (natural exit, kill, cleanup) removes
+    /// the registry entry first.
+    async fn on_process_finished(&self, outcome: ProcessOutcome);
+}
+
+/// Join the buffered stdout then stderr lines and keep only the newest
+/// [`COMPLETION_OUTPUT_TAIL_BYTES`] bytes, aligned to a char boundary.
+async fn collect_output_tail(
+    stdout_buf: &Arc<Mutex<Vec<String>>>,
+    stderr_buf: &Arc<Mutex<Vec<String>>>,
+) -> String {
+    let mut joined = String::new();
+    for buf in [stdout_buf, stderr_buf] {
+        let lines = buf.lock().await;
+        for line in lines.iter() {
+            joined.push_str(line);
+            joined.push('\n');
+        }
+    }
+    if joined.len() > COMPLETION_OUTPUT_TAIL_BYTES {
+        let mut start = joined.len() - COMPLETION_OUTPUT_TAIL_BYTES;
+        while start < joined.len() && !joined.is_char_boundary(start) {
+            start += 1;
+        }
+        joined = joined[start..].to_string();
+    }
+    joined
+}
 
 /// A managed persistent process.
 struct ManagedProcess {
@@ -29,6 +89,10 @@ struct ManagedProcess {
     command: String,
     /// When the process was started.
     started_at: std::time::Instant,
+    /// Optional completion sink (#6471). When present, the terminal path
+    /// that removes this entry (natural exit, kill, or cleanup) hands it
+    /// the process's [`ProcessOutcome`] exactly once.
+    completion_sink: Option<Arc<dyn ProcessCompletionSink>>,
 }
 
 /// Process info for listing.
@@ -79,6 +143,10 @@ impl ProcessManager {
     /// `hand_allowed_env` — full secret heuristic applies). The spawned
     /// child's environment is scrubbed down to the safe baseline plus these
     /// names (see [`crate::subprocess_sandbox::sandbox_command`]).
+    ///
+    /// Untracked variant — no completion sink. Equivalent to
+    /// [`start_tracked`](Self::start_tracked) with an `on_spawn` closure
+    /// that always returns `None`.
     pub async fn start(
         &self,
         agent_id: &str,
@@ -87,6 +155,36 @@ impl ProcessManager {
         operator_env: &[String],
         untrusted_env: &[String],
     ) -> Result<(ProcessId, Vec<String>), String> {
+        self.start_tracked(agent_id, command, args, operator_env, untrusted_env, |_| {
+            None
+        })
+        .await
+    }
+
+    /// Like [`start`](Self::start), but wires a completion sink (#6471).
+    ///
+    /// After the child is spawned and its OS pid is known, `on_spawn(pid)`
+    /// is invoked **synchronously** (before the per-process reaper task is
+    /// spawned, so there is no race window in which the process could
+    /// complete before the caller has registered its tracking). Whatever
+    /// [`ProcessCompletionSink`] it returns is stored and handed the
+    /// process's [`ProcessOutcome`] exactly once when the process reaches a
+    /// terminal state — natural exit (reaper), explicit `process_kill`, or
+    /// the idle-cleanup sweep. Returning `None` disables tracking for this
+    /// process. When the child has already exited (no pid) `on_spawn` is not
+    /// called.
+    pub async fn start_tracked<F>(
+        &self,
+        agent_id: &str,
+        command: &str,
+        args: &[String],
+        operator_env: &[String],
+        untrusted_env: &[String],
+        on_spawn: F,
+    ) -> Result<(ProcessId, Vec<String>), String>
+    where
+        F: FnOnce(u32) -> Option<Arc<dyn ProcessCompletionSink>>,
+    {
         // Check per-agent limit
         let agent_count = self
             .processes
@@ -125,6 +223,12 @@ impl ProcessManager {
         let mut child = cmd
             .spawn()
             .map_err(|e| format!("Failed to start process '{}': {}", command, e))?;
+
+        // Resolve the completion sink synchronously, before the reaper task
+        // is spawned, so a fast-exiting child cannot fire completion before
+        // the caller has registered its tracking (#6471). A child that has
+        // already exited exposes no pid → no tracking.
+        let completion_sink = child.id().and_then(on_spawn);
 
         let stdin = child.stdin.take();
         let stdout = child.stdout.take();
@@ -193,6 +297,7 @@ impl ProcessManager {
                 agent_id: agent_id.to_string(),
                 command: cmd_display,
                 started_at: std::time::Instant::now(),
+                completion_sink,
             },
         );
 
@@ -240,8 +345,21 @@ impl ProcessManager {
             // collect its exit status and avoid a zombie. If `kill()`
             // already removed the entry this is a harmless no-op.
             if let Some((_, mut proc)) = processes.remove(&reap_id) {
-                let _ = proc.child.wait().await;
+                let exit_code = proc.child.wait().await.ok().and_then(|s| s.code());
                 debug!(process_id = %reap_id, "Reaped naturally-exited process");
+                // Natural-exit terminal path. Fire the completion sink (if
+                // any) exactly once — the DashMap remove above is atomic, so
+                // an explicit kill that removed the entry first reaches this
+                // `remove` as `None` and never double-fires (#6471).
+                if let Some(sink) = proc.completion_sink.take() {
+                    let output_tail = collect_output_tail(&proc.stdout_buf, &proc.stderr_buf).await;
+                    sink.on_process_finished(ProcessOutcome {
+                        exit_code,
+                        cancelled: false,
+                        output_tail,
+                    })
+                    .await;
+                }
             }
         });
 
@@ -332,6 +450,22 @@ impl ProcessManager {
             let _ = crate::subprocess_sandbox::kill_process_tree(pid, 3000).await;
         }
         let _ = proc.child.kill().await;
+        // Kill / cleanup terminal path. The caller already removed the entry
+        // from the registry (`remove_if` / `remove`), so this owns the sink
+        // and the natural-exit reaper will see `None` — exactly-once holds
+        // (#6471). Surfaced as `cancelled` (no meaningful exit code after a
+        // kill) so the agent can distinguish a self-terminated process from
+        // one that ran to completion.
+        if let Some(sink) = proc.completion_sink.take() {
+            // The cancelled outcome carries no output tail — the production sink
+            // discards it for a killed process, so don't pay to collect it here.
+            sink.on_process_finished(ProcessOutcome {
+                exit_code: None,
+                cancelled: true,
+                output_tail: String::new(),
+            })
+            .await;
+        }
     }
 
     /// List all processes for an agent.
@@ -601,5 +735,96 @@ mod tests {
         // The owner still has full access.
         assert!(pm.read(&id, "owner").await.is_ok());
         pm.kill(&id, "owner").await.unwrap();
+    }
+
+    /// Test sink that forwards every delivered [`ProcessOutcome`] onto a
+    /// channel so a test can assert exactly-once firing and the payload.
+    struct RecordingSink {
+        tx: tokio::sync::mpsc::UnboundedSender<ProcessOutcome>,
+    }
+
+    #[async_trait::async_trait]
+    impl ProcessCompletionSink for RecordingSink {
+        async fn on_process_finished(&self, outcome: ProcessOutcome) {
+            let _ = self.tx.send(outcome);
+        }
+    }
+
+    /// Regression (#6471): a tracked process that exits on its own fires its
+    /// completion sink exactly once, reporting a non-cancelled outcome with
+    /// the child's exit code.
+    #[tokio::test]
+    async fn tracked_process_natural_exit_fires_sink_with_exit_code() {
+        let pm = ProcessManager::new(5);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (cmd, args) = short_lived_proc();
+        let (_id, _) = pm
+            .start_tracked("agent1", cmd, &args, &[], &[], move |_pid| {
+                Some(Arc::new(RecordingSink { tx }) as Arc<dyn ProcessCompletionSink>)
+            })
+            .await
+            .unwrap();
+
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
+            .await
+            .expect("sink should fire within the budget")
+            .expect("outcome delivered");
+        assert!(
+            !outcome.cancelled,
+            "a naturally-exited process is not cancelled"
+        );
+        assert_eq!(
+            outcome.exit_code,
+            Some(0),
+            "short-lived success process exits 0"
+        );
+
+        // Exactly once: the reaper removed the entry, so no further outcome
+        // and no lingering registry record.
+        assert!(rx.try_recv().is_err(), "sink must fire exactly once");
+        assert_eq!(pm.count(), 0, "reaped entry is gone");
+    }
+
+    /// Regression (#6471): killing a tracked process fires its sink exactly
+    /// once with `cancelled = true` (no meaningful exit code after a kill).
+    #[tokio::test]
+    async fn tracked_process_kill_fires_cancelled_outcome() {
+        let pm = ProcessManager::new(5);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (cmd, args) = long_running_proc();
+        let (id, _) = pm
+            .start_tracked("agent1", cmd, &args, &[], &[], move |_pid| {
+                Some(Arc::new(RecordingSink { tx }) as Arc<dyn ProcessCompletionSink>)
+            })
+            .await
+            .unwrap();
+
+        pm.kill(&id, "agent1").await.unwrap();
+
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
+            .await
+            .expect("sink should fire within the budget")
+            .expect("outcome delivered");
+        assert!(
+            outcome.cancelled,
+            "an explicitly-killed process is cancelled"
+        );
+        assert!(
+            outcome.output_tail.is_empty(),
+            "the cancel path carries no output tail — it is discarded for a killed process"
+        );
+
+        // Give the natural-exit reaper a chance to run: it must find the
+        // entry already removed and NOT fire a second outcome.
+        for _ in 0..40 {
+            if pm.count() == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "sink must fire exactly once even though both kill and reaper run"
+        );
     }
 }
