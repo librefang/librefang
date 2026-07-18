@@ -2886,6 +2886,7 @@ system_prompt = "You are a helpful assistant."
                             false, // loop_engineering
                             None,  // verify_agent_id
                             None,  // verify_max_retries
+                            None,  // evaluator_model
                         );
                     }
                 }
