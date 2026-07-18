@@ -115,6 +115,12 @@ pub struct Goal {
     /// work."
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify_agent_id: Option<AgentId>,
+    /// Optional evaluator model name for goal completion judgment.
+    /// When set, the goal runner uses this model (e.g. "haiku", "deepseek-v4-pro")
+    /// to evaluate if the goal is met. When None, defaults to the agent's model.
+    /// Claude Code /goal uses Haiku as the evaluator — cheap and objective.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evaluator_model: Option<String>,
     /// When the goal was created.
     pub created_at: DateTime<Utc>,
     /// When the goal was last updated.
@@ -228,6 +234,11 @@ pub struct GoalRunState {
     /// Default 0 (set at run-start, clamped to ≥1 by the runner).
     #[serde(default)]
     pub verify_max_retries: u32,
+    /// Optional evaluator model name used for goal completion judgment.
+    /// When set, the runner uses this model to evaluate if the goal is met.
+    /// When None, defaults to the agent's model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evaluator_model: Option<String>,
     /// When the run started.
     pub started_at: DateTime<Utc>,
     /// When the most recent tick completed.
@@ -253,6 +264,7 @@ mod tests {
             agent_id: None,
             loop_engineering: false,
             verify_agent_id: None,
+            evaluator_model: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
