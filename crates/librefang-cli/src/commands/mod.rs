@@ -13,6 +13,7 @@ pub(crate) mod common;
 pub(crate) mod config;
 pub(crate) mod daemon;
 pub(crate) mod doctor_cmd;
+pub(crate) mod goal;
 pub(crate) mod hand;
 pub(crate) mod init;
 pub(crate) mod maintenance;

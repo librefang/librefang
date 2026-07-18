@@ -34,6 +34,7 @@ pub(crate) use super::common::*;
 pub(crate) use super::config::*;
 pub(crate) use super::daemon::*;
 pub(crate) use super::doctor_cmd::*;
+pub(crate) use super::goal::*;
 pub(crate) use super::hand::*;
 pub(crate) use super::init::*;
 pub(crate) use super::maintenance::*;

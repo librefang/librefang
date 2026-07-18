@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { type GoalItem, type GoalTemplate } from "../api";
+import { useAgents } from "../lib/queries/agents";
 import { useGoals, useGoalTemplates, useGoalRun } from "../lib/queries/goals";
 import {
   useCreateGoal,
@@ -118,9 +119,11 @@ export function GoalsPage() {
   const [expandedById, setExpandedById] = useState<Record<string, boolean>>({});
   const [createDraft, setCreateDraft] = useState({ title: "", description: "", status: "pending" as "pending" | "in_progress" | "completed", progress: 0, parent_id: "", agent_id: "", loop_engineering: false, verify_agent_id: "" });
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [editDraft, setEditDraft] = useState({ title: "", description: "", status: "pending" as "pending" | "in_progress" | "completed", progress: 0, loop_engineering: false, verify_agent_id: "" });
+  const [editDraft, setEditDraft] = useState({ title: "", description: "", status: "pending" as "pending" | "in_progress" | "completed", progress: 0, agent_id: "", loop_engineering: false, verify_agent_id: "" });
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
+  const agentsQuery = useAgents();
+  const agents = agentsQuery.data ?? [];
   const goalsQuery = useGoals();
   const templatesQuery = useGoalTemplates();
   const [applyingTemplate, setApplyingTemplate] = useState<string | null>(null);
@@ -194,6 +197,7 @@ export function GoalsPage() {
           ? goal.status
           : "pending",
       progress: goal.progress || 0,
+      agent_id: goal.agent_id || "",
       loop_engineering: goal.loop_engineering || false,
       verify_agent_id: goal.verify_agent_id || "",
     });
@@ -423,6 +427,11 @@ export function GoalsPage() {
                 <input id="goal-create-title" value={createDraft.title} onChange={e => setCreateDraft({...createDraft, title: e.target.value})} placeholder={t("goals.goal_title_placeholder")} className={inputClass} />
                 <label htmlFor="goal-create-description" className="sr-only">{t("goals.goal_desc_placeholder")}</label>
                 <textarea id="goal-create-description" value={createDraft.description} onChange={e => setCreateDraft({...createDraft, description: e.target.value})} placeholder={t("goals.goal_desc_placeholder")} className={`${inputClass} resize-none`} rows={3} />
+                <label htmlFor="goal-create-agent" className="sr-only">{t("agent_label")}</label>
+                <select id="goal-create-agent" value={createDraft.agent_id} onChange={e => setCreateDraft({...createDraft, agent_id: e.target.value})} className={inputClass}>
+                  <option value="">Select agent (required to run)</option>
+                  {agents.map(a => <option key={a.id} value={a.id}>{a.name || a.id}</option>)}
+                </select>
                 <label className="flex items-center gap-2 text-xs text-text-dim cursor-pointer">
                   <input type="checkbox" checked={createDraft.loop_engineering}
                     onChange={e => setCreateDraft({...createDraft, loop_engineering: e.target.checked})}
@@ -470,6 +479,11 @@ export function GoalsPage() {
                             </select>
                             <label htmlFor="goal-edit-progress" className="sr-only">{t("goals.progress")}</label>
                             <input id="goal-edit-progress" type="number" value={editDraft.progress} onChange={e => setEditDraft({...editDraft, progress: Number(e.target.value)})} className={inputClass} min={0} max={100} style={{ width: "80px" }} />
+                            <label htmlFor="goal-edit-agent" className="sr-only">{t("agent_label")}</label>
+                            <select id="goal-edit-agent" value={editDraft.agent_id} onChange={e => setEditDraft({...editDraft, agent_id: e.target.value})} className={inputClass}>
+                              <option value="">Select agent (required to run)</option>
+                              {agents.map(a => <option key={a.id} value={a.id}>{a.name || a.id}</option>)}
+                            </select>
                             <label className="flex items-center gap-2 text-xs text-text-dim cursor-pointer">
                               <input type="checkbox" checked={editDraft.loop_engineering}
                                 onChange={e => setEditDraft({...editDraft, loop_engineering: e.target.checked})}
