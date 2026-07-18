@@ -155,6 +155,16 @@ pub enum TaskKind {
         /// opaque to the kernel.
         prompt_hash: String,
     },
+    /// A background process started via `process_start` (#6471). Carries
+    /// the OS-level pid so the kernel can correlate the completion event —
+    /// injected when the process exits on its own (or is killed) — back to
+    /// the originating handle, and so duplicate registrations for the same
+    /// live pid dedupe. Only registered when the tool call opted in via
+    /// `notify_on_completion`.
+    Process {
+        /// OS-level process identifier of the background process.
+        pid: u32,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -269,6 +279,14 @@ mod tests {
         }
     }
 
+    fn sample_process_handle() -> TaskHandle {
+        TaskHandle {
+            id: TaskId(Uuid::nil()),
+            kind: TaskKind::Process { pid: 4242 },
+            started_at: fixed_started_at(),
+        }
+    }
+
     #[test]
     fn task_status_serde_roundtrip() {
         let cases = vec![
@@ -301,6 +319,16 @@ mod tests {
         let delegation_back: TaskKind =
             serde_json::from_str(&serde_json::to_string(&delegation).unwrap()).unwrap();
         assert_eq!(delegation, delegation_back);
+
+        let process = TaskKind::Process { pid: 4242 };
+        let process_wire = serde_json::to_string(&process).unwrap();
+        // Tagged `kind` discriminator keeps the variant additive on the wire.
+        assert!(
+            process_wire.contains("\"kind\":\"process\""),
+            "unexpected Process wire form: {process_wire}"
+        );
+        let process_back: TaskKind = serde_json::from_str(&process_wire).unwrap();
+        assert_eq!(process, process_back);
     }
 
     #[test]
@@ -345,6 +373,27 @@ mod tests {
                 assert_eq!(prompt_hash, "sha256:abcd");
             }
             other => panic!("expected Delegation kind, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn task_completion_event_process_roundtrip() {
+        let event = TaskCompletionEvent {
+            handle: sample_process_handle(),
+            status: TaskStatus::Completed(json!({
+                "pid": 4242,
+                "exit_code": 0,
+                "output": "build finished\n",
+            })),
+            completed_at: fixed_completed_at(),
+        };
+        let wire = serde_json::to_string(&event).expect("serialize process event");
+        let back: TaskCompletionEvent =
+            serde_json::from_str(&wire).expect("deserialize process event");
+        assert_eq!(event, back);
+        match back.handle.kind {
+            TaskKind::Process { pid } => assert_eq!(pid, 4242),
+            other => panic!("expected Process kind, got {other:?}"),
         }
     }
 

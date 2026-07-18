@@ -203,6 +203,7 @@ pub(super) fn format_task_completion_text(
     let kind_str = match &event.handle.kind {
         TaskKind::Workflow { run_id } => format!("workflow (run {run_id})"),
         TaskKind::Delegation { agent_id, .. } => format!("delegation to agent {agent_id}"),
+        TaskKind::Process { pid } => format!("process (pid {pid})"),
     };
     let status_str = match &event.status {
         TaskStatus::Completed(value) => {

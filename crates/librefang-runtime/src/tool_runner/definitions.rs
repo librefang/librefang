@@ -1059,7 +1059,7 @@ use instead of web_fetch + file_write (which round-trips the entire body through
             },
             ToolDefinition {
                 name: tool_name::PROCESS_START.to_string(),
-                description: "Start a long-running process (REPL, server, watcher). Returns a process_id for subsequent poll/write/kill operations. Max 5 processes per agent.".to_string(),
+                description: "Start a long-running process (REPL, server, watcher). Returns a process_id for subsequent poll/write/kill operations. Max 5 processes per agent. Set notify_on_completion to be told when the process exits without polling.".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -1068,6 +1068,10 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                             "type": "array",
                             "items": { "type": "string" },
                             "description": "Command-line arguments (e.g. ['-i'] for interactive Python)"
+                        },
+                        "notify_on_completion": {
+                            "type": "boolean",
+                            "description": "When true, a completion notification (exit code + tail of output) is delivered back into this session when the process exits or is killed — no polling required. Default false."
                         }
                     },
                     "required": ["command"]

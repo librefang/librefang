@@ -1137,6 +1137,9 @@ pub async fn execute_tool_raw(
                 *exec_policy,
                 *dangerous_command_checker,
                 *allowed_env_vars,
+                *kernel,
+                *session_id,
+                *chat_id,
             )
             .await
         }
