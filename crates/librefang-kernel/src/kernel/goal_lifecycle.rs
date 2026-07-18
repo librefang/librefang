@@ -127,6 +127,44 @@ impl LibreFangKernel {
             }
         };
 
+        // Evaluator closure: asks a cheap model whether the goal condition
+        // has been met, mirroring Claude Code's /goal evaluator pattern.
+        // Never trust the agent's self-reported GOAL_DONE alone.
+        let eval_kernel = kernel.clone();
+        let evaluate = move |goal_desc: String, agent_reply: String| {
+            let k = eval_kernel.clone();
+            async move {
+                let prompt = format!(
+                    "You are a goal evaluator. Read the goal and the agent's \
+                     latest output. Answer ONLY 'YES' if the goal is fully \
+                     achieved, or 'NO' if more work is needed.\n\n\
+                     GOAL: {goal_desc}\n\n\
+                     AGENT OUTPUT:\n{agent_reply}\n\n\
+                     Is the goal achieved? (YES/NO):"
+                );
+                // Use agent itself for evaluation (same send path).
+                // In a full implementation, this would use a separate
+                // cheap evaluator model (Haiku) as Claude Code does.
+                let sender = SenderContext {
+                    channel: SYSTEM_CHANNEL_AUTONOMOUS.to_string(),
+                    user_id: agent_id.to_string(),
+                    display_name: "goal-evaluator".to_string(),
+                    is_internal_system: true,
+                    ..Default::default()
+                };
+                match k
+                    .send_message_with_sender_context(agent_id, &prompt, &sender)
+                    .await
+                {
+                    Ok(r) => {
+                        let upper = r.response.to_ascii_uppercase();
+                        Ok(upper.contains("YES") && !upper.contains("NO"))
+                    }
+                    Err(e) => Err(e.to_string()),
+                }
+            }
+        };
+
         // Learnings callback: persist captured knowledge as an auto-created
         // skill so the agent self-evolves. Only when loop_engineering is on.
         let learnings_agent_id = agent_id;
@@ -190,6 +228,7 @@ impl LibreFangKernel {
             send,
             spawn_sub,
             on_learnings,
+            evaluate,
             loop_engineering,
             verify_agent_id,
             verify_max_retries,
@@ -213,7 +252,12 @@ impl LibreFangKernel {
     /// are demoted to `Stopped` ("Interrupted by daemon restart"). Runs are not
     /// auto-resumed — an in-flight LLM call cannot be replayed. Returns the
     /// recovered goal ids.
-    pub fn recover_stale_goal_runs(&self, stale_timeout: std::time::Duration) -> Vec<GoalId> {
+    /// Returns (goal_id, agent_id) pairs for stale runs to auto-resume.
+    /// Caller must call `goal_run_start` for each returned pair.
+    pub fn recover_stale_goal_runs(
+        &self,
+        stale_timeout: std::time::Duration,
+    ) -> Vec<(GoalId, AgentId)> {
         self.workflows.goal_runner.recover_stale_runs(stale_timeout)
     }
 }
