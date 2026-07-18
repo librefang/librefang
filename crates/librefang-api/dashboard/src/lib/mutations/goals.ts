@@ -47,8 +47,8 @@ export function useDeleteGoal() {
 export function useStartGoalRun() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, maxIterations }: { id: string; maxIterations?: number }) =>
-      startGoalRun(id, maxIterations !== undefined ? { max_iterations: maxIterations } : undefined),
+    mutationFn: ({ id, maxIterations, verifyMaxRetries }: { id: string; maxIterations?: number; verifyMaxRetries?: number }) =>
+      startGoalRun(id, maxIterations !== undefined || verifyMaxRetries !== undefined ? { max_iterations: maxIterations, verify_max_retries: verifyMaxRetries } : undefined),
     onSuccess: (_data, { id }) => {
       qc.invalidateQueries({ queryKey: goalKeys.run(id) });
       qc.invalidateQueries({ queryKey: goalKeys.lists() });

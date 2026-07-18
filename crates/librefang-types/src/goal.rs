@@ -224,7 +224,8 @@ pub struct GoalRunState {
     /// agent for verification before accepting progress.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify_agent_id: Option<AgentId>,
-    /// Max verification retries per iteration before blocking (default 3).
+    /// Max verification retries per iteration before blocking.
+    /// Default 0 (set at run-start, clamped to ≥1 by the runner).
     #[serde(default)]
     pub verify_max_retries: u32,
     /// When the run started.

@@ -1074,6 +1074,8 @@ export interface GoalItem {
   agent_id?: string;
   status?: string;
   progress?: number;
+  loop_engineering?: boolean;
+  verify_agent_id?: string;
   created_at?: string;
   updated_at?: string;
 }
@@ -1759,6 +1761,7 @@ export interface ModelItem {
   };
   aliases?: string[];
   available?: boolean;
+  source?: string;
 }
 
 export async function listModels(params?: { provider?: string; tier?: string; available?: boolean }): Promise<{ models: ModelItem[]; total: number; available: number }> {
@@ -3956,6 +3959,8 @@ export interface GoalRunState {
   max_iterations: number;
   last_progress: number;
   last_error?: string;
+  verify_agent_id?: string;
+  verify_max_retries?: number;
   started_at: string;
   updated_at: string;
 }
@@ -3963,7 +3968,7 @@ export interface GoalRunState {
 /** Begin an autonomous run that drives the goal's assigned agent. */
 export async function startGoalRun(
   goalId: string,
-  payload?: { max_iterations?: number }
+  payload?: { max_iterations?: number; verify_max_retries?: number }
 ): Promise<{ ok: boolean; run: GoalRunState | null }> {
   return post<{ ok: boolean; run: GoalRunState | null }>(
     `/api/goals/${encodeURIComponent(goalId)}/start`,
