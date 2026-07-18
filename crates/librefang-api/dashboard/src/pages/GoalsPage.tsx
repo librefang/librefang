@@ -327,6 +327,40 @@ export function GoalsPage() {
             <h3 className="text-lg font-black tracking-tight mb-1">{t("goals.pick_template")}</h3>
             <p className="text-sm text-text-dim">{t("goals.pick_template_desc")}</p>
           </div>
+
+          {/* Free-form create — always visible, even with zero goals */}
+          <Card padding="lg" hover>
+            <div className="flex items-center gap-2 mb-5">
+              <div className="w-8 h-8 rounded-lg bg-brand/10 flex items-center justify-center"><Plus className="w-4 h-4 text-brand" /></div>
+              <h2 className="text-sm font-black tracking-tight uppercase">{t("goals.create_goal")}</h2>
+            </div>
+            <form className="flex flex-col gap-4" onSubmit={handleCreate}>
+              <label htmlFor="goal-create-title-empty" className="sr-only">{t("goals.goal_title_placeholder")}</label>
+              <input id="goal-create-title-empty" value={createDraft.title} onChange={e => setCreateDraft({...createDraft, title: e.target.value})} placeholder={t("goals.goal_title_placeholder")} className={inputClass} />
+              <label htmlFor="goal-create-description-empty" className="sr-only">{t("goals.goal_desc_placeholder")}</label>
+              <textarea id="goal-create-description-empty" value={createDraft.description} onChange={e => setCreateDraft({...createDraft, description: e.target.value})} placeholder={t("goals.goal_desc_placeholder")} className={`${inputClass} resize-none`} rows={3} />
+              <select id="goal-create-agent-empty" value={createDraft.agent_id} onChange={e => setCreateDraft({...createDraft, agent_id: e.target.value})} className={inputClass}>
+                <option value="">{t("goals.no_agent_selected")}</option>
+                {agents.map(a => <option key={a.id} value={a.id}>{a.name ?? a.id}</option>)}
+              </select>
+              <label className="flex items-center gap-3 text-sm cursor-pointer">
+                <input type="checkbox" checked={createDraft.loop_engineering}
+                  onChange={e => setCreateDraft({...createDraft, loop_engineering: e.target.checked})}
+                  className="rounded border-border/50" />
+                <span>{t("goals.loop_engineering")}</span>
+              </label>
+              {createDraft.loop_engineering && (
+                <input value={createDraft.verify_agent_id}
+                  onChange={e => setCreateDraft({...createDraft, verify_agent_id: e.target.value})}
+                  placeholder={t("goals.verifier_agent_id")} className={inputClass} />
+              )}
+              <Button type="submit" variant="primary" disabled={createMutation.isPending || !createDraft.title.trim()} className="mt-2">
+                {createMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+                {t("goals.create_goal")}
+              </Button>
+            </form>
+          </Card>
+
           <StaggerList className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-4">
             {templates.map((tpl) => {
               const Icon = TEMPLATE_ICONS[tpl.icon] ?? Target;

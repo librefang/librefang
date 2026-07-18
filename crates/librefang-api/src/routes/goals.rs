@@ -242,10 +242,38 @@ pub async fn start_goal_run(
         .map(|n| n as u32);
 
     let loop_engineering = goal["loop_engineering"].as_bool().unwrap_or(false);
-    let verify_agent_id = goal["verify_agent_id"]
+    let mut verify_agent_id = goal["verify_agent_id"]
         .as_str()
         .and_then(|s| s.parse::<uuid::Uuid>().ok())
         .map(AgentId);
+    // Auto-spawn verifier when loop_engineering is on but no verifier assigned.
+    // Mirroring Claude Code: the system provisions disposable workers automatically.
+    if loop_engineering && verify_agent_id.is_none() {
+        let vmanifest = librefang_types::agent::AgentManifest {
+            name: format!("goal-verifier-{}", &id[..8.min(id.len())]),
+            version: "0.1.0".into(),
+            description: format!(
+                "Auto-spawned verifier for goal: {}",
+                goal["title"].as_str().unwrap_or(&id)
+            ),
+            author: "goal-runner".into(),
+            module: "builtin:chat".into(),
+            schedule: librefang_types::agent::ScheduleMode::Reactive,
+            session_mode: librefang_types::agent::SessionMode::New,
+            model: librefang_types::agent::ModelConfig {
+                provider: "deepseek".into(),
+                model: "deepseek-v4-pro".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        match state.kernel.spawn_agent_typed(vmanifest) {
+            Ok(vid) => {
+                verify_agent_id = Some(vid);
+            }
+            Err(e) => tracing::warn!(goal_id=%id, error=%e, "Failed to auto-spawn verifier agent"),
+        }
+    }
     let evaluator_model = goal["evaluator_model"].as_str().map(|s| s.to_string());
     let verify_max_retries = body
         .as_ref()
