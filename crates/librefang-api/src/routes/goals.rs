@@ -226,6 +226,7 @@ pub async fn start_goal_run(
         .as_str()
         .and_then(|s| s.parse::<uuid::Uuid>().ok())
         .map(AgentId);
+    let evaluator_model = goal["evaluator_model"].as_str().map(|s| s.to_string());
     let verify_max_retries = body
         .as_ref()
         .and_then(|b| b.0.get("verify_max_retries"))
@@ -273,6 +274,7 @@ pub async fn start_goal_run(
         loop_engineering,
         verify_agent_id,
         verify_max_retries,
+        evaluator_model,
     );
     let run = state.kernel.goal_run_state(goal_id);
     (
@@ -363,6 +365,7 @@ pub async fn create_goal(
     }
     let loop_engineering = req["loop_engineering"].as_bool().unwrap_or(false);
     let verify_agent_id_str = req["verify_agent_id"].as_str().map(|s| s.to_string());
+    let evaluator_model_str = req["evaluator_model"].as_str().map(|s| s.to_string());
 
     let now = chrono::Utc::now().to_rfc3339();
     let goal_id = uuid::Uuid::new_v4().to_string();
@@ -385,6 +388,9 @@ pub async fn create_goal(
     }
     if let Some(ref vid) = verify_agent_id_str {
         entry["verify_agent_id"] = serde_json::Value::String(vid.clone());
+    }
+    if let Some(ref em) = evaluator_model_str {
+        entry["evaluator_model"] = serde_json::Value::String(em.clone());
     }
 
     // Atomic read-modify-write under BEGIN IMMEDIATE (#5138). Parent
@@ -592,6 +598,13 @@ pub async fn update_goal_by_id(
                             g.as_object_mut().map(|obj| obj.remove("verify_agent_id"));
                         } else if let Some(v) = vid.as_str() {
                             g["verify_agent_id"] = serde_json::Value::String(v.to_string());
+                        }
+                    }
+                    if let Some(em) = req.get("evaluator_model") {
+                        if em.is_null() {
+                            g.as_object_mut().map(|obj| obj.remove("evaluator_model"));
+                        } else if let Some(v) = em.as_str() {
+                            g["evaluator_model"] = serde_json::Value::String(v.to_string());
                         }
                     }
                     g["updated_at"] = serde_json::Value::String(chrono::Utc::now().to_rfc3339());

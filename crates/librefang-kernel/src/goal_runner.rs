@@ -377,6 +377,7 @@ impl GoalRunner {
         loop_engineering: bool,
         verify_agent_id: Option<AgentId>,
         verify_max_retries: Option<u32>,
+        evaluator_model: Option<String>,
     ) where
         F: Fn(AgentId, String) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = Result<String, String>> + Send + 'static,
@@ -412,6 +413,7 @@ impl GoalRunner {
             last_error: None,
             verify_agent_id,
             verify_max_retries: verify_max_retries.unwrap_or(3),
+            evaluator_model,
             started_at: now,
             updated_at: now,
         };
@@ -951,6 +953,7 @@ mod tests {
             agent_id: Some(agent_id),
             loop_engineering: false,
             verify_agent_id: None,
+            evaluator_model: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -975,6 +978,7 @@ mod tests {
             last_error: None,
             verify_agent_id: None,
             verify_max_retries: 0,
+            evaluator_model: None,
             started_at: Utc::now(),
             updated_at: Utc::now(),
         }));
@@ -1025,6 +1029,7 @@ mod tests {
             last_error: None,
             verify_agent_id: None,
             verify_max_retries: 0,
+            evaluator_model: None,
             started_at: Utc::now(),
             updated_at: Utc::now(),
         }));
@@ -1072,6 +1077,7 @@ mod tests {
             last_error: None,
             verify_agent_id: None,
             verify_max_retries: 0,
+            evaluator_model: None,
             started_at: Utc::now(),
             updated_at: Utc::now(),
         }))
@@ -1321,6 +1327,7 @@ mod tests {
                 last_error: None,
                 verify_agent_id: None,
                 verify_max_retries: 0,
+                evaluator_model: None,
                 started_at: Utc::now(),
                 updated_at: Utc::now(),
             }))
@@ -1534,6 +1541,7 @@ mod tests {
                     false,                      // loop_engineering
                     None,
                     None,
+                    None, // evaluator_model
                 );
             });
             let h2 = tokio::spawn(async move {
@@ -1549,6 +1557,7 @@ mod tests {
                     false,                      // loop_engineering
                     None,
                     None,
+                    None, // evaluator_model
                 );
             });
             let _ = tokio::join!(h1, h2);

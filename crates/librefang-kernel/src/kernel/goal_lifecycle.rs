@@ -32,6 +32,7 @@ impl LibreFangKernel {
         loop_engineering: bool,
         verify_agent_id: Option<AgentId>,
         verify_max_retries: Option<u32>,
+        evaluator_model: Option<String>,
     ) {
         let max = max_iterations.unwrap_or(DEFAULT_GOAL_MAX_ITERATIONS).max(1);
         let substrate = self.substrate_ref().clone();
@@ -127,40 +128,53 @@ impl LibreFangKernel {
             }
         };
 
-        // Evaluator closure: asks a cheap model whether the goal condition
-        // has been met, mirroring Claude Code's /goal evaluator pattern.
-        // Never trust the agent's self-reported GOAL_DONE alone.
+        // Evaluator closure: asks a model (configurable or the agent itself)
+        // whether the goal condition has been met, mirroring Claude Code's
+        // /goal evaluator pattern. Never trust the agent's self-reported
+        // GOAL_DONE alone.
         let eval_kernel = kernel.clone();
+        let eval_model = evaluator_model.clone();
         let evaluate = move |goal_desc: String, agent_reply: String| {
             let k = eval_kernel.clone();
+            let eval_model = eval_model.clone();
             async move {
+                let model_hint = eval_model.as_deref().unwrap_or("agent-default");
                 let prompt = format!(
-                    "You are a goal evaluator. Read the goal and the agent's \
-                     latest output. Answer ONLY 'YES' if the goal is fully \
-                     achieved, or 'NO' if more work is needed.\n\n\
+                    "You are a goal evaluator (model: {model_hint}). Read the goal \
+                     and the agent's latest output. Answer ONLY 'YES' if the goal \
+                     is fully achieved, or 'NO' if more work is needed.\n\n\
                      GOAL: {goal_desc}\n\n\
                      AGENT OUTPUT:\n{agent_reply}\n\n\
                      Is the goal achieved? (YES/NO):"
                 );
-                // Use agent itself for evaluation (same send path).
-                // In a full implementation, this would use a separate
-                // cheap evaluator model (Haiku) as Claude Code does.
-                let sender = SenderContext {
-                    channel: SYSTEM_CHANNEL_AUTONOMOUS.to_string(),
-                    user_id: agent_id.to_string(),
-                    display_name: "goal-evaluator".to_string(),
-                    is_internal_system: true,
-                    ..Default::default()
-                };
-                match k
-                    .send_message_with_sender_context(agent_id, &prompt, &sender)
-                    .await
-                {
-                    Ok(r) => {
-                        let upper = r.response.to_ascii_uppercase();
-                        Ok(upper.contains("YES") && !upper.contains("NO"))
+                if let Some(ref model_name) = eval_model {
+                    // Use the configured evaluator model via one-shot LLM call.
+                    match k.one_shot_llm_call(model_name, &prompt).await {
+                        Ok(response) => {
+                            let upper = response.to_ascii_uppercase();
+                            Ok(upper.contains("YES") && !upper.contains("NO"))
+                        }
+                        Err(e) => Err(e),
                     }
-                    Err(e) => Err(e.to_string()),
+                } else {
+                    // Fallback: send to the agent itself for evaluation.
+                    let sender = SenderContext {
+                        channel: SYSTEM_CHANNEL_AUTONOMOUS.to_string(),
+                        user_id: agent_id.to_string(),
+                        display_name: "goal-evaluator".to_string(),
+                        is_internal_system: true,
+                        ..Default::default()
+                    };
+                    match k
+                        .send_message_with_sender_context(agent_id, &prompt, &sender)
+                        .await
+                    {
+                        Ok(r) => {
+                            let upper = r.response.to_ascii_uppercase();
+                            Ok(upper.contains("YES") && !upper.contains("NO"))
+                        }
+                        Err(e) => Err(e.to_string()),
+                    }
                 }
             }
         };
@@ -232,6 +246,7 @@ impl LibreFangKernel {
             loop_engineering,
             verify_agent_id,
             verify_max_retries,
+            evaluator_model,
         );
     }
 
