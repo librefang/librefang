@@ -976,14 +976,14 @@ pub fn evaluate_gate_condition(cond: &GateCondition, output: &str) -> Result<(),
                     GateOp::Lt => l < r,
                     GateOp::Gte => l >= r,
                     GateOp::Lte => l <= r,
-                    _ => unreachable!(),
+                    _ => false, // graceful: unknown GateOp → gate fails closed
                 },
                 _ => match cond.op {
                     GateOp::Gt => lhs_str.as_str() > rhs_str.as_str(),
                     GateOp::Lt => lhs_str.as_str() < rhs_str.as_str(),
                     GateOp::Gte => lhs_str.as_str() >= rhs_str.as_str(),
                     GateOp::Lte => lhs_str.as_str() <= rhs_str.as_str(),
-                    _ => unreachable!(),
+                    _ => false, // graceful: unknown GateOp → gate fails closed
                 },
             }
         }
