@@ -325,6 +325,133 @@ async fn test_send_channel_message_honours_adapter_output_format_override_6445()
     kernel.shutdown();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn test_post_approval_reply_routes_to_account_qualified_adapter_6492() {
+    // #6492 Bug 2: the post-approval wake path (`wake_agent_after_approval`)
+    // used to deliver the resumed agent reply with a BARE adapter lookup
+    // (`channel_adapters.get(channel)`) that ignored `deferred.account_id`.
+    // On a multi-account install the channel bridge registers each adapter
+    // under BOTH the bare key (`"whatsapp"`) and the account-qualified key
+    // (`"whatsapp:<account_id>"`), so a reply for a non-first account landed
+    // on the wrong account's bot/chat (or missed entirely). The fix routes the
+    // reply through the canonical `send_channel_message`, which keys by
+    // `"<channel>:<account_id>"` first and falls back to the bare channel.
+    //
+    // This test asserts that account-qualified delivery contract the wake path
+    // now delegates to — driving `send_channel_message` with the exact
+    // `(routing_chat_id, account_id)` that `wake_agent_after_approval` extracts
+    // from the `DeferredToolExecution`. (The full `send_message_full` LLM
+    // round-trip inside the wake path is out of unit-test scope, matching the
+    // module note on the notification tests.)
+    use librefang_types::tool::DeferredToolExecution;
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    // Two adapters for the same channel type, registered under the bare and the
+    // account-qualified keys — exactly what the bridge does for a multi-account
+    // WhatsApp deployment.
+    let bare_adapter = Arc::new(RecordingChannelAdapter::new("whatsapp"));
+    let bare_sent = bare_adapter.sent.clone();
+    let acct_adapter = Arc::new(RecordingChannelAdapter::new("whatsapp"));
+    let acct_sent = acct_adapter.sent.clone();
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("whatsapp".to_string(), bare_adapter);
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("whatsapp:acct1".to_string(), acct_adapter);
+
+    // Case 1: a deferred exec that arrived on account "acct1" in a group chat.
+    // The reply MUST land on the "whatsapp:acct1" adapter and NOT the bare one.
+    let deferred_acct = DeferredToolExecution {
+        agent_id: "agent-1".to_string(),
+        tool_use_id: "tu-acct".to_string(),
+        tool_name: "file_write".to_string(),
+        input: serde_json::json!({}),
+        allowed_tools: None,
+        allowed_env_vars: None,
+        exec_policy: None,
+        sender_id: Some("user-7".to_string()),
+        channel: Some("whatsapp".to_string()),
+        chat_id: Some("group-99".to_string()),
+        account_id: Some("acct1".to_string()),
+        workspace_root: None,
+        force_human: false,
+        session_id: None,
+    };
+    // Recipient + account resolution mirror `wake_agent_after_approval`: prefer
+    // chat_id over sender_id, and forward account_id verbatim.
+    let routing_chat_id = deferred_acct
+        .chat_id
+        .as_deref()
+        .filter(|c| !c.is_empty())
+        .unwrap_or_else(|| deferred_acct.sender_id.as_deref().unwrap());
+    kernel
+        .send_channel_message(
+            deferred_acct.channel.as_deref().unwrap(),
+            routing_chat_id,
+            "approved — done",
+            None,
+            deferred_acct.account_id.as_deref(),
+        )
+        .await
+        .expect("send should succeed to the account-qualified adapter");
+    assert_eq!(
+        acct_sent.lock().unwrap().clone(),
+        vec!["group-99:approved — done".to_string()],
+        "post-approval reply for account 'acct1' must be delivered via the 'whatsapp:acct1' adapter"
+    );
+    assert!(
+        bare_sent.lock().unwrap().is_empty(),
+        "post-approval reply for account 'acct1' must NOT leak to the bare 'whatsapp' adapter (the misdelivery bug)"
+    );
+
+    // Case 2: a deferred exec with no account (single-tenant / bare source)
+    // routes to the bare "whatsapp" adapter, not the account-qualified one.
+    let deferred_bare = DeferredToolExecution {
+        account_id: None,
+        chat_id: Some("dm-1".to_string()),
+        tool_use_id: "tu-bare".to_string(),
+        ..deferred_acct.clone()
+    };
+    let routing_chat_id_bare = deferred_bare
+        .chat_id
+        .as_deref()
+        .filter(|c| !c.is_empty())
+        .unwrap_or_else(|| deferred_bare.sender_id.as_deref().unwrap());
+    kernel
+        .send_channel_message(
+            deferred_bare.channel.as_deref().unwrap(),
+            routing_chat_id_bare,
+            "approved — bare",
+            None,
+            deferred_bare.account_id.as_deref(),
+        )
+        .await
+        .expect("send should succeed to the bare adapter");
+    assert_eq!(
+        bare_sent.lock().unwrap().clone(),
+        vec!["dm-1:approved — bare".to_string()],
+        "post-approval reply with no account must be delivered via the bare 'whatsapp' adapter"
+    );
+    assert_eq!(
+        acct_sent.lock().unwrap().len(),
+        1,
+        "bare-account reply must NOT reach the account-qualified adapter (still only the case-1 send)"
+    );
+
+    kernel.shutdown();
+}
+
 #[test]
 fn test_manifest_to_capabilities() {
     let mut manifest = AgentManifest {

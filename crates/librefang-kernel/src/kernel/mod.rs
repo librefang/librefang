@@ -1741,8 +1741,8 @@ impl LibreFangKernel {
         // Skipping this step is what made "tap [Approve] → silence"
         // surface in production: the agent loop ran and produced a
         // perfect natural-language follow-up that nobody ever showed
-        // the user. Route it now via the channel registry, looking up
-        // the adapter the original tool call's `channel` field names.
+        // the user. Route it now through the canonical outbound path,
+        // keyed by the original tool call's `channel` and `account_id`.
         if loop_result.silent || loop_result.response.is_empty() {
             debug!(
                 agent_id = %agent_id,
@@ -1751,25 +1751,29 @@ impl LibreFangKernel {
             );
             return;
         }
-        let Some(adapter) = self.mesh.channel_adapters.get(channel) else {
-            warn!(
-                agent_id = %agent_id,
-                tool_use_id = %deferred.tool_use_id,
-                channel = channel,
-                "No active adapter for the originating channel — agent reply produced but cannot be delivered; session has the reply persisted so the next user turn surfaces it"
-            );
-            return;
-        };
-        let recipient = librefang_channels::types::ChannelUser {
-            platform_id: routing_chat_id.to_string(),
-            display_name: String::new(),
-            librefang_user: None,
-        };
-        if let Err(e) = adapter
-            .value()
-            .send(
-                &recipient,
-                librefang_channels::types::ChannelContent::Text(loop_result.response.clone()),
+        // Route the reply through the canonical account-qualified outbound
+        // path (#6492 Bug 2). `send_channel_message` builds the adapter
+        // lookup key as `"<channel>:<account_id>"` when an account is present
+        // and falls back to the bare `<channel>` otherwise — matching how the
+        // channel bridge registers adapters under BOTH keys for multi-account
+        // installs. The previous bare `channel_adapters.get(channel)` ignored
+        // `deferred.account_id`, so on a multi-account daemon a post-approval
+        // reply for a non-first account was delivered to the wrong account's
+        // adapter (wrong bot/chat) or missed entirely. Reusing the canonical
+        // path also picks up the adapter's `output_format` override for free,
+        // exactly as a normal inbound reply would. `thread_id: None` — the wake
+        // path carries no thread context (mirrors the pre-fix `adapter.send()`,
+        // which never threaded). On an adapter-miss OR a send failure the call
+        // returns `Err`; we log WARN (it does not log itself) with the same
+        // information as before — the reply is still persisted in session
+        // history, so the next user turn surfaces it.
+        if let Err(e) = self
+            .send_channel_message(
+                channel,
+                routing_chat_id,
+                &loop_result.response,
+                None,
+                deferred.account_id.as_deref(),
             )
             .await
         {
@@ -1777,9 +1781,10 @@ impl LibreFangKernel {
                 agent_id = %agent_id,
                 tool_use_id = %deferred.tool_use_id,
                 channel = channel,
-                recipient = %recipient.platform_id,
+                account_id = ?deferred.account_id,
+                recipient = routing_chat_id,
                 error = %e,
-                "Failed to deliver post-approval agent reply to channel — reply is still persisted in session history"
+                "No active adapter for the originating channel/account, or delivery failed — post-approval agent reply produced but not delivered; reply is still persisted in session history so the next user turn surfaces it"
             );
         }
     }
