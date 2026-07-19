@@ -2571,17 +2571,42 @@ fn reconstruct_command_text(name: &str, args: &[String]) -> String {
     }
 }
 
+/// Whether the group-message reply-intent precheck (#6445) applies to this override set.
+///
+/// The precheck is a lightweight LLM classifier that runs only when the bot is configured to process *every* group message unconditionally — the one place an intent filter earns its keep.
+/// That "process all" state is reached two ways, which `should_process_group_message` already collapses into the same `true` arm: an explicit `group_policy = "all"`, or an unset `group_policy` with no `group_trigger_patterns` (the historical whole-struct-absent behaviour the #6445 fix restored).
+/// An unset policy WITH trigger patterns resolves to mention-only gating instead (the patterns are the gate), so the precheck must stay off there.
+///
+/// Both `dispatch_message` and `media_dispatch_allowed` call this so the two paths cannot drift — before #6445 they each matched only the literal `Some(GroupPolicy::All)` and silently skipped the precheck on the common unset-policy "process all" config.
+fn group_reply_precheck_applies(overrides: &ChannelOverrides) -> bool {
+    match overrides.group_policy {
+        Some(GroupPolicy::All) => true,
+        None => overrides.group_trigger_patterns.is_empty(),
+        _ => false,
+    }
+}
+
 fn should_process_group_message(
     ct_str: &str,
     overrides: &ChannelOverrides,
     message: &ChannelMessage,
 ) -> bool {
-    match overrides.group_policy {
-        GroupPolicy::Ignore => {
+    // #6445: `group_trigger_patterns` is only consulted under mention-only semantics (it widens the mention gate with extra regex triggers).
+    // An operator who set trigger patterns but left `group_policy` unset clearly wants pattern-gating, so an unset policy WITH patterns resolves to MentionOnly.
+    // An unset policy with NO patterns stays "process all" — the historical whole-struct-absent behaviour the #6445 fix restores.
+    // (Setting trigger patterns is itself a group-gating decision, so honouring it is not the silent-materialization footgun #6445 fixed — that was about UNRELATED fields like `threading` flipping the group gate.)
+    let effective_policy = match overrides.group_policy {
+        None if !overrides.group_trigger_patterns.is_empty() => Some(GroupPolicy::MentionOnly),
+        other => other,
+    };
+    match effective_policy {
+        // `None` here means no group policy AND no trigger patterns — process every group message, byte-identical to the historical whole-struct-absent behaviour, same as an explicit `All`.
+        None | Some(GroupPolicy::All) => true,
+        Some(GroupPolicy::Ignore) => {
             debug!("Ignoring group message on {ct_str} (group_policy=ignore)");
             false
         }
-        GroupPolicy::CommandsOnly => {
+        Some(GroupPolicy::CommandsOnly) => {
             if !is_group_command(message) {
                 debug!(
                     "Ignoring non-command group message on {ct_str} (group_policy=commands_only)"
@@ -2590,7 +2615,7 @@ fn should_process_group_message(
             }
             true
         }
-        GroupPolicy::MentionOnly => {
+        Some(GroupPolicy::MentionOnly) => {
             let was_mentioned = message
                 .metadata
                 .get("was_mentioned")
@@ -2677,7 +2702,6 @@ fn should_process_group_message(
             );
             true
         }
-        GroupPolicy::All => true,
     }
 }
 
@@ -3844,10 +3868,9 @@ async fn dispatch_message(
             // erasing the very context the next addressed turn was meant
             // to recover. See `dispatch_message` near the journal-record
             // call for the actual drain.
-            // Reply-intent precheck: lightweight LLM classification for group
-            // messages when group_policy is "all" and precheck is enabled.
+            // Reply-intent precheck: lightweight LLM classification for group messages processed unconditionally (explicit `group_policy = "all"` or the unset-policy "process all" path) when precheck is enabled.
             // Skipped for mentions and commands (already filtered above).
-            if ov.reply_precheck && matches!(ov.group_policy, GroupPolicy::All) {
+            if ov.reply_precheck && group_reply_precheck_applies(ov) {
                 let text = text_content(message).unwrap_or("");
                 let sender = &message.sender.display_name;
                 let model = ov.reply_precheck_model.as_deref();
@@ -3877,14 +3900,15 @@ async fn dispatch_message(
         } else {
             // DM
             match ov.dm_policy {
-                DmPolicy::Ignore => {
+                Some(DmPolicy::Ignore) => {
                     debug!("Ignoring DM on {ct_str} (dm_policy=ignore)");
                     return;
                 }
-                DmPolicy::AllowedOnly => {
+                Some(DmPolicy::AllowedOnly) => {
                     // Rely on RBAC authorize_channel_user below
                 }
-                DmPolicy::Respond => {}
+                // `None` (no DM policy configured) or an explicit `Respond` both process the DM — matching the historical whole-struct-absent behaviour (#6445).
+                Some(DmPolicy::Respond) | None => {}
             }
         }
     }
@@ -6371,16 +6395,10 @@ async fn media_dispatch_allowed(
                 return false;
             }
 
-            // Reply-intent precheck: lightweight LLM classification when
-            // group_policy is "all" and precheck is enabled. This IS run on the
-            // media path for parity with the text path — a deliberate choice, so
-            // a captioned media message does not get a reply where the same text
-            // would have stayed silent. Captionless media has no text to
-            // classify, so we skip the (billed) LLM call and proceed rather than
-            // classify an empty string: group_policy=all is opt-in to respond
-            // broadly, and bare media always reached the agent before the media
-            // gate existed, so proceeding preserves that behavior.
-            if ov.reply_precheck && matches!(ov.group_policy, GroupPolicy::All) {
+            // Reply-intent precheck: lightweight LLM classification when the group is processed unconditionally (explicit `group_policy = "all"` or the unset-policy "process all" path) and precheck is enabled.
+            // This IS run on the media path for parity with the text path — a deliberate choice, so a captioned media message does not get a reply where the same text would have stayed silent.
+            // Captionless media has no text to classify, so we skip the (billed) LLM call and proceed rather than classify an empty string: the unconditional "process all" mode is opt-in to respond broadly, and bare media always reached the agent before the media gate existed, so proceeding preserves that behavior.
+            if ov.reply_precheck && group_reply_precheck_applies(ov) {
                 let text = extracted_user_text(&message.content).unwrap_or_default();
                 if !text.trim().is_empty() {
                     let sender = &message.sender.display_name;
@@ -6412,14 +6430,15 @@ async fn media_dispatch_allowed(
         } else {
             // DM
             match ov.dm_policy {
-                DmPolicy::Ignore => {
+                Some(DmPolicy::Ignore) => {
                     debug!("Ignoring DM on {ct_str} (dm_policy=ignore)");
                     return false;
                 }
-                DmPolicy::AllowedOnly => {
+                Some(DmPolicy::AllowedOnly) => {
                     // Rely on RBAC authorize_channel_user in dispatch_with_blocks
                 }
-                DmPolicy::Respond => {}
+                // `None` or explicit `Respond` both process the DM (#6445).
+                Some(DmPolicy::Respond) | None => {}
             }
         }
     }
@@ -8117,7 +8136,18 @@ mod tests {
 
     #[test]
     fn test_dm_policy_filtering() {
-        // Test that DmPolicy::Ignore would be checked
+        // The enum `#[default]`s are unchanged and still used by serde when an explicit value is written, but since #6445 they NO LONGER drive `ChannelOverrides` gating: an unset policy is `None`, not the enum default.
+        // Assert the load-bearing invariant so a maintainer does not read this test and conclude the group default is still `MentionOnly` (re-introducing the materialization footgun #6445 fixed).
+        let ov = librefang_types::config::ChannelOverrides::default();
+        assert_eq!(
+            ov.dm_policy, None,
+            "unset dm_policy must be None, not the enum default"
+        );
+        assert_eq!(
+            ov.group_policy, None,
+            "unset group_policy must be None (process all), not MentionOnly"
+        );
+        // The enum defaults themselves are still what an explicit value falls back to during deserialization — kept as documentation of that.
         assert_eq!(DmPolicy::default(), DmPolicy::Respond);
         assert_eq!(GroupPolicy::default(), GroupPolicy::MentionOnly);
     }
@@ -8187,7 +8217,7 @@ mod tests {
             // Fix 2: under mention_only with no mention/trigger, the same gate
             // the text path runs drops this media message.
             let overrides = ChannelOverrides {
-                group_policy: GroupPolicy::MentionOnly,
+                group_policy: Some(GroupPolicy::MentionOnly),
                 ..Default::default()
             };
             assert!(
@@ -8197,7 +8227,7 @@ mod tests {
 
             // And an explicit `ignore` group policy drops it unconditionally.
             let ignore_overrides = ChannelOverrides {
-                group_policy: GroupPolicy::Ignore,
+                group_policy: Some(GroupPolicy::Ignore),
                 ..Default::default()
             };
             assert!(
@@ -8271,6 +8301,7 @@ mod tests {
         with_guard_off_locked(|| {
             let message = group_text_message("hello MyAgent");
             let overrides = ChannelOverrides {
+                group_policy: Some(GroupPolicy::MentionOnly),
                 group_trigger_patterns: vec!["(?i)\\bmyagent\\b".to_string()],
                 ..Default::default()
             };
@@ -8285,6 +8316,7 @@ mod tests {
         with_guard_off_locked(|| {
             let message = group_text_message("hello myagenttt");
             let overrides = ChannelOverrides {
+                group_policy: Some(GroupPolicy::MentionOnly),
                 group_trigger_patterns: vec!["(?i)\\bmyagent\\b".to_string()],
                 ..Default::default()
             };
@@ -8299,6 +8331,7 @@ mod tests {
         with_guard_off_locked(|| {
             let message = group_text_message("bot please reply");
             let overrides = ChannelOverrides {
+                group_policy: Some(GroupPolicy::MentionOnly),
                 group_trigger_patterns: vec!["(".to_string(), "(?i)\\bbot\\b".to_string()],
                 ..Default::default()
             };
@@ -8315,7 +8348,10 @@ mod tests {
             message
                 .metadata
                 .insert("was_mentioned".to_string(), serde_json::Value::Bool(true));
-            let overrides = ChannelOverrides::default();
+            let overrides = ChannelOverrides {
+                group_policy: Some(GroupPolicy::MentionOnly),
+                ..Default::default()
+            };
             assert!(should_process_group_message(
                 "telegram", &overrides, &message
             ));
@@ -9914,7 +9950,7 @@ mod tests {
                 let mut msg = group_text_message("Caterina, chiedi al Signore il pagamento");
                 inject_roster(&mut msg, &["Caterina", "Ambrogio"], "Ambrogio");
                 let overrides = ChannelOverrides {
-                    group_policy: GroupPolicy::MentionOnly,
+                    group_policy: Some(GroupPolicy::MentionOnly),
                     group_trigger_patterns: vec!["Signore".to_string()],
                     ..Default::default()
                 };
@@ -9928,7 +9964,7 @@ mod tests {
                 let mut msg = group_text_message("Signore, conferma il prossimo appuntamento");
                 inject_roster(&mut msg, &["Caterina", "Ambrogio"], "Ambrogio");
                 let overrides = ChannelOverrides {
-                    group_policy: GroupPolicy::MentionOnly,
+                    group_policy: Some(GroupPolicy::MentionOnly),
                     group_trigger_patterns: vec!["Signore".to_string()],
                     ..Default::default()
                 };
@@ -9945,7 +9981,7 @@ mod tests {
                 let mut msg = group_text_message("ciao a tutti, come va?");
                 inject_roster(&mut msg, &["Caterina", "Ambrogio"], "Ambrogio");
                 let overrides = ChannelOverrides {
-                    group_policy: GroupPolicy::MentionOnly,
+                    group_policy: Some(GroupPolicy::MentionOnly),
                     group_trigger_patterns: vec!["Signore".to_string()],
                     ..Default::default()
                 };
@@ -9961,7 +9997,7 @@ mod tests {
                 msg.metadata
                     .insert("was_mentioned".to_string(), json!(true));
                 let overrides = ChannelOverrides {
-                    group_policy: GroupPolicy::MentionOnly,
+                    group_policy: Some(GroupPolicy::MentionOnly),
                     ..Default::default()
                 };
                 assert!(should_process_group_message("whatsapp", &overrides, &msg));
@@ -9975,13 +10011,147 @@ mod tests {
             with_guard_off(|| {
                 let msg = group_text_message("Caterina, chiedi al Signore il pagamento");
                 let overrides = ChannelOverrides {
-                    group_policy: GroupPolicy::MentionOnly,
+                    group_policy: Some(GroupPolicy::MentionOnly),
                     group_trigger_patterns: vec!["(?i)\\bSignore\\b".to_string()],
                     ..Default::default()
                 };
                 // Legacy behavior: substring matches → returns true.
                 assert!(should_process_group_message("whatsapp", &overrides, &msg));
             });
+        }
+
+        #[test]
+        fn none_group_policy_processes_all_but_some_mention_only_gates_6445() {
+            // The exact #6445 divergence: an override struct with only an unrelated field set (`threading`) leaves `group_policy` at `None`, which must process every group message — identical to the historical whole-struct-absent behaviour.
+            // The pre-fix bug materialized `group_policy = MentionOnly` here and silently dropped this unmentioned message.
+            with_guard_off(|| {
+                let msg = group_text_message("hello there, nobody in particular");
+                let unrelated_field_only = ChannelOverrides {
+                    threading: true,
+                    ..Default::default()
+                };
+                assert!(
+                    should_process_group_message("whatsapp", &unrelated_field_only, &msg),
+                    "group_policy=None must process all — writing `threading` must not flip gating"
+                );
+
+                // An explicit MentionOnly still gates the same unmentioned message out, so the fix does not weaken configured gating.
+                let explicit_mention_only = ChannelOverrides {
+                    group_policy: Some(GroupPolicy::MentionOnly),
+                    ..Default::default()
+                };
+                assert!(
+                    !should_process_group_message("whatsapp", &explicit_mention_only, &msg),
+                    "explicit MentionOnly still gates unmentioned traffic"
+                );
+            });
+        }
+
+        #[test]
+        fn none_group_policy_with_trigger_patterns_still_gates_6445() {
+            // Regression for the code-review finding on the #6445 fix: setting `group_trigger_patterns` without an explicit `group_policy` is itself a pattern-gating decision.
+            // An unset policy WITH patterns must resolve to MentionOnly (not fall into the process-all `None` arm), otherwise the patterns become inert and the bot replies to every group message — the very silent flip #6445 set out to kill.
+            with_guard_off(|| {
+                let unmatched = group_text_message("hello there, nobody in particular");
+                let patterns_only = ChannelOverrides {
+                    group_trigger_patterns: vec!["(?i)\\bmybot\\b".to_string()],
+                    ..Default::default()
+                };
+                assert!(
+                    !should_process_group_message("whatsapp", &patterns_only, &unmatched),
+                    "patterns set + policy unset must gate like MentionOnly, not process-all"
+                );
+
+                // A message that hits a trigger pattern is still accepted.
+                let matched = group_text_message("hey MyBot, are you there?");
+                assert!(
+                    should_process_group_message("whatsapp", &patterns_only, &matched),
+                    "a trigger-pattern hit must still be accepted under the None+patterns gate"
+                );
+
+                // Sanity: with NO patterns and no policy, process-all still holds.
+                let bare = ChannelOverrides::default();
+                assert!(
+                    should_process_group_message("whatsapp", &bare, &unmatched),
+                    "no policy and no patterns must still process all group messages"
+                );
+            });
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // #6445 — reply-intent precheck gate follows the "process all" resolution, not the literal `Some(GroupPolicy::All)`.
+    //
+    // `should_process_group_message` treats an unset `group_policy` (no trigger patterns) as process-all, identical to explicit `all`.
+    // The two reply-precheck gates (`dispatch_message` text path + `media_dispatch_allowed`) must resolve the same way, or the common unset-policy config silently loses its reply-intent filter.
+    // `group_reply_precheck_applies` is the shared helper both gates call; these lock its truth table so the paths cannot drift again.
+    // ---------------------------------------------------------------------
+    mod group_reply_precheck_applies_tests {
+        use super::super::group_reply_precheck_applies;
+        use librefang_types::config::{ChannelOverrides, GroupPolicy};
+
+        #[test]
+        fn explicit_all_applies() {
+            let ov = ChannelOverrides {
+                group_policy: Some(GroupPolicy::All),
+                ..Default::default()
+            };
+            assert!(group_reply_precheck_applies(&ov));
+        }
+
+        #[test]
+        fn unset_policy_without_patterns_applies() {
+            // The #6445 "process all" default: no group_policy, no trigger patterns.
+            // `should_process_group_message` processes every message here, so the precheck must fire too.
+            let ov = ChannelOverrides::default();
+            assert!(ov.group_policy.is_none());
+            assert!(ov.group_trigger_patterns.is_empty());
+            assert!(
+                group_reply_precheck_applies(&ov),
+                "unset group_policy with no patterns is process-all — precheck must apply, matching explicit `all`"
+            );
+        }
+
+        #[test]
+        fn unset_policy_with_patterns_does_not_apply() {
+            // Trigger patterns without an explicit policy resolve to mention-only gating inside `should_process_group_message`; the patterns are the gate, so the process-all precheck must stay off.
+            let ov = ChannelOverrides {
+                group_policy: None,
+                group_trigger_patterns: vec!["(?i)\\bmybot\\b".to_string()],
+                ..Default::default()
+            };
+            assert!(
+                !group_reply_precheck_applies(&ov),
+                "None + patterns is mention-only gating, not process-all"
+            );
+        }
+
+        #[test]
+        fn other_explicit_policies_do_not_apply() {
+            for policy in [
+                GroupPolicy::MentionOnly,
+                GroupPolicy::CommandsOnly,
+                GroupPolicy::Ignore,
+            ] {
+                let ov = ChannelOverrides {
+                    group_policy: Some(policy),
+                    ..Default::default()
+                };
+                assert!(
+                    !group_reply_precheck_applies(&ov),
+                    "precheck must not apply under {policy:?} gating"
+                );
+                // Trigger patterns must not flip a gated policy into process-all.
+                let ov_patterns = ChannelOverrides {
+                    group_policy: Some(policy),
+                    group_trigger_patterns: vec!["(?i)\\bmybot\\b".to_string()],
+                    ..Default::default()
+                };
+                assert!(
+                    !group_reply_precheck_applies(&ov_patterns),
+                    "precheck must not apply under {policy:?} even with trigger patterns"
+                );
+            }
         }
     }
 

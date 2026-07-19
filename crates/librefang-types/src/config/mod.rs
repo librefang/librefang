@@ -387,8 +387,10 @@ admin_role = "admin"
     #[test]
     fn test_channel_overrides_defaults() {
         let ov = ChannelOverrides::default();
-        assert_eq!(ov.dm_policy, DmPolicy::Respond);
-        assert_eq!(ov.group_policy, GroupPolicy::MentionOnly);
+        // #6445: an unset dm/group policy is `None`, NOT the enum default.
+        // `None` gates nothing (DMs flow, all group messages processed), whereas `Some(GroupPolicy::MentionOnly)` — the old default — silently dropped non-mention group traffic whenever any single override field was written.
+        assert_eq!(ov.dm_policy, None);
+        assert_eq!(ov.group_policy, None);
         assert!(ov.group_trigger_patterns.is_empty());
         assert_eq!(ov.rate_limit_per_user, 0);
         assert!(!ov.threading);
@@ -412,6 +414,22 @@ admin_role = "admin"
         let bare: ChannelOverrides = toml::from_str("").unwrap();
         assert_eq!(bare.conversation_ownership_ttl_seconds, 600);
         assert!(!bare.conversation_ownership_include_dms);
+    }
+
+    #[test]
+    fn absent_group_and_dm_policy_deserialize_to_none_6445() {
+        // #6445: writing an unrelated field must NOT materialize a policy the operator never set.
+        // A `[channel_overrides]` table that mentions only `threading` leaves both policies `None` (no gating), instead of the pre-fix behaviour where `group_policy` silently became `MentionOnly`.
+        let partial: ChannelOverrides = toml::from_str("threading = true").unwrap();
+        assert!(partial.threading);
+        assert_eq!(partial.group_policy, None);
+        assert_eq!(partial.dm_policy, None);
+
+        // An explicitly written policy still round-trips to `Some(_)`.
+        let explicit: ChannelOverrides =
+            toml::from_str("group_policy = \"all\"\ndm_policy = \"ignore\"").unwrap();
+        assert_eq!(explicit.group_policy, Some(GroupPolicy::All));
+        assert_eq!(explicit.dm_policy, Some(DmPolicy::Ignore));
     }
 
     #[test]
@@ -457,8 +475,8 @@ admin_role = "admin"
     #[test]
     fn test_channel_overrides_serde() {
         let ov = ChannelOverrides {
-            dm_policy: DmPolicy::Ignore,
-            group_policy: GroupPolicy::CommandsOnly,
+            dm_policy: Some(DmPolicy::Ignore),
+            group_policy: Some(GroupPolicy::CommandsOnly),
             group_trigger_patterns: vec!["(?i)\\bbot\\b".to_string()],
             rate_limit_per_user: 10,
             threading: true,
@@ -467,8 +485,8 @@ admin_role = "admin"
         };
         let json = serde_json::to_string(&ov).unwrap();
         let back: ChannelOverrides = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.dm_policy, DmPolicy::Ignore);
-        assert_eq!(back.group_policy, GroupPolicy::CommandsOnly);
+        assert_eq!(back.dm_policy, Some(DmPolicy::Ignore));
+        assert_eq!(back.group_policy, Some(GroupPolicy::CommandsOnly));
         assert_eq!(back.group_trigger_patterns, vec!["(?i)\\bbot\\b"]);
         assert_eq!(back.rate_limit_per_user, 10);
         assert!(back.threading);

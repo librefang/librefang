@@ -123,18 +123,22 @@ pub struct ChannelOverrides {
     #[serde(default)]
     pub system_prompt: Option<String>,
     /// DM policy.
-    #[serde(default)]
-    pub dm_policy: DmPolicy,
+    /// `None` means no DM gating is configured — DMs flow, matching the historical behaviour when the whole `ChannelOverrides` was absent.
+    /// This must stay distinct from `Some(DmPolicy::Respond)` so that setting an unrelated field (e.g. `threading`) does not silently materialize a DM policy the operator never wrote (#6445).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dm_policy: Option<DmPolicy>,
     /// Group message policy.
-    #[serde(default)]
-    pub group_policy: GroupPolicy,
+    /// `None` means no group gating is configured — every group message is processed, matching the historical behaviour when the whole `ChannelOverrides` was absent.
+    /// This must stay distinct from `Some(GroupPolicy::MentionOnly)` (the enum default): before #6445, writing any single override field silently flipped an unset group policy to `MentionOnly` and dropped all non-mention group traffic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_policy: Option<GroupPolicy>,
     /// Regex patterns that can trigger a reply in group chats when
     /// `group_policy` is `mention_only`.
     #[serde(default)]
     pub group_trigger_patterns: Vec<String>,
     /// Enable LLM-based reply-intent precheck for group messages.
-    /// When true and group_policy is "all", a lightweight classifier decides
-    /// whether to reply before running the full agent loop.
+    /// When true and the group is processed unconditionally — an explicit `group_policy = "all"`, or an unset `group_policy` with no `group_trigger_patterns` (the #6445 "process all" default) — a lightweight classifier decides whether to reply before running the full agent loop.
+    /// Has no effect under mention-only / commands-only / ignore gating, where the policy itself already filters group traffic.
     #[serde(default)]
     pub reply_precheck: bool,
     /// Model override for the reply precheck classifier (default: agent's model).
@@ -253,8 +257,8 @@ impl Default for ChannelOverrides {
         Self {
             model: None,
             system_prompt: None,
-            dm_policy: DmPolicy::default(),
-            group_policy: GroupPolicy::default(),
+            dm_policy: None,
+            group_policy: None,
             group_trigger_patterns: Vec::new(),
             reply_precheck: false,
             reply_precheck_model: None,
@@ -2487,6 +2491,26 @@ pub struct SidecarChannelConfig {
     /// guessing a recipient. Set it to the owner / home chat to opt in.
     #[serde(default)]
     pub default_conversation: Option<String>,
+    /// Per-channel DM policy for this sidecar instance (#6445).
+    /// `None` (the default) inherits the bridge default — DMs flow — and, crucially, is distinct from an explicit value so setting only one behavioural knob here does not materialize a policy the operator never wrote.
+    /// Projected onto `ChannelOverrides.dm_policy` only when `Some`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dm_policy: Option<DmPolicy>,
+    /// Per-channel group policy for this sidecar instance (#6445).
+    /// `None` (the default) inherits the bridge default — every group message is processed.
+    /// Projected onto `ChannelOverrides.group_policy` only when `Some`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_policy: Option<GroupPolicy>,
+    /// Enable thread replies for this sidecar instance (#6445).
+    /// `None` (the default) inherits the bridge default (off).
+    /// Projected onto `ChannelOverrides.threading` only when `Some`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threading: Option<bool>,
+    /// Output-format override for this sidecar instance (#6445).
+    /// `None` (the default) inherits the channel default.
+    /// Projected onto `ChannelOverrides.output_format` only when `Some`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_format: Option<OutputFormat>,
 }
 
 fn default_sidecar_restart() -> bool {

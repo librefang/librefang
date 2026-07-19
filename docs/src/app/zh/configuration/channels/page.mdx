@@ -573,11 +573,12 @@ channel_type = "wechat"
 | 旧的 override | 现在对应的 sidecar 写法 |
 |---|---|
 | `model`、`system_prompt` | 在 agent（`agent.toml`）上设置而不是按通道 —— sidecar 把每个入站都路由到同一个 agent。 |
-| `dm_policy`、`group_policy` | 移到了 agent 上：写在 `agent.toml [channel_overrides]` 里 —— channel bridge 在每次派发时强制执行，`allowed_only` 的用户白名单由 `[[users]]` channel bindings（RBAC）背书。它们不是 sidecar 环境变量：只有 WhatsApp sidecar 读 `WHATSAPP_DM_POLICY`（仅 Cloud API webhook 模式生效），`WHATSAPP_GROUP_POLICY` 会被读取但目前不生效，Telegram / Discord / Slack / Teams 四个 sidecar 完全不读 `*_DM_POLICY` / `*_GROUP_POLICY`。 |
+| `dm_policy`、`group_policy` | 现在可直接写在 `[[sidecar_channels]]` 上按通道设置（#6445），也可写在 agent 的 `agent.toml [channel_overrides]` 里（agent 级优先）。channel bridge 在每次派发时强制执行，`allowed_only` 的用户白名单由 `[[users]]` channel bindings（RBAC）背书。与 sidecar 环境变量不同：只有 WhatsApp sidecar 读 `WHATSAPP_DM_POLICY`（仅 Cloud API webhook 模式生效），`WHATSAPP_GROUP_POLICY` 会被读取但目前不生效，Telegram / Discord / Slack / Teams 四个 sidecar 完全不读 `*_DM_POLICY` / `*_GROUP_POLICY`。 |
 | `rate_limit_per_minute`、`rate_limit_per_user` | Sidecar 自己按平台限流；要更严的话，在 sidecar 前面套反向代理。 |
-| `output_format` | `[[sidecar_channels]]` 没暴露这个 knob；需要特定输出格式的 agent 应在 agent 侧切换。 |
+| `output_format` | 现在可直接写在 `[[sidecar_channels]]` 上按通道设置（#6445），也可在 agent 侧设置（agent 级优先）。 |
 | `disable_commands`、`allowed_commands`、`blocked_commands` | 在 agent 清单（`agent.toml`）的命令策略区块设置 —— 跨通道统一生效。 |
-| `threading`、`usage_footer`、`typing_mode` | 用 sidecar 默认行为（平台支持时启用 threading；不显示用量页脚；instant 打字态）。当前不可按通道配置。 |
+| `threading` | 现在可直接写在 `[[sidecar_channels]]` 上按通道设置（#6445），也可在 agent 侧设置（agent 级优先）。 |
+| `usage_footer`、`typing_mode` | 用 sidecar 默认行为（不显示用量页脚；instant 打字态）。当前不可按通道配置。 |
 
 下方是**已删除**的 override 结构 —— 保留作参考；**不要**复制到当前的 `config.toml`。
 
@@ -606,8 +607,8 @@ blocked_commands = []
 |------|------|--------|------|
 | `model` | string 或 null | `null` | 该通道的模型覆盖。为 null 时使用 Agent 的默认模型。 |
 | `system_prompt` | string 或 null | `null` | 该通道的系统提示词覆盖。 |
-| `dm_policy` | string | `"respond"` | Bot 处理私聊消息的方式。见下表。 |
-| `group_policy` | string | `"mention_only"` | Bot 处理群组消息的方式。见下表。 |
+| `dm_policy` | string 或 null | `null` | Bot 处理私聊消息的方式。见下表。`null`（未设）不做任何私聊门控 —— 私聊照常放行 —— 且与写入具体值不同，不会影响任何其他 override（#6445）。 |
+| `group_policy` | string 或 null | `null` | Bot 处理群组消息的方式。见下表。`null`（未设）不做任何群组门控 —— 每条群消息都会被处理。在 #6445 之前，只要写了任何其他 override 字段，未设的 `group_policy` 就会被静默当作 `mention_only`。 |
 | `rate_limit_per_minute` | u32 | `0` | 该通道的全局速率限制（每分钟消息数）。`0` = 无限制。 |
 | `rate_limit_per_user` | u32 | `0` | 每个用户每分钟的最大消息数。`0` = 无限制。 |
 | `threading` | bool | `false` | 启用线程回复（在支持的平台上）。 |
@@ -712,6 +713,14 @@ MY_API_TOKEN = "secret"
 | `args` | list of strings | `[]` | 传递给命令的参数。 |
 | `env` | map of string to string | `{}` | 传递给子进程的额外环境变量。 |
 | `channel_type` | string 或 null | `null` | 通道类型标识符。为 null 时默认为 `Custom(<name>)`。 |
+| `dm_policy` | string 或 null | `null` | 此 sidecar 实例的私聊策略（`respond` / `allowed_only` / `ignore`）（#6445）。`null` 继承 bridge 默认（私聊放行），且与写入具体值不同，不会影响任何其他 override。 |
+| `group_policy` | string 或 null | `null` | 此 sidecar 实例的群组策略（`all` / `mention_only` / `commands_only` / `ignore`）（#6445）。`null` 继承 bridge 默认（处理全部群消息）。 |
+| `threading` | bool 或 null | `null` | 为此 sidecar 实例启用线程回复（#6445）。`null` 继承 bridge 默认（关闭）。 |
+| `output_format` | string 或 null | `null` | 此 sidecar 实例的输出格式覆盖（`markdown` / `telegram_html` / `slack_mrkdwn` / `plain_text`）（#6445）。`null` 继承通道默认。 |
+
+未设（`null`）的字段不会投影为任何 override，因此在这里设一个 knob 绝不会连带产生你没写的策略 —— 这正是 #6445 修复的陷阱。
+agent 级 `agent.toml` 里的 `[channel_overrides]` 仍优先于这些按通道设置的值，且这个优先级是整表替换，不是逐字段合并：只要 agent 清单里声明了 `[channel_overrides]` 表，就会整体替换掉这个 sidecar 的 `dm_policy` / `group_policy` / `threading` / `output_format`，哪怕 agent 表里根本没写这些字段。
+如果一个 agent 的 `[channel_overrides]` 只写了 `model`，什么都不写别的，那 sidecar 级设置的 `group_policy = "ignore"` 会被静默打回未设状态（变为处理所有群消息）—— 如果这个策略无论 agent 覆盖了什么都必须保持生效，就把它也写进该 agent 的 `[channel_overrides]` 里。
 
 ---
 
