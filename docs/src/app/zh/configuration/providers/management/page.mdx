@@ -714,6 +714,47 @@ key = "sk-ant-key-3"
 
 ---
 
+## 用户级密钥与轮转优先级
+
+当已认证用户通过 `PUT /api/users/{name}/provider-keys/{provider}` 存储自己的 provider 密钥（用户级凭据功能，#6460）后，该用户的 Agent 回合将计费到*其本人*的密钥，并且对该 provider 而言优先于运维方的共享凭据。
+凭据解析按固定顺序进行，优先级从高到低：
+
+1. **组织级 provider 允许列表** — 不在允许列表中的 provider 会在选择任何密钥之前被拒绝，因此用户密钥永远无法绕过治理策略。
+2. **Agent 清单中固定的 `api_key_env`** — 运维级覆盖，即使存在用户密钥也优先生效。
+3. **已认证用户为该 provider 存储的自有密钥**。
+4. **守护进程全局的 credential pool**（`credential_pools`）。
+5. **运维方的轮转选择** — `provider_api_keys`，或优先级最高的 `auth_profiles` 条目。
+6. **目录中的 `api_key_env`**，其次是 `{PROVIDER}_API_KEY` 约定。
+
+因此，存在的用户密钥（第 3 级）会对该 provider **绕过 credential pool（第 4 级）与 `auth_profiles` 轮转（第 5 级）**。
+这是有意为之：用户密钥意味着"计入这个人的配额"，因此上游的开销、速率限制与账单归属于带来密钥的用户，而非运维方的共享池。
+这与 Agent 固定的 `api_key_env` 所遵循的规则相同——显式、绑定身份的凭据优先于轮转。
+在清单中固定 `api_key_env` 的 Agent（第 2 级）仍会覆盖用户密钥，因为该固定是运维方对生产 Agent 必须使用哪个凭据所做的决定。
+
+### 设置用户密钥
+
+```
+PUT /api/users/{name}/provider-keys/{provider}
+Content-Type: application/json
+
+{ "api_key": "sk-ant-..." }
+```
+
+此调用之后，无论 `[providers.<provider>]` 下配置的 `rotation_strategy` 是什么，该用户在此 provider 上的回合都会使用其自有密钥，而非运维方的池或轮转。
+
+### 需要预先规划的两种失败模式
+
+**用户密钥是该用户在主 provider 上回合的单点故障。**
+不存在向运维方池的同 provider 回退：若用户密钥返回 `401` 或 `429`，且未配置故障转移链，则该用户的回合会响亮地失败。
+运维方的共享密钥被有意*不*用作静默兜底，因为那会导致运维方被错误计费。
+这只影响该用户自己的回合——其他所有用户以及所有使用运维凭据的 Agent 均不受影响。
+
+**在已配置故障转移链的情况下，失败的主密钥会切换到链中的下一个 provider（一个不同的 provider），该槽位若用户对该 provider 拥有自有密钥则优先使用之，否则使用运维方对该 provider 的全局或轮转密钥。**
+因此，用户失败的主密钥可能会转移到运维方对某个*故障转移* provider 的凭据上，范围限于用户未提供密钥的故障转移 provider。
+这是开销唯一可能回流到运维方的地方；它是有意设计的"保持回合存活"的安全阀，在此明确指出以免在账单上造成意外。
+
+---
+
 ## 速率限制追踪器
 
 **源码：** `librefang-llm-drivers/src/rate_limit_tracker.rs`

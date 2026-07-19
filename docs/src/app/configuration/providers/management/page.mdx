@@ -729,6 +729,47 @@ tracking is available through the budget ledger (`/api/providers/{name}/usage`).
 
 ---
 
+## Per-user keys and rotation precedence
+
+When an authenticated user stores their own provider key through `PUT /api/users/{name}/provider-keys/{provider}` (the per-user credentials feature, #6460), that user's agent turns are billed to *their* key, and it takes precedence over the operator's shared credentials for that provider.
+Credential resolution walks a fixed order, highest priority first:
+
+1. **Org-wide provider allowlist** — a disallowed provider is refused before any key is chosen, so governance is never bypassed by a user key.
+2. **Agent-pinned `api_key_env`** in the agent manifest — an operator-level override that wins even over a user's key.
+3. **The authenticated user's own stored key** for the provider.
+4. **The daemon-global credential pool** (`credential_pools`).
+5. **The operator rotation selection** — `provider_api_keys`, or the highest-priority `auth_profiles` entry.
+6. **Catalog `api_key_env`**, then the `{PROVIDER}_API_KEY` convention.
+
+A present user key (tier 3) therefore **bypasses the credential pool (tier 4) and the `auth_profiles` rotation (tier 5)** for that provider.
+This is deliberate: a user key means "bill this human's quota," so upstream spend, rate limits, and chargeback attach to the person who brought the key rather than to the operator's shared pool.
+It is the same rule the agent-pinned `api_key_env` already follows — an explicit, identity-bound credential wins over rotation.
+An agent that pins an `api_key_env` in its manifest (tier 2) still overrides a user key, because that pin is an operator decision about which credential a production agent must use.
+
+### Setting a user key
+
+```
+PUT /api/users/{name}/provider-keys/{provider}
+Content-Type: application/json
+
+{ "api_key": "sk-ant-..." }
+```
+
+After this call, that user's turns on the provider use their own key instead of the operator's pool or rotation, regardless of the `rotation_strategy` configured under `[providers.<provider>]`.
+
+### Two failure modes to plan for
+
+**A user key is a single point of failure for that user's turns on the primary provider.**
+There is no same-provider fall-through to the operator's pool: if the user's key returns `401` or `429` and no fallback chain is configured, that user's turn fails loudly.
+The operator's shared key is deliberately *not* used as a silent backstop, because that would mis-bill the operator.
+This affects only that one user's turns — every other user and every operator-credentialed agent is unaffected.
+
+**With a fallback chain configured, a failed primary key advances to the next provider in the chain — a different provider — and that slot prefers the user's own key for that provider if they have one, else the operator's global or rotation key for that provider.**
+So a user's failed primary key can fail over onto the operator's credential for a *fallback* provider, bounded to fallback providers the user has not supplied a key for.
+This is the one place spend can cross back to the operator; it is the intended "keep the turn alive" safety valve, named here so it is not a surprise on an invoice.
+
+---
+
 ## Rate Limit Tracker
 
 **Source:** `librefang-llm-drivers/src/rate_limit_tracker.rs`
