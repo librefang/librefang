@@ -7,6 +7,10 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ## [Unreleased]
 
+### Fixed
+
+- Pin `crates/librefang-api/src/login_page.html` to LF in `.gitattributes`: the file is embedded verbatim via `include_str!` and its inline `<script>` is authorised by an exact SHA-256 baked into the CSP (`middleware.rs`), so a Windows checkout with `core.autocrlf=true` rewrote it to CRLF, shifted the computed hash, and failed `dashboard_login_page_script_is_allowed_by_csp_hash` on the Windows shard only — turning `main` red on every merge since #6486 touched the page (#6481) (@houko)
+
 ### Added
 
 - Edit `HAND.toml` online from the Hands panel: the read-only manifest viewer now has an Edit / Save / Cancel affordance backed by a new authenticated `PUT /api/hands/{id}/manifest` that validates the submitted TOML by parsing it into a `HandDefinition` (rejecting invalid TOML or a changed `id` with a 400 and leaving the on-disk file untouched), runs the same supply-chain audit as the install path, persists the file to whichever on-disk copy the hand loads from, and hot-reloads the in-memory definitions — an already-active hand instance keeps its old manifest until it is deactivated and reactivated, and edits to a built-in (registry) hand are overwritten on the next registry sync (#6478) (@houko)
