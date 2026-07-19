@@ -276,17 +276,14 @@ async fn tools_list_unknown_agent_header_falls_back_to_kernel_catalogue() {
     );
 }
 
-// Real MCP tool names are runtime-generated and namespaced
-// `mcp__<server>__<tool>` (double underscore), so an operator cannot
-// enumerate them as static literals. The cases below use that real shape.
+// Real MCP tool names are runtime-generated and namespaced `mcp__<server>__<tool>` (double underscore), so an operator cannot enumerate them as static literals.
+// The cases below use that real shape.
 const MCP_NOTION_A: &str = "mcp__notion__search";
 const MCP_NOTION_B: &str = "mcp__notion__create_page";
 const MCP_GITHUB: &str = "mcp__github__create_issue";
 
-/// #6495: a `tool_allowlist` glob entry (`mcp__notion__*`) must retain the
-/// matching namespaced MCP tools and drop the rest. Before the fix, Step 4
-/// used exact `==`, so the `*` was a literal that matched nothing and the
-/// allowlist silently stripped EVERY MCP tool.
+/// #6495: a `tool_allowlist` glob entry (`mcp__notion__*`) must retain the matching namespaced MCP tools and drop the rest.
+/// Before the fix, Step 4 used exact `==`, so the `*` was a literal that matched nothing and the allowlist silently stripped EVERY MCP tool.
 #[tokio::test(flavor = "multi_thread")]
 async fn tools_list_allowlist_supports_mcp_glob() {
     let h = boot();
@@ -309,8 +306,7 @@ async fn tools_list_allowlist_supports_mcp_glob() {
     );
 }
 
-/// #6495 companion: exact native names still match under `glob_matches`
-/// (`pattern == value`), so plain allowlists are not regressed.
+/// #6495 companion: exact native names still match under `glob_matches` (`pattern == value`), so plain allowlists are not regressed.
 #[tokio::test(flavor = "multi_thread")]
 async fn tools_list_allowlist_exact_name_still_works() {
     let h = boot();
@@ -332,8 +328,7 @@ async fn tools_list_allowlist_exact_name_still_works() {
     );
 }
 
-/// #6495: a `tool_blocklist` glob (`mcp__github__*`) must remove the whole
-/// matching namespace while leaving other MCP tools visible.
+/// #6495: a `tool_blocklist` glob (`mcp__github__*`) must remove the whole matching namespace while leaving other MCP tools visible.
 #[tokio::test(flavor = "multi_thread")]
 async fn tools_list_blocklist_supports_mcp_glob() {
     let h = boot();

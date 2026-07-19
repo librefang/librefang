@@ -298,14 +298,9 @@ impl LibreFangKernel {
             })
             .unwrap_or_default();
 
-        // Match with glob_matches (mirroring the Step 1 builtin filter above),
-        // not exact string equality. MCP tool names are runtime-generated and
-        // namespaced (`mcp__<server>__<tool>`), so they can never be enumerated
-        // as static literals in a manifest — a non-empty exact-match allowlist
-        // silently dropped every mcp__* tool, and a `mcp__*` glob entry was
-        // itself treated as a literal and matched nothing (#6495). glob_matches
-        // still matches a bare tool name exactly (`pattern == value`), so plain
-        // native-tool allowlists behave exactly as before.
+        // Match with glob_matches (mirroring the Step 1 builtin filter above), not exact string equality.
+        // MCP tool names are runtime-generated and namespaced (`mcp__<server>__<tool>`), so they can never be enumerated as static literals in a manifest — a non-empty exact-match allowlist silently dropped every mcp__* tool, and a `mcp__*` glob entry was itself treated as a literal and matched nothing (#6495).
+        // glob_matches still matches a bare tool name exactly (`pattern == value`), so plain native-tool allowlists behave exactly as before.
         if !tool_allowlist.is_empty() {
             all_tools.retain(|t| tool_allowlist.iter().any(|a| glob_matches(a, &t.name)));
         }
