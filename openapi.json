@@ -12278,6 +12278,135 @@
         }
       }
     },
+    "/api/users/{name}/provider-keys": {
+      "get": {
+        "tags": [
+          "users"
+        ],
+        "operationId": "list_user_provider_keys",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Provider names the user has a stored key for",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderKeysResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "User not found"
+          }
+        }
+      }
+    },
+    "/api/users/{name}/provider-keys/{provider}": {
+      "put": {
+        "tags": [
+          "users"
+        ],
+        "operationId": "set_user_provider_key",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "provider",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetProviderKeyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Provider key stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderKeyMutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid provider or empty key"
+          },
+          "404": {
+            "description": "User not found"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "users"
+        ],
+        "operationId": "delete_user_provider_key",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "provider",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Provider key removed (or absent)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderKeyMutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid provider"
+          },
+          "404": {
+            "description": "User not found"
+          }
+        }
+      }
+    },
     "/api/users/{name}/rotate-key": {
       "post": {
         "tags": [
@@ -14115,6 +14244,44 @@
         },
         "additionalProperties": false
       },
+      "ProviderKeyMutationResponse": {
+        "type": "object",
+        "description": "Response for a successful set / delete of a provider key.",
+        "required": [
+          "status",
+          "provider"
+        ],
+        "properties": {
+          "provider": {
+            "type": "string"
+          },
+          "removed": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Present on delete only — whether a stored value was actually removed\n(`false` when the user had no key for that provider)."
+          },
+          "status": {
+            "type": "string"
+          }
+        }
+      },
+      "ProviderKeysResponse": {
+        "type": "object",
+        "description": "Response for the provider-keys list — provider NAMES only, never any\nsecret value.",
+        "required": [
+          "providers"
+        ],
+        "properties": {
+          "providers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
       "PushMessageRequest": {
         "type": "object",
         "description": "Request to push a proactive outbound message from an agent to a channel.",
@@ -14297,6 +14464,18 @@
           }
         },
         "additionalProperties": false
+      },
+      "SetProviderKeyRequest": {
+        "type": "object",
+        "description": "Body for `PUT /api/users/{name}/provider-keys/{provider}` — carries the\nplaintext upstream API key to store. The key is written straight into\nthe vault and is never echoed back in any response.",
+        "required": [
+          "api_key"
+        ],
+        "properties": {
+          "api_key": {
+            "type": "string"
+          }
+        }
       },
       "SidecarSchema": {
         "type": "object",

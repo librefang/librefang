@@ -4719,3 +4719,291 @@ async fn test_upload_over_limit_returns_413() {
          by the route-local RequestBodyLimitLayer"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Per-user LLM provider credentials (#6460 Follow-up B)
+//
+// Owner-gated CRUD over `/api/users/{name}/provider-keys[/{provider}]`.
+// These run against the full auth middleware stack (owner-only write gate
+// + the Owner gate on the list GET) so the security posture is exercised
+// end-to-end, not just the handler body.
+// ---------------------------------------------------------------------------
+
+/// Owner can PUT a provider key and then see the provider NAME (only) come
+/// back from the list GET. The list must never surface the secret value.
+#[tokio::test(flavor = "multi_thread")]
+async fn users_provider_keys_put_then_list_shows_name_not_secret() {
+    let server = start_test_server_with_rbac_users(
+        "any-key",
+        vec![
+            ("Owner1", "owner", "owner-key"),
+            ("Alice", "user", "alice-key"),
+        ],
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let secret = "sk-super-secret-value-do-not-leak";
+
+    // PUT Alice's anthropic key as Owner.
+    let resp = client
+        .put(format!(
+            "{}/api/users/Alice/provider-keys/anthropic",
+            server.base_url
+        ))
+        .header("authorization", "Bearer owner-key")
+        .json(&serde_json::json!({ "api_key": secret }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "Owner must be allowed to set a user's provider key"
+    );
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["provider"], "anthropic");
+    // The write response must not echo the key.
+    let body_str = body.to_string();
+    assert!(
+        !body_str.contains(secret),
+        "PUT response leaked the secret key value: {body_str}"
+    );
+
+    // GET the list as Owner — name is present, value is not.
+    let resp = client
+        .get(format!("{}/api/users/Alice/provider-keys", server.base_url))
+        .header("authorization", "Bearer owner-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "Owner must be allowed to list keys");
+    let text = resp.text().await.unwrap();
+    assert!(
+        text.contains("anthropic"),
+        "list must show the provider name: {text}"
+    );
+    assert!(
+        !text.contains(secret),
+        "list GET leaked the secret key value: {text}"
+    );
+}
+
+/// Owner can DELETE a provider key; a subsequent list no longer shows it,
+/// and the delete response reports whether a value actually existed.
+#[tokio::test(flavor = "multi_thread")]
+async fn users_provider_keys_delete_removes_entry() {
+    let server = start_test_server_with_rbac_users(
+        "any-key",
+        vec![
+            ("Owner1", "owner", "owner-key"),
+            ("Alice", "user", "alice-key"),
+        ],
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    // Seed a key.
+    let resp = client
+        .put(format!(
+            "{}/api/users/Alice/provider-keys/openai",
+            server.base_url
+        ))
+        .header("authorization", "Bearer owner-key")
+        .json(&serde_json::json!({ "api_key": "sk-openai-xyz" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Delete it — `removed` must be true.
+    let resp = client
+        .delete(format!(
+            "{}/api/users/Alice/provider-keys/openai",
+            server.base_url
+        ))
+        .header("authorization", "Bearer owner-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "Owner must be allowed to delete a key");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["removed"], true,
+        "delete must report the existing key was removed: {body}"
+    );
+
+    // List is now empty for Alice.
+    let resp = client
+        .get(format!("{}/api/users/Alice/provider-keys", server.base_url))
+        .header("authorization", "Bearer owner-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let providers = body["providers"].as_array().unwrap();
+    assert!(
+        providers.is_empty(),
+        "provider list must be empty after delete: {body}"
+    );
+}
+
+/// Non-Owner (Admin) callers are rejected on every provider-key route by
+/// the middleware gate — PUT / DELETE via `is_owner_only_write`, and the
+/// list GET via `min_role_for_privileged_get`. An Admin must never be able
+/// to read or write another user's upstream provider credentials.
+#[tokio::test(flavor = "multi_thread")]
+async fn users_provider_keys_reject_non_owner() {
+    let server = start_test_server_with_rbac_users(
+        "any-key",
+        vec![
+            ("Owner1", "owner", "owner-key"),
+            ("Alice", "admin", "alice-admin-key"),
+        ],
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    // Admin PUT — 403.
+    let resp = client
+        .put(format!(
+            "{}/api/users/Alice/provider-keys/anthropic",
+            server.base_url
+        ))
+        .header("authorization", "Bearer alice-admin-key")
+        .json(&serde_json::json!({ "api_key": "sk-nope" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        403,
+        "Admin must NOT be able to set a provider key — Owner only"
+    );
+
+    // Admin DELETE — 403.
+    let resp = client
+        .delete(format!(
+            "{}/api/users/Alice/provider-keys/anthropic",
+            server.base_url
+        ))
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        403,
+        "Admin must NOT be able to delete a provider key — Owner only"
+    );
+
+    // Admin GET (list) — 403 via the Owner gate on the read.
+    let resp = client
+        .get(format!("{}/api/users/Alice/provider-keys", server.base_url))
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        403,
+        "Admin must NOT be able to enumerate another user's providers — Owner only"
+    );
+
+    // Sanity: the Owner IS allowed the same GET, proving the 403 is a role
+    // gate and not a broken route.
+    let resp = client
+        .get(format!("{}/api/users/Alice/provider-keys", server.base_url))
+        .header("authorization", "Bearer owner-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "Owner must be allowed to list keys");
+}
+
+/// An invalid provider segment is rejected with 400 by the handler's
+/// `validate_provider` guard — an unknown provider name never reaches the
+/// vault. (An empty or `/`-containing segment cannot route to the handler
+/// at all, so the reachable invalid case is the unknown-name one.)
+#[tokio::test(flavor = "multi_thread")]
+async fn users_provider_keys_invalid_provider_rejected() {
+    let server = start_test_server_with_rbac_users(
+        "any-key",
+        vec![
+            ("Owner1", "owner", "owner-key"),
+            ("Alice", "user", "alice-key"),
+        ],
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .put(format!(
+            "{}/api/users/Alice/provider-keys/not-a-real-provider",
+            server.base_url
+        ))
+        .header("authorization", "Bearer owner-key")
+        .json(&serde_json::json!({ "api_key": "sk-whatever" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        400,
+        "an unknown provider name must be rejected with 400, not stored"
+    );
+
+    // An empty api_key for a valid provider is also a 400.
+    let resp = client
+        .put(format!(
+            "{}/api/users/Alice/provider-keys/anthropic",
+            server.base_url
+        ))
+        .header("authorization", "Bearer owner-key")
+        .json(&serde_json::json!({ "api_key": "" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        400,
+        "an empty api_key must be rejected with 400"
+    );
+}
+
+/// Managing provider keys for a user that does not exist yields 404, so an
+/// Owner typo never seeds an orphaned vault entry keyed to a phantom user.
+#[tokio::test(flavor = "multi_thread")]
+async fn users_provider_keys_unknown_user_404() {
+    let server =
+        start_test_server_with_rbac_users("any-key", vec![("Owner1", "owner", "owner-key")]).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .put(format!(
+            "{}/api/users/Ghost/provider-keys/anthropic",
+            server.base_url
+        ))
+        .header("authorization", "Bearer owner-key")
+        .json(&serde_json::json!({ "api_key": "sk-ghost" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        404,
+        "setting a key for an unknown user must 404"
+    );
+
+    let resp = client
+        .get(format!("{}/api/users/Ghost/provider-keys", server.base_url))
+        .header("authorization", "Bearer owner-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        404,
+        "listing keys for an unknown user must 404"
+    );
+}
