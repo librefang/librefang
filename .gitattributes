@@ -5,9 +5,7 @@
 # explicit `eol=lf` here is a safety rail for tests that byte-compare.)
 crates/librefang-api/tests/fixtures/*.json text eol=lf
 
-# login_page.html is embedded verbatim via include_str! and its inline
-# <script> is pinned by an exact SHA-256 in the CSP (middleware.rs). A
-# Windows checkout with core.autocrlf=true rewrites it to CRLF, which
-# shifts the hash and fails dashboard_login_page_script_is_allowed_by_csp_hash
-# on Windows only. Pin it to LF so the embedded bytes match CI on every OS.
+# login_page.html is embedded verbatim via include_str! and its inline <script> is pinned by an exact SHA-256 in the CSP (middleware.rs).
+# A Windows checkout with core.autocrlf=true rewrites it to CRLF, which shifts the hash and fails dashboard_login_page_script_is_allowed_by_csp_hash on Windows only.
+# Pin it to LF so the embedded bytes match CI on every OS.
 crates/librefang-api/src/login_page.html text eol=lf
