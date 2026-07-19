@@ -190,6 +190,29 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     fn vault_redeem_recovery_code(&self, code: &str) -> Result<bool, String>;
 
     // ====================================================================
+    // Per-user LLM provider credentials (#6460).
+    //
+    // These forward to the inherent `LibreFangKernel` methods in
+    // `user_provider_credentials.rs`. Only the write / list / remove half
+    // is exposed here — the plaintext getter (`get_user_provider_key`) is
+    // deliberately kept `pub(crate)` on the concrete kernel and is NOT on
+    // this trait, so the HTTP layer can never read a stored key back out.
+    // ====================================================================
+
+    fn set_user_provider_key(
+        &self,
+        user_id: librefang_types::agent::UserId,
+        provider: &str,
+        api_key: &str,
+    ) -> Result<(), String>;
+    fn remove_user_provider_key(
+        &self,
+        user_id: librefang_types::agent::UserId,
+        provider: &str,
+    ) -> Result<bool, String>;
+    fn list_user_provider_keys(&self, user_id: librefang_types::agent::UserId) -> Vec<String>;
+
+    // ====================================================================
     // MCP install façade — routes through the kernel's cached vault and
     // catalog so HTTP request handlers don't open vault.enc and run the
     // unlock-time Argon2id KDF on every install request (#3598). The trait
@@ -930,6 +953,26 @@ impl KernelApi for LibreFangKernel {
     }
     fn vault_redeem_recovery_code(&self, code: &str) -> Result<bool, String> {
         Self::vault_redeem_recovery_code(self, code)
+    }
+
+    // -- Per-user LLM provider credentials (#6460) --
+    fn set_user_provider_key(
+        &self,
+        user_id: librefang_types::agent::UserId,
+        provider: &str,
+        api_key: &str,
+    ) -> Result<(), String> {
+        Self::set_user_provider_key(self, user_id, provider, api_key)
+    }
+    fn remove_user_provider_key(
+        &self,
+        user_id: librefang_types::agent::UserId,
+        provider: &str,
+    ) -> Result<bool, String> {
+        Self::remove_user_provider_key(self, user_id, provider)
+    }
+    fn list_user_provider_keys(&self, user_id: librefang_types::agent::UserId) -> Vec<String> {
+        Self::list_user_provider_keys(self, user_id)
     }
 
     // -- MCP install façade --

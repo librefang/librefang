@@ -236,6 +236,18 @@ fn min_role_for_privileged_get(path: &str) -> Option<UserRole> {
     if path == "/api/config/export" {
         return Some(UserRole::Owner);
     }
+    // `GET /api/users/{name}/provider-keys` lists the provider NAMES a user
+    // has stored an upstream LLM key for (#6460 Follow-up B). No secret value
+    // is returned, but the set of providers a user is configured against is
+    // still account-management metadata, and the sibling PUT/DELETE writes on
+    // the same resource are Owner-only via `is_owner_only_write`. Gate the
+    // read to Owner too so an Admin cannot enumerate another user's provider
+    // credential layout — matching the Owner posture of the whole
+    // `/api/users*` management surface. Matched by prefix + suffix because
+    // the `{name}` segment is concrete on the request URI.
+    if path.starts_with("/api/users/") && path.ends_with("/provider-keys") {
+        return Some(UserRole::Owner);
+    }
     None
 }
 
