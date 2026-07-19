@@ -1031,6 +1031,7 @@ model-picker-item =     { $idx }. { $id } { $tier }
 
 # Approvals command specific keys
 approval-none-pending = Немає апрувів у черзі.
+approval-header-status = СТАТУС
 approval-header-request = ЗАПИТ
 
 # Auth command specific keys

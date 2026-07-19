@@ -1017,6 +1017,7 @@ model-picker-item =     { $idx }. { $id } { $tier }
 
 # Approvals command specific keys
 approval-none-pending = 대기 중인 승인이 없습니다.
+approval-header-status = 상태
 approval-header-request = 요청
 
 # Auth command specific keys

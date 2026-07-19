@@ -367,17 +367,29 @@ pub(crate) fn cmd_approvals_list(json: bool) {
             println!("{}", i18n::t("approval-none-pending"));
             return;
         }
+        // The API returns both pending requests and recently-resolved ones
+        // (approved / rejected / expired / modified), pending-first. Without a
+        // Status column a terminal entry is indistinguishable from a pending
+        // one, so a just-approved request still looked actionable (#6492).
+        // Surface the status so terminal entries are visibly not pending.
         let header_id = i18n::t("label-header-id");
         let header_agent = i18n::t("label-header-agent");
         let header_type = i18n::t("label-header-type");
+        let header_status = i18n::t("approval-header-status");
         let header_request = i18n::t("approval-header-request");
-        let mut t =
-            crate::table::Table::new(&[&header_id, &header_agent, &header_type, &header_request]);
+        let mut t = crate::table::Table::new(&[
+            &header_id,
+            &header_agent,
+            &header_type,
+            &header_status,
+            &header_request,
+        ]);
         for a in arr {
             t.add_row(&[
                 a["id"].as_str().unwrap_or("?"),
                 a["agent_name"].as_str().unwrap_or("?"),
                 a["approval_type"].as_str().unwrap_or("?"),
+                a["status"].as_str().unwrap_or("pending"),
                 a["description"].as_str().unwrap_or(""),
             ]);
         }
@@ -390,27 +402,124 @@ pub(crate) fn cmd_approvals_list(json: bool) {
     }
 }
 
+/// Whether an approval approve/reject HTTP response indicates success.
+///
+/// A response counts as success only when the status is 2xx AND the body
+/// carries no `error` field. Before #6492 the CLI checked only `body["error"]`,
+/// so a 415 (or any 4xx/5xx) that carried no JSON error — e.g. the bodyless
+/// POST that missed `Content-Type` — deserialized to `{}` and printed a false
+/// `✔ approved`.
+fn approval_response_succeeded(status: reqwest::StatusCode, body: &serde_json::Value) -> bool {
+    status.is_success() && body.get("error").is_none()
+}
+
+/// The human-readable failure reason for a non-successful approval response:
+/// the body's `error` string when present, else the HTTP status.
+fn approval_response_error(status: reqwest::StatusCode, body: &serde_json::Value) -> String {
+    body.get("error")
+        .and_then(|e| e.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| status.to_string())
+}
+
 pub(crate) fn cmd_approvals_respond(id: &str, approve: bool) {
     let base = require_daemon("approvals");
     let client = daemon_client();
     let endpoint = if approve { "approve" } else { "reject" };
-    let body = daemon_json(
+    // The approve handler deserializes `Json<ApproveRequestBody>`, so the
+    // request must carry `Content-Type: application/json` or axum's `Json`
+    // extractor rejects it with 415 before the handler runs. A bodyless
+    // `.post().send()` sets no content type; send an empty JSON object so the
+    // header is present (both approve and reject accept an empty body). (#6492)
+    let (status, body) = daemon_json_checked(
         client
             .post(format!("{base}/api/approvals/{id}/{endpoint}"))
+            .json(&serde_json::json!({}))
             .send(),
     );
-    if body.get("error").is_some() {
-        ui::error(&i18n::t_args(
-            "approval-failed",
-            &[
-                ("action", endpoint),
-                ("error", body["error"].as_str().unwrap_or("?")),
-            ],
-        ));
-    } else {
+    // Gate success on the real HTTP status, not only on the presence of an
+    // `error` field: a 415/4xx/5xx often carries no JSON error, so checking
+    // `body["error"]` alone printed a false "approved" on failure. (#6492)
+    if approval_response_succeeded(status, &body) {
         ui::success(&i18n::t_args(
             "approval-responded",
             &[("id", id), ("action", endpoint)],
+        ));
+    } else {
+        let err = approval_response_error(status, &body);
+        ui::error(&i18n::t_args(
+            "approval-failed",
+            &[("action", endpoint), ("error", &err)],
+        ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{approval_response_error, approval_response_succeeded};
+    use reqwest::StatusCode;
+    use serde_json::json;
+
+    #[test]
+    fn success_requires_2xx_and_no_error() {
+        // The success path: a 2xx with the handler's `{id, status, decided_at}`
+        // body and no `error` key.
+        assert!(approval_response_succeeded(
+            StatusCode::OK,
+            &json!({ "id": "a1", "status": "approved" })
+        ));
+        // An empty 2xx body is still success.
+        assert!(approval_response_succeeded(StatusCode::OK, &json!({})));
+    }
+
+    #[test]
+    fn status_415_with_empty_body_is_not_success() {
+        // #6492 core regression: the bodyless POST missed Content-Type, the
+        // Json extractor returned 415, `unwrap_or_default()` yielded `{}`, and
+        // the old `body["error"].is_some()` check treated it as success.
+        let body = serde_json::Value::Null;
+        assert!(!approval_response_succeeded(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            &body
+        ));
+        assert!(!approval_response_succeeded(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            &json!({})
+        ));
+        // The reported reason falls back to the status when no error body.
+        assert_eq!(
+            approval_response_error(StatusCode::UNSUPPORTED_MEDIA_TYPE, &body),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE.to_string()
+        );
+    }
+
+    #[test]
+    fn server_error_is_not_success() {
+        assert!(!approval_response_succeeded(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &json!({})
+        ));
+    }
+
+    #[test]
+    fn error_body_wins_over_status_in_message_and_blocks_success() {
+        // A 400 that carries a real error (e.g. the #6441 "Already approved"
+        // typed 400) is a failure, and its message is surfaced verbatim.
+        let body = json!({ "error": "Already approved" });
+        assert!(!approval_response_succeeded(StatusCode::BAD_REQUEST, &body));
+        assert_eq!(
+            approval_response_error(StatusCode::BAD_REQUEST, &body),
+            "Already approved"
+        );
+    }
+
+    #[test]
+    fn a_2xx_carrying_an_error_field_is_still_a_failure() {
+        // Defensive: if the server ever returns 200 with an error payload, the
+        // AND on the error field keeps us from printing a false success.
+        assert!(!approval_response_succeeded(
+            StatusCode::OK,
+            &json!({ "error": "soft failure" })
         ));
     }
 }

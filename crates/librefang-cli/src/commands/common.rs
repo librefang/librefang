@@ -236,6 +236,18 @@ pub(crate) fn should_surface_status_error(
 pub(crate) fn daemon_json(
     resp: Result<reqwest::blocking::Response, reqwest::Error>,
 ) -> serde_json::Value {
+    daemon_json_checked(resp).1
+}
+
+/// Like [`daemon_json`], but also returns the HTTP status so a caller can
+/// gate success on the real response code rather than only on the presence
+/// of an `error` field in the body. `daemon_json` surfaces a status error to
+/// the user but still returns the (often empty) body, so a caller that only
+/// checked `body["error"]` would treat a 4xx/5xx with no JSON error as
+/// success — the #6492 CLI `approvals approve` false-success bug.
+pub(crate) fn daemon_json_checked(
+    resp: Result<reqwest::blocking::Response, reqwest::Error>,
+) -> (reqwest::StatusCode, serde_json::Value) {
     match resp {
         Ok(r) => {
             let status = r.status();
@@ -246,7 +258,7 @@ pub(crate) fn daemon_json(
                     &i18n::t("error-daemon-returned-fix"),
                 );
             }
-            body
+            (status, body)
         }
         Err(e) => {
             let msg = e.to_string();
