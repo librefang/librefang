@@ -1598,6 +1598,18 @@ class UsersResource {
     return this._c._request("PUT", `/api/users/${name}/policy`, data, undefined);
   }
 
+  async listUserProviderKeys(name) {
+    return this._c._request("GET", `/api/users/${name}/provider-keys`);
+  }
+
+  async setUserProviderKey(name, provider, data) {
+    return this._c._request("PUT", `/api/users/${name}/provider-keys/${provider}`, data, undefined);
+  }
+
+  async deleteUserProviderKey(name, provider) {
+    return this._c._request("DELETE", `/api/users/${name}/provider-keys/${provider}`);
+  }
+
   async rotateUserKey(name) {
     return this._c._request("POST", `/api/users/${name}/rotate-key`);
   }

@@ -1252,6 +1252,15 @@ class _UsersResource(_Resource):
     def update_user_policy(self, name: str, **data):
         return self._c._request("PUT", f"/api/users/{name}/policy", data)
 
+    def list_user_provider_keys(self, name: str):
+        return self._c._request("GET", f"/api/users/{name}/provider-keys")
+
+    def set_user_provider_key(self, name: str, provider: str, **data):
+        return self._c._request("PUT", f"/api/users/{name}/provider-keys/{provider}", data)
+
+    def delete_user_provider_key(self, name: str, provider: str):
+        return self._c._request("DELETE", f"/api/users/{name}/provider-keys/{provider}")
+
     def rotate_user_key(self, name: str):
         return self._c._request("POST", f"/api/users/{name}/rotate-key")
 
