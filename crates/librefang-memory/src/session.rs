@@ -1748,7 +1748,21 @@ impl SessionStore {
             .collect();
         let start = filtered.len().saturating_sub(window);
         let recent = filtered[start..].to_vec();
-        Ok((canonical.compacted_summary.clone(), recent))
+        // Gate the compacted summary by its owning session, mirroring
+        // MemorySubstrate::compacted_summary_for_session (#6225). The summary
+        // is agent-scoped (one row per agent, keyed by agent_id) but is built
+        // from one session's history, so returning it unconditionally on a
+        // caller that named a *different* session injects that session's
+        // content into another's prompt — a cross-user leak on a multi-user
+        // agent (#6493). When a specific session is requested, surface the
+        // summary only if it is the one that owns it; a legacy row with no
+        // recorded owner, or a caller that requested no particular session
+        // (None, e.g. a full agent-wide read), keeps the prior behaviour.
+        let summary = match (&session_id, &canonical.compacted_summary_session_id) {
+            (Some(want), Some(owner)) if owner != want => None,
+            _ => canonical.compacted_summary.clone(),
+        };
+        Ok((summary, recent))
     }
 
     /// Persist a canonical session to SQLite.
@@ -2252,6 +2266,81 @@ mod tests {
 
         let (_, recent_all) = store.canonical_context(agent_id, None, None).unwrap();
         assert_eq!(recent_all.len(), 4);
+    }
+
+    // #6493: the compacted summary is agent-scoped (one row per agent) but is
+    // built from a single session's history and stamped with that owning
+    // session. canonical_context must surface it only to its owner, otherwise
+    // a multi-user agent leaks user A's summarized conversation into user B's
+    // prompt. This mirrors the ownership check compacted_summary_for_session
+    // already applied to the dashboard banner path (#6225).
+    #[test]
+    fn test_canonical_context_summary_gated_by_owning_session() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let sid_a = SessionId::new();
+        let sid_b = SessionId::new();
+
+        // User A's turn produced a compaction summary owned by session A.
+        store
+            .store_llm_summary(
+                agent_id,
+                "SECRET summary of user A's private conversation",
+                vec![Message::user("A recent")],
+                Some(sid_a),
+            )
+            .unwrap();
+
+        // A different session (user B) must NOT receive A's summary.
+        let (summary_b, _) = store
+            .canonical_context(agent_id, Some(sid_b), None)
+            .unwrap();
+        assert_eq!(
+            summary_b, None,
+            "summary owned by session A must not leak into session B's context (#6493)"
+        );
+
+        // The owning session still gets its own summary.
+        let (summary_a, _) = store
+            .canonical_context(agent_id, Some(sid_a), None)
+            .unwrap();
+        assert_eq!(
+            summary_a.as_deref(),
+            Some("SECRET summary of user A's private conversation"),
+            "the owning session must still receive its summary"
+        );
+
+        // A caller that requests no particular session (agent-wide read) keeps
+        // the prior behaviour and still sees the summary.
+        let (summary_none, _) = store.canonical_context(agent_id, None, None).unwrap();
+        assert_eq!(
+            summary_none.as_deref(),
+            Some("SECRET summary of user A's private conversation"),
+            "an unscoped (None) read is unchanged"
+        );
+    }
+
+    // #6493: a legacy row whose summary predates the owner column (owner is
+    // None) must not be silently withheld from every session — it falls back
+    // to the prior always-return behaviour so existing deployments are not
+    // regressed by the gate.
+    #[test]
+    fn test_canonical_context_legacy_ownerless_summary_still_returned() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let sid = SessionId::new();
+
+        // Owner column left None (legacy / pre-#6225 summary).
+        store
+            .store_llm_summary(agent_id, "legacy summary", vec![Message::user("x")], None)
+            .unwrap();
+
+        let (summary, _) = store.canonical_context(agent_id, Some(sid), None).unwrap();
+        assert_eq!(
+            summary.as_deref(),
+            Some("legacy summary"),
+            "an ownerless legacy summary is still returned (no owner to gate against)"
+        );
     }
 
     #[test]
