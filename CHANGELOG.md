@@ -17,6 +17,10 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ### Added
 
+- Expand the scheduler delivery-target channel-type dropdown from 4 presets to all 25 first-party sidecar channel adapters, so operators picking a `channel` fan-out target can select WeChat, WeCom, Feishu / Lark, DingTalk, Microsoft Teams, Google Chat, Rocket.Chat, Matrix, Mattermost, WhatsApp, QQ, LINE, and the rest by name instead of typing the raw `channel_type` string. The two adapters that map to their own delivery-target tabs (`email`, `webhook`) are intentionally excluded to avoid two UI paths to the same target, and the existing "Custom…" escape hatch still passes through any channel_type the transport accepts (#6476) (@houko)
+
+### Added
+
 - Edit `HAND.toml` online from the Hands panel: the read-only manifest viewer now has an Edit / Save / Cancel affordance backed by a new authenticated `PUT /api/hands/{id}/manifest` that validates the submitted TOML by parsing it into a `HandDefinition` (rejecting invalid TOML or a changed `id` with a 400 and leaving the on-disk file untouched), runs the same supply-chain audit as the install path, persists the file to whichever on-disk copy the hand loads from, and hot-reloads the in-memory definitions — an already-active hand instance keeps its old manifest until it is deactivated and reactivated, and edits to a built-in (registry) hand are overwritten on the next registry sync (#6478) (@houko)
 
 ### Added

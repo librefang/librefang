@@ -20,11 +20,36 @@ const TYPE_OPTIONS: { value: CronDeliveryTargetType; labelKey: string; defaultLa
   { value: "email", labelKey: "scheduler.delivery.type_email", defaultLabel: "Email" },
 ];
 
+// Every first-party sidecar channel adapter (sdk/python/librefang/sidecar/adapters/).
+// `value` is the canonical channel_type string the adapter registers — identical to the adapter filename and to the docs' `[[sidecar_channels]]` examples.
+// `email` and `webhook` are deliberately omitted: they are separate CronDeliveryTargetType tabs (TYPE_OPTIONS), not channel presets, so listing them here would create a duplicate way to pick the same target.
+// Sorted case-insensitively by label; the "Custom…" option below keeps arbitrary channel types available.
 const CHANNEL_PRESETS: { value: string; label: string }[] = [
-  { value: "telegram", label: "Telegram" },
-  { value: "slack", label: "Slack" },
+  { value: "bluesky", label: "Bluesky" },
+  { value: "dingtalk", label: "DingTalk" },
   { value: "discord", label: "Discord" },
+  { value: "feishu", label: "Feishu / Lark" },
+  { value: "google_chat", label: "Google Chat" },
+  { value: "gotify", label: "Gotify" },
+  { value: "line", label: "LINE" },
+  { value: "mastodon", label: "Mastodon" },
+  { value: "matrix", label: "Matrix" },
+  { value: "mattermost", label: "Mattermost" },
+  { value: "teams", label: "Microsoft Teams" },
+  { value: "nextcloud", label: "Nextcloud Talk" },
+  { value: "ntfy", label: "ntfy" },
+  { value: "qq", label: "QQ" },
+  { value: "reddit", label: "Reddit" },
+  { value: "rocketchat", label: "Rocket.Chat" },
   { value: "signal", label: "Signal" },
+  { value: "slack", label: "Slack" },
+  { value: "telegram", label: "Telegram" },
+  { value: "twitch", label: "Twitch" },
+  { value: "webex", label: "Webex" },
+  { value: "wechat", label: "WeChat" },
+  { value: "wecom", label: "WeCom" },
+  { value: "whatsapp", label: "WhatsApp" },
+  { value: "zulip", label: "Zulip" },
 ];
 
 interface DeliveryTargetsEditorProps {
