@@ -8745,17 +8745,11 @@ async fn vault_cache_reuses_unlocked_handle_across_calls() {
     kernel.shutdown();
 }
 
-/// Per-user LLM provider credentials (#6460): a user-scoped provider key is
-/// stored encrypted in the vault, reads back verbatim for its owner, stays
-/// isolated across users / providers, and — through the shared resolution
-/// helper — takes precedence over the daemon-global credential. A provider
-/// with no user-scoped key falls back to the global credential, so global-only
-/// behaviour is unchanged. Listing surfaces provider names only, never the
-/// secret value.
+/// Per-user LLM provider credentials (#6460): a user-scoped provider key is stored encrypted in the vault, reads back verbatim for its owner, stays isolated across users / providers, and — through the shared resolution helper — takes precedence over the daemon-global credential.
+/// A provider with no user-scoped key falls back to the global credential, so global-only behaviour is unchanged.
+/// Listing surfaces provider names only, never the secret value.
 ///
-/// Same `serial_test::serial(librefang_vault_key)` group as every other
-/// vault-key-touching test in this crate because `LIBREFANG_VAULT_KEY` and
-/// `LIBREFANG_VAULT_NO_KEYRING` are process-global.
+/// Same `serial_test::serial(librefang_vault_key)` group as every other vault-key-touching test in this crate because `LIBREFANG_VAULT_KEY` and `LIBREFANG_VAULT_NO_KEYRING` are process-global.
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::serial(librefang_vault_key)]
 async fn per_user_provider_key_beats_global_and_falls_back() {
@@ -8839,16 +8833,10 @@ async fn per_user_provider_key_beats_global_and_falls_back() {
     kernel.shutdown();
 }
 
-/// Owner-path coverage for `resolve_driver_for_owner` (#6460 review). The test
-/// above exercises the standalone `resolve_provider_credential` helper, but the
-/// production driver path inlines its OWN owner-aware resolution — the
-/// `get_user_provider_key` lookup at llm_drivers.rs and the credential-pool
-/// bypass it triggers — which had zero coverage. Drive that branch directly:
-/// with a user-scoped key set for the owner, resolving a driver on behalf of
-/// that owner must succeed (the user-key lookup + pool-bypass path runs without
-/// panic on the exact key `get_user_provider_key` surfaces), and the ownerless
-/// path must still resolve so global-only behaviour is unchanged. Uses the local
-/// `ollama` provider so the build is deterministic regardless of env vars.
+/// Owner-path coverage for `resolve_driver_for_owner` (#6460 review).
+/// The test above exercises the standalone `resolve_provider_credential` helper, but the production driver path inlines its OWN owner-aware resolution — the `get_user_provider_key` lookup at llm_drivers.rs and the credential-pool bypass it triggers — which had zero coverage.
+/// Drive that branch directly: with a user-scoped key set for the owner, resolving a driver on behalf of that owner must succeed (the user-key lookup + pool-bypass path runs without panic on the exact key `get_user_provider_key` surfaces), and the ownerless path must still resolve so global-only behaviour is unchanged.
+/// Uses the local `ollama` provider so the build is deterministic regardless of env vars.
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::serial(librefang_vault_key)]
 async fn resolve_driver_for_owner_drives_the_owner_scoped_key_path() {
@@ -8880,8 +8868,7 @@ async fn resolve_driver_for_owner_drives_the_owner_scoped_key_path() {
     let mut manifest = librefang_types::agent::AgentManifest::default();
     manifest.model.provider = "ollama".to_string();
 
-    // Owner path: exercises the user_scoped_key lookup + pool-bypass + the
-    // api_key = user_key branch.
+    // Owner path: exercises the user_scoped_key lookup + pool-bypass + the api_key = user_key branch.
     assert!(
         kernel
             .resolve_driver_for_owner(&manifest, Some(alice))
