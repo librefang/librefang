@@ -413,11 +413,24 @@ fn approval_response_succeeded(status: reqwest::StatusCode, body: &serde_json::V
     status.is_success() && body.get("error").is_none()
 }
 
-/// The human-readable failure reason for a non-successful approval response:
-/// the body's `error` string when present, else the HTTP status.
+/// The human-readable failure reason for a non-successful approval response.
+///
+/// The server's `ApiErrorResponse` puts the human message at the top-level
+/// `message` field and mirrors it at `error.message`; its `error` field is a
+/// nested object, not a bare string. Read those in order, keeping a bare
+/// string `error` as a last content fallback (for any handler that returns the
+/// simpler shape), and finally the HTTP status when the body carries no
+/// message at all. Reading only `error.as_str()` (as the first cut did) always
+/// missed the real message and fell back to the bare status.
 fn approval_response_error(status: reqwest::StatusCode, body: &serde_json::Value) -> String {
-    body.get("error")
-        .and_then(|e| e.as_str())
+    body.get("message")
+        .and_then(|m| m.as_str())
+        .or_else(|| {
+            body.get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(|m| m.as_str())
+        })
+        .or_else(|| body.get("error").and_then(|e| e.as_str()))
         .map(str::to_string)
         .unwrap_or_else(|| status.to_string())
 }
@@ -521,5 +534,30 @@ mod tests {
             StatusCode::OK,
             &json!({ "error": "soft failure" })
         ));
+    }
+
+    #[test]
+    fn error_message_extracted_from_real_apierror_shape() {
+        // The real server error shape (ApiErrorResponse): the human message is
+        // at the top-level `message`, mirrored at `error.message`; `error` is a
+        // nested object, NOT a bare string. Reading `error.as_str()` alone (the
+        // first cut) always missed this and fell back to the bare status.
+        let body = json!({
+            "error": { "code": "conflict", "message": "Already resolved" },
+            "message": "Already resolved"
+        });
+        assert!(!approval_response_succeeded(StatusCode::BAD_REQUEST, &body));
+        assert_eq!(
+            approval_response_error(StatusCode::BAD_REQUEST, &body),
+            "Already resolved",
+            "the real message must be surfaced, not the bare HTTP status"
+        );
+
+        // error.message alone (no top-level message) is still found.
+        let nested_only = json!({ "error": { "message": "nested only" } });
+        assert_eq!(
+            approval_response_error(StatusCode::BAD_REQUEST, &nested_only),
+            "nested only"
+        );
     }
 }
