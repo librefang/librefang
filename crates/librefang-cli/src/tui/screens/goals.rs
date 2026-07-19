@@ -286,7 +286,7 @@ impl GoalsState {
                 }
             }
             KeyCode::Enter => {
-                if self.create_step >= 5 {
+                if self.create_step >= 6 {
                     let action = GoalsAction::CreateGoal {
                         title: self.create_title.clone(),
                         description: self.create_desc.clone(),
@@ -307,8 +307,9 @@ impl GoalsState {
                 0 => self.create_title.push(c),
                 1 => self.create_desc.push(c),
                 2 => self.create_agent_id.push(c),
-                3 => self.create_verify_agent_id.push(c),
-                4 => self.create_evaluator_model.push(c),
+                3 => {} // toggle, no text input
+                4 => self.create_verify_agent_id.push(c),
+                5 => self.create_evaluator_model.push(c),
                 _ => {}
             },
             KeyCode::Backspace => match self.create_step {
@@ -321,10 +322,11 @@ impl GoalsState {
                 2 => {
                     self.create_agent_id.pop();
                 }
-                3 => {
+                3 => {} // toggle, no text
+                4 => {
                     self.create_verify_agent_id.pop();
                 }
-                4 => {
+                5 => {
                     self.create_evaluator_model.pop();
                 }
                 _ => {}
@@ -501,13 +503,19 @@ fn draw_detail(f: &mut Frame, area: Rect, state: &mut GoalsState) {
         Span::styled(agent, Style::default().fg(theme::CYAN)),
     ]));
     lines.push(Line::from(vec![
-        Span::styled("  Loop Engineering: ", theme::dim_style()),
+        Span::styled("  Auto-review: ", theme::dim_style()),
         Span::styled(loop_eng, Style::default().fg(theme::YELLOW)),
     ]));
     lines.push(Line::from(vec![
-        Span::styled("  Verify Agent: ", theme::dim_style()),
+        Span::styled("  Reviewer: ", theme::dim_style()),
         Span::styled(verify_agent, Style::default().fg(theme::TEXT_SECONDARY)),
     ]));
+    if let Some(ref em) = g.evaluator_model {
+        lines.push(Line::from(vec![
+            Span::styled("  Goal Judge: ", theme::dim_style()),
+            Span::styled(em.as_str(), Style::default().fg(theme::CYAN)),
+        ]));
+    }
 
     if let Some(ref phase) = g.run_phase {
         let iter = g.run_iteration.unwrap_or(0);
@@ -600,7 +608,7 @@ fn draw_create(f: &mut Frame, area: Rect, state: &GoalsState) {
     f.render_widget(widgets::separator(chunks[1].width), chunks[1]);
 
     // Step progress indicator
-    let progress: Vec<Span> = (0..5)
+    let progress: Vec<Span> = (0..6)
         .map(|i| {
             if i < state.create_step {
                 Span::styled("\u{25cf} ", Style::default().fg(theme::GREEN))
@@ -614,18 +622,39 @@ fn draw_create(f: &mut Frame, area: Rect, state: &GoalsState) {
     let mut step_line = vec![Span::raw("  ")];
     step_line.extend(progress);
     step_line.push(Span::styled(
-        format!("  step {}/5", state.create_step + 1),
+        format!("  step {}/6", state.create_step + 1),
         Style::default().fg(theme::TEXT_SECONDARY),
     ));
     f.render_widget(Paragraph::new(Line::from(step_line)), chunks[2]);
 
-    let (label, value): (&str, &str) = match state.create_step {
-        0 => ("Title:", &state.create_title),
-        1 => ("Description:", &state.create_desc),
-        2 => ("Agent ID:", &state.create_agent_id),
-        3 => ("Verify Agent ID:", &state.create_verify_agent_id),
-        4 => ("Evaluator Model:", &state.create_evaluator_model),
-        _ => ("", &state.create_title),
+    let (label, _value, hint): (&str, &str, &str) = match state.create_step {
+        0 => ("Title:", &state.create_title, "e.g. \"Fix login timeout\""),
+        1 => (
+            "Description:",
+            &state.create_desc,
+            "What should the agent accomplish?",
+        ),
+        2 => (
+            "Agent:",
+            &state.create_agent_id,
+            "UUID or empty to auto-spawn one",
+        ),
+        3 => (
+            "Auto-review:",
+            "",
+            "Toggle Space/Tab — verifier checks quality each iteration",
+        ),
+        4 => (
+            "Reviewer:",
+            &state.create_verify_agent_id,
+            "UUID or empty to auto-spawn a reviewer",
+        ),
+        5 => (
+            "Goal Judge:",
+            &state.create_evaluator_model,
+            "Model for done-check, e.g. \"claude-haiku\" (optional)",
+        ),
+        _ => ("", &state.create_title, ""),
     };
 
     f.render_widget(
@@ -636,46 +665,13 @@ fn draw_create(f: &mut Frame, area: Rect, state: &GoalsState) {
         chunks[4],
     );
 
-    if state.create_step == 3 {
-        // Checkbox / toggle for loop_engineering
-        let toggle = if state.create_loop_engineering {
-            "\u{25a3} enabled"
-        } else {
-            "\u{25a1} disabled"
-        };
+    // Info hint with ⓘ icon
+    if !hint.is_empty() {
+        let hint_style = Style::default().fg(theme::TEXT_SECONDARY);
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled("  \u{276f} ", Style::default().fg(theme::ACCENT)),
-                Span::styled(toggle, theme::input_style()),
-            ])),
-            chunks[6],
-        );
-    } else {
-        let display = if value.is_empty() {
-            match state.create_step {
-                0 => "e.g. Improve code quality",
-                1 => "e.g. Run linters and tests on every PR",
-                2 => "e.g. 550e8400-e29b-41d4-a716-446655440000",
-                _ => "e.g. 550e8400-e29b-41d4-a716-446655440000",
-            }
-        } else {
-            value
-        };
-        let style = if value.is_empty() {
-            theme::dim_style()
-        } else {
-            theme::input_style()
-        };
-        f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled("  \u{276f} ", Style::default().fg(theme::ACCENT)),
-                Span::styled(display, style),
-                Span::styled(
-                    "\u{2588}",
-                    Style::default()
-                        .fg(theme::GREEN)
-                        .add_modifier(Modifier::SLOW_BLINK),
-                ),
+                Span::styled("  \u{24d8} ", Style::default().fg(theme::ACCENT)),
+                Span::styled(hint, hint_style),
             ])),
             chunks[6],
         );
