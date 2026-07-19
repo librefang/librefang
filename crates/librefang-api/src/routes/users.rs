@@ -56,6 +56,14 @@ pub fn router() -> axum::Router<Arc<AppState>> {
             "/users/{name}/rotate-key",
             axum::routing::post(rotate_user_key),
         )
+        .route(
+            "/users/{name}/provider-keys",
+            axum::routing::get(list_user_provider_keys),
+        )
+        .route(
+            "/users/{name}/provider-keys/{provider}",
+            axum::routing::put(set_user_provider_key).delete(delete_user_provider_key),
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -857,6 +865,224 @@ pub async fn rotate_user_key(
         sessions_invalidated,
     })
     .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Per-user LLM provider credentials (#6460, Follow-up B)
+// ---------------------------------------------------------------------------
+//
+// Owner-gated CRUD over each user's own upstream provider API key, stored
+// encrypted in the vault by the kernel (`user_provider_credentials.rs`).
+// The plaintext value NEVER leaves the vault through this surface: the GET
+// lists provider *names* only, and the kernel's plaintext getter is
+// `pub(crate)` and absent from the `KernelApi` trait, so no handler here
+// can read a stored key back.
+//
+// Owner-gating comes from the middleware, not from an in-handler check:
+//   * `PUT` / `DELETE` are non-GET methods under `/api/users/`, which
+//     `middleware::is_owner_only_write` already forces to `Owner` (same gate
+//     as `rotate-key` / create / delete).
+//   * `GET /api/users/{name}/provider-keys` is registered in
+//     `middleware::min_role_for_privileged_get` as `Owner` (mirroring
+//     `/api/config/export`) so an Admin cannot enumerate another user's
+//     configured providers.
+
+/// Body for `PUT /api/users/{name}/provider-keys/{provider}` — carries the
+/// plaintext upstream API key to store. The key is written straight into
+/// the vault and is never echoed back in any response.
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
+pub struct SetProviderKeyRequest {
+    pub api_key: String,
+}
+
+/// Response for the provider-keys list — provider NAMES only, never any
+/// secret value.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct ProviderKeysResponse {
+    pub providers: Vec<String>,
+}
+
+/// Response for a successful set / delete of a provider key.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct ProviderKeyMutationResponse {
+    pub status: String,
+    pub provider: String,
+    /// Present on delete only — whether a stored value was actually removed
+    /// (`false` when the user had no key for that provider).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub removed: Option<bool>,
+}
+
+/// Validate a `provider` path segment before it becomes a vault-key
+/// component.
+///
+/// The path router already refuses a `{provider}` segment that contains a
+/// `/`, so a slash cannot reach a handler in practice — we still reject it
+/// (and the empty string) explicitly because the validated value is folded
+/// into a vault key, and defense-in-depth at the boundary is cheap. We also
+/// reject anything outside the canonical provider registry
+/// (`known_providers()`) so an Owner cannot silently seed the vault with
+/// keys for garbage provider names that no driver will ever consume.
+fn validate_provider(provider: &str) -> Result<String, String> {
+    let trimmed = provider.trim();
+    if trimmed.is_empty() {
+        return Err("provider must not be empty".to_string());
+    }
+    if trimmed.contains('/') {
+        return Err("provider must not contain '/'".to_string());
+    }
+    if !librefang_llm_drivers::drivers::known_providers().contains(&trimmed) {
+        return Err(format!(
+            "unknown provider '{trimmed}' — expected one of the registered LLM providers"
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Resolve a registered user's [`UserId`] by name, or `None` when no user
+/// with that name exists. Mirrors the case-sensitive `u.name == name` match
+/// `persist_users` uses, so setting / listing / removing a provider key for
+/// an unknown user yields a `404` instead of orphaning a vault entry.
+fn resolve_user_id_by_name(state: &Arc<AppState>, name: &str) -> Option<UserId> {
+    state
+        .kernel
+        .config_ref()
+        .users
+        .iter()
+        .find(|u| u.name == name)
+        .map(|_| UserId::from_name(name))
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/users/{name}/provider-keys/{provider}",
+    tag = "users",
+    request_body = SetProviderKeyRequest,
+    responses(
+        (status = 200, description = "Provider key stored", body = ProviderKeyMutationResponse),
+        (status = 400, description = "Invalid provider or empty key"),
+        (status = 404, description = "User not found"),
+    )
+)]
+pub async fn set_user_provider_key(
+    State(state): State<Arc<AppState>>,
+    Path((name, provider)): Path<(String, String)>,
+    caller: Option<Extension<AuthenticatedApiUser>>,
+    Json(req): Json<SetProviderKeyRequest>,
+) -> impl IntoResponse {
+    let provider = match validate_provider(&provider) {
+        Ok(p) => p,
+        Err(e) => return err_response(StatusCode::BAD_REQUEST, e),
+    };
+    if req.api_key.trim().is_empty() {
+        return err_response(StatusCode::BAD_REQUEST, "api_key must not be empty");
+    }
+    let Some(user_id) = resolve_user_id_by_name(&state, &name) else {
+        return err_response(StatusCode::NOT_FOUND, format!("user '{name}' not found"));
+    };
+
+    if let Err(e) = state
+        .kernel
+        .set_user_provider_key(user_id, &provider, &req.api_key)
+    {
+        return err_response(StatusCode::INTERNAL_SERVER_ERROR, e);
+    }
+
+    // Audit the credential write. Detail names the actor and the target
+    // user + provider but NEVER the key value — only that a key was set.
+    let actor = caller
+        .as_ref()
+        .map(|c| c.0.name.clone())
+        .unwrap_or_else(|| "system".to_string());
+    let actor_user_id = caller.as_ref().map(|c| c.0.user_id);
+    state.kernel.audit().record_with_context(
+        "system",
+        librefang_kernel::audit::AuditAction::ConfigChange,
+        format!("provider key '{provider}' set by {actor} for user {name}"),
+        "completed",
+        actor_user_id,
+        Some("api".to_string()),
+    );
+
+    Json(ProviderKeyMutationResponse {
+        status: "ok".to_string(),
+        provider,
+        removed: None,
+    })
+    .into_response()
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/users/{name}/provider-keys/{provider}",
+    tag = "users",
+    responses(
+        (status = 200, description = "Provider key removed (or absent)", body = ProviderKeyMutationResponse),
+        (status = 400, description = "Invalid provider"),
+        (status = 404, description = "User not found"),
+    )
+)]
+pub async fn delete_user_provider_key(
+    State(state): State<Arc<AppState>>,
+    Path((name, provider)): Path<(String, String)>,
+    caller: Option<Extension<AuthenticatedApiUser>>,
+) -> impl IntoResponse {
+    let provider = match validate_provider(&provider) {
+        Ok(p) => p,
+        Err(e) => return err_response(StatusCode::BAD_REQUEST, e),
+    };
+    let Some(user_id) = resolve_user_id_by_name(&state, &name) else {
+        return err_response(StatusCode::NOT_FOUND, format!("user '{name}' not found"));
+    };
+
+    let removed = match state.kernel.remove_user_provider_key(user_id, &provider) {
+        Ok(removed) => removed,
+        Err(e) => return err_response(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
+
+    let actor = caller
+        .as_ref()
+        .map(|c| c.0.name.clone())
+        .unwrap_or_else(|| "system".to_string());
+    let actor_user_id = caller.as_ref().map(|c| c.0.user_id);
+    state.kernel.audit().record_with_context(
+        "system",
+        librefang_kernel::audit::AuditAction::ConfigChange,
+        format!(
+            "provider key '{provider}' removed by {actor} for user {name} (existed: {removed})"
+        ),
+        "completed",
+        actor_user_id,
+        Some("api".to_string()),
+    );
+
+    Json(ProviderKeyMutationResponse {
+        status: "ok".to_string(),
+        provider,
+        removed: Some(removed),
+    })
+    .into_response()
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/users/{name}/provider-keys",
+    tag = "users",
+    responses(
+        (status = 200, description = "Provider names the user has a stored key for", body = ProviderKeysResponse),
+        (status = 404, description = "User not found"),
+    )
+)]
+pub async fn list_user_provider_keys(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let Some(user_id) = resolve_user_id_by_name(&state, &name) else {
+        return err_response(StatusCode::NOT_FOUND, format!("user '{name}' not found"));
+    };
+    // Names only — the kernel's list method never returns secret values.
+    let providers = state.kernel.list_user_provider_keys(user_id);
+    Json(ProviderKeysResponse { providers }).into_response()
 }
 
 /// Generate a 32-byte (256-bit) random API key plaintext.
