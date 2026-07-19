@@ -16,23 +16,33 @@ pub trait KnowledgeGraph: Send + Sync {
     /// implementation clones into the underlying store when it actually
     /// needs ownership; total clone count is unchanged but the choice
     /// moves from caller to callee. See issue #3553.
+    /// `peer_id` scopes the entity to a single user on a multi-user agent
+    /// (#6494); `None` writes a shared/unscoped entity.
     async fn knowledge_add_entity(
         &self,
         entity: &librefang_types::memory::Entity,
+        peer_id: Option<&str>,
     ) -> Result<String, KernelOpError>;
 
     /// Add a relation to the knowledge graph.
     ///
     /// Takes `relation` by reference for the same reason as
     /// [`knowledge_add_entity`](Self::knowledge_add_entity). See #3553.
+    /// `peer_id` scopes the relation to a single user (#6494); `None` writes a
+    /// shared/unscoped relation.
     async fn knowledge_add_relation(
         &self,
         relation: &librefang_types::memory::Relation,
+        peer_id: Option<&str>,
     ) -> Result<String, KernelOpError>;
 
-    /// Query the knowledge graph with a pattern.
+    /// Query the knowledge graph with a pattern, optionally scoped to a user.
+    ///
+    /// `peer_id` restricts the read to that user's triples (#6494); `None` is
+    /// an unscoped read returning every peer's rows.
     async fn knowledge_query(
         &self,
         pattern: librefang_types::memory::GraphPattern,
+        peer_id: Option<&str>,
     ) -> Result<Vec<librefang_types::memory::GraphMatch>, KernelOpError>;
 }

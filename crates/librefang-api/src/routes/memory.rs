@@ -1467,7 +1467,10 @@ pub async fn memory_store_relations(
     }
 
     let count = triples.len();
-    store.store_relations(&triples, &agent_id);
+    // This admin/dashboard endpoint is authenticated by API user, not a
+    // channel peer, so relations it writes are shared/unscoped (#6494); a
+    // per-user write arrives through the agent's knowledge tools instead.
+    store.store_relations(&triples, &agent_id, None);
 
     (
         StatusCode::OK,
@@ -1487,6 +1490,9 @@ pub struct RelationQueryParams {
     pub source: Option<String>,
     pub relation: Option<String>,
     pub target: Option<String>,
+    /// Optional per-user scope (#6494): when set, only that user's triples are
+    /// returned; omitted means the whole agent graph (every user's rows).
+    pub peer_id: Option<String>,
 }
 
 /// Query the knowledge graph for relations matching a pattern.
@@ -1545,8 +1551,9 @@ pub async fn memory_query_relations(
     };
 
     // Scope to the path agent id so one agent's endpoint never returns
-    // another agent's triples (the write path is already per-agent).
-    match store.query_relations_for_agent(pattern, &agent_id) {
+    // another agent's triples (the write path is already per-agent). An
+    // optional `?peer_id=` further narrows the read to one user (#6494).
+    match store.query_relations_for_agent(pattern, &agent_id, params.peer_id.as_deref()) {
         Ok(matches) => {
             let results: Vec<serde_json::Value> = matches
                 .iter()

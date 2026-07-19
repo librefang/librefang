@@ -1088,7 +1088,15 @@ impl ProactiveMemoryStore {
     /// Store extracted relation triples into the knowledge graph.
     ///
     /// Deduplicates: skips if an identical (source, relation, target) already exists.
-    pub fn store_relations(&self, triples: &[RelationTriple], agent_id: &str) {
+    /// `peer_id` scopes every write to a single user on a multi-user agent
+    /// (#6494); `None` writes shared/unscoped triples (the pre-migration
+    /// behaviour, and correct for single-user agents).
+    pub fn store_relations(
+        &self,
+        triples: &[RelationTriple],
+        agent_id: &str,
+        peer_id: Option<&str>,
+    ) {
         for triple in triples {
             let source_type = parse_entity_type(&triple.subject_type);
             let target_type = parse_entity_type(&triple.object_type);
@@ -1104,6 +1112,7 @@ impl ProactiveMemoryStore {
                     updated_at: chrono::Utc::now(),
                 },
                 agent_id,
+                peer_id,
             ) {
                 Ok(id) => id,
                 Err(e) => {
@@ -1123,6 +1132,7 @@ impl ProactiveMemoryStore {
                     updated_at: chrono::Utc::now(),
                 },
                 agent_id,
+                peer_id,
             ) {
                 Ok(id) => id,
                 Err(e) => {
@@ -1135,7 +1145,7 @@ impl ProactiveMemoryStore {
             let relation_type = parse_relation_type(&triple.relation);
             match self
                 .knowledge
-                .has_relation(&source_id, &relation_type, &target_id)
+                .has_relation(&source_id, &relation_type, &target_id, peer_id)
             {
                 Ok(true) => {
                     tracing::debug!(
@@ -1156,6 +1166,7 @@ impl ProactiveMemoryStore {
                             created_at: chrono::Utc::now(),
                         },
                         agent_id,
+                        peer_id,
                     ) {
                         tracing::warn!(
                             "Failed to add relation '{}' -> '{}': {}",
@@ -1525,17 +1536,21 @@ impl ProactiveMemoryStore {
     }
 
     /// Query the knowledge graph for relations matching a pattern, scoped to
-    /// a single agent.
+    /// a single agent and optionally a single user.
     ///
     /// The per-agent relations HTTP endpoint must never leak another agent's
     /// triples, so it routes through this scoped variant instead of the
-    /// unscoped [`query_relations`].
+    /// unscoped [`query_relations`]. When `peer_id` is `Some`, the read is
+    /// further narrowed to that user's triples (#6494); `None` returns every
+    /// user's rows for the agent (shared semantics).
     pub fn query_relations_for_agent(
         &self,
         pattern: GraphPattern,
         agent_id: &str,
+        peer_id: Option<&str>,
     ) -> LibreFangResult<Vec<librefang_types::memory::GraphMatch>> {
-        self.knowledge.query_graph_scoped(pattern, Some(agent_id))
+        self.knowledge
+            .query_graph_scoped(pattern, Some(agent_id), peer_id)
     }
 
     /// Find duplicate/near-duplicate memories for a user/agent.
@@ -1995,9 +2010,11 @@ impl ProactiveMemory for ProactiveMemoryStore {
         // already includes the ADDs, and eviction will trim only the true excess.
         self.evict_if_over_cap(agent_id, 0)?;
 
-        // Step 6: Store extracted relations in knowledge graph
+        // Step 6: Store extracted relations in knowledge graph. This path has
+        // no per-message peer context (it extracts from the level-defaulting
+        // add() flow), so relations are stored shared/unscoped (#6494).
         if !extraction.relations.is_empty() {
-            self.store_relations(&extraction.relations, user_id);
+            self.store_relations(&extraction.relations, user_id, None);
         }
 
         Ok(results)
@@ -2559,9 +2576,10 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
             }
         }
 
-        // Store extracted relations in knowledge graph
+        // Store extracted relations in knowledge graph, scoped to the peer
+        // whose conversation produced them (#6494).
         if !extraction_result.relations.is_empty() {
-            self.store_relations(&extraction_result.relations, user_id);
+            self.store_relations(&extraction_result.relations, user_id, peer_id);
         }
 
         // Auto-consolidation: merge duplicates every AUTO_CONSOLIDATE_EVERY
@@ -3940,7 +3958,7 @@ mod tests {
             object: "Acme Corp".to_string(),
             object_type: "organization".to_string(),
         }];
-        store.store_relations(&triples, "test-agent");
+        store.store_relations(&triples, "test-agent", None);
 
         // Query the knowledge graph
         let matches = substrate
@@ -4143,8 +4161,8 @@ mod tests {
         }];
 
         // Store twice
-        store.store_relations(&triples, "test-agent");
-        store.store_relations(&triples, "test-agent");
+        store.store_relations(&triples, "test-agent", None);
+        store.store_relations(&triples, "test-agent", None);
 
         // Should only have 1 relation (deduped)
         let matches = substrate
