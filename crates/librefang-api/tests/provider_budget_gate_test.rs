@@ -138,7 +138,9 @@ async fn ephemeral_path_no_longer_pre_dispatch_gates_on_provider_budget() {
     exhaust_provider_budget(&kernel);
     let agent_id = register_agent(&kernel);
 
-    let result = kernel.send_message_ephemeral(agent_id, "ping", None).await;
+    let result = kernel
+        .send_message_ephemeral(agent_id, "ping", None, None)
+        .await;
     assert_no_per_provider_gate(result, "ephemeral");
 }
 
