@@ -155,6 +155,7 @@ impl KnowledgeGraph for TrackingSendHandle {
     async fn knowledge_add_entity(
         &self,
         _entity: &librefang_types::memory::Entity,
+        _: Option<&str>,
     ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Ok("entity".into())
     }
@@ -162,6 +163,7 @@ impl KnowledgeGraph for TrackingSendHandle {
     async fn knowledge_add_relation(
         &self,
         _relation: &librefang_types::memory::Relation,
+        _: Option<&str>,
     ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Ok("relation".into())
     }
@@ -169,6 +171,7 @@ impl KnowledgeGraph for TrackingSendHandle {
     async fn knowledge_query(
         &self,
         _pattern: librefang_types::memory::GraphPattern,
+        _: Option<&str>,
     ) -> Result<Vec<librefang_types::memory::GraphMatch>, librefang_kernel_handle::KernelOpError>
     {
         Ok(vec![])
@@ -349,6 +352,7 @@ impl KnowledgeGraph for TrackingSpawnHandle {
     async fn knowledge_add_entity(
         &self,
         _entity: &librefang_types::memory::Entity,
+        _: Option<&str>,
     ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Ok("entity".into())
     }
@@ -356,6 +360,7 @@ impl KnowledgeGraph for TrackingSpawnHandle {
     async fn knowledge_add_relation(
         &self,
         _relation: &librefang_types::memory::Relation,
+        _: Option<&str>,
     ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Ok("relation".into())
     }
@@ -363,6 +368,7 @@ impl KnowledgeGraph for TrackingSpawnHandle {
     async fn knowledge_query(
         &self,
         _pattern: librefang_types::memory::GraphPattern,
+        _: Option<&str>,
     ) -> Result<Vec<librefang_types::memory::GraphMatch>, librefang_kernel_handle::KernelOpError>
     {
         Ok(vec![])
@@ -544,6 +550,7 @@ impl KnowledgeGraph for TrackingApprovalHandle {
     async fn knowledge_add_entity(
         &self,
         _entity: &librefang_types::memory::Entity,
+        _: Option<&str>,
     ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Ok("entity".into())
     }
@@ -551,6 +558,7 @@ impl KnowledgeGraph for TrackingApprovalHandle {
     async fn knowledge_add_relation(
         &self,
         _relation: &librefang_types::memory::Relation,
+        _: Option<&str>,
     ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Ok("relation".into())
     }
@@ -558,6 +566,7 @@ impl KnowledgeGraph for TrackingApprovalHandle {
     async fn knowledge_query(
         &self,
         _pattern: librefang_types::memory::GraphPattern,
+        _: Option<&str>,
     ) -> Result<Vec<librefang_types::memory::GraphMatch>, librefang_kernel_handle::KernelOpError>
     {
         Ok(vec![])

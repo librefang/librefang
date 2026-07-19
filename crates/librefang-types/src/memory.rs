@@ -1491,15 +1491,33 @@ pub trait Memory: Send + Sync {
     // -- Knowledge graph operations --
 
     /// Add an entity to the knowledge graph.
-    async fn add_entity(&self, entity: Entity) -> crate::error::LibreFangResult<String>;
+    ///
+    /// `peer_id` scopes the entity to a single user on a multi-user agent
+    /// (#6494); `None` writes a shared/unscoped entity.
+    async fn add_entity(
+        &self,
+        entity: Entity,
+        peer_id: Option<&str>,
+    ) -> crate::error::LibreFangResult<String>;
 
     /// Add a relation between entities.
-    async fn add_relation(&self, relation: Relation) -> crate::error::LibreFangResult<String>;
+    ///
+    /// `peer_id` scopes the relation to a single user (#6494); `None` writes a
+    /// shared/unscoped relation.
+    async fn add_relation(
+        &self,
+        relation: Relation,
+        peer_id: Option<&str>,
+    ) -> crate::error::LibreFangResult<String>;
 
-    /// Query the knowledge graph.
+    /// Query the knowledge graph, optionally scoped to a single user.
+    ///
+    /// `peer_id` restricts the read to that user's triples (#6494); `None` is
+    /// an unscoped read returning every peer's rows (shared semantics).
     async fn query_graph(
         &self,
         pattern: GraphPattern,
+        peer_id: Option<&str>,
     ) -> crate::error::LibreFangResult<Vec<GraphMatch>>;
 
     // -- Maintenance --

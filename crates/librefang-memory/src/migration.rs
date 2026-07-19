@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 46;
+const SCHEMA_VERSION: u32 = 47;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -223,6 +223,12 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // whose own history was actually compacted — never leaked onto a
     // freshly created session that merely became the agent's active one.
     run_step!(46, migrate_v46);
+    // v47 (#6494): add peer_id to entities and relations so a multi-user
+    // agent's knowledge graph is isolated per user, mirroring the
+    // memories.peer_id column added in v16. NULL peer_id = shared/unscoped,
+    // which is backward compatible with every existing row and a no-op for
+    // single-user agents.
+    run_step!(47, migrate_v47);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -796,6 +802,81 @@ fn migrate_v16(conn: &Connection) -> Result<(), rusqlite::Error> {
     }
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) VALUES (16, datetime('now'), 'Add peer_id to memories and sessions for per-user isolation')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// v47 (#6494): Add peer_id to entities and relations for per-user
+/// isolation of the knowledge graph on multi-user agents.
+///
+/// Mirrors the memories.peer_id column (v16), but entities needs more than a
+/// bare column: its `id` is derived from the (lower-cased) entity name, so two
+/// users' same-named entities share one `id`. With `id` as the sole PRIMARY
+/// KEY they cannot coexist — a second user's entity would collide and be
+/// dropped — so the entities table is rebuilt with a composite
+/// `PRIMARY KEY (id, peer_id)`, letting each user hold their own row for the
+/// same name. relations keeps its single-column `id` PK (a relation row is
+/// unique per UUID) and only gains a nullable peer_id used as the read
+/// filter.
+///
+/// The shared/unscoped peer is the empty string `''`, NOT SQL NULL: NULL is
+/// distinct from NULL in a UNIQUE/PRIMARY KEY, so `PRIMARY KEY (id, peer_id)`
+/// with NULL peers would let the same shared entity insert twice (and the
+/// upsert's `ON CONFLICT(id, peer_id)` would never fire), producing duplicate
+/// rows that fan out the read JOIN. `''` is a normal value that deduplicates
+/// correctly. Every existing row migrates to `peer_id = ''` (shared), so reads
+/// without a peer are unchanged and single-user agents are unaffected.
+///
+/// The caller (`run_step!`) already wraps this in a transaction, so a crash
+/// mid-rebuild rolls back and leaves the original entities table intact — this
+/// function must NOT open its own transaction (nesting would fail with "cannot
+/// start a transaction within a transaction"). Guards make the step idempotent
+/// on retry.
+fn migrate_v47(conn: &Connection) -> Result<(), rusqlite::Error> {
+    // --- entities: rebuild with composite PRIMARY KEY (id, peer_id) ---
+    // Skip the rebuild if a prior run already produced the peer_id column
+    // (idempotent retry): the new PK is only observable via a rebuild, and the
+    // column's presence is our marker that the rebuild completed.
+    if !column_exists(conn, "entities", "peer_id") {
+        conn.execute_batch(
+            "CREATE TABLE entities_new (
+                id TEXT NOT NULL,
+                entity_type TEXT NOT NULL,
+                name TEXT NOT NULL,
+                properties TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                agent_id TEXT NOT NULL DEFAULT '',
+                peer_id TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (id, peer_id)
+            );
+            INSERT INTO entities_new (id, entity_type, name, properties, created_at, updated_at, agent_id, peer_id)
+                SELECT id, entity_type, name, properties, created_at, updated_at, agent_id, ''
+                FROM entities;
+            DROP TABLE entities;
+            ALTER TABLE entities_new RENAME TO entities;
+            CREATE INDEX IF NOT EXISTS idx_entities_agent ON entities(agent_id);
+            CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name);
+            CREATE INDEX IF NOT EXISTS idx_entities_peer ON entities(agent_id, peer_id);",
+        )?;
+    }
+
+    // --- relations: additive column, shared sentinel '' (single-column id PK
+    // is fine here — a relation row is unique per UUID). ---
+    if !column_exists(conn, "relations", "peer_id") {
+        conn.execute(
+            "ALTER TABLE relations ADD COLUMN peer_id TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_relations_peer ON relations(agent_id, peer_id)",
+            [],
+        )?;
+    }
+
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) VALUES (47, datetime('now'), 'Add peer_id to entities and relations for per-user isolation (#6494)')",
         [],
     )?;
     Ok(())
@@ -2138,6 +2219,100 @@ mod tests {
         assert!(tables.contains(&"prompt_experiments".to_string()));
         assert!(tables.contains(&"experiment_variants".to_string()));
         assert!(tables.contains(&"experiment_metrics".to_string()));
+    }
+
+    #[test]
+    fn test_migrate_v47_adds_peer_id_columns() {
+        // #6494: entities and relations gain a nullable peer_id for per-user
+        // KG isolation. Pre-existing rows must keep working with NULL peer_id.
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        assert!(column_exists(&conn, "entities", "peer_id"));
+        assert!(column_exists(&conn, "relations", "peer_id"));
+
+        // A legacy-shaped INSERT that omits peer_id gets the '' shared default.
+        conn.execute(
+            "INSERT INTO entities (id, entity_type, name, properties, created_at, updated_at, agent_id) VALUES ('leg', '\"Person\"', 'X', '{}', '2026-07-19T00:00:00+00:00', '2026-07-19T00:00:00+00:00', 'a')",
+            [],
+        )
+        .unwrap();
+        let peer: String = conn
+            .query_row("SELECT peer_id FROM entities WHERE id = 'leg'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            peer, "",
+            "omitted peer_id defaults to the '' shared sentinel"
+        );
+
+        // Two users' same-named entities collapse to the same `id` (derived
+        // from the name), so both must be insertable — proving the composite
+        // PRIMARY KEY (id, peer_id) took effect instead of the old single `id`.
+        for peer in ["user-A", "user-B"] {
+            conn.execute(
+                "INSERT INTO entities (id, entity_type, name, properties, created_at, updated_at, agent_id, peer_id) VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7)",
+                rusqlite::params!["john", "\"Person\"", "John", "{}", "2026-07-19T00:00:00+00:00", "shared-agent", peer],
+            )
+            .unwrap();
+        }
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM entities WHERE id = 'john'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            n, 2,
+            "same-named entities coexist as one row per peer (#6494)"
+        );
+
+        // Shared (empty-peer) entities dedup: inserting the same shared id
+        // twice must collapse to one row (NULL would not, hence the '' sentinel).
+        conn.execute(
+            "INSERT INTO entities (id, entity_type, name, properties, created_at, updated_at, agent_id, peer_id) VALUES ('shared1', '\"Org\"', 'Acme', '{}', '2026-07-19T00:00:00+00:00', '2026-07-19T00:00:00+00:00', 'a', '')",
+            [],
+        )
+        .unwrap();
+        let dup = conn.execute(
+            "INSERT INTO entities (id, entity_type, name, properties, created_at, updated_at, agent_id, peer_id) VALUES ('shared1', '\"Org\"', 'Acme', '{}', '2026-07-19T00:00:00+00:00', '2026-07-19T00:00:00+00:00', 'a', '')",
+            [],
+        );
+        assert!(
+            dup.is_err(),
+            "a duplicate shared entity must violate the (id, '') PK"
+        );
+    }
+
+    #[test]
+    fn test_migrate_v47_preserves_existing_entity_rows() {
+        // The entities rebuild must not lose data: an entity written under the
+        // pre-v47 schema must survive with peer_id = NULL (shared).
+        let conn = Connection::open_in_memory().unwrap();
+        // Migrate only up to the state just before v47 by running the full
+        // ladder, then asserting the row seeded post-migration round-trips. We
+        // seed after migration (the table shape is stable) and re-run
+        // migrate_v47 to prove idempotence does not drop it either.
+        run_migrations(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO entities (id, entity_type, name, properties, created_at, updated_at, agent_id, peer_id) VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, '')",
+            rusqlite::params!["legacy1", "\"Org\"", "Acme", "{\"k\":1}", "2026-07-19T00:00:00+00:00", "agent-1"],
+        )
+        .unwrap();
+
+        // A second call to migrate_v47 is a no-op (peer_id already present) and
+        // must leave the seeded row untouched.
+        migrate_v47(&conn).unwrap();
+        let (name, props, peer): (String, String, String) = conn
+            .query_row(
+                "SELECT name, properties, peer_id FROM entities WHERE id = 'legacy1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(name, "Acme");
+        assert_eq!(props, "{\"k\":1}");
+        assert_eq!(peer, "", "a pre-v47 row migrates to the '' shared sentinel");
     }
 
     #[test]

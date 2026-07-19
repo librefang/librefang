@@ -1718,25 +1718,38 @@ impl Memory for MemorySubstrate {
             .map_err(|e| LibreFangError::Internal(e.to_string()))?
     }
 
-    async fn add_entity(&self, entity: Entity) -> LibreFangResult<String> {
+    async fn add_entity(&self, entity: Entity, peer_id: Option<&str>) -> LibreFangResult<String> {
         let store = self.knowledge.clone();
-        tokio::task::spawn_blocking(move || store.add_entity(entity, ""))
+        let peer = peer_id.map(str::to_string);
+        tokio::task::spawn_blocking(move || store.add_entity(entity, "", peer.as_deref()))
             .await
             .map_err(|e| LibreFangError::Internal(e.to_string()))?
     }
 
-    async fn add_relation(&self, relation: Relation) -> LibreFangResult<String> {
+    async fn add_relation(
+        &self,
+        relation: Relation,
+        peer_id: Option<&str>,
+    ) -> LibreFangResult<String> {
         let store = self.knowledge.clone();
-        tokio::task::spawn_blocking(move || store.add_relation(relation, ""))
+        let peer = peer_id.map(str::to_string);
+        tokio::task::spawn_blocking(move || store.add_relation(relation, "", peer.as_deref()))
             .await
             .map_err(|e| LibreFangError::Internal(e.to_string()))?
     }
 
-    async fn query_graph(&self, pattern: GraphPattern) -> LibreFangResult<Vec<GraphMatch>> {
+    async fn query_graph(
+        &self,
+        pattern: GraphPattern,
+        peer_id: Option<&str>,
+    ) -> LibreFangResult<Vec<GraphMatch>> {
         let store = self.knowledge.clone();
-        tokio::task::spawn_blocking(move || store.query_graph(pattern))
-            .await
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?
+        let peer = peer_id.map(str::to_string);
+        tokio::task::spawn_blocking(move || {
+            store.query_graph_scoped(pattern, None, peer.as_deref())
+        })
+        .await
+        .map_err(|e| LibreFangError::Internal(e.to_string()))?
     }
 
     async fn consolidate(&self) -> LibreFangResult<ConsolidationReport> {
