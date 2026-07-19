@@ -258,10 +258,7 @@ impl LibreFangKernel {
         } else {
             // No credential pool — resolve a single API key the traditional
             // way.
-            let api_key = if let Some(user_key) = user_scoped_key {
-                // #6460: the human owner's own provider key wins over the daemon-global env-var credential.
-                Some(user_key)
-            } else if has_custom_key {
+            let global_api_key = if has_custom_key {
                 manifest
                     .model
                     .api_key_env
@@ -281,6 +278,15 @@ impl LibreFangKernel {
                 let env_var = self.resolve_non_default_api_key_env(&cfg, agent_provider);
                 std::env::var(&env_var).ok()
             };
+            // #6460: route through the shared precedence helper so the
+            // tested `resolve_provider_credential` contract (user-scoped key
+            // wins, global-only behaviour unchanged when no user key exists)
+            // is the actual production logic rather than a parallel inline
+            // copy of it.
+            let api_key = crate::user_provider_credentials::resolve_provider_credential(
+                user_scoped_key,
+                global_api_key,
+            );
 
             let driver_config = make_driver_config(api_key);
 
