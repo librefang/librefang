@@ -20,14 +20,10 @@ const TYPE_OPTIONS: { value: CronDeliveryTargetType; labelKey: string; defaultLa
   { value: "email", labelKey: "scheduler.delivery.type_email", defaultLabel: "Email" },
 ];
 
-// Every first-party sidecar channel adapter (sdk/python/librefang/sidecar/
-// adapters/). `value` is the canonical channel_type string the adapter
-// registers — identical to the adapter filename and to the docs'
-// `[[sidecar_channels]]` examples. `email` and `webhook` are deliberately
-// omitted: they are separate CronDeliveryTargetType tabs (TYPE_OPTIONS), not
-// channel presets, so listing them here would create a duplicate way to pick
-// the same target. Sorted case-insensitively by label; the "Custom…" option
-// below keeps arbitrary channel types available.
+// Every first-party sidecar channel adapter (sdk/python/librefang/sidecar/adapters/).
+// `value` is the canonical channel_type string the adapter registers — identical to the adapter filename and to the docs' `[[sidecar_channels]]` examples.
+// `email` and `webhook` are deliberately omitted: they are separate CronDeliveryTargetType tabs (TYPE_OPTIONS), not channel presets, so listing them here would create a duplicate way to pick the same target.
+// Sorted case-insensitively by label; the "Custom…" option below keeps arbitrary channel types available.
 const CHANNEL_PRESETS: { value: string; label: string }[] = [
   { value: "bluesky", label: "Bluesky" },
   { value: "dingtalk", label: "DingTalk" },
