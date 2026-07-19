@@ -3868,9 +3868,7 @@ async fn dispatch_message(
             // erasing the very context the next addressed turn was meant
             // to recover. See `dispatch_message` near the journal-record
             // call for the actual drain.
-            // Reply-intent precheck: lightweight LLM classification for group
-            // messages processed unconditionally (explicit `group_policy = "all"`
-            // or the unset-policy "process all" path) when precheck is enabled.
+            // Reply-intent precheck: lightweight LLM classification for group messages processed unconditionally (explicit `group_policy = "all"` or the unset-policy "process all" path) when precheck is enabled.
             // Skipped for mentions and commands (already filtered above).
             if ov.reply_precheck && group_reply_precheck_applies(ov) {
                 let text = text_content(message).unwrap_or("");
@@ -6397,17 +6395,9 @@ async fn media_dispatch_allowed(
                 return false;
             }
 
-            // Reply-intent precheck: lightweight LLM classification when the
-            // group is processed unconditionally (explicit `group_policy = "all"`
-            // or the unset-policy "process all" path) and precheck is enabled.
-            // This IS run on the media path for parity with the text path — a
-            // deliberate choice, so a captioned media message does not get a
-            // reply where the same text would have stayed silent. Captionless
-            // media has no text to classify, so we skip the (billed) LLM call and
-            // proceed rather than classify an empty string: the unconditional
-            // "process all" mode is opt-in to respond broadly, and bare media
-            // always reached the agent before the media gate existed, so
-            // proceeding preserves that behavior.
+            // Reply-intent precheck: lightweight LLM classification when the group is processed unconditionally (explicit `group_policy = "all"` or the unset-policy "process all" path) and precheck is enabled.
+            // This IS run on the media path for parity with the text path — a deliberate choice, so a captioned media message does not get a reply where the same text would have stayed silent.
+            // Captionless media has no text to classify, so we skip the (billed) LLM call and proceed rather than classify an empty string: the unconditional "process all" mode is opt-in to respond broadly, and bare media always reached the agent before the media gate existed, so proceeding preserves that behavior.
             if ov.reply_precheck && group_reply_precheck_applies(ov) {
                 let text = extracted_user_text(&message.content).unwrap_or_default();
                 if !text.trim().is_empty() {
@@ -10090,15 +10080,11 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // #6445 — reply-intent precheck gate follows the "process all" resolution,
-    // not the literal `Some(GroupPolicy::All)`.
+    // #6445 — reply-intent precheck gate follows the "process all" resolution, not the literal `Some(GroupPolicy::All)`.
     //
-    // `should_process_group_message` treats an unset `group_policy` (no trigger
-    // patterns) as process-all, identical to explicit `all`. The two
-    // reply-precheck gates (`dispatch_message` text path + `media_dispatch_allowed`)
-    // must resolve the same way, or the common unset-policy config silently loses
-    // its reply-intent filter. `group_reply_precheck_applies` is the shared helper
-    // both gates call; these lock its truth table so the paths cannot drift again.
+    // `should_process_group_message` treats an unset `group_policy` (no trigger patterns) as process-all, identical to explicit `all`.
+    // The two reply-precheck gates (`dispatch_message` text path + `media_dispatch_allowed`) must resolve the same way, or the common unset-policy config silently loses its reply-intent filter.
+    // `group_reply_precheck_applies` is the shared helper both gates call; these lock its truth table so the paths cannot drift again.
     // ---------------------------------------------------------------------
     mod group_reply_precheck_applies_tests {
         use super::super::group_reply_precheck_applies;
@@ -10115,9 +10101,8 @@ mod tests {
 
         #[test]
         fn unset_policy_without_patterns_applies() {
-            // The #6445 "process all" default: no group_policy, no trigger
-            // patterns. `should_process_group_message` processes every message
-            // here, so the precheck must fire too.
+            // The #6445 "process all" default: no group_policy, no trigger patterns.
+            // `should_process_group_message` processes every message here, so the precheck must fire too.
             let ov = ChannelOverrides::default();
             assert!(ov.group_policy.is_none());
             assert!(ov.group_trigger_patterns.is_empty());
@@ -10129,9 +10114,7 @@ mod tests {
 
         #[test]
         fn unset_policy_with_patterns_does_not_apply() {
-            // Trigger patterns without an explicit policy resolve to mention-only
-            // gating inside `should_process_group_message`; the patterns are the
-            // gate, so the process-all precheck must stay off.
+            // Trigger patterns without an explicit policy resolve to mention-only gating inside `should_process_group_message`; the patterns are the gate, so the process-all precheck must stay off.
             let ov = ChannelOverrides {
                 group_policy: None,
                 group_trigger_patterns: vec!["(?i)\\bmybot\\b".to_string()],

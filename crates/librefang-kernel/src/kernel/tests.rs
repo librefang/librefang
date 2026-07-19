@@ -30,8 +30,7 @@ impl RecordingChannelAdapter {
         }
     }
 
-    /// Same as [`Self::new`] but carries a per-adapter `channel_overrides()`
-    /// (#6445 — e.g. a sidecar's `[[sidecar_channels]] output_format`).
+    /// Same as [`Self::new`] but carries a per-adapter `channel_overrides()` (#6445 — e.g. a sidecar's `[[sidecar_channels]] output_format`).
     fn with_overrides(
         channel_type: &str,
         overrides: librefang_types::config::ChannelOverrides,
@@ -272,11 +271,7 @@ async fn test_notify_escalated_approval_prefers_request_route_to() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_send_channel_message_honours_adapter_output_format_override_6445() {
-    // #6445: `send_channel_message` must consult the adapter's own
-    // `channel_overrides().output_format` (e.g. a sidecar's
-    // `[[sidecar_channels]] output_format`) rather than only the
-    // channel-type default, so an agent-initiated `channel_send` formats
-    // the same way a normal reply would.
+    // #6445: `send_channel_message` must consult the adapter's own `channel_overrides().output_format` (e.g. a sidecar's `[[sidecar_channels]] output_format`) rather than only the channel-type default, so an agent-initiated `channel_send` formats the same way a normal reply would.
     let dir = tempfile::tempdir().unwrap();
     let home_dir = dir.path().to_path_buf();
     std::fs::create_dir_all(home_dir.join("data")).unwrap();
@@ -287,9 +282,7 @@ async fn test_send_channel_message_honours_adapter_output_format_override_6445()
     };
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
 
-    // No override: the "test" channel type falls back to the generic
-    // `Markdown` default (`default_output_format_for_channel`), which
-    // passes markdown syntax through unchanged.
+    // No override: the "test" channel type falls back to the generic `Markdown` default (`default_output_format_for_channel`), which passes markdown syntax through unchanged.
     let plain_adapter = Arc::new(RecordingChannelAdapter::new("test"));
     let plain_sent = plain_adapter.sent.clone();
     kernel
