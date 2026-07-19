@@ -2416,6 +2416,19 @@ export function AgentsPage() {
                   <div className="rounded-lg bg-main border border-border-subtle p-4 space-y-2">
                     {editingModel ? (
                       <>
+                        {!detailAgent.is_hand && (
+                          <div className="flex justify-end">
+                            <button
+                              type="button"
+                              onClick={() => setModelDraft(d => ({ ...d, provider: "default", model: "default" }))}
+                              disabled={modelDraft.provider === "default" && modelDraft.model === "default"}
+                              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium text-brand border border-brand/30 hover:bg-brand/10 disabled:opacity-50 disabled:cursor-default"
+                            >
+                              <RotateCcw className="w-3 h-3" />
+                              {t("agents.use_global_default", { defaultValue: "Use global default" })}
+                            </button>
+                          </div>
+                        )}
                         <DetailRow label={t("agents.provider")}>
                           <select
                             value={modelDraft.provider}

@@ -1086,14 +1086,16 @@ struct KernelCronBridge {
 impl LibreFangKernel {
     /// Mark all active Hands' cron jobs as due-now so the next scheduler tick fires them.
     /// Called after a provider is first configured so Hands resume immediately.
-    /// Update registry entries for agents that should track the kernel default model.
-    /// Called after a provider switch so agents pick up the new provider without restart.
+    /// Update legacy concrete registry entries that should track the kernel default model.
+    /// Agents carrying the `default/default` sentinel resolve the new value at execution time and require no rewrite.
     ///
     /// Agents eligible for update:
-    /// - Any agent with provider="default" or "" (new spawn-time behavior)
-    /// - The auto-spawned "assistant" agent (may have stale concrete provider in DB)
     /// - Dashboard-created agents (no source_toml_path, no custom api_key_env) whose
     ///   stored provider matches `old_provider` — these were using the old default
+    ///
+    /// `old_model` narrows the match to agents also pinned to that specific model.
+    /// Pass `None` for a full provider switch, where every dashboard-created agent on the old provider should move regardless of which model it was on.
+    /// Pass `Some(old_model)` for an intra-provider free-model migration (the old and new provider are the same), so only agents actually pinned to the delisted model move — an agent deliberately pinned to a different model on the same provider must not be silently overwritten.
     ///
     /// Returns a per-agent partial-failure list `(agent_name, error)`. An
     /// empty vec means every eligible agent was migrated cleanly. Callers
@@ -1104,6 +1106,7 @@ impl LibreFangKernel {
     pub fn sync_default_model_agents(
         &self,
         old_provider: &str,
+        old_model: Option<&str>,
         dm: &librefang_types::config::DefaultModelConfig,
     ) -> Vec<(String, String)> {
         let mut failures: Vec<(String, String)> = Vec::new();
@@ -1112,19 +1115,25 @@ impl LibreFangKernel {
                 || entry.manifest.model.provider == "default";
             let is_default_model =
                 entry.manifest.model.model.is_empty() || entry.manifest.model.model == "default";
-            let is_auto_spawned = entry.name == "assistant"
-                && entry.manifest.description == "General-purpose assistant";
+            if is_default_provider && is_default_model {
+                continue;
+            }
             // Dashboard-created agents that were using the old default provider:
             // no source TOML, no custom API key, and saved provider == old default
-            let is_stale_dashboard_default = entry.source_toml_path.is_none()
+            // The built-in assistant is excluded because users can explicitly select its model in the dashboard.
+            // Provider equality alone cannot distinguish that choice from a legacy resolved default.
+            // When `old_model` is set (intra-provider free-model migration) the stored model must also match.
+            // Under this condition, an agent deliberately pinned to a different model on the same provider is left alone.
+            let is_stale_dashboard_default = entry.name != "assistant"
+                && entry.source_toml_path.is_none()
                 && entry.manifest.model.api_key_env.is_none()
                 && entry.manifest.model.base_url.is_none()
-                && entry.manifest.model.provider == old_provider;
+                && entry.manifest.model.provider == old_provider
+                && old_model
+                    .map(|m| entry.manifest.model.model == m)
+                    .unwrap_or(true);
 
-            if (is_default_provider && is_default_model)
-                || is_auto_spawned
-                || is_stale_dashboard_default
-            {
+            if is_stale_dashboard_default {
                 if let Err(e) = self.agents.registry.update_model_and_provider(
                     entry.id,
                     dm.model.clone(),
@@ -1334,9 +1343,11 @@ impl LibreFangKernel {
             // Fallback to global channels based on event type
             match event_type {
                 "approval_requested" => cfg.notification.approval_channels.clone(),
-                "task_completed" | "task_failed" | "tool_failure" | "health_check_failed" => {
-                    cfg.notification.alert_channels.clone()
-                }
+                "task_completed"
+                | "task_failed"
+                | "tool_failure"
+                | "health_check_failed"
+                | "model_migrated" => cfg.notification.alert_channels.clone(),
                 _ => Vec::new(),
             }
         };
@@ -1349,6 +1360,29 @@ impl LibreFangKernel {
         for target in &targets {
             self.push_to_target(target, &delivered).await;
         }
+    }
+
+    /// Record and notify operators that LibreFang changed a configured model automatically.
+    pub async fn notify_model_migrated(
+        &self,
+        agent_id: &str,
+        provider: &str,
+        old_model: &str,
+        new_model: &str,
+        reason: &str,
+    ) {
+        let detail =
+            format!("{provider} model migrated from `{old_model}` to `{new_model}`: {reason}");
+        self.metering.audit_log.record_with_context(
+            agent_id,
+            librefang_runtime::audit::AuditAction::ConfigChange,
+            detail.clone(),
+            "success",
+            None,
+            None,
+        );
+        self.push_notification(agent_id, "model_migrated", &detail, None)
+            .await;
     }
 
     /// Resolve an agent identifier string (either a UUID or a human-readable

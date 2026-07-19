@@ -597,22 +597,14 @@ impl LibreFangKernel {
         // Apply model routing if configured (disabled in Stable mode)
         let mut manifest = entry.manifest.clone();
 
-        // Resolve "default" provider/model to the current effective default.
-        // This covers three cases:
-        // 1. New agents stored as "default"/"default" (post-fix spawn behavior)
-        // 2. The auto-spawned "assistant" agent that may have a stale concrete
-        //    provider/model in DB from before a provider switch
-        // 3. TOML agents with provider="default" that got a concrete value baked in
+        // Resolve `default/default` only in this per-execution copy.
+        // The registry and persisted manifest retain the sentinel so later global model changes take effect without rewriting the agent.
         {
             let is_default_provider =
                 manifest.model.provider.is_empty() || manifest.model.provider == "default";
             let is_default_model =
                 manifest.model.model.is_empty() || manifest.model.model == "default";
-            let is_auto_spawned = entry.name == "assistant"
-                && manifest
-                    .description
-                    .starts_with("General-purpose assistant");
-            if (is_default_provider && is_default_model) || is_auto_spawned {
+            if is_default_provider && is_default_model {
                 let override_guard = self
                     .llm
                     .default_model_override
@@ -630,6 +622,13 @@ impl LibreFangKernel {
                 }
                 if dm.base_url.is_some() && manifest.model.base_url.is_none() {
                     manifest.model.base_url.clone_from(&dm.base_url);
+                }
+                for (key, value) in &dm.extra_params {
+                    manifest
+                        .model
+                        .extra_params
+                        .entry(key.clone())
+                        .or_insert(value.clone());
                 }
             }
         }
@@ -1273,6 +1272,10 @@ impl LibreFangKernel {
             &loop_opts,
         )
         .await;
+
+        if let Err(error) = &result {
+            self.refresh_openrouter_catalog_after_model_not_found(&manifest, error);
+        }
 
         // Tear down injection channel after loop finishes.
         self.teardown_injection_channel(agent_id, effective_session_id);

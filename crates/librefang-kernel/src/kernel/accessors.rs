@@ -14,6 +14,7 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use super::spawn_logged;
 use super::subsystems::{EventSubsystemApi, McpSubsystemApi, MemorySubsystemApi};
 
 use tracing::{debug, info, warn};
@@ -27,6 +28,16 @@ use crate::workflow::WorkflowEngine;
 
 use super::workspace_setup::migrate_legacy_agent_dirs;
 use super::LibreFangKernel;
+
+pub(super) fn should_refresh_openrouter_catalog_after_error(
+    manifest: &librefang_types::agent::AgentManifest,
+    error: &str,
+) -> bool {
+    use librefang_llm_driver::llm_errors::{classify_error, LlmErrorCategory};
+
+    manifest.model.provider == "openrouter"
+        && classify_error(error, None).category == LlmErrorCategory::ModelNotFound
+}
 
 impl LibreFangKernel {
     /// Full kernel configuration (atomically loaded snapshot).
@@ -416,6 +427,54 @@ impl LibreFangKernel {
         self.llm.catalog_update(f)
     }
 
+    pub(crate) fn refresh_openrouter_catalog_after_model_not_found(
+        &self,
+        manifest: &librefang_types::agent::AgentManifest,
+        error: &impl std::fmt::Display,
+    ) {
+        if !should_refresh_openrouter_catalog_after_error(manifest, &error.to_string()) {
+            return;
+        }
+        let base_url = manifest.model.base_url.clone().or_else(|| {
+            self.llm
+                .model_catalog
+                .load()
+                .get_provider("openrouter")
+                .map(|provider| provider.base_url.clone())
+        });
+        let Some(base_url) = base_url.filter(|url| !url.is_empty()) else {
+            return;
+        };
+        let Some(kernel) = self.self_handle.get().and_then(|weak| weak.upgrade()) else {
+            return;
+        };
+
+        spawn_logged("openrouter_catalog_error_refresh", async move {
+            match librefang_runtime::model_catalog::fetch_openrouter_model_snapshot(&base_url).await
+            {
+                Ok(snapshot) => {
+                    kernel.model_catalog_update(|catalog| {
+                        catalog.reconcile_live_provider_models(
+                            "openrouter",
+                            snapshot.available_models.clone(),
+                            snapshot.live_models.clone(),
+                        );
+                    });
+                    tracing::info!(
+                        models = snapshot.live_models.len(),
+                        "refreshed OpenRouter catalog after model-not-found error"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "failed to refresh OpenRouter catalog after model-not-found error"
+                    );
+                }
+            }
+        });
+    }
+
     /// Spawn background tasks to validate API keys for every `Configured` provider.
     ///
     /// Called at daemon boot and whenever a new key is set via the dashboard.
@@ -452,19 +511,103 @@ impl LibreFangKernel {
                         let result =
                             librefang_runtime::model_catalog::probe_api_key(&id, &base_url, &key)
                                 .await;
-                        if let Some(valid) = result.key_valid {
+                        let key_valid = result.key_valid;
+                        let available_models = result.available_models;
+                        let live_models = result.live_models;
+                        let model_list_fetched = result.model_list_fetched;
+
+                        if id == "openrouter" && model_list_fetched {
+                            let status = key_valid.map(|valid| {
+                                if valid {
+                                    AuthStatus::ValidatedKey
+                                } else {
+                                    AuthStatus::InvalidKey
+                                }
+                            });
+                            kernel.model_catalog_update(|catalog| {
+                                if let Some(status) = status {
+                                    catalog.set_provider_auth_status(&id, status);
+                                }
+                                catalog.reconcile_live_provider_models(
+                                    &id,
+                                    available_models.clone(),
+                                    live_models.clone(),
+                                );
+                            });
+
+                            // Existing installations may still have a delisted OpenRouter free model in config.toml.
+                            // Hot-migrate the effective default to another live free model.
+                            // Explicitly selected agent models remain pinned.
+                            let current = {
+                                let guard = kernel
+                                    .llm
+                                    .default_model_override
+                                    .read()
+                                    .unwrap_or_else(|e| e.into_inner());
+                                guard.clone().unwrap_or_else(|| {
+                                    kernel.config.load().default_model.clone()
+                                })
+                            };
+                            let replacement = {
+                                let catalog = kernel.llm.model_catalog.load();
+                                (current.provider == id
+                                    && librefang_runtime::model_catalog::is_free_openrouter_model(
+                                        &current.model,
+                                    )
+                                    && catalog.is_model_available(&id, &current.model)
+                                        == Some(false))
+                                .then(|| {
+                                    catalog.closest_free_openrouter_model(&current.model)
+                                })
+                                .flatten()
+                            };
+                            if let Some(model) = replacement {
+                                let old_model = current.model.clone();
+                                let migrated = librefang_types::config::DefaultModelConfig {
+                                    model: model.clone(),
+                                    ..current
+                                };
+                                {
+                                    let mut guard = kernel
+                                        .llm
+                                        .default_model_override
+                                        .write()
+                                        .unwrap_or_else(|e| e.into_inner());
+                                    *guard = Some(migrated.clone());
+                                }
+                                let failures = kernel.sync_default_model_agents(
+                                     &id,
+                                     Some(old_model.as_str()),
+                                     &migrated,
+                                 );
+                                if !failures.is_empty() {
+                                    tracing::warn!(
+                                        provider = %id,
+                                        failures = failures.len(),
+                                        "some agents could not be migrated from a delisted OpenRouter free model"
+                                    );
+                                }
+                                kernel
+                                    .notify_model_migrated(
+                                        "system",
+                                        &id,
+                                        &old_model,
+                                        &model,
+                                        "the previous free model is no longer listed by the provider",
+                                    )
+                                    .await;
+                            }
+                        } else if let Some(valid) = key_valid {
                             let status = if valid {
                                 AuthStatus::ValidatedKey
                             } else {
                                 AuthStatus::InvalidKey
                             };
                             tracing::info!(provider = %id, valid, "provider key validation result");
-                            let available_models = result.available_models.clone();
                             kernel.model_catalog_update(|catalog| {
                                 catalog.set_provider_auth_status(&id, status);
-                                // Store available models so downstream can check
-                                // whether a configured model actually exists.
                                 if !available_models.is_empty() {
+                                    // Store available models so downstream can check whether a configured model actually exists.
                                     catalog.set_provider_available_models(
                                         &id,
                                         available_models.clone(),

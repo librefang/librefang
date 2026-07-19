@@ -571,6 +571,362 @@ fn test_available_models_includes_local() {
     assert!(available.iter().any(|m| m.provider == "ollama"));
 }
 
+fn openrouter_test_catalog() -> ModelCatalog {
+    let provider = ProviderInfo {
+        id: "openrouter".to_string(),
+        display_name: "OpenRouter".to_string(),
+        api_key_env: "OPENROUTER_API_KEY".to_string(),
+        base_url: "https://openrouter.ai/api/v1".to_string(),
+        auth_status: AuthStatus::ValidatedKey,
+        ..ProviderInfo::default()
+    };
+    let model = |id: &str, tier| ModelCatalogEntry {
+        id: id.to_string(),
+        display_name: id.to_string(),
+        provider: "openrouter".to_string(),
+        tier,
+        context_window: 32_768,
+        max_output_tokens: 4_096,
+        supports_streaming: true,
+        ..ModelCatalogEntry::default()
+    };
+    ModelCatalog::from_entries(
+        vec![
+            model("openrouter/qwen/deprecated:free", ModelTier::Balanced),
+            model("openrouter/acme/paid", ModelTier::Smart),
+            model("openrouter/user/pinned", ModelTier::Custom),
+        ],
+        vec![provider],
+    )
+}
+
+#[test]
+fn openrouter_live_parser_maps_metadata() {
+    let body = serde_json::json!({
+        "data": [{
+            "id": "acme/current:free",
+            "name": "Current Free",
+            "context_length": 200000,
+            "pricing": {
+                "prompt": "0.00000025",
+                "completion": "0.000001"
+            },
+            "architecture": {
+                "input_modalities": ["text", "image"]
+            },
+            "supported_parameters": ["tools", "reasoning"],
+            "top_provider": {
+                "max_completion_tokens": 12000
+            }
+        }]
+    });
+
+    let entries = parse_openrouter_model_entries(&body);
+    assert_eq!(entries.len(), 1);
+    let model = &entries[0];
+    assert_eq!(model.id, "openrouter/acme/current:free");
+    assert_eq!(model.display_name, "Current Free");
+    assert_eq!(model.context_window, 200_000);
+    assert_eq!(model.max_output_tokens, 12_000);
+    assert!((model.input_cost_per_m - 0.25).abs() < f64::EPSILON);
+    assert!((model.output_cost_per_m - 1.0).abs() < f64::EPSILON);
+    assert!(model.supports_tools);
+    assert!(model.supports_vision);
+    assert!(model.supports_thinking);
+    assert!(model.supports_streaming);
+    assert!(model.pricing_known);
+}
+
+#[test]
+fn openrouter_live_parser_preserves_unknown_pricing() {
+    let entries = parse_openrouter_model_entries(&serde_json::json!({
+        "data": [{
+            "id": "acme/no-price",
+            "name": "No Price",
+            "context_length": 32768
+        }]
+    }));
+
+    let model = entries.first().expect("model without pricing");
+    assert!(!model.pricing_known);
+    assert_eq!(model.input_cost_per_m, 0.0);
+    assert_eq!(model.output_cost_per_m, 0.0);
+}
+
+#[test]
+fn reconcile_openrouter_models_replaces_static_snapshot_and_keeps_custom() {
+    let mut catalog = openrouter_test_catalog();
+    assert!(!catalog.has_live_provider_models("openrouter"));
+    let live = parse_openrouter_model_entries(&serde_json::json!({
+        "data": [
+            {
+                "id": "acme/paid",
+                "name": "Paid",
+                "context_length": 100000,
+                "pricing": {"prompt": "0.000001", "completion": "0.000002"}
+            },
+            {
+                "id": "acme/current:free",
+                "name": "Current Free",
+                "context_length": 100000,
+                "pricing": {"prompt": "0", "completion": "0"}
+            }
+        ]
+    }));
+
+    catalog.reconcile_live_provider_models(
+        "openrouter",
+        vec!["acme/paid".to_string(), "acme/current:free".to_string()],
+        live,
+    );
+    assert!(catalog.has_live_provider_models("openrouter"));
+    assert!(!catalog.live_provider_models_are_stale("openrouter", OPENROUTER_MODEL_CATALOG_TTL));
+    assert!(catalog.live_provider_models_are_stale("openrouter", std::time::Duration::ZERO));
+
+    let ids: Vec<&str> = catalog
+        .models_by_provider("openrouter")
+        .into_iter()
+        .map(|model| model.id.as_str())
+        .collect();
+    assert!(!ids.contains(&"openrouter/qwen/deprecated:free"));
+    assert!(ids.contains(&"openrouter/acme/paid"));
+    assert!(ids.contains(&"openrouter/acme/current:free"));
+    assert!(ids.contains(&"openrouter/user/pinned"));
+    assert_eq!(
+        catalog
+            .find_model_for_provider("openrouter", "openrouter/acme/paid")
+            .expect("live paid model")
+            .tier,
+        ModelTier::Smart,
+        "curated classification should survive live metadata refresh"
+    );
+    assert_eq!(
+        catalog.is_model_available("openrouter", "openrouter/acme/current:free"),
+        Some(true)
+    );
+    assert_eq!(
+        catalog.is_model_available("openrouter", "acme/missing"),
+        Some(false)
+    );
+    assert_eq!(
+        catalog.is_model_available("openrouter", "openrouter/user/pinned"),
+        Some(true),
+        "explicit custom entries remain selectable"
+    );
+    assert_eq!(
+        catalog.automatic_default_model_for_provider("openrouter"),
+        Some("openrouter/acme/current:free".to_string())
+    );
+}
+
+#[test]
+fn openrouter_availability_accepts_raw_auto_router_ids() {
+    let mut catalog = openrouter_test_catalog();
+    catalog.reconcile_live_provider_models(
+        "openrouter",
+        vec!["openrouter/free".to_string()],
+        parse_openrouter_model_entries(&serde_json::json!({
+            "data": [{
+                "id": "openrouter/free",
+                "name": "OpenRouter Free",
+                "context_length": 4096,
+                "pricing": {"prompt": "0", "completion": "0"}
+            }]
+        })),
+    );
+
+    assert_eq!(
+        catalog.is_model_available("openrouter", "openrouter/openrouter/free"),
+        Some(true),
+        "catalog-form auto-router ids must match raw upstream OpenRouter ids"
+    );
+}
+
+#[tokio::test]
+async fn openrouter_catalog_fetch_does_not_require_authorization() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{
+                "id": "acme/current:free",
+                "name": "Current Free",
+                "context_length": 65536,
+                "pricing": {"prompt": "0", "completion": "0"}
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let snapshot = fetch_openrouter_model_snapshot(&server.uri())
+        .await
+        .expect("public OpenRouter catalog fetch");
+    assert_eq!(snapshot.available_models, vec!["acme/current:free"]);
+    assert_eq!(snapshot.live_models[0].id, "openrouter/acme/current:free");
+}
+
+#[tokio::test]
+async fn openrouter_probe_validates_key_separately_from_catalog_fetch() {
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/key"))
+        .and(header("authorization", "Bearer test-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {"label": "test"}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{
+                "id": "acme/current:free",
+                "name": "Current Free",
+                "context_length": 65536,
+                "pricing": {"prompt": "0", "completion": "0"}
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let result = probe_api_key("openrouter", &server.uri(), "test-key").await;
+    assert_eq!(result.key_valid, Some(true));
+    assert!(result.model_list_fetched);
+    assert_eq!(result.available_models, vec!["acme/current:free"]);
+}
+
+#[test]
+fn openrouter_automatic_default_never_selects_paid_model() {
+    let mut catalog = openrouter_test_catalog();
+    assert_eq!(
+        catalog.automatic_default_model_for_provider("openrouter"),
+        Some("openrouter/qwen/deprecated:free".to_string()),
+        "a failed live fetch should retain a free build-snapshot fallback"
+    );
+
+    let live = parse_openrouter_model_entries(&serde_json::json!({
+        "data": [{
+            "id": "acme/paid",
+            "name": "Paid",
+            "context_length": 100000,
+            "pricing": {"prompt": "0.000001", "completion": "0.000002"}
+        }]
+    }));
+    catalog.reconcile_live_provider_models("openrouter", vec!["acme/paid".to_string()], live);
+    assert_eq!(
+        catalog.automatic_default_model_for_provider("openrouter"),
+        None
+    );
+}
+
+#[test]
+fn test_embedded_openrouter_snapshot_is_valid() {
+    let body: serde_json::Value = serde_json::from_str(OPENROUTER_BUILD_SNAPSHOT)
+        .expect("Embedded OpenRouter models snapshot must be valid JSON");
+    let snapshot = parse_openrouter_model_entries(&body);
+    assert!(
+        !snapshot.is_empty(),
+        "Embedded OpenRouter snapshot must contain at least one model"
+    );
+
+    for model in &snapshot {
+        assert!(
+            model.id.starts_with("openrouter/"),
+            "Model ID must start with prefix: {}",
+            model.id
+        );
+        assert!(
+            !model.display_name.is_empty(),
+            "Model display name must not be empty"
+        );
+        assert!(
+            model.context_window > 0,
+            "Model context window must be positive"
+        );
+    }
+}
+
+#[test]
+fn openrouter_free_predicate_includes_auto_router() {
+    assert!(is_free_openrouter_model("openrouter/openrouter/free"));
+    assert!(is_free_openrouter_model("openrouter/qwen/qwen3-8b:free"));
+    assert!(!is_free_openrouter_model("openrouter/qwen/qwen3-8b"));
+}
+
+#[test]
+fn openrouter_parameter_scale_parses_dense_and_moe_models() {
+    assert_eq!(
+        extract_parameter_scale("qwen/qwen3-14b:free"),
+        (Some(14.0), None)
+    );
+    assert_eq!(
+        extract_parameter_scale("qwen/qwen3-235b-a22b:free"),
+        (Some(235.0), Some(22.0))
+    );
+}
+
+#[test]
+fn openrouter_replacement_prefers_same_family_and_nearest_parameter_scale() {
+    let mut catalog = openrouter_test_catalog();
+    let live = parse_openrouter_model_entries(&serde_json::json!({
+        "data": [
+            {
+                "id": "qwen/qwen3-72b:free",
+                "name": "Qwen3 72B",
+                "context_length": 131072,
+                "pricing": {"prompt": "0", "completion": "0"}
+            },
+            {
+                "id": "qwen/qwen3-14b:free",
+                "name": "Qwen3 14B",
+                "context_length": 131072,
+                "pricing": {"prompt": "0", "completion": "0"}
+            },
+            {
+                "id": "qwen/qwen3-235b:free",
+                "name": "Qwen3 235B",
+                "context_length": 131072,
+                "pricing": {"prompt": "0", "completion": "0"}
+            },
+            {
+                "id": "qwen/qwen3-250b-a22b:free",
+                "name": "Qwen3 250B A22B",
+                "context_length": 131072,
+                "pricing": {"prompt": "0", "completion": "0"}
+            },
+            {
+                "id": "other/model-8b:free",
+                "name": "Other 8B",
+                "context_length": 131072,
+                "pricing": {"prompt": "0", "completion": "0"}
+            }
+        ]
+    }));
+    let available = live
+        .iter()
+        .map(|model| strip_catalog_provider_prefix("openrouter", &model.id).to_string())
+        .collect();
+    catalog.reconcile_live_provider_models("openrouter", available, live);
+
+    assert_eq!(
+        catalog.closest_free_openrouter_model("openrouter/qwen/qwen3-8b:free"),
+        Some("openrouter/qwen/qwen3-14b:free".to_string())
+    );
+    assert_eq!(
+        catalog.closest_free_openrouter_model("openrouter/qwen/qwen3-235b-a22b:free"),
+        Some("openrouter/qwen/qwen3-250b-a22b:free".to_string())
+    );
+}
+
 #[test]
 fn test_provider_model_counts() {
     let catalog = test_catalog();

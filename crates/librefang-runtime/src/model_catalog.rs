@@ -8,7 +8,11 @@ use librefang_types::model_catalog::{
     ModelOverrides, ModelTier, ProviderInfo,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::time::{Duration, Instant};
 use tracing::warn;
+
+const OPENROUTER_BUILD_SNAPSHOT: &str = include_str!("../openrouter-models.snapshot.json");
+pub const OPENROUTER_MODEL_CATALOG_TTL: Duration = Duration::from_secs(15 * 60);
 
 /// The model catalog — registry of all known models and providers.
 ///
@@ -23,6 +27,10 @@ pub struct ModelCatalog {
     models: Vec<ModelCatalogEntry>,
     aliases: HashMap<String, String>,
     providers: Vec<ProviderInfo>,
+    /// Providers whose model list was successfully fetched from their live API during this process.
+    /// Kept separately from `available_models` so an empty successful response is distinguishable from "not probed yet".
+    live_model_providers: HashSet<String>,
+    live_model_fetched_at: HashMap<String, Instant>,
     /// Providers whose fallback/CLI detection is suppressed by the user
     /// (i.e. the user explicitly removed the key via the dashboard).
     suppressed_providers: HashSet<String>,
@@ -96,6 +104,129 @@ fn resolve_discovered_capabilities(
     (has_vision, supports_tools, has_thinking)
 }
 
+fn strip_catalog_provider_prefix<'a>(provider: &str, model: &'a str) -> &'a str {
+    model
+        .strip_prefix(provider)
+        .and_then(|rest| rest.strip_prefix('/').or_else(|| rest.strip_prefix(':')))
+        .unwrap_or(model)
+}
+
+pub fn is_free_openrouter_model(model: &str) -> bool {
+    model.ends_with(":free")
+        || strip_catalog_provider_prefix("openrouter", model) == "openrouter/free"
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct OpenRouterModelIdentity {
+    author: String,
+    family: String,
+    total_parameter_billions: Option<f64>,
+    active_parameter_billions: Option<f64>,
+}
+
+fn openrouter_model_identity(id: &str, display_name: &str) -> OpenRouterModelIdentity {
+    let normalized = strip_catalog_provider_prefix("openrouter", id)
+        .trim_end_matches(":free")
+        .to_ascii_lowercase();
+    let (author, slug) = normalized
+        .split_once('/')
+        .unwrap_or(("", normalized.as_str()));
+    let family = slug
+        .split(|character: char| !character.is_ascii_alphabetic())
+        .find(|part| !part.is_empty())
+        .unwrap_or(slug)
+        .to_string();
+    let (mut total_parameter_billions, mut active_parameter_billions) =
+        extract_parameter_scale(&normalized);
+    if total_parameter_billions.is_none() || active_parameter_billions.is_none() {
+        let display_scale = extract_parameter_scale(&display_name.to_ascii_lowercase());
+        total_parameter_billions = total_parameter_billions.or(display_scale.0);
+        active_parameter_billions = active_parameter_billions.or(display_scale.1);
+    }
+
+    OpenRouterModelIdentity {
+        author: author.to_string(),
+        family,
+        total_parameter_billions,
+        active_parameter_billions,
+    }
+}
+
+fn extract_parameter_scale(value: &str) -> (Option<f64>, Option<f64>) {
+    let bytes = value.as_bytes();
+    let mut total = None;
+    let mut active = None;
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte != b'b' || index == 0 {
+            continue;
+        }
+        let mut start = index;
+        while start > 0 && (bytes[start - 1].is_ascii_digit() || bytes[start - 1] == b'.') {
+            start -= 1;
+        }
+        if start == index {
+            continue;
+        }
+        let has_digit = bytes[start..index].iter().any(u8::is_ascii_digit);
+        let is_active = start > 0
+            && bytes[start - 1] == b'a'
+            && (start == 1 || !bytes[start - 2].is_ascii_alphanumeric());
+        let valid_boundary = start == 0 || !bytes[start - 1].is_ascii_alphanumeric() || is_active;
+        if has_digit && valid_boundary {
+            if let Ok(parameters) = value[start..index].parse::<f64>() {
+                if parameters.is_finite() && parameters > 0.0 {
+                    if is_active {
+                        active.get_or_insert(parameters);
+                    } else {
+                        total.get_or_insert(parameters);
+                    }
+                }
+            }
+        }
+    }
+    (total, active)
+}
+
+fn relative_parameter_distance(left: Option<f64>, right: Option<f64>) -> (bool, u64) {
+    match (left, right) {
+        (Some(left), Some(right)) => {
+            let distance = (left / right).ln().abs();
+            (false, (distance * 1_000_000.0).round() as u64)
+        }
+        _ => (true, u64::MAX),
+    }
+}
+
+fn replace_provider_snapshot(
+    models: &mut Vec<ModelCatalogEntry>,
+    provider: &str,
+    mut snapshot: Vec<ModelCatalogEntry>,
+) {
+    let curated: HashMap<String, ModelCatalogEntry> = models
+        .iter()
+        .filter(|model| model.provider == provider && model.tier != ModelTier::Custom)
+        .map(|model| (model.id.to_lowercase(), model.clone()))
+        .collect();
+    for model in &mut snapshot {
+        if let Some(existing) = curated.get(&model.id.to_lowercase()) {
+            model.tier = existing.tier;
+            model.reasoning_echo_policy = existing.reasoning_echo_policy;
+            model.aliases.clone_from(&existing.aliases);
+        }
+    }
+
+    let mut seen: HashSet<String> = models
+        .iter()
+        .filter(|model| model.provider == provider && model.tier == ModelTier::Custom)
+        .map(|model| model.id.to_lowercase())
+        .collect();
+    snapshot.retain(|model| model.provider == provider && seen.insert(model.id.to_lowercase()));
+    snapshot.sort_by(|a, b| a.id.cmp(&b.id));
+
+    models.retain(|model| model.provider != provider || model.tier == ModelTier::Custom);
+    models.extend(snapshot);
+}
+
 impl ModelCatalog {
     /// Construct a catalog directly from owned entries without going
     /// through TOML loading. Used by:
@@ -123,6 +254,8 @@ impl ModelCatalog {
             models,
             aliases,
             providers,
+            live_model_providers: HashSet::new(),
+            live_model_fetched_at: HashMap::new(),
             suppressed_providers: HashSet::new(),
             overrides: HashMap::new(),
         }
@@ -251,6 +384,16 @@ impl ModelCatalog {
             }
         }
 
+        // Builds embed the version-controlled OpenRouter `/models` snapshot.
+        // It is a fallback snapshot only: runtime refreshes do not treat it as live-confirmed and replace it after the first successful API fetch.
+        // A scheduled workflow refreshes the file without making builds depend on network access.
+        if let Ok(body) = serde_json::from_str::<serde_json::Value>(OPENROUTER_BUILD_SNAPSHOT) {
+            let snapshot = parse_openrouter_model_entries(&body);
+            if !snapshot.is_empty() {
+                replace_provider_snapshot(&mut models, "openrouter", snapshot);
+            }
+        }
+
         let mut aliases: HashMap<String, String> = aliases_source
             .and_then(|s| toml::from_str::<AliasesCatalogFile>(s).ok())
             .map(|f| {
@@ -278,6 +421,8 @@ impl ModelCatalog {
             models,
             aliases,
             providers,
+            live_model_providers: HashSet::new(),
+            live_model_fetched_at: HashMap::new(),
             suppressed_providers: HashSet::new(),
             overrides: HashMap::new(),
         }
@@ -412,20 +557,59 @@ impl ModelCatalog {
 
     /// Store the list of models confirmed available via live probe.
     pub fn set_provider_available_models(&mut self, provider_id: &str, models: Vec<String>) {
+        self.live_model_providers.insert(provider_id.to_string());
+        self.live_model_fetched_at
+            .insert(provider_id.to_string(), Instant::now());
         if let Some(p) = self.providers.iter_mut().find(|p| p.id == provider_id) {
             p.available_models = models;
         }
+    }
+
+    /// Forget live model availability after a provider is deconfigured.
+    pub fn clear_provider_available_models(&mut self, provider_id: &str) {
+        self.live_model_providers.remove(provider_id);
+        self.live_model_fetched_at.remove(provider_id);
+        if let Some(p) = self.providers.iter_mut().find(|p| p.id == provider_id) {
+            p.available_models.clear();
+        }
+    }
+
+    /// Whether this process has successfully fetched a provider's live model list.
+    /// Build-time and registry snapshots deliberately return false.
+    pub fn has_live_provider_models(&self, provider_id: &str) -> bool {
+        self.live_model_providers.contains(provider_id)
+    }
+
+    /// Whether a live model list is missing or older than `max_age`.
+    /// This is only a freshness signal; callers decide which user action is allowed to trigger network refresh.
+    pub fn live_provider_models_are_stale(&self, provider_id: &str, max_age: Duration) -> bool {
+        self.live_model_fetched_at
+            .get(provider_id)
+            .is_none_or(|fetched_at| fetched_at.elapsed() >= max_age)
     }
 
     /// Check whether a model is confirmed available on its provider.
     /// Returns `None` if the provider hasn't been probed yet (no data),
     /// `Some(true)` if the model is in the probed list, `Some(false)` if not.
     pub fn is_model_available(&self, provider_id: &str, model: &str) -> Option<bool> {
-        let p = self.providers.iter().find(|p| p.id == provider_id)?;
-        if p.available_models.is_empty() {
-            return None; // not probed yet
+        if !self.live_model_providers.contains(provider_id) {
+            return None;
         }
-        Some(p.available_models.iter().any(|m| m == model))
+        if self.models.iter().any(|entry| {
+            entry.provider == provider_id
+                && entry.tier == ModelTier::Custom
+                && strip_catalog_provider_prefix(provider_id, &entry.id)
+                    == strip_catalog_provider_prefix(provider_id, model)
+        }) {
+            return Some(true);
+        }
+        let p = self.providers.iter().find(|p| p.id == provider_id)?;
+        let requested = strip_catalog_provider_prefix(provider_id, model);
+        Some(
+            p.available_models.iter().any(|m| {
+                m == requested || strip_catalog_provider_prefix(provider_id, m) == requested
+            }),
+        )
     }
 
     /// List all models in the catalog.
@@ -609,6 +793,67 @@ impl ModelCatalog {
             .map(|m| m.id.clone())
     }
 
+    /// Return a model that may be selected without explicit user consent.
+    ///
+    /// OpenRouter's catalog mixes free and paid models and changes frequently.
+    /// Automatic setup prefers the live snapshot and falls back to a checked-in free model when the live fetch fails.
+    /// Paid OpenRouter models remain available for explicit selection.
+    pub fn automatic_default_model_for_provider(&self, provider: &str) -> Option<String> {
+        if provider != "openrouter" {
+            return self.default_model_for_provider(provider);
+        }
+        self.models
+            .iter()
+            .find(|m| m.provider == provider && is_free_openrouter_model(&m.id))
+            .map(|m| m.id.clone())
+    }
+
+    /// Find the closest available free OpenRouter replacement for a delisted model.
+    ///
+    /// OpenRouter does not publish parameter count as a dedicated field, so model IDs and display names are parsed best-effort.
+    /// Selection is deterministic: same family, same author, nearest parameter scale, nearest context window, then lexical model ID.
+    pub fn closest_free_openrouter_model(&self, current_model: &str) -> Option<String> {
+        let current = openrouter_model_identity(current_model, current_model);
+        let current_context = self
+            .find_model(current_model)
+            .map(|model| model.context_window)
+            .unwrap_or_default();
+
+        self.models
+            .iter()
+            .filter(|model| {
+                model.provider == "openrouter"
+                    && model.id != current_model
+                    && is_free_openrouter_model(&model.id)
+                    && self.is_model_available("openrouter", &model.id) != Some(false)
+            })
+            .min_by_key(|model| {
+                let candidate = openrouter_model_identity(&model.id, &model.display_name);
+                let context_distance = if current_context == 0 || model.context_window == 0 {
+                    u64::MAX
+                } else {
+                    current_context.abs_diff(model.context_window)
+                };
+                (
+                    candidate.family != current.family,
+                    candidate.author != current.author,
+                    current.active_parameter_billions.is_some()
+                        && candidate.active_parameter_billions.is_none(),
+                    relative_parameter_distance(
+                        current.total_parameter_billions,
+                        candidate.total_parameter_billions,
+                    ),
+                    relative_parameter_distance(
+                        current.active_parameter_billions,
+                        candidate.active_parameter_billions,
+                    ),
+                    context_distance,
+                    model.id.as_str(),
+                )
+            })
+            .map(|model| model.id.clone())
+    }
+
     /// List models that are available (from configured providers only).
     pub fn available_models(&self) -> Vec<&ModelCatalogEntry> {
         let configured: Vec<&str> = self
@@ -626,7 +871,8 @@ impl ModelCatalog {
     /// Get pricing for a model: (input_cost_per_million, output_cost_per_million).
     pub fn pricing(&self, model_id: &str) -> Option<(f64, f64)> {
         self.find_model(model_id)
-            .map(|m| (m.input_cost_per_m, m.output_cost_per_m))
+            .filter(|model| model.pricing_known)
+            .map(|model| (model.input_cost_per_m, model.output_cost_per_m))
     }
 
     /// List all alias mappings.
@@ -1063,6 +1309,27 @@ impl ModelCatalog {
         }
     }
 
+    /// Replace a provider's registry snapshot with a successful live API response.
+    /// Explicit custom entries survive reconciliation.
+    /// All registry-derived entries are replaced so delisted models disappear.
+    pub fn reconcile_live_provider_models(
+        &mut self,
+        provider: &str,
+        available_models: Vec<String>,
+        live_models: Vec<ModelCatalogEntry>,
+    ) {
+        replace_provider_snapshot(&mut self.models, provider, live_models);
+        self.set_provider_available_models(provider, available_models);
+
+        if let Some(p) = self.providers.iter_mut().find(|p| p.id == provider) {
+            p.model_count = self
+                .models
+                .iter()
+                .filter(|model| model.provider == provider)
+                .count();
+        }
+    }
+
     /// Add a custom model at runtime.
     ///
     /// Returns `true` if the model was added, `false` if a model with the same
@@ -1495,23 +1762,98 @@ pub struct ProbeResult {
     /// Model IDs available on this provider (empty if key invalid or models
     /// could not be listed, e.g. rate-limited or non-OpenAI-compatible).
     pub available_models: Vec<String>,
+    /// Rich live entries when the provider exposes model metadata.
+    ///
+    /// OpenRouter returns context, pricing, modalities, and supported parameters from `/models`; these entries replace its static snapshot.
+    pub live_models: Vec<ModelCatalogEntry>,
+    /// True only when `/models` returned a successful, parseable list.
+    pub model_list_fetched: bool,
+}
+
+#[derive(Debug)]
+pub struct ProviderModelSnapshot {
+    pub available_models: Vec<String>,
+    pub live_models: Vec<ModelCatalogEntry>,
+}
+
+/// Fetch OpenRouter's public model catalog without using an API key.
+///
+/// Key validation is intentionally separate.
+/// `/models` is public, so a 200 response proves catalog reachability rather than configured-key validity.
+pub async fn fetch_openrouter_model_snapshot(
+    base_url: &str,
+) -> Result<ProviderModelSnapshot, String> {
+    fetch_openrouter_model_snapshot_with_client(crate::provider_health::probe_client(), base_url)
+        .await
+}
+
+async fn fetch_openrouter_model_snapshot_with_client(
+    client: &reqwest::Client,
+    base_url: &str,
+) -> Result<ProviderModelSnapshot, String> {
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| format!("OpenRouter model request failed: {error}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!(
+            "OpenRouter model request returned HTTP {}",
+            status.as_u16()
+        ));
+    }
+
+    let body = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|error| format!("OpenRouter model response was invalid JSON: {error}"))?;
+    let available_models = extract_available_model_ids(&body)
+        .filter(|models| !models.is_empty())
+        .ok_or_else(|| "OpenRouter model response contained no models".to_string())?;
+    let live_models = parse_openrouter_model_entries(&body);
+    if live_models.is_empty() {
+        return Err("OpenRouter model response contained no usable models".to_string());
+    }
+
+    Ok(ProviderModelSnapshot {
+        available_models,
+        live_models,
+    })
 }
 
 pub async fn probe_api_key(provider_id: &str, base_url: &str, api_key: &str) -> ProbeResult {
-    use std::time::Duration;
+    let client = crate::provider_health::probe_client();
 
-    let client = match crate::http_client::proxied_client_builder()
-        .timeout(Duration::from_secs(8))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => {
-            return ProbeResult {
-                key_valid: None,
-                available_models: Vec::new(),
-            }
-        }
-    };
+    if provider_id.eq_ignore_ascii_case("openrouter") {
+        let auth_url = format!("{}/key", base_url.trim_end_matches('/'));
+        let (auth_response, snapshot) = tokio::join!(
+            client
+                .get(auth_url)
+                .header("Authorization", format!("Bearer {api_key}"))
+                .send(),
+            fetch_openrouter_model_snapshot_with_client(client, base_url),
+        );
+        let key_valid = match auth_response {
+            Ok(response) => match response.status().as_u16() {
+                200..=299 | 429 => Some(true),
+                401 | 403 => Some(false),
+                _ => None,
+            },
+            Err(_) => None,
+        };
+        let (available_models, live_models, model_list_fetched) = match snapshot {
+            Ok(snapshot) => (snapshot.available_models, snapshot.live_models, true),
+            Err(_) => (Vec::new(), Vec::new(), false),
+        };
+        return ProbeResult {
+            key_valid,
+            available_models,
+            live_models,
+            model_list_fetched,
+        };
+    }
 
     let url = format!("{}/models", base_url.trim_end_matches('/'));
 
@@ -1532,6 +1874,8 @@ pub async fn probe_api_key(provider_id: &str, base_url: &str, api_key: &str) -> 
             return ProbeResult {
                 key_valid: None,
                 available_models: Vec::new(),
+                live_models: Vec::new(),
+                model_list_fetched: false,
             }
         }
     };
@@ -1542,53 +1886,147 @@ pub async fn probe_api_key(provider_id: &str, base_url: &str, api_key: &str) -> 
     match status {
         200..=299 => {
             // Key is valid — try to extract model IDs from the response body.
-            let models = resp
-                .json::<serde_json::Value>()
-                .await
-                .ok()
-                .and_then(|body| {
-                    // OpenAI-compatible format: { "data": [{ "id": "gpt-4o" }, ...] }
-                    // Gemini format: { "models": [{ "name": "models/gemini-..." }, ...] }
-                    if let Some(arr) = body.get("data").and_then(|d| d.as_array()) {
-                        Some(
-                            arr.iter()
-                                .filter_map(|m| {
-                                    m.get("id").and_then(|v| v.as_str()).map(String::from)
-                                })
-                                .collect::<Vec<_>>(),
-                        )
-                    } else {
-                        body.get("models").and_then(|d| d.as_array()).map(|arr| {
-                            arr.iter()
-                                .filter_map(|m| {
-                                    m.get("name")
-                                        .or_else(|| m.get("id"))
-                                        .and_then(|v| v.as_str())
-                                        .map(|s| s.strip_prefix("models/").unwrap_or(s).to_string())
-                                })
-                                .collect::<Vec<_>>()
-                        })
-                    }
-                })
-                .unwrap_or_default();
+            let body = resp.json::<serde_json::Value>().await.ok();
+            let extracted_models = body.as_ref().and_then(extract_available_model_ids);
+            let model_list_fetched = extracted_models.is_some();
+            let models = extracted_models.unwrap_or_default();
+            let live_models = if provider_id.eq_ignore_ascii_case("openrouter") {
+                body.as_ref()
+                    .map(parse_openrouter_model_entries)
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
             ProbeResult {
                 key_valid: Some(true),
                 available_models: models,
+                live_models,
+                model_list_fetched,
             }
         }
         429 => ProbeResult {
             key_valid: Some(true), // rate-limited but key is valid
             available_models: Vec::new(),
+            live_models: Vec::new(),
+            model_list_fetched: false,
         },
         401 | 403 => ProbeResult {
             key_valid: Some(false),
             available_models: Vec::new(),
+            live_models: Vec::new(),
+            model_list_fetched: false,
         },
         _ => ProbeResult {
             key_valid: None, // transient / unknown — don't penalise
             available_models: Vec::new(),
+            live_models: Vec::new(),
+            model_list_fetched: false,
         },
     }
+}
+
+fn extract_available_model_ids(body: &serde_json::Value) -> Option<Vec<String>> {
+    // OpenAI-compatible format: { "data": [{ "id": "gpt-4o" }, ...] }
+    // Gemini format: { "models": [{ "name": "models/gemini-..." }, ...] }
+    if let Some(arr) = body.get("data").and_then(|d| d.as_array()) {
+        Some(
+            arr.iter()
+                .filter_map(|m| m.get("id").and_then(|v| v.as_str()).map(String::from))
+                .collect(),
+        )
+    } else {
+        body.get("models").and_then(|d| d.as_array()).map(|arr| {
+            arr.iter()
+                .filter_map(|m| {
+                    m.get("name")
+                        .or_else(|| m.get("id"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.strip_prefix("models/").unwrap_or(s).to_string())
+                })
+                .collect()
+        })
+    }
+}
+
+fn parse_openrouter_model_entries(body: &serde_json::Value) -> Vec<ModelCatalogEntry> {
+    let Some(models) = body.get("data").and_then(|data| data.as_array()) else {
+        return Vec::new();
+    };
+
+    models
+        .iter()
+        .filter_map(|model| {
+            let raw_id = model.get("id")?.as_str()?.trim();
+            if raw_id.is_empty() {
+                return None;
+            }
+
+            let context_window = model
+                .get("context_length")
+                .and_then(serde_json::Value::as_u64)
+                .filter(|value| *value > 0)
+                .unwrap_or(131_072);
+            let max_output_tokens = model
+                .pointer("/top_provider/max_completion_tokens")
+                .and_then(serde_json::Value::as_u64)
+                .filter(|value| *value > 0)
+                .unwrap_or_else(|| context_window.min(16_384));
+            let supported_parameters = model
+                .get("supported_parameters")
+                .and_then(serde_json::Value::as_array);
+            let supports_parameter = |wanted: &str| {
+                supported_parameters.is_some_and(|parameters| {
+                    parameters
+                        .iter()
+                        .any(|parameter| parameter.as_str() == Some(wanted))
+                })
+            };
+            let supports_vision = model
+                .pointer("/architecture/input_modalities")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|modalities| {
+                    modalities
+                        .iter()
+                        .any(|modality| modality.as_str() == Some("image"))
+                });
+
+            let input_cost_per_m = openrouter_price_per_million(model, "prompt");
+            let output_cost_per_m = openrouter_price_per_million(model, "completion");
+            Some(ModelCatalogEntry {
+                id: format!("openrouter/{raw_id}"),
+                display_name: model
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or(raw_id)
+                    .to_string(),
+                provider: "openrouter".to_string(),
+                tier: ModelTier::Balanced,
+                context_window,
+                max_output_tokens,
+                input_cost_per_m: input_cost_per_m.unwrap_or_default(),
+                output_cost_per_m: output_cost_per_m.unwrap_or_default(),
+                pricing_known: input_cost_per_m.is_some() && output_cost_per_m.is_some(),
+                supports_tools: supports_parameter("tools"),
+                supports_vision,
+                supports_streaming: true,
+                supports_thinking: supports_parameter("reasoning")
+                    || supports_parameter("include_reasoning"),
+                aliases: Vec::new(),
+                ..Default::default()
+            })
+        })
+        .collect()
+}
+
+fn openrouter_price_per_million(model: &serde_json::Value, field: &str) -> Option<f64> {
+    model
+        .get("pricing")
+        .and_then(|pricing| pricing.get(field))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|price| price.parse::<f64>().ok())
+        .filter(|price| price.is_finite() && *price >= 0.0)
+        .map(|price| price * 1_000_000.0)
 }
 
 #[cfg(test)]

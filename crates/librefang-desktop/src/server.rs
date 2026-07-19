@@ -121,6 +121,10 @@ async fn run_embedded_server(
 ) {
     let (app, state) = build_router(kernel.clone(), listen_addr).await;
 
+    // The standalone API server starts provider validation after building the router.
+    // Desktop embeds the router directly, so it must start the same task here or live provider catalogs (notably OpenRouter) never refresh.
+    kernel.clone().spawn_key_validation();
+
     // Sync dashboard assets in background (downloads from release if outdated)
     {
         let home = kernel.home_dir().to_path_buf();

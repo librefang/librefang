@@ -27,6 +27,9 @@ env:
   #     (applied to first-party crates via `lints.workspace = true`)
   # See issue #3554.
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  CARGO_INCREMENTAL: 0
 
 jobs:
   # ── Detect changes + compute affected crate subset ─────────────────────────────

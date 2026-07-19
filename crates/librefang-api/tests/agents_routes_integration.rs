@@ -1999,3 +1999,50 @@ async fn test_patch_config_empty_string_clears_api_key_env_but_preserves_base_ur
         "an absent base_url must be left unchanged"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_patch_config_can_restore_global_default_inheritance() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "default-inheriting-agent");
+
+    let (status, body) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{id}/config"),
+            serde_json::json!({
+                "provider": "custom-provider",
+                "model": "custom-model",
+                "api_key_env": "CUSTOM_KEY",
+                "base_url": "https://custom.example/v1",
+            }),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body:?}");
+
+    let (status, body) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{id}/config"),
+            serde_json::json!({
+                "provider": "default",
+                "model": "default",
+            }),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body:?}");
+
+    let entry = h
+        .state
+        .kernel
+        .agent_registry()
+        .get(id)
+        .expect("agent exists");
+    assert_eq!(entry.manifest.model.provider, "default");
+    assert_eq!(entry.manifest.model.model, "default");
+    assert!(entry.manifest.model.api_key_env.is_none());
+    assert!(entry.manifest.model.base_url.is_none());
+}
