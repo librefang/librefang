@@ -884,7 +884,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     ) -> Result<String, String> {
         let result = self
             .kernel
-            .send_message_ephemeral(agent_id, message, sender)
+            .send_message_ephemeral(agent_id, message, sender, None)
             .await
             .map_err(|e| format!("{e}"))?;
         if result.silent {

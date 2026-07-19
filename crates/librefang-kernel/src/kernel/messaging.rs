@@ -200,6 +200,7 @@ impl LibreFangKernel {
             None,
             upstream,
             false,
+            None, // agent_send to a subagent — no authenticated owner (#6460)
         )
         .await
     }
@@ -233,6 +234,7 @@ impl LibreFangKernel {
             Some(session_id),
             upstream,
             false,
+            None, // agent_send to a subagent — no authenticated owner (#6460)
         )
         .await
     }
@@ -311,6 +313,7 @@ impl LibreFangKernel {
         thinking_override: Option<bool>,
         session_id_override: Option<SessionId>,
         incognito: bool,
+        owner: Option<librefang_types::agent::UserId>,
     ) -> KernelResult<AgentLoopResult> {
         let handle = kernel_handle.unwrap_or_else(|| self.kernel_handle());
         self.send_message_full_with_upstream(
@@ -324,6 +327,7 @@ impl LibreFangKernel {
             session_id_override,
             None,
             incognito,
+            owner,
         )
         .await
     }
@@ -464,6 +468,7 @@ impl LibreFangKernel {
         agent_id: AgentId,
         message: &str,
         sender_context: Option<&SenderContext>,
+        owner: Option<librefang_types::agent::UserId>,
     ) -> KernelResult<AgentLoopResult> {
         let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
@@ -641,7 +646,7 @@ impl LibreFangKernel {
             )));
         }
 
-        let driver = self.resolve_driver(&manifest)?;
+        let driver = self.resolve_driver_for_owner(&manifest, owner)?;
 
         let ctx_window = Some(self.llm.model_catalog.load()).and_then(|cat| {
             // #6423: provider-aware, prefix-reconciling lookup so a bare
@@ -884,6 +889,11 @@ impl LibreFangKernel {
         thinking_override: Option<bool>,
         session_id_override: Option<SessionId>,
     ) -> KernelResult<AgentLoopResult> {
+        // This entry point serves the paths with no single authenticated human
+        // owner — channel messages, cron fires, agent-to-agent sends — so it
+        // resolves the driver with `owner = None` (daemon-global credential).
+        // The API/DM paths that DO carry an `AuthenticatedApiUser` go through
+        // the owner-aware `*_ephemeral` / streaming entry points instead (#6460).
         self.send_message_full_with_upstream(
             agent_id,
             message,
@@ -895,6 +905,7 @@ impl LibreFangKernel {
             session_id_override,
             None,
             false,
+            None,
         )
         .await
     }
@@ -925,6 +936,7 @@ impl LibreFangKernel {
         session_id_override: Option<SessionId>,
         upstream_interrupt: Option<librefang_runtime::interrupt::SessionInterrupt>,
         incognito: bool,
+        owner: Option<librefang_types::agent::UserId>,
     ) -> KernelResult<AgentLoopResult> {
         librefang_runtime::held_agent_locks::scope(self.send_message_full_inner(
             agent_id,
@@ -937,6 +949,7 @@ impl LibreFangKernel {
             session_id_override,
             upstream_interrupt,
             incognito,
+            owner,
         ))
         .await
     }
@@ -956,6 +969,7 @@ impl LibreFangKernel {
         session_id_override: Option<SessionId>,
         upstream_interrupt: Option<librefang_runtime::interrupt::SessionInterrupt>,
         incognito: bool,
+        owner: Option<librefang_types::agent::UserId>,
     ) -> KernelResult<AgentLoopResult> {
         // Briefly acquire the config reload barrier to ensure we observe a
         // fully-applied hot-reload (config swap + side effects are atomic
@@ -1199,6 +1213,7 @@ impl LibreFangKernel {
                     resolved_session_id.or(session_id_override),
                     upstream_interrupt,
                     incognito,
+                    owner,
                 )
                 .await
             }
@@ -1660,6 +1675,7 @@ impl LibreFangKernel {
     /// traffic. The HTTP `/message/stream` handler must build this from
     /// the request body (see `request_sender_context` in
     /// `crates/librefang-api/src/routes/agents/mod.rs`).
+    #[allow(clippy::too_many_arguments)]
     pub async fn send_message_streaming_with_incognito(
         self: &Arc<Self>,
         agent_id: AgentId,
@@ -1668,6 +1684,7 @@ impl LibreFangKernel {
         sender_context: Option<&SenderContext>,
         session_id_override: Option<SessionId>,
         incognito: bool,
+        owner: Option<librefang_types::agent::UserId>,
     ) -> KernelResult<(
         tokio::sync::mpsc::Receiver<StreamEvent>,
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
@@ -1705,6 +1722,7 @@ impl LibreFangKernel {
             None,
             session_id_override,
             loop_opts,
+            owner,
         )
     }
 
@@ -1917,6 +1935,7 @@ impl LibreFangKernel {
             None, // no thinking override
             None, // forks MUST stay on canonical — see invariant above
             loop_opts,
+            None, // fork must not inherit the parent turn's owner (#6460)
         )
     }
 
@@ -1994,6 +2013,7 @@ impl LibreFangKernel {
             thinking_override,
             session_id_override,
             loop_opts,
+            None, // channel-bridge streaming path has no authenticated owner (#6460)
         )
     }
 
@@ -2013,6 +2033,7 @@ impl LibreFangKernel {
         thinking_override: Option<bool>,
         session_id_override: Option<SessionId>,
         mut loop_opts: librefang_runtime::agent_loop::LoopOptions,
+        owner: Option<librefang_types::agent::UserId>,
     ) -> KernelResult<(
         tokio::sync::mpsc::Receiver<StreamEvent>,
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
@@ -2371,7 +2392,13 @@ impl LibreFangKernel {
             )));
         }
 
-        let driver = self.resolve_driver(&entry.manifest)?;
+        // A fork / sub-agent must never bill the parent turn's human owner —
+        // its spend is the sub-agent's, not the initiating user's — so the
+        // owner is defensively cleared on the fork path regardless of what the
+        // caller passed (#6460). Non-fork streaming turns resolve with the
+        // real owner.
+        let effective_owner = if loop_opts.is_fork { None } else { owner };
+        let driver = self.resolve_driver_for_owner(&entry.manifest, effective_owner)?;
 
         // Look up model's actual context window from the catalog. Filter out
         // 0 so image/audio entries (no context window) fall through to the
