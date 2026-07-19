@@ -443,6 +443,14 @@ fn detect_secret_rule_with_skip(
         // are structured identifiers, not credentials. Exclude strings
         // that look like paths: start with `/` or `C:\`, or contain
         // multiple `/` segments with a file extension at the end.
+        // A bare basename with a recognized file extension (no directory
+        // separator) is also a structured identifier, not a credential —
+        // e.g. an export attachment named `note-<id>-<id>.pdf`. Without this
+        // branch such a filename tripped OpaqueToken purely for being long,
+        // blocking legitimate attachment arguments (#6499). The extension
+        // must start with a letter (`.pdf`, `.docx`) so a numeric-suffixed
+        // opaque token like `sometoken.1234567` is NOT excluded and still
+        // scanned — this keeps the false-negative surface narrow.
         let looks_like_path = trimmed.starts_with('/')
             || (trimmed.len() >= 3
                 && trimmed.as_bytes()[1] == b':'
@@ -451,7 +459,8 @@ fn detect_secret_rule_with_skip(
             || (trimmed.contains('/')
                 && trimmed
                     .rfind('.')
-                    .is_some_and(|dot| dot > trimmed.rfind('/').unwrap_or(0)));
+                    .is_some_and(|dot| dot > trimmed.rfind('/').unwrap_or(0)))
+            || (!trimmed.contains('/') && bare_filename_regex().is_match(trimmed));
 
         if !skip_opaque {
             let looks_opaque = trimmed.len() >= 32
@@ -519,7 +528,7 @@ fn detect_pii_rule_with_skip(
     if !skip_rules.contains(&TaintRuleId::PiiEmail) && email_regex().is_match(payload) {
         return Some(TaintRuleId::PiiEmail);
     }
-    if !skip_rules.contains(&TaintRuleId::PiiPhone) && phone_regex().is_match(payload) {
+    if !skip_rules.contains(&TaintRuleId::PiiPhone) && phone_match_is_real(payload) {
         return Some(TaintRuleId::PiiPhone);
     }
     if !skip_rules.contains(&TaintRuleId::PiiCreditCard) && credit_card_regex().is_match(payload) {
@@ -529,6 +538,62 @@ fn detect_pii_rule_with_skip(
         return Some(TaintRuleId::PiiSsn);
     }
     None
+}
+
+/// Longest phone-number digit count (E.164 caps a subscriber number at 15
+/// digits). A contiguous run longer than this is an identifier, not a phone
+/// number. Kept at 16 to stay clear of 13-16 digit card numbers, which have
+/// their own rule and previously leaned on the phone rule for coverage.
+const MAX_PHONE_DIGITS: usize = 16;
+
+/// Whether the phone regex matches a *real* phone number in `payload`, as
+/// opposed to slicing a phone-shaped window out of a much longer contiguous
+/// digit run (#6499). The phone regex makes every separator optional, so a
+/// long numeric id like `6571000000000000000` (19 digits) matches its
+/// `\d{2,4}\d{3,4}\d{3,4}` floor. For each match, expand to the full contiguous
+/// digit run it sits in (across the optional separators is unnecessary — a bare
+/// id has no separators) and reject the match only when that run exceeds
+/// `MAX_PHONE_DIGITS`. A genuine phone number — even a bare 10-11 digit one —
+/// stays within the cap and still fires, and a card-length run (13-16) is left
+/// for the credit-card rule rather than silently dropped.
+fn phone_match_is_real(payload: &str) -> bool {
+    let bytes = payload.as_bytes();
+    for m in phone_regex().find_iter(payload) {
+        // Walk outward over ASCII digits to size the full contiguous run this
+        // match is part of.
+        let mut start = m.start();
+        while start > 0 && bytes[start - 1].is_ascii_digit() {
+            start -= 1;
+        }
+        let mut end = m.end();
+        while end < bytes.len() && bytes[end].is_ascii_digit() {
+            end += 1;
+        }
+        let digit_count = payload[start..end]
+            .chars()
+            .filter(|c| c.is_ascii_digit())
+            .count();
+        if digit_count <= MAX_PHONE_DIGITS {
+            return true;
+        }
+    }
+    false
+}
+
+/// Matches a bare basename with a recognized file extension and no directory
+/// separator, e.g. `note-6571000000000000000-1000000000.pdf`. Used to exclude
+/// long attachment filenames from the opaque-token heuristic (#6499). The
+/// extension must start with a letter and be 1-8 alphanumerics, so a token
+/// with a numeric suffix (`abc123.9876543`) is not treated as a filename and
+/// is still scanned as a potential opaque secret. The body allows only the
+/// filename charset (word chars, `.`, `-`), so a value with other punctuation
+/// is not mistaken for a filename.
+fn bare_filename_regex() -> &'static Regex {
+    static BARE_FILENAME: OnceLock<Regex> = OnceLock::new();
+    BARE_FILENAME.get_or_init(|| {
+        Regex::new(r"^[\w.\-]+\.[A-Za-z][A-Za-z0-9]{0,7}$")
+            .expect("built-in bare-filename regex must compile")
+    })
 }
 
 /// Matches a calendar date in ISO 8601 / RFC 3339 form (`YYYY-MM-DD`).
@@ -678,6 +743,83 @@ mod tests {
         assert!(tok.len() >= 32);
         let sink = TaintSink::mcp_tool_call();
         assert!(check_outbound_text_violation(tok, &sink).is_some());
+    }
+
+    #[test]
+    fn test_long_export_filename_is_not_opaque_token_6499() {
+        // #6499: a bare export-attachment filename (no directory separator)
+        // was flagged OpaqueToken purely for being long, blocking legitimate
+        // MCP attachment arguments. A basename with a real extension is a
+        // structured identifier, not a credential.
+        let sink = TaintSink::mcp_tool_call();
+        for name in [
+            "note-6571000000000000000-1000000000.pdf", // 39 chars, from the report
+            "export-6512345678901234567-1000000000.pdf",
+            "report_2026_final-abc123def456ghi789.docx",
+            "attachment-0000000000000000000.json",
+        ] {
+            assert!(
+                check_outbound_text_violation(name, &sink).is_none(),
+                "benign attachment filename must not be flagged: {name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_numeric_suffix_token_still_flagged_after_6499() {
+        // Counter-test for the #6499 filename exclusion: the extension must
+        // start with a LETTER, so a long opaque value whose tail merely looks
+        // like `.<digits>` is NOT treated as a filename and is still scanned.
+        let sink = TaintSink::mcp_tool_call();
+        // 32+ chars, mixed alnum, non-hex, numeric ".suffix" — a token shape,
+        // not a filename.
+        let tok = "0p3nSecretValueAbcXYZ1234567.9876543";
+        assert!(tok.len() >= 32);
+        assert!(
+            check_outbound_text_violation(tok, &sink).is_some(),
+            "a numeric-suffixed opaque token must still be flagged"
+        );
+    }
+
+    #[test]
+    fn test_long_numeric_id_is_not_a_phone_number_6499() {
+        // #6499: the phone regex made every separator optional, so a long
+        // contiguous numeric id matched its digit-group floor and was flagged
+        // PiiPhone, blocking an agent from looking a record up by id.
+        // Note: these ids start with 7/8/9 to stay out of the 3/4/5/6 card-BIN
+        // ranges — a 19-digit run beginning 65.. would legitimately match the
+        // Discover card rule on its first 16 digits, which is a separate
+        // heuristic outside this fix's scope (#6499 covers OpaqueToken +
+        // PiiPhone only).
+        let sink = TaintSink::mcp_tool_call();
+        for payload in [
+            "7571000000000000000",                          // bare 19-digit id
+            "export-8512345678901234567",                   // id embedded in an arg
+            "WHERE id LIKE '%export-9512345678901234567%'", // SQL with the id
+        ] {
+            assert!(
+                check_outbound_text_violation(payload, &sink).is_none(),
+                "a long numeric id (>16 contiguous digits) must not be flagged as a phone number: {payload:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_real_phone_numbers_still_flagged_after_6499() {
+        // Counter-test: genuine phone numbers (with separators / parentheses /
+        // a leading +, or standing alone at a normal length) must still fire.
+        let sink = TaintSink::mcp_tool_call();
+        for payload in [
+            "+1-555-123-4567",
+            "(555) 123-4567",
+            "call me at 555.123.4567 tomorrow",
+            "+44 20 7946 0958",
+        ] {
+            assert!(
+                check_outbound_text_violation(payload, &sink).is_some(),
+                "a genuine phone number must still be flagged: {payload:?}"
+            );
+        }
     }
 
     #[test]
