@@ -7,6 +7,10 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ## [Unreleased]
 
+### Documentation
+
+- Document how `[approval].trusted_senders` composes with `[[users]]` RBAC on the approvals security page (EN + zh mirror): the two are separate trust surfaces and the per-user RBAC gate is evaluated first, so an ID listed in `trusted_senders` that is not also a registered `[[users]]` on the `api` channel still has its low-risk tools (e.g. `memory_*`) gated by the `guest_gate`, because the forced-approval verdict short-circuits before the `trusted_senders` bypass is consulted; the new subsection gives the concrete fix (register the operator as a `[[users]]` bound to the `api` channel with a `tool_policy` covering the tools it drives) and notes that with no `[[users]]` configured `trusted_senders` works standalone (#6492) (@houko)
+
 ### Fixed
 
 - Pin `crates/librefang-api/src/login_page.html` to LF in `.gitattributes`: the file is embedded verbatim via `include_str!` and its inline `<script>` is authorised by an exact SHA-256 baked into the CSP (`middleware.rs`), so a Windows checkout with `core.autocrlf=true` rewrote it to CRLF, shifted the computed hash, and failed `dashboard_login_page_script_is_allowed_by_csp_hash` on the Windows shard only — turning `main` red on every merge since #6486 touched the page (#6481) (@houko)

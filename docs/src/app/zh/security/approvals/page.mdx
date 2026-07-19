@@ -57,6 +57,39 @@ totp_tools = []                        # 留空表示审批列表内所有工具
 - `allow`——放行。仅适用于完全受信任的自主场景。
 - `retry`——再请求一次审批。
 
+### `trusted_senders` 与 `[[users]]` RBAC 如何叠加
+
+`trusted_senders` 和 `[[users]]` RBAC 是两个相互独立的信任面，被其中一个信任并不意味着可以豁免另一个。
+`trusted_senders` 只作用于审批层——它为受信任发送者的低风险工具免除审批提示（高风险工具仍被拦截，见[加固清单](#加固清单)）。
+`[[users]]` RBAC 作用于按用户的工具门禁，而该门禁**先于**审批层、且独立地被求值。
+
+由于 RBAC 先运行，它给出的「需要审批」结论会在 `trusted_senders` 免审批被查阅之前就先生效。
+因此，当配置了 `[[users]]` 而某个发送者**不是** `api` 通道上已注册的用户时（REST `POST /api/agents/{id}/message` 请求正是走 `api` 通道），该发送者会落入内置的 guest gate（`guest_gate`）。
+guest gate 只放行一小组只读工具（文件读取、搜索、`web_fetch` 等），对其余一切都返回「需要审批」——包括本属低风险的 `memory_store` / `memory_recall`。
+由此得出一个反直觉的结果：一个列入 `trusted_senders`、但**未**同时注册为 `api` 通道上 `[[users]]` 的 ID，其 `memory_*` 调用仍会被拦截，因为 guest gate 在 `trusted_senders` 免审批生效之前就已强制审批。
+
+**解决办法——把该操作者注册为绑定到 `api` 通道的用户**，并授予覆盖其所用工具的策略：
+
+```toml
+[[users]]
+name = "ops-bot"
+role = "user"
+
+# 把 REST 的 sender_id（/message 请求上的 `sender_id` 字段）
+# 绑定到该用户在 "api" 通道上的身份。
+[users.channel_bindings]
+api = "ops-bot-sender-id"
+
+# 授予该操作者所用的低风险工具；RBAC 门禁此时对这些工具返回
+# Allow，而不再把它们路由进 guest gate。
+[users.tool_policy]
+allowed_tools = ["memory_*"]
+```
+
+如此配置后，RBAC 门禁对 `memory_*` 返回 `Allow`，于是不再强制审批，`trusted_senders` 免审批便如设计般在其之上叠加生效。
+
+如果完全没有配置 `[[users]]`，RBAC 处于未启用状态——按用户门禁对每个发送者都返回 `Allow`——此时 `trusted_senders` 无需额外设置即可独立工作。
+
 ---
 
 ## 启用 TOTP
