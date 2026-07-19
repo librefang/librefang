@@ -1672,13 +1672,35 @@ impl SessionStore {
             let keep_count = DEFAULT_CANONICAL_WINDOW;
             let to_compact = canonical.messages.len().saturating_sub(keep_count);
             if to_compact > canonical.compaction_cursor {
-                // Build a summary from the messages being compacted
+                // Build a summary from the messages being compacted, but fold
+                // in ONLY the triggering session's own entries (plus legacy
+                // untagged ones), mirroring the read-path session filter in
+                // `canonical_context`. The compacted_summary is agent-scoped
+                // (one row per agent) yet stamped with a single owning session,
+                // so if the fold included other sessions' content the read gate
+                // — which keys only on the owner stamp, not the content — would
+                // hand user A's private text to user B on a multi-user agent
+                // (#6493). Restricting the content to the owner keeps the stamp
+                // honest. Other sessions' trimmed messages still leave the recent
+                // window below; they simply don't enter this session's summary.
                 let compacting = &canonical.messages[canonical.compaction_cursor..to_compact];
                 let mut summary_parts: Vec<String> = Vec::new();
+                // Only carry forward an existing summary that this same session
+                // owns; another session's summary must not be prepended (it
+                // would re-introduce the cross-session content the fold filter
+                // above removes).
                 if let Some(ref existing) = canonical.compacted_summary {
-                    summary_parts.push(existing.clone());
+                    if canonical.compacted_summary_session_id == session_id {
+                        summary_parts.push(existing.clone());
+                    }
                 }
                 for entry in compacting {
+                    // Skip entries owned by a different session; an untagged
+                    // (legacy) entry has no owner and folds into any session.
+                    match (&entry.session_id, &session_id) {
+                        (Some(got), Some(want)) if got != want => continue,
+                        _ => {}
+                    }
                     let msg = &entry.message;
                     let role = match msg.role {
                         librefang_types::message::Role::User => "User",
@@ -1696,20 +1718,30 @@ impl SessionStore {
                         summary_parts.push(format!("{role}: {truncated}"));
                     }
                 }
-                // Keep summary under ~4000 chars (UTF-8 safe)
-                let mut full_summary = summary_parts.join("\n");
-                if full_summary.len() > 4000 {
-                    let start = full_summary.len() - 4000;
-                    // Find the next char boundary at or after `start`
-                    let safe_start = (start..full_summary.len())
-                        .find(|&i| full_summary.is_char_boundary(i))
-                        .unwrap_or(full_summary.len());
-                    full_summary = full_summary[safe_start..].to_string();
+                // Only (re)write the summary when this session actually
+                // contributed content. If the compacted batch held no entry
+                // owned by the triggering session (e.g. another session crossed
+                // the threshold while this one's messages were all still in the
+                // window), leave the existing summary and its owner stamp
+                // untouched rather than stamping an empty summary onto this
+                // session. The message trim below still runs unconditionally so
+                // the canonical blob cannot grow without bound.
+                if !summary_parts.is_empty() {
+                    // Keep summary under ~4000 chars (UTF-8 safe)
+                    let mut full_summary = summary_parts.join("\n");
+                    if full_summary.len() > 4000 {
+                        let start = full_summary.len() - 4000;
+                        // Find the next char boundary at or after `start`
+                        let safe_start = (start..full_summary.len())
+                            .find(|&i| full_summary.is_char_boundary(i))
+                            .unwrap_or(full_summary.len());
+                        full_summary = full_summary[safe_start..].to_string();
+                    }
+                    canonical.compacted_summary = Some(full_summary);
+                    // #6225: stamp the session that triggered this compaction so
+                    // the read path only surfaces the banner on that session.
+                    canonical.compacted_summary_session_id = session_id;
                 }
-                canonical.compacted_summary = Some(full_summary);
-                // #6225: stamp the session that triggered this compaction so
-                // the read path only surfaces the banner on that session.
-                canonical.compacted_summary_session_id = session_id;
                 canonical.compaction_cursor = to_compact;
                 // Trim messages: keep only the recent window
                 canonical.messages = canonical.messages.split_off(to_compact);
@@ -1748,7 +1780,14 @@ impl SessionStore {
             .collect();
         let start = filtered.len().saturating_sub(window);
         let recent = filtered[start..].to_vec();
-        Ok((canonical.compacted_summary.clone(), recent))
+        // Gate the compacted summary by its owning session, mirroring MemorySubstrate::compacted_summary_for_session (#6225).
+        // The summary is agent-scoped (one row per agent, keyed by agent_id) but is built from one session's history, so returning it unconditionally on a caller that named a *different* session injects that session's content into another's prompt — a cross-user leak on a multi-user agent (#6493).
+        // When a specific session is requested, surface the summary only if it is the one that owns it; a legacy row with no recorded owner, or a caller that requested no particular session (None, e.g. a full agent-wide read), keeps the prior behaviour.
+        let summary = match (&session_id, &canonical.compacted_summary_session_id) {
+            (Some(want), Some(owner)) if owner != want => None,
+            _ => canonical.compacted_summary.clone(),
+        };
+        Ok((summary, recent))
     }
 
     /// Persist a canonical session to SQLite.
@@ -2252,6 +2291,121 @@ mod tests {
 
         let (_, recent_all) = store.canonical_context(agent_id, None, None).unwrap();
         assert_eq!(recent_all.len(), 4);
+    }
+
+    // #6493: the compacted summary is agent-scoped (one row per agent) but is built from a single session's history and stamped with that owning session.
+    // canonical_context must surface it only to its owner, otherwise a multi-user agent leaks user A's summarized conversation into user B's prompt.
+    // This mirrors the ownership check compacted_summary_for_session already applied to the dashboard banner path (#6225).
+    #[test]
+    fn test_canonical_context_summary_gated_by_owning_session() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let sid_a = SessionId::new();
+        let sid_b = SessionId::new();
+
+        // User A's turn produced a compaction summary owned by session A.
+        store
+            .store_llm_summary(
+                agent_id,
+                "SECRET summary of user A's private conversation",
+                vec![Message::user("A recent")],
+                Some(sid_a),
+            )
+            .unwrap();
+
+        // A different session (user B) must NOT receive A's summary.
+        let (summary_b, _) = store
+            .canonical_context(agent_id, Some(sid_b), None)
+            .unwrap();
+        assert_eq!(
+            summary_b, None,
+            "summary owned by session A must not leak into session B's context (#6493)"
+        );
+
+        // The owning session still gets its own summary.
+        let (summary_a, _) = store
+            .canonical_context(agent_id, Some(sid_a), None)
+            .unwrap();
+        assert_eq!(
+            summary_a.as_deref(),
+            Some("SECRET summary of user A's private conversation"),
+            "the owning session must still receive its summary"
+        );
+
+        // A caller that requests no particular session (agent-wide read) keeps
+        // the prior behaviour and still sees the summary.
+        let (summary_none, _) = store.canonical_context(agent_id, None, None).unwrap();
+        assert_eq!(
+            summary_none.as_deref(),
+            Some("SECRET summary of user A's private conversation"),
+            "an unscoped (None) read is unchanged"
+        );
+    }
+
+    // #6493: the DEFAULT heuristic compaction path (append_canonical, used when no LLM summary is configured) must not fold one session's message content into another session's summary.
+    // The read gate keys only on the owner stamp, so if the heuristic summary that B's compaction stamps with owner=B contained A's messages, B would read A's private text — a cross-user leak the owner gate cannot catch because it never inspects content.
+    #[test]
+    fn test_append_canonical_heuristic_summary_does_not_fold_other_sessions() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let sid_a = SessionId::new();
+        let sid_b = SessionId::new();
+        // Compaction fires when the blob exceeds the threshold AND there are
+        // more than DEFAULT_CANONICAL_WINDOW (50) messages, since
+        // to_compact = len - window. Use 55 A-messages + 10 B-messages = 65,
+        // so to_compact = 15 and the compacted batch [0..15] is entirely A's
+        // content — exactly the cross-session fold the fix must prevent.
+        let threshold = Some(60usize);
+
+        // User A speaks first — 55 private messages tagged to session A.
+        let a_msgs: Vec<Message> = (0..55)
+            .map(|i| Message::user(format!("APRIVATE secret from A number {i}")))
+            .collect();
+        store
+            .append_canonical(agent_id, &a_msgs, threshold, Some(sid_a))
+            .unwrap();
+
+        // User B's messages push the blob to 65 > 60, so B's append triggers
+        // compaction and stamps the summary with owner = B; the compacted
+        // batch is A's first 15 messages.
+        let b_msgs: Vec<Message> = (0..10)
+            .map(|i| Message::user(format!("BPUBLIC from B number {i}")))
+            .collect();
+        store
+            .append_canonical(agent_id, &b_msgs, threshold, Some(sid_b))
+            .unwrap();
+
+        // B reads its own context: the summary (if any) is owner=B, so the gate
+        // hands it to B. It must NOT contain A's private text.
+        let (summary_b, _) = store
+            .canonical_context(agent_id, Some(sid_b), None)
+            .unwrap();
+        if let Some(s) = summary_b {
+            assert!(
+                !s.contains("APRIVATE"),
+                "B's heuristic summary must not fold in A's private messages (#6493); got: {s}"
+            );
+        }
+    }
+
+    // #6493: a legacy row whose summary predates the owner column (owner is None) must not be silently withheld from every session — it falls back to the prior always-return behaviour so existing deployments are not regressed by the gate.
+    #[test]
+    fn test_canonical_context_legacy_ownerless_summary_still_returned() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let sid = SessionId::new();
+
+        // Owner column left None (legacy / pre-#6225 summary).
+        store
+            .store_llm_summary(agent_id, "legacy summary", vec![Message::user("x")], None)
+            .unwrap();
+
+        let (summary, _) = store.canonical_context(agent_id, Some(sid), None).unwrap();
+        assert_eq!(
+            summary.as_deref(),
+            Some("legacy summary"),
+            "an ownerless legacy summary is still returned (no owner to gate against)"
+        );
     }
 
     #[test]
