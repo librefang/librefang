@@ -335,6 +335,7 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         agent_id: AgentId,
         message: &str,
         sender_context: Option<&librefang_channels::types::SenderContext>,
+        owner: Option<librefang_types::agent::UserId>,
     ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult>;
     /// Send a message to an agent with an optional per-call `session_mode` override.
     ///
@@ -572,6 +573,7 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         thinking_override: Option<bool>,
         session_id_override: Option<SessionId>,
         incognito: bool,
+        owner: Option<librefang_types::agent::UserId>,
     ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult>;
     async fn send_message_streaming_with_routing(
         self: Arc<Self>,
@@ -591,6 +593,7 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     // signature borrow-flexible for internal callers that already hold a
     // reference. Do not "unify" by making both by-ref or both by-value
     // without auditing every callsite.
+    #[allow(clippy::too_many_arguments)]
     async fn send_message_streaming_with_incognito(
         self: Arc<Self>,
         agent_id: AgentId,
@@ -599,6 +602,7 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         sender_context: Option<librefang_channels::types::SenderContext>,
         session_id_override: Option<SessionId>,
         incognito: bool,
+        owner: Option<librefang_types::agent::UserId>,
     ) -> KernelResult<(
         tokio::sync::mpsc::Receiver<librefang_runtime::llm_driver::StreamEvent>,
         tokio::task::JoinHandle<KernelResult<librefang_runtime::agent_loop::AgentLoopResult>>,
@@ -1103,8 +1107,11 @@ impl KernelApi for LibreFangKernel {
         agent_id: AgentId,
         message: &str,
         sender_context: Option<&librefang_channels::types::SenderContext>,
+        owner: Option<librefang_types::agent::UserId>,
     ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult> {
-        Self::send_message_ephemeral(self, agent_id, message, sender_context).await
+        // Forward the caller's owner (the API handler passes the authenticated
+        // user; runtime callers pass None → daemon-global credential) (#6460).
+        Self::send_message_ephemeral(self, agent_id, message, sender_context, owner).await
     }
     async fn send_message_with_session_mode(
         &self,
@@ -1392,6 +1399,7 @@ impl KernelApi for LibreFangKernel {
         thinking_override: Option<bool>,
         session_id_override: Option<SessionId>,
         incognito: bool,
+        owner: Option<librefang_types::agent::UserId>,
     ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult> {
         Self::send_message_with_incognito(
             self,
@@ -1402,6 +1410,7 @@ impl KernelApi for LibreFangKernel {
             thinking_override,
             session_id_override,
             incognito,
+            owner,
         )
         .await
     }
@@ -1422,6 +1431,7 @@ impl KernelApi for LibreFangKernel {
         )
         .await
     }
+    #[allow(clippy::too_many_arguments)]
     async fn send_message_streaming_with_incognito(
         self: Arc<Self>,
         agent_id: AgentId,
@@ -1430,6 +1440,7 @@ impl KernelApi for LibreFangKernel {
         sender_context: Option<librefang_channels::types::SenderContext>,
         session_id_override: Option<SessionId>,
         incognito: bool,
+        owner: Option<librefang_types::agent::UserId>,
     ) -> KernelResult<(
         tokio::sync::mpsc::Receiver<librefang_runtime::llm_driver::StreamEvent>,
         tokio::task::JoinHandle<KernelResult<librefang_runtime::agent_loop::AgentLoopResult>>,
@@ -1442,6 +1453,7 @@ impl KernelApi for LibreFangKernel {
             sender_context.as_ref(),
             session_id_override,
             incognito,
+            owner,
         )
         .await
     }

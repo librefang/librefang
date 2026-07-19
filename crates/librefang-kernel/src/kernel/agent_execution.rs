@@ -343,6 +343,13 @@ impl LibreFangKernel {
         session_id_override: Option<SessionId>,
         upstream_interrupt: Option<librefang_runtime::interrupt::SessionInterrupt>,
         incognito: bool,
+        // The authenticated human owner of this turn, if any (#6460). Used to
+        // select that user's own provider credential. `None` on every path
+        // without a single authenticated initiator — channel messages, cron
+        // fires, agent-to-agent sends, and forks — which fall back to the
+        // daemon-global credential. A fork must never inherit its parent's
+        // owner or the sub-agent's spend would be mis-attributed.
+        owner: Option<librefang_types::agent::UserId>,
     ) -> KernelResult<AgentLoopResult> {
         let cfg = self.config.load_full();
         // Check metering quota before starting
@@ -1027,7 +1034,7 @@ impl LibreFangKernel {
             )));
         }
 
-        let driver = self.resolve_driver(&manifest)?;
+        let driver = self.resolve_driver_for_owner(&manifest, owner)?;
 
         // Look up model's actual context window from the catalog. Filter out
         // 0 so image/audio entries (no context window) fall through to the

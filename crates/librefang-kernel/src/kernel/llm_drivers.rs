@@ -118,6 +118,16 @@ impl LibreFangKernel {
     /// When `owner` is `None`, or the user has no key for the provider, resolution is identical to the historical behaviour.
     ///
     /// An agent that pins an explicit `api_key_env` in its manifest is treated as an operator-level override and is NOT shadowed by a user-scoped key.
+    ///
+    /// Full credential precedence for the resolved provider, highest first (#6460 OQ#5 decision):
+    ///   1. Org-wide provider allowlist (#6459) — a disallowed provider is refused before any key is chosen.
+    ///   2. Agent-pinned `api_key_env` in the manifest — operator override.
+    ///   3. The owner's user-scoped key (`get_user_provider_key`) — bills that user; wins over the daemon-global pool and rotation chain.
+    ///   4. The daemon-global credential pool.
+    ///   5. Operator rotation chain — `[provider_api_keys]` / `[auth_profiles]` via `resolve_non_default_api_key_env`.
+    ///   6. Catalog `api_key_env`, then convention env var.
+    ///
+    /// The user-scoped key sits above the operator rotation chain because a user key means "bill THIS user's quota," which must not be silently overridden by the org's shared-key failover. The same owner-key preference is applied to every fallback-chain slot (not just the primary) so a provider failover cannot leak spend back onto the operator's credential.
     pub(crate) fn resolve_driver_for_owner(
         &self,
         manifest: &AgentManifest,
@@ -359,17 +369,38 @@ impl LibreFangKernel {
                     );
                     continue;
                 }
-                let fb_api_key = if let Some(env) = &fb.api_key_env {
+                // Global credential candidate for this fallback slot. An
+                // agent-pinned `api_key_env` on the fallback is an operator
+                // override; otherwise use the same operator-explicit > catalog
+                // `api_key_env` > convention resolution as the primary path. A
+                // custom catalog provider used only as a fallback model would
+                // otherwise 401 on the convention-only env var — the same #5755
+                // bug as the primary branch above. Refs: #5755, #5807.
+                let fb_global_key = if let Some(env) = &fb.api_key_env {
                     std::env::var(env).ok()
                 } else {
-                    // Same precedence as the primary path (operator-explicit >
-                    // catalog `api_key_env` > convention). A custom catalog
-                    // provider used only as a fallback model would otherwise
-                    // 401 on the convention-only env var — the same #5755 bug
-                    // as the primary branch above. Refs: #5755, #5807.
                     let env_var = self.resolve_non_default_api_key_env(&cfg, &fb_provider);
                     std::env::var(&env_var).ok()
                 };
+                // #6460 chargeback integrity: if the turn has a human owner
+                // with their own stored key for THIS fallback provider, the
+                // fallback slot must bill that user's key too — otherwise a
+                // failover from the primary would silently charge the operator's
+                // credential (a chargeback leak). An agent-pinned `api_key_env`
+                // on the fallback still wins (operator override), so it is not
+                // shadowed by a user key. Route through the same shared
+                // `resolve_provider_credential` helper the primary path uses
+                // (ae1f59b9) rather than a parallel inline copy of the
+                // precedence contract.
+                let fb_user_key: Option<String> = if fb.api_key_env.is_some() {
+                    None
+                } else {
+                    owner.and_then(|uid| self.get_user_provider_key(uid, &fb_provider))
+                };
+                let fb_api_key = crate::user_provider_credentials::resolve_provider_credential(
+                    fb_user_key,
+                    fb_global_key,
+                );
                 let config = DriverConfig {
                     provider: fb_provider.clone(),
                     api_key: fb_api_key,
