@@ -1946,6 +1946,7 @@ model-header-base-url = 基础 URL
 model-picker-item =     { $idx }. { $id } { $tier }
 # Approvals command specific keys
 approval-none-pending = 没有待处理的批准请求。
+approval-header-status = 状态
 approval-header-request = 请求
 # Auth command specific keys
 auth-error-create-home-dir = 创建 LibreFang 主目录失败：{ $error }
