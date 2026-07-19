@@ -319,6 +319,9 @@ use crate::types;
         routes::users::rotate_user_key,
         routes::users::get_user_policy,
         routes::users::update_user_policy,
+        routes::users::set_user_provider_key,
+        routes::users::delete_user_provider_key,
+        routes::users::list_user_provider_keys,
 
         // ── Authorization (RBAC checks) ──
         routes::check,
@@ -527,6 +530,9 @@ use crate::types;
         routes::users::BulkImportResult,
         routes::users::BulkImportRow,
         routes::users::RotateKeyResponse,
+        routes::users::SetProviderKeyRequest,
+        routes::users::ProviderKeysResponse,
+        routes::users::ProviderKeyMutationResponse,
         routes::channels::ConfigureSidecarBody,
         routes::sidecar_describe::SidecarSchema,
         routes::sidecar_describe::SidecarSchemaField,

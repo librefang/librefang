@@ -685,6 +685,7 @@
     "edit_name": "Agent name",
     "model_save_failed": "Failed to update model",
     "model_saved": "Model updated",
+    "use_global_default": "Use global default",
     "rename_failed": "Failed to rename agent",
     "rename_hand_disabled": "Hand-managed agents cannot be renamed",
     "rename_hint": "Click to rename",

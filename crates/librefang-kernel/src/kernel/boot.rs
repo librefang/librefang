@@ -377,7 +377,7 @@ impl LibreFangKernel {
                 // resolve a sensible default from the model catalog.
                 let model = if model_hint.is_empty() {
                     librefang_runtime::model_catalog::ModelCatalog::default()
-                        .default_model_for_provider(provider)
+                        .automatic_default_model_for_provider(provider)
                         .unwrap_or_else(|| "default".to_string())
                 } else {
                     model_hint.to_string()
@@ -604,7 +604,7 @@ impl LibreFangKernel {
                     {
                         let model = if model_hint.is_empty() {
                             librefang_runtime::model_catalog::ModelCatalog::default()
-                                .default_model_for_provider(provider)
+                                .automatic_default_model_for_provider(provider)
                                 .unwrap_or_else(|| "default".to_string())
                         } else {
                             model_hint.to_string()
@@ -1326,6 +1326,8 @@ impl LibreFangKernel {
                 "task_completed",
                 "task_failed",
                 "tool_failure",
+                "health_check_failed",
+                "model_migrated",
             ];
             for (i, rule) in config.notification.agent_rules.iter().enumerate() {
                 for event in &rule.events {
@@ -2173,25 +2175,42 @@ impl LibreFangKernel {
                         &mut restored_entry.manifest.resources,
                     );
 
-                    // Apply default_model to restored agents.
-                    //
-                    // Three cases:
-                    // 1. Agent has empty/default provider → always apply default_model
-                    // 2. Agent's source TOML defines provider="default" → the DB value
-                    //    is a stale resolved provider from a previous config; override it
-                    // 3. Agent named "assistant" (auto-spawned) → update to match
-                    //    default_model so config.toml changes take effect on restart
+                    // Preserve the default sentinel for agents that inherit the global model.
+                    // Older versions stored a concrete resolved value in SQLite even when the source TOML declared `default/default`.
                     {
-                        let dm = &cfg.default_model;
                         let is_default_provider = restored_entry.manifest.model.provider.is_empty()
                             || restored_entry.manifest.model.provider == "default";
                         let is_default_model = restored_entry.manifest.model.model.is_empty()
                             || restored_entry.manifest.model.model == "default";
-
-                        // Also check the source TOML: if the agent definition says
-                        // provider="default", the persisted value is stale and must
-                        // be overridden with the current default_model.
-                        let toml_says_default = toml_path.exists()
+                        // Older boots resolved the auto-spawned assistant's default OpenRouter free model into a concrete SQLite row.
+                        // Treat that row as a default sentinel again when it still uses the catalog's standard OpenRouter credential and no local catalog entry exists for that model.
+                        let uses_legacy_openrouter_key =
+                            restored_entry.manifest.model.api_key_env.as_deref()
+                                == Some("OPENROUTER_API_KEY")
+                                || (!cfg.default_model.api_key_env.is_empty()
+                                    && restored_entry.manifest.model.api_key_env.as_deref()
+                                        == Some(cfg.default_model.api_key_env.as_str()));
+                        let openrouter_model_missing = {
+                            let catalog = kernel.llm.model_catalog.load();
+                            catalog
+                                .find_model_for_provider(
+                                    "openrouter",
+                                    &restored_entry.manifest.model.model,
+                                )
+                                .is_none()
+                        };
+                        let is_legacy_auto_spawned_assistant = name == "assistant"
+                            && restored_entry.source_toml_path.is_none()
+                            && restored_entry.manifest.model.provider == "openrouter"
+                            && uses_legacy_openrouter_key
+                            && openrouter_model_missing
+                            && librefang_runtime::model_catalog::is_free_openrouter_model(
+                                &restored_entry.manifest.model.model,
+                            );
+                        // The source manifest is authoritative for legacy rows whose SQLite copy contains a previously resolved concrete model.
+                        let toml_says_default = restored_entry.source_toml_path.is_some()
+                            && restored_entry.manifest.model.api_key_env.is_none()
+                            && toml_path.exists()
                             && std::fs::read_to_string(&toml_path)
                                 .ok()
                                 .and_then(|s| {
@@ -2203,38 +2222,14 @@ impl LibreFangKernel {
                                 })
                                 .unwrap_or(false);
 
-                        let is_auto_spawned = restored_entry.name == "assistant"
-                            && restored_entry.manifest.description == "General-purpose assistant";
-                        if is_default_provider && is_default_model
+                        if (is_default_provider && is_default_model)
                             || toml_says_default
-                            || is_auto_spawned
+                            || is_legacy_auto_spawned_assistant
                         {
-                            if !dm.provider.is_empty() {
-                                restored_entry.manifest.model.provider = dm.provider.clone();
-                            }
-                            if !dm.model.is_empty() {
-                                restored_entry.manifest.model.model = dm.model.clone();
-                            }
-                            if !dm.api_key_env.is_empty() {
-                                restored_entry.manifest.model.api_key_env =
-                                    Some(dm.api_key_env.clone());
-                            }
-                            if dm.base_url.is_some() {
-                                restored_entry
-                                    .manifest
-                                    .model
-                                    .base_url
-                                    .clone_from(&dm.base_url);
-                            }
-                            // Merge extra_params from default_model
-                            for (key, value) in &dm.extra_params {
-                                restored_entry
-                                    .manifest
-                                    .model
-                                    .extra_params
-                                    .entry(key.clone())
-                                    .or_insert(value.clone());
-                            }
+                            restored_entry.manifest.model.provider = "default".to_string();
+                            restored_entry.manifest.model.model = "default".to_string();
+                            restored_entry.manifest.model.api_key_env = None;
+                            restored_entry.manifest.model.base_url = None;
                         }
                     }
 

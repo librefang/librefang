@@ -187,7 +187,7 @@ const ModelCard = memo(function ModelCard({ m, hidden, onOpen, onSettings, onTog
   // NOT a user-added custom model — it has no persisted custom entry, so its
   // delete button would always 404. Only treat genuine custom models as deletable.
   const isCustom = m.tier === "custom" && m.source !== "cli_config";
-  const free = m.input_cost_per_m === 0 && m.output_cost_per_m === 0;
+  const free = m.pricing_known !== false && m.input_cost_per_m === 0 && m.output_cost_per_m === 0;
 
   const formatCost = (cost?: number) => {
     if (cost === undefined || cost === null) return "—";
@@ -233,7 +233,9 @@ const ModelCard = memo(function ModelCard({ m, hidden, onOpen, onSettings, onTog
       <div className="flex items-center gap-3 text-[11px] text-text-dim">
         <span className="font-mono" title={t("models.context_window")}>{formatCtx(m.context_window)}</span>
         <span className="text-border-subtle">·</span>
-        {free
+        {m.pricing_known === false
+          ? <span className="font-mono">—</span>
+          : free
           ? <span className="font-mono text-success font-bold">{t("models.free")}</span>
           : (
             <span className="font-mono">
@@ -341,11 +343,11 @@ function ModelDetailBody({
         </div>
         <div>
           <div className="text-[10px] font-bold text-text-dim uppercase mb-1">{t("models.col_input")}</div>
-          <span className="font-mono">{formatCostUtil(m.input_cost_per_m ?? 0)} / M</span>
+          <span className="font-mono">{m.pricing_known === false ? "—" : `${formatCostUtil(m.input_cost_per_m ?? 0)} / M`}</span>
         </div>
         <div>
           <div className="text-[10px] font-bold text-text-dim uppercase mb-1">{t("models.col_output")}</div>
-          <span className="font-mono">{formatCostUtil(m.output_cost_per_m ?? 0)} / M</span>
+          <span className="font-mono">{m.pricing_known === false ? "—" : `${formatCostUtil(m.output_cost_per_m ?? 0)} / M`}</span>
         </div>
         <div>
           <div className="text-[10px] font-bold text-text-dim uppercase mb-1">{t("models.max_output")}</div>

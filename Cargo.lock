@@ -4451,6 +4451,7 @@ dependencies = [
  "jsonwebtoken",
  "libc",
  "librefang-acp",
+ "librefang-api",
  "librefang-channels",
  "librefang-extensions",
  "librefang-hands",
@@ -4506,6 +4507,7 @@ dependencies = [
  "webauthn-rs",
  "which",
  "windows-sys 0.61.2",
+ "wiremock",
  "zeroize",
  "zip 8.6.0",
 ]

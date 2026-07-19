@@ -951,6 +951,19 @@ fn test_set_agent_model_clears_overrides_when_provider_changes() {
         "same-provider swap must preserve per-agent base_url override"
     );
 
+    kernel
+        .set_agent_model(agent_id, "default", Some("default"))
+        .expect("switching back to the global default should succeed");
+    let inherited = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent after switching to global default");
+    assert_eq!(inherited.manifest.model.provider, "default");
+    assert_eq!(inherited.manifest.model.model, "default");
+    assert!(inherited.manifest.model.api_key_env.is_none());
+    assert!(inherited.manifest.model.base_url.is_none());
+
     kernel.shutdown();
 }
 
@@ -1638,7 +1651,7 @@ async fn test_send_message_ephemeral_unknown_agent_returns_not_found() {
     // Use a random AgentId that doesn't exist
     let bogus_id = AgentId::new();
     let result = kernel
-        .send_message_ephemeral(bogus_id, "hello?", None)
+        .send_message_ephemeral(bogus_id, "hello?", None, None)
         .await;
     assert!(
         result.is_err(),
@@ -1678,7 +1691,7 @@ async fn test_send_message_ephemeral_does_not_modify_session() {
     // Send ephemeral message (will fail because no LLM provider, but that's OK —
     // the point is the session should remain untouched)
     let _ = kernel
-        .send_message_ephemeral(agent_id, "what is 2+2?", None)
+        .send_message_ephemeral(agent_id, "what is 2+2?", None, None)
         .await;
 
     // Check session is unchanged
@@ -5725,6 +5738,109 @@ async fn test_push_notification_health_check_failed_agent_rule_overrides_alert_c
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn test_model_migrated_notification_falls_back_to_alert_channels() {
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    config.notification = NotificationConfig {
+        approval_channels: Vec::new(),
+        alert_channels: vec![NotificationTarget {
+            channel_type: "test".to_string(),
+            recipient: "ops".to_string(),
+            thread_id: None,
+        }],
+        agent_rules: Vec::new(),
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let adapter = Arc::new(RecordingChannelAdapter::new("test"));
+    let sent = adapter.sent.clone();
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("test".to_string(), adapter);
+
+    kernel
+        .notify_model_migrated(
+            "system",
+            "openrouter",
+            "openrouter/acme/old:free",
+            "openrouter/acme/new:free",
+            "old model disappeared",
+        )
+        .await;
+
+    let recorded = sent.lock().unwrap().clone();
+    assert_eq!(recorded.len(), 1);
+    assert!(
+        recorded[0].starts_with("ops:openrouter model migrated from `openrouter/acme/old:free`")
+    );
+    assert!(recorded[0].contains("`openrouter/acme/new:free`"));
+
+    kernel.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_model_migrated_agent_rule_overrides_alert_channels() {
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    config.notification = NotificationConfig {
+        approval_channels: Vec::new(),
+        alert_channels: vec![NotificationTarget {
+            channel_type: "test".to_string(),
+            recipient: "global-ops".to_string(),
+            thread_id: None,
+        }],
+        agent_rules: vec![AgentNotificationRule {
+            agent_pattern: "assistant".to_string(),
+            channels: vec![NotificationTarget {
+                channel_type: "test".to_string(),
+                recipient: "assistant-topic".to_string(),
+                thread_id: None,
+            }],
+            events: vec!["model_migrated".to_string()],
+        }],
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let adapter = Arc::new(RecordingChannelAdapter::new("test"));
+    let sent = adapter.sent.clone();
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("test".to_string(), adapter);
+
+    kernel
+        .notify_model_migrated(
+            "assistant",
+            "openrouter",
+            "openrouter/acme/old:free",
+            "openrouter/acme/new:free",
+            "old model disappeared",
+        )
+        .await;
+
+    let recorded = sent.lock().unwrap().clone();
+    assert_eq!(recorded.len(), 1);
+    assert!(recorded[0].starts_with("assistant-topic:"));
+
+    kernel.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_push_notification_health_check_failed_no_targets_when_unconfigured() {
     let dir = tempfile::tempdir().unwrap();
     let home_dir = dir.path().to_path_buf();
@@ -6320,7 +6436,7 @@ async fn before_prompt_build_hook_fires_for_ephemeral_with_call_site_and_user_me
     // is resolved. Both Ok and Err are acceptable here; we only care that
     // the recorder captured the hook payload.
     let _ = kernel
-        .send_message_ephemeral(agent_id, "hello from the test", None)
+        .send_message_ephemeral(agent_id, "hello from the test", None, None)
         .await;
 
     let data = recorder
@@ -6367,7 +6483,9 @@ async fn before_prompt_build_hook_unregistered_event_does_not_fire_provider() {
         recorder.clone(),
     );
 
-    let _ = kernel.send_message_ephemeral(agent_id, "hello", None).await;
+    let _ = kernel
+        .send_message_ephemeral(agent_id, "hello", None, None)
+        .await;
 
     assert!(
         recorder.last_data.lock().unwrap().is_none(),
@@ -8745,6 +8863,270 @@ async fn vault_cache_reuses_unlocked_handle_across_calls() {
     kernel.shutdown();
 }
 
+/// Per-user LLM provider credentials (#6460): a user-scoped provider key is stored encrypted in the vault, reads back verbatim for its owner, stays isolated across users / providers, and — through the shared resolution helper — takes precedence over the daemon-global credential.
+/// A provider with no user-scoped key falls back to the global credential, so global-only behaviour is unchanged.
+/// Listing surfaces provider names only, never the secret value.
+///
+/// Same `serial_test::serial(librefang_vault_key)` group as every other vault-key-touching test in this crate because `LIBREFANG_VAULT_KEY` and `LIBREFANG_VAULT_NO_KEYRING` are process-global.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial(librefang_vault_key)]
+async fn per_user_provider_key_beats_global_and_falls_back() {
+    use crate::user_provider_credentials::resolve_provider_credential;
+
+    const TEST_VAULT_KEY_B64: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+    let _vault_key = set_test_env("LIBREFANG_VAULT_KEY", TEST_VAULT_KEY_B64);
+    let _no_keyring = set_test_env("LIBREFANG_VAULT_NO_KEYRING", "1");
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let alice = librefang_types::agent::UserId::from_name("alice");
+    let bob = librefang_types::agent::UserId::from_name("bob");
+
+    // Store Alice's own OpenAI key (encrypted at rest in the vault).
+    kernel
+        .set_user_provider_key(alice, "openai", "sk-alice-openai")
+        .expect("store user-scoped provider key");
+
+    // Round-trips verbatim for the owner...
+    assert_eq!(
+        kernel.get_user_provider_key(alice, "openai").as_deref(),
+        Some("sk-alice-openai"),
+    );
+    // ...and is isolated per user and per provider.
+    assert_eq!(kernel.get_user_provider_key(bob, "openai"), None);
+    assert_eq!(kernel.get_user_provider_key(alice, "anthropic"), None);
+
+    // Resolution order: the user-scoped key beats the daemon-global key.
+    let global = Some("sk-global-openai".to_string());
+    assert_eq!(
+        resolve_provider_credential(
+            kernel.get_user_provider_key(alice, "openai"),
+            global.clone(),
+        ),
+        Some("sk-alice-openai".to_string()),
+        "user-scoped key must win over the daemon-global key",
+    );
+
+    // Fallback: a provider with no user-scoped key uses the global credential,
+    // so global-only behaviour is unchanged.
+    assert_eq!(
+        resolve_provider_credential(
+            kernel.get_user_provider_key(alice, "anthropic"),
+            global.clone(),
+        ),
+        global,
+        "provider without a user-scoped key must fall back to the global credential",
+    );
+
+    // Listing surfaces provider NAMES only, never the secret values.
+    kernel
+        .set_user_provider_key(alice, "anthropic", "sk-alice-anthropic")
+        .expect("store second user-scoped provider key");
+    let names = kernel.list_user_provider_keys(alice);
+    assert_eq!(names, vec!["anthropic".to_string(), "openai".to_string()]);
+    for name in &names {
+        assert!(
+            !name.contains("sk-alice"),
+            "list must expose provider names only, never secret values",
+        );
+    }
+
+    // Removal drops only the targeted (user, provider) pair.
+    assert!(kernel.remove_user_provider_key(alice, "openai").unwrap());
+    assert_eq!(kernel.get_user_provider_key(alice, "openai"), None);
+    assert_eq!(
+        kernel.list_user_provider_keys(alice),
+        vec!["anthropic".to_string()],
+    );
+
+    kernel.shutdown();
+}
+
+/// Owner-path coverage for `resolve_driver_for_owner` (#6460 review).
+/// The test above exercises the standalone `resolve_provider_credential` helper, but the production driver path inlines its OWN owner-aware resolution — the `get_user_provider_key` lookup at llm_drivers.rs and the credential-pool bypass it triggers — which had zero coverage.
+/// Drive that branch directly: with a user-scoped key set for the owner, resolving a driver on behalf of that owner must succeed (the user-key lookup + pool-bypass path runs without panic on the exact key `get_user_provider_key` surfaces), and the ownerless path must still resolve so global-only behaviour is unchanged.
+/// Uses the local `ollama` provider so the build is deterministic regardless of env vars.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial(librefang_vault_key)]
+async fn resolve_driver_for_owner_drives_the_owner_scoped_key_path() {
+    const TEST_VAULT_KEY_B64: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+    let _vault_key = set_test_env("LIBREFANG_VAULT_KEY", TEST_VAULT_KEY_B64);
+    let _no_keyring = set_test_env("LIBREFANG_VAULT_NO_KEYRING", "1");
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let alice = librefang_types::agent::UserId::from_name("alice");
+    kernel
+        .set_user_provider_key(alice, "ollama", "sk-alice-ollama")
+        .expect("store user-scoped provider key");
+    // The production path (resolve_driver_for_owner) reads exactly this.
+    assert_eq!(
+        kernel.get_user_provider_key(alice, "ollama").as_deref(),
+        Some("sk-alice-ollama"),
+        "owner-scoped key must be readable for the owner",
+    );
+
+    let mut manifest = librefang_types::agent::AgentManifest::default();
+    manifest.model.provider = "ollama".to_string();
+
+    // Owner path: exercises the user_scoped_key lookup + pool-bypass + the api_key = user_key branch.
+    assert!(
+        kernel
+            .resolve_driver_for_owner(&manifest, Some(alice))
+            .is_ok(),
+        "resolving a driver on behalf of an owner with a user-scoped key must succeed",
+    );
+    // Ownerless path: global resolution, unchanged.
+    assert!(
+        kernel.resolve_driver_for_owner(&manifest, None).is_ok(),
+        "the ownerless path must still resolve (global behaviour unchanged)",
+    );
+
+    kernel.shutdown();
+}
+
+/// #6460 precedence guard: an operator-pinned `api_key_env` on the agent manifest is an operator-level override and MUST NOT be shadowed by the owner's user-scoped key.
+/// `resolve_driver_for_owner`'s doc comment claims this (agent-pinned `api_key_env` at precedence rank 2 beats the user-scoped key at rank 3) and the code forces `user_scoped_key = None` whenever `has_custom_key` is set, but nothing asserted the behaviour.
+///
+/// Drive it through the driver cache, whose key is derived from the resolved API key: when the manifest pins `api_key_env`, resolving on behalf of an owner who ALSO holds a stored key for the same provider must yield the SAME cached driver as the ownerless resolution (both keyed on the operator-pinned env value), and a DIFFERENT driver from the unpinned owner path (which does read the owner's key) — proving the pin, not the user key, chose the credential.
+///
+/// Uses the keyless `ollama` provider so every branch builds deterministically regardless of the test host's env vars.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial(librefang_vault_key)]
+async fn resolve_driver_for_owner_operator_pinned_key_not_shadowed_by_user_key() {
+    const TEST_VAULT_KEY_B64: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+    let _vault_key = set_test_env("LIBREFANG_VAULT_KEY", TEST_VAULT_KEY_B64);
+    let _no_keyring = set_test_env("LIBREFANG_VAULT_NO_KEYRING", "1");
+    // Operator pins ollama's key to this env var; its value must be the one the
+    // pinned resolution reads, never alice's stored key.
+    let _pinned = set_test_env(
+        "LIBREFANG_TEST_OPERATOR_PINNED_OLLAMA_KEY",
+        "sk-operator-ollama",
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let alice = librefang_types::agent::UserId::from_name("alice");
+    kernel
+        .set_user_provider_key(alice, "ollama", "sk-alice-ollama")
+        .expect("store user-scoped provider key");
+
+    // Manifest that pins the operator's env var for ollama's key.
+    let mut pinned = librefang_types::agent::AgentManifest::default();
+    pinned.model.provider = "ollama".to_string();
+    pinned.model.api_key_env = Some("LIBREFANG_TEST_OPERATOR_PINNED_OLLAMA_KEY".to_string());
+
+    // Same provider, but no operator pin — this path DOES honour alice's key.
+    let mut unpinned = librefang_types::agent::AgentManifest::default();
+    unpinned.model.provider = "ollama".to_string();
+
+    let d_pinned_owner = kernel
+        .resolve_driver_for_owner(&pinned, Some(alice))
+        .expect("pinned resolution for owner must build");
+    let d_pinned_none = kernel
+        .resolve_driver_for_owner(&pinned, None)
+        .expect("pinned resolution without owner must build");
+    let d_unpinned_owner = kernel
+        .resolve_driver_for_owner(&unpinned, Some(alice))
+        .expect("unpinned resolution for owner must build");
+
+    // The driver cache keys on the resolved API key, so identical drivers imply an identical key.
+    // The pinned path ignores the owner entirely: resolving for alice yields the SAME driver as resolving ownerless (both the operator-pinned key), proving the user key did not shadow the pin.
+    assert!(
+        Arc::ptr_eq(&d_pinned_owner, &d_pinned_none),
+        "operator-pinned api_key_env must not be shadowed by the owner's user key: \
+         the owner and ownerless pinned resolutions must share one cached driver",
+    );
+    // Sanity: the pin genuinely diverges from the user-key path, so the equality above is not vacuously true (all three collapsing onto one driver).
+    assert!(
+        !Arc::ptr_eq(&d_pinned_owner, &d_unpinned_owner),
+        "the unpinned owner path must read the user key and so resolve a different driver",
+    );
+
+    kernel.shutdown();
+}
+
+/// #6460 chargeback integrity: when an agent has a fallback chain and the
+/// owner holds a stored key for the fallback provider, resolving the driver
+/// must succeed through the owner-aware fallback path (the fallback slot now
+/// reads the owner's key so a failover doesn't silently bill the operator's
+/// credential). This exercises the new `fb_user_key` branch in
+/// `resolve_driver_for_owner`'s fallback loop. The resolved `Arc<dyn LlmDriver>`
+/// is opaque, so we assert the resolution path is intact rather than
+/// introspecting the slot's key; the key-selection precedence itself is
+/// asserted by the storage/precedence tests above.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial(librefang_vault_key)]
+async fn resolve_driver_for_owner_fallback_slot_uses_owner_key() {
+    const TEST_VAULT_KEY_B64: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+    let _vault_key = set_test_env("LIBREFANG_VAULT_KEY", TEST_VAULT_KEY_B64);
+    let _no_keyring = set_test_env("LIBREFANG_VAULT_NO_KEYRING", "1");
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let bob = librefang_types::agent::UserId::from_name("bob");
+    // Bob has his own key for BOTH the primary and the fallback provider.
+    kernel
+        .set_user_provider_key(bob, "ollama", "sk-bob-ollama")
+        .expect("store primary user key");
+    kernel
+        .set_user_provider_key(bob, "openai", "sk-bob-openai")
+        .expect("store fallback user key");
+
+    let mut manifest = librefang_types::agent::AgentManifest::default();
+    manifest.model.provider = "ollama".to_string();
+    // Give the agent a fallback chain whose provider bob owns a key for.
+    manifest.fallback_models = Some(vec![librefang_types::agent::FallbackModel {
+        provider: "openai".to_string(),
+        model: "gpt-4o-mini".to_string(),
+        api_key_env: None,
+        base_url: None,
+        extra_params: Default::default(),
+    }]);
+
+    assert!(
+        kernel
+            .resolve_driver_for_owner(&manifest, Some(bob))
+            .is_ok(),
+        "resolving with an owner who has keys for both the primary and fallback provider must succeed",
+    );
+
+    kernel.shutdown();
+}
+
 /// Regression test for the kernel install façade introduced in #3295: the
 /// HTTP install path historically opened `vault.enc` and ran the Argon2id
 /// KDF on every request. After the refactor, `Kernel::install_integration`
@@ -10802,15 +11184,11 @@ fn suspend_resume_actually_transition_in_memory_state() {
     kernel.shutdown();
 }
 
-/// #5137: `sync_default_model_agents` previously returned `()` and
-/// discarded the `update_model_and_provider` / `save_agent` Results, so a
-/// provider switch could half-apply with no signal. It now returns a
-/// per-agent partial-failure list. On the happy path the list must be
-/// empty AND the eligible agent must have been migrated to the new
-/// provider/model — proving the writes are observed, not swallowed, and
-/// that the new return contract is wired through the trait.
+/// #5137: `sync_default_model_agents` previously discarded update and save errors, so a provider switch could half-apply with no signal.
+/// The legacy concrete row must still migrate successfully.
+/// An agent carrying `default/default` must retain that sentinel because execution-time resolution now follows the effective global model.
 #[test]
-fn sync_default_model_agents_reports_no_failures_and_migrates() {
+fn sync_default_model_agents_migrates_legacy_and_keeps_default_sentinel() {
     let tmp = tempfile::tempdir().unwrap();
     let home_dir = tmp.path().join("librefang-kernel-sync-default-5137");
     std::fs::create_dir_all(&home_dir).unwrap();
@@ -10821,8 +11199,7 @@ fn sync_default_model_agents_reports_no_failures_and_migrates() {
     };
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
 
-    // Agent spawned with provider="default" — eligible for default-model sync.
-    let agent_id = kernel
+    let inherited_id = kernel
         .spawn_agent_inner(
             AgentManifest {
                 name: "default-tracking-agent".to_string(),
@@ -10849,6 +11226,33 @@ fn sync_default_model_agents_reports_no_failures_and_migrates() {
         )
         .expect("agent should spawn");
 
+    let legacy_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "legacy-default-agent".to_string(),
+                description: "contains a previously resolved default".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                model: ModelConfig {
+                    provider: "anthropic".to_string(),
+                    model: "claude-old-default".to_string(),
+                    max_tokens: 4096,
+                    temperature: 0.7,
+                    system_prompt: String::new(),
+                    api_key_env: None,
+                    base_url: None,
+                    context_window: None,
+                    max_output_tokens: None,
+                    extra_params: std::collections::BTreeMap::new(),
+                },
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("legacy agent should spawn");
+
     let new_dm = DefaultModelConfig {
         provider: "openrouter".to_string(),
         model: "anthropic/claude-3.5-sonnet".to_string(),
@@ -10857,25 +11261,438 @@ fn sync_default_model_agents_reports_no_failures_and_migrates() {
         ..Default::default()
     };
 
-    let failures = kernel.sync_default_model_agents("anthropic", &new_dm);
+    let failures = kernel.sync_default_model_agents("anthropic", None, &new_dm);
     assert!(
         failures.is_empty(),
         "happy-path sync must report zero per-agent failures, got: {failures:?} (#5137)"
     );
+
+    let inherited = kernel
+        .agents
+        .registry
+        .get(inherited_id)
+        .expect("inheriting agent after sync");
+    assert_eq!(inherited.manifest.model.provider, "default");
+    assert_eq!(inherited.manifest.model.model, "default");
+
+    let legacy = kernel
+        .agents
+        .registry
+        .get(legacy_id)
+        .expect("legacy agent after sync");
+    assert_eq!(legacy.manifest.model.provider, "openrouter");
+    assert_eq!(legacy.manifest.model.model, "anthropic/claude-3.5-sonnet");
+
+    kernel.shutdown();
+}
+
+#[test]
+fn default_model_sentinel_survives_restart() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-default-model-restart");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let registry_dir = home_dir.join("registry");
+    std::fs::create_dir_all(&registry_dir).unwrap();
+    std::fs::write(registry_dir.join(".sync_marker"), "").unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        default_model: DefaultModelConfig {
+            provider: "openrouter".to_string(),
+            model: "acme/current:free".to_string(),
+            api_key_env: "OPENROUTER_API_KEY".to_string(),
+            ..Default::default()
+        },
+        ..KernelConfig::default()
+    };
+
+    let kernel =
+        LibreFangKernel::boot_with_config(config.clone()).expect("first kernel should boot");
+    let assistant_id = kernel
+        .agents
+        .registry
+        .list()
+        .into_iter()
+        .find(|entry| entry.name == "assistant")
+        .expect("default assistant")
+        .id;
+    kernel
+        .set_agent_model(assistant_id, "default", Some("default"))
+        .expect("assistant should follow the global default");
+    kernel.shutdown();
+    drop(kernel);
+
+    let restarted = LibreFangKernel::boot_with_config(config).expect("second kernel should boot");
+    let assistant = restarted
+        .agents
+        .registry
+        .get(assistant_id)
+        .expect("assistant should be restored");
+    assert_eq!(assistant.manifest.model.provider, "default");
+    assert_eq!(assistant.manifest.model.model, "default");
+    assert!(assistant.manifest.model.api_key_env.is_none());
+    assert!(assistant.manifest.model.base_url.is_none());
+
+    restarted.shutdown();
+}
+
+#[test]
+fn legacy_auto_spawned_assistant_with_delisted_openrouter_free_model_reverts_to_default_sentinel() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-legacy-assistant-default");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        default_model: DefaultModelConfig {
+            provider: "openrouter".to_string(),
+            model: "acme/deprecated:free".to_string(),
+            api_key_env: "OPENROUTER_API_KEY".to_string(),
+            ..Default::default()
+        },
+        ..KernelConfig::default()
+    };
+
+    let kernel =
+        LibreFangKernel::boot_with_config(config.clone()).expect("first kernel should boot");
+    let assistant_id = kernel
+        .agents
+        .registry
+        .list()
+        .into_iter()
+        .find(|entry| entry.name == "assistant")
+        .expect("default assistant")
+        .id;
+    kernel
+        .agents
+        .registry
+        .update_model_provider_config(
+            assistant_id,
+            "acme/deprecated:free".to_string(),
+            "openrouter".to_string(),
+            Some("OPENROUTER_API_KEY".to_string()),
+            None,
+        )
+        .expect("seed legacy assistant model");
+    let legacy = kernel
+        .agents
+        .registry
+        .get(assistant_id)
+        .expect("legacy assistant");
+    kernel
+        .memory
+        .substrate
+        .save_agent(&legacy)
+        .expect("persist legacy assistant");
+    kernel.shutdown();
+    drop(kernel);
+
+    let restarted = LibreFangKernel::boot_with_config(config).expect("second kernel should boot");
+    let assistant = restarted
+        .agents
+        .registry
+        .get(assistant_id)
+        .expect("assistant should be restored");
+    assert_eq!(assistant.manifest.model.provider, "default");
+    assert_eq!(assistant.manifest.model.model, "default");
+    assert!(assistant.manifest.model.api_key_env.is_none());
+    assert!(assistant.manifest.model.base_url.is_none());
+
+    restarted.shutdown();
+}
+
+#[test]
+fn explicit_assistant_openrouter_free_model_with_custom_key_survives_restart() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp
+        .path()
+        .join("librefang-kernel-explicit-assistant-openrouter-key");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let registry_dir = home_dir.join("registry");
+    std::fs::create_dir_all(&registry_dir).unwrap();
+    std::fs::write(registry_dir.join(".sync_marker"), "").unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        default_model: DefaultModelConfig {
+            provider: "openrouter".to_string(),
+            model: "acme/deprecated:free".to_string(),
+            api_key_env: "OPENROUTER_API_KEY".to_string(),
+            ..Default::default()
+        },
+        ..KernelConfig::default()
+    };
+
+    let kernel =
+        LibreFangKernel::boot_with_config(config.clone()).expect("first kernel should boot");
+    let assistant_id = kernel
+        .agents
+        .registry
+        .list()
+        .into_iter()
+        .find(|entry| entry.name == "assistant")
+        .expect("default assistant")
+        .id;
+    kernel
+        .agents
+        .registry
+        .update_model_provider_config(
+            assistant_id,
+            "acme/deprecated:free".to_string(),
+            "openrouter".to_string(),
+            Some("OPENROUTER_SECONDARY_KEY".to_string()),
+            None,
+        )
+        .expect("seed explicit assistant model");
+    let explicit = kernel
+        .agents
+        .registry
+        .get(assistant_id)
+        .expect("explicit assistant");
+    kernel
+        .memory
+        .substrate
+        .save_agent(&explicit)
+        .expect("persist explicit assistant");
+    kernel.shutdown();
+    drop(kernel);
+
+    let restarted = LibreFangKernel::boot_with_config(config).expect("second kernel should boot");
+    let assistant = restarted
+        .agents
+        .registry
+        .get(assistant_id)
+        .expect("assistant should be restored");
+    assert_eq!(assistant.manifest.model.provider, "openrouter");
+    assert_eq!(assistant.manifest.model.model, "acme/deprecated:free");
+    assert_eq!(
+        assistant.manifest.model.api_key_env.as_deref(),
+        Some("OPENROUTER_SECONDARY_KEY")
+    );
+    assert!(assistant.manifest.model.base_url.is_none());
+
+    restarted.shutdown();
+}
+
+#[test]
+fn sync_default_model_agents_preserves_explicit_assistant_model() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-explicit-assistant-model");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let agent_id = kernel
+        .agents
+        .registry
+        .list()
+        .into_iter()
+        .find(|entry| entry.name == "assistant")
+        .expect("boot should create the default assistant")
+        .id;
+    kernel
+        .set_agent_model(agent_id, "poolside/laguna-xs.2:free", Some("openrouter"))
+        .expect("explicit assistant model should be saved");
+
+    let new_dm = DefaultModelConfig {
+        provider: "openrouter".to_string(),
+        model: "poolside/laguna-m.1:free".to_string(),
+        api_key_env: "OPENROUTER_API_KEY".to_string(),
+        base_url: None,
+        ..Default::default()
+    };
+
+    let failures = kernel.sync_default_model_agents("openrouter", None, &new_dm);
+    assert!(failures.is_empty());
 
     let entry = kernel
         .agents
         .registry
         .get(agent_id)
         .expect("agent entry after sync");
+    assert_eq!(entry.manifest.model.provider, "openrouter");
     assert_eq!(
-        entry.manifest.model.provider, "openrouter",
-        "eligible agent must be migrated to the new provider — the \
-         update_model_and_provider Result is no longer swallowed (#5137)"
+        entry.manifest.model.model, "poolside/laguna-xs.2:free",
+        "an explicit assistant model must not be replaced by the global default"
     );
-    assert_eq!(entry.manifest.model.model, "anthropic/claude-3.5-sonnet");
 
     kernel.shutdown();
+}
+
+#[test]
+fn sync_default_model_agents_with_old_model_spares_agents_on_other_models() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = KernelConfig {
+        home_dir: tmp.path().to_path_buf(),
+        data_dir: tmp.path().join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("kernel should boot");
+
+    // Spawn agent 1: pinned to the old delisted model (e.g. "poolside/laguna-xs.2:free") on openrouter
+    let migrated_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "migrated-agent".to_string(),
+                description: "agent pinned to delisted model".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                model: ModelConfig {
+                    provider: "openrouter".to_string(),
+                    model: "poolside/laguna-xs.2:free".to_string(),
+                    max_tokens: 4096,
+                    temperature: 0.7,
+                    system_prompt: String::new(),
+                    api_key_env: None,
+                    base_url: None,
+                    context_window: None,
+                    max_output_tokens: None,
+                    extra_params: std::collections::BTreeMap::new(),
+                },
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+
+    // Spawn agent 2: pinned to a different model (e.g. "openai/gpt-4o") on openrouter
+    let spared_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "spared-agent".to_string(),
+                description: "agent pinned to different model".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                model: ModelConfig {
+                    provider: "openrouter".to_string(),
+                    model: "openai/gpt-4o".to_string(),
+                    max_tokens: 4096,
+                    temperature: 0.7,
+                    system_prompt: String::new(),
+                    api_key_env: None,
+                    base_url: None,
+                    context_window: None,
+                    max_output_tokens: None,
+                    extra_params: std::collections::BTreeMap::new(),
+                },
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+
+    let new_dm = DefaultModelConfig {
+        provider: "openrouter".to_string(),
+        model: "poolside/laguna-m.1:free".to_string(),
+        api_key_env: "OPENROUTER_API_KEY".to_string(),
+        base_url: None,
+        ..Default::default()
+    };
+
+    // Narrow sync to poolside/laguna-xs.2:free
+    let failures =
+        kernel.sync_default_model_agents("openrouter", Some("poolside/laguna-xs.2:free"), &new_dm);
+    assert!(failures.is_empty());
+
+    // Agent 1 should be migrated
+    let migrated = kernel
+        .agents
+        .registry
+        .get(migrated_id)
+        .expect("migrated agent");
+    assert_eq!(migrated.manifest.model.model, "poolside/laguna-m.1:free");
+
+    // Agent 2 should be spared
+    let spared = kernel.agents.registry.get(spared_id).expect("spared agent");
+    assert_eq!(spared.manifest.model.model, "openai/gpt-4o");
+
+    kernel.shutdown();
+}
+
+#[test]
+#[serial_test::serial(librefang_vault_key)]
+fn set_agent_model_rejects_only_against_a_fresh_openrouter_catalog() {
+    let _env = set_test_env("OPENROUTER_API_KEY", "");
+    let _env_offline = set_test_env("LIBREFANG_REGISTRY_OFFLINE", "1");
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    librefang_runtime::registry_sync::seed_registry_fixture_for_tests(&home_dir);
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("kernel should boot");
+    let agent_id = kernel
+        .agents
+        .registry
+        .list()
+        .into_iter()
+        .find(|entry| entry.name == "assistant")
+        .expect("default assistant")
+        .id;
+    let live_model = librefang_types::model_catalog::ModelCatalogEntry {
+        id: "openrouter/acme/current:free".to_string(),
+        display_name: "Current Free".to_string(),
+        provider: "openrouter".to_string(),
+        context_window: 32_768,
+        max_output_tokens: 4_096,
+        ..Default::default()
+    };
+    kernel.model_catalog_update(|catalog| {
+        catalog.reconcile_live_provider_models(
+            "openrouter",
+            vec!["acme/current:free".to_string()],
+            vec![live_model.clone()],
+        );
+    });
+
+    let error = kernel
+        .set_agent_model(agent_id, "acme/new:free", Some("openrouter"))
+        .expect_err("fresh catalog should reject an absent model");
+    assert!(error.to_string().contains("not in the live catalog"));
+
+    kernel.model_catalog_update(|catalog| {
+        catalog.clear_provider_available_models("openrouter");
+    });
+    kernel
+        .set_agent_model(agent_id, "acme/new:free", Some("openrouter"))
+        .expect("missing or stale availability must not reject an explicit user choice");
+
+    kernel.shutdown();
+}
+
+#[test]
+fn openrouter_model_not_found_error_triggers_catalog_refresh_policy() {
+    let mut manifest = AgentManifest::default();
+    manifest.model.provider = "openrouter".to_string();
+    assert!(
+        super::accessors::should_refresh_openrouter_catalog_after_error(
+            &manifest,
+            "LLM driver error: Model not found: acme/retired"
+        )
+    );
+    assert!(
+        !super::accessors::should_refresh_openrouter_catalog_after_error(
+            &manifest,
+            "LLM driver error: Rate limited"
+        )
+    );
+
+    manifest.model.provider = "openai".to_string();
+    assert!(
+        !super::accessors::should_refresh_openrouter_catalog_after_error(
+            &manifest,
+            "LLM driver error: Model not found: ft:gpt-4o:new"
+        )
+    );
 }
 
 // ── resolve_scope_channel: reserved-name defense-in-depth ──────────────────

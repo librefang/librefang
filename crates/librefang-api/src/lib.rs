@@ -128,6 +128,7 @@ pub mod middleware;
 pub mod oauth;
 pub mod openai_compat;
 pub mod openapi;
+pub mod openrouter_catalog;
 pub mod passkey;
 pub mod password_hash;
 pub mod rate_limiter;

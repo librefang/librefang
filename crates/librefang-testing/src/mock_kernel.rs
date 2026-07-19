@@ -53,6 +53,7 @@ pub fn test_catalog_baseline() -> CatalogSeed {
         max_output_tokens: 16_384,
         input_cost_per_m: 0.15,
         output_cost_per_m: 0.6,
+        pricing_known: true,
         image_input_cost_per_m: None,
         image_output_cost_per_m: None,
         supports_tools: true,
