@@ -275,3 +275,82 @@ async fn tools_list_unknown_agent_header_falls_back_to_kernel_catalogue() {
         "unknown agent header must fall back to the unfiltered catalogue; got {names:?}"
     );
 }
+
+// Real MCP tool names are runtime-generated and namespaced
+// `mcp__<server>__<tool>` (double underscore), so an operator cannot
+// enumerate them as static literals. The cases below use that real shape.
+const MCP_NOTION_A: &str = "mcp__notion__search";
+const MCP_NOTION_B: &str = "mcp__notion__create_page";
+const MCP_GITHUB: &str = "mcp__github__create_issue";
+
+/// #6495: a `tool_allowlist` glob entry (`mcp__notion__*`) must retain the
+/// matching namespaced MCP tools and drop the rest. Before the fix, Step 4
+/// used exact `==`, so the `*` was a literal that matched nothing and the
+/// allowlist silently stripped EVERY MCP tool.
+#[tokio::test(flavor = "multi_thread")]
+async fn tools_list_allowlist_supports_mcp_glob() {
+    let h = boot();
+    seed_mcp_tool(&h.state, MCP_NOTION_A);
+    seed_mcp_tool(&h.state, MCP_NOTION_B);
+    seed_mcp_tool(&h.state, MCP_GITHUB);
+
+    let agent_id = register_agent_with_filters(&h.state, &["mcp__notion__*"], &[]);
+
+    let body = list_tools(&h, Some(agent_id)).await;
+    let names = tool_names(&body);
+
+    assert!(
+        names.iter().any(|n| n == MCP_NOTION_A) && names.iter().any(|n| n == MCP_NOTION_B),
+        "glob allowlist `mcp__notion__*` must retain the notion tools; got {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n == MCP_GITHUB),
+        "a tool outside the glob must be dropped; got {names:?}"
+    );
+}
+
+/// #6495 companion: exact native names still match under `glob_matches`
+/// (`pattern == value`), so plain allowlists are not regressed.
+#[tokio::test(flavor = "multi_thread")]
+async fn tools_list_allowlist_exact_name_still_works() {
+    let h = boot();
+    seed_mcp_tool(&h.state, MCP_NOTION_A);
+    seed_mcp_tool(&h.state, MCP_GITHUB);
+
+    let agent_id = register_agent_with_filters(&h.state, &[MCP_NOTION_A], &[]);
+
+    let body = list_tools(&h, Some(agent_id)).await;
+    let names = tool_names(&body);
+
+    assert!(
+        names.iter().any(|n| n == MCP_NOTION_A),
+        "an exact tool name in the allowlist must still match; got {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n == MCP_GITHUB),
+        "a tool not in the allowlist must be dropped; got {names:?}"
+    );
+}
+
+/// #6495: a `tool_blocklist` glob (`mcp__github__*`) must remove the whole
+/// matching namespace while leaving other MCP tools visible.
+#[tokio::test(flavor = "multi_thread")]
+async fn tools_list_blocklist_supports_mcp_glob() {
+    let h = boot();
+    seed_mcp_tool(&h.state, MCP_NOTION_A);
+    seed_mcp_tool(&h.state, MCP_GITHUB);
+
+    let agent_id = register_agent_with_filters(&h.state, &[], &["mcp__github__*"]);
+
+    let body = list_tools(&h, Some(agent_id)).await;
+    let names = tool_names(&body);
+
+    assert!(
+        names.iter().any(|n| n == MCP_NOTION_A),
+        "a tool outside the blocklist glob must remain visible; got {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n == MCP_GITHUB),
+        "the blocklist glob `mcp__github__*` must hide the github tool; got {names:?}"
+    );
+}
