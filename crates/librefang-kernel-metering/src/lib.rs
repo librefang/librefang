@@ -510,7 +510,10 @@ impl MeteringEngine {
 
             // ChatGPT session-auth models do not expose billable catalog pricing,
             // but budgets still need a conservative non-zero estimate.
-            if input_per_m == 0.0 && output_per_m == 0.0 && should_use_legacy_budget_estimate(entry)
+            if !entry.pricing_known
+                || (input_per_m == 0.0
+                    && output_per_m == 0.0
+                    && should_use_legacy_budget_estimate(entry))
             {
                 return estimate_cost_from_rates(
                     input_tokens,
@@ -1006,6 +1009,40 @@ mod tests {
         );
         // Zero-priced chatgpt model falls back to legacy rates ($1/$3 per million).
         assert!((cost - 4.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_estimate_cost_with_catalog_unknown_pricing_uses_conservative_rate() {
+        use librefang_types::model_catalog::{ModelCatalogEntry, ModelCatalogFile, ModelTier};
+        let mut catalog = librefang_runtime::model_catalog::ModelCatalog::new_from_dir(
+            &std::path::PathBuf::from("/nonexistent"),
+        );
+        catalog.merge_catalog_file(ModelCatalogFile {
+            provider: None,
+            models: vec![ModelCatalogEntry {
+                id: "unknown-priced-openrouter-model".to_string(),
+                display_name: "Unknown-priced OpenRouter Model".to_string(),
+                provider: "openrouter".to_string(),
+                tier: ModelTier::Balanced,
+                context_window: 32_000,
+                max_output_tokens: 4_096,
+                input_cost_per_m: 0.0,
+                output_cost_per_m: 0.0,
+                pricing_known: false,
+                ..Default::default()
+            }],
+        });
+
+        let cost = MeteringEngine::estimate_cost_with_catalog(
+            &catalog,
+            "unknown-priced-openrouter-model",
+            1_000_000,
+            1_000_000,
+            0,
+            0,
+        );
+        let expected = DEFAULT_INPUT_COST_PER_M + DEFAULT_OUTPUT_COST_PER_M;
+        assert!((cost - expected).abs() < f64::EPSILON);
     }
 
     #[test]

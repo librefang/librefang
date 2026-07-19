@@ -64,6 +64,15 @@ describe("buildModelConfigPatch", () => {
     expect(patch).toEqual({ provider: "openai", model: "gpt-4o-mini" });
   });
 
+  it("persists the global-default sentinel as a provider/model pair", () => {
+    const persisted = { provider: "openrouter", model: "acme/current:free" };
+    const draft = seededDraft({ provider: "default", model: "default" });
+
+    const { patch } = buildModelConfigPatch(draft, persisted);
+
+    expect(patch).toEqual({ provider: "default", model: "default" });
+  });
+
   it("returns no fields when nothing changed", () => {
     const persisted = { provider: "openai", model: "gpt-4o", max_tokens: 4096, temperature: 0.7 };
     const draft = seededDraft({ provider: "openai", model: "gpt-4o" });

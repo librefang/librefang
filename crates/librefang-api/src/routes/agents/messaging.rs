@@ -16,8 +16,13 @@ pub async fn send_message(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(req): Json<MessageRequest>,
 ) -> impl IntoResponse {
+    // The authenticated human owner of this turn (#6460), used to select that
+    // user's own provider credential. Optional so unauthenticated /
+    // auth-disabled deployments keep working (owner = None → daemon-global).
+    let owner = api_user.as_ref().map(|u| u.0.user_id);
     // Pre-translate error messages before the `.await` point below.
     // `ErrorTranslator` wraps a `FluentBundle` which is `!Send`, so it must
     // not be held across an await boundary (axum requires `Send` futures).
@@ -174,8 +179,11 @@ pub async fn send_message(
         // Ephemeral "side question" — use a temp session, no persistence
         let kernel = state.kernel.clone();
         let msg = effective_message.clone();
+        let owner_dm = owner;
         match run_cancel_on_disconnect(async move {
-            kernel.send_message_ephemeral(agent_id, &msg, None).await
+            kernel
+                .send_message_ephemeral(agent_id, &msg, None, owner_dm)
+                .await
         })
         .await
         {
@@ -200,6 +208,7 @@ pub async fn send_message(
         let msg = effective_message.clone();
         let sc = sender_context.clone();
         let incognito = req.incognito;
+        let owner_msg = owner;
         match run_cancel_on_disconnect(async move {
             kernel
                 .send_message_with_incognito(
@@ -210,6 +219,7 @@ pub async fn send_message(
                     thinking_override,
                     session_id_override,
                     incognito,
+                    owner_msg,
                 )
                 .await
         })
@@ -398,8 +408,12 @@ pub async fn send_message_stream(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(req): Json<MessageRequest>,
 ) -> axum::response::Response {
+    // Authenticated human owner of this streaming turn (#6460); None when
+    // unauthenticated → daemon-global credential.
+    let owner = api_user.as_ref().map(|u| u.0.user_id);
     use axum::response::sse::{Event, Sse};
     use futures::stream;
     use librefang_kernel::llm_driver::StreamEvent;
@@ -487,6 +501,7 @@ pub async fn send_message_stream(
             sender_context,
             session_override,
             incognito,
+            owner,
         )
         .await
     {

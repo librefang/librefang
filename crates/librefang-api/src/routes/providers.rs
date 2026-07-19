@@ -222,6 +222,7 @@ fn synthesized_cli_model_row(
         "max_output_tokens": 0,
         "input_cost_per_m": 0.0,
         "output_cost_per_m": 0.0,
+        "pricing_known": true,
         // Text CLI models have no per-image pricing, but emit the keys (null) so
         // the row's shape matches every catalog row in the same response.
         "image_input_cost_per_m": serde_json::Value::Null,
@@ -257,13 +258,22 @@ pub async fn list_models(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let catalog = state.kernel.model_catalog_ref().load();
     let provider_filter = params.get("provider").map(|s| s.to_lowercase());
     let tier_filter = params.get("tier").map(|s| s.to_lowercase());
     let available_only = params
         .get("available")
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false);
+    let openrouter_in_scope = provider_filter
+        .as_deref()
+        .map(|provider| provider == "openrouter")
+        .unwrap_or(true);
+    if openrouter_in_scope {
+        if let Err(error) = crate::openrouter_catalog::refresh_if_stale(&state.kernel).await {
+            tracing::warn!(%error, "OpenRouter live catalog unavailable; using checked-in snapshot");
+        }
+    }
+    let catalog = state.kernel.model_catalog_ref().load();
 
     // Pre-compute the live-discovered model ID set per local provider so we
     // can hide static catalog entries whose IDs aren't actually exposed by
@@ -358,6 +368,7 @@ pub async fn list_models(
                 "max_output_tokens": m.max_output_tokens,
                 "input_cost_per_m": m.input_cost_per_m,
                 "output_cost_per_m": m.output_cost_per_m,
+                "pricing_known": m.pricing_known,
                 "image_input_cost_per_m": m.image_input_cost_per_m,
                 "image_output_cost_per_m": m.image_output_cost_per_m,
                 "supports_tools": eff.supports_tools,
@@ -563,6 +574,9 @@ pub async fn get_model(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    if id.starts_with("openrouter/") || id.starts_with("openrouter:") {
+        let _ = crate::openrouter_catalog::refresh_if_missing(&state.kernel).await;
+    }
     let catalog = state.kernel.model_catalog_ref().load();
     match catalog.find_model(&id) {
         Some(m) => {
@@ -586,6 +600,7 @@ pub async fn get_model(
                     "max_output_tokens": m.max_output_tokens,
                     "input_cost_per_m": m.input_cost_per_m,
                     "output_cost_per_m": m.output_cost_per_m,
+                    "pricing_known": m.pricing_known,
                     "image_input_cost_per_m": m.image_input_cost_per_m,
                     "image_output_cost_per_m": m.image_output_cost_per_m,
                     "supports_tools": eff.supports_tools,
@@ -823,6 +838,7 @@ fn provider_max_output_tokens(
     )
 )]
 pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    crate::openrouter_catalog::refresh_if_missing_in_background(&state.kernel);
     // Snapshot both the provider list and the matching suppression flags
     // from the same catalog load — racing a `delete_provider_key` /
     // `enable_provider` mid-iteration would otherwise let the JSON show a
@@ -1089,6 +1105,9 @@ pub async fn get_provider(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
+    if name == "openrouter" {
+        let _ = crate::openrouter_catalog::refresh_if_stale(&state.kernel).await;
+    }
     let (provider, models, max_output_tokens) = {
         let catalog = state.kernel.model_catalog_ref().load();
         match catalog.get_provider(&name) {
@@ -1109,6 +1128,7 @@ pub async fn get_provider(
                             "max_output_tokens": m.max_output_tokens,
                             "input_cost_per_m": m.input_cost_per_m,
                             "output_cost_per_m": m.output_cost_per_m,
+                            "pricing_known": m.pricing_known,
                             "image_input_cost_per_m": m.image_input_cost_per_m,
                             "image_output_cost_per_m": m.image_output_cost_per_m,
                             "supports_tools": eff.supports_tools,
@@ -1243,6 +1263,7 @@ pub async fn add_custom_model(
             .get("output_cost_per_m")
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0),
+        pricing_known: true,
         image_input_cost_per_m: body.get("image_input_cost_per_m").and_then(|v| v.as_f64()),
         image_output_cost_per_m: body.get("image_output_cost_per_m").and_then(|v| v.as_f64()),
         supports_tools: body
@@ -1444,6 +1465,46 @@ pub async fn set_provider_key(
         });
     }
 
+    // OpenRouter's model inventory changes frequently.
+    // Refresh it before choosing or migrating a default so a delisted static entry can never be selected during this request.
+    // Other providers keep the existing background-validation path.
+    if name == "openrouter" {
+        let base_url = {
+            let catalog = state.kernel.model_catalog_ref().load();
+            catalog
+                .get_provider(&name)
+                .map(|provider| provider.base_url.clone())
+                .unwrap_or_default()
+        };
+        if !base_url.is_empty() {
+            let result =
+                librefang_kernel::model_catalog::probe_api_key(&name, &base_url, &key).await;
+            let key_status = result.key_valid.map(|valid| {
+                if valid {
+                    librefang_types::model_catalog::AuthStatus::ValidatedKey
+                } else {
+                    librefang_types::model_catalog::AuthStatus::InvalidKey
+                }
+            });
+            let available_models = result.available_models;
+            let live_models = result.live_models;
+            let model_list_fetched = result.model_list_fetched;
+            let provider_id = name.clone();
+            state.kernel.model_catalog_update(&mut move |catalog| {
+                if let Some(status) = key_status {
+                    catalog.set_provider_auth_status(&provider_id, status);
+                }
+                if model_list_fetched {
+                    catalog.reconcile_live_provider_models(
+                        &provider_id,
+                        available_models.clone(),
+                        live_models.clone(),
+                    );
+                }
+            });
+        }
+    }
+
     // Kick off a background probe to validate the new key immediately so the
     // dashboard reflects ValidatedKey / InvalidKey without waiting for restart.
     state.kernel.clone().spawn_key_validation();
@@ -1455,17 +1516,21 @@ pub async fn set_provider_key(
     // Read the effective default from the hot-reload override (if set) rather than
     // the stale boot-time config — a previous set_provider_key call may have already
     // switched the default.
-    let (current_provider, current_key_env) = {
+    let (current_provider, current_model, current_key_env) = {
         let guard = state
             .kernel
             .default_model_override_ref()
             .read()
             .unwrap_or_else(|e| e.into_inner());
         match guard.as_ref() {
-            Some(dm) => (dm.provider.clone(), dm.api_key_env.clone()),
+            Some(dm) => (
+                dm.provider.clone(),
+                dm.model.clone(),
+                dm.api_key_env.clone(),
+            ),
             None => {
                 let dm = state.kernel.config_ref().default_model.clone();
-                (dm.provider, dm.api_key_env)
+                (dm.provider, dm.model, dm.api_key_env)
             }
         }
     };
@@ -1477,11 +1542,12 @@ pub async fn set_provider_key(
             .filter(|v| !v.is_empty())
             .is_some()
     };
+    let mut migrated_model: Option<(String, String)> = None;
     let switched = if !current_has_key && current_provider != name {
         // Find a default model for the newly-keyed provider
         let default_model = {
             let catalog = state.kernel.model_catalog_ref().load();
-            catalog.default_model_for_provider(&name)
+            catalog.automatic_default_model_for_provider(&name)
         };
         if let Some(model_id) = default_model {
             // Update config.toml to persist the switch
@@ -1512,21 +1578,22 @@ pub async fn set_provider_key(
             false
         }
     } else if current_provider == name {
-        // User is saving a key for the CURRENT default provider. The env var is
-        // already set (set_var above), but we must ensure default_model_override
-        // has the correct api_key_env so resolve_driver reads the right variable.
-        let needs_update = {
-            let guard = state
-                .kernel
-                .default_model_override_ref()
-                .read()
-                .unwrap_or_else(|e| e.into_inner());
-            match guard.as_ref() {
-                Some(dm) => dm.api_key_env != env_var,
-                None => state.kernel.config_ref().default_model.api_key_env != env_var,
-            }
+        // If the current OpenRouter default was a free model that disappeared, migrate it to another live free model.
+        // Never replace it with a paid model automatically.
+        let replacement = {
+            let catalog = state.kernel.model_catalog_ref().load();
+            (name == "openrouter"
+                && librefang_kernel::model_catalog::is_free_openrouter_model(&current_model)
+                && catalog.is_model_available(&name, &current_model) == Some(false))
+            .then(|| catalog.closest_free_openrouter_model(&current_model))
+            .flatten()
         };
-        if needs_update {
+        if let Some(model_id) = replacement {
+            let old_model = current_model.clone();
+            let config_path = state.kernel.home_dir().join("config.toml");
+            if let Err(e) = persist_default_model(&config_path, &name, &model_id, &env_var) {
+                tracing::warn!("Failed to persist default_model to config.toml: {e}");
+            }
             let mut guard = state
                 .kernel
                 .default_model_override_ref()
@@ -1536,11 +1603,42 @@ pub async fn set_provider_key(
                 .clone()
                 .unwrap_or_else(|| state.kernel.config_ref().default_model.clone());
             *guard = Some(librefang_types::config::DefaultModelConfig {
+                model: model_id.clone(),
                 api_key_env: env_var.clone(),
                 ..base
             });
+            migrated_model = Some((old_model, model_id));
+            false
+        } else {
+            // User is saving a key for the current default provider.
+            // The env var is already set above, but `default_model_override` must carry the correct `api_key_env` so `resolve_driver` reads it.
+            let needs_update = {
+                let guard = state
+                    .kernel
+                    .default_model_override_ref()
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner());
+                match guard.as_ref() {
+                    Some(dm) => dm.api_key_env != env_var,
+                    None => state.kernel.config_ref().default_model.api_key_env != env_var,
+                }
+            };
+            if needs_update {
+                let mut guard = state
+                    .kernel
+                    .default_model_override_ref()
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
+                let base = guard
+                    .clone()
+                    .unwrap_or_else(|| state.kernel.config_ref().default_model.clone());
+                *guard = Some(librefang_types::config::DefaultModelConfig {
+                    api_key_env: env_var.clone(),
+                    ..base
+                });
+            }
+            false
         }
-        false
     } else {
         false
     };
@@ -1554,9 +1652,8 @@ pub async fn set_provider_key(
     // Trigger all active hands so they resume immediately
     state.kernel.trigger_all_hands();
 
-    // If default provider switched, update registry entries for agents that were
-    // using the old default so they immediately pick up the new provider/model.
-    if switched {
+    // If the effective default changed, update registry entries for agents that were using the old default so they immediately pick up the new provider/model.
+    if switched || migrated_model.is_some() {
         let new_dm = {
             let guard = state
                 .kernel
@@ -1567,21 +1664,53 @@ pub async fn set_provider_key(
                 .clone()
                 .unwrap_or_else(|| state.kernel.config_ref().default_model.clone())
         };
-        let sync_failures = state
-            .kernel
-            .sync_default_model_agents(&current_provider, &new_dm);
+        // `switched` is a full provider switch: every dashboard agent on the old provider should move regardless of which model it was on, so pass `None`.
+        // `migrated_model` is an intra-provider free-model migration: only agents pinned to the specific delisted model should move, so narrow by `old_model`.
+        let old_model_for_sync = migrated_model.as_ref().map(|(old, _)| old.as_str());
+        let sync_failures =
+            state
+                .kernel
+                .sync_default_model_agents(&current_provider, old_model_for_sync, &new_dm);
         if !sync_failures.is_empty() {
+            if let Some((old_model, new_model)) = migrated_model.as_ref() {
+                state
+                    .kernel
+                    .notify_model_migrated(
+                        "system",
+                        &name,
+                        old_model,
+                        new_model,
+                        "the previous free model is no longer listed by the provider",
+                    )
+                    .await;
+            }
             let mut resp = serde_json::json!({"status": "saved", "provider": name});
-            resp["switched_default"] = serde_json::json!(true);
+            if switched {
+                resp["switched_default"] = serde_json::json!(true);
+            }
+            if let Some((old_model, new_model)) = migrated_model.as_ref() {
+                resp["model_migrated"] = serde_json::json!(true);
+                resp["old_model"] = serde_json::json!(old_model);
+                resp["new_model"] = serde_json::json!(new_model);
+            }
             resp["sync_failures"] = serde_json::json!(sync_failures
                 .iter()
                 .map(|(agent, err)| serde_json::json!({"agent": agent, "error": err}))
                 .collect::<Vec<_>>());
-            resp["message"] = serde_json::json!(format!(
-                "API key saved and default provider switched to '{name}', but {} agent(s) \
-                 could not be migrated and remain pinned to the old provider on disk.",
-                sync_failures.len()
-            ));
+            resp["message"] = if let Some((old_model, new_model)) = migrated_model.as_ref() {
+                serde_json::json!(format!(
+                    "API key saved and OpenRouter default model migrated from '{old_model}' to \
+                     '{new_model}', but {} agent(s) could not be migrated and remain pinned to \
+                     the old model on disk.",
+                    sync_failures.len()
+                ))
+            } else {
+                serde_json::json!(format!(
+                    "API key saved and default provider switched to '{name}', but {} agent(s) \
+                     could not be migrated and remain pinned to the old provider on disk.",
+                    sync_failures.len()
+                ))
+            };
             // Mixed outcome: the key was saved but the fan-out half-applied.
             // 207 surfaces the partial failure instead of a lying 200.
             return (StatusCode::MULTI_STATUS, Json(resp));
@@ -1594,6 +1723,25 @@ pub async fn set_provider_key(
         resp["message"] = serde_json::json!(format!(
             "API key saved and default provider switched to '{}'.",
             name
+        ));
+    }
+    if let Some((old_model, new_model)) = migrated_model {
+        state
+            .kernel
+            .notify_model_migrated(
+                "system",
+                &name,
+                &old_model,
+                &new_model,
+                "the previous free model is no longer listed by the provider",
+            )
+            .await;
+        resp["model_migrated"] = serde_json::json!(true);
+        resp["old_model"] = serde_json::json!(old_model);
+        resp["new_model"] = serde_json::json!(new_model);
+        resp["message"] = serde_json::json!(format!(
+            "API key saved and OpenRouter default model migrated from '{old_model}' to \
+             '{new_model}' because the previous free model is no longer available."
         ));
     }
 
@@ -1660,6 +1808,7 @@ pub async fn delete_provider_key(
         let name_for_closure = name.clone();
         state.kernel.model_catalog_update(&mut move |catalog| {
             catalog.suppress_provider(&name_for_closure);
+            catalog.clear_provider_available_models(&name_for_closure);
             catalog.save_suppressed(&suppressed_path);
             catalog.detect_auth();
         });
@@ -1839,6 +1988,78 @@ pub async fn test_provider(
     }
 
     let api_key_val = api_key.unwrap_or_default();
+
+    // OpenRouter's model list is public and therefore cannot validate an API key.
+    // Probe `/key` for authentication and refresh `/models` separately.
+    // The shared runtime helper combines both operations.
+    if name == "openrouter" {
+        let start = Instant::now();
+        let result =
+            librefang_kernel::model_catalog::probe_api_key(&name, &base_url, &api_key_val).await;
+        let latency_ms = start.elapsed().as_millis();
+        let refreshed_models = result.live_models.len();
+        let model_list_fetched = result.model_list_fetched;
+        let key_valid = result.key_valid;
+        let available_models = result.available_models;
+        let live_models = result.live_models;
+        state.kernel.model_catalog_update(&mut move |catalog| {
+            if let Some(valid) = key_valid {
+                let status = if valid {
+                    librefang_types::model_catalog::AuthStatus::ValidatedKey
+                } else {
+                    librefang_types::model_catalog::AuthStatus::InvalidKey
+                };
+                catalog.set_provider_auth_status("openrouter", status);
+            }
+            if model_list_fetched {
+                catalog.reconcile_live_provider_models(
+                    "openrouter",
+                    available_models.clone(),
+                    live_models.clone(),
+                );
+            }
+        });
+        state.provider_test_cache.insert(
+            name.clone(),
+            (
+                Instant::now(),
+                latency_ms,
+                chrono::Utc::now().to_rfc3339(),
+                key_valid.is_some() || model_list_fetched,
+            ),
+        );
+
+        return match key_valid {
+            Some(true) => (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "ok",
+                    "provider": name,
+                    "latency_ms": latency_ms,
+                    "models_refreshed": refreshed_models,
+                })),
+            ),
+            Some(false) => (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "provider": name,
+                    "error": "Authentication failed (HTTP 401/403)",
+                    "models_refreshed": refreshed_models,
+                })),
+            ),
+            None => (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "provider": name,
+                    "error": "OpenRouter key validation was inconclusive",
+                    "models_refreshed": refreshed_models,
+                })),
+            ),
+        };
+    }
+
     // Reuse the shared probe HTTP client instead of building a fresh
     // `reqwest::Client` per request. Each rebuild paid a TLS-config init +
     // root-cert-chain load (~50–100 ms) on top of the actual handshake,
@@ -2189,6 +2410,9 @@ pub async fn set_default_provider(
     Path(name): Path<String>,
     body: Option<axum::Json<serde_json::Value>>,
 ) -> impl IntoResponse {
+    if name == "openrouter" {
+        let _ = crate::openrouter_catalog::refresh_if_stale(&state.kernel).await;
+    }
     // Accept optional {"model": "model-id"} body to override the auto-selected model.
     // This is needed for providers like ollama where models are dynamic and may
     // not be in the static catalog.
@@ -2209,7 +2433,23 @@ pub async fn set_default_provider(
                     .into_json_tuple();
             }
         };
-        let model_id = user_model.or_else(|| catalog.default_model_for_provider(&name));
+        if let Some(ref model_id) = user_model {
+            if name == "openrouter" {
+                let openrouter_catalog_is_fresh = !catalog.live_provider_models_are_stale(
+                    "openrouter",
+                    librefang_kernel::model_catalog::OPENROUTER_MODEL_CATALOG_TTL,
+                );
+                if openrouter_catalog_is_fresh
+                    && catalog.is_model_available(&name, model_id) == Some(false)
+                {
+                    return ApiErrorResponse::bad_request(format!(
+                        "Model '{model_id}' is not available from provider '{name}'"
+                    ))
+                    .into_json_tuple();
+                }
+            }
+        }
+        let model_id = user_model.or_else(|| catalog.automatic_default_model_for_provider(&name));
         (model_id, provider.api_key_env.clone())
     };
 
@@ -2264,10 +2504,11 @@ pub async fn set_default_provider(
         *guard = Some(new_dm.clone());
     }
 
-    // Update registry entries for agents that were tracking the old default
+    // Update registry entries for agents that were tracking the old default.
+    // This is an explicit user-driven default change (possibly same provider, different model), so every dashboard agent following the old default moves — pass `None` rather than narrowing to a specific old model.
     let sync_failures = state
         .kernel
-        .sync_default_model_agents(&old_provider, &new_dm);
+        .sync_default_model_agents(&old_provider, None, &new_dm);
 
     let mut body = serde_json::json!({
         "status": "updated",

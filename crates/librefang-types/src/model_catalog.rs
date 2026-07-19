@@ -4,6 +4,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 
+fn default_true() -> bool {
+    true
+}
+
 /// A model's capability tier.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -195,6 +199,11 @@ pub struct ModelCatalogEntry {
     pub input_cost_per_m: f64,
     /// Cost per million output tokens (USD) — text tokens for image/audio models.
     pub output_cost_per_m: f64,
+    /// Whether text-token pricing is known.
+    ///
+    /// Older registry entries predate this field and carry explicit prices, so a missing value defaults to true.
+    #[serde(default = "default_true")]
+    pub pricing_known: bool,
     /// Cost per million image input tokens (USD). Only set for image/multimodal
     /// models where image pixels are priced separately from text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -317,6 +326,7 @@ impl Default for ModelCatalogEntry {
             max_output_tokens: 0,
             input_cost_per_m: 0.0,
             output_cost_per_m: 0.0,
+            pricing_known: true,
             image_input_cost_per_m: None,
             image_output_cost_per_m: None,
             supports_tools: false,
@@ -705,6 +715,7 @@ mod tests {
         assert!(entry.id.is_empty());
         assert_eq!(entry.tier, ModelTier::Balanced);
         assert!(entry.aliases.is_empty());
+        assert!(entry.pricing_known);
     }
 
     #[test]

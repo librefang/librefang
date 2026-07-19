@@ -58,6 +58,39 @@ When an approval times out, the action falls through to `timeout_fallback`:
 - `allow` — action proceeds. Only safe in fully-trusted autonomous setups.
 - `retry` — re-requests approval once more.
 
+### How `trusted_senders` composes with `[[users]]` RBAC
+
+`trusted_senders` and `[[users]]` RBAC are two separate trust surfaces, and being listed in one does not exempt a sender from the other.
+`trusted_senders` governs only the approval layer — it waives the approval prompt for a trusted sender's low-risk tools (high-risk tools stay gated, per the [Hardening Checklist](#hardening-checklist)).
+`[[users]]` RBAC governs the per-user tool gate, which is evaluated **first** and independently.
+
+Because RBAC runs first, a "needs approval" verdict from it wins before the `trusted_senders` bypass is ever consulted.
+So when `[[users]]` is configured and a sender is **not** a registered user on the `api` channel — the channel REST `POST /api/agents/{id}/message` requests arrive on — that sender falls to the built-in guest gate (`guest_gate`).
+The guest gate allows only a small read-only set (file reads, search, `web_fetch`, …) and returns "needs approval" for everything else — including `memory_store` / `memory_recall`, which are otherwise low-risk.
+The surprising consequence: an ID listed in `trusted_senders` that is not *also* a registered `[[users]]` on the `api` channel still has its `memory_*` calls gated, because the guest gate forced approval before `trusted_senders` could waive it.
+
+**Fix — register the operator as a user bound to the `api` channel**, with a tool policy covering the tools it drives:
+
+```toml
+[[users]]
+name = "ops-bot"
+role = "user"
+
+# Bind the REST sender_id (the `sender_id` field on the /message request)
+# to this user on the "api" channel.
+[users.channel_bindings]
+api = "ops-bot-sender-id"
+
+# Grant the low-risk tools this operator uses; the RBAC gate now returns
+# Allow for these instead of routing them through the guest gate.
+[users.tool_policy]
+allowed_tools = ["memory_*"]
+```
+
+With this in place the RBAC gate returns `Allow` for `memory_*`, so approval is no longer forced and the `trusted_senders` bypass applies on top exactly as designed.
+
+If no `[[users]]` are configured at all, RBAC is inactive — the per-user gate returns `Allow` for every sender — and `trusted_senders` works standalone with no extra setup.
+
 ---
 
 ## Enabling TOTP

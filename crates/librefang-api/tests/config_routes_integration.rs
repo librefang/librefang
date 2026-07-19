@@ -178,6 +178,53 @@ async fn get_config_schema_is_public_and_returns_json_schema() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn get_config_schema_starts_configured_openrouter_catalog_refresh() {
+    use librefang_types::model_catalog::AuthStatus;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{
+                "id": "acme/schema:free",
+                "name": "Schema Free",
+                "context_length": 65536,
+                "pricing": {"prompt": "0", "completion": "0"}
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let h = boot_router_with_api_key(API_KEY).await;
+    h.state.kernel.model_catalog_update(&mut |catalog| {
+        assert!(catalog.set_provider_url("openrouter", &server.uri()));
+        catalog.set_provider_auth_status("openrouter", AuthStatus::Configured);
+        catalog.clear_provider_available_models("openrouter");
+    });
+
+    let (status, _) = send(h.app.clone(), anon_get("/api/config/schema")).await;
+    assert_eq!(status, StatusCode::OK);
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if h.state
+                .kernel
+                .model_catalog_ref()
+                .load()
+                .has_live_provider_models("openrouter")
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("config schema should trigger OpenRouter refresh");
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/config/export
 // ---------------------------------------------------------------------------

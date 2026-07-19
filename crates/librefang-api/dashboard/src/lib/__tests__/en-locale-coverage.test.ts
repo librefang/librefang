@@ -482,7 +482,41 @@ function isStylingLiteral(text: string): boolean {
 function isAllowedHardcodedText(text: string, kind: string): boolean {
   if (isTechnicalLiteral(text)) return true;
   if (["English", "Українська", "中文", "简体中文", "한국어"].includes(text)) return true;
-  if (["Telegram", "Slack", "Discord", "Signal"].includes(text)) return true;
+  // Channel product / brand names are proper nouns and must NOT be translated.
+  // Mirrors DeliveryTargetsEditor's CHANNEL_PRESETS labels — adding a channel
+  // there only needs an entry here when its name is not already brand-like
+  // (e.g. all-caps "LINE"/"QQ", lowercase "ntfy", or CamelCase "DingTalk").
+  if (
+    [
+      "Bluesky",
+      "DingTalk",
+      "Discord",
+      "Feishu / Lark",
+      "Google Chat",
+      "Gotify",
+      "LINE",
+      "Mastodon",
+      "Matrix",
+      "Mattermost",
+      "Microsoft Teams",
+      "Nextcloud Talk",
+      "ntfy",
+      "QQ",
+      "Reddit",
+      "Rocket.Chat",
+      "Signal",
+      "Slack",
+      "Telegram",
+      "Twitch",
+      "Webex",
+      "WeChat",
+      "WeCom",
+      "WhatsApp",
+      "Zulip",
+    ].includes(text)
+  ) {
+    return true;
+  }
   if (["CLI N/A"].includes(text)) return true;
   if (kind === "jsx-attr:placeholder" && /^e\.g\. [\w./:"{}* -]+$/.test(text)) {
     return true;

@@ -685,6 +685,7 @@
     "edit_name": "智能体名称",
     "model_save_failed": "更新模型失败",
     "model_saved": "模型已更新",
+    "use_global_default": "使用全局默认模型",
     "rename_failed": "重命名智能体失败",
     "rename_hand_disabled": "Hand 管理的智能体不能重命名",
     "rename_hint": "点击重命名",

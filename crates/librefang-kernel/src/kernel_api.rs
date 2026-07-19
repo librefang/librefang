@@ -194,6 +194,29 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     fn vault_redeem_recovery_code(&self, code: &str) -> Result<bool, String>;
 
     // ====================================================================
+    // Per-user LLM provider credentials (#6460).
+    //
+    // These forward to the inherent `LibreFangKernel` methods in
+    // `user_provider_credentials.rs`. Only the write / list / remove half
+    // is exposed here — the plaintext getter (`get_user_provider_key`) is
+    // deliberately kept `pub(crate)` on the concrete kernel and is NOT on
+    // this trait, so the HTTP layer can never read a stored key back out.
+    // ====================================================================
+
+    fn set_user_provider_key(
+        &self,
+        user_id: librefang_types::agent::UserId,
+        provider: &str,
+        api_key: &str,
+    ) -> Result<(), String>;
+    fn remove_user_provider_key(
+        &self,
+        user_id: librefang_types::agent::UserId,
+        provider: &str,
+    ) -> Result<bool, String>;
+    fn list_user_provider_keys(&self, user_id: librefang_types::agent::UserId) -> Vec<String>;
+
+    // ====================================================================
     // MCP install façade — routes through the kernel's cached vault and
     // catalog so HTTP request handlers don't open vault.enc and run the
     // unlock-time Argon2id KDF on every install request (#3598). The trait
@@ -339,6 +362,7 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         agent_id: AgentId,
         message: &str,
         sender_context: Option<&librefang_channels::types::SenderContext>,
+        owner: Option<librefang_types::agent::UserId>,
     ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult>;
     /// Send a message to an agent with an optional per-call `session_mode` override.
     ///
@@ -535,13 +559,22 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         model: &str,
         explicit_provider: Option<&str>,
     ) -> KernelResult<()>;
-    /// Returns a per-agent partial-failure list `(agent_name, error)`;
-    /// empty means every eligible agent migrated cleanly.
+    /// Returns a per-agent partial-failure list `(agent_name, error)`; empty means every eligible agent migrated cleanly.
+    /// `old_model` narrows the match to agents pinned to that model too — see the `LibreFangKernel::sync_default_model_agents` doc comment for when to pass `Some`/`None`.
     fn sync_default_model_agents(
         &self,
         old_provider: &str,
+        old_model: Option<&str>,
         dm: &librefang_types::config::DefaultModelConfig,
     ) -> Vec<(String, String)>;
+    async fn notify_model_migrated(
+        &self,
+        agent_id: &str,
+        provider: &str,
+        old_model: &str,
+        new_model: &str,
+        reason: &str,
+    );
     fn traces(&self) -> &dashmap::DashMap<AgentId, Vec<librefang_types::tool::DecisionTrace>>;
     fn update_hand_agent_runtime_override(
         &self,
@@ -576,6 +609,7 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         thinking_override: Option<bool>,
         session_id_override: Option<SessionId>,
         incognito: bool,
+        owner: Option<librefang_types::agent::UserId>,
     ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult>;
     async fn send_message_streaming_with_routing(
         self: Arc<Self>,
@@ -595,6 +629,7 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     // signature borrow-flexible for internal callers that already hold a
     // reference. Do not "unify" by making both by-ref or both by-value
     // without auditing every callsite.
+    #[allow(clippy::too_many_arguments)]
     async fn send_message_streaming_with_incognito(
         self: Arc<Self>,
         agent_id: AgentId,
@@ -603,6 +638,7 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         sender_context: Option<librefang_channels::types::SenderContext>,
         session_id_override: Option<SessionId>,
         incognito: bool,
+        owner: Option<librefang_types::agent::UserId>,
     ) -> KernelResult<(
         tokio::sync::mpsc::Receiver<librefang_runtime::llm_driver::StreamEvent>,
         tokio::task::JoinHandle<KernelResult<librefang_runtime::agent_loop::AgentLoopResult>>,
@@ -948,6 +984,26 @@ impl KernelApi for LibreFangKernel {
         Self::vault_redeem_recovery_code(self, code)
     }
 
+    // -- Per-user LLM provider credentials (#6460) --
+    fn set_user_provider_key(
+        &self,
+        user_id: librefang_types::agent::UserId,
+        provider: &str,
+        api_key: &str,
+    ) -> Result<(), String> {
+        Self::set_user_provider_key(self, user_id, provider, api_key)
+    }
+    fn remove_user_provider_key(
+        &self,
+        user_id: librefang_types::agent::UserId,
+        provider: &str,
+    ) -> Result<bool, String> {
+        Self::remove_user_provider_key(self, user_id, provider)
+    }
+    fn list_user_provider_keys(&self, user_id: librefang_types::agent::UserId) -> Vec<String> {
+        Self::list_user_provider_keys(self, user_id)
+    }
+
     // -- MCP install façade --
     fn install_integration(
         &self,
@@ -1119,8 +1175,11 @@ impl KernelApi for LibreFangKernel {
         agent_id: AgentId,
         message: &str,
         sender_context: Option<&librefang_channels::types::SenderContext>,
+        owner: Option<librefang_types::agent::UserId>,
     ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult> {
-        Self::send_message_ephemeral(self, agent_id, message, sender_context).await
+        // Forward the caller's owner (the API handler passes the authenticated
+        // user; runtime callers pass None → daemon-global credential) (#6460).
+        Self::send_message_ephemeral(self, agent_id, message, sender_context, owner).await
     }
     async fn send_message_with_session_mode(
         &self,
@@ -1358,9 +1417,20 @@ impl KernelApi for LibreFangKernel {
     fn sync_default_model_agents(
         &self,
         old_provider: &str,
+        old_model: Option<&str>,
         dm: &librefang_types::config::DefaultModelConfig,
     ) -> Vec<(String, String)> {
-        Self::sync_default_model_agents(self, old_provider, dm)
+        Self::sync_default_model_agents(self, old_provider, old_model, dm)
+    }
+    async fn notify_model_migrated(
+        &self,
+        agent_id: &str,
+        provider: &str,
+        old_model: &str,
+        new_model: &str,
+        reason: &str,
+    ) {
+        Self::notify_model_migrated(self, agent_id, provider, old_model, new_model, reason).await;
     }
     fn traces(&self) -> &dashmap::DashMap<AgentId, Vec<librefang_types::tool::DecisionTrace>> {
         <Self as crate::AgentSubsystemApi>::traces(self)
@@ -1408,6 +1478,7 @@ impl KernelApi for LibreFangKernel {
         thinking_override: Option<bool>,
         session_id_override: Option<SessionId>,
         incognito: bool,
+        owner: Option<librefang_types::agent::UserId>,
     ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult> {
         Self::send_message_with_incognito(
             self,
@@ -1418,6 +1489,7 @@ impl KernelApi for LibreFangKernel {
             thinking_override,
             session_id_override,
             incognito,
+            owner,
         )
         .await
     }
@@ -1438,6 +1510,7 @@ impl KernelApi for LibreFangKernel {
         )
         .await
     }
+    #[allow(clippy::too_many_arguments)]
     async fn send_message_streaming_with_incognito(
         self: Arc<Self>,
         agent_id: AgentId,
@@ -1446,6 +1519,7 @@ impl KernelApi for LibreFangKernel {
         sender_context: Option<librefang_channels::types::SenderContext>,
         session_id_override: Option<SessionId>,
         incognito: bool,
+        owner: Option<librefang_types::agent::UserId>,
     ) -> KernelResult<(
         tokio::sync::mpsc::Receiver<librefang_runtime::llm_driver::StreamEvent>,
         tokio::task::JoinHandle<KernelResult<librefang_runtime::agent_loop::AgentLoopResult>>,
@@ -1458,6 +1532,7 @@ impl KernelApi for LibreFangKernel {
             sender_context.as_ref(),
             session_id_override,
             incognito,
+            owner,
         )
         .await
     }
