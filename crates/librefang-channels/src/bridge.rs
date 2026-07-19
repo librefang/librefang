@@ -2571,24 +2571,13 @@ fn reconstruct_command_text(name: &str, args: &[String]) -> String {
     }
 }
 
-/// Whether the group-message reply-intent precheck (#6445) applies to this
-/// override set.
+/// Whether the group-message reply-intent precheck (#6445) applies to this override set.
 ///
-/// The precheck is a lightweight LLM classifier that runs only when the bot is
-/// configured to process *every* group message unconditionally — the one place
-/// an intent filter earns its keep.
-/// That "process all" state is reached two ways, which
-/// `should_process_group_message` already collapses into the same `true` arm:
-/// an explicit `group_policy = "all"`, or an unset `group_policy` with no
-/// `group_trigger_patterns` (the historical whole-struct-absent behaviour the
-/// #6445 fix restored).
-/// An unset policy WITH trigger patterns resolves to mention-only gating instead
-/// (the patterns are the gate), so the precheck must stay off there.
+/// The precheck is a lightweight LLM classifier that runs only when the bot is configured to process *every* group message unconditionally — the one place an intent filter earns its keep.
+/// That "process all" state is reached two ways, which `should_process_group_message` already collapses into the same `true` arm: an explicit `group_policy = "all"`, or an unset `group_policy` with no `group_trigger_patterns` (the historical whole-struct-absent behaviour the #6445 fix restored).
+/// An unset policy WITH trigger patterns resolves to mention-only gating instead (the patterns are the gate), so the precheck must stay off there.
 ///
-/// Both `dispatch_message` and `media_dispatch_allowed` call this so the two
-/// paths cannot drift — before #6445 they each matched only the literal
-/// `Some(GroupPolicy::All)` and silently skipped the precheck on the common
-/// unset-policy "process all" config.
+/// Both `dispatch_message` and `media_dispatch_allowed` call this so the two paths cannot drift — before #6445 they each matched only the literal `Some(GroupPolicy::All)` and silently skipped the precheck on the common unset-policy "process all" config.
 fn group_reply_precheck_applies(overrides: &ChannelOverrides) -> bool {
     match overrides.group_policy {
         Some(GroupPolicy::All) => true,
