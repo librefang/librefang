@@ -60,7 +60,7 @@ totp_tools = []                        # 留空表示审批列表内所有工具
 ### `trusted_senders` 与 `[[users]]` RBAC 如何叠加
 
 `trusted_senders` 和 `[[users]]` RBAC 是两个相互独立的信任面，被其中一个信任并不意味着可以豁免另一个。
-`trusted_senders` 只作用于审批层——它为受信任发送者的低风险工具免除审批提示（高风险工具仍被拦截，见[加固清单](#hardening-checklist)）。
+`trusted_senders` 只作用于审批层——它为受信任发送者的低风险工具免除审批提示（高风险工具仍被拦截，见[加固清单](#加固清单)）。
 `[[users]]` RBAC 作用于按用户的工具门禁，而该门禁**先于**审批层、且独立地被求值。
 
 由于 RBAC 先运行，它给出的「需要审批」结论会在 `trusted_senders` 免审批被查阅之前就先生效。
