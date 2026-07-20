@@ -629,7 +629,6 @@ fn convert_response(resp: GeminiResponse) -> Result<CompletionResponse, LlmError
 
 // ── Shared helpers (used by both Gemini and Vertex AI drivers) ────────
 
-/// Build a Gemini API request body.
 /// Map a [`ResponseFormat`] to Gemini's `(responseMimeType, responseSchema)`
 /// pair. Gemini honors structured output through `generationConfig`, unlike
 /// OpenAI/Anthropic; `None` / `Text` leaves both unset (free-form text).
@@ -647,6 +646,7 @@ fn gemini_response_format(
     }
 }
 
+/// Build a Gemini API request body.
 pub(crate) fn build_request(
     contents: Vec<GeminiContent>,
     system_instruction: Option<GeminiContent>,
