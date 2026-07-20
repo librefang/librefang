@@ -991,8 +991,12 @@ pub async fn execute_tool_raw(
         // Knowledge graph tools. `sender_id` is the per-user peer identity
         // (same as the memory tools use), so a multi-user agent's KG writes and
         // reads are scoped to the calling user (#6494).
-        "knowledge_add_entity" => tool_knowledge_add_entity(input, *kernel, *sender_id).await,
-        "knowledge_add_relation" => tool_knowledge_add_relation(input, *kernel, *sender_id).await,
+        "knowledge_add_entity" => {
+            tool_knowledge_add_entity(input, *kernel, *caller_agent_id, *sender_id).await
+        }
+        "knowledge_add_relation" => {
+            tool_knowledge_add_relation(input, *kernel, *caller_agent_id, *sender_id).await
+        }
         "knowledge_query" => tool_knowledge_query(input, *kernel, *sender_id).await,
 
         // Image analysis tool

@@ -1718,10 +1718,19 @@ impl Memory for MemorySubstrate {
             .map_err(|e| LibreFangError::Internal(e.to_string()))?
     }
 
-    async fn add_entity(&self, entity: Entity, peer_id: Option<&str>) -> LibreFangResult<String> {
+    async fn add_entity(
+        &self,
+        entity: Entity,
+        agent_id: &str,
+        peer_id: Option<&str>,
+    ) -> LibreFangResult<String> {
         let store = self.knowledge.clone();
+        // Own the id before the move into the blocking closure ('static). The
+        // caller's agent id scopes the row so agent-scoped reads / delete see
+        // it; an empty caller id keeps the historical shared/unscoped write.
+        let agent = agent_id.to_string();
         let peer = peer_id.map(str::to_string);
-        tokio::task::spawn_blocking(move || store.add_entity(entity, "", peer.as_deref()))
+        tokio::task::spawn_blocking(move || store.add_entity(entity, &agent, peer.as_deref()))
             .await
             .map_err(|e| LibreFangError::Internal(e.to_string()))?
     }
@@ -1729,11 +1738,13 @@ impl Memory for MemorySubstrate {
     async fn add_relation(
         &self,
         relation: Relation,
+        agent_id: &str,
         peer_id: Option<&str>,
     ) -> LibreFangResult<String> {
         let store = self.knowledge.clone();
+        let agent = agent_id.to_string();
         let peer = peer_id.map(str::to_string);
-        tokio::task::spawn_blocking(move || store.add_relation(relation, "", peer.as_deref()))
+        tokio::task::spawn_blocking(move || store.add_relation(relation, &agent, peer.as_deref()))
             .await
             .map_err(|e| LibreFangError::Internal(e.to_string()))?
     }
@@ -1788,6 +1799,83 @@ mod tests {
             .unwrap();
         let val = substrate.get(agent_id, "key").await.unwrap();
         assert_eq!(val, Some(serde_json::json!("value")));
+    }
+
+    /// Regression: a knowledge entity/relation written THROUGH THE SUBSTRATE
+    /// (the MCP `knowledge_add_*` tool path) must be scoped to the caller's
+    /// agent. The substrate previously hardcoded `agent_id = ""`, so the row
+    /// was invisible to the agent-scoped relations read
+    /// (`query_graph_scoped(.., Some(agent), ..)`) and un-deletable by
+    /// `delete_by_agent`, and split-brained from proactively-extracted triples
+    /// (which are written under the real agent id).
+    #[tokio::test]
+    async fn knowledge_add_scopes_the_row_to_the_caller_agent() {
+        use librefang_types::memory::{Entity, EntityType, GraphPattern, Relation, RelationType};
+
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let mk = |id: &str, name: &str, t: EntityType| Entity {
+            id: id.to_string(),
+            entity_type: t,
+            name: name.to_string(),
+            properties: HashMap::new(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        // Write via the `Memory` trait (exactly as the MCP tool path does),
+        // threading a real caller agent id.
+        substrate
+            .add_entity(mk("alice", "Alice", EntityType::Person), "agent-x", None)
+            .await
+            .unwrap();
+        substrate
+            .add_entity(
+                mk("acme", "Acme", EntityType::Organization),
+                "agent-x",
+                None,
+            )
+            .await
+            .unwrap();
+        substrate
+            .add_relation(
+                Relation {
+                    source: "alice".to_string(),
+                    relation: RelationType::WorksAt,
+                    target: "acme".to_string(),
+                    properties: HashMap::new(),
+                    confidence: 1.0,
+                    created_at: chrono::Utc::now(),
+                },
+                "agent-x",
+                None,
+            )
+            .await
+            .unwrap();
+
+        let pattern = || GraphPattern {
+            source: None,
+            relation: Some(RelationType::WorksAt),
+            target: None,
+            max_depth: 1,
+        };
+
+        // The owning agent's scoped read sees it — this was EMPTY when the
+        // substrate wrote the row under `agent_id = ""`.
+        let mine = substrate
+            .knowledge()
+            .query_graph_scoped(pattern(), Some("agent-x"), None)
+            .unwrap();
+        assert_eq!(mine.len(), 1, "the caller agent must see its own knowledge");
+
+        // A different agent's scoped read does not.
+        let other = substrate
+            .knowledge()
+            .query_graph_scoped(pattern(), Some("other-agent"), None)
+            .unwrap();
+        assert!(
+            other.is_empty(),
+            "another agent must not see another's knowledge"
+        );
     }
 
     #[tokio::test]

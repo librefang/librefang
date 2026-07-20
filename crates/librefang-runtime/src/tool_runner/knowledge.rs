@@ -51,6 +51,7 @@ fn parse_relation_type(s: &str) -> librefang_types::memory::RelationType {
 pub(super) async fn tool_knowledge_add_entity(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
+    agent_id: Option<&str>,
     peer_id: Option<&str>,
 ) -> ToolResult {
     let kh = require_kernel_typed(kernel)?;
@@ -96,7 +97,10 @@ pub(super) async fn tool_knowledge_add_entity(
     };
 
     let id = kh
-        .knowledge_add_entity(&entity, peer_id)
+        // Scope the row to the calling agent so agent-scoped reads /
+        // delete_by_agent see it; an absent caller id keeps the historical
+        // shared/unscoped write.
+        .knowledge_add_entity(&entity, agent_id.unwrap_or(""), peer_id)
         .await
         .map_err(ToolError::upstream)?;
     Ok(format!("Entity '{name}' added with ID: {id}"))
@@ -105,6 +109,7 @@ pub(super) async fn tool_knowledge_add_entity(
 pub(super) async fn tool_knowledge_add_relation(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
+    agent_id: Option<&str>,
     peer_id: Option<&str>,
 ) -> ToolResult {
     let kh = require_kernel_typed(kernel)?;
@@ -147,7 +152,7 @@ pub(super) async fn tool_knowledge_add_relation(
     };
 
     let id = kh
-        .knowledge_add_relation(&relation, peer_id)
+        .knowledge_add_relation(&relation, agent_id.unwrap_or(""), peer_id)
         .await
         .map_err(ToolError::upstream)?;
     Ok(format!(
@@ -234,13 +239,13 @@ mod tests {
 
     #[tokio::test]
     async fn knowledge_add_entity_without_kernel_returns_unavailable() {
-        let r = tool_knowledge_add_entity(&json!({}), None, None).await;
+        let r = tool_knowledge_add_entity(&json!({}), None, None, None).await;
         assert!(matches!(r, Err(ToolError::Unavailable("Kernel handle"))));
     }
 
     #[tokio::test]
     async fn knowledge_add_relation_without_kernel_returns_unavailable() {
-        let r = tool_knowledge_add_relation(&json!({}), None, None).await;
+        let r = tool_knowledge_add_relation(&json!({}), None, None, None).await;
         assert!(matches!(r, Err(ToolError::Unavailable("Kernel handle"))));
     }
 
