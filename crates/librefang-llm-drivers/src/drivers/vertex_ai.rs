@@ -809,6 +809,7 @@ impl LlmDriver for VertexAiDriver {
             tools,
             Some(request.temperature),
             Some(request.max_tokens),
+            request.response_format.as_ref(),
         );
 
         // Configurable in-driver retry cap (#10); default 3 (four total
@@ -919,6 +920,7 @@ impl LlmDriver for VertexAiDriver {
             tools,
             Some(request.temperature),
             Some(request.max_tokens),
+            request.response_format.as_ref(),
         );
 
         // Configurable in-driver retry cap (#10); default 3 (four total
