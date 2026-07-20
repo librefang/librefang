@@ -405,7 +405,9 @@ impl LibreFangKernel {
                 let fb_user_key: Option<String> = if fb.api_key_env.is_some() {
                     None
                 } else {
-                    owner.and_then(|uid| self.get_user_provider_key(uid, &fb_provider))
+                    let canonical_fb_provider =
+                        librefang_llm_drivers::drivers::canonical_provider_name(&fb_provider);
+                    owner.and_then(|uid| self.get_user_provider_key(uid, canonical_fb_provider))
                 };
                 let fb_api_key = crate::user_provider_credentials::resolve_provider_credential(
                     fb_user_key,
