@@ -26,8 +26,6 @@ pub enum HotAction {
     UpdateUsageFooter,
     /// Web config changed — rebuild web tools context.
     ReloadWebConfig,
-    /// Browser config changed.
-    ReloadBrowserConfig,
     /// Approval policy changed.
     UpdateApprovalPolicy,
     /// Cron max jobs changed.
@@ -425,7 +423,19 @@ pub fn build_reload_plan_with_caps(
     }
 
     if field_changed(&old.browser, &new.browser) {
-        plan.hot_actions.push(HotAction::ReloadBrowserConfig);
+        // The live `BrowserManager` captures `BrowserConfig` by value at boot
+        // (`subsystems/media.rs`, constructed once in `boot.rs`) with no rebuild
+        // path, and every new-session read is from that frozen field
+        // (`max_sessions` / `cdp_endpoint` / `headless`). The old
+        // `ReloadBrowserConfig` hot action only logged "new sessions will use
+        // updated config" — which was false — so a reload reported success
+        // while nothing changed until a full restart. Classify browser changes
+        // as restart-required so the reload report is honest.
+        plan.restart_required = true;
+        plan.restart_reasons.push(
+            "browser config changed (BrowserManager is boot-captured; restart required)"
+                .to_string(),
+        );
     }
 
     if field_changed(&old.approval, &new.approval) {
