@@ -2824,8 +2824,19 @@ impl LibreFangKernel {
         // already resolves to the canonical id in that case, so only the lock
         // namespace changes; a no-override channel dispatch keeps the per-agent
         // lock (narrow fix — the channel-derived variant is unchanged here).
+        //
+        // Re-read the canonical id FRESH here rather than reusing the `entry`
+        // snapshot captured ~760 lines above (line ~2065): `entry.session_id`
+        // is mutable via `switch_agent_session` (#4291), and this non-async fn
+        // does substantial preemptible synchronous work (catalog/budget/quota,
+        // session-mode resolution) between that fetch and this decision, so a
+        // concurrent rotation could leave the snapshot stale and mis-select the
+        // lock namespace — reintroducing the very race this fix closes. Mirrors
+        // the non-streaming `send_message_full_inner` site, and the fork branch
+        // above which reads the parent session id from `loop_opts`, not `entry`.
+        let canonical_session_id = self.agents.registry.get(agent_id).map(|e| e.session_id);
         let session_scoped_lock =
-            matches!(session_id_override, Some(sid) if sid != entry.session_id);
+            matches!(session_id_override, Some(sid) if Some(sid) != canonical_session_id);
         let (session_lock, agent_scoped) = if session_scoped_lock {
             (
                 self.agents
