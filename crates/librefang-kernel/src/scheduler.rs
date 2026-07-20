@@ -385,13 +385,8 @@ impl AgentScheduler {
     /// token budget.
     ///
     /// **Production call sites should use [`Self::reserve_tokens`] instead.**
-    /// It wraps this same check-and-charge in an RAII [`TokenReservation`]
-    /// guard whose `Drop` releases the pre-charge automatically, so a caller
-    /// whose future is dropped before it can call `settle_reservation` /
-    /// `release_reservation` — a superseded streaming turn, a `stop`/`kill`,
-    /// a `tokio::time::timeout` — can no longer leak the reservation (#6513).
-    /// This lower-level method remains `pub` for `reserve_tokens`'s own use
-    /// and for tests exercising the bare pre-charge/settle/release sequence.
+    /// It wraps this same check-and-charge in an RAII [`TokenReservation`] guard whose `Drop` releases the pre-charge automatically, so a caller whose future is dropped before it can call `settle_reservation` / `release_reservation` — a superseded streaming turn, a `stop`/`kill`, a `tokio::time::timeout` — can no longer leak the reservation (#6513).
+    /// This lower-level method remains `pub` for `reserve_tokens`'s own use and for tests exercising the bare pre-charge/settle/release sequence.
     ///
     /// This closes the TOCTOU window between `check_quota` and
     /// `record_usage`: N concurrent callers all calling `check_quota` before
