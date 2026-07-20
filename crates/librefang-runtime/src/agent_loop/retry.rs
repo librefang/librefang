@@ -281,12 +281,8 @@ pub(super) async fn stream_with_retry(
     // a RateLimited or Overloaded retry would start a fresh accumulator and
     // give the leaking model a "do over" — defeating the guard entirely.
     let mut leak_fired_sticky = false;
-    // Sticky flag: once any observable content (text / thinking / tool deltas)
-    // has been forwarded to the caller's `tx`, a retry would re-stream a second
-    // full response onto that same `tx`, concatenating a duplicate/garbled
-    // answer. So a retryable error (RateLimited / Overloaded / transient) that
-    // arrives AFTER content was emitted must be surfaced, not retried —
-    // mirroring the content-emitted guard in FallbackChain / FallbackDriver.
+    // Sticky flag: once any observable content (text / thinking / tool deltas) has been forwarded to the caller's `tx`, a retry would re-stream a second full response onto that same `tx`, concatenating a duplicate/garbled answer.
+    // So a retryable error (RateLimited / Overloaded / transient) that arrives AFTER content was emitted must be surfaced, not retried — mirroring the content-emitted guard in FallbackChain / FallbackDriver.
     // (Retry is still safe when the error precedes any content.)
     let mut content_emitted_sticky = false;
 
@@ -328,8 +324,7 @@ pub(super) async fn stream_with_retry(
         let forward_task = tokio::spawn(async move {
             let mut accumulated = String::new();
             let mut leak_fired = false;
-            // Whether any observable output reached the caller's `tx` on this
-            // attempt (drives the no-retry-after-content guard below).
+            // Whether any observable output reached the caller's `tx` on this attempt (drives the no-retry-after-content guard below).
             let mut content_emitted = false;
             while let Some(event) = proxy_rx.recv().await {
                 match &event {
@@ -366,9 +361,7 @@ pub(super) async fn stream_with_retry(
                         // leak_fired: swallow remaining text tokens silently.
                     }
                     other => {
-                        // Observable output (matches the content set the
-                        // failover guards use); metadata events (PhaseChange…)
-                        // do not count as content the caller would see twice.
+                        // Observable output (matches the content set the failover guards use); metadata events (PhaseChange…) do not count as content the caller would see twice.
                         if matches!(
                             other,
                             StreamEvent::ToolUseStart { .. }
@@ -471,10 +464,8 @@ pub(super) async fn stream_with_retry(
                 )));
             }
             Err(e) => {
-                // Reached for any non-retryable error, AND for a
-                // RateLimited/Overloaded that arrived after content was emitted
-                // (the guards above fall through here). A transient error is
-                // retried only when nothing has reached the caller yet.
+                // Reached for any non-retryable error, AND for a RateLimited/Overloaded that arrived after content was emitted (the guards above fall through here).
+                // A transient error is retried only when nothing has reached the caller yet.
                 let err_str = e.to_string();
                 if !content_emitted_sticky
                     && llm_errors::is_transient(&err_str)
@@ -510,9 +501,7 @@ mod tests {
     use super::*;
     use crate::llm_driver::CompletionResponse;
 
-    /// A streaming driver that forwards one observable delta and then errors
-    /// with a *retryable* variant — the shape that makes an un-guarded retry
-    /// re-stream and duplicate output.
+    /// A streaming driver that forwards one observable delta and then errors with a *retryable* variant — the shape that makes an un-guarded retry re-stream and duplicate output.
     struct PartialThenOverloaded;
 
     #[async_trait::async_trait]
@@ -534,12 +523,8 @@ mod tests {
         }
     }
 
-    /// Regression (#6512 review [2]): once observable content has reached the
-    /// caller's `tx`, a retryable mid-stream error (Overloaded / RateLimited /
-    /// transient) must NOT be retried — a retry re-streams a second full
-    /// response onto the same `tx`, concatenating a duplicate/garbled answer.
-    /// The caller must receive the error and exactly ONE copy of the partial
-    /// content.
+    /// Regression (#6512 review [2]): once observable content has reached the caller's `tx`, a retryable mid-stream error (Overloaded / RateLimited / transient) must NOT be retried — a retry re-streams a second full response onto the same `tx`, concatenating a duplicate/garbled answer.
+    /// The caller must receive the error and exactly ONE copy of the partial content.
     #[tokio::test]
     async fn no_retry_after_partial_content_on_overload() {
         let driver = PartialThenOverloaded;

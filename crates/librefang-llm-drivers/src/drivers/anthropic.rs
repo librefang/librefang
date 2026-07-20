@@ -992,19 +992,10 @@ impl LlmDriver for AnthropicDriver {
                             }
                         }
                         "error" => {
-                            // Mid-stream error frame delivered over an
-                            // already-HTTP-200 SSE body — Anthropic emits
-                            // `event: error` with e.g. `overloaded_error`
-                            // under load. Without this arm the frame falls
-                            // into `_ => {}` below and the stream ends
-                            // "successfully" with truncated/empty content, so
-                            // no retry or failover engages and a recoverable
-                            // overload becomes silent data loss. Surface it as
-                            // a typed Err (mirroring the pre-stream error
-                            // mapping above) so the caller discards any partial
-                            // deltas already sent on `tx` and fails over.
-                            // Returning Err mid-loop matches the existing
-                            // mid-stream IO-error path (`chunk_result.map_err`).
+                            // Mid-stream error frame delivered over an already-HTTP-200 SSE body — Anthropic emits `event: error` with e.g. `overloaded_error` under load.
+                            // Without this arm the frame falls into `_ => {}` below and the stream ends "successfully" with truncated/empty content, so no retry or failover engages and a recoverable overload becomes silent data loss.
+                            // Surface it as a typed Err (mirroring the pre-stream error mapping above) so the caller discards any partial deltas already sent on `tx` and fails over.
+                            // Returning Err mid-loop matches the existing mid-stream IO-error path (`chunk_result.map_err`).
                             let err = &json["error"];
                             let kind = err["type"].as_str();
                             let message = err["message"]
@@ -2751,8 +2742,7 @@ mod tests {
         }
     }
 
-    /// Spawn a minimal server that answers any request with the given raw SSE
-    /// body as `text/event-stream`, then closes the socket.
+    /// Spawn a minimal server that answers any request with the given raw SSE body as `text/event-stream`, then closes the socket.
     async fn spawn_sse_server(sse_body: String) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
@@ -2784,12 +2774,9 @@ mod tests {
         }
     }
 
-    /// Regression: Anthropic can emit `event: error` mid-stream over an
-    /// already-HTTP-200 SSE body (commonly `overloaded_error` under load).
-    /// Such a frame used to fall into the catch-all match arm and be dropped,
-    /// so the stream ended "successfully" with truncated/empty content — no
-    /// retry or failover engaged and a recoverable overload became silent data
-    /// loss. It must now surface as a typed `Err`.
+    /// Regression: Anthropic can emit `event: error` mid-stream over an already-HTTP-200 SSE body (commonly `overloaded_error` under load).
+    /// Such a frame used to fall into the catch-all match arm and be dropped, so the stream ended "successfully" with truncated/empty content — no retry or failover engaged and a recoverable overload became silent data loss.
+    /// It must now surface as a typed `Err`.
     #[tokio::test]
     async fn streaming_error_frame_surfaces_as_error() {
         let sse_body = "event: error\n\

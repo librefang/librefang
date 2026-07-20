@@ -384,23 +384,18 @@ impl LlmDriver for FallbackDriver {
                 req.model = entry.model_name.clone();
             }
 
-            // Intercept the event stream so we can tell whether any observable
-            // content has already reached the caller before deciding whether
-            // failover is safe. If a provider forwards content and then errors
-            // mid-stream, failing through to the next driver on the same caller
-            // `tx` would concatenate a second full response onto the partial
-            // output already delivered — producing garbage. In that case
-            // propagate the error instead of failing over. Mirrors the guard in
-            // `FallbackChain::stream`.
+            // Intercept the event stream so we can tell whether any observable content has already reached the caller before deciding whether failover is safe.
+            // If a provider forwards content and then errors mid-stream, failing through to the next driver on the same caller `tx` would concatenate a second full response onto the partial output already delivered — producing garbage.
+            // In that case propagate the error instead of failing over.
+            // Mirrors the guard in `FallbackChain::stream`.
             let (content_emitted_tx, content_emitted_rx) = watch::channel(false);
             let (intercept_tx, mut intercept_rx) = tokio::sync::mpsc::channel::<StreamEvent>(32);
             let tx_relay = tx.clone();
             let content_flag = content_emitted_tx.clone();
             let relay_handle = tokio::spawn(async move {
                 while let Some(event) = intercept_rx.recv().await {
-                    // Any event representing observable LLM output to the
-                    // caller. PhaseChange is metadata-only and excluded — same
-                    // set as FallbackChain::stream.
+                    // Any event representing observable LLM output to the caller.
+                    // PhaseChange is metadata-only and excluded — same set as FallbackChain::stream.
                     let is_content = matches!(
                         &event,
                         StreamEvent::TextDelta { .. }
@@ -415,9 +410,7 @@ impl LlmDriver for FallbackDriver {
                         let _ = content_flag.send(true);
                     }
                     if tx_relay.send(event).await.is_err() {
-                        // Downstream caller dropped the receiver; close the
-                        // relay inbound so the wrapped driver's next send fails
-                        // and it aborts the upstream stream (#3769).
+                        // Downstream caller dropped the receiver; close the relay inbound so the wrapped driver's next send fails and it aborts the upstream stream (#3769).
                         tracing::debug!(
                             "FallbackDriver(stream): downstream receiver dropped; cancelling inner driver"
                         );
@@ -430,8 +423,7 @@ impl LlmDriver for FallbackDriver {
             let start = std::time::Instant::now();
             match entry.driver.stream(req, intercept_tx).await {
                 Ok(mut response) => {
-                    // Drain buffered relay events before returning so none are
-                    // silently dropped when the handle is discarded.
+                    // Drain buffered relay events before returning so none are silently dropped when the handle is discarded.
                     let _ = relay_handle.await;
                     let latency = start.elapsed().as_millis() as u64;
                     let prev = entry.ewma_latency_ms.load(Ordering::Relaxed);
@@ -448,19 +440,11 @@ impl LlmDriver for FallbackDriver {
                     return Ok(response);
                 }
                 Err(e) => {
-                    // Wait for the relay to finish draining before reading the
-                    // content flag to avoid a TOCTOU race (events buffered in
-                    // the mpsc but not yet forwarded).
+                    // Wait for the relay to finish draining before reading the content flag to avoid a TOCTOU race (events buffered in the mpsc but not yet forwarded).
                     let _ = relay_handle.await;
-                    // If the provider already forwarded content to the caller,
-                    // failing over would corrupt the output — propagate
-                    // immediately, and do NOT penalize the slot's health or mark
-                    // it exhausted: it served content and this is not a
-                    // failover, so demoting it from rotation for future
-                    // unrelated requests would be spurious. Mirrors
-                    // FallbackChain::stream, which returns before mark_exhausted
-                    // for the same reason. (Checked before the health/exhaustion
-                    // bookkeeping — the divergence #6512 review [0] flagged.)
+                    // If the provider already forwarded content to the caller, failing over would corrupt the output — propagate immediately, and do NOT penalize the slot's health or mark it exhausted: it served content and this is not a failover, so demoting it from rotation for future unrelated requests would be spurious.
+                    // Mirrors FallbackChain::stream, which returns before mark_exhausted for the same reason.
+                    // (Checked before the health/exhaustion bookkeeping — the divergence #6512 review [0] flagged.)
                     if *content_emitted_rx.borrow() {
                         return Err(e);
                     }
@@ -536,8 +520,7 @@ mod tests {
         }
     }
 
-    /// A streaming driver that forwards one observable delta to the caller and
-    /// then fails mid-stream — the exact shape that makes blind failover unsafe.
+    /// A streaming driver that forwards one observable delta to the caller and then fails mid-stream — the exact shape that makes blind failover unsafe.
     struct PartialThenFailStream;
 
     #[async_trait]
@@ -595,12 +578,8 @@ mod tests {
         }
     }
 
-    /// Regression: once a provider has forwarded observable content to the
-    /// caller and then errors, `FallbackDriver::stream` must NOT fail over —
-    /// running the next driver on the same caller `tx` would concatenate a
-    /// second full response onto the partial output already delivered, so the
-    /// caller must instead receive the primary's error and only its partial
-    /// delta. Mirrors the guarantee `FallbackChain::stream` already provides.
+    /// Regression: once a provider has forwarded observable content to the caller and then errors, `FallbackDriver::stream` must NOT fail over — running the next driver on the same caller `tx` would concatenate a second full response onto the partial output already delivered, so the caller must instead receive the primary's error and only its partial delta.
+    /// Mirrors the guarantee `FallbackChain::stream` already provides.
     #[tokio::test]
     async fn stream_does_not_fail_over_after_content_emitted() {
         let fb = FallbackDriver::with_models(vec![
@@ -633,8 +612,7 @@ mod tests {
             vec!["partial".to_string()],
             "the secondary must never run once the primary emitted content"
         );
-        // #6512 review [0]: a provider that served content then hit a transient
-        // error must NOT be health-penalized — it is not a failover.
+        // #6512 review [0]: a provider that served content then hit a transient error must NOT be health-penalized — it is not a failover.
         assert_eq!(
             fb.drivers[0].consecutive_errors.load(Ordering::Relaxed),
             0,
