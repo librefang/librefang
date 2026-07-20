@@ -784,6 +784,12 @@ impl LibreFangKernel {
             .actual_provider
             .clone()
             .unwrap_or_else(|| manifest.model.provider.clone());
+        // #6460: mirror the `owner.or(attribution_user_id)` precedence used at the other two write sites (`execute_llm_agent`, the streaming task).
+        // `sender_context` is NOT always `None` here: the channel-bridge /btw path (`crates/librefang-api/src/channel_bridge.rs::send_message_ephemeral`) always calls through with `owner: None` but forwards a real `SenderContext`, so falling back to sender-derived attribution keeps that call attributed instead of silently unattributed.
+        // No fork reaches this path.
+        let attribution_user_id: Option<UserId> =
+            sender_context.and_then(|sc| self.security.auth.identify(&sc.channel, &sc.user_id));
+        let billed_user_id: Option<UserId> = owner.or(attribution_user_id);
         let usage_record = librefang_memory::usage::UsageRecord {
             agent_id,
             provider: billed_provider,
@@ -795,10 +801,7 @@ impl LibreFangKernel {
             cost_usd: cost,
             tool_calls: result.decision_traces.len() as u32,
             latency_ms,
-            // #6460: attribute ephemeral (/btw) spend to the authenticated owner.
-            // This path passes `sender_context = None`, so `owner` is the only available attribution — leaving it `None` recorded the owner's own-key spend as unattributed.
-            // No fork reaches this path.
-            user_id: owner,
+            user_id: billed_user_id,
             channel: None,
             session_id: None,
         };
@@ -813,6 +816,26 @@ impl LibreFangKernel {
                 "Post-call quota check failed (ephemeral); recording usage anyway"
             );
             let _ = self.metering.engine.record(&usage_record);
+        } else if let Some(uid) = billed_user_id {
+            // #6460: per-user budget enforcement, post-call, mirroring the same audit-trail-only semantics as the other two write sites — a breach trips `BudgetExceeded` for dashboard visibility but does not deny this already-billed response.
+            if let Some(user_budget) = self.security.auth.budget_for(uid) {
+                if let Err(e) = self.metering.engine.check_user_budget(uid, &user_budget) {
+                    tracing::warn!(
+                        agent_id = %agent_id,
+                        user = %uid,
+                        error = %e,
+                        "Per-user budget check failed (ephemeral)"
+                    );
+                    self.metering.audit_log.record_with_context(
+                        agent_id.to_string(),
+                        librefang_runtime::audit::AuditAction::BudgetExceeded,
+                        format!("{e}"),
+                        "denied",
+                        Some(uid),
+                        None,
+                    );
+                }
+            }
         }
 
         // Record experiment metrics if running an experiment (kernel has cost info)
