@@ -770,6 +770,40 @@ fn pick_cache_read_tokens(nested_cached: u64, deepseek_cached: u64) -> u64 {
     }
 }
 
+/// Map an OpenAI-compatible error frame's `type` / `code` string to a typed
+/// [`ProviderErrorCode`] so failover classification (e.g. rate-limit → retry
+/// same provider, credit-exhausted → skip provider) works for a mid-stream
+/// error delivered over an HTTP-200 SSE body. Returns `None` for unrecognized
+/// values, so the caller falls back to status-code-only classification.
+/// Mirrors `anthropic_error_code` for the OpenAI-compatible error vocabulary.
+fn openai_stream_error_code(
+    err_type: Option<&str>,
+    err_code: Option<&str>,
+) -> Option<crate::llm_driver::llm_errors::ProviderErrorCode> {
+    use crate::llm_driver::llm_errors::ProviderErrorCode;
+    // `code` is more specific than `type`; consult both.
+    for s in [err_code, err_type].into_iter().flatten() {
+        return Some(match s {
+            "rate_limit_exceeded" | "rate_limit_error" => ProviderErrorCode::RateLimit,
+            "insufficient_quota" | "billing_error" | "credit_exhausted" => {
+                ProviderErrorCode::CreditExhausted
+            }
+            "context_length_exceeded" => ProviderErrorCode::ContextLengthExceeded,
+            "model_not_found" | "model_not_available" => ProviderErrorCode::ModelNotFound,
+            "overloaded" | "overloaded_error" | "service_unavailable" => {
+                ProviderErrorCode::ServerUnavailable
+            }
+            "server_error" | "internal_server_error" => ProviderErrorCode::ServerError,
+            "invalid_api_key" | "authentication_error" | "permission_error" => {
+                ProviderErrorCode::AuthError
+            }
+            // Unknown discriminator on this string; try the next one.
+            _ => continue,
+        });
+    }
+    None
+}
+
 /// Convert an OpenAI-compatible `finish_reason` into a `StopReason`,
 /// honoring the safety/policy refusal path (#3450).
 ///
@@ -1930,6 +1964,44 @@ impl LlmDriver for OpenAIDriver {
                         }
                         if let Some(ct) = u["completion_tokens"].as_u64() {
                             usage.output_tokens = ct;
+                        }
+                    }
+
+                    // Terminal error frame delivered over an already-HTTP-200
+                    // SSE body. OpenAI-compatible providers (notably OpenRouter
+                    // and Groq) send `data: {"error": {...}}` mid-stream instead
+                    // of a non-2xx status. Such a frame carries no `choices`, so
+                    // without this it hits `None => continue` below, the stream
+                    // ends "successfully" with empty content, and no retry or
+                    // failover engages — a recoverable provider error becomes a
+                    // silent empty turn. Surface it as an Err instead (a bare
+                    // `"error": null` on an otherwise-normal chunk is ignored).
+                    if let Some(err) = json.get("error") {
+                        let is_terminal = match err {
+                            serde_json::Value::Object(o) => !o.is_empty(),
+                            serde_json::Value::String(s) => !s.is_empty(),
+                            _ => false,
+                        };
+                        if is_terminal {
+                            let message = err
+                                .get("message")
+                                .and_then(|m| m.as_str())
+                                .or_else(|| err.as_str())
+                                .unwrap_or("provider error in stream")
+                                .to_string();
+                            let code = openai_stream_error_code(
+                                err.get("type").and_then(|t| t.as_str()),
+                                err.get("code").and_then(|c| c.as_str()),
+                            );
+                            warn!(
+                                error = %message,
+                                "OpenAI-compatible provider sent a mid-stream error frame; surfacing as error"
+                            );
+                            return Err(LlmError::Api {
+                                status: 502,
+                                message,
+                                code,
+                            });
                         }
                     }
 
@@ -4480,6 +4552,67 @@ mod tests {
             "out-of-range tool index must not appear in the response"
         );
         assert_eq!(resp.text(), "ok");
+    }
+
+    /// Regression: an OpenAI-compatible provider (OpenRouter / Groq) can send a
+    /// terminal error as an SSE `data:` frame over an already-HTTP-200 body
+    /// instead of a non-2xx status. Such a frame carries no `choices`, so the
+    /// streaming loop used to `continue` past it and return `Ok` with empty
+    /// content — a silent, un-retried empty turn. It must surface as an `Err`
+    /// (typed so failover classifies it) instead.
+    #[tokio::test]
+    async fn streamed_error_frame_surfaces_as_error() {
+        let sse_body = "data: {\"error\":{\"message\":\"You are rate limited\",\"type\":\"rate_limit_error\",\"code\":\"rate_limit_exceeded\"}}\n\
+                        data: [DONE]\n"
+            .to_string();
+        let base = spawn_sse_server(sse_body).await;
+        let driver = OpenAIDriver::new("test-key".to_string(), base);
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let err = driver
+            .stream(transport_retry_request(), tx)
+            .await
+            .expect_err("mid-stream error frame must surface as Err, not Ok(empty)");
+
+        match err {
+            LlmError::Api {
+                status,
+                ref message,
+                code,
+            } => {
+                assert_eq!(status, 502);
+                assert!(
+                    message.to_lowercase().contains("rate"),
+                    "provider message must be carried through: {message}"
+                );
+                assert!(
+                    matches!(
+                        code,
+                        Some(crate::llm_driver::llm_errors::ProviderErrorCode::RateLimit)
+                    ),
+                    "a mid-stream rate-limit frame must classify as RateLimit for failover retry"
+                );
+            }
+            other => panic!("expected LlmError::Api from a mid-stream error frame, got {other:?}"),
+        }
+    }
+
+    /// A bare `"error": null` on an otherwise-normal chunk must NOT be treated
+    /// as a terminal error — some providers include the field unconditionally.
+    #[tokio::test]
+    async fn streamed_null_error_field_is_ignored() {
+        let sse_body = "data: {\"error\":null,\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\
+                        data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\
+                        data: [DONE]\n"
+            .to_string();
+        let base = spawn_sse_server(sse_body).await;
+        let driver = OpenAIDriver::new("test-key".to_string(), base);
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let resp = driver
+            .stream(transport_retry_request(), tx)
+            .await
+            .expect("a null error field must not abort an otherwise-valid stream");
+        assert_eq!(resp.text(), "hi");
     }
 
     fn transport_retry_request() -> librefang_llm_driver::CompletionRequest {

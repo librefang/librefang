@@ -10,6 +10,7 @@ use librefang_llm_driver::exhaustion::ProviderExhaustionStore;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::watch;
 use tracing::{info, warn};
 
 /// A driver that wraps multiple LLM drivers and tries each in order.
@@ -383,9 +384,55 @@ impl LlmDriver for FallbackDriver {
                 req.model = entry.model_name.clone();
             }
 
+            // Intercept the event stream so we can tell whether any observable
+            // content has already reached the caller before deciding whether
+            // failover is safe. If a provider forwards content and then errors
+            // mid-stream, failing through to the next driver on the same caller
+            // `tx` would concatenate a second full response onto the partial
+            // output already delivered — producing garbage. In that case
+            // propagate the error instead of failing over. Mirrors the guard in
+            // `FallbackChain::stream`.
+            let (content_emitted_tx, content_emitted_rx) = watch::channel(false);
+            let (intercept_tx, mut intercept_rx) = tokio::sync::mpsc::channel::<StreamEvent>(32);
+            let tx_relay = tx.clone();
+            let content_flag = content_emitted_tx.clone();
+            let relay_handle = tokio::spawn(async move {
+                while let Some(event) = intercept_rx.recv().await {
+                    // Any event representing observable LLM output to the
+                    // caller. PhaseChange is metadata-only and excluded — same
+                    // set as FallbackChain::stream.
+                    let is_content = matches!(
+                        &event,
+                        StreamEvent::TextDelta { .. }
+                            | StreamEvent::ToolUseStart { .. }
+                            | StreamEvent::ToolInputDelta { .. }
+                            | StreamEvent::ToolUseEnd { .. }
+                            | StreamEvent::ThinkingDelta { .. }
+                            | StreamEvent::ContentComplete { .. }
+                            | StreamEvent::ToolExecutionResult { .. }
+                    );
+                    if is_content {
+                        let _ = content_flag.send(true);
+                    }
+                    if tx_relay.send(event).await.is_err() {
+                        // Downstream caller dropped the receiver; close the
+                        // relay inbound so the wrapped driver's next send fails
+                        // and it aborts the upstream stream (#3769).
+                        tracing::debug!(
+                            "FallbackDriver(stream): downstream receiver dropped; cancelling inner driver"
+                        );
+                        intercept_rx.close();
+                        break;
+                    }
+                }
+            });
+
             let start = std::time::Instant::now();
-            match entry.driver.stream(req, tx.clone()).await {
+            match entry.driver.stream(req, intercept_tx).await {
                 Ok(mut response) => {
+                    // Drain buffered relay events before returning so none are
+                    // silently dropped when the handle is discarded.
+                    let _ = relay_handle.await;
                     let latency = start.elapsed().as_millis() as u64;
                     let prev = entry.ewma_latency_ms.load(Ordering::Relaxed);
                     let new = if prev == 0 {
@@ -401,6 +448,10 @@ impl LlmDriver for FallbackDriver {
                     return Ok(response);
                 }
                 Err(e) => {
+                    // Wait for the relay to finish draining before reading the
+                    // content flag to avoid a TOCTOU race (events buffered in
+                    // the mpsc but not yet forwarded).
+                    let _ = relay_handle.await;
                     entry.consecutive_errors.fetch_add(1, Ordering::Relaxed);
                     entry
                         .last_failure_at_ms
@@ -418,6 +469,11 @@ impl LlmDriver for FallbackDriver {
                         "Fallback driver (stream) failed, trying next"
                     );
                     self.record_exhaustion(entry, &e);
+                    // If the provider already forwarded content to the caller,
+                    // failing over would corrupt the output — propagate instead.
+                    if *content_emitted_rx.borrow() {
+                        return Err(e);
+                    }
                     last_error = Some(e);
                 }
             }
@@ -471,6 +527,105 @@ mod tests {
                 actual_model: None,
             })
         }
+    }
+
+    /// A streaming driver that forwards one observable delta to the caller and
+    /// then fails mid-stream — the exact shape that makes blind failover unsafe.
+    struct PartialThenFailStream;
+
+    #[async_trait]
+    impl LlmDriver for PartialThenFailStream {
+        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+            unreachable!("this mock is only exercised through stream()")
+        }
+        async fn stream(
+            &self,
+            _req: CompletionRequest,
+            tx: tokio::sync::mpsc::Sender<StreamEvent>,
+        ) -> Result<CompletionResponse, LlmError> {
+            let _ = tx
+                .send(StreamEvent::TextDelta {
+                    text: "partial".to_string(),
+                })
+                .await;
+            Err(LlmError::Api {
+                status: 503,
+                message: "dropped mid-stream".to_string(),
+                code: None,
+            })
+        }
+    }
+
+    /// A streaming driver that would produce a full second response if reached.
+    struct SecondaryOkStream;
+
+    #[async_trait]
+    impl LlmDriver for SecondaryOkStream {
+        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+            unreachable!("this mock is only exercised through stream()")
+        }
+        async fn stream(
+            &self,
+            _req: CompletionRequest,
+            tx: tokio::sync::mpsc::Sender<StreamEvent>,
+        ) -> Result<CompletionResponse, LlmError> {
+            let _ = tx
+                .send(StreamEvent::TextDelta {
+                    text: "SECONDARY".to_string(),
+                })
+                .await;
+            Ok(CompletionResponse {
+                content: vec![ContentBlock::Text {
+                    text: "SECONDARY".to_string(),
+                    provider_metadata: None,
+                }],
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+                actual_provider: None,
+                actual_model: None,
+            })
+        }
+    }
+
+    /// Regression: once a provider has forwarded observable content to the
+    /// caller and then errors, `FallbackDriver::stream` must NOT fail over —
+    /// running the next driver on the same caller `tx` would concatenate a
+    /// second full response onto the partial output already delivered, so the
+    /// caller must instead receive the primary's error and only its partial
+    /// delta. Mirrors the guarantee `FallbackChain::stream` already provides.
+    #[tokio::test]
+    async fn stream_does_not_fail_over_after_content_emitted() {
+        let fb = FallbackDriver::with_models(vec![
+            (
+                Arc::new(PartialThenFailStream) as Arc<dyn LlmDriver>,
+                "primary".to_string(),
+            ),
+            (
+                Arc::new(SecondaryOkStream) as Arc<dyn LlmDriver>,
+                "secondary".to_string(),
+            ),
+        ]);
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let result = fb.stream(test_request(), tx).await;
+
+        assert!(
+            result.is_err(),
+            "must propagate the primary's error, not fail over after partial content"
+        );
+
+        let mut texts = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let StreamEvent::TextDelta { text } = ev {
+                texts.push(text);
+            }
+        }
+        assert_eq!(
+            texts,
+            vec!["partial".to_string()],
+            "the secondary must never run once the primary emitted content"
+        );
     }
 
     #[tokio::test]
