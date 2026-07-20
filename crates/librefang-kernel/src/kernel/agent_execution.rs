@@ -1435,16 +1435,10 @@ impl LibreFangKernel {
         let attribution_user_id: Option<UserId> =
             sender_context.and_then(|sc| self.security.auth.identify(&sc.channel, &sc.user_id));
         let attribution_channel: Option<String> = sender_context.map(|sc| sc.channel.clone());
-        // #6460: when an authenticated API caller owns this turn, their vault
-        // key is what gets billed upstream (see `resolve_driver_for_owner`
-        // above), so usage attribution and per-user budget enforcement must
-        // key on that owner. A plain authenticated POST carries no `sender_id`,
-        // so `attribution_user_id` is `None` and the owner's spend would
-        // otherwise be recorded unattributed and never gated against their
-        // budget. The owner wins when present; sender-derived attribution stays
-        // the fallback for owner-less paths (channel / cron / agent_send).
-        // Forks never reach `execute_llm_agent` (see the fork short-circuit at
-        // the top of this method), so the raw owner needs no fork-nulling here.
+        // #6460: when an authenticated API caller owns this turn, their vault key is what gets billed upstream (see `resolve_driver_for_owner` above), so usage attribution and per-user budget enforcement must key on that owner.
+        // A plain authenticated POST carries no `sender_id`, so `attribution_user_id` is `None` and the owner's spend would otherwise be recorded unattributed and never gated against their budget.
+        // The owner wins when present; sender-derived attribution stays the fallback for owner-less paths (channel / cron / agent_send).
+        // Forks never reach `execute_llm_agent` (see the fork short-circuit at the top of this method), so the raw owner needs no fork-nulling here.
         let billed_user_id: Option<UserId> = owner.or(attribution_user_id);
         // #4807 review nit 10: when the LLM fallback chain redirected
         // the request to an alternative slot, bill the *actual* serving

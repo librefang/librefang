@@ -795,10 +795,9 @@ impl LibreFangKernel {
             cost_usd: cost,
             tool_calls: result.decision_traces.len() as u32,
             latency_ms,
-            // #6460: attribute ephemeral (/btw) spend to the authenticated
-            // owner. This path passes `sender_context = None`, so `owner` is the
-            // only available attribution — leaving it `None` recorded the
-            // owner's own-key spend as unattributed. No fork reaches this path.
+            // #6460: attribute ephemeral (/btw) spend to the authenticated owner.
+            // This path passes `sender_context = None`, so `owner` is the only available attribution — leaving it `None` recorded the owner's own-key spend as unattributed.
+            // No fork reaches this path.
             user_id: owner,
             channel: None,
             session_id: None,
@@ -2776,14 +2775,8 @@ impl LibreFangKernel {
         let attribution_user_id: Option<UserId> =
             sender_context.and_then(|sc| self.security.auth.identify(&sc.channel, &sc.user_id));
         let attribution_channel: Option<String> = sender_context.map(|sc| sc.channel.clone());
-        // #6460: the authenticated owner's vault key is billed upstream (via
-        // `effective_owner` → `resolve_driver_for_owner`), so usage attribution
-        // and the per-user budget gate must key on that owner when present —
-        // otherwise a plain authenticated stream (sender_context = None →
-        // attribution_user_id = None) records the owner's own-key spend
-        // unattributed and never enforces their budget. Use `effective_owner`
-        // (already null for forks, computed above) NOT the raw owner, so a
-        // sub-agent's spend is not mis-attributed to the parent turn's user.
+        // #6460: the authenticated owner's vault key is billed upstream (via `effective_owner` → `resolve_driver_for_owner`), so usage attribution and the per-user budget gate must key on that owner when present — otherwise a plain authenticated stream (sender_context = None → attribution_user_id = None) records the owner's own-key spend unattributed and never enforces their budget.
+        // Use `effective_owner` (already null for forks, computed above) NOT the raw owner, so a sub-agent's spend is not mis-attributed to the parent turn's user.
         // Snapshot into a Copy local before the spawn moves it into the task.
         let billed_user_id: Option<UserId> = effective_owner.or(attribution_user_id);
 
