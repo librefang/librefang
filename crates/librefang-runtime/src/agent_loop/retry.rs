@@ -281,6 +281,10 @@ pub(super) async fn stream_with_retry(
     // a RateLimited or Overloaded retry would start a fresh accumulator and
     // give the leaking model a "do over" — defeating the guard entirely.
     let mut leak_fired_sticky = false;
+    // Sticky flag: once any observable content (text / thinking / tool deltas) has been forwarded to the caller's `tx`, a retry would re-stream a second full response onto that same `tx`, concatenating a duplicate/garbled answer.
+    // So a retryable error (RateLimited / Overloaded / transient) that arrives AFTER content was emitted must be surfaced, not retried — mirroring the content-emitted guard in FallbackChain / FallbackDriver.
+    // (Retry is still safe when the error precedes any content.)
+    let mut content_emitted_sticky = false;
 
     for attempt in 0..=MAX_RETRIES {
         // If a previous attempt already triggered the leak guard, do not
@@ -320,6 +324,8 @@ pub(super) async fn stream_with_retry(
         let forward_task = tokio::spawn(async move {
             let mut accumulated = String::new();
             let mut leak_fired = false;
+            // Whether any observable output reached the caller's `tx` on this attempt (drives the no-retry-after-content guard below).
+            let mut content_emitted = false;
             while let Some(event) = proxy_rx.recv().await {
                 match &event {
                     StreamEvent::TextDelta { text } if !leak_fired => {
@@ -346,6 +352,7 @@ pub(super) async fn stream_with_retry(
                             continue;
                         }
                         // Forward the delta; ignore send errors (client gone).
+                        content_emitted = true;
                         let _ = outer_tx
                             .send(StreamEvent::TextDelta { text: text.clone() })
                             .await;
@@ -354,11 +361,23 @@ pub(super) async fn stream_with_retry(
                         // leak_fired: swallow remaining text tokens silently.
                     }
                     other => {
+                        // Observable output (matches the content set the failover guards use); metadata events (PhaseChange…) do not count as content the caller would see twice.
+                        if matches!(
+                            other,
+                            StreamEvent::ToolUseStart { .. }
+                                | StreamEvent::ToolInputDelta { .. }
+                                | StreamEvent::ToolUseEnd { .. }
+                                | StreamEvent::ThinkingDelta { .. }
+                                | StreamEvent::ContentComplete { .. }
+                                | StreamEvent::ToolExecutionResult { .. }
+                        ) {
+                            content_emitted = true;
+                        }
                         let _ = outer_tx.send(other.clone()).await;
                     }
                 }
             }
-            leak_fired
+            (leak_fired, content_emitted)
         });
 
         // Drive the LLM stream, then join the forwarding task exactly once.
@@ -367,11 +386,12 @@ pub(super) async fn stream_with_retry(
         let driver_result = driver.stream(request.clone(), proxy_tx).await;
         // proxy_tx is dropped when driver returns (moved into driver.stream).
         // forward_task drains the proxy channel and finishes.
-        let cascade_leak_aborted = forward_task.await.unwrap_or(false);
+        let (cascade_leak_aborted, content_emitted) = forward_task.await.unwrap_or((false, false));
         // Propagate to the sticky flag so any retry iteration short-circuits.
         if cascade_leak_aborted {
             leak_fired_sticky = true;
         }
+        content_emitted_sticky |= content_emitted;
 
         match driver_result {
             Ok(response) => {
@@ -381,7 +401,7 @@ pub(super) async fn stream_with_retry(
                     cascade_leak_aborted,
                 });
             }
-            Err(LlmError::RateLimited { retry_after_ms, .. }) => {
+            Err(LlmError::RateLimited { retry_after_ms, .. }) if !content_emitted_sticky => {
                 last_error = Some(
                     handle_retryable_llm_error(
                         attempt,
@@ -395,7 +415,7 @@ pub(super) async fn stream_with_retry(
                     .await?,
                 );
             }
-            Err(LlmError::Overloaded { retry_after_ms }) => {
+            Err(LlmError::Overloaded { retry_after_ms }) if !content_emitted_sticky => {
                 last_error = Some(
                     handle_retryable_llm_error(
                         attempt,
@@ -444,8 +464,13 @@ pub(super) async fn stream_with_retry(
                 )));
             }
             Err(e) => {
+                // Reached for any non-retryable error, AND for a RateLimited/Overloaded that arrived after content was emitted (the guards above fall through here).
+                // A transient error is retried only when nothing has reached the caller yet.
                 let err_str = e.to_string();
-                if llm_errors::is_transient(&err_str) && attempt < MAX_RETRIES {
+                if !content_emitted_sticky
+                    && llm_errors::is_transient(&err_str)
+                    && attempt < MAX_RETRIES
+                {
                     warn!(
                         attempt,
                         error = %err_str,
@@ -469,4 +494,57 @@ pub(super) async fn stream_with_retry(
     Err(LibreFangError::llm_driver_msg(
         last_error.unwrap_or_else(|| "Unknown error".to_string()),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::llm_driver::CompletionResponse;
+
+    /// A streaming driver that forwards one observable delta and then errors with a *retryable* variant — the shape that makes an un-guarded retry re-stream and duplicate output.
+    struct PartialThenOverloaded;
+
+    #[async_trait::async_trait]
+    impl LlmDriver for PartialThenOverloaded {
+        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+            unreachable!("this mock is only exercised through stream()")
+        }
+        async fn stream(
+            &self,
+            _req: CompletionRequest,
+            tx: mpsc::Sender<StreamEvent>,
+        ) -> Result<CompletionResponse, LlmError> {
+            let _ = tx
+                .send(StreamEvent::TextDelta {
+                    text: "partial".to_string(),
+                })
+                .await;
+            Err(LlmError::Overloaded { retry_after_ms: 0 })
+        }
+    }
+
+    /// Regression (#6512 review [2]): once observable content has reached the caller's `tx`, a retryable mid-stream error (Overloaded / RateLimited / transient) must NOT be retried — a retry re-streams a second full response onto the same `tx`, concatenating a duplicate/garbled answer.
+    /// The caller must receive the error and exactly ONE copy of the partial content.
+    #[tokio::test]
+    async fn no_retry_after_partial_content_on_overload() {
+        let driver = PartialThenOverloaded;
+        let (tx, mut rx) = mpsc::channel(64);
+        let result = stream_with_retry(&driver, CompletionRequest::default(), tx, None, None).await;
+
+        assert!(
+            result.is_err(),
+            "a retryable error after partial content must be surfaced, not retried"
+        );
+
+        let mut deltas = 0;
+        while let Ok(ev) = rx.try_recv() {
+            if matches!(ev, StreamEvent::TextDelta { .. }) {
+                deltas += 1;
+            }
+        }
+        assert_eq!(
+            deltas, 1,
+            "the partial content must reach the caller exactly once — a retry would duplicate it"
+        );
+    }
 }
