@@ -1667,6 +1667,10 @@ export interface ModelItem {
   };
   aliases?: string[];
   available?: boolean;
+  // Provenance hint. "cli_config" marks a row synthesized from a CLI tool's own
+  // live config (codex/claude-code/gemini/qwen) rather than a catalog entry — it
+  // is not a user-added custom model, so it must not show a delete control.
+  source?: string;
 }
 
 export async function listModels(params?: { provider?: string; tier?: string; available?: boolean }): Promise<{ models: ModelItem[]; total: number; available: number }> {
@@ -2374,9 +2378,20 @@ export async function runWorkflow(
   }, LONG_RUNNING_TIMEOUT_MS); // 5 min timeout — workflows run multiple LLM steps
 }
 
-/** Re-run a previous workflow run with the same input parameters. */
+/**
+ * Re-run a previous run with its original parameters.
+ *
+ * The backend reads the workflow + input off the stored run (not caller-supplied
+ * params), so this is a faithful, non-destructive repeat of what executed. The
+ * original run is left untouched; a fresh run is queued and `{ run_id }` of the
+ * new run is returned.
+ */
 export async function rerunWorkflowRun(runId: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/workflows/runs/${encodeURIComponent(runId)}/rerun`, {}, DEFAULT_POST_TIMEOUT_MS);
+  return post<ApiActionResponse>(
+    `/api/workflows/runs/${encodeURIComponent(runId)}/rerun`,
+    {},
+    LONG_RUNNING_TIMEOUT_MS, // queues a multi-step LLM run
+  );
 }
 
 export async function deleteWorkflow(workflowId: string): Promise<ApiActionResponse> {
