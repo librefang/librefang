@@ -105,11 +105,15 @@ impl KnowledgeStore {
         Ok(id)
     }
 
-    /// Delete all entities and relations belonging to a specific agent.
+    /// Delete an agent's relations, plus the entities it first wrote that no surviving relation still references.
     ///
-    /// Wrapped in a single transaction so a relations-then-entities
-    /// failure can't leave orphan entities (relations referencing entities
-    /// silently broke ranking on the next graph query). See #3501.
+    /// Wrapped in a single transaction so a relations-then-entities failure can't leave orphan entities (relations referencing entities silently broke ranking on the next graph query).
+    /// See #3501.
+    ///
+    /// Relations are strictly per-agent, so this agent's relations are deleted wholesale.
+    /// Entities are NOT per-agent: the table's key is `(id, peer_id)` (agent_id is only first-writer provenance), so an entity a since-deleted agent happened to write first can still be referenced — by id or name — by another agent's live relations.
+    /// Deleting every `agent_id = A` entity would silently orphan those relations, quietly vanishing another agent's data from future reads (#6521).
+    /// So only entities this agent wrote that NO surviving relation still references (by id or name, across any agent / peer) are removed; shared, still-referenced entities are kept in place.
     pub fn delete_by_agent(&self, agent_id: &str) -> LibreFangResult<u64> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let tx = conn
@@ -121,9 +125,16 @@ impl KnowledgeStore {
                 rusqlite::params![agent_id],
             )
             .map_err(LibreFangError::memory)? as u64;
+        // Runs AFTER the relations delete above, so this agent's own relations no longer count as "referencing" — only OTHER agents' surviving relations keep an entity alive.
+        // Conservative on `name` as well as `id` because `query_graph_scoped`'s JOIN resolves a relation endpoint by either.
         let ent_count = tx
             .execute(
-                "DELETE FROM entities WHERE agent_id = ?1",
+                "DELETE FROM entities
+                 WHERE agent_id = ?1
+                   AND id NOT IN (SELECT source_entity FROM relations
+                                  UNION SELECT target_entity FROM relations)
+                   AND name NOT IN (SELECT source_entity FROM relations
+                                    UNION SELECT target_entity FROM relations)",
                 rusqlite::params![agent_id],
             )
             .map_err(LibreFangError::memory)? as u64;
@@ -976,5 +987,96 @@ mod tests {
             2,
             "an unscoped read returns every peer's triples"
         );
+    }
+
+    /// Regression (#6521): `delete_by_agent` must not remove a shared entity
+    /// that a surviving agent's relation still references, and must still clean
+    /// up genuinely-orphaned entities the deleted agent wrote.
+    #[test]
+    fn delete_by_agent_keeps_shared_entities_but_prunes_orphans() {
+        let store = setup();
+        let ent = |id: &str, name: &str, t: EntityType| Entity {
+            id: id.to_string(),
+            entity_type: t,
+            name: name.to_string(),
+            properties: HashMap::new(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        // Agent A first-writes two entities and a relation between them.
+        store
+            .add_entity(
+                ent("acme", "Acme", EntityType::Organization),
+                "agent-a",
+                None,
+            )
+            .unwrap();
+        store
+            .add_entity(ent("alice", "Alice", EntityType::Person), "agent-a", None)
+            .unwrap();
+        store
+            .add_relation(
+                Relation {
+                    source: "alice".to_string(),
+                    relation: RelationType::WorksAt,
+                    target: "acme".to_string(),
+                    properties: HashMap::new(),
+                    confidence: 1.0,
+                    created_at: Utc::now(),
+                },
+                "agent-a",
+                None,
+            )
+            .unwrap();
+        // Agent B references the SHARED "acme" entity via its own relation
+        // (bob -> acme). B's "bob" upserts under agent B; "acme" stays agent A.
+        store
+            .add_entity(ent("bob", "Bob", EntityType::Person), "agent-b", None)
+            .unwrap();
+        store
+            .add_relation(
+                Relation {
+                    source: "bob".to_string(),
+                    relation: RelationType::WorksAt,
+                    target: "acme".to_string(),
+                    properties: HashMap::new(),
+                    confidence: 1.0,
+                    created_at: Utc::now(),
+                },
+                "agent-b",
+                None,
+            )
+            .unwrap();
+
+        // Delete agent A. Its relation goes; "acme" survives (B still references
+        // it); "alice" is pruned (only A's now-deleted relation referenced it).
+        store.delete_by_agent("agent-a").unwrap();
+
+        // Agent B's relation still resolves — its target entity is intact.
+        let b = store
+            .query_graph_scoped(
+                GraphPattern {
+                    source: Some("bob".to_string()),
+                    relation: Some(RelationType::WorksAt),
+                    target: None,
+                    max_depth: 1,
+                },
+                Some("agent-b"),
+                None,
+            )
+            .unwrap();
+        assert_eq!(b.len(), 1, "agent B's relation must not be orphaned");
+        assert_eq!(b[0].target.name, "Acme");
+
+        // The genuinely-orphaned "alice" entity is gone; the shared "acme" stays.
+        let conn = store.pool.get().unwrap();
+        let names: Vec<String> = conn
+            .prepare("SELECT name FROM entities ORDER BY name")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(names, vec!["Acme".to_string(), "Bob".to_string()]);
     }
 }
