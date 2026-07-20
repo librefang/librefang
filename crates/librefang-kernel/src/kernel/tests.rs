@@ -9254,6 +9254,134 @@ async fn resolve_driver_for_owner_fallback_slot_uses_owner_key() {
     kernel.shutdown();
 }
 
+/// #6517 regression: the owner-scoped key lookup must canonicalize the
+/// manifest provider before reading the vault. The write surface
+/// (`validate_provider`) only accepts canonical `known_providers()` names, so
+/// a user can only ever store a key under "openai" — never under the alias
+/// "codex". Before #6517, the lookup used the raw manifest provider string,
+/// so an alias-configured agent (`provider = "codex"`) missed the owner's
+/// stored key entirely and fell through to the (here, absent) global
+/// credential, failing with `MissingApiKey` instead of billing the owner.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial(librefang_vault_key)]
+async fn resolve_driver_for_owner_canonicalizes_alias_provider_before_owner_key_lookup() {
+    const TEST_VAULT_KEY_B64: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+    let _vault_key = set_test_env("LIBREFANG_VAULT_KEY", TEST_VAULT_KEY_B64);
+    let _no_keyring = set_test_env("LIBREFANG_VAULT_NO_KEYRING", "1");
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let alice = librefang_types::agent::UserId::from_name("alice");
+    // Stored under the CANONICAL name — the only name the write surface accepts.
+    kernel
+        .set_user_provider_key(alice, "openai", "sk-alice-openai-canon")
+        .expect("store user-scoped provider key");
+
+    // Agent manifest configured with an ALIAS of "openai".
+    let mut manifest = librefang_types::agent::AgentManifest::default();
+    manifest.model.provider = "codex".to_string();
+
+    assert!(
+        kernel
+            .resolve_driver_for_owner(&manifest, Some(alice))
+            .is_ok(),
+        "an alias-configured agent (`provider = \"codex\"`) must resolve the \
+         owner's key stored under the canonical name (\"openai\"); without \
+         canonicalizing the lookup, this owner has no stored key under the \
+         raw alias, no global key exists in this test environment, and \
+         resolution fails with MissingApiKey instead of billing the owner",
+    );
+
+    kernel.shutdown();
+}
+
+/// #6517 fallback-slot regression: the fallback-chain owner-key lookup must
+/// canonicalize the fallback provider the same way the primary-slot lookup
+/// does. Bob's key is stored under the canonical "openai"; the fallback slot
+/// is configured with the alias "codex". Distinguishes the fixed from the
+/// broken behaviour by comparing driver identity rather than asserting
+/// `is_ok()` alone — a failed fallback slot is warn-logged and dropped
+/// (`resolve_driver_for_owner` still returns `Ok` via the bare primary
+/// driver), so a bare success check would pass either way. Instead: resolve
+/// once with no fallback configured (`d_primary_only`) and once with the
+/// alias fallback slot (`d_with_fallback`), both for the same owner and
+/// primary provider/key so they'd share one cached driver if the fallback
+/// slot never actually builds. If canonicalization works, the fallback slot
+/// builds successfully and `resolve_driver_for_owner` wraps both drivers in
+/// a NEW `FallbackDriver`, so `d_with_fallback` is a distinct `Arc` from
+/// `d_primary_only`. If canonicalization is missing, the fallback slot's
+/// `driver_cache.get_or_create` fails with `MissingApiKey` (bob's key is
+/// stored under "openai", not the raw alias "codex", and no global
+/// credential exists in this test environment), the slot is dropped, and
+/// `resolve_driver_for_owner` falls through to returning the SAME cached
+/// primary driver as `d_primary_only` — so the two Arcs are `ptr_eq`.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial(librefang_vault_key)]
+async fn resolve_driver_for_owner_canonicalizes_alias_provider_in_fallback_slot() {
+    const TEST_VAULT_KEY_B64: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+    let _vault_key = set_test_env("LIBREFANG_VAULT_KEY", TEST_VAULT_KEY_B64);
+    let _no_keyring = set_test_env("LIBREFANG_VAULT_NO_KEYRING", "1");
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let bob = librefang_types::agent::UserId::from_name("bob");
+    kernel
+        .set_user_provider_key(bob, "ollama", "sk-bob-ollama")
+        .expect("store primary user key");
+    // Stored under the CANONICAL fallback provider name.
+    kernel
+        .set_user_provider_key(bob, "openai", "sk-bob-openai-canon")
+        .expect("store fallback user key");
+
+    let mut manifest_primary_only = librefang_types::agent::AgentManifest::default();
+    manifest_primary_only.model.provider = "ollama".to_string();
+
+    let mut manifest_with_fallback = librefang_types::agent::AgentManifest::default();
+    manifest_with_fallback.model.provider = "ollama".to_string();
+    // Fallback slot configured with an ALIAS of "openai".
+    manifest_with_fallback.fallback_models = Some(vec![librefang_types::agent::FallbackModel {
+        provider: "codex".to_string(),
+        model: "gpt-4o-mini".to_string(),
+        api_key_env: None,
+        base_url: None,
+        extra_params: Default::default(),
+    }]);
+
+    let d_primary_only = kernel
+        .resolve_driver_for_owner(&manifest_primary_only, Some(bob))
+        .expect("primary-only resolution must build");
+    let d_with_fallback = kernel
+        .resolve_driver_for_owner(&manifest_with_fallback, Some(bob))
+        .expect("resolution with an alias-configured fallback slot must still build");
+
+    assert!(
+        !Arc::ptr_eq(&d_primary_only, &d_with_fallback),
+        "the alias-configured fallback slot must build successfully (proving \
+         its owner-scoped key was found under the canonical name) and get \
+         wrapped in a NEW FallbackDriver, distinct from the bare primary \
+         driver; identical Arcs mean the fallback slot silently failed and \
+         was dropped — the fallback-slot alias canonicalization regressed",
+    );
+
+    kernel.shutdown();
+}
+
 /// Regression test for the kernel install façade introduced in #3295: the
 /// HTTP install path historically opened `vault.enc` and ran the Argon2id
 /// KDF on every request. After the refactor, `Kernel::install_integration`
