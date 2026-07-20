@@ -1492,11 +1492,8 @@ pub trait Memory: Send + Sync {
 
     /// Add an entity to the knowledge graph.
     ///
-    /// `agent_id` scopes the entity to its owning agent so agent-scoped reads
-    /// (`GET /api/memory/agents/{id}/relations`) and `delete_by_agent` see it;
-    /// the empty string is the shared/unscoped sentinel. `peer_id` scopes the
-    /// entity to a single user on a multi-user agent (#6494); `None` writes a
-    /// shared/unscoped entity.
+    /// `agent_id` scopes the entity to its owning agent so agent-scoped reads (`GET /api/memory/agents/{id}/relations`) and `delete_by_agent` see it; the empty string is the shared/unscoped sentinel.
+    /// `peer_id` scopes the entity to a single user on a multi-user agent (#6494); `None` writes a shared/unscoped entity.
     async fn add_entity(
         &self,
         entity: Entity,

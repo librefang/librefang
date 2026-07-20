@@ -1,10 +1,8 @@
 //! Knowledge-graph tools — add_entity / add_relation / query.
 //!
-//! Migrated from `Result<String, String>` to `Result<String, ToolError>`
-//! (#3576) — fourth slice after `tool_runner::{cron, schedule, task}`. These
-//! tools take no caller agent id (no per-caller authorization), so the
-//! migration is purely the error-channel type. The `parse_entity_type` /
-//! `parse_relation_type` helpers are infallible and unchanged.
+//! Migrated from `Result<String, String>` to `Result<String, ToolError>` (#3576) — fourth slice after `tool_runner::{cron, schedule, task}`.
+//! At the time of that migration none of these tools took a caller agent id, so the migration was purely the error-channel type; `add_entity` / `add_relation` since gained an `agent_id` parameter (#6519) that scopes the write to the calling agent, not a per-caller authorization check.
+//! The `parse_entity_type` / `parse_relation_type` helpers are infallible and unchanged.
 
 use super::error::{ToolError, ToolResult};
 use super::require_kernel_typed;
@@ -97,9 +95,7 @@ pub(super) async fn tool_knowledge_add_entity(
     };
 
     let id = kh
-        // Scope the row to the calling agent so agent-scoped reads /
-        // delete_by_agent see it; an absent caller id keeps the historical
-        // shared/unscoped write.
+        // Scope the row to the calling agent so agent-scoped reads / delete_by_agent see it; an absent caller id keeps the historical shared/unscoped write.
         .knowledge_add_entity(&entity, agent_id.unwrap_or(""), peer_id)
         .await
         .map_err(ToolError::upstream)?;

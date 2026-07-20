@@ -988,9 +988,8 @@ pub async fn execute_tool_raw(
         "schedule_delete" => tool_schedule_delete(input, *kernel, *caller_agent_id).await,
         "schedule_resume" => tool_schedule_resume(input, *kernel, *caller_agent_id).await,
 
-        // Knowledge graph tools. `sender_id` is the per-user peer identity
-        // (same as the memory tools use), so a multi-user agent's KG writes and
-        // reads are scoped to the calling user (#6494).
+        // Knowledge graph tools. `sender_id` is the per-user peer identity (same as the memory tools use), so a multi-user agent's KG writes and reads are scoped to the calling user (#6494).
+        // `caller_agent_id` additionally scopes `add_entity` / `add_relation` writes to the calling agent (#6519).
         "knowledge_add_entity" => {
             tool_knowledge_add_entity(input, *kernel, *caller_agent_id, *sender_id).await
         }

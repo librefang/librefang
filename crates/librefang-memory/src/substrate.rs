@@ -1725,9 +1725,8 @@ impl Memory for MemorySubstrate {
         peer_id: Option<&str>,
     ) -> LibreFangResult<String> {
         let store = self.knowledge.clone();
-        // Own the id before the move into the blocking closure ('static). The
-        // caller's agent id scopes the row so agent-scoped reads / delete see
-        // it; an empty caller id keeps the historical shared/unscoped write.
+        // Own the id before the move into the blocking closure ('static).
+        // The caller's agent id scopes the row so agent-scoped reads / delete see it; an empty caller id keeps the historical shared/unscoped write.
         let agent = agent_id.to_string();
         let peer = peer_id.map(str::to_string);
         tokio::task::spawn_blocking(move || store.add_entity(entity, &agent, peer.as_deref()))
@@ -1801,13 +1800,8 @@ mod tests {
         assert_eq!(val, Some(serde_json::json!("value")));
     }
 
-    /// Regression: a knowledge entity/relation written THROUGH THE SUBSTRATE
-    /// (the MCP `knowledge_add_*` tool path) must be scoped to the caller's
-    /// agent. The substrate previously hardcoded `agent_id = ""`, so the row
-    /// was invisible to the agent-scoped relations read
-    /// (`query_graph_scoped(.., Some(agent), ..)`) and un-deletable by
-    /// `delete_by_agent`, and split-brained from proactively-extracted triples
-    /// (which are written under the real agent id).
+    /// Regression: a knowledge entity/relation written THROUGH THE SUBSTRATE (the MCP `knowledge_add_*` tool path) must be scoped to the caller's agent.
+    /// The substrate previously hardcoded `agent_id = ""`, so the row was invisible to the agent-scoped relations read (`query_graph_scoped(.., Some(agent), ..)`) and un-deletable by `delete_by_agent`, and split-brained from proactively-extracted triples (which are written under the real agent id).
     #[tokio::test]
     async fn knowledge_add_scopes_the_row_to_the_caller_agent() {
         use librefang_types::memory::{Entity, EntityType, GraphPattern, Relation, RelationType};
