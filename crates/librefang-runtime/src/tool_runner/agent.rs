@@ -57,7 +57,7 @@ pub(super) async fn tool_agent_send(
     // kernel async-task tracker and return a task id immediately instead of
     // blocking this agent's loop until the callee replies (which otherwise
     // trips `tool_timeout_secs` for any long delegation).
-    let async_mode = input["async"].as_bool().unwrap_or(true);
+    let async_mode = input["async"].as_bool().unwrap_or(false);
 
     if let Some(caller) = caller_agent_id {
         if caller == agent_id {
