@@ -1632,6 +1632,7 @@
       "response_placeholder": "你的回复（文本）",
       "submitting": "正在提交…",
       "submit_action": "提交 {{action}}",
+      "pending_review_one": "1 个工作流运行正在等待操作员审查",
       "pending_review_other": "{{count}} 个工作流运行正在等待操作员审查",
       "empty_artifact": "（空产物）"
     },
