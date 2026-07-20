@@ -13,6 +13,7 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ### Fixed
 
+- Route the post-approval agent reply through the account-qualified outbound path so multi-account installs deliver to the correct bot/chat: `wake_agent_after_approval` previously looked the channel adapter up by the bare channel key (`channel_adapters.get(channel)`), ignoring `deferred.account_id`, but adapters are registered under both the bare key and the account-qualified key (`"<channel>:<account_id>"`), so a resumed reply for a non-first account was delivered to the wrong account's adapter or missed entirely; it now reuses `ChannelSender::send_channel_message`, which builds the same account-qualified lookup key the canonical outbound path uses (#6492) (@houko)
 - Pin `crates/librefang-api/src/login_page.html` to LF in `.gitattributes`: the file is embedded verbatim via `include_str!` and its inline `<script>` is authorised by an exact SHA-256 baked into the CSP (`middleware.rs`), so a Windows checkout with `core.autocrlf=true` rewrote it to CRLF, shifted the computed hash, and failed `dashboard_login_page_script_is_allowed_by_csp_hash` on the Windows shard only — turning `main` red on every merge since #6486 touched the page (#6481) (@houko)
 
 ### Added
