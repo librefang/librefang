@@ -1145,10 +1145,7 @@ impl LibreFangKernel {
             .map_err(KernelError::LibreFang)?;
 
         // Enforce quota on the effective target agent (after routing).
-        // Use check_quota_and_reserve so the estimated token budget is
-        // pre-charged inside the same DashMap write-lock, closing the TOCTOU
-        // race where N concurrent callers all pass the check before any of
-        // them calls record_usage (#3736).
+        // Use reserve_tokens so the estimated token budget is pre-charged inside the same DashMap write-lock, closing the TOCTOU race where N concurrent callers all pass the check before any of them calls record_usage (#3736).
         let estimated_tokens = entry.manifest.model.max_tokens as u64;
         let token_reservation = match self
             .agents
