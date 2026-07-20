@@ -116,6 +116,35 @@ def has_attribution(line: str) -> bool:
     return ATTRIBUTION_RE.search(line) is not None or NO_ATTRIBUTION_RE.search(line) is not None
 
 
+def bullet_block_has_attribution(lines: list[str], bullet_idx: int) -> bool:
+    """Whether the bullet starting at `bullet_idx` (0-based) carries attribution
+    on ANY of its lines.
+
+    The repo's prose rule wraps a long bullet across multiple lines, one
+    sentence per line, so the trailing `(@user)` often lands on the final
+    continuation line rather than the `- ` marker line:
+
+        - First sentence.
+          Second sentence.
+          Third sentence. (@houko)
+
+    A bullet's block is its marker line plus the following continuation lines
+    (indented, non-empty, not themselves a new bullet or a heading), ending at
+    the first blank line, next bullet, or heading. Checking the whole block —
+    rather than only the marker line — keeps the attribution rule compatible
+    with the one-sentence-per-line wrapping the CHANGELOG mandates.
+    """
+    if has_attribution(lines[bullet_idx]):
+        return True
+    for j in range(bullet_idx + 1, len(lines)):
+        nxt = lines[j]
+        if nxt.strip() == "" or is_bullet(nxt) or HEADER_RE.match(nxt):
+            break
+        if has_attribution(nxt):
+            return True
+    return False
+
+
 def report(violations: list[tuple[int, str]], scope: str) -> int:
     if not violations:
         sys.stdout.write(f"OK: no missing attribution in scope '{scope}'.\n")
@@ -217,7 +246,13 @@ def added_lines_in_unreleased(
             # (unreleased_start+1) .. unreleased_end (exclusive of the next
             # release heading).
             if (unreleased_start + 1) <= lineno <= unreleased_end:
-                if is_bullet(content) and not has_attribution(content):
+                # Check the whole bullet block (marker + wrapped continuation
+                # lines) in the post-image, so a `(@user)` on a continuation
+                # line counts — the one-sentence-per-line prose rule pushes it
+                # off the marker line for multi-sentence bullets.
+                if is_bullet(content) and not bullet_block_has_attribution(
+                    head_lines, lineno - 1
+                ):
                     added.append((lineno, content))
             cur_new_lineno += 1
         elif raw.startswith("-"):
@@ -246,7 +281,7 @@ def scan_unreleased_section(root: Path) -> list[tuple[int, str]]:
     violations: list[tuple[int, str]] = []
     for i in range(start + 1, end):
         line = lines[i]
-        if is_bullet(line) and not has_attribution(line):
+        if is_bullet(line) and not bullet_block_has_attribution(lines, i):
             violations.append((i + 1, line))  # 1-based line number
     return violations
 
@@ -265,7 +300,7 @@ def scan_full_file(root: Path) -> list[tuple[int, str]]:
             continue
         if in_fenced_block:
             continue
-        if is_bullet(line) and not has_attribution(line):
+        if is_bullet(line) and not bullet_block_has_attribution(lines, i - 1):
             violations.append((i, line))
     return violations
 
@@ -316,7 +351,11 @@ def scan_staged_added_lines(root: Path) -> list[tuple[int, str]]:
             content = raw[1:]
             lineno = cur_new_lineno
             if (unreleased_start + 1) <= lineno <= unreleased_end:
-                if is_bullet(content) and not has_attribution(content):
+                # See added_lines_in_unreleased: attribution may sit on a
+                # wrapped continuation line, so check the whole bullet block.
+                if is_bullet(content) and not bullet_block_has_attribution(
+                    staged_lines, lineno - 1
+                ):
                     added.append((lineno, content))
             cur_new_lineno += 1
 
