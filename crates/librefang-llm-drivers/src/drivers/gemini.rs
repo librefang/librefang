@@ -12,6 +12,7 @@ use crate::backoff::standard_retry_delay;
 use crate::llm_driver::{CompletionRequest, CompletionResponse, LlmDriver, LlmError, StreamEvent};
 use async_trait::async_trait;
 use futures::StreamExt;
+use librefang_types::config::ResponseFormat;
 use librefang_types::message::{
     ContentBlock, Message, MessageContent, Role, StopReason, TokenUsage,
 };
@@ -218,6 +219,14 @@ pub(crate) struct GenerationConfig {
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_output_tokens: Option<u32>,
+    /// Structured-output MIME type — `application/json` for `ResponseFormat::Json` / `JsonSchema`.
+    /// Serialized as `responseMimeType`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_mime_type: Option<String>,
+    /// Response schema (a restricted OpenAPI-subset schema) for `ResponseFormat::JsonSchema`.
+    /// Serialized as `responseSchema`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_schema: Option<serde_json::Value>,
 }
 
 // ── Response types ─────────────────────────────────────────────────────
@@ -620,6 +629,21 @@ fn convert_response(resp: GeminiResponse) -> Result<CompletionResponse, LlmError
 
 // ── Shared helpers (used by both Gemini and Vertex AI drivers) ────────
 
+/// Map a [`ResponseFormat`] to Gemini's `(responseMimeType, responseSchema)` pair.
+/// Gemini honors structured output through `generationConfig`, unlike OpenAI/Anthropic; `None` / `Text` leaves both unset (free-form text).
+/// Note the schema is a restricted OpenAPI-subset, not full JSON Schema — an invalid schema is rejected by the API, same as any other bad request.
+fn gemini_response_format(
+    rf: Option<&ResponseFormat>,
+) -> (Option<String>, Option<serde_json::Value>) {
+    match rf {
+        None | Some(ResponseFormat::Text) => (None, None),
+        Some(ResponseFormat::Json) => (Some("application/json".to_string()), None),
+        Some(ResponseFormat::JsonSchema { schema, .. }) => {
+            (Some("application/json".to_string()), Some(schema.clone()))
+        }
+    }
+}
+
 /// Build a Gemini API request body.
 pub(crate) fn build_request(
     contents: Vec<GeminiContent>,
@@ -627,7 +651,9 @@ pub(crate) fn build_request(
     tools: Vec<GeminiToolConfig>,
     temperature: Option<f32>,
     max_output_tokens: Option<u32>,
+    response_format: Option<&ResponseFormat>,
 ) -> GeminiRequest {
+    let (response_mime_type, response_schema) = gemini_response_format(response_format);
     GeminiRequest {
         contents,
         system_instruction,
@@ -635,6 +661,8 @@ pub(crate) fn build_request(
         generation_config: Some(GenerationConfig {
             temperature,
             max_output_tokens,
+            response_mime_type,
+            response_schema,
         }),
     }
 }
@@ -901,15 +929,14 @@ impl LlmDriver for GeminiDriver {
         let (contents, system_instruction) = convert_messages(&request.messages, &request.system);
         let tools = convert_tools(&request);
 
-        let gemini_request = GeminiRequest {
+        let gemini_request = build_request(
             contents,
             system_instruction,
             tools,
-            generation_config: Some(GenerationConfig {
-                temperature: Some(request.temperature),
-                max_output_tokens: Some(request.max_tokens),
-            }),
-        };
+            Some(request.temperature),
+            Some(request.max_tokens),
+            request.response_format.as_ref(),
+        );
 
         // Cross-process rate-limit guard.
         let guard_provider = "gemini";
@@ -1051,15 +1078,14 @@ impl LlmDriver for GeminiDriver {
         let (contents, system_instruction) = convert_messages(&request.messages, &request.system);
         let tools = convert_tools(&request);
 
-        let gemini_request = GeminiRequest {
+        let gemini_request = build_request(
             contents,
             system_instruction,
             tools,
-            generation_config: Some(GenerationConfig {
-                temperature: Some(request.temperature),
-                max_output_tokens: Some(request.max_tokens),
-            }),
-        };
+            Some(request.temperature),
+            Some(request.max_tokens),
+            request.response_format.as_ref(),
+        );
 
         // Cross-process rate-limit guard (streaming path).
         let guard_provider = "gemini";
@@ -1478,6 +1504,8 @@ mod tests {
             generation_config: Some(GenerationConfig {
                 temperature: Some(0.7),
                 max_output_tokens: Some(1024),
+                response_mime_type: None,
+                response_schema: None,
             }),
         };
 
@@ -1816,10 +1844,62 @@ mod tests {
         let config = GenerationConfig {
             temperature: Some(0.5),
             max_output_tokens: Some(2048),
+            response_mime_type: None,
+            response_schema: None,
         };
         let json = serde_json::to_value(&config).unwrap();
         assert_eq!(json["temperature"], 0.5);
         assert_eq!(json["maxOutputTokens"], 2048);
+        // Structured-output fields stay absent when unset.
+        assert!(json.get("responseMimeType").is_none());
+        assert!(json.get("responseSchema").is_none());
+    }
+
+    #[test]
+    fn build_request_maps_response_format_to_generation_config() {
+        // Text / None → no structured-output fields.
+        let (mime, schema) = gemini_response_format(None);
+        assert!(mime.is_none() && schema.is_none());
+        let (mime, schema) = gemini_response_format(Some(&ResponseFormat::Text));
+        assert!(mime.is_none() && schema.is_none());
+
+        // Json → responseMimeType only.
+        let req = build_request(
+            vec![],
+            None,
+            vec![],
+            None,
+            None,
+            Some(&ResponseFormat::Json),
+        );
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(
+            json["generationConfig"]["responseMimeType"],
+            "application/json"
+        );
+        assert!(json["generationConfig"].get("responseSchema").is_none());
+
+        // JsonSchema → responseMimeType + responseSchema (verbatim schema).
+        let schema =
+            serde_json::json!({"type": "object", "properties": {"n": {"type": "integer"}}});
+        let req = build_request(
+            vec![],
+            None,
+            vec![],
+            None,
+            None,
+            Some(&ResponseFormat::JsonSchema {
+                name: "s".to_string(),
+                schema: schema.clone(),
+                strict: Some(true),
+            }),
+        );
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(
+            json["generationConfig"]["responseMimeType"],
+            "application/json"
+        );
+        assert_eq!(json["generationConfig"]["responseSchema"], schema);
     }
 
     // --- Issue #501/#506: thought_signature round-trip tests ---
