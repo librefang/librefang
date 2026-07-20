@@ -681,7 +681,7 @@ fn find_provider(name: &str) -> Option<&'static ProviderEntry> {
 }
 
 /// Canonicalize a provider name or alias to its registry canonical name
-/// (e.g. `"google"` → `"gemini"`, `"codex"` → `"chatgpt"`). Unknown names pass
+/// (e.g. `"google"` → `"gemini"`, `"codex"` → `"openai"`). Unknown names pass
 /// through unchanged. Callers that must share a namespace with the write
 /// surface — which only stores the canonical [`known_providers`] names — use
 /// this so an alias-configured agent resolves the same key that was stored.
