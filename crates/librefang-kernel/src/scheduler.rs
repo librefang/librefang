@@ -124,21 +124,14 @@ pub struct AgentScheduler {
     quotas: DashMap<AgentId, ResourceQuota>,
     /// Usage tracking per agent.
     ///
-    /// Wrapped in `Arc` so a [`TokenReservation`] RAII guard can hold a
-    /// handle to this map and release its pre-charge on drop — e.g. when a
-    /// streaming turn is superseded/aborted or a trigger fire times out, the
-    /// spawned future (which owns the guard) is dropped mid-flight before it
-    /// can settle/release explicitly — without a reference back to the whole
-    /// scheduler.
+    /// Wrapped in `Arc` so a [`TokenReservation`] RAII guard can hold a handle to this map and release its pre-charge on drop — e.g. when a streaming turn is superseded/aborted or a trigger fire times out, the spawned future (which owns the guard) is dropped mid-flight before it can settle/release explicitly — without a reference back to the whole scheduler.
     usage: Arc<DashMap<AgentId, UsageTracker>>,
     /// Active task handles per agent.
     tasks: DashMap<AgentId, JoinHandle<()>>,
 }
 
-/// Roll back a pre-charged token reservation (undo the `total_tokens`
-/// increment) without recording an LLM call. Shared by
-/// [`AgentScheduler::release_reservation`] and [`TokenReservation`]'s drop /
-/// release paths so the math has a single source of truth.
+/// Roll back a pre-charged token reservation (undo the `total_tokens` increment) without recording an LLM call.
+/// Shared by [`AgentScheduler::release_reservation`] and [`TokenReservation`]'s drop / release paths so the math has a single source of truth.
 fn release_tokens_in(
     usage: &DashMap<AgentId, UsageTracker>,
     agent_id: AgentId,
@@ -153,9 +146,8 @@ fn release_tokens_in(
     }
 }
 
-/// Replace a pre-charged token reservation with actual usage and record the
-/// LLM call. Shared by [`AgentScheduler::settle_reservation`] and
-/// [`TokenReservation::settle`].
+/// Replace a pre-charged token reservation with actual usage and record the LLM call.
+/// Shared by [`AgentScheduler::settle_reservation`] and [`TokenReservation::settle`].
 fn settle_tokens_in(
     usage: &DashMap<AgentId, UsageTracker>,
     agent_id: AgentId,
@@ -198,20 +190,12 @@ fn settle_tokens_in(
 
 /// RAII guard for a pre-charged token reservation.
 ///
-/// Returned by [`AgentScheduler::reserve_tokens`]. It exists to close a class
-/// of leak the bare-`u64` reservation had: the pre-charge on `total_tokens`
-/// was released only by an explicit `settle`/`release` call, so a spawned
-/// streaming turn that was superseded/aborted (#3739) — or a
-/// trigger fire dropped by its `tokio::time::timeout` — dropped the future
-/// *before* reaching either call, permanently inflating the agent's hourly
-/// token counter until the window rolled over (a self-inflicted quota DoS).
-/// The USD sibling ([`librefang_kernel_metering::MeteringReservation`]) already
-/// releases on drop; this brings the token side to parity.
+/// Returned by [`AgentScheduler::reserve_tokens`].
+/// It exists to close a class of leak the bare-`u64` reservation had: the pre-charge on `total_tokens` was released only by an explicit `settle`/`release` call, so a spawned streaming turn that was superseded/aborted (#3739) — or a trigger fire dropped by its `tokio::time::timeout` — dropped the future *before* reaching either call, permanently inflating the agent's hourly token counter until the window rolled over (a self-inflicted quota DoS).
+/// The USD sibling ([`librefang_kernel_metering::MeteringReservation`]) already releases on drop; this brings the token side to parity.
 ///
-/// On drop the guard releases the pre-charge unless it was already
-/// settled/released. A reservation for an agent with no quota carries
-/// `estimated_tokens == 0`, so its drop is a no-op — preserving the
-/// zero-reservation contract of [`AgentScheduler::check_quota_and_reserve`].
+/// On drop the guard releases the pre-charge unless it was already settled/released.
+/// A reservation for an agent with no quota carries `estimated_tokens == 0`, so its drop is a no-op — preserving the zero-reservation contract of [`AgentScheduler::check_quota_and_reserve`].
 #[must_use = "binding is required: a dropped TokenReservation releases the pre-charge"]
 pub struct TokenReservation {
     usage: Arc<DashMap<AgentId, UsageTracker>>,
@@ -221,8 +205,8 @@ pub struct TokenReservation {
 }
 
 impl TokenReservation {
-    /// Settle the reservation with the actual usage consumed and record the
-    /// LLM call. Consumes the guard so its drop becomes a no-op.
+    /// Settle the reservation with the actual usage consumed and record the LLM call.
+    /// Consumes the guard so its drop becomes a no-op.
     pub fn settle(mut self, usage_data: &TokenUsage) {
         settle_tokens_in(
             &self.usage,
@@ -233,16 +217,15 @@ impl TokenReservation {
         self.settled = true;
     }
 
-    /// Release the reservation without recording an LLM call (used when no LLM
-    /// call was made — suspended agent, non-LLM agent failure, early error).
+    /// Release the reservation without recording an LLM call (used when no LLM call was made — suspended agent, non-LLM agent failure, early error).
     /// Consumes the guard so its drop becomes a no-op.
     pub fn release(mut self) {
         release_tokens_in(&self.usage, self.agent_id, self.estimated_tokens);
         self.settled = true;
     }
 
-    /// The pre-charged estimate (0 when the agent has no effective token
-    /// quota). Exposed for diagnostics / tests.
+    /// The pre-charged estimate (0 when the agent has no effective token quota).
+    /// Exposed for diagnostics / tests.
     pub fn estimated_tokens(&self) -> u64 {
         self.estimated_tokens
     }
@@ -515,26 +498,17 @@ impl AgentScheduler {
         release_tokens_in(&self.usage, agent_id, estimated_tokens);
     }
 
-    /// Pre-charge an estimated token reservation and return an RAII
-    /// [`TokenReservation`] guard.
+    /// Pre-charge an estimated token reservation and return an RAII [`TokenReservation`] guard.
     ///
-    /// Same quota check and pre-charge as [`Self::check_quota_and_reserve`],
-    /// but the returned guard releases the pre-charge on drop unless it is
-    /// explicitly settled ([`TokenReservation::settle`]) or released
-    /// ([`TokenReservation::release`]). This is the reservation entry point
-    /// the send/streaming/trigger paths must use, so a future that is dropped
-    /// mid-flight (streaming supersede/abort, trigger `timeout`) cannot leak
-    /// the pre-charge. On an over-quota / burst error the pre-charge is never
-    /// applied and the `Err` propagates unchanged.
+    /// Same quota check and pre-charge as [`Self::check_quota_and_reserve`], but the returned guard releases the pre-charge on drop unless it is explicitly settled ([`TokenReservation::settle`]) or released ([`TokenReservation::release`]).
+    /// This is the reservation entry point the send/streaming/trigger paths must use, so a future that is dropped mid-flight (streaming supersede/abort, trigger `timeout`) cannot leak the pre-charge.
+    /// On an over-quota / burst error the pre-charge is never applied and the `Err` propagates unchanged.
     pub fn reserve_tokens(
         &self,
         agent_id: AgentId,
         estimated_tokens: u64,
     ) -> LibreFangResult<TokenReservation> {
-        // check_quota_and_reserve returns the amount actually pre-charged
-        // (0 when the agent has no effective token quota), so the guard's
-        // drop subtracts exactly what was added — nothing, in the no-quota
-        // case.
+        // check_quota_and_reserve returns the amount actually pre-charged (0 when the agent has no effective token quota), so the guard's drop subtracts exactly what was added — nothing, in the no-quota case.
         let reserved = self.check_quota_and_reserve(agent_id, estimated_tokens)?;
         Ok(TokenReservation {
             usage: Arc::clone(&self.usage),
@@ -1197,12 +1171,8 @@ mod tests {
         }
     }
 
-    /// Regression: dropping a [`TokenReservation`] without calling
-    /// `settle`/`release` must roll back the pre-charge. This is the leak the
-    /// bare-`u64` reservation had — a superseded/aborted streaming turn or a
-    /// timed-out trigger fire dropped the owning future before settle/release
-    /// ran, permanently inflating the hourly token counter until the window
-    /// rolled over (a self-inflicted quota DoS).
+    /// Regression: dropping a [`TokenReservation`] without calling `settle`/`release` must roll back the pre-charge.
+    /// This is the leak the bare-`u64` reservation had — a superseded/aborted streaming turn or a timed-out trigger fire dropped the owning future before settle/release ran, permanently inflating the hourly token counter until the window rolled over (a self-inflicted quota DoS).
     #[test]
     fn dropped_reservation_releases_the_precharge() {
         let scheduler = AgentScheduler::new();
@@ -1217,8 +1187,7 @@ mod tests {
                 500,
                 "reservation pre-charged"
             );
-            // Guard dropped here with neither settle nor release — this is what
-            // an aborted / timed-out future does.
+            // Guard dropped here with neither settle nor release — this is what an aborted / timed-out future does.
         }
 
         let after = scheduler.get_usage(id).unwrap();
@@ -1232,8 +1201,7 @@ mod tests {
         );
     }
 
-    /// `settle` corrects the pre-charge to actual usage and records the call,
-    /// and the guard's subsequent drop must NOT double-release.
+    /// `settle` corrects the pre-charge to actual usage and records the call, and the guard's subsequent drop must NOT double-release.
     #[test]
     fn reservation_settle_records_actual_and_drop_is_noop() {
         let scheduler = AgentScheduler::new();
@@ -1258,8 +1226,7 @@ mod tests {
         assert_eq!(after.output_tokens, 40);
     }
 
-    /// `release` rolls back the pre-charge without counting an LLM call, and
-    /// the guard's subsequent drop must NOT double-release.
+    /// `release` rolls back the pre-charge without counting an LLM call, and the guard's subsequent drop must NOT double-release.
     #[test]
     fn reservation_release_rolls_back_and_drop_is_noop() {
         let scheduler = AgentScheduler::new();
@@ -1275,9 +1242,7 @@ mod tests {
         assert_eq!(after.llm_calls, 0, "release path is not an LLM call");
     }
 
-    /// An agent with no effective token quota gets a no-op guard
-    /// (`estimated_tokens == 0`), so its drop must not disturb real recorded
-    /// usage — preserving the zero-reservation contract.
+    /// An agent with no effective token quota gets a no-op guard (`estimated_tokens == 0`), so its drop must not disturb real recorded usage — preserving the zero-reservation contract.
     #[test]
     fn reservation_without_quota_is_a_noop_guard() {
         let scheduler = AgentScheduler::new();
