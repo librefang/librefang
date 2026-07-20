@@ -1735,6 +1735,7 @@ impl KnowledgeGraph for SpawnCheckKernel {
     async fn knowledge_add_entity(
         &self,
         _entity: &librefang_types::memory::Entity,
+        _agent_id: &str,
         _: Option<&str>,
     ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
@@ -1743,6 +1744,7 @@ impl KnowledgeGraph for SpawnCheckKernel {
     async fn knowledge_add_relation(
         &self,
         _relation: &librefang_types::memory::Relation,
+        _agent_id: &str,
         _: Option<&str>,
     ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
