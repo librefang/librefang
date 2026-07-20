@@ -680,6 +680,15 @@ fn find_provider(name: &str) -> Option<&'static ProviderEntry> {
         .find(|p| p.name == name || p.aliases.contains(&name))
 }
 
+/// Canonicalize a provider name or alias to its registry canonical name
+/// (e.g. `"google"` → `"gemini"`, `"codex"` → `"chatgpt"`). Unknown names pass
+/// through unchanged. Callers that must share a namespace with the write
+/// surface — which only stores the canonical [`known_providers`] names — use
+/// this so an alias-configured agent resolves the same key that was stored.
+pub fn canonical_provider_name(name: &str) -> &str {
+    find_provider(name).map(|p| p.name).unwrap_or(name)
+}
+
 // ── Provider Defaults (registry-backed, used by tests) ───────────
 
 /// Provider metadata: base URL and env var name for the API key.
@@ -1842,5 +1851,18 @@ mod tests {
         assert_eq!(cache.len(), 1);
         cache.clear();
         assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn canonical_provider_name_resolves_aliases_to_canonical() {
+        // Aliases collapse to the canonical registry name...
+        assert_eq!(canonical_provider_name("google"), "gemini");
+        assert_eq!(canonical_provider_name("codex"), "openai");
+        assert_eq!(canonical_provider_name("openai-codex"), "openai");
+        // ...a canonical name is unchanged...
+        assert_eq!(canonical_provider_name("gemini"), "gemini");
+        assert_eq!(canonical_provider_name("openai"), "openai");
+        // ...and an unknown name passes through so nothing is silently dropped.
+        assert_eq!(canonical_provider_name("not-a-provider"), "not-a-provider");
     }
 }

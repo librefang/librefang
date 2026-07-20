@@ -238,7 +238,17 @@ impl LibreFangKernel {
         let user_scoped_key: Option<String> = if has_custom_key {
             None
         } else {
-            owner.and_then(|uid| self.get_user_provider_key(uid, agent_provider))
+            // Canonicalize the (possibly alias) manifest provider to the same
+            // namespace the write surface stores keys under. The Owner CRUD
+            // (`validate_provider`) only accepts canonical `known_providers()`
+            // names, so an alias-configured agent (e.g. `provider = "google"`,
+            // an alias of `gemini`) would look the user's key up under "google",
+            // miss the key stored under "gemini", and silently fall back to the
+            // operator's global credential — billing the org for the user's turn
+            // (a chargeback leak) and mis-attributing per-user spend.
+            let canonical_provider =
+                librefang_llm_drivers::drivers::canonical_provider_name(agent_provider);
+            owner.and_then(|uid| self.get_user_provider_key(uid, canonical_provider))
         };
 
         // Check for a credential pool for this provider.
