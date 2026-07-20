@@ -2016,8 +2016,15 @@ impl LlmDriver for OpenAIDriver {
                         let message = err
                             .get("message")
                             .and_then(|m| m.as_str())
-                            .or_else(|| err.as_str())
-                            .map(str::to_string);
+                            .map(str::to_string)
+                            .or_else(|| {
+                                // Bare string shape: only a non-empty string is
+                                // a real signal, mirroring the null/all-null
+                                // object exclusions above — some providers send
+                                // `"error": ""` as a benign placeholder on an
+                                // otherwise normal chunk.
+                                err.as_str().filter(|s| !s.is_empty()).map(str::to_string)
+                            });
                         let err_type = err.get("type").and_then(|t| t.as_str());
                         // `code` may be a string ("rate_limit_exceeded"), a
                         // number (OpenRouter sends `429`), or — for a bare
@@ -4715,6 +4722,25 @@ mod tests {
             .stream(transport_retry_request(), tx)
             .await
             .expect("a null error field must not abort an otherwise-valid stream");
+        assert_eq!(resp.text(), "hi");
+    }
+
+    /// A bare `"error": ""` (empty string, not an object) on an otherwise-normal
+    /// chunk must NOT be treated as a terminal error, mirroring the null/all-null
+    /// exclusions above: only a *non-empty* bare string counts as a real signal.
+    #[tokio::test]
+    async fn streamed_empty_bare_error_string_is_ignored() {
+        let sse_body = "data: {\"error\":\"\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\
+                        data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\
+                        data: [DONE]\n"
+            .to_string();
+        let base = spawn_sse_server(sse_body).await;
+        let driver = OpenAIDriver::new("test-key".to_string(), base);
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let resp = driver
+            .stream(transport_retry_request(), tx)
+            .await
+            .expect("a bare empty-string error field must not abort an otherwise-valid stream");
         assert_eq!(resp.text(), "hi");
     }
 
