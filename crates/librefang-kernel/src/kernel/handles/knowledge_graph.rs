@@ -13,6 +13,7 @@ impl kernel_handle::KnowledgeGraph for LibreFangKernel {
     async fn knowledge_add_entity(
         &self,
         entity: &librefang_types::memory::Entity,
+        agent_id: &str,
         peer_id: Option<&str>,
     ) -> Result<String, kernel_handle::KernelOpError> {
         // The substrate owns the value (it moves into spawn_blocking).
@@ -20,7 +21,7 @@ impl kernel_handle::KnowledgeGraph for LibreFangKernel {
         // every caller to give up ownership. See #3553.
         self.memory
             .substrate
-            .add_entity(entity.clone(), peer_id)
+            .add_entity(entity.clone(), agent_id, peer_id)
             .await
             .map_err(|e| {
                 kernel_handle::KernelOpError::Internal(format!("Knowledge add entity failed: {e}"))
@@ -30,11 +31,12 @@ impl kernel_handle::KnowledgeGraph for LibreFangKernel {
     async fn knowledge_add_relation(
         &self,
         relation: &librefang_types::memory::Relation,
+        agent_id: &str,
         peer_id: Option<&str>,
     ) -> Result<String, kernel_handle::KernelOpError> {
         self.memory
             .substrate
-            .add_relation(relation.clone(), peer_id)
+            .add_relation(relation.clone(), agent_id, peer_id)
             .await
             .map_err(|e| {
                 kernel_handle::KernelOpError::Internal(format!(
