@@ -1435,6 +1435,11 @@ impl LibreFangKernel {
         let attribution_user_id: Option<UserId> =
             sender_context.and_then(|sc| self.security.auth.identify(&sc.channel, &sc.user_id));
         let attribution_channel: Option<String> = sender_context.map(|sc| sc.channel.clone());
+        // #6460: when an authenticated API caller owns this turn, their vault key is what gets billed upstream (see `resolve_driver_for_owner` above), so usage attribution and per-user budget enforcement must key on that owner.
+        // A plain authenticated POST carries no `sender_id`, so `attribution_user_id` is `None` and the owner's spend would otherwise be recorded unattributed and never gated against their budget.
+        // The owner wins when present; sender-derived attribution stays the fallback for owner-less paths (channel / cron / agent_send).
+        // Forks never reach `execute_llm_agent` (see the fork short-circuit at the top of this method), so the raw owner needs no fork-nulling here.
+        let billed_user_id: Option<UserId> = owner.or(attribution_user_id);
         // #4807 review nit 10: when the LLM fallback chain redirected
         // the request to an alternative slot, bill the *actual* serving
         // provider rather than the manifest-nominated one. The agent
@@ -1457,7 +1462,7 @@ impl LibreFangKernel {
             cost_usd: cost,
             tool_calls: result.decision_traces.len() as u32,
             latency_ms,
-            user_id: attribution_user_id,
+            user_id: billed_user_id,
             channel: attribution_channel.clone(),
             session_id: Some(effective_session_id),
         };
@@ -1480,12 +1485,12 @@ impl LibreFangKernel {
                 librefang_runtime::audit::AuditAction::BudgetExceeded,
                 format!("{e}"),
                 "denied",
-                attribution_user_id,
+                billed_user_id,
                 attribution_channel.clone(),
             );
             // Fall back to plain record so the cost is not lost from tracking
             let _ = self.metering.engine.record(&usage_record);
-        } else if let Some(uid) = attribution_user_id {
+        } else if let Some(uid) = billed_user_id {
             // RBAC M5: per-user budget enforcement, post-call (matches the
             // global / per-agent / per-provider semantics — the row was
             // already persisted above so `query_user_*` includes this
