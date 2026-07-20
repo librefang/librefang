@@ -5,6 +5,7 @@ use librefang_types::agent::{AgentId, ResourceQuota};
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::message::TokenUsage;
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
 use tracing::debug;
@@ -122,9 +123,120 @@ pub struct AgentScheduler {
     /// Resource quotas per agent.
     quotas: DashMap<AgentId, ResourceQuota>,
     /// Usage tracking per agent.
-    usage: DashMap<AgentId, UsageTracker>,
+    ///
+    /// Wrapped in `Arc` so a [`TokenReservation`] RAII guard can hold a handle to this map and release its pre-charge on drop — e.g. when a streaming turn is superseded/aborted or a trigger fire times out, the spawned future (which owns the guard) is dropped mid-flight before it can settle/release explicitly — without a reference back to the whole scheduler.
+    usage: Arc<DashMap<AgentId, UsageTracker>>,
     /// Active task handles per agent.
     tasks: DashMap<AgentId, JoinHandle<()>>,
+}
+
+/// Roll back a pre-charged token reservation (undo the `total_tokens` increment) without recording an LLM call.
+/// Shared by [`AgentScheduler::release_reservation`] and [`TokenReservation`]'s drop / release paths so the math has a single source of truth.
+fn release_tokens_in(
+    usage: &DashMap<AgentId, UsageTracker>,
+    agent_id: AgentId,
+    estimated_tokens: u64,
+) {
+    if estimated_tokens == 0 {
+        return;
+    }
+    if let Some(mut tracker) = usage.get_mut(&agent_id) {
+        tracker.reset_if_expired();
+        tracker.total_tokens = tracker.total_tokens.saturating_sub(estimated_tokens);
+    }
+}
+
+/// Replace a pre-charged token reservation with actual usage and record the LLM call.
+/// Shared by [`AgentScheduler::settle_reservation`] and [`TokenReservation::settle`].
+fn settle_tokens_in(
+    usage: &DashMap<AgentId, UsageTracker>,
+    agent_id: AgentId,
+    estimated_tokens: u64,
+    usage_data: &TokenUsage,
+) {
+    let actual_tokens = usage_data.total();
+    if let Some(mut tracker) = usage.get_mut(&agent_id) {
+        tracker.reset_if_expired();
+
+        if estimated_tokens > 0 {
+            // Correct the pre-charged estimate to the actual amount:
+            //   total_tokens was incremented by `estimated`; adjust it
+            //   to reflect `actual` instead.
+            tracker.total_tokens = tracker
+                .total_tokens
+                .saturating_sub(estimated_tokens)
+                .saturating_add(actual_tokens);
+        } else {
+            // No reservation was made (no quota) — behave like record_usage
+            tracker.total_tokens = tracker.total_tokens.saturating_add(actual_tokens);
+        }
+
+        // Per-dimension counters (never pre-charged). Saturating because
+        // `usage.*` is untrusted provider wire data (matches the metering
+        // crate's clamping of the same fields).
+        tracker.input_tokens = tracker.input_tokens.saturating_add(usage_data.input_tokens);
+        tracker.output_tokens = tracker
+            .output_tokens
+            .saturating_add(usage_data.output_tokens);
+        tracker.llm_calls += 1;
+
+        // Sliding-window for burst detection (#4943): see record_usage
+        // — push burst_tokens() so cache-read hits don't gate throughput.
+        tracker
+            .token_timestamps
+            .push_back((Instant::now(), usage_data.burst_tokens()));
+    }
+}
+
+/// RAII guard for a pre-charged token reservation.
+///
+/// Returned by [`AgentScheduler::reserve_tokens`].
+/// It exists to close a class of leak the bare-`u64` reservation had: the pre-charge on `total_tokens` was released only by an explicit `settle`/`release` call, so a spawned streaming turn that was superseded/aborted (#3739) — or a trigger fire dropped by its `tokio::time::timeout` — dropped the future *before* reaching either call, permanently inflating the agent's hourly token counter until the window rolled over (a self-inflicted quota DoS).
+/// The USD sibling ([`librefang_kernel_metering::MeteringReservation`]) already releases on drop; this brings the token side to parity.
+///
+/// On drop the guard releases the pre-charge unless it was already settled/released.
+/// A reservation for an agent with no quota carries `estimated_tokens == 0`, so its drop is a no-op — preserving the zero-reservation contract of [`AgentScheduler::check_quota_and_reserve`].
+#[must_use = "binding is required: a dropped TokenReservation releases the pre-charge"]
+pub struct TokenReservation {
+    usage: Arc<DashMap<AgentId, UsageTracker>>,
+    agent_id: AgentId,
+    estimated_tokens: u64,
+    settled: bool,
+}
+
+impl TokenReservation {
+    /// Settle the reservation with the actual usage consumed and record the LLM call.
+    /// Consumes the guard so its drop becomes a no-op.
+    pub fn settle(mut self, usage_data: &TokenUsage) {
+        settle_tokens_in(
+            &self.usage,
+            self.agent_id,
+            self.estimated_tokens,
+            usage_data,
+        );
+        self.settled = true;
+    }
+
+    /// Release the reservation without recording an LLM call (used when no LLM call was made — suspended agent, non-LLM agent failure, early error).
+    /// Consumes the guard so its drop becomes a no-op.
+    pub fn release(mut self) {
+        release_tokens_in(&self.usage, self.agent_id, self.estimated_tokens);
+        self.settled = true;
+    }
+
+    /// The pre-charged estimate (0 when the agent has no effective token quota).
+    /// Exposed for diagnostics / tests.
+    pub fn estimated_tokens(&self) -> u64 {
+        self.estimated_tokens
+    }
+}
+
+impl Drop for TokenReservation {
+    fn drop(&mut self) {
+        if !self.settled {
+            release_tokens_in(&self.usage, self.agent_id, self.estimated_tokens);
+        }
+    }
 }
 
 impl AgentScheduler {
@@ -132,7 +244,7 @@ impl AgentScheduler {
     pub fn new() -> Self {
         Self {
             quotas: DashMap::new(),
-            usage: DashMap::new(),
+            usage: Arc::new(DashMap::new()),
             tasks: DashMap::new(),
         }
     }
@@ -272,6 +384,10 @@ impl AgentScheduler {
     /// Atomically check the per-agent quota **and** pre-charge an estimated
     /// token budget.
     ///
+    /// **Production call sites should use [`Self::reserve_tokens`] instead.**
+    /// It wraps this same check-and-charge in an RAII [`TokenReservation`] guard whose `Drop` releases the pre-charge automatically, so a caller whose future is dropped before it can call `settle_reservation` / `release_reservation` — a superseded streaming turn, a `stop`/`kill`, a `tokio::time::timeout` — can no longer leak the reservation (#6513).
+    /// This lower-level method remains `pub` for `reserve_tokens`'s own use and for tests exercising the bare pre-charge/settle/release sequence.
+    ///
     /// This closes the TOCTOU window between `check_quota` and
     /// `record_usage`: N concurrent callers all calling `check_quota` before
     /// any of them calls `record_usage` can each individually pass the check
@@ -357,36 +473,7 @@ impl AgentScheduler {
     /// When `estimated_tokens == 0` (no quota was configured) the function
     /// falls back to the same logic as `record_usage`.
     pub fn settle_reservation(&self, agent_id: AgentId, estimated_tokens: u64, usage: &TokenUsage) {
-        let actual_tokens = usage.total();
-        if let Some(mut tracker) = self.usage.get_mut(&agent_id) {
-            tracker.reset_if_expired();
-
-            if estimated_tokens > 0 {
-                // Correct the pre-charged estimate to the actual amount:
-                //   total_tokens was incremented by `estimated`; adjust it
-                //   to reflect `actual` instead.
-                tracker.total_tokens = tracker
-                    .total_tokens
-                    .saturating_sub(estimated_tokens)
-                    .saturating_add(actual_tokens);
-            } else {
-                // No reservation was made (no quota) — behave like record_usage
-                tracker.total_tokens = tracker.total_tokens.saturating_add(actual_tokens);
-            }
-
-            // Per-dimension counters (never pre-charged). Saturating because
-            // `usage.*` is untrusted provider wire data (matches the metering
-            // crate's clamping of the same fields).
-            tracker.input_tokens = tracker.input_tokens.saturating_add(usage.input_tokens);
-            tracker.output_tokens = tracker.output_tokens.saturating_add(usage.output_tokens);
-            tracker.llm_calls += 1;
-
-            // Sliding-window for burst detection (#4943): see record_usage
-            // — push burst_tokens() so cache-read hits don't gate throughput.
-            tracker
-                .token_timestamps
-                .push_back((Instant::now(), usage.burst_tokens()));
-        }
+        settle_tokens_in(&self.usage, agent_id, estimated_tokens, usage);
     }
 
     /// Release a prior `check_quota_and_reserve` reservation without
@@ -403,13 +490,27 @@ impl AgentScheduler {
     /// Distinct from `settle_reservation`, which is for paths where an
     /// LLM call **was** attempted (it always increments `llm_calls`).
     pub fn release_reservation(&self, agent_id: AgentId, estimated_tokens: u64) {
-        if estimated_tokens == 0 {
-            return;
-        }
-        if let Some(mut tracker) = self.usage.get_mut(&agent_id) {
-            tracker.reset_if_expired();
-            tracker.total_tokens = tracker.total_tokens.saturating_sub(estimated_tokens);
-        }
+        release_tokens_in(&self.usage, agent_id, estimated_tokens);
+    }
+
+    /// Pre-charge an estimated token reservation and return an RAII [`TokenReservation`] guard.
+    ///
+    /// Same quota check and pre-charge as [`Self::check_quota_and_reserve`], but the returned guard releases the pre-charge on drop unless it is explicitly settled ([`TokenReservation::settle`]) or released ([`TokenReservation::release`]).
+    /// This is the reservation entry point the send/streaming/trigger paths must use, so a future that is dropped mid-flight (streaming supersede/abort, trigger `timeout`) cannot leak the pre-charge.
+    /// On an over-quota / burst error the pre-charge is never applied and the `Err` propagates unchanged.
+    pub fn reserve_tokens(
+        &self,
+        agent_id: AgentId,
+        estimated_tokens: u64,
+    ) -> LibreFangResult<TokenReservation> {
+        // check_quota_and_reserve returns the amount actually pre-charged (0 when the agent has no effective token quota), so the guard's drop subtracts exactly what was added — nothing, in the no-quota case.
+        let reserved = self.check_quota_and_reserve(agent_id, estimated_tokens)?;
+        Ok(TokenReservation {
+            usage: Arc::clone(&self.usage),
+            agent_id,
+            estimated_tokens: reserved,
+            settled: false,
+        })
     }
 
     /// Reset usage tracking for an agent (e.g. on session reset).
@@ -1054,6 +1155,117 @@ mod tests {
         assert!(
             len == 10_000,
             "all 10k same-second pushes survive; got {len}",
+        );
+    }
+
+    fn quota_100k() -> ResourceQuota {
+        ResourceQuota {
+            max_llm_tokens_per_hour: Some(100_000),
+            max_tool_calls_per_minute: 0,
+            ..Default::default()
+        }
+    }
+
+    /// Regression: dropping a [`TokenReservation`] without calling `settle`/`release` must roll back the pre-charge.
+    /// This is the leak the bare-`u64` reservation had — a superseded/aborted streaming turn or a timed-out trigger fire dropped the owning future before settle/release ran, permanently inflating the hourly token counter until the window rolled over (a self-inflicted quota DoS).
+    #[test]
+    fn dropped_reservation_releases_the_precharge() {
+        let scheduler = AgentScheduler::new();
+        let id = AgentId::new();
+        scheduler.register(id, quota_100k());
+
+        {
+            let reservation = scheduler.reserve_tokens(id, 500).unwrap();
+            assert_eq!(reservation.estimated_tokens(), 500);
+            assert_eq!(
+                scheduler.get_usage(id).unwrap().total_tokens,
+                500,
+                "reservation pre-charged"
+            );
+            // Guard dropped here with neither settle nor release — this is what an aborted / timed-out future does.
+        }
+
+        let after = scheduler.get_usage(id).unwrap();
+        assert_eq!(
+            after.total_tokens, 0,
+            "dropping the guard must release the pre-charge"
+        );
+        assert_eq!(
+            after.llm_calls, 0,
+            "a dropped (never-invoked) reservation is not an LLM call"
+        );
+    }
+
+    /// `settle` corrects the pre-charge to actual usage and records the call, and the guard's subsequent drop must NOT double-release.
+    #[test]
+    fn reservation_settle_records_actual_and_drop_is_noop() {
+        let scheduler = AgentScheduler::new();
+        let id = AgentId::new();
+        scheduler.register(id, quota_100k());
+
+        let reservation = scheduler.reserve_tokens(id, 1000).unwrap();
+        assert_eq!(scheduler.get_usage(id).unwrap().total_tokens, 1000);
+        reservation.settle(&TokenUsage {
+            input_tokens: 60,
+            output_tokens: 40,
+            ..Default::default()
+        });
+
+        let after = scheduler.get_usage(id).unwrap();
+        assert_eq!(
+            after.total_tokens, 100,
+            "settle corrects to actual; a double-release on drop would show 0"
+        );
+        assert_eq!(after.llm_calls, 1);
+        assert_eq!(after.input_tokens, 60);
+        assert_eq!(after.output_tokens, 40);
+    }
+
+    /// `release` rolls back the pre-charge without counting an LLM call, and the guard's subsequent drop must NOT double-release.
+    #[test]
+    fn reservation_release_rolls_back_and_drop_is_noop() {
+        let scheduler = AgentScheduler::new();
+        let id = AgentId::new();
+        scheduler.register(id, quota_100k());
+
+        let reservation = scheduler.reserve_tokens(id, 500).unwrap();
+        assert_eq!(scheduler.get_usage(id).unwrap().total_tokens, 500);
+        reservation.release();
+
+        let after = scheduler.get_usage(id).unwrap();
+        assert_eq!(after.total_tokens, 0, "release rolls the pre-charge back");
+        assert_eq!(after.llm_calls, 0, "release path is not an LLM call");
+    }
+
+    /// An agent with no effective token quota gets a no-op guard (`estimated_tokens == 0`), so its drop must not disturb real recorded usage — preserving the zero-reservation contract.
+    #[test]
+    fn reservation_without_quota_is_a_noop_guard() {
+        let scheduler = AgentScheduler::new();
+        let id = AgentId::new();
+        scheduler.register(id, ResourceQuota::default()); // unlimited
+        scheduler.record_usage(
+            id,
+            &TokenUsage {
+                input_tokens: 100,
+                output_tokens: 50,
+                ..Default::default()
+            },
+        );
+        assert_eq!(scheduler.get_usage(id).unwrap().total_tokens, 150);
+
+        {
+            let reservation = scheduler.reserve_tokens(id, 1000).unwrap();
+            assert_eq!(
+                reservation.estimated_tokens(),
+                0,
+                "unlimited quota pre-charges nothing"
+            );
+        }
+
+        assert_eq!(
+            scheduler.get_usage(id).unwrap().total_tokens,
+            150,
+            "a no-quota guard drop must not touch real recorded usage"
         );
     }
 }
