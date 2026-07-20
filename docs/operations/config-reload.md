@@ -212,7 +212,7 @@ classified differently — the row note spells out which is which.
 | Field | Class | Meaning |
 |---|---|---|
 | `web` | H | Web tools config (search + fetch) — rebuilds web context. |
-| `browser` | H | Browser automation config. |
+| `browser` | R | Browser automation config — the `BrowserManager` captures it by value at boot with no rebuild path, so a change needs a restart. |
 | `media` | N | Media-understanding config. |
 | `links` | N | Link-understanding config. |
 | `canvas` | R | Canvas (A2UI) config. |
