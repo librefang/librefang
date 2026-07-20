@@ -131,6 +131,7 @@ impl KnowledgeGraph for StubKernel {
     async fn knowledge_add_entity(
         &self,
         _entity: &librefang_types::memory::Entity,
+        _agent_id: &str,
         _: Option<&str>,
     ) -> Result<String, super::KernelOpError> {
         Err("stub".into())
@@ -138,6 +139,7 @@ impl KnowledgeGraph for StubKernel {
     async fn knowledge_add_relation(
         &self,
         _relation: &librefang_types::memory::Relation,
+        _agent_id: &str,
         _: Option<&str>,
     ) -> Result<String, super::KernelOpError> {
         Err("stub".into())

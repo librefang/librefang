@@ -291,13 +291,6 @@ impl LibreFangKernel {
                         new_config.web.search_provider, new_config.web.cache_ttl_minutes
                     );
                 }
-                HotAction::ReloadBrowserConfig => {
-                    info!(
-                        "Hot-reload: browser config updated (headless={}) \
-                         — new sessions will use updated config",
-                        new_config.browser.headless
-                    );
-                }
                 HotAction::UpdateWebhookConfig => {
                     let enabled = new_config
                         .webhook_triggers

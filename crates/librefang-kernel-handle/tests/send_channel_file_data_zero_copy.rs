@@ -177,6 +177,7 @@ impl KnowledgeGraph for CapturingFileKernel {
     async fn knowledge_add_entity(
         &self,
         _entity: &Entity,
+        _agent_id: &str,
         _: Option<&str>,
     ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
@@ -185,6 +186,7 @@ impl KnowledgeGraph for CapturingFileKernel {
     async fn knowledge_add_relation(
         &self,
         _relation: &Relation,
+        _agent_id: &str,
         _: Option<&str>,
     ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Err("not used".into())

@@ -1663,6 +1663,7 @@ mod tests {
         async fn knowledge_add_entity(
             &self,
             _: &librefang_types::memory::Entity,
+            _agent_id: &str,
             _: Option<&str>,
         ) -> Result<String, librefang_kernel_handle::KernelOpError> {
             Err("not implemented".into())
@@ -1670,6 +1671,7 @@ mod tests {
         async fn knowledge_add_relation(
             &self,
             _: &librefang_types::memory::Relation,
+            _agent_id: &str,
             _: Option<&str>,
         ) -> Result<String, librefang_kernel_handle::KernelOpError> {
             Err("not implemented".into())
