@@ -219,12 +219,12 @@ pub(crate) struct GenerationConfig {
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_output_tokens: Option<u32>,
-    /// Structured-output MIME type — `application/json` for
-    /// `ResponseFormat::Json` / `JsonSchema`. Serialized as `responseMimeType`.
+    /// Structured-output MIME type — `application/json` for `ResponseFormat::Json` / `JsonSchema`.
+    /// Serialized as `responseMimeType`.
     #[serde(skip_serializing_if = "Option::is_none")]
     response_mime_type: Option<String>,
-    /// Response schema (a restricted OpenAPI-subset schema) for
-    /// `ResponseFormat::JsonSchema`. Serialized as `responseSchema`.
+    /// Response schema (a restricted OpenAPI-subset schema) for `ResponseFormat::JsonSchema`.
+    /// Serialized as `responseSchema`.
     #[serde(skip_serializing_if = "Option::is_none")]
     response_schema: Option<serde_json::Value>,
 }
@@ -629,11 +629,9 @@ fn convert_response(resp: GeminiResponse) -> Result<CompletionResponse, LlmError
 
 // ── Shared helpers (used by both Gemini and Vertex AI drivers) ────────
 
-/// Map a [`ResponseFormat`] to Gemini's `(responseMimeType, responseSchema)`
-/// pair. Gemini honors structured output through `generationConfig`, unlike
-/// OpenAI/Anthropic; `None` / `Text` leaves both unset (free-form text).
-/// Note the schema is a restricted OpenAPI-subset, not full JSON Schema — an
-/// invalid schema is rejected by the API, same as any other bad request.
+/// Map a [`ResponseFormat`] to Gemini's `(responseMimeType, responseSchema)` pair.
+/// Gemini honors structured output through `generationConfig`, unlike OpenAI/Anthropic; `None` / `Text` leaves both unset (free-form text).
+/// Note the schema is a restricted OpenAPI-subset, not full JSON Schema — an invalid schema is rejected by the API, same as any other bad request.
 fn gemini_response_format(
     rf: Option<&ResponseFormat>,
 ) -> (Option<String>, Option<serde_json::Value>) {
