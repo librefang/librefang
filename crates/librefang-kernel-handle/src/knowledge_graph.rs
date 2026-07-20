@@ -18,9 +18,12 @@ pub trait KnowledgeGraph: Send + Sync {
     /// moves from caller to callee. See issue #3553.
     /// `peer_id` scopes the entity to a single user on a multi-user agent
     /// (#6494); `None` writes a shared/unscoped entity.
+    /// `agent_id` scopes the entity to its owning agent so the agent-scoped relations read and `delete_by_agent` see it (the empty string is the shared/unscoped sentinel).
+    /// Callers thread the turn's `caller_agent_id`.
     async fn knowledge_add_entity(
         &self,
         entity: &librefang_types::memory::Entity,
+        agent_id: &str,
         peer_id: Option<&str>,
     ) -> Result<String, KernelOpError>;
 
@@ -30,9 +33,11 @@ pub trait KnowledgeGraph: Send + Sync {
     /// [`knowledge_add_entity`](Self::knowledge_add_entity). See #3553.
     /// `peer_id` scopes the relation to a single user (#6494); `None` writes a
     /// shared/unscoped relation.
+    /// `agent_id` scopes the relation to its owning agent (see [`knowledge_add_entity`](Self::knowledge_add_entity)).
     async fn knowledge_add_relation(
         &self,
         relation: &librefang_types::memory::Relation,
+        agent_id: &str,
         peer_id: Option<&str>,
     ) -> Result<String, KernelOpError>;
 
