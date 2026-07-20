@@ -795,7 +795,11 @@ impl LibreFangKernel {
             cost_usd: cost,
             tool_calls: result.decision_traces.len() as u32,
             latency_ms,
-            user_id: None,
+            // #6460: attribute ephemeral (/btw) spend to the authenticated
+            // owner. This path passes `sender_context = None`, so `owner` is the
+            // only available attribution — leaving it `None` recorded the
+            // owner's own-key spend as unattributed. No fork reaches this path.
+            user_id: owner,
             channel: None,
             session_id: None,
         };
@@ -2772,6 +2776,16 @@ impl LibreFangKernel {
         let attribution_user_id: Option<UserId> =
             sender_context.and_then(|sc| self.security.auth.identify(&sc.channel, &sc.user_id));
         let attribution_channel: Option<String> = sender_context.map(|sc| sc.channel.clone());
+        // #6460: the authenticated owner's vault key is billed upstream (via
+        // `effective_owner` → `resolve_driver_for_owner`), so usage attribution
+        // and the per-user budget gate must key on that owner when present —
+        // otherwise a plain authenticated stream (sender_context = None →
+        // attribution_user_id = None) records the owner's own-key spend
+        // unattributed and never enforces their budget. Use `effective_owner`
+        // (already null for forks, computed above) NOT the raw owner, so a
+        // sub-agent's spend is not mis-attributed to the parent turn's user.
+        // Snapshot into a Copy local before the spawn moves it into the task.
+        let billed_user_id: Option<UserId> = effective_owner.or(attribution_user_id);
 
         // `loop_opts` is already a local — the spawned async move will
         // capture it. Agent loop reads these at each turn-end / save /
@@ -3147,9 +3161,9 @@ impl LibreFangKernel {
                         cost_usd: cost,
                         tool_calls: result.decision_traces.len() as u32,
                         latency_ms,
-                        // RBAC M5: attribution captured from sender_context
+                        // RBAC M5 + #6460: owner-preferred attribution captured
                         // before the spawn — moves into this async block.
-                        user_id: attribution_user_id,
+                        user_id: billed_user_id,
                         channel: attribution_channel.clone(),
                         session_id: Some(effective_session_id),
                     };
@@ -3170,11 +3184,11 @@ impl LibreFangKernel {
                             librefang_runtime::audit::AuditAction::BudgetExceeded,
                             format!("{e}"),
                             "denied",
-                            attribution_user_id,
+                            billed_user_id,
                             attribution_channel.clone(),
                         );
                         let _ = kernel_clone.metering.engine.record(&usage_record);
-                    } else if let Some(uid) = attribution_user_id {
+                    } else if let Some(uid) = billed_user_id {
                         // RBAC M5: per-user budget enforcement, post-call.
                         // `check_all_and_record` already persisted the row,
                         // so `query_user_*` reflects this call. A breach
