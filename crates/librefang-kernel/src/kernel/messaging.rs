@@ -1035,7 +1035,26 @@ impl LibreFangKernel {
         // key re-acquires `session_msg_locks[sid]` — also non-reentrant — on
         // the same task. Check the held-session registry for that path rather
         // than exempting it.
-        match session_id_override {
+        // An explicit `session_id_override` that equals the agent's canonical
+        // (persistent) session addresses the SAME session the no-override
+        // persistent path writes. Selecting the per-*session* lock for it while
+        // that path takes the per-*agent* lock would let the two dispatches
+        // write one session under two different mutexes concurrently — a lost
+        // update / corrupted history. Collapse such an override to the
+        // per-agent lock namespace so both serialize on the same mutex. The
+        // raw `session_id_override` is still passed to
+        // `resolve_dispatch_session_id` below, so the resolved session id is
+        // unchanged; only the lock (and its re-entrancy / held-lock tracking)
+        // is normalized. (Read the canonical id once here; it is mutable via
+        // switch_agent_session, but a concurrent switch mid-dispatch is out of
+        // scope, as it already is for the resolution read below.)
+        let canonical_session_id = self.agents.registry.get(agent_id).map(|e| e.session_id);
+        let session_lock_key: Option<SessionId> = match session_id_override {
+            Some(sid) if Some(sid) != canonical_session_id => Some(sid),
+            _ => None,
+        };
+
+        match session_lock_key {
             None => {
                 if librefang_runtime::held_agent_locks::is_held(agent_id) {
                     let mut chain: Vec<String> =
@@ -1081,7 +1100,7 @@ impl LibreFangKernel {
         // are not serialized against each other (multi-tab / multi-session UIs).
         // Without an override, fall back to the per-agent lock to preserve the
         // existing serialization guarantee for single-session agents.
-        let (lock, agent_scoped) = if let Some(sid) = session_id_override {
+        let (lock, agent_scoped) = if let Some(sid) = session_lock_key {
             (
                 self.agents
                     .session_msg_locks
@@ -1121,7 +1140,7 @@ impl LibreFangKernel {
         // a re-entrant keyed `agent_send` (same conversation_key, transitive
         // A->B->A) is rejected above instead of deadlocking on the
         // non-reentrant `session_msg_locks[sid]` mutex.
-        let _held_session_guard = match session_id_override {
+        let _held_session_guard = match session_lock_key {
             Some(sid) if !agent_scoped => {
                 Some(librefang_runtime::held_agent_locks::HeldSessionLockGuard::register(sid))
             }
@@ -2807,7 +2826,30 @@ impl LibreFangKernel {
         // paths can observe this streaming turn's holding of agent_msg_locks
         // and skip / reject as appropriate. Mirrors the non-streaming site at
         // `send_message_full_inner` (~L871-906).
-        let (session_lock, agent_scoped) = if session_id_override.is_some() {
+        // Collapse an override that targets the agent's canonical session onto
+        // the per-agent lock, exactly as the non-streaming
+        // `send_message_full_inner` site does: an override equal to
+        // `entry.session_id` writes the SAME session the no-override persistent
+        // path writes, so taking the per-session lock here while that path
+        // takes the per-agent lock would let the two write one session under
+        // two mutexes concurrently (lost update). `effective_session_id`
+        // already resolves to the canonical id in that case, so only the lock
+        // namespace changes; a no-override channel dispatch keeps the per-agent
+        // lock (narrow fix — the channel-derived variant is unchanged here).
+        //
+        // Re-read the canonical id FRESH here rather than reusing the `entry`
+        // snapshot captured ~760 lines above (line ~2065): `entry.session_id`
+        // is mutable via `switch_agent_session` (#4291), and this non-async fn
+        // does substantial preemptible synchronous work (catalog/budget/quota,
+        // session-mode resolution) between that fetch and this decision, so a
+        // concurrent rotation could leave the snapshot stale and mis-select the
+        // lock namespace — reintroducing the very race this fix closes. Mirrors
+        // the non-streaming `send_message_full_inner` site, and the fork branch
+        // above which reads the parent session id from `loop_opts`, not `entry`.
+        let canonical_session_id = self.agents.registry.get(agent_id).map(|e| e.session_id);
+        let session_scoped_lock =
+            matches!(session_id_override, Some(sid) if Some(sid) != canonical_session_id);
+        let (session_lock, agent_scoped) = if session_scoped_lock {
             (
                 self.agents
                     .session_msg_locks
