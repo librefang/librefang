@@ -325,6 +325,133 @@ async fn test_send_channel_message_honours_adapter_output_format_override_6445()
     kernel.shutdown();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn test_post_approval_reply_routes_to_account_qualified_adapter_6492() {
+    // #6492 Bug 2: the post-approval wake path (`wake_agent_after_approval`)
+    // used to deliver the resumed agent reply with a BARE adapter lookup
+    // (`channel_adapters.get(channel)`) that ignored `deferred.account_id`.
+    // On a multi-account install the channel bridge registers each adapter
+    // under BOTH the bare key (`"whatsapp"`) and the account-qualified key
+    // (`"whatsapp:<account_id>"`), so a reply for a non-first account landed
+    // on the wrong account's bot/chat (or missed entirely). The fix routes the
+    // reply through the canonical `send_channel_message`, which keys by
+    // `"<channel>:<account_id>"` first and falls back to the bare channel.
+    //
+    // This test asserts that account-qualified delivery contract the wake path
+    // now delegates to — driving `send_channel_message` with the exact
+    // `(routing_chat_id, account_id)` that `wake_agent_after_approval` extracts
+    // from the `DeferredToolExecution`. (The full `send_message_full` LLM
+    // round-trip inside the wake path is out of unit-test scope, matching the
+    // module note on the notification tests.)
+    use librefang_types::tool::DeferredToolExecution;
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    // Two adapters for the same channel type, registered under the bare and the
+    // account-qualified keys — exactly what the bridge does for a multi-account
+    // WhatsApp deployment.
+    let bare_adapter = Arc::new(RecordingChannelAdapter::new("whatsapp"));
+    let bare_sent = bare_adapter.sent.clone();
+    let acct_adapter = Arc::new(RecordingChannelAdapter::new("whatsapp"));
+    let acct_sent = acct_adapter.sent.clone();
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("whatsapp".to_string(), bare_adapter);
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("whatsapp:acct1".to_string(), acct_adapter);
+
+    // Case 1: a deferred exec that arrived on account "acct1" in a group chat.
+    // The reply MUST land on the "whatsapp:acct1" adapter and NOT the bare one.
+    let deferred_acct = DeferredToolExecution {
+        agent_id: "agent-1".to_string(),
+        tool_use_id: "tu-acct".to_string(),
+        tool_name: "file_write".to_string(),
+        input: serde_json::json!({}),
+        allowed_tools: None,
+        allowed_env_vars: None,
+        exec_policy: None,
+        sender_id: Some("user-7".to_string()),
+        channel: Some("whatsapp".to_string()),
+        chat_id: Some("group-99".to_string()),
+        account_id: Some("acct1".to_string()),
+        workspace_root: None,
+        force_human: false,
+        session_id: None,
+    };
+    // Recipient + account resolution mirror `wake_agent_after_approval`: prefer
+    // chat_id over sender_id, and forward account_id verbatim.
+    let routing_chat_id = deferred_acct
+        .chat_id
+        .as_deref()
+        .filter(|c| !c.is_empty())
+        .unwrap_or_else(|| deferred_acct.sender_id.as_deref().unwrap());
+    kernel
+        .send_channel_message(
+            deferred_acct.channel.as_deref().unwrap(),
+            routing_chat_id,
+            "approved — done",
+            None,
+            deferred_acct.account_id.as_deref(),
+        )
+        .await
+        .expect("send should succeed to the account-qualified adapter");
+    assert_eq!(
+        acct_sent.lock().unwrap().clone(),
+        vec!["group-99:approved — done".to_string()],
+        "post-approval reply for account 'acct1' must be delivered via the 'whatsapp:acct1' adapter"
+    );
+    assert!(
+        bare_sent.lock().unwrap().is_empty(),
+        "post-approval reply for account 'acct1' must NOT leak to the bare 'whatsapp' adapter (the misdelivery bug)"
+    );
+
+    // Case 2: a deferred exec with no account (single-tenant / bare source)
+    // routes to the bare "whatsapp" adapter, not the account-qualified one.
+    let deferred_bare = DeferredToolExecution {
+        account_id: None,
+        chat_id: Some("dm-1".to_string()),
+        tool_use_id: "tu-bare".to_string(),
+        ..deferred_acct.clone()
+    };
+    let routing_chat_id_bare = deferred_bare
+        .chat_id
+        .as_deref()
+        .filter(|c| !c.is_empty())
+        .unwrap_or_else(|| deferred_bare.sender_id.as_deref().unwrap());
+    kernel
+        .send_channel_message(
+            deferred_bare.channel.as_deref().unwrap(),
+            routing_chat_id_bare,
+            "approved — bare",
+            None,
+            deferred_bare.account_id.as_deref(),
+        )
+        .await
+        .expect("send should succeed to the bare adapter");
+    assert_eq!(
+        bare_sent.lock().unwrap().clone(),
+        vec!["dm-1:approved — bare".to_string()],
+        "post-approval reply with no account must be delivered via the bare 'whatsapp' adapter"
+    );
+    assert_eq!(
+        acct_sent.lock().unwrap().len(),
+        1,
+        "bare-account reply must NOT reach the account-qualified adapter (still only the case-1 send)"
+    );
+
+    kernel.shutdown();
+}
+
 #[test]
 fn test_manifest_to_capabilities() {
     let mut manifest = AgentManifest {
@@ -9122,6 +9249,134 @@ async fn resolve_driver_for_owner_fallback_slot_uses_owner_key() {
             .resolve_driver_for_owner(&manifest, Some(bob))
             .is_ok(),
         "resolving with an owner who has keys for both the primary and fallback provider must succeed",
+    );
+
+    kernel.shutdown();
+}
+
+/// #6517 regression: the owner-scoped key lookup must canonicalize the
+/// manifest provider before reading the vault. The write surface
+/// (`validate_provider`) only accepts canonical `known_providers()` names, so
+/// a user can only ever store a key under "openai" — never under the alias
+/// "codex". Before #6517, the lookup used the raw manifest provider string,
+/// so an alias-configured agent (`provider = "codex"`) missed the owner's
+/// stored key entirely and fell through to the (here, absent) global
+/// credential, failing with `MissingApiKey` instead of billing the owner.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial(librefang_vault_key)]
+async fn resolve_driver_for_owner_canonicalizes_alias_provider_before_owner_key_lookup() {
+    const TEST_VAULT_KEY_B64: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+    let _vault_key = set_test_env("LIBREFANG_VAULT_KEY", TEST_VAULT_KEY_B64);
+    let _no_keyring = set_test_env("LIBREFANG_VAULT_NO_KEYRING", "1");
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let alice = librefang_types::agent::UserId::from_name("alice");
+    // Stored under the CANONICAL name — the only name the write surface accepts.
+    kernel
+        .set_user_provider_key(alice, "openai", "sk-alice-openai-canon")
+        .expect("store user-scoped provider key");
+
+    // Agent manifest configured with an ALIAS of "openai".
+    let mut manifest = librefang_types::agent::AgentManifest::default();
+    manifest.model.provider = "codex".to_string();
+
+    assert!(
+        kernel
+            .resolve_driver_for_owner(&manifest, Some(alice))
+            .is_ok(),
+        "an alias-configured agent (`provider = \"codex\"`) must resolve the \
+         owner's key stored under the canonical name (\"openai\"); without \
+         canonicalizing the lookup, this owner has no stored key under the \
+         raw alias, no global key exists in this test environment, and \
+         resolution fails with MissingApiKey instead of billing the owner",
+    );
+
+    kernel.shutdown();
+}
+
+/// #6517 fallback-slot regression: the fallback-chain owner-key lookup must
+/// canonicalize the fallback provider the same way the primary-slot lookup
+/// does. Bob's key is stored under the canonical "openai"; the fallback slot
+/// is configured with the alias "codex". Distinguishes the fixed from the
+/// broken behaviour by comparing driver identity rather than asserting
+/// `is_ok()` alone — a failed fallback slot is warn-logged and dropped
+/// (`resolve_driver_for_owner` still returns `Ok` via the bare primary
+/// driver), so a bare success check would pass either way. Instead: resolve
+/// once with no fallback configured (`d_primary_only`) and once with the
+/// alias fallback slot (`d_with_fallback`), both for the same owner and
+/// primary provider/key so they'd share one cached driver if the fallback
+/// slot never actually builds. If canonicalization works, the fallback slot
+/// builds successfully and `resolve_driver_for_owner` wraps both drivers in
+/// a NEW `FallbackDriver`, so `d_with_fallback` is a distinct `Arc` from
+/// `d_primary_only`. If canonicalization is missing, the fallback slot's
+/// `driver_cache.get_or_create` fails with `MissingApiKey` (bob's key is
+/// stored under "openai", not the raw alias "codex", and no global
+/// credential exists in this test environment), the slot is dropped, and
+/// `resolve_driver_for_owner` falls through to returning the SAME cached
+/// primary driver as `d_primary_only` — so the two Arcs are `ptr_eq`.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial(librefang_vault_key)]
+async fn resolve_driver_for_owner_canonicalizes_alias_provider_in_fallback_slot() {
+    const TEST_VAULT_KEY_B64: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+    let _vault_key = set_test_env("LIBREFANG_VAULT_KEY", TEST_VAULT_KEY_B64);
+    let _no_keyring = set_test_env("LIBREFANG_VAULT_NO_KEYRING", "1");
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let bob = librefang_types::agent::UserId::from_name("bob");
+    kernel
+        .set_user_provider_key(bob, "ollama", "sk-bob-ollama")
+        .expect("store primary user key");
+    // Stored under the CANONICAL fallback provider name.
+    kernel
+        .set_user_provider_key(bob, "openai", "sk-bob-openai-canon")
+        .expect("store fallback user key");
+
+    let mut manifest_primary_only = librefang_types::agent::AgentManifest::default();
+    manifest_primary_only.model.provider = "ollama".to_string();
+
+    let mut manifest_with_fallback = librefang_types::agent::AgentManifest::default();
+    manifest_with_fallback.model.provider = "ollama".to_string();
+    // Fallback slot configured with an ALIAS of "openai".
+    manifest_with_fallback.fallback_models = Some(vec![librefang_types::agent::FallbackModel {
+        provider: "codex".to_string(),
+        model: "gpt-4o-mini".to_string(),
+        api_key_env: None,
+        base_url: None,
+        extra_params: Default::default(),
+    }]);
+
+    let d_primary_only = kernel
+        .resolve_driver_for_owner(&manifest_primary_only, Some(bob))
+        .expect("primary-only resolution must build");
+    let d_with_fallback = kernel
+        .resolve_driver_for_owner(&manifest_with_fallback, Some(bob))
+        .expect("resolution with an alias-configured fallback slot must still build");
+
+    assert!(
+        !Arc::ptr_eq(&d_primary_only, &d_with_fallback),
+        "the alias-configured fallback slot must build successfully (proving \
+         its owner-scoped key was found under the canonical name) and get \
+         wrapped in a NEW FallbackDriver, distinct from the bare primary \
+         driver; identical Arcs mean the fallback slot silently failed and \
+         was dropped — the fallback-slot alias canonicalization regressed",
     );
 
     kernel.shutdown();
