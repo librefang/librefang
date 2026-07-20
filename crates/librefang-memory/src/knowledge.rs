@@ -105,22 +105,15 @@ impl KnowledgeStore {
         Ok(id)
     }
 
-    /// Delete an agent's relations, plus the entities it first wrote that no
-    /// surviving relation still references.
+    /// Delete an agent's relations, plus the entities it first wrote that no surviving relation still references.
     ///
-    /// Wrapped in a single transaction so a relations-then-entities failure
-    /// can't leave orphan entities (relations referencing entities silently
-    /// broke ranking on the next graph query). See #3501.
+    /// Wrapped in a single transaction so a relations-then-entities failure can't leave orphan entities (relations referencing entities silently broke ranking on the next graph query).
+    /// See #3501.
     ///
-    /// Relations are strictly per-agent, so this agent's relations are deleted
-    /// wholesale. Entities are NOT per-agent: the table's key is `(id, peer_id)`
-    /// (agent_id is only first-writer provenance), so an entity a since-deleted
-    /// agent happened to write first can still be referenced — by id or name —
-    /// by another agent's live relations. Deleting every `agent_id = A` entity
-    /// would silently orphan those relations, quietly vanishing another agent's
-    /// data from future reads (#6521). So only entities this agent wrote that
-    /// NO surviving relation still references (by id or name, across any agent /
-    /// peer) are removed; shared, still-referenced entities are kept in place.
+    /// Relations are strictly per-agent, so this agent's relations are deleted wholesale.
+    /// Entities are NOT per-agent: the table's key is `(id, peer_id)` (agent_id is only first-writer provenance), so an entity a since-deleted agent happened to write first can still be referenced — by id or name — by another agent's live relations.
+    /// Deleting every `agent_id = A` entity would silently orphan those relations, quietly vanishing another agent's data from future reads (#6521).
+    /// So only entities this agent wrote that NO surviving relation still references (by id or name, across any agent / peer) are removed; shared, still-referenced entities are kept in place.
     pub fn delete_by_agent(&self, agent_id: &str) -> LibreFangResult<u64> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let tx = conn
@@ -132,11 +125,8 @@ impl KnowledgeStore {
                 rusqlite::params![agent_id],
             )
             .map_err(LibreFangError::memory)? as u64;
-        // Runs AFTER the relations delete above, so this agent's own relations
-        // no longer count as "referencing" — only OTHER agents' surviving
-        // relations keep an entity alive. Conservative on `name` as well as
-        // `id` because `query_graph_scoped`'s JOIN resolves a relation endpoint
-        // by either.
+        // Runs AFTER the relations delete above, so this agent's own relations no longer count as "referencing" — only OTHER agents' surviving relations keep an entity alive.
+        // Conservative on `name` as well as `id` because `query_graph_scoped`'s JOIN resolves a relation endpoint by either.
         let ent_count = tx
             .execute(
                 "DELETE FROM entities
