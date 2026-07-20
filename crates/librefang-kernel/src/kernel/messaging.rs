@@ -1171,15 +1171,12 @@ impl LibreFangKernel {
             .map_err(KernelError::LibreFang)?;
 
         // Enforce quota on the effective target agent (after routing).
-        // Use check_quota_and_reserve so the estimated token budget is
-        // pre-charged inside the same DashMap write-lock, closing the TOCTOU
-        // race where N concurrent callers all pass the check before any of
-        // them calls record_usage (#3736).
+        // Use reserve_tokens so the estimated token budget is pre-charged inside the same DashMap write-lock, closing the TOCTOU race where N concurrent callers all pass the check before any of them calls record_usage (#3736).
         let estimated_tokens = entry.manifest.model.max_tokens as u64;
         let token_reservation = match self
             .agents
             .scheduler
-            .check_quota_and_reserve(agent_id, estimated_tokens)
+            .reserve_tokens(agent_id, estimated_tokens)
         {
             Ok(r) => r,
             Err(e) => {
@@ -1194,9 +1191,7 @@ impl LibreFangKernel {
             tracing::debug!(agent_id = %agent_id, "Skipping message to suspended agent");
             // No LLM call is made; release reservations without inflating
             // llm_calls or the burst window.
-            self.agents
-                .scheduler
-                .release_reservation(agent_id, token_reservation);
+            token_reservation.release();
             usd_reservation.release();
             return Ok(AgentLoopResult::default());
         }
@@ -1252,11 +1247,7 @@ impl LibreFangKernel {
                 // cost will be recorded by `check_all_and_record` further
                 // down the call path; releasing the in-memory hold lets
                 // the next reservation pass see a consistent total.
-                self.agents.scheduler.settle_reservation(
-                    agent_id,
-                    token_reservation,
-                    &result.total_usage,
-                );
+                token_reservation.settle(&result.total_usage);
                 usd_reservation.settle();
                 // Record tool calls for rate limiting
                 let tool_count = result.decision_traces.len() as u32;
@@ -1566,9 +1557,7 @@ impl LibreFangKernel {
             Err(e) => {
                 // Release the pre-charged token + USD reservations — the
                 // agent loop failed before completing, no usage to settle.
-                self.agents
-                    .scheduler
-                    .release_reservation(agent_id, token_reservation);
+                token_reservation.release();
                 usd_reservation.release();
 
                 // SECURITY: Record failed message in audit trail
@@ -2127,7 +2116,7 @@ impl LibreFangKernel {
         let token_reservation = match self
             .agents
             .scheduler
-            .check_quota_and_reserve(agent_id, estimated_tokens)
+            .reserve_tokens(agent_id, estimated_tokens)
         {
             Ok(r) => r,
             Err(e) => {
@@ -2178,11 +2167,7 @@ impl LibreFangKernel {
                             })
                             .await;
                         // Settle pre-charged reservation (#3736)
-                        kernel_clone.agents.scheduler.settle_reservation(
-                            agent_id,
-                            token_reservation,
-                            &result.total_usage,
-                        );
+                        token_reservation.settle(&result.total_usage);
                         // Release the global USD hold — non-LLM modules incur
                         // no provider cost, so there is nothing to settle.
                         usd_reservation.release();
@@ -2196,10 +2181,7 @@ impl LibreFangKernel {
                         // Non-LLM agent (wasm/python) failed — never made an
                         // LLM call, release reservation without inflating
                         // llm_calls.
-                        kernel_clone
-                            .agents
-                            .scheduler
-                            .release_reservation(agent_id, token_reservation);
+                        token_reservation.release();
                         usd_reservation.release();
                         kernel_clone.agents.supervisor.record_panic();
                         warn!(agent_id = %agent_id, error = %e, "Non-LLM agent failed");
@@ -3122,11 +3104,7 @@ impl LibreFangKernel {
                     // Settle the pre-charged token reservation with actual usage
                     // (#3736). This replaces record_usage for the token counters
                     // while still correctly accounting for the burst window.
-                    kernel_clone.agents.scheduler.settle_reservation(
-                        agent_id,
-                        token_reservation,
-                        &result.total_usage,
-                    );
+                    token_reservation.settle(&result.total_usage);
                     // Settle the global USD hold (#3616) — actual spend is
                     // recorded via `check_all_and_record`; this frees the
                     // pre-call ceiling that throttled concurrent fires.
@@ -3360,10 +3338,7 @@ impl LibreFangKernel {
                     kernel_clone.refresh_openrouter_catalog_after_model_not_found(&manifest, &e);
                     // Release the pre-charged token reservation — the
                     // streaming loop failed, no usage to settle.
-                    kernel_clone
-                        .agents
-                        .scheduler
-                        .release_reservation(agent_id, token_reservation);
+                    token_reservation.release();
                     usd_reservation.release();
                     kernel_clone.agents.supervisor.record_panic();
                     warn!(agent_id = %agent_id, error = %e, "Streaming agent loop failed");
