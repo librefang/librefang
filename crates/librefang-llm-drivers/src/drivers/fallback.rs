@@ -452,6 +452,18 @@ impl LlmDriver for FallbackDriver {
                     // content flag to avoid a TOCTOU race (events buffered in
                     // the mpsc but not yet forwarded).
                     let _ = relay_handle.await;
+                    // If the provider already forwarded content to the caller,
+                    // failing over would corrupt the output — propagate
+                    // immediately, and do NOT penalize the slot's health or mark
+                    // it exhausted: it served content and this is not a
+                    // failover, so demoting it from rotation for future
+                    // unrelated requests would be spurious. Mirrors
+                    // FallbackChain::stream, which returns before mark_exhausted
+                    // for the same reason. (Checked before the health/exhaustion
+                    // bookkeeping — the divergence #6512 review [0] flagged.)
+                    if *content_emitted_rx.borrow() {
+                        return Err(e);
+                    }
                     entry.consecutive_errors.fetch_add(1, Ordering::Relaxed);
                     entry
                         .last_failure_at_ms
@@ -469,11 +481,6 @@ impl LlmDriver for FallbackDriver {
                         "Fallback driver (stream) failed, trying next"
                     );
                     self.record_exhaustion(entry, &e);
-                    // If the provider already forwarded content to the caller,
-                    // failing over would corrupt the output — propagate instead.
-                    if *content_emitted_rx.borrow() {
-                        return Err(e);
-                    }
                     last_error = Some(e);
                 }
             }
@@ -625,6 +632,13 @@ mod tests {
             texts,
             vec!["partial".to_string()],
             "the secondary must never run once the primary emitted content"
+        );
+        // #6512 review [0]: a provider that served content then hit a transient
+        // error must NOT be health-penalized — it is not a failover.
+        assert_eq!(
+            fb.drivers[0].consecutive_errors.load(Ordering::Relaxed),
+            0,
+            "a content-emitting provider must not be penalized on the propagate path"
         );
     }
 
