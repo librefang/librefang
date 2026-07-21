@@ -29,7 +29,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_client_protocol::schema::{
+use agent_client_protocol::schema::v1::{
     ClientCapabilities, ReadTextFileRequest, WriteTextFileRequest,
 };
 use agent_client_protocol::Client;
@@ -50,7 +50,7 @@ const FS_RPC_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Editor-declared filesystem capabilities, captured at `initialize` time.
 ///
-/// Mirrors [`agent_client_protocol::schema::FileSystemCapabilities`]
+/// Mirrors [`agent_client_protocol::schema::v1::FileSystemCapabilities`]
 /// but as a flat plain-old-data struct so callers in `librefang-kernel`
 /// and `librefang-runtime` don't pull in the ACP schema crate.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -112,7 +112,7 @@ impl FsClientHandle {
     /// typically return JSON-RPC `method_not_found`.
     pub async fn read_text_file(
         &self,
-        session_id: agent_client_protocol::schema::SessionId,
+        session_id: agent_client_protocol::schema::v1::SessionId,
         path: PathBuf,
         line: Option<u32>,
         limit: Option<u32>,
@@ -140,7 +140,7 @@ impl FsClientHandle {
     /// Issue an `fs/write_text_file` request and await the response.
     pub async fn write_text_file(
         &self,
-        session_id: agent_client_protocol::schema::SessionId,
+        session_id: agent_client_protocol::schema::v1::SessionId,
         path: PathBuf,
         content: String,
     ) -> Result<(), AcpError> {
@@ -168,8 +168,8 @@ impl FsClientHandle {
     /// available at the call site). Editors don't reuse the bytes for
     /// anything in `fs/*` requests beyond echoing them back, so an
     /// empty string is fine on the wire.
-    fn dummy_acp_session_id() -> agent_client_protocol::schema::SessionId {
-        agent_client_protocol::schema::SessionId::new(String::new())
+    fn dummy_acp_session_id() -> agent_client_protocol::schema::v1::SessionId {
+        agent_client_protocol::schema::v1::SessionId::new(String::new())
     }
 }
 
@@ -221,7 +221,7 @@ fn acp_to_kernel_err(e: AcpError) -> KernelOpError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::FileSystemCapabilities;
+    use agent_client_protocol::schema::v1::FileSystemCapabilities;
 
     #[test]
     fn fs_capabilities_default_is_disabled() {

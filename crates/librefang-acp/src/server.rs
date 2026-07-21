@@ -4,12 +4,12 @@
 //! into each handler closure, chains them onto an
 //! [`agent_client_protocol::Agent`] builder, runs the permission bridge
 //! as a background task spawned with [`agent_client_protocol::Builder::with_spawned`],
-//! and finally hands the whole thing to [`agent_client_protocol_tokio::Stdio`]
+//! and finally hands the whole thing to [`agent_client_protocol::Stdio`]
 //! to drive the JSON-RPC loop until stdin EOF.
 
 use std::sync::Arc;
 
-use agent_client_protocol::schema::{
+use agent_client_protocol::schema::v1::{
     AgentCapabilities, CancelNotification, CloseSessionRequest, CloseSessionResponse,
     InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse,
     LoadSessionRequest, LoadSessionResponse, NewSessionRequest, NewSessionResponse,
@@ -17,8 +17,8 @@ use agent_client_protocol::schema::{
     SessionCapabilities, SessionCloseCapabilities, SessionInfo, SessionListCapabilities,
     SessionResumeCapabilities,
 };
+use agent_client_protocol::Stdio;
 use agent_client_protocol::{Agent, Client, ConnectTo, Dispatch};
-use agent_client_protocol_tokio::Stdio;
 use librefang_types::agent::AgentId;
 use tracing::debug;
 
@@ -121,7 +121,7 @@ where
                 responder.respond(
                     InitializeResponse::new(req.protocol_version)
                         .agent_capabilities(agent_caps)
-                        .agent_info(agent_client_protocol::schema::Implementation::new(
+                        .agent_info(agent_client_protocol::schema::v1::Implementation::new(
                             "librefang",
                             env!("CARGO_PKG_VERSION"),
                         )),
@@ -307,9 +307,9 @@ where
 /// deterministically from this string, so a reconnecting editor
 /// rejoins the same persisted session without an explicit mapping
 /// table.
-fn next_session_id() -> agent_client_protocol::schema::SessionId {
+fn next_session_id() -> agent_client_protocol::schema::v1::SessionId {
     let uuid = uuid::Uuid::new_v4();
-    agent_client_protocol::schema::SessionId::new(uuid.to_string())
+    agent_client_protocol::schema::v1::SessionId::new(uuid.to_string())
 }
 
 /// Maximum number of history turns we replay back to the editor on
@@ -341,14 +341,14 @@ const MAX_REPLAY_TURNS: usize = 50;
 async fn replay_session_history<K: AcpKernel>(
     kernel: &std::sync::Arc<K>,
     cx: &agent_client_protocol::ConnectionTo<Client>,
-    acp_id: &agent_client_protocol::schema::SessionId,
+    acp_id: &agent_client_protocol::schema::v1::SessionId,
     lf_id: librefang_types::agent::SessionId,
 ) {
     let history = kernel.fetch_session_history(lf_id).await;
     if history.is_empty() {
         return;
     }
-    use agent_client_protocol::schema::{ContentBlock, ContentChunk, TextContent};
+    use agent_client_protocol::schema::v1::{ContentBlock, ContentChunk, TextContent};
     use librefang_types::message::Role;
     let total = history.len();
     // Trim from the front so the user sees the *most recent* turns,
@@ -367,17 +367,19 @@ async fn replay_session_history<K: AcpKernel>(
     for (role, text) in to_replay {
         let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(text)));
         let update = match role {
-            Role::User => agent_client_protocol::schema::SessionUpdate::UserMessageChunk(chunk),
+            Role::User => agent_client_protocol::schema::v1::SessionUpdate::UserMessageChunk(chunk),
             Role::Assistant => {
-                agent_client_protocol::schema::SessionUpdate::AgentMessageChunk(chunk)
+                agent_client_protocol::schema::v1::SessionUpdate::AgentMessageChunk(chunk)
             }
             // System messages are filtered upstream by `fetch_session_history`,
             // but be defensive — fall back to AgentMessageChunk so a
             // forwarded system message at least shows in the panel.
-            Role::System => agent_client_protocol::schema::SessionUpdate::AgentMessageChunk(chunk),
+            Role::System => {
+                agent_client_protocol::schema::v1::SessionUpdate::AgentMessageChunk(chunk)
+            }
         };
         if let Err(e) = cx.send_notification(
-            agent_client_protocol::schema::SessionNotification::new(acp_id.clone(), update),
+            agent_client_protocol::schema::v1::SessionNotification::new(acp_id.clone(), update),
         ) {
             tracing::warn!(error = %e, "ACP session/load: failed to emit history chunk");
             break;

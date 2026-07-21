@@ -17,7 +17,7 @@
 
 use std::sync::Arc;
 
-use agent_client_protocol::schema::{
+use agent_client_protocol::schema::v1::{
     ContentBlock, ContentChunk, PromptRequest, PromptResponse, SessionNotification, SessionUpdate,
     StopReason, TextContent,
 };
@@ -207,7 +207,7 @@ fn map_stop_reason(reason: LfStopReason) -> StopReason {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::TextContent;
+    use agent_client_protocol::schema::v1::TextContent;
 
     #[test]
     fn concat_text_inserts_separator_between_blocks() {
@@ -248,7 +248,7 @@ mod tests {
 
     #[test]
     fn concat_text_image_block_converts_to_placeholder() {
-        use agent_client_protocol::schema::ImageContent;
+        use agent_client_protocol::schema::v1::ImageContent;
         let blocks = vec![
             ContentBlock::Text(TextContent::new("look at this:")),
             ContentBlock::Image(ImageContent::new("AAAA", "image/png")),
@@ -270,7 +270,7 @@ mod tests {
 
     #[test]
     fn concat_text_audio_block_converts_to_placeholder() {
-        use agent_client_protocol::schema::AudioContent;
+        use agent_client_protocol::schema::v1::AudioContent;
         let blocks = vec![ContentBlock::Audio(AudioContent::new(
             "BBBBCCCC",
             "audio/wav",
