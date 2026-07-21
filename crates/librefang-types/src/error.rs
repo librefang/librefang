@@ -187,11 +187,9 @@ pub enum LibreFangError {
     #[error("Invalid input: {0}")]
     InvalidInput(String),
 
-    /// The request conflicts with the current state of the resource, so it
-    /// cannot be applied as-is. Distinct from `InvalidInput` (the request is
-    /// well-formed) and from `AgentNotFound` (the resource never existed):
-    /// the classic case is resolving an approval that a prior call already
-    /// resolved. Maps to HTTP 409 Conflict on the api boundary (#6492).
+    /// The request conflicts with the current state of the resource, so it cannot be applied as-is.
+    /// Distinct from `InvalidInput` (the request is well-formed) and from `AgentNotFound` (the resource never existed): the classic case is resolving an approval that a prior call already resolved.
+    /// Maps to HTTP 409 Conflict on the api boundary (#6492).
     #[error("{0}")]
     Conflict(String),
 

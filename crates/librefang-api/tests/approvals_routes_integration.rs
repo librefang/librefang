@@ -273,11 +273,8 @@ async fn approve_resolves_pending_to_approved() {
     assert_eq!(item["status"], "approved");
 }
 
-/// Re-approving an already-resolved request is a 409 Conflict, not a 400/404
-/// or a 500 (issue #6492 Bug 3). The first approve terminalizes the request;
-/// the second must report the conflict with a typed status the client can act
-/// on, deterministically — the kernel consults the durable audit log so the
-/// answer does not depend on the in-memory `recent` ring still holding it.
+/// Re-approving an already-resolved request is a 409 Conflict, not a 400/404 or a 500 (issue #6492 Bug 3).
+/// The first approve terminalizes the request; the second must report the conflict with a typed status the client can act on, deterministically — the kernel consults the durable audit log so the answer does not depend on the in-memory `recent` ring still holding it.
 #[tokio::test(flavor = "multi_thread")]
 async fn double_approve_is_conflict() {
     let h = boot();

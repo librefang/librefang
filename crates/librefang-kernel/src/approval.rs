@@ -113,9 +113,8 @@ impl ApprovalManager {
     }
 
     pub fn new(mut policy: ApprovalPolicy) -> Self {
-        // Normalize the `auto_approve` shorthand at the single point where a
-        // policy is installed, so no construction site can forget it (#6492
-        // Bug 1). See `new_with_db` / `update_policy` for the other two.
+        // Normalize the `auto_approve` shorthand at the single point where a policy is installed, so no construction site can forget it (#6492 Bug 1).
+        // See `new_with_db` / `update_policy` for the other two.
         policy.apply_shorthands();
         let (events_tx, _) = broadcast::channel(256);
         Self {
@@ -139,10 +138,7 @@ impl ApprovalManager {
     /// so they cannot be auto-resolved by the agent loop — they surface in
     /// the dashboard / API as pending items that require operator action.
     pub fn new_with_db(mut policy: ApprovalPolicy, pool: Pool<SqliteConnectionManager>) -> Self {
-        // Normalize the `auto_approve` shorthand here (the daemon-boot path,
-        // `boot.rs`) so `auto_approve = true` actually clears `require_approval`
-        // — previously it was a silent no-op because `apply_shorthands` was
-        // only ever called in unit tests (#6492 Bug 1).
+        // Normalize the `auto_approve` shorthand here (the daemon-boot path, `boot.rs`) so `auto_approve = true` actually clears `require_approval` — previously it was a silent no-op because `apply_shorthands` was only ever called in unit tests (#6492 Bug 1).
         policy.apply_shorthands();
         let failures = Self::load_totp_lockout(&pool);
         let pending: DashMap<Uuid, PendingRequest> = DashMap::new();
@@ -506,21 +502,14 @@ impl ApprovalManager {
         }
     }
 
-    /// Look up the terminal decision for an already-resolved approval from the
-    /// durable audit log (`approval_audit`).
+    /// Look up the terminal decision for an already-resolved approval from the durable audit log (`approval_audit`).
     ///
-    /// The in-memory `recent` ring buffer only holds the last
-    /// `MAX_RECENT_APPROVALS` resolutions, so a double-resolve arriving after
-    /// the entry has aged out — or after a daemon restart — would otherwise be
-    /// indistinguishable from a never-existed id. `approval_audit` is the
-    /// authoritative record: every resolution writes a terminal row (decision
-    /// != "pending") via [`Self::push_recent`]. Consulting it lets `resolve`
-    /// answer "already resolved" (→ HTTP 409) deterministically instead of
-    /// degrading to "not found" (→ 404). See issue #6492 Bug 3.
+    /// The in-memory `recent` ring buffer only holds the last `MAX_RECENT_APPROVALS` resolutions, so a double-resolve arriving after the entry has aged out — or after a daemon restart — would otherwise be indistinguishable from a never-existed id.
+    /// `approval_audit` is the authoritative record: every resolution writes a terminal row (decision != "pending") via [`Self::push_recent`].
+    /// Consulting it lets `resolve` answer "already resolved" (→ HTTP 409) deterministically instead of degrading to "not found" (→ 404).
+    /// See issue #6492 Bug 3.
     ///
-    /// Returns `(decision, decided_by)` for the most recent terminal row, or
-    /// `None` when no resolution has been recorded (id never existed, still
-    /// pending, or no audit DB is attached).
+    /// Returns `(decision, decided_by)` for the most recent terminal row, or `None` when no resolution has been recorded (id never existed, still pending, or no audit DB is attached).
     fn db_lookup_resolved_decision(&self, id: Uuid) -> Option<(String, String)> {
         let db = self.audit_db.as_ref()?;
         let conn = db.get().ok()?;
@@ -1118,12 +1107,8 @@ impl ApprovalManager {
                 Ok((response, pending.deferred))
             }
             None => {
-                // Not pending. Distinguish "already resolved" (→ 409 at the
-                // api boundary) from "never existed / long expired" (→ 404).
-                // Check the in-memory `recent` ring first for the fast path,
-                // then fall back to the durable audit log so the answer stays
-                // stable after `recent` evicts the entry or the daemon
-                // restarts (issue #6492 Bug 3).
+                // Not pending. Distinguish "already resolved" (→ 409 at the api boundary) from "never existed / long expired" (→ 404).
+                // Check the in-memory `recent` ring first for the fast path, then fall back to the durable audit log so the answer stays stable after `recent` evicts the entry or the daemon restarts (issue #6492 Bug 3).
                 let recent = self.recent.lock().unwrap_or_else(|e| e.into_inner());
                 let handler_info = recent.iter().find(|r| r.request.id == request_id).map(|r| {
                     let who = r.decided_by.as_deref().unwrap_or("unknown");
@@ -1397,9 +1382,7 @@ impl ApprovalManager {
 
     /// Update the approval policy (for hot-reload).
     pub fn update_policy(&self, mut policy: ApprovalPolicy) {
-        // Apply the `auto_approve` shorthand on the reload path too (#6492
-        // Bug 1) so a `POST /api/config/reload` that flips `auto_approve = true`
-        // takes effect, mirroring the boot-time normalization in `new_with_db`.
+        // Apply the `auto_approve` shorthand on the reload path too (#6492 Bug 1) so a `POST /api/config/reload` that flips `auto_approve = true` takes effect, mirroring the boot-time normalization in `new_with_db`.
         policy.apply_shorthands();
         *self.policy.write().unwrap_or_else(|e| e.into_inner()) = policy;
     }
@@ -3714,16 +3697,13 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // #6492 Bug 1 — `auto_approve` shorthand is applied when a policy is
-    // installed (not just in a unit test that manually calls apply_shorthands)
+    // #6492 Bug 1 — `auto_approve` shorthand is applied when a policy is installed (not just in a unit test that manually calls apply_shorthands)
     // -----------------------------------------------------------------------
 
     #[test]
     fn auto_approve_shorthand_applied_at_construction() {
-        // A default policy gates shell_exec; with `auto_approve = true` the
-        // manager must ungate everything at construction time. Before #6492
-        // this only happened if a caller remembered to call apply_shorthands,
-        // which no production path did.
+        // A default policy gates shell_exec; with `auto_approve = true` the manager must ungate everything at construction time.
+        // Before #6492 this only happened if a caller remembered to call apply_shorthands, which no production path did.
         let policy = ApprovalPolicy {
             auto_approve: true,
             ..Default::default()
@@ -3762,8 +3742,7 @@ mod tests {
 
     #[test]
     fn auto_approve_shorthand_applied_on_hot_reload() {
-        // A `POST /api/config/reload` that flips `auto_approve = true` routes
-        // through `update_policy`, which must also apply the shorthand.
+        // A `POST /api/config/reload` that flips `auto_approve = true` routes through `update_policy`, which must also apply the shorthand.
         let mgr = default_manager();
         assert!(mgr.requires_approval("shell_exec"));
         mgr.update_policy(ApprovalPolicy {
@@ -3820,9 +3799,7 @@ mod tests {
 
     #[test]
     fn double_resolve_stays_a_conflict_after_recent_eviction() {
-        // Once the in-memory `recent` ring evicts the resolution, a re-resolve
-        // must still report "Already …" (→ 409) via the durable audit log —
-        // not degrade to "not found" (→ 404), which was the pre-#6492 flip.
+        // Once the in-memory `recent` ring evicts the resolution, a re-resolve must still report "Already …" (→ 409) via the durable audit log — not degrade to "not found" (→ 404), which was the pre-#6492 flip.
         let mgr = make_manager_with_db();
         let id = seed_pending(&mgr, make_request("agent-x", "shell_exec", 300));
         mgr.resolve(
