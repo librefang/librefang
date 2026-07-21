@@ -264,9 +264,7 @@ impl LibreFangKernel {
     ///
     /// Boot calls this once, mirroring the workflow stale-recovery sweep:
     /// persisted runs still in `Running` phase and older than `stale_timeout`
-    /// are demoted to `Stopped` ("Interrupted by daemon restart"). Runs are not
-    /// auto-resumed — an in-flight LLM call cannot be replayed. Returns the
-    /// recovered goal ids.
+    /// are deleted from the durable store.
     /// Returns (goal_id, agent_id) pairs for stale runs to auto-resume.
     /// Caller must call `goal_run_start` for each returned pair.
     pub fn recover_stale_goal_runs(
