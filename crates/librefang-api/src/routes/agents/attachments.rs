@@ -78,6 +78,23 @@ fn is_text_like_attachment(content_type: &str, filename: &str) -> bool {
     )
 }
 
+/// Build the `[File: <name>] saved to <path>` marker block that tells the agent where the raw upload bytes live on disk.
+///
+/// Emitted for EVERY resolved attachment type (image / PDF / text / other), so the on-disk path is available to the agent regardless of whether the content was also inlined.
+/// This mirrors the channel bridge's path block (`librefang-channels` `bridge.rs`, `FILE_SAVED_BLOCK_PREFIX`, #4448) so web/dashboard uploads reach the LLM with the same path affordance channel (Telegram/Matrix) uploads already have — previously the dashboard path omitted it, forcing agents to guess the file by listing the upload dir and size-matching.
+///
+/// Kept as its OWN `Text` block — never folded into the `Image` block — so it survives the two image-redaction passes (`redact_images_for_text_only` for no-vision models and `strip_images` for history trimming), both of which replace only `Image`/`ImageFile` blocks and leave `Text` untouched.
+/// That is what lets a non-vision model still learn where an uploaded image lives.
+fn file_saved_block(
+    filename: &str,
+    path: &std::path::Path,
+) -> librefang_types::message::ContentBlock {
+    librefang_types::message::ContentBlock::Text {
+        text: format!("[File: {}] saved to {}", filename, path.display()),
+        provider_metadata: None,
+    }
+}
+
 /// Resolve uploaded file attachments into content blocks.
 ///
 /// Reads each file from the upload directory and produces blocks the
@@ -91,7 +108,10 @@ fn is_text_like_attachment(content_type: &str, filename: &str) -> bool {
 ///     plus common code/data extensions) → `ContentBlock::Text` with a
 ///     `[Attached file: <filename>]` header. Read as UTF-8 lossy and
 ///     truncated at 200K chars.
-///   - everything else → skipped with a warn log.
+///   - everything else → a bare note that the file exists but its type is not
+///     inlined (the path block below still points the agent at the bytes).
+///
+/// In ALL cases a `[File: <name>] saved to <path>` block (see [`file_saved_block`]) is appended so the agent always knows the on-disk path of the raw upload — this is the parity fix that lets the agent attach the file to a vault / transcribe it / read it, for every file type.
 pub fn resolve_attachments(
     state: &AppState,
     attachments: &[AttachmentRef],
@@ -144,6 +164,8 @@ pub fn resolve_attachments(
                         media_type: content_type,
                         data: b64,
                     });
+                    // Sibling path block: survives no-vision redaction / history image-stripping so the agent can still locate and act on the raw image file.
+                    blocks.push(file_saved_block(&filename, &file_path));
                 }
                 Err(e) => {
                     tracing::warn!(file_id = %att.file_id, error = %e, "Failed to read image upload");
@@ -176,6 +198,7 @@ pub fn resolve_attachments(
                         text: format!("{header}\n\n{body}"),
                         provider_metadata: None,
                     });
+                    blocks.push(file_saved_block(&filename, &file_path));
                 }
                 Err(e) => {
                     tracing::warn!(file_id = %att.file_id, error = %e, "Failed to read PDF upload");
@@ -213,18 +236,38 @@ pub fn resolve_attachments(
                         text: format!("{header}\n\n{body}"),
                         provider_metadata: None,
                     });
+                    blocks.push(file_saved_block(&filename, &file_path));
                 }
                 Err(e) => {
                     tracing::warn!(file_id = %att.file_id, error = %e, "Failed to read text upload");
                 }
             }
         } else {
-            tracing::warn!(
-                file_id = %att.file_id,
-                content_type = %content_type,
-                filename = %filename,
-                "Attachment type not yet wired into the agent loop; skipping"
-            );
+            // Unsupported/binary type: we can't inline its content, but the file IS on disk and the agent may still want to act on it (attach to a vault, hand to a file-reader tool).
+            // Surface a note + the path block instead of silently dropping the attachment.
+            // Guarded on existence so we never advertise a path to a missing file.
+            if file_path.exists() {
+                tracing::info!(
+                    file_id = %att.file_id,
+                    content_type = %content_type,
+                    filename = %filename,
+                    "Attachment type not inlined; surfacing on-disk path only"
+                );
+                blocks.push(librefang_types::message::ContentBlock::Text {
+                    text: format!(
+                        "[Attached file: {filename} ({content_type})] — content not inlined for this type; the raw file is available on disk."
+                    ),
+                    provider_metadata: None,
+                });
+                blocks.push(file_saved_block(&filename, &file_path));
+            } else {
+                tracing::warn!(
+                    file_id = %att.file_id,
+                    content_type = %content_type,
+                    filename = %filename,
+                    "Attachment type not wired into the agent loop and file missing on disk; skipping"
+                );
+            }
         }
     }
 
@@ -420,9 +463,30 @@ fn mime_from_url(url: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// Regression: the streaming attachment fetch must bound peak memory by
-    /// refusing a chunk that would exceed the cap (previously `resp.bytes()`
-    /// buffered the whole body first, enabling remote OOM).
+    /// The `[File: <name>] saved to <path>` marker is the contract downstream agents parse to locate an uploaded file on disk.
+    /// It must match the channel bridge's `FILE_SAVED_BLOCK_PREFIX` format, so pin the exact shape.
+    #[test]
+    fn file_saved_block_has_expected_format() {
+        let block = file_saved_block(
+            "H1 report.pdf",
+            std::path::Path::new("/tmp/librefang_uploads/9ff3f16a"),
+        );
+        match block {
+            librefang_types::message::ContentBlock::Text { text, .. } => {
+                assert_eq!(
+                    text,
+                    "[File: H1 report.pdf] saved to /tmp/librefang_uploads/9ff3f16a"
+                );
+                // Prefix parity with librefang-channels bridge.rs.
+                assert!(text.starts_with("[File: "));
+                assert!(text.contains("] saved to "));
+            }
+            other => panic!("expected Text block, got {other:?}"),
+        }
+    }
+
+    /// Regression: the streaming attachment fetch must bound peak memory by refusing a chunk that would exceed the cap.
+    /// Previously `resp.bytes()` buffered the whole body first, enabling remote OOM.
     #[test]
     fn push_within_cap_rejects_over_cap_chunk() {
         let mut buf = Vec::new();
