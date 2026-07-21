@@ -1091,8 +1091,7 @@ pub struct WorkflowRun {
     /// Set at the top of each step iteration, cleared on terminal state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_step_index: Option<usize>,
-    /// Total number of steps in the workflow (copied at creation so the
-    /// UI can show "Step 2/4" without loading the definition separately).
+    /// Total number of steps in the workflow (copied at creation so the UI can show "Step 2/4" without loading the definition separately).
     #[serde(default)]
     pub total_steps: usize,
     /// Final output (set when workflow completes).
@@ -3887,8 +3886,7 @@ impl WorkflowEngine {
         let mut all_outputs: Vec<String> = Vec::new();
 
         while i < workflow.steps.len() {
-            // Update the run's current_step_index so pollers (dashboard)
-            // can show live progress as each step begins executing.
+            // Update the run's current_step_index so pollers (dashboard) can show live progress as each step begins executing.
             if let Some(mut run) = self.runs.get_mut(&run_id) {
                 run.current_step_index = Some(i);
             }

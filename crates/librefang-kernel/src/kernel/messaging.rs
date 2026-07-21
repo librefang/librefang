@@ -2444,11 +2444,8 @@ impl LibreFangKernel {
         let mut manifest = entry.manifest.clone();
 
         // Resolve "default" provider/model to the effective default.
-        // Mirrors the resolution in `execute_llm_agent` so the streaming
-        // path (WebUI, Telegram, forks) and the non-streaming path stay in
-        // sync. Without this, agents spawned post-boot with
-        // provider="default"/model="default" reach the LLM API with
-        // the literal sentinel values still in place.
+        // Mirrors the resolution in `execute_llm_agent` so the streaming path (WebUI, Telegram, forks) and the non-streaming path stay in sync.
+        // Without this, agents spawned post-boot with provider="default"/model="default" reach the LLM API with the literal sentinel values still in place.
         {
             let cfg = self.config.load();
             let is_default_provider =
@@ -2481,11 +2478,8 @@ impl LibreFangKernel {
             }
         }
 
-        // Stamp sender_chat_id into the manifest so tool dispatch
-        // (agent_send, defer, approval-resume) can thread the
-        // conversation context through async task registration.
-        // Mirrors the identical block in send_message_full_inner so
-        // the streaming and non-streaming paths stay in sync.
+        // Stamp sender_chat_id into the manifest so tool dispatch (agent_send, defer, approval-resume) can thread the conversation context through async task registration.
+        // Mirrors the identical block in send_message_full_inner so the streaming and non-streaming paths stay in sync.
         if let Some(ref ctx) = sender_context {
             if let Some(ref cid) = ctx.chat_id {
                 if !cid.is_empty() {

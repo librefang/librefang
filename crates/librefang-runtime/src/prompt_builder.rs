@@ -1018,12 +1018,8 @@ fn build_channel_section(
         }
     }
 
-    // Tell the agent it can send rich media via channel_send when the tool
-    // is available AND the channel is a real messaging adapter (not a kernel
-    // system channel like "webui" / "cron" / "autonomous"). System channels
-    // deliver files and media through the normal response stream — telling
-    // the agent to use channel_send to "webui" with a client IP as recipient
-    // would fail (no adapter) and push the agent to fall back to Telegram.
+    // Tell the agent it can send rich media via channel_send when the tool is available AND the channel is a real messaging adapter (not a kernel system channel like "webui" / "cron" / "autonomous").
+    // System channels deliver files and media through the normal response stream — telling the agent to use channel_send to "webui" with a client IP as recipient would fail (no adapter) and push the agent to fall back to Telegram.
     let is_system_channel = matches!(channel, "webui" | "cron" | "autonomous");
     let has_channel_send = granted_tools
         .iter()

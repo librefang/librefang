@@ -380,8 +380,7 @@ export function WorkflowsPage() {
   const runsQuery = useWorkflowRuns(selectedWorkflowId);
 
   // Poll run detail every 3s while the selected run is executing.
-  // Start polling immediately when a run is selected; disable once we
-  // see a terminal state (completed/failed/cancelled/paused).
+  // Start polling immediately when a run is selected; disable once we see a terminal state (completed/failed/cancelled/paused).
   const [runDetailPollMs, setRunDetailPollMs] = useState<number | false>(false);
   const runDetailQuery = useWorkflowRunDetail(selectedRunId ?? "", {
     refetchInterval: runDetailPollMs,
