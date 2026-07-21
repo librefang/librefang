@@ -348,10 +348,8 @@ fn build_sender_prefix(manifest: &AgentManifest, sender_user_id: Option<&str>) -
 /// user sent a photo. Redacting upstream of the driver covers *every* entry
 /// path (WebUI, channels, sidecars, triggers), not just the OpenAI driver.
 ///
-/// For `ImageFile` blocks (which reference the image by on-disk path) the
-/// placeholder keeps that path, so a text-only agent can still read or attach
-/// the raw file even though it can't see the pixels. The inline base64
-/// `Image` variant has no path to keep.
+/// For `ImageFile` blocks (which reference the image by on-disk path) the placeholder keeps that path, so a text-only agent can still read or attach the raw file even though it can't see the pixels.
+/// The inline base64 `Image` variant has no path to keep.
 ///
 /// Pure function: the caller passes a clone, so the live session history is
 /// never mutated and the vision path stays byte-identical to before.

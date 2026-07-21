@@ -78,23 +78,13 @@ fn is_text_like_attachment(content_type: &str, filename: &str) -> bool {
     )
 }
 
-/// Build the `[File: <name>] saved to <path>` marker block that tells the
-/// agent where the raw upload bytes live on disk.
+/// Build the `[File: <name>] saved to <path>` marker block that tells the agent where the raw upload bytes live on disk.
 ///
-/// Emitted for EVERY resolved attachment type (image / PDF / text / other),
-/// so the on-disk path is available to the agent regardless of whether the
-/// content was also inlined. This mirrors the channel bridge's path block
-/// (`librefang-channels` `bridge.rs`, `FILE_SAVED_BLOCK_PREFIX`, #4448) so
-/// web/dashboard uploads reach the LLM with the same path affordance channel
-/// (Telegram/Matrix) uploads already have — previously the dashboard path
-/// omitted it, forcing agents to guess the file by listing the upload dir and
-/// size-matching.
+/// Emitted for EVERY resolved attachment type (image / PDF / text / other), so the on-disk path is available to the agent regardless of whether the content was also inlined.
+/// This mirrors the channel bridge's path block (`librefang-channels` `bridge.rs`, `FILE_SAVED_BLOCK_PREFIX`, #4448) so web/dashboard uploads reach the LLM with the same path affordance channel (Telegram/Matrix) uploads already have — previously the dashboard path omitted it, forcing agents to guess the file by listing the upload dir and size-matching.
 ///
-/// Kept as its OWN `Text` block — never folded into the `Image` block — so it
-/// survives the two image-redaction passes (`redact_images_for_text_only` for
-/// no-vision models and `strip_images` for history trimming), both of which
-/// replace only `Image`/`ImageFile` blocks and leave `Text` untouched. That is
-/// what lets a non-vision model still learn where an uploaded image lives.
+/// Kept as its OWN `Text` block — never folded into the `Image` block — so it survives the two image-redaction passes (`redact_images_for_text_only` for no-vision models and `strip_images` for history trimming), both of which replace only `Image`/`ImageFile` blocks and leave `Text` untouched.
+/// That is what lets a non-vision model still learn where an uploaded image lives.
 fn file_saved_block(
     filename: &str,
     path: &std::path::Path,
@@ -121,10 +111,7 @@ fn file_saved_block(
 ///   - everything else → a bare note that the file exists but its type is not
 ///     inlined (the path block below still points the agent at the bytes).
 ///
-/// In ALL cases a `[File: <name>] saved to <path>` block (see
-/// [`file_saved_block`]) is appended so the agent always knows the on-disk
-/// path of the raw upload — this is the parity fix that lets the agent attach
-/// the file to a vault / transcribe it / read it, for every file type.
+/// In ALL cases a `[File: <name>] saved to <path>` block (see [`file_saved_block`]) is appended so the agent always knows the on-disk path of the raw upload — this is the parity fix that lets the agent attach the file to a vault / transcribe it / read it, for every file type.
 pub fn resolve_attachments(
     state: &AppState,
     attachments: &[AttachmentRef],
@@ -177,9 +164,7 @@ pub fn resolve_attachments(
                         media_type: content_type,
                         data: b64,
                     });
-                    // Sibling path block: survives no-vision redaction /
-                    // history image-stripping so the agent can still locate
-                    // and act on the raw image file.
+                    // Sibling path block: survives no-vision redaction / history image-stripping so the agent can still locate and act on the raw image file.
                     blocks.push(file_saved_block(&filename, &file_path));
                 }
                 Err(e) => {
@@ -258,11 +243,9 @@ pub fn resolve_attachments(
                 }
             }
         } else {
-            // Unsupported/binary type: we can't inline its content, but the
-            // file IS on disk and the agent may still want to act on it (attach
-            // to a vault, hand to a file-reader tool). Surface a note + the
-            // path block instead of silently dropping the attachment. Guarded
-            // on existence so we never advertise a path to a missing file.
+            // Unsupported/binary type: we can't inline its content, but the file IS on disk and the agent may still want to act on it (attach to a vault, hand to a file-reader tool).
+            // Surface a note + the path block instead of silently dropping the attachment.
+            // Guarded on existence so we never advertise a path to a missing file.
             if file_path.exists() {
                 tracing::info!(
                     file_id = %att.file_id,
@@ -480,12 +463,8 @@ fn mime_from_url(url: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// Regression: the streaming attachment fetch must bound peak memory by
-    /// refusing a chunk that would exceed the cap (previously `resp.bytes()`
-    /// buffered the whole body first, enabling remote OOM).
-    /// The `[File: <name>] saved to <path>` marker is the contract downstream
-    /// agents parse to locate an uploaded file on disk (and it must match the
-    /// channel bridge's `FILE_SAVED_BLOCK_PREFIX` format). Pin the exact shape.
+    /// The `[File: <name>] saved to <path>` marker is the contract downstream agents parse to locate an uploaded file on disk.
+    /// It must match the channel bridge's `FILE_SAVED_BLOCK_PREFIX` format, so pin the exact shape.
     #[test]
     fn file_saved_block_has_expected_format() {
         let block = file_saved_block(
@@ -506,6 +485,8 @@ mod tests {
         }
     }
 
+    /// Regression: the streaming attachment fetch must bound peak memory by refusing a chunk that would exceed the cap.
+    /// Previously `resp.bytes()` buffered the whole body first, enabling remote OOM.
     #[test]
     fn push_within_cap_rejects_over_cap_chunk() {
         let mut buf = Vec::new();

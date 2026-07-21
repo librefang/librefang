@@ -252,9 +252,7 @@ impl MessageContent {
             MessageContent::Blocks(blocks) => {
                 let mut stripped = false;
                 for block in blocks.iter_mut() {
-                    // Capture the media type and, for on-disk `ImageFile`
-                    // blocks, the path — so the placeholder can point a later
-                    // turn at the raw bytes even after the pixels are dropped.
+                    // Capture the media type and, for on-disk `ImageFile` blocks, the path — so the placeholder can point a later turn at the raw bytes even after the pixels are dropped.
                     // The inline base64 `Image` variant carries no path.
                     let media = match block {
                         ContentBlock::Image { media_type, .. } => Some((media_type.clone(), None)),
@@ -272,10 +270,7 @@ impl MessageContent {
                         // saying "I did not receive any image" is the symptom
                         // we are guarding against here.
                         //
-                        // When the source was an `ImageFile`, keep its on-disk
-                        // path in the placeholder: a follow-up turn may want to
-                        // attach or re-read the raw file even though the pixels
-                        // are gone from history.
+                        // When the source was an `ImageFile`, keep its on-disk path in the placeholder: a follow-up turn may want to attach or re-read the raw file even though the pixels are gone from history.
                         let path_hint = match path {
                             Some(p) => format!(
                                 " The raw file remains on disk at {p} if you need to act on it directly."

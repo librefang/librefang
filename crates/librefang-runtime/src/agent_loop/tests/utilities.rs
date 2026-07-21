@@ -2161,8 +2161,7 @@ fn redact_images_for_text_only_preserves_imagefile_path() {
     let messages = vec![Message {
         role: Role::User,
         content: MessageContent::Blocks(vec![
-            // On-disk image: path must survive into the placeholder so a
-            // text-only agent can still read/attach the raw file.
+            // On-disk image: path must survive into the placeholder so a text-only agent can still read/attach the raw file.
             ContentBlock::ImageFile {
                 media_type: "image/png".to_string(),
                 path: "/tmp/librefang_uploads/0dc8dfe0.png".to_string(),
