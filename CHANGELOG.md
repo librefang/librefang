@@ -7,6 +7,14 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ## [Unreleased]
 
+### Added
+
+- Implement the MCP `resources` primitive in the `librefang-runtime-mcp` client, which was previously tools-only, so an agent can now consume MCP servers that expose their data as resources rather than tools.
+  `McpConnection` gains `list_resources` (`resources/list`), `read_resource` (`resources/read`), and `list_resource_templates` (`resources/templates/list`) on both the rmcp (stdio + streamable-HTTP) and hand-rolled SSE transports; HttpCompat has no resources concept and returns a clear error.
+  When a server advertises the `resources` capability (read live from the rmcp handshake `peer_info`, or captured from the SSE `initialize` response) the client registers two synthetic tools — `list_resources` and `read_resource` — that flow through the normal tool-call loop and are intercepted before the transport `tools/call`, so a real server tool literally named `read_resource` is unaffected.
+  A `resource_link` in a tool result is now surfaced as a first-class `[resource_link] name — uri (mime)` line instead of being flattened into an opaque JSON string, and an embedded resource contributes its text (binary blobs are elided, never inlined into the prompt); resource lists are sorted by URI for prompt-cache stability.
+  No `resources` client capability is declared because the MCP `resources` capability is server-side and rmcp's `ClientCapabilities` has no such field (#6501) (@houko)
+
 ### Documentation
 
 - Document how `[approval].trusted_senders` composes with `[[users]]` RBAC on the approvals security page (EN + zh mirror): the two are separate trust surfaces and the per-user RBAC gate is evaluated first, so an ID listed in `trusted_senders` that is not also a registered `[[users]]` on the `api` channel still has its low-risk tools (e.g. `memory_*`) gated by the `guest_gate`, because the forced-approval verdict short-circuits before the `trusted_senders` bypass is consulted; the new subsection gives the concrete fix (register the operator as a `[[users]]` bound to the `api` channel with a `tool_policy` covering the tools it drives) and notes that with no `[[users]]` configured `trusted_senders` works standalone (#6492) (@houko)
