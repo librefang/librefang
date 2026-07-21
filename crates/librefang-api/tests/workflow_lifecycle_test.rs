@@ -853,3 +853,109 @@ async fn list_workflow_runs_is_scoped_to_path_workflow() {
     let (status, _body) = get(&h, "/api/workflows/not-a-uuid/runs").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
+
+// ---------------------------------------------------------------------------
+// Debug UI fields: total_steps / current_step_index / per-step variables (#6504)
+// ---------------------------------------------------------------------------
+
+/// `GET /api/workflows/runs/{run_id}` and the list-runs endpoint must surface
+/// `total_steps` and `current_step_index`, and each entry in `step_results`
+/// must carry the `{{var}}` → resolved-value bindings that were in scope
+/// when that step executed. This pins the kernel↔API wiring added for the
+/// workflow debug console (execution timeline + live progress) so a future
+/// rename/removal of any of these fields on the kernel side is caught here
+/// instead of silently breaking the dashboard.
+#[tokio::test(flavor = "multi_thread")]
+async fn run_detail_and_list_expose_total_steps_and_step_variables() {
+    use librefang_kernel::workflow::{
+        ErrorMode, StepAgent, StepMode, Workflow, WorkflowId, WorkflowStep,
+    };
+    use librefang_types::agent::AgentId;
+
+    let h = boot().await;
+    let engine = h.state.kernel.workflow_engine();
+
+    let wf = Workflow {
+        id: WorkflowId::new(),
+        name: "debug-fields".to_string(),
+        description: String::new(),
+        steps: vec![WorkflowStep {
+            name: "greet".to_string(),
+            agent: StepAgent::ByName {
+                name: "writer".to_string(),
+            },
+            prompt_template: "Topic: {{topic}}.".to_string(),
+            mode: StepMode::Sequential,
+            timeout_secs: 10,
+            error_mode: ErrorMode::Fail,
+            output_var: None,
+            inherit_context: None,
+            depends_on: vec![],
+            session_mode: None,
+        }],
+        created_at: chrono::Utc::now(),
+        layout: None,
+        total_timeout_secs: None,
+        input_schema: None,
+    };
+    let wf_id_typed = engine.register(wf).await;
+    let wf_id_str = wf_id_typed.0.to_string();
+    let run_id = engine
+        .create_run(wf_id_typed, "{\"topic\":\"cats\"}".to_string())
+        .await
+        .expect("create run");
+
+    let resolver = |_a: &StepAgent| -> Option<(AgentId, String, bool)> {
+        Some((AgentId::new(), "writer".to_string(), true))
+    };
+    let sender =
+        |_id: AgentId, msg: String, _sm: Option<librefang_types::agent::SessionMode>| async move {
+            Ok((format!("ack:{msg}"), 3u64, 5u64))
+        };
+    engine
+        .execute_run(run_id, resolver, sender)
+        .await
+        .expect("run must complete successfully");
+
+    // Run detail: total_steps reflects the workflow definition, and
+    // current_step_index is cleared once the run reaches a terminal state.
+    let (status, detail) = get(&h, &format!("/api/workflows/runs/{run_id}")).await;
+    assert_eq!(status, StatusCode::OK, "{detail:?}");
+    assert_eq!(
+        detail["total_steps"].as_u64(),
+        Some(1),
+        "total_steps must equal the workflow's step count: {detail:?}"
+    );
+    assert!(
+        detail["current_step_index"].is_null(),
+        "current_step_index must be cleared on a completed run: {detail:?}"
+    );
+    let steps = detail["step_results"]
+        .as_array()
+        .expect("step_results array");
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    assert_eq!(
+        steps[0]["variables"]["topic"].as_str(),
+        Some("cats"),
+        "step_results[].variables must expose the {{{{topic}}}} binding in scope for that step: {:?}",
+        steps[0]
+    );
+
+    // List-runs must expose the same run-level fields.
+    let (status, list_body) = get(&h, &format!("/api/workflows/{wf_id_str}/runs")).await;
+    assert_eq!(status, StatusCode::OK, "{list_body:?}");
+    let arr = list_body.as_array().expect("array body");
+    let row = arr
+        .iter()
+        .find(|r| r["id"].as_str() == Some(&run_id.to_string()))
+        .unwrap_or_else(|| panic!("run not in list: {list_body:?}"));
+    assert_eq!(
+        row["total_steps"].as_u64(),
+        Some(1),
+        "list-runs total_steps must match run detail: {row:?}"
+    );
+    assert!(
+        row["current_step_index"].is_null(),
+        "list-runs current_step_index must be cleared on a completed run: {row:?}"
+    );
+}
