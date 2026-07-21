@@ -896,17 +896,11 @@ pub struct McpConnection {
     inner: McpInner,
     /// Current OAuth authentication state for this connection.
     auth_state: crate::mcp_oauth::McpAuthState,
-    /// Raw names of the synthetic resource tools this connection registered
-    /// (`list_resources` / `read_resource`), so `call_tool_with_caller` can
-    /// intercept them and route to the `resources/*` methods instead of a
-    /// `tools/call` — without shadowing a real server tool of the same name
-    /// (#6501).
+    /// Raw names of the synthetic resource tools this connection registered (`list_resources` / `read_resource`), so `call_tool_with_caller` can intercept them and route to the `resources/*` methods instead of a `tools/call` — without shadowing a real server tool of the same name (#6501).
     resource_ops: std::collections::HashSet<String>,
     /// Whether the server advertised the `resources` capability at handshake.
-    /// For the Rmcp path this is read live from `peer_info()`; for the
-    /// hand-rolled SSE path it is captured from the `initialize` response
-    /// (there is no stored capability object otherwise). Gates resource-tool
-    /// registration (#6501).
+    /// For the Rmcp path this is read live from `peer_info()`; for the hand-rolled SSE path it is captured from the `initialize` response (there is no stored capability object otherwise).
+    /// Gates resource-tool registration (#6501).
     server_advertises_resources: bool,
 }
 
@@ -1091,12 +1085,9 @@ const SAFE_ENV_VARS: &[&str] = &[
 // MCP resources primitive (#6501)
 // ---------------------------------------------------------------------------
 
-/// A resource advertised by an MCP server via `resources/list`, flattened to
-/// the fields LibreFang surfaces.
+/// A resource advertised by an MCP server via `resources/list`, flattened to the fields LibreFang surfaces.
 ///
-/// Owned so callers and tests never depend on rmcp's `#[non_exhaustive]`
-/// `Resource` type (which cannot be constructed with a struct literal outside
-/// the rmcp crate).
+/// Owned so callers and tests never depend on rmcp's `#[non_exhaustive]` `Resource` type (which cannot be constructed with a struct literal outside the rmcp crate).
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ResourceInfo {
     /// The resource URI (the handle passed back to `resources/read`).
@@ -1109,8 +1100,7 @@ pub struct ResourceInfo {
     pub mime_type: Option<String>,
 }
 
-/// A resource template advertised via `resources/templates/list` — a URI
-/// pattern (RFC 6570) the server can expand, rather than a concrete resource.
+/// A resource template advertised via `resources/templates/list` — a URI pattern (RFC 6570) the server can expand, rather than a concrete resource.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ResourceTemplateInfo {
     /// The URI template (e.g. `file:///logs/{date}.log`).
@@ -1123,9 +1113,7 @@ pub struct ResourceTemplateInfo {
     pub mime_type: Option<String>,
 }
 
-/// Transport tag computed without holding a borrow into `self.inner`, so a
-/// resource method can decide its dispatch arm and then reborrow `&mut self`
-/// (for the SSE path, which takes `&mut self`) without tripping E0502.
+/// Transport tag computed without holding a borrow into `self.inner`, so a resource method can decide its dispatch arm and then reborrow `&mut self` (for the SSE path, which takes `&mut self`) without tripping E0502.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum McpTransportKind {
     Rmcp,
@@ -1133,8 +1121,7 @@ enum McpTransportKind {
     HttpCompat,
 }
 
-/// Format a `resource_link` tool-result block as a single first-class line,
-/// instead of letting it collapse into opaque JSON (#6501).
+/// Format a `resource_link` tool-result block as a single first-class line, instead of letting it collapse into opaque JSON (#6501).
 fn format_resource_link(name: &str, uri: &str, mime: Option<&str>) -> String {
     match mime {
         Some(m) if !m.is_empty() => format!("[resource_link] {name} — {uri} ({m})"),
@@ -1142,8 +1129,7 @@ fn format_resource_link(name: &str, uri: &str, mime: Option<&str>) -> String {
     }
 }
 
-/// Render one `ResourceContents` value to a string: text inline, binary blobs
-/// elided (their base64 payload must never be inlined into an LLM prompt).
+/// Render one `ResourceContents` value to a string: text inline, binary blobs elided (their base64 payload must never be inlined into an LLM prompt).
 fn render_resource_contents(contents: &rmcp::model::ResourceContents) -> String {
     use rmcp::model::ResourceContents;
     match contents {
@@ -1157,20 +1143,15 @@ fn render_resource_contents(contents: &rmcp::model::ResourceContents) -> String 
                 blob.len()
             )
         }
-        // `ResourceContents` is `#[non_exhaustive]`; an unknown future variant
-        // contributes no text rather than failing the whole read.
+        // `ResourceContents` is `#[non_exhaustive]`; an unknown future variant contributes no text rather than failing the whole read.
         _ => String::new(),
     }
 }
 
-/// Render one rmcp tool-result content block to an output line, or `None` for a
-/// block LibreFang does not surface as text.
+/// Render one rmcp tool-result content block to an output line, or `None` for a block LibreFang does not surface as text.
 ///
-/// Before #6501 the tool-call path only kept `as_text()` and JSON-stringified
-/// everything else, so a `resource_link` (the 2025-06-18 escape hatch for
-/// large/binary payloads) was flattened into an opaque JSON string. Now a
-/// `resource_link` becomes a first-class line and an embedded resource
-/// contributes its text (or a binary-elided note).
+/// Before #6501 the tool-call path only kept `as_text()` and JSON-stringified everything else, so a `resource_link` (the 2025-06-18 escape hatch for large/binary payloads) was flattened into an opaque JSON string.
+/// Now a `resource_link` becomes a first-class line and an embedded resource contributes its text (or a binary-elided note).
 fn render_rmcp_content_block(item: &rmcp::model::ContentBlock) -> Option<String> {
     if let Some(text) = item.as_text() {
         return Some(text.text.clone());
@@ -1188,8 +1169,7 @@ fn render_rmcp_content_block(item: &rmcp::model::ContentBlock) -> Option<String>
     None
 }
 
-/// SSE-transport analogue of [`render_rmcp_content_block`], operating on the
-/// raw JSON content item from a hand-rolled `tools/call` response.
+/// SSE-transport analogue of [`render_rmcp_content_block`], operating on the raw JSON content item from a hand-rolled `tools/call` response.
 fn render_json_content_block(item: &serde_json::Value) -> Option<String> {
     match item.get("type").and_then(|t| t.as_str()) {
         Some("text") => item
@@ -1207,8 +1187,7 @@ fn render_json_content_block(item: &serde_json::Value) -> Option<String> {
     }
 }
 
-/// SSE-transport analogue of [`render_resource_contents`], operating on the raw
-/// JSON `contents[]` / embedded-resource object.
+/// SSE-transport analogue of [`render_resource_contents`], operating on the raw JSON `contents[]` / embedded-resource object.
 fn render_json_resource_contents(res: &serde_json::Value) -> String {
     if let Some(text) = res.get("text").and_then(|t| t.as_str()) {
         text.to_string()
@@ -1259,8 +1238,7 @@ fn parse_sse_resource_list(resp: Option<serde_json::Value>) -> Vec<ResourceInfo>
     out
 }
 
-/// Parse an SSE `resources/templates/list` result into sorted
-/// [`ResourceTemplateInfo`]s.
+/// Parse an SSE `resources/templates/list` result into sorted [`ResourceTemplateInfo`]s.
 fn parse_sse_resource_templates(resp: Option<serde_json::Value>) -> Vec<ResourceTemplateInfo> {
     let mut out = Vec::new();
     if let Some(arr) = resp
@@ -1292,8 +1270,7 @@ fn parse_sse_resource_templates(resp: Option<serde_json::Value>) -> Vec<Resource
     out
 }
 
-/// Parse an SSE `resources/read` result's `contents[]` array into a joined
-/// string (text inline, blobs elided).
+/// Parse an SSE `resources/read` result's `contents[]` array into a joined string (text inline, blobs elided).
 fn parse_sse_read_resource(resp: Option<serde_json::Value>) -> String {
     resp.as_ref()
         .and_then(|v| v.get("contents"))
@@ -1399,8 +1376,7 @@ impl McpConnection {
             }
         }
 
-        // Surface the server's resources primitive (if any) as synthetic
-        // read tools alongside the discovered tools (#6501).
+        // Surface the server's resources primitive (if any) as synthetic read tools alongside the discovered tools (#6501).
         conn.discover_and_register_resources().await;
 
         info!(
@@ -1966,10 +1942,8 @@ impl McpConnection {
                 "MCP SSE initialize response"
             );
 
-            // Capture whether the server advertised the `resources` capability
-            // so `discover_and_register_resources` can gate on it without an
-            // extra probe request (#6501). The Rmcp path reads this live from
-            // `peer_info()` instead.
+            // Capture whether the server advertised the `resources` capability so `discover_and_register_resources` can gate on it without an extra probe request (#6501).
+            // The Rmcp path reads this live from `peer_info()` instead.
             self.server_advertises_resources = result
                 .get("capabilities")
                 .and_then(|c| c.get("resources"))
@@ -2561,8 +2535,7 @@ fn json_type_name(v: &serde_json::Value) -> &'static str {
 }
 
 impl McpConnection {
-    /// Transport tag for `self`, computed without holding a borrow into
-    /// `self.inner` (so the SSE arms can reborrow `&mut self`).
+    /// Transport tag for `self`, computed without holding a borrow into `self.inner` (so the SSE arms can reborrow `&mut self`).
     fn transport_kind(&self) -> McpTransportKind {
         match &self.inner {
             McpInner::Rmcp(_) => McpTransportKind::Rmcp,
@@ -2573,9 +2546,8 @@ impl McpConnection {
 
     /// List the resources this MCP server exposes (`resources/list`).
     ///
-    /// Returns owned [`ResourceInfo`]s sorted by URI (deterministic order for
-    /// prompt-cache stability, #3298). HttpCompat has no resources concept and
-    /// returns an error (#6501).
+    /// Returns owned [`ResourceInfo`]s sorted by URI (deterministic order for prompt-cache stability, #3298).
+    /// HttpCompat has no resources concept and returns an error (#6501).
     pub async fn list_resources(&mut self) -> Result<Vec<ResourceInfo>, String> {
         let timeout = std::time::Duration::from_secs(self.config.timeout_secs);
         match self.transport_kind() {
@@ -2614,8 +2586,7 @@ impl McpConnection {
         }
     }
 
-    /// List the URI templates this MCP server exposes
-    /// (`resources/templates/list`).
+    /// List the URI templates this MCP server exposes (`resources/templates/list`).
     pub async fn list_resource_templates(&mut self) -> Result<Vec<ResourceTemplateInfo>, String> {
         let timeout = std::time::Duration::from_secs(self.config.timeout_secs);
         match self.transport_kind() {
@@ -2656,8 +2627,7 @@ impl McpConnection {
         }
     }
 
-    /// Read a single resource by URI (`resources/read`), returning its text
-    /// content joined; binary blobs are elided rather than inlined (#6501).
+    /// Read a single resource by URI (`resources/read`), returning its text content joined; binary blobs are elided rather than inlined (#6501).
     pub async fn read_resource(&mut self, uri: &str) -> Result<String, String> {
         let timeout = std::time::Duration::from_secs(self.config.timeout_secs);
         match self.transport_kind() {
@@ -2694,9 +2664,7 @@ impl McpConnection {
         }
     }
 
-    /// If the server advertises the `resources` capability, register the
-    /// synthetic `list_resources` / `read_resource` tools so an agent can reach
-    /// resources through the normal tool-call loop (#6501).
+    /// If the server advertises the `resources` capability, register the synthetic `list_resources` / `read_resource` tools so an agent can reach resources through the normal tool-call loop (#6501).
     async fn discover_and_register_resources(&mut self) {
         let has_resources = match self.transport_kind() {
             McpTransportKind::Rmcp => {
@@ -2708,8 +2676,7 @@ impl McpConnection {
                     .map(|info| info.capabilities.resources.is_some())
                     .unwrap_or(false)
             }
-            // SSE stores the handshake-advertised flag (no live capability
-            // object to query); HttpCompat has no resources concept.
+            // SSE stores the handshake-advertised flag (no live capability object to query); HttpCompat has no resources concept.
             McpTransportKind::Sse => self.server_advertises_resources,
             McpTransportKind::HttpCompat => false,
         };
@@ -2718,8 +2685,7 @@ impl McpConnection {
         }
     }
 
-    /// Register the two synthetic resource tools and record their raw names in
-    /// `resource_ops` so dispatch intercepts them.
+    /// Register the two synthetic resource tools and record their raw names in `resource_ops` so dispatch intercepts them.
     fn register_resource_tools(&mut self) {
         self.register_resource_op(
             "list_resources",
@@ -2747,8 +2713,7 @@ impl McpConnection {
         );
     }
 
-    /// Register one synthetic resource tool and mark its raw name for dispatch
-    /// interception.
+    /// Register one synthetic resource tool and mark its raw name for dispatch interception.
     fn register_resource_op(
         &mut self,
         raw_name: &str,
@@ -2759,8 +2724,7 @@ impl McpConnection {
         self.resource_ops.insert(raw_name.to_string());
     }
 
-    /// Route an intercepted synthetic resource tool to the matching
-    /// `resources/*` method (#6501).
+    /// Route an intercepted synthetic resource tool to the matching `resources/*` method (#6501).
     async fn dispatch_resource_op(
         &mut self,
         raw_name: &str,
@@ -2769,8 +2733,7 @@ impl McpConnection {
         match raw_name {
             "list_resources" => {
                 let resources = self.list_resources().await?;
-                // Templates are optional; a server without them answers
-                // method-not-found, which we treat as "none".
+                // Templates are optional; a server without them answers method-not-found, which we treat as "none".
                 let templates = self.list_resource_templates().await.unwrap_or_default();
                 let payload = serde_json::json!({
                     "resources": resources,
@@ -2906,13 +2869,9 @@ impl McpConnection {
             }
         }
 
-        // #6501: intercept the synthetic resource tools we registered
-        // (`list_resources` / `read_resource`) and route them to the
-        // `resources/*` methods instead of a `tools/call`. Guarded by
-        // membership in `resource_ops` so a real server tool literally named
-        // `read_resource` is dispatched normally. Runs AFTER the schema and
-        // taint guards above so the synthetic tools get the same argument
-        // validation as any other tool.
+        // #6501: intercept the synthetic resource tools we registered (`list_resources` / `read_resource`) and route them to the `resources/*` methods instead of a `tools/call`.
+        // Guarded by membership in `resource_ops` so a real server tool literally named `read_resource` is dispatched normally.
+        // Runs AFTER the schema and taint guards above so the synthetic tools get the same argument validation as any other tool.
         if self.resource_ops.contains(&raw_name) {
             return self.dispatch_resource_op(&raw_name, arguments).await;
         }
@@ -2990,10 +2949,8 @@ impl McpConnection {
                         })?
                         .map_err(|e| format!("MCP tool call failed: {e}"))?;
 
-                // Extract renderable content from the response: text passes
-                // through, a `resource_link` becomes a first-class line, and an
-                // embedded resource contributes its text (#6501). Unknown block
-                // types still fall back to the JSON representation below.
+                // Extract renderable content from the response: text passes through, a `resource_link` becomes a first-class line, and an embedded resource contributes its text (#6501).
+                // Unknown block types still fall back to the JSON representation below.
                 let lines: Vec<String> = result
                     .content
                     .iter()
@@ -3068,9 +3025,7 @@ impl McpConnection {
                 match response {
                     Some(result) => {
                         if let Some(content) = result.get("content").and_then(|c| c.as_array()) {
-                            // Same content handling as the Rmcp arm: text plus
-                            // first-class `resource_link` / embedded resource
-                            // lines (#6501).
+                            // Same content handling as the Rmcp arm: text plus first-class `resource_link` / embedded resource lines (#6501).
                             let lines: Vec<String> = content
                                 .iter()
                                 .filter_map(render_json_content_block)
@@ -5405,8 +5360,7 @@ mod tests {
 
     #[test]
     fn resources_list_read_deserialize_from_jsonrpc() {
-        // Mirrors `test_mcp_jsonrpc_tools_list`: the wire shapes the SSE parse
-        // helpers consume must round-trip cleanly.
+        // Mirrors `test_mcp_jsonrpc_tools_list`: the wire shapes the SSE parse helpers consume must round-trip cleanly.
         let list: serde_json::Value = serde_json::from_str(
             r#"{"resources":[{"uri":"file:///a.txt","name":"A","mimeType":"text/plain"}]}"#,
         )
@@ -5430,8 +5384,7 @@ mod tests {
         assert_eq!(t[0].uri_template, "file:///{d}.log");
     }
 
-    /// Extract the JSON-RPC `method` and `id` from a raw HTTP request the SSE
-    /// stub received, so it can answer with an id-matched envelope.
+    /// Extract the JSON-RPC `method` and `id` from a raw HTTP request the SSE stub received, so it can answer with an id-matched envelope.
     fn stub_extract_method_and_id(request: &str) -> (String, Option<u64>) {
         let body = request.split("\r\n\r\n").nth(1).unwrap_or("");
         let v: serde_json::Value = serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
@@ -5444,19 +5397,14 @@ mod tests {
         (method, id)
     }
 
-    /// End-to-end SSE resources: a stub advertises the `resources` capability,
-    /// so connect registers the synthetic `list_resources` / `read_resource`
-    /// tools, and the three `resources/*` methods round-trip (#6501).
+    /// End-to-end SSE resources: a stub advertises the `resources` capability, so connect registers the synthetic `list_resources` / `read_resource` tools, and the three `resources/*` methods round-trip (#6501).
     #[tokio::test]
     async fn sse_resources_discovered_and_readable() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = tokio::spawn(async move {
-            // connect drives initialize + notifications/initialized + tools/list;
-            // then the test drives resources/list, resources/read,
-            // resources/templates/list — each on its own `Connection: close`
-            // socket.
+            // connect drives initialize + notifications/initialized + tools/list; then the test drives resources/list, resources/read, resources/templates/list — each on its own `Connection: close` socket.
             for _ in 0..10 {
                 let (mut stream, _) = match listener.accept().await {
                     Ok(v) => v,
@@ -5561,8 +5509,7 @@ mod tests {
         server.abort();
     }
 
-    /// A synthetic `read_resource` call with no `uri` argument errors clearly
-    /// rather than reaching the transport (#6501).
+    /// A synthetic `read_resource` call with no `uri` argument errors clearly rather than reaching the transport (#6501).
     #[tokio::test]
     async fn read_resource_without_uri_errors() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
