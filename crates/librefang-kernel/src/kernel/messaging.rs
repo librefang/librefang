@@ -2475,6 +2475,13 @@ impl LibreFangKernel {
                 if dm.base_url.is_some() && manifest.model.base_url.is_none() {
                     manifest.model.base_url.clone_from(&dm.base_url);
                 }
+                for (key, value) in &dm.extra_params {
+                    manifest
+                        .model
+                        .extra_params
+                        .entry(key.clone())
+                        .or_insert(value.clone());
+                }
             }
         }
 
