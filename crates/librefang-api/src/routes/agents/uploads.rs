@@ -141,7 +141,12 @@ pub async fn upload_file(
         );
     }
 
-    let file_path = upload_dir.join(&file_id);
+    // Persist under `<uuid>.<ext>` so the type survives at rest (#6530), while
+    // the registry key / client-facing `file_id` stays a bare UUID for the
+    // traversal + owner guards. Readers reconstruct the same name via
+    // `on_disk_name` from the registry's stored content_type/filename.
+    let on_disk = librefang_types::media::on_disk_name(&file_id, &content_type, &filename);
+    let file_path = upload_dir.join(&on_disk);
     if let Err(e) = tokio::fs::write(&file_path, &body).await {
         tracing::warn!("Failed to write upload: {e}");
         return (
@@ -197,6 +202,42 @@ pub async fn upload_file(
     )
 }
 
+/// Resolve the on-disk path of a persisted upload, tolerating both the
+/// `<uuid>.<ext>` scheme (#6530) and the historical bare-`<uuid>` scheme.
+///
+/// Tries, in order: the deterministic `<uuid>.<ext>` name (from the known
+/// content type / filename), the bare `<uuid>` (files written before #6530 and
+/// registry misses), then a `<uuid>.*` directory probe (generated images whose
+/// content type the reader may not know). Returns the first existing path.
+/// `file_id` is a validated UUID, so the probe's prefix match cannot escape
+/// `dir`.
+pub(crate) fn resolve_existing_upload_path(
+    dir: &std::path::Path,
+    file_id: &str,
+    content_type: &str,
+    filename: &str,
+) -> Option<std::path::PathBuf> {
+    let named = dir.join(librefang_types::media::on_disk_name(
+        file_id,
+        content_type,
+        filename,
+    ));
+    if named.exists() {
+        return Some(named);
+    }
+    let bare = dir.join(file_id);
+    if bare.exists() {
+        return Some(bare);
+    }
+    let prefix = format!("{file_id}.");
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            return Some(entry.path());
+        }
+    }
+    None
+}
+
 /// GET /api/uploads/{file_id} — Serve an uploaded file.
 #[utoipa::path(
     get,
@@ -224,31 +265,33 @@ pub async fn serve_upload(
         );
     }
 
-    let file_path = state
+    let upload_dir = state
         .kernel
         .config_ref()
         .channels
-        .effective_file_download_dir()
-        .join(&file_id);
+        .effective_file_download_dir();
 
-    // Look up metadata from registry; fall back to disk probe for generated images
-    // (image_generate saves files without registering in UPLOAD_REGISTRY).
-    let (content_type, owner) = match UPLOAD_REGISTRY.get(&file_id) {
-        Some(m) => (m.content_type.clone(), m.uploaded_by),
-        None => {
-            // Infer content type from file magic bytes
-            if !file_path.exists() {
-                return (
-                    StatusCode::NOT_FOUND,
-                    [(
-                        axum::http::header::CONTENT_TYPE,
-                        "application/json".to_string(),
-                    )],
-                    b"{\"error\":\"File not found\"}".to_vec(),
-                );
-            }
-            ("image/png".to_string(), None)
-        }
+    // The registry carries the content_type/filename needed to reconstruct the
+    // `<uuid>.<ext>` on-disk name (#6530) and the owner for the access check. A
+    // miss means a generated image / pre-registry file — the resolver's
+    // `<uuid>.*` probe still finds it, and the content type defaults to PNG (the
+    // only un-registered producer today is image_generate).
+    let (content_type, filename, owner) = match UPLOAD_REGISTRY.get(&file_id) {
+        Some(m) => (m.content_type.clone(), m.filename.clone(), m.uploaded_by),
+        None => ("image/png".to_string(), String::new(), None),
+    };
+
+    let Some(file_path) =
+        resolve_existing_upload_path(&upload_dir, &file_id, &content_type, &filename)
+    else {
+        return (
+            StatusCode::NOT_FOUND,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "application/json".to_string(),
+            )],
+            b"{\"error\":\"File not found\"}".to_vec(),
+        );
     };
 
     // SECURITY (#3361): Bind uploads to their uploader. A bare UUID is not
@@ -293,5 +336,48 @@ pub async fn serve_upload(
             )],
             b"{\"error\":\"File not found on disk\"}".to_vec(),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_existing_upload_path;
+
+    #[test]
+    fn resolver_finds_named_bare_and_generated_image_schemes() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+
+        // 1. Registry hit: producer wrote `<uuid>.png`, reader knows the type.
+        let named_id = "11111111-1111-1111-1111-111111111111";
+        std::fs::write(p.join(format!("{named_id}.png")), b"png").unwrap();
+        assert_eq!(
+            resolve_existing_upload_path(p, named_id, "image/png", "shot.png"),
+            Some(p.join(format!("{named_id}.png")))
+        );
+
+        // 2. Legacy file written bare `<uuid>` before #6530: still served, even
+        //    though the reader now computes a `.png` name that does not exist.
+        let bare_id = "22222222-2222-2222-2222-222222222222";
+        std::fs::write(p.join(bare_id), b"legacy").unwrap();
+        assert_eq!(
+            resolve_existing_upload_path(p, bare_id, "image/png", "old.png"),
+            Some(p.join(bare_id))
+        );
+
+        // 3. Generated image not in the registry: the reader defaults the type,
+        //    but the `<uuid>.*` probe finds the real extension.
+        let gen_id = "33333333-3333-3333-3333-333333333333";
+        std::fs::write(p.join(format!("{gen_id}.jpg")), b"jpg").unwrap();
+        assert_eq!(
+            resolve_existing_upload_path(p, gen_id, "application/octet-stream", ""),
+            Some(p.join(format!("{gen_id}.jpg")))
+        );
+
+        // 4. Nothing on disk → None.
+        assert_eq!(
+            resolve_existing_upload_path(p, "44444444-4444-4444-4444-444444444444", "", ""),
+            None
+        );
     }
 }

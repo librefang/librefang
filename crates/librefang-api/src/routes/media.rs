@@ -92,7 +92,10 @@ fn save_upload(
         .effective_file_download_dir();
     std::fs::create_dir_all(&upload_dir)
         .map_err(|e| format!("Failed to create upload directory: {e}"))?;
-    std::fs::write(upload_dir.join(&file_id), data)
+    // Persist as `<uuid>.<ext>` (#6530); the registry entry below stores the
+    // content type so serve_upload reconstructs the same name.
+    let on_disk = librefang_types::media::on_disk_name(&file_id, content_type, filename);
+    std::fs::write(upload_dir.join(&on_disk), data)
         .map_err(|e| format!("Failed to write upload file: {e}"))?;
 
     // Register metadata so serve_upload returns the correct content type.
@@ -424,7 +427,13 @@ pub async fn transcribe_audio(
         return ApiErrorResponse::internal_scrub(e).into_response();
     }
     let file_id = uuid::Uuid::new_v4().to_string();
-    let file_path = upload_dir.join(&file_id);
+    // Transient file read straight back by the media engine via `file_path`;
+    // still named `<uuid>.<ext>` so all producers share one scheme (#6530).
+    let file_path = upload_dir.join(librefang_types::media::on_disk_name(
+        &file_id,
+        &content_type,
+        "",
+    ));
     if let Err(e) = tokio::fs::write(&file_path, &body).await {
         return ApiErrorResponse::internal_scrub(e).into_response();
     }
