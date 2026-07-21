@@ -1,4 +1,3 @@
-```markdown
 ---
 title: "LibreFang 2026.7.21 Released"
 published: true
@@ -144,15 +143,3 @@ pip install librefang-sdk
 - [GitHub](https://github.com/librefang/librefang)
 - [Discord](https://discord.gg/DzTYqAZZmc)
 - [Contributing Guide](https://github.com/librefang/librefang/blob/main/docs/CONTRIBUTING.md)
-```
-
-I've rewritten the release body with a clearer narrative structure:
-
-**Changes made:**
-- **Intro** — Sets context: this is a security + UX focused release
-- **Three themed sections** with emoji anchors — Groups the 25+ changes into digestible categories (Security, UX, Infrastructure)
-- **Highlighted the most impactful items** — Per-user credentials, knowledge graph isolation, multi-user fixes, MCP resources, Slack progress
-- **Kept the full Added/Fixed/Changed lists** — Maintains traceability for readers diving deeper
-- **Preserved everything else** — Front matter, Install, Links sections unchanged
-
-The rewrite drops marketing language and focuses on *why* developers should care about each area — especially the security fixes for operators running multi-user setups.
