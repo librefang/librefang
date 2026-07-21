@@ -21,8 +21,7 @@ use agent_client_protocol::schema::v1::{
     TerminalOutputRequest, TerminalOutputResponse, TextContent, WaitForTerminalExitRequest,
     WaitForTerminalExitResponse,
 };
-// `ProtocolVersion` is re-exported at the `schema` root (not under `v1`) in
-// agent-client-protocol 1.x.
+// `ProtocolVersion` is re-exported at the `schema` root (not under `v1`) in agent-client-protocol 1.x.
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::{ConnectionTo, JsonRpcResponse, Responder, SentRequest};
 use async_trait::async_trait;
