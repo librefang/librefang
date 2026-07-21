@@ -33,6 +33,7 @@ use axum::http::StatusCode;
 /// |-------------------------------------------------|--------|
 /// | `AgentNotFound` / `SessionNotFound`             | 404    |
 /// | `InvalidInput` / `InvalidState` / `ManifestParse` | 400  |
+/// | `Conflict`                                      | 409    |
 /// | `AuthDenied` / `CapabilityDenied`               | 403    |
 /// | `Unavailable` / `ShuttingDown`                  | 503    |
 /// | everything else                                 | 500    |
@@ -44,6 +45,7 @@ pub fn kernel_op_status(err: &KernelOpError) -> StatusCode {
         KernelOpError::InvalidInput(_)
         | KernelOpError::InvalidState { .. }
         | KernelOpError::ManifestParse(_) => StatusCode::BAD_REQUEST,
+        KernelOpError::Conflict(_) => StatusCode::CONFLICT,
         KernelOpError::AuthDenied(_) | KernelOpError::CapabilityDenied(_) => StatusCode::FORBIDDEN,
         KernelOpError::Unavailable(_) | KernelOpError::ShuttingDown => {
             StatusCode::SERVICE_UNAVAILABLE
@@ -72,6 +74,7 @@ pub fn kernel_op_error_code(err: &KernelOpError) -> ErrorCode {
         KernelOpError::InvalidInput(_)
         | KernelOpError::InvalidState { .. }
         | KernelOpError::ManifestParse(_) => ErrorCode::InvalidInput,
+        KernelOpError::Conflict(_) => ErrorCode::Conflict,
         KernelOpError::AuthDenied(_) => ErrorCode::Forbidden,
         KernelOpError::CapabilityDenied(_) => ErrorCode::CapabilityDenied,
         KernelOpError::Unavailable(_) | KernelOpError::ShuttingDown => {
