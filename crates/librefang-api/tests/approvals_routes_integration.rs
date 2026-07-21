@@ -273,6 +273,34 @@ async fn approve_resolves_pending_to_approved() {
     assert_eq!(item["status"], "approved");
 }
 
+/// Re-approving an already-resolved request is a 409 Conflict, not a 400/404
+/// or a 500 (issue #6492 Bug 3). The first approve terminalizes the request;
+/// the second must report the conflict with a typed status the client can act
+/// on, deterministically — the kernel consults the durable audit log so the
+/// answer does not depend on the in-memory `recent` ring still holding it.
+#[tokio::test(flavor = "multi_thread")]
+async fn double_approve_is_conflict() {
+    let h = boot();
+    let id = seed_pending(&h, make_request("a", "shell_exec", None)).await;
+
+    let (status, body) = post(
+        &h,
+        &format!("/api/approvals/{id}/approve"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "first approve: got {body}");
+
+    let (status, body) = post(
+        &h,
+        &format!("/api/approvals/{id}/approve"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "second approve: got {body}");
+    assert_eq!(body["code"], "conflict", "got: {body}");
+}
+
 /// Approve with an invalid UUID path segment is 400 (not 404, not 500).
 #[tokio::test(flavor = "multi_thread")]
 async fn approve_invalid_uuid_is_bad_request() {

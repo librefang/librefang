@@ -456,16 +456,23 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
             .approval_manager
             .resolve(request_id, decision, decided_by, totp_verified, user_id)
             .map_err(|msg| {
-                if msg.contains("not found") {
+                if msg.starts_with("Already ") {
+                    // Double-resolve of an already-terminal approval
+                    // ("Already {decision} by {who}") is a state conflict, not
+                    // a malformed request: map to `Conflict` (409) so a client
+                    // can tell "someone already handled this" apart from a bad
+                    // request (400) or a never-existed id (404). `resolve`
+                    // consults the durable audit log, so this stays a stable
+                    // 409 even after the in-memory `recent` ring evicts the
+                    // entry or the daemon restarts (issue #6492 Bug 3).
+                    kernel_handle::KernelOpError::Conflict(msg)
+                } else if msg.contains("not found") {
                     kernel_handle::KernelOpError::AgentNotFound(request_id.to_string())
-                } else if msg.contains("TOTP code required") || msg.starts_with("Already ") {
-                    // Client-side conditions surfaced by `ApprovalManager::resolve`:
-                    // a missing second factor ("TOTP code required …") and a
-                    // double-resolve ("Already {decision} by …") are 4xx, not 500.
-                    // Map to `InvalidInput` (400) so the typed status mapping
-                    // (`api::error::kernel_op_status`) does not turn a client error
-                    // into a server error — this preserves the pre-#3541 400 for
-                    // these cases while keeping the not-found→404 classification.
+                } else if msg.contains("TOTP code required") {
+                    // A missing second factor is a well-formed request that
+                    // lacks a required field → 400, not 500. Map to
+                    // `InvalidInput` so the typed status mapping
+                    // (`api::error::kernel_op_status`) keeps the pre-#3541 400.
                     kernel_handle::KernelOpError::InvalidInput(msg)
                 } else {
                     kernel_handle::KernelOpError::Internal(msg)
