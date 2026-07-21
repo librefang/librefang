@@ -136,8 +136,14 @@ pub async fn get_agent_session(
                                     if let Ok(bytes) =
                                         base64::engine::general_purpose::STANDARD.decode(data)
                                     {
+                                        // Persist as `<uuid>.<ext>` (#6530); the
+                                        // registry stores content_type so the
+                                        // history-load serve reconstructs it.
+                                        let on_disk = librefang_types::media::on_disk_name(
+                                            &file_id, media_type, "",
+                                        );
                                         if let Err(e) =
-                                            std::fs::write(upload_dir.join(&file_id), &bytes)
+                                            std::fs::write(upload_dir.join(&on_disk), &bytes)
                                         {
                                             tracing::warn!("Failed to write upload file: {e}");
                                         }

@@ -703,7 +703,9 @@ pub(super) async fn execute_tool_group(
                     Some(executed.result.status),
                     executed.execution_ms,
                 );
-                members.push((idx, Member::Blocked(Box::new(executed))));
+                // `executed` is already `Box<ExecutedToolCall>` (the precheck
+                // variant is now boxed), so hand it straight to `Member::Blocked`.
+                members.push((idx, Member::Blocked(executed)));
             }
             LoopGuardPrecheck::CircuitBreak(err) => {
                 record_tool_call_metric(ctx.agent_id_str, &tool_call.name, true, None, None);
@@ -819,7 +821,10 @@ pub(super) enum LoopGuardPrecheck {
     Proceed(LoopGuardVerdict),
     /// Guard blocked this single call (soft). The call yields the carried
     /// error result without running the tool body; the batch continues.
-    Blocked(ExecutedToolCall),
+    /// Boxed because `ExecutedToolCall` is far larger than the sibling
+    /// variants, matching the `Member::Blocked(Box<ExecutedToolCall>)`
+    /// pattern above (avoids `clippy::large_enum_variant`).
+    Blocked(Box<ExecutedToolCall>),
     /// Circuit breaker tripped. The whole turn aborts with this error —
     /// session already repaired + saved and the `AgentLoopEnd` hook fired.
     CircuitBreak(LibreFangError),
@@ -883,7 +888,7 @@ pub(super) async fn precheck_loop_guard(
             // (#5979). `Skipped` is soft (`is_soft_error()`), so the turn
             // survives and the block message steers the model; the genuinely
             // fatal runaway is still caught by the CircuitBreak arm above.
-            LoopGuardPrecheck::Blocked(ExecutedToolCall {
+            LoopGuardPrecheck::Blocked(Box::new(ExecutedToolCall {
                 result: librefang_types::tool::ToolResult {
                     tool_use_id: tool_call.id.clone(),
                     content: msg.clone(),
@@ -894,7 +899,7 @@ pub(super) async fn precheck_loop_guard(
                 final_content: msg.clone(),
                 // Loop-guard block never ran the timed tool body.
                 execution_ms: None,
-            })
+            }))
         }
         _ => LoopGuardPrecheck::Proceed(verdict),
     }
@@ -918,7 +923,7 @@ pub(super) async fn execute_single_tool_call_inner(
     .await
     {
         LoopGuardPrecheck::Proceed(verdict) => verdict,
-        LoopGuardPrecheck::Blocked(executed) => return Ok(executed),
+        LoopGuardPrecheck::Blocked(executed) => return Ok(*executed),
         LoopGuardPrecheck::CircuitBreak(err) => return Err(err),
     };
 

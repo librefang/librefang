@@ -18,7 +18,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use agent_client_protocol::schema::SessionId as AcpSessionId;
+use agent_client_protocol::schema::v1::SessionId as AcpSessionId;
 use dashmap::DashMap;
 use librefang_types::agent::SessionId as LfSessionId;
 use tokio_util::sync::CancellationToken;

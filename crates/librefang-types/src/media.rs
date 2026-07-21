@@ -216,6 +216,91 @@ pub fn mime_base(mime: &str) -> String {
         .to_ascii_lowercase()
 }
 
+/// Map a content type to the bare file extension (no leading dot) a persisted
+/// upload should carry, or `None` when the type is generic/unknown.
+///
+/// The MIME is normalized with [`mime_base`] first, so parameterized values
+/// (`text/plain; charset=utf-8`, `audio/ogg; codecs=opus`) still match. Returns
+/// `None` for `application/octet-stream` and anything unmapped so callers fall
+/// back to the filename extension or a bare UUID rather than inventing a
+/// misleading extension. Used by [`on_disk_name`].
+pub fn ext_for_content_type(content_type: &str) -> Option<&'static str> {
+    match mime_base(content_type).as_str() {
+        "image/png" => Some("png"),
+        "image/jpeg" | "image/jpg" => Some("jpg"),
+        "image/gif" => Some("gif"),
+        "image/webp" => Some("webp"),
+        "image/svg+xml" => Some("svg"),
+        "image/bmp" => Some("bmp"),
+        "image/tiff" => Some("tiff"),
+        "application/pdf" => Some("pdf"),
+        "text/plain" => Some("txt"),
+        "text/markdown" => Some("md"),
+        "text/csv" => Some("csv"),
+        "text/html" => Some("html"),
+        "application/json" => Some("json"),
+        "application/xml" | "text/xml" => Some("xml"),
+        "audio/ogg" => Some("oga"),
+        "audio/mpeg" => Some("mp3"),
+        "audio/wav" | "audio/x-wav" => Some("wav"),
+        "audio/mp4" | "audio/m4a" | "audio/x-m4a" => Some("m4a"),
+        "audio/webm" => Some("weba"),
+        "audio/flac" => Some("flac"),
+        "video/mp4" => Some("mp4"),
+        "video/quicktime" => Some("mov"),
+        "video/webm" => Some("webm"),
+        _ => None,
+    }
+}
+
+/// Extract a safe lowercase extension from a filename, or `None`.
+///
+/// Guards against a filename doubling as a path-injection vector: the
+/// extension must be short, purely ASCII-alphanumeric, and free of any path
+/// separator. This is the fallback arm of [`on_disk_name`] for content types
+/// [`ext_for_content_type`] does not map.
+fn safe_ext_from_filename(filename: &str) -> Option<String> {
+    let ext = std::path::Path::new(filename).extension()?.to_str()?;
+    let lower = ext.to_ascii_lowercase();
+    if !lower.is_empty() && lower.len() <= 8 && lower.chars().all(|c| c.is_ascii_alphanumeric()) {
+        Some(lower)
+    } else {
+        None
+    }
+}
+
+/// Compute the on-disk basename for a persisted upload: `"<file_id>.<ext>"`,
+/// or a bare `"<file_id>"` when no extension can be determined.
+///
+/// This is the single naming authority shared by every producer that writes
+/// into, and every consumer that reads back from, the shared upload directory
+/// (`channels::effective_file_download_dir()`). The client-facing `file_id`
+/// stays a bare UUID — the path-traversal and owner-access guards parse it with
+/// `uuid::Uuid::parse_str` — while the on-disk name additionally carries the
+/// type so extension-sniffing tools and persisted copies keep their type at
+/// rest (#6530).
+///
+/// The extension is chosen deterministically: the mapped
+/// [`ext_for_content_type`] first, then a safe extension parsed from
+/// `filename`, then none.
+///
+/// INVARIANT — this function is pure: identical `(file_id, content_type,
+/// filename)` inputs always yield the same name. Writers and readers call it
+/// independently and never coordinate, so a read site MUST pass the same
+/// `content_type` / `filename` the write site used (the `UPLOAD_REGISTRY`
+/// stores both for API uploads; cross-crate producers key on a fixed
+/// content type both sides know). A reader that lacks those inputs must fall
+/// back to a `"<file_id>.*"` directory probe instead of guessing here.
+pub fn on_disk_name(file_id: &str, content_type: &str, filename: &str) -> String {
+    let ext = ext_for_content_type(content_type)
+        .map(str::to_string)
+        .or_else(|| safe_ext_from_filename(filename));
+    match ext {
+        Some(ext) => format!("{file_id}.{ext}"),
+        None => file_id.to_string(),
+    }
+}
+
 impl MediaAttachment {
     /// Validate the attachment against security constraints.
     pub fn validate(&self) -> Result<(), String> {
@@ -772,6 +857,59 @@ pub struct MediaMusicResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ext_for_content_type_maps_known_and_rejects_generic() {
+        assert_eq!(ext_for_content_type("image/png"), Some("png"));
+        assert_eq!(ext_for_content_type("image/jpeg"), Some("jpg"));
+        assert_eq!(ext_for_content_type("application/pdf"), Some("pdf"));
+        assert_eq!(ext_for_content_type("audio/ogg"), Some("oga"));
+        // Parameters and case are normalized via mime_base.
+        assert_eq!(
+            ext_for_content_type("text/plain; charset=utf-8"),
+            Some("txt")
+        );
+        assert_eq!(ext_for_content_type("IMAGE/PNG"), Some("png"));
+        // Generic / unknown → None (caller falls back to filename or bare uuid).
+        assert_eq!(ext_for_content_type("application/octet-stream"), None);
+        assert_eq!(ext_for_content_type("application/x-not-real"), None);
+        assert_eq!(ext_for_content_type(""), None);
+    }
+
+    #[test]
+    fn on_disk_name_prefers_content_type_then_filename_then_bare() {
+        let id = "11111111-1111-1111-1111-111111111111";
+        // Content type wins even when the filename disagrees.
+        assert_eq!(
+            on_disk_name(id, "image/png", "photo.jpeg"),
+            format!("{id}.png")
+        );
+        // Unknown content type falls back to the filename extension.
+        assert_eq!(
+            on_disk_name(id, "application/octet-stream", "notes.md"),
+            format!("{id}.md")
+        );
+        // Neither known → bare uuid (no dot), so the traversal guard still parses it.
+        assert_eq!(on_disk_name(id, "application/octet-stream", "noext"), id);
+        // A filename with an unsafe/oversized "extension" is ignored, not joined.
+        assert_eq!(
+            on_disk_name(id, "application/octet-stream", "x.evil/../y"),
+            id
+        );
+        assert_eq!(
+            on_disk_name(id, "application/octet-stream", "x.verylongext"),
+            id
+        );
+    }
+
+    #[test]
+    fn on_disk_name_is_deterministic() {
+        let id = "22222222-2222-2222-2222-222222222222";
+        assert_eq!(
+            on_disk_name(id, "audio/ogg; codecs=opus", "voice.oga"),
+            on_disk_name(id, "audio/ogg; codecs=opus", "voice.oga"),
+        );
+    }
 
     #[test]
     fn test_media_type_display() {

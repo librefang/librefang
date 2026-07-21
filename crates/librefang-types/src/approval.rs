@@ -670,7 +670,8 @@ pub struct ApprovalPolicy {
     pub timeout_secs: u64,
     /// Auto-approve in autonomous mode. Default: `false`.
     pub auto_approve_autonomous: bool,
-    /// If `auto_approve = true`, clears the require list at boot.
+    /// When `true`, `apply_shorthands` clears `require_approval` so no tool is gated.
+    /// Applied whenever the policy is installed into an `ApprovalManager` (boot, hot-reload, construction) — see `#6492`.
     #[serde(default)]
     pub auto_approve: bool,
     /// User IDs that are trusted and auto-approved for all tools.

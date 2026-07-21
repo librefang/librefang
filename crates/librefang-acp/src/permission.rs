@@ -15,7 +15,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_client_protocol::schema::{
+use agent_client_protocol::schema::v1::{
     PermissionOption, PermissionOptionKind, RequestPermissionOutcome, RequestPermissionRequest,
     RequestPermissionResponse, ToolCallId, ToolCallUpdate, ToolCallUpdateFields,
 };
@@ -309,7 +309,7 @@ fn is_high_risk_tool(tool: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::{PermissionOptionId, SelectedPermissionOutcome};
+    use agent_client_protocol::schema::v1::{PermissionOptionId, SelectedPermissionOutcome};
 
     fn outcome(id: &'static str) -> RequestPermissionOutcome {
         RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(PermissionOptionId::new(
