@@ -11,16 +11,19 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_client_protocol::schema::{
+use agent_client_protocol::schema::v1::{
     ContentBlock, CreateTerminalRequest, CreateTerminalResponse, InitializeRequest,
     InitializeResponse, LoadSessionRequest, NewSessionRequest, NewSessionResponse,
-    PermissionOptionId, PromptRequest, PromptResponse, ProtocolVersion, ReadTextFileRequest,
-    ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionNotification, SessionUpdate, StopReason, TerminalExitStatus,
-    TerminalId, TerminalOutputRequest, TerminalOutputResponse, TextContent,
-    WaitForTerminalExitRequest, WaitForTerminalExitResponse,
+    PermissionOptionId, PromptRequest, PromptResponse, ReadTextFileRequest, ReadTextFileResponse,
+    ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
+    SessionNotification, SessionUpdate, StopReason, TerminalExitStatus, TerminalId,
+    TerminalOutputRequest, TerminalOutputResponse, TextContent, WaitForTerminalExitRequest,
+    WaitForTerminalExitResponse,
 };
+// `ProtocolVersion` is re-exported at the `schema` root (not under `v1`) in
+// agent-client-protocol 1.x.
+use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::{ConnectionTo, JsonRpcResponse, Responder, SentRequest};
 use async_trait::async_trait;
 use librefang_acp::TerminalClientHandle;
@@ -439,7 +442,7 @@ async fn unknown_session_id_returns_invalid_params() {
                         recv(cx.send_request(InitializeRequest::new(ProtocolVersion::LATEST)))
                             .await?;
 
-                    let bogus = agent_client_protocol::schema::SessionId::new("does-not-exist");
+                    let bogus = agent_client_protocol::schema::v1::SessionId::new("does-not-exist");
                     let prompt_result = recv(cx.send_request(PromptRequest::new(
                         bogus,
                         vec![ContentBlock::Text(TextContent::new("hi"))],
@@ -517,7 +520,7 @@ async fn fs_read_text_file_round_trip() {
                         assert!(handle.capabilities().read_text_file);
                         let content = handle
                             .read_text_file(
-                                agent_client_protocol::schema::SessionId::new("test-session"),
+                                agent_client_protocol::schema::v1::SessionId::new("test-session"),
                                 PathBuf::from("/tmp/hello.txt"),
                                 None,
                                 None,
@@ -717,7 +720,7 @@ async fn session_load_replays_history_to_client() {
                         // SessionState::for_acp_id derives the same
                         // LibreFang session id we'd see across restarts.
                         let session_id =
-                            agent_client_protocol::schema::SessionId::new("reconnecting-session");
+                            agent_client_protocol::schema::v1::SessionId::new("reconnecting-session");
                         let _ = recv(cx.send_request(LoadSessionRequest::new(
                             session_id.clone(),
                             PathBuf::from("/tmp/proj"),

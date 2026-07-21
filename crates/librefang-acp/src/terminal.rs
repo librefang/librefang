@@ -31,7 +31,7 @@ const TERMINAL_RPC_TIMEOUT: Duration = Duration::from_secs(60);
 /// editor never sends `terminal/kill`).
 const TERMINAL_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
 
-use agent_client_protocol::schema::{
+use agent_client_protocol::schema::v1::{
     ClientCapabilities, CreateTerminalRequest, EnvVariable, KillTerminalRequest,
     ReleaseTerminalRequest, SessionId as AcpSessionId, TerminalExitStatus, TerminalId,
     TerminalOutputRequest, WaitForTerminalExitRequest,
