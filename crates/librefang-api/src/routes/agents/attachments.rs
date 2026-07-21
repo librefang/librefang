@@ -147,7 +147,15 @@ pub fn resolve_attachments(
             continue;
         }
 
-        let file_path = upload_dir.join(&att.file_id);
+        // Reconstruct the `<uuid>.<ext>` on-disk name written by the producer
+        // (#6530), tolerating legacy bare-`<uuid>` files and the `<uuid>.*`
+        // probe for generated images. Skip the attachment if nothing is on disk.
+        let Some(file_path) =
+            resolve_existing_upload_path(&upload_dir, &att.file_id, &raw_content_type, &filename)
+        else {
+            tracing::debug!(file_id = %att.file_id, "attachment not found on disk; skipping");
+            continue;
+        };
 
         if content_type.starts_with("image/") {
             match std::fs::read(&file_path) {

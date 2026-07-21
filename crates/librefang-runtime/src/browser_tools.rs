@@ -147,7 +147,13 @@ pub async fn tool_browser_screenshot(
         let _ = std::fs::create_dir_all(upload_dir);
         let file_id = uuid::Uuid::new_v4().to_string();
         if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(b64) {
-            let path = upload_dir.join(&file_id);
+            // Screenshots are PNG; persist as `<uuid>.png` (#6530). The URL
+            // keeps the bare file_id and serve_upload's resolver finds the file.
+            let path = upload_dir.join(librefang_types::media::on_disk_name(
+                &file_id,
+                "image/png",
+                "",
+            ));
             if std::fs::write(&path, &decoded).is_ok() {
                 image_urls.push(format!("/api/uploads/{file_id}"));
             }
