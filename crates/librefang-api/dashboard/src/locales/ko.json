@@ -1594,9 +1594,6 @@
     "delete_failed": "삭제 실패",
     "run_failed": "실행 실패",
     "run_started": "실행이 시작되었습니다",
-    "rerun": "동일한 매개변수로 다시 실행",
-    "rerun_started": "동일한 매개변수로 다시 실행 시작됨",
-    "rerun_failed": "재실행 실패",
     "runs_label": "실행",
     "schedule_failed": "일정 생성 실패",
     "skip": "건너뛰기",
@@ -1637,7 +1634,14 @@
       "pending_review_one": "운영자 검토를 기다리는 워크플로 실행 1개",
       "pending_review_other": "운영자 검토를 기다리는 워크플로 실행 {{count}}개",
       "empty_artifact": "(빈 인공물)"
-    }
+    },
+    "rerun_hint": "이 매개변수로 다시 실행",
+    "step_executing": "단계 {{current}}/{{total}} 실행 중…",
+    "starting": "시작 중…",
+    "variables": "변수",
+    "step_output": "출력",
+    "step_pending": "대기 중…",
+    "console": "콘솔"
   },
   "scheduler": {
     "title": "스케줄러",

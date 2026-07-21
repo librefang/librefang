@@ -829,8 +829,7 @@
     "tools_declared_title": "Оголошені інструменти",
     "providers_error_loading": "Помилка завантаження",
     "no_providers": "Немає провайдерів",
-    "select_provider_first": "Спочатку оберіть провайдера",
-    "no_models": "Немає моделей"
+    "select_provider_first": "Спочатку оберіть провайдера"
   },
   "providers": {
     "title": "Провайдери",
@@ -1643,7 +1642,8 @@
     "starting": "Запуск…",
     "variables": "Змінні",
     "step_output": "Вивід",
-    "step_pending": "Очікування…"
+    "step_pending": "Очікування…",
+    "console": "Консоль"
   },
   "scheduler": {
     "title": "Планувальник",
