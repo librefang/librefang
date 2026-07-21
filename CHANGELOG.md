@@ -15,6 +15,12 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
   A `resource_link` in a tool result is now surfaced as a first-class `[resource_link] name — uri (mime)` line instead of being flattened into an opaque JSON string, and an embedded resource contributes its text (binary blobs are elided, never inlined into the prompt); resource lists are sorted by URI for prompt-cache stability.
   No `resources` client capability is declared because the MCP `resources` capability is server-side and rmcp's `ClientCapabilities` has no such field (#6501) (@houko)
 
+### Changed
+
+- Normalize on-disk upload naming so every producer that writes into the shared upload directory names the file `<uuid>.<ext>` instead of today's three divergent schemes (bare `<uuid>`, `image_<uuid>.png`, `<uuid>.<ext>`), keeping the file's type at rest for extension-sniffing tools and for any flow that persists or re-dispatches the bytes.
+  A single deterministic `librefang_types::media::on_disk_name(file_id, content_type, filename)` helper (extension from `ext_for_content_type`, then a safe filename extension, else a bare UUID) is now the one naming authority: the API upload / media / session-image / generated-image / browser-screenshot producers all route through it, and the client-facing `file_id` stays a bare UUID so the path-traversal and #3361 owner guards still `uuid::Uuid::parse_str` it.
+  `serve_upload` and `resolve_attachments` reconstruct the name through a shared resolver that also tolerates legacy bare-`<uuid>` files and probes `<uuid>.*` for generated images not in the upload registry, so existing uploads keep serving (#6530) (@houko)
+
 ### Documentation
 
 - Document how `[approval].trusted_senders` composes with `[[users]]` RBAC on the approvals security page (EN + zh mirror): the two are separate trust surfaces and the per-user RBAC gate is evaluated first, so an ID listed in `trusted_senders` that is not also a registered `[[users]]` on the `api` channel still has its low-risk tools (e.g. `memory_*`) gated by the `guest_gate`, because the forced-approval verdict short-circuits before the `trusted_senders` bypass is consulted; the new subsection gives the concrete fix (register the operator as a `[[users]]` bound to the `api` channel with a `tool_policy` covering the tools it drives) and notes that with no `[[users]]` configured `trusted_senders` works standalone (#6492) (@houko)

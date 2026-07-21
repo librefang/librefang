@@ -321,7 +321,13 @@ pub(super) async fn tool_image_generate(
                 .map_err(|e| {
                     ToolError::upstream_msg(format!("Failed to decode image data: {e}"))
                 })?;
-            let path = upload_dir.join(&file_id);
+            // Persist as `<uuid>.png` (#6530); the URL keeps the bare file_id
+            // and serve_upload's resolver reconstructs the `.png` name.
+            let path = upload_dir.join(librefang_types::media::on_disk_name(
+                &file_id,
+                "image/png",
+                "",
+            ));
             tokio::fs::write(&path, &decoded).await.map_err(|e| {
                 ToolError::upstream_msg(format!("Failed to write upload file: {e}"))
             })?;
@@ -362,7 +368,8 @@ async fn save_media_images_to_workspace(
             .decode(&img.data_base64)
             .map_err(|e| ToolError::upstream_msg(format!("Failed to decode image: {e}")))?;
         let file_id = uuid::Uuid::new_v4();
-        let filename = format!("image_{file_id}.png");
+        // Converge on the shared `<uuid>.<ext>` naming (#6530); these are PNGs.
+        let filename = librefang_types::media::on_disk_name(&file_id.to_string(), "image/png", "");
         let path = output_dir.join(&filename);
         tokio::fs::write(&path, &decoded)
             .await
@@ -396,7 +403,14 @@ async fn save_media_images_to_uploads(
         if decoded.is_empty() {
             continue;
         }
-        let path = upload_dir.join(&file_id);
+        // Persist as `<uuid>.png` (#6530); the returned URL keeps the bare
+        // `file_id`, and serve_upload's resolver reconstructs the `.png` name
+        // (these generated images are not in UPLOAD_REGISTRY).
+        let path = upload_dir.join(librefang_types::media::on_disk_name(
+            &file_id,
+            "image/png",
+            "",
+        ));
         tokio::fs::write(&path, &decoded)
             .await
             .map_err(|e| ToolError::upstream_msg(format!("Failed to write upload file: {e}")))?;
