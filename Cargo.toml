@@ -181,7 +181,7 @@ psl = "2"
 tera = { version = "2", default-features = false }
 
 # WASM sandbox
-wasmtime = "46"
+wasmtime = "47"
 
 # HTTP server (for API daemon)
 axum = { version = "0.8", features = ["ws"] }
