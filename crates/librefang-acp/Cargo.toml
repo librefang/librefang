@@ -23,7 +23,6 @@ librefang-kernel-handle = { path = "../librefang-kernel-handle" }
 librefang-kernel = { path = "../librefang-kernel", optional = true }
 
 agent-client-protocol = { workspace = true }
-agent-client-protocol-tokio = { workspace = true }
 
 tokio = { workspace = true }
 tokio-util = { workspace = true }

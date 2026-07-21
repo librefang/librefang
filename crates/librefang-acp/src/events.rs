@@ -3,7 +3,7 @@
 //! The agent loop in `librefang-runtime` emits a flat stream of
 //! [`librefang_llm_driver::StreamEvent`] values during one prompt turn.
 //! ACP expects those events delivered as `session/update` notifications
-//! whose payload is a [`agent_client_protocol::schema::SessionUpdate`].
+//! whose payload is a [`agent_client_protocol::schema::v1::SessionUpdate`].
 //!
 //! We do the translation here. State is needed across events because:
 //!
@@ -35,7 +35,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use agent_client_protocol::schema::{
+use agent_client_protocol::schema::v1::{
     ContentBlock, ContentChunk, SessionUpdate, TextContent, ToolCall, ToolCallContent, ToolCallId,
     ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
 };

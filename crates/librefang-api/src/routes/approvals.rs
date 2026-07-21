@@ -341,7 +341,7 @@ pub(crate) struct ApproveRequestBody {
     totp_code: Option<String>,
 }
 
-#[utoipa::path(post, path = "/api/approvals/{id}/approve", tag = "approvals", params(("id" = String, Path, description = "Approval ID")), request_body = crate::types::JsonObject, responses((status = 200, description = "Request approved", body = crate::types::JsonObject)))]
+#[utoipa::path(post, path = "/api/approvals/{id}/approve", tag = "approvals", params(("id" = String, Path, description = "Approval ID")), request_body = crate::types::JsonObject, responses((status = 200, description = "Request approved", body = crate::types::JsonObject), (status = 404, description = "No such pending request", body = crate::types::JsonObject), (status = 409, description = "Request was already resolved", body = crate::types::JsonObject)))]
 #[allow(private_interfaces)]
 pub async fn approve_request(
     State(state): State<Arc<AppState>>,
@@ -581,7 +581,7 @@ pub async fn approve_request(
 }
 
 /// POST /api/approvals/{id}/reject — Reject a pending request.
-#[utoipa::path(post, path = "/api/approvals/{id}/reject", tag = "approvals", params(("id" = String, Path, description = "Approval ID")), responses((status = 200, description = "Request rejected", body = crate::types::JsonObject)))]
+#[utoipa::path(post, path = "/api/approvals/{id}/reject", tag = "approvals", params(("id" = String, Path, description = "Approval ID")), responses((status = 200, description = "Request rejected", body = crate::types::JsonObject), (status = 404, description = "No such pending request", body = crate::types::JsonObject), (status = 409, description = "Request was already resolved", body = crate::types::JsonObject)))]
 pub async fn reject_request(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -636,7 +636,7 @@ pub(crate) struct ModifyRequestBody {
     feedback: String,
 }
 
-#[utoipa::path(post, path = "/api/approvals/{id}/modify", tag = "approvals", params(("id" = String, Path, description = "Approval ID")), request_body = crate::types::JsonObject, responses((status = 200, description = "Request modified", body = crate::types::JsonObject)))]
+#[utoipa::path(post, path = "/api/approvals/{id}/modify", tag = "approvals", params(("id" = String, Path, description = "Approval ID")), request_body = crate::types::JsonObject, responses((status = 200, description = "Request modified", body = crate::types::JsonObject), (status = 404, description = "No such pending request", body = crate::types::JsonObject), (status = 409, description = "Request was already resolved", body = crate::types::JsonObject)))]
 #[allow(private_interfaces)]
 pub async fn modify_request(
     State(state): State<Arc<AppState>>,

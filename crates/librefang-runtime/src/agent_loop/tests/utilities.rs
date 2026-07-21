@@ -2154,6 +2154,62 @@ fn redact_images_for_text_only_replaces_image_and_imagefile_blocks() {
 }
 
 #[test]
+fn redact_images_for_text_only_preserves_imagefile_path() {
+    use super::super::redact_images_for_text_only;
+    use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
+
+    let messages = vec![Message {
+        role: Role::User,
+        content: MessageContent::Blocks(vec![
+            // On-disk image: path must survive into the placeholder so a text-only agent can still read/attach the raw file.
+            ContentBlock::ImageFile {
+                media_type: "image/png".to_string(),
+                path: "/tmp/librefang_uploads/0dc8dfe0.png".to_string(),
+            },
+            // Inline base64 image: no path exists, so none may be fabricated.
+            ContentBlock::Image {
+                media_type: "image/jpeg".to_string(),
+                data: "aGVsbG8=".to_string(),
+            },
+        ]),
+        pinned: false,
+        timestamp: None,
+    }];
+
+    let out = redact_images_for_text_only(messages, "deepseek-v4");
+    let blocks = match &out[0].content {
+        MessageContent::Blocks(b) => b,
+        other => panic!("expected Blocks, got {other:?}"),
+    };
+
+    // ImageFile placeholder keeps the on-disk path.
+    match &blocks[0] {
+        ContentBlock::Text { text, .. } => {
+            assert!(
+                text.contains("image omitted") && text.contains("no vision support"),
+                "got {text:?}"
+            );
+            assert!(
+                text.contains("/tmp/librefang_uploads/0dc8dfe0.png"),
+                "ImageFile placeholder must keep the on-disk path, got {text:?}"
+            );
+        }
+        other => panic!("expected Text, got {other:?}"),
+    }
+    // Base64 Image placeholder must not claim a path it does not have.
+    match &blocks[1] {
+        ContentBlock::Text { text, .. } => {
+            assert!(text.contains("image omitted"), "got {text:?}");
+            assert!(
+                !text.contains("on disk at"),
+                "base64 Image has no path and must not claim one, got {text:?}"
+            );
+        }
+        other => panic!("expected Text, got {other:?}"),
+    }
+}
+
+#[test]
 fn redact_images_for_text_only_is_noop_without_images() {
     use super::super::redact_images_for_text_only;
     use librefang_types::message::{ContentBlock, Message, MessageContent, Role};

@@ -112,7 +112,10 @@ impl ApprovalManager {
             .count()
     }
 
-    pub fn new(policy: ApprovalPolicy) -> Self {
+    pub fn new(mut policy: ApprovalPolicy) -> Self {
+        // Normalize the `auto_approve` shorthand at the single point where a policy is installed, so no construction site can forget it (#6492 Bug 1).
+        // See `new_with_db` / `update_policy` for the other two.
+        policy.apply_shorthands();
         let (events_tx, _) = broadcast::channel(256);
         Self {
             pending: DashMap::new(),
@@ -134,7 +137,9 @@ impl ApprovalManager {
     /// restart (issue #3611). Restored entries have no live `oneshot::Sender`,
     /// so they cannot be auto-resolved by the agent loop — they surface in
     /// the dashboard / API as pending items that require operator action.
-    pub fn new_with_db(policy: ApprovalPolicy, pool: Pool<SqliteConnectionManager>) -> Self {
+    pub fn new_with_db(mut policy: ApprovalPolicy, pool: Pool<SqliteConnectionManager>) -> Self {
+        // Normalize the `auto_approve` shorthand here (the daemon-boot path, `boot.rs`) so `auto_approve = true` actually clears `require_approval` — previously it was a silent no-op because `apply_shorthands` was only ever called in unit tests (#6492 Bug 1).
+        policy.apply_shorthands();
         let failures = Self::load_totp_lockout(&pool);
         let pending: DashMap<Uuid, PendingRequest> = DashMap::new();
         // Restore pending approvals from the previous session.
@@ -495,6 +500,27 @@ impl ApprovalManager {
         ) {
             warn!(request_id = %id, error = %e, "Failed to delete pending approval from database");
         }
+    }
+
+    /// Look up the terminal decision for an already-resolved approval from the durable audit log (`approval_audit`).
+    ///
+    /// The in-memory `recent` ring buffer only holds the last `MAX_RECENT_APPROVALS` resolutions, so a double-resolve arriving after the entry has aged out — or after a daemon restart — would otherwise be indistinguishable from a never-existed id.
+    /// `approval_audit` is the authoritative record: every resolution writes a terminal row (decision != "pending") via [`Self::push_recent`].
+    /// Consulting it lets `resolve` answer "already resolved" (→ HTTP 409) deterministically instead of degrading to "not found" (→ 404).
+    /// See issue #6492 Bug 3.
+    ///
+    /// Returns `(decision, decided_by)` for the most recent terminal row, or `None` when no resolution has been recorded (id never existed, still pending, or no audit DB is attached).
+    fn db_lookup_resolved_decision(&self, id: Uuid) -> Option<(String, String)> {
+        let db = self.audit_db.as_ref()?;
+        let conn = db.get().ok()?;
+        conn.query_row(
+            "SELECT decision, COALESCE(decided_by, 'unknown') FROM approval_audit \
+             WHERE request_id = ?1 AND decision != 'pending' \
+             ORDER BY decided_at DESC LIMIT 1",
+            rusqlite::params![id.to_string()],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .ok()
     }
 
     /// Load persisted TOTP lockout state from the database.
@@ -1081,7 +1107,8 @@ impl ApprovalManager {
                 Ok((response, pending.deferred))
             }
             None => {
-                // Check recent records for who already handled this
+                // Not pending. Distinguish "already resolved" (→ 409 at the api boundary) from "never existed / long expired" (→ 404).
+                // Check the in-memory `recent` ring first for the fast path, then fall back to the durable audit log so the answer stays stable after `recent` evicts the entry or the daemon restarts (issue #6492 Bug 3).
                 let recent = self.recent.lock().unwrap_or_else(|e| e.into_inner());
                 let handler_info = recent.iter().find(|r| r.request.id == request_id).map(|r| {
                     let who = r.decided_by.as_deref().unwrap_or("unknown");
@@ -1089,6 +1116,10 @@ impl ApprovalManager {
                     format!("Already {decision} by {who}")
                 });
                 drop(recent);
+                let handler_info = handler_info.or_else(|| {
+                    self.db_lookup_resolved_decision(request_id)
+                        .map(|(decision, who)| format!("Already {decision} by {who}"))
+                });
                 Err(handler_info.unwrap_or_else(|| {
                     format!("Approval request {request_id} not found or expired")
                 }))
@@ -1350,7 +1381,9 @@ impl ApprovalManager {
     }
 
     /// Update the approval policy (for hot-reload).
-    pub fn update_policy(&self, policy: ApprovalPolicy) {
+    pub fn update_policy(&self, mut policy: ApprovalPolicy) {
+        // Apply the `auto_approve` shorthand on the reload path too (#6492 Bug 1) so a `POST /api/config/reload` that flips `auto_approve = true` takes effect, mirroring the boot-time normalization in `new_with_db`.
+        policy.apply_shorthands();
         *self.policy.write().unwrap_or_else(|e| e.into_inner()) = policy;
     }
 
@@ -3661,6 +3694,154 @@ mod tests {
             librefang_memory::migration::run_migrations(&conn).unwrap();
         }
         ApprovalManager::new_with_db(ApprovalPolicy::default(), pool)
+    }
+
+    // -----------------------------------------------------------------------
+    // #6492 Bug 1 — `auto_approve` shorthand is applied when a policy is installed (not just in a unit test that manually calls apply_shorthands)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn auto_approve_shorthand_applied_at_construction() {
+        // A default policy gates shell_exec; with `auto_approve = true` the manager must ungate everything at construction time.
+        // Before #6492 this only happened if a caller remembered to call apply_shorthands, which no production path did.
+        let policy = ApprovalPolicy {
+            auto_approve: true,
+            ..Default::default()
+        };
+        assert!(
+            !policy.require_approval.is_empty(),
+            "precondition: default policy has a non-empty require list"
+        );
+        let mgr = ApprovalManager::new(policy);
+        assert!(
+            mgr.policy().require_approval.is_empty(),
+            "auto_approve must clear require_approval at construction"
+        );
+        assert!(!mgr.requires_approval("shell_exec"));
+    }
+
+    #[test]
+    fn auto_approve_shorthand_applied_at_construction_with_db() {
+        // Same guarantee on the daemon-boot path (`new_with_db`).
+        let pool = Pool::builder()
+            .max_size(1)
+            .build(SqliteConnectionManager::memory())
+            .unwrap();
+        {
+            let conn = pool.get().unwrap();
+            librefang_memory::migration::run_migrations(&conn).unwrap();
+        }
+        let policy = ApprovalPolicy {
+            auto_approve: true,
+            ..Default::default()
+        };
+        let mgr = ApprovalManager::new_with_db(policy, pool);
+        assert!(mgr.policy().require_approval.is_empty());
+        assert!(!mgr.requires_approval("file_write"));
+    }
+
+    #[test]
+    fn auto_approve_shorthand_applied_on_hot_reload() {
+        // A `POST /api/config/reload` that flips `auto_approve = true` routes through `update_policy`, which must also apply the shorthand.
+        let mgr = default_manager();
+        assert!(mgr.requires_approval("shell_exec"));
+        mgr.update_policy(ApprovalPolicy {
+            auto_approve: true,
+            ..Default::default()
+        });
+        assert!(mgr.policy().require_approval.is_empty());
+        assert!(!mgr.requires_approval("shell_exec"));
+    }
+
+    // -----------------------------------------------------------------------
+    // #6492 Bug 3 — double-resolve is a deterministic conflict, never a 404
+    // -----------------------------------------------------------------------
+
+    fn seed_pending(mgr: &ApprovalManager, req: ApprovalRequest) -> Uuid {
+        let id = req.id;
+        mgr.db_insert_pending(&req, None);
+        mgr.pending.insert(
+            id,
+            PendingRequest {
+                request: req,
+                sender: None,
+                deferred: None,
+                submitted_at: chrono::Utc::now(),
+            },
+        );
+        id
+    }
+
+    #[test]
+    fn double_resolve_reports_already_resolved() {
+        let mgr = make_manager_with_db();
+        let id = seed_pending(&mgr, make_request("agent-x", "shell_exec", 300));
+        mgr.resolve(
+            id,
+            ApprovalDecision::Approved,
+            Some("api".into()),
+            false,
+            None,
+        )
+        .expect("first resolve succeeds");
+        let err = mgr
+            .resolve(
+                id,
+                ApprovalDecision::Approved,
+                Some("api".into()),
+                false,
+                None,
+            )
+            .expect_err("second resolve must be rejected");
+        assert!(err.starts_with("Already "), "got: {err}");
+        assert!(err.contains("approved"), "got: {err}");
+    }
+
+    #[test]
+    fn double_resolve_stays_a_conflict_after_recent_eviction() {
+        // Once the in-memory `recent` ring evicts the resolution, a re-resolve must still report "Already …" (→ 409) via the durable audit log — not degrade to "not found" (→ 404), which was the pre-#6492 flip.
+        let mgr = make_manager_with_db();
+        let id = seed_pending(&mgr, make_request("agent-x", "shell_exec", 300));
+        mgr.resolve(
+            id,
+            ApprovalDecision::Denied,
+            Some("api".into()),
+            false,
+            None,
+        )
+        .expect("first resolve succeeds");
+        // Simulate the 100-slot ring buffer aging the entry out.
+        mgr.recent.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        let err = mgr
+            .resolve(
+                id,
+                ApprovalDecision::Denied,
+                Some("api".into()),
+                false,
+                None,
+            )
+            .expect_err("second resolve must still be rejected");
+        assert!(
+            err.starts_with("Already "),
+            "audit-log fallback must keep it a conflict, got: {err}"
+        );
+        assert!(err.contains("denied"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_genuinely_unknown_id_is_not_found() {
+        // A never-existed id must stay "not found" (→ 404), never a false 409.
+        let mgr = make_manager_with_db();
+        let err = mgr
+            .resolve(
+                Uuid::new_v4(),
+                ApprovalDecision::Approved,
+                Some("api".into()),
+                false,
+                None,
+            )
+            .expect_err("unknown id must be rejected");
+        assert!(err.contains("not found"), "got: {err}");
     }
 
     #[test]

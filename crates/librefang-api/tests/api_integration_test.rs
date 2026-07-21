@@ -4720,6 +4720,100 @@ async fn test_upload_over_limit_returns_413() {
     );
 }
 
+/// #6530 round-trip: a file uploaded via `POST /upload` is persisted on disk as
+/// `<uuid>.<ext>`, but the client-facing `file_id` stays a bare UUID. Serving
+/// it back by that bare `file_id` must still find the file — this proves the
+/// write-side `on_disk_name` matches the read-side reconstruction in
+/// `serve_upload`. Covers a typed content type (PNG → `.png`) and the generic
+/// `application/octet-stream` (no extension → bare `<uuid>`) so both arms of
+/// `on_disk_name` are exercised end to end.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_upload_roundtrip_serves_by_bare_file_id() {
+    let harness = start_full_router("").await;
+
+    async fn upload_then_serve(
+        harness: &FullRouterHarness,
+        content_type: &str,
+        filename: &str,
+        body: Vec<u8>,
+    ) {
+        // The upload route validates the agent-id *format* (parses as a UUID);
+        // it does not require the agent to exist, so a fresh UUID is enough.
+        let agent_id = uuid::Uuid::new_v4();
+        let mut up = Request::builder()
+            .method("POST")
+            .uri(format!("/api/agents/{agent_id}/upload"))
+            .header("content-type", content_type)
+            .header("x-filename", filename)
+            .header("content-length", body.len().to_string())
+            .body(Body::from(body.clone()))
+            .unwrap();
+        up.extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                0,
+            ))));
+        let up_resp = harness.app.clone().oneshot(up).await.unwrap();
+        let up_status = up_resp.status();
+        let bytes = axum::body::to_bytes(up_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            up_status,
+            StatusCode::CREATED,
+            "upload of {content_type} must succeed, got {up_status}: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let file_id = json["file_id"].as_str().expect("file_id in response");
+        // The client-facing id is a bare UUID (the traversal/owner guards parse it).
+        assert!(
+            uuid::Uuid::parse_str(file_id).is_ok(),
+            "file_id must stay a bare UUID, got {file_id}"
+        );
+
+        let mut serve = Request::builder()
+            .method("GET")
+            .uri(format!("/api/uploads/{file_id}"))
+            .body(Body::empty())
+            .unwrap();
+        serve
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                0,
+            ))));
+        let serve_resp = harness.app.clone().oneshot(serve).await.unwrap();
+        assert_eq!(
+            serve_resp.status(),
+            StatusCode::OK,
+            "serve_upload must find the {content_type} file by its bare id"
+        );
+        let served = axum::body::to_bytes(serve_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            served.as_ref(),
+            body.as_slice(),
+            "served bytes must match the uploaded bytes"
+        );
+    }
+
+    // PNG → persisted as `<uuid>.png`, served by bare id. The bare-uuid arm of
+    // on_disk_name (generic content type) is covered by the media.rs unit tests;
+    // application/octet-stream is not an allowed upload content type so it can't
+    // exercise that arm through this route.
+    upload_then_serve(
+        &harness,
+        "image/png",
+        "shot.png",
+        b"\x89PNG\r\n\x1a\nHELLO-6530".to_vec(),
+    )
+    .await;
+    // text/plain → persisted as `<uuid>.txt`; also round-trips by bare id.
+    upload_then_serve(&harness, "text/plain", "note.txt", b"hello-6530".to_vec()).await;
+}
+
 // ---------------------------------------------------------------------------
 // Per-user LLM provider credentials (#6460 Follow-up B)
 //

@@ -7,6 +7,26 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ## [Unreleased]
 
+### Added
+
+- Implement the MCP `resources` primitive in the `librefang-runtime-mcp` client, which was previously tools-only, so an agent can now consume MCP servers that expose their data as resources rather than tools.
+  `McpConnection` gains `list_resources` (`resources/list`), `read_resource` (`resources/read`), and `list_resource_templates` (`resources/templates/list`) on both the rmcp (stdio + streamable-HTTP) and hand-rolled SSE transports; HttpCompat has no resources concept and returns a clear error.
+  When a server advertises the `resources` capability (read live from the rmcp handshake `peer_info`, or captured from the SSE `initialize` response) the client registers two synthetic tools — `list_resources` and `read_resource` — that flow through the normal tool-call loop and are intercepted before the transport `tools/call`, so a real server tool literally named `read_resource` is unaffected.
+  A `resource_link` in a tool result is now surfaced as a first-class `[resource_link] name — uri (mime)` line instead of being flattened into an opaque JSON string, and an embedded resource contributes its text (binary blobs are elided, never inlined into the prompt); resource lists are sorted by URI for prompt-cache stability.
+  No `resources` client capability is declared because the MCP `resources` capability is server-side and rmcp's `ClientCapabilities` has no such field (#6501) (@houko)
+
+### Changed
+
+- Upgrade `agent-client-protocol` from 0.11.1 to 1.3.0 in the `librefang-acp` crate, migrating the ACP adapter to the 1.x API (supersedes the version-only dependabot bump that left the crate failing to compile).
+  The 1.x SDK moved the wire-schema types under a versioned namespace, so every `agent_client_protocol::schema::X` import is now `agent_client_protocol::schema::v1::X` (with `ProtocolVersion` re-exported at the `schema` root); the connection, router, and JSON-RPC surface (`Agent`, `Client`, `ConnectionTo`, `Builder`, `ByteStreams`, `Responder`, `on_receive_*`, `util`) is unchanged at the crate root.
+  The companion `agent-client-protocol-tokio` crate has no 1.x release and was pulling a second, older copy of `agent-client-protocol` (and a stale `rmcp` 1.8) into the tree, so it is dropped entirely: its sole use, `agent_client_protocol_tokio::Stdio`, is replaced by `agent_client_protocol::Stdio`, which 1.x exposes at its own crate root with the same `Stdio::new()` constructor (#6526) (@houko)
+
+### Changed
+
+- Normalize on-disk upload naming so every producer that writes into the shared upload directory names the file `<uuid>.<ext>` instead of today's three divergent schemes (bare `<uuid>`, `image_<uuid>.png`, `<uuid>.<ext>`), keeping the file's type at rest for extension-sniffing tools and for any flow that persists or re-dispatches the bytes.
+  A single deterministic `librefang_types::media::on_disk_name(file_id, content_type, filename)` helper (extension from `ext_for_content_type`, then a safe filename extension, else a bare UUID) is now the one naming authority: the API upload / media / session-image / generated-image / browser-screenshot producers all route through it, and the client-facing `file_id` stays a bare UUID so the path-traversal and #3361 owner guards still `uuid::Uuid::parse_str` it.
+  `serve_upload` and `resolve_attachments` reconstruct the name through a shared resolver that also tolerates legacy bare-`<uuid>` files and probes `<uuid>.*` for generated images not in the upload registry, so existing uploads keep serving (#6530) (@houko)
+
 ### Documentation
 
 - Document how `[approval].trusted_senders` composes with `[[users]]` RBAC on the approvals security page (EN + zh mirror): the two are separate trust surfaces and the per-user RBAC gate is evaluated first, so an ID listed in `trusted_senders` that is not also a registered `[[users]]` on the `api` channel still has its low-risk tools (e.g. `memory_*`) gated by the `guest_gate`, because the forced-approval verdict short-circuits before the `trusted_senders` bypass is consulted; the new subsection gives the concrete fix (register the operator as a `[[users]]` bound to the `api` channel with a `tool_policy` covering the tools it drives) and notes that with no `[[users]]` configured `trusted_senders` works standalone (#6492) (@houko)
@@ -14,6 +34,12 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ### Fixed
 
+- Apply the `[approval] auto_approve = true` shorthand when the policy is installed into the `ApprovalManager`, fixing a silent no-op where the flag cleared nothing and every tool stayed gated.
+  `ApprovalPolicy::apply_shorthands` (which clears `require_approval` when `auto_approve` is set) was only ever called from a unit test — the daemon-boot path (`ApprovalManager::new_with_db`) and the hot-reload path (`update_policy`) both installed `config.approval` verbatim, so an operator who set `auto_approve = true` to disable gating got no effect and the field's own doc comment ("clears the require list at boot") was false.
+  The shorthand is now applied at all three policy-install entry points (`new`, `new_with_db`, `update_policy`), so `auto_approve` takes effect at boot and on `POST /api/config/reload`; the separate `trusted_senders` / `[[users]]` RBAC layering is documented above and unchanged (#6492) (@houko)
+- Return a deterministic `409 Conflict` when a client resolves an approval that was already resolved, instead of a non-deterministic `400`-or-`404` that depended on whether the in-memory `recent` ring still held the entry.
+  `ApprovalManager::resolve` reported "Already {decision} by {who}" (mapped to `400`) only while the resolution sat in the 100-slot buffer, and degraded to "not found" (`404`) once the buffer evicted it or the daemon restarted, so the same double-resolve returned different statuses depending on load and uptime.
+  `resolve` now falls back to the durable `approval_audit` log to recognize an already-terminal request, and the api boundary maps the "Already …" verdict to a new typed `LibreFangError::Conflict` (`409`, code `conflict`) a client can act on, while a genuinely-unknown id still returns `404` and a missing second factor still returns `400` (#6492) (@houko)
 - Stop `KnowledgeStore::delete_by_agent` from silently orphaning another agent's knowledge when a shared entity's first-writer agent is deleted (#6521).
   Entities are keyed on `(id, peer_id)` — not `agent_id`, which is only first-writer provenance — so a deterministic-id entity (a well-known org/person name) first written by agent A can be referenced by agent B's live relations; deleting every `agent_id = A` entity on A's deletion removed that shared row, and B's relations quietly stopped resolving (the JOIN just stopped matching — no error, data vanished from future reads).
   `delete_by_agent` now deletes A's relations wholesale (they are strictly per-agent) but only removes A's entities that NO surviving relation still references by id or name, keeping shared, still-referenced entities in place.
