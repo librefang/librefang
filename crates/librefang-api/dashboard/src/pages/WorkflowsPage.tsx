@@ -202,6 +202,12 @@ function StepResultContent({ step }: { step: WorkflowStepResult }) {
   const imageRefs = useMemo(() => extractImageRefs(step.output), [step.output]);
   return (
     <div className="px-3 pb-3 space-y-2 border-t border-border-subtle">
+      {step.error && (
+        <div className="flex items-start gap-1.5 p-2 mt-2 rounded-lg bg-error/5 border border-error/20">
+          <AlertCircle className="w-3 h-3 text-error shrink-0 mt-0.5" />
+          <p className="text-[10px] text-error whitespace-pre-wrap">{step.error}</p>
+        </div>
+      )}
       <div>
         <p className="text-[9px] font-bold text-text-dim/50 mt-2">{t("workflows.prompt_sent", { defaultValue: "Prompt sent:" })}</p>
         <pre className="text-[10px] text-text whitespace-pre-wrap max-h-24 overflow-y-auto bg-surface rounded-lg p-2 mt-1">
@@ -783,7 +789,9 @@ export function WorkflowsPage() {
     <button
       className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-surface transition-colors"
       onClick={toggle}>
-      <CheckCircle2 className="w-3 h-3 text-success shrink-0" />
+      {step.error
+        ? <AlertCircle className="w-3 h-3 text-error shrink-0" />
+        : <CheckCircle2 className="w-3 h-3 text-success shrink-0" />}
       <span className="text-[10px] font-bold truncate flex-1">{step.step_name}</span>
       <span className="text-[9px] text-text-dim/50 shrink-0">{step.duration_ms}ms</span>
       <ChevronDown className={`w-3 h-3 text-text-dim/30 shrink-0 transition-transform ${isExpanded ? "rotate-180" : ""}`} />
