@@ -348,19 +348,30 @@ fn build_sender_prefix(manifest: &AgentManifest, sender_user_id: Option<&str>) -
 /// user sent a photo. Redacting upstream of the driver covers *every* entry
 /// path (WebUI, channels, sidecars, triggers), not just the OpenAI driver.
 ///
+/// For `ImageFile` blocks (which reference the image by on-disk path) the
+/// placeholder keeps that path, so a text-only agent can still read or attach
+/// the raw file even though it can't see the pixels. The inline base64
+/// `Image` variant has no path to keep.
+///
 /// Pure function: the caller passes a clone, so the live session history is
 /// never mutated and the vision path stays byte-identical to before.
 pub(super) fn redact_images_for_text_only(mut messages: Vec<Message>, model: &str) -> Vec<Message> {
-    let placeholder = format!("[image omitted: model `{model}` has no vision support]");
     for msg in &mut messages {
         if let MessageContent::Blocks(blocks) = &mut msg.content {
             for block in blocks.iter_mut() {
-                if matches!(
-                    block,
-                    ContentBlock::Image { .. } | ContentBlock::ImageFile { .. }
-                ) {
+                let replacement = match block {
+                    ContentBlock::ImageFile { path, .. } => Some(format!(
+                        "[image omitted: model `{model}` has no vision support. \
+                         The image file is on disk at {path} — read or attach it directly if you need its contents.]"
+                    )),
+                    ContentBlock::Image { .. } => {
+                        Some(format!("[image omitted: model `{model}` has no vision support]"))
+                    }
+                    _ => None,
+                };
+                if let Some(text) = replacement {
                     *block = ContentBlock::Text {
-                        text: placeholder.clone(),
+                        text,
                         provider_metadata: None,
                     };
                 }

@@ -252,12 +252,18 @@ impl MessageContent {
             MessageContent::Blocks(blocks) => {
                 let mut stripped = false;
                 for block in blocks.iter_mut() {
+                    // Capture the media type and, for on-disk `ImageFile`
+                    // blocks, the path — so the placeholder can point a later
+                    // turn at the raw bytes even after the pixels are dropped.
+                    // The inline base64 `Image` variant carries no path.
                     let media = match block {
-                        ContentBlock::Image { media_type, .. }
-                        | ContentBlock::ImageFile { media_type, .. } => Some(media_type.clone()),
+                        ContentBlock::Image { media_type, .. } => Some((media_type.clone(), None)),
+                        ContentBlock::ImageFile { media_type, path } => {
+                            Some((media_type.clone(), Some(path.clone())))
+                        }
                         _ => None,
                     };
-                    if let Some(mt) = media {
+                    if let Some((mt, path)) = media {
                         // Phrase the placeholder so an LLM, on re-reading the
                         // session, infers "I already received and analyzed this
                         // image earlier in this thread" rather than the literal
@@ -265,10 +271,21 @@ impl MessageContent {
                         // mistake for "no image was delivered". The model
                         // saying "I did not receive any image" is the symptom
                         // we are guarding against here.
+                        //
+                        // When the source was an `ImageFile`, keep its on-disk
+                        // path in the placeholder: a follow-up turn may want to
+                        // attach or re-read the raw file even though the pixels
+                        // are gone from history.
+                        let path_hint = match path {
+                            Some(p) => format!(
+                                " The raw file remains on disk at {p} if you need to act on it directly."
+                            ),
+                            None => String::new(),
+                        };
                         let placeholder = format!(
                             "[Image ({mt}) — already received and analyzed by you (the assistant) earlier in this conversation; \
                              the raw bytes were removed from history to save context tokens. Your earlier turn in this thread \
-                             contains your analysis of this image — refer to it rather than claiming the image is missing.]"
+                             contains your analysis of this image — refer to it rather than claiming the image is missing.]{path_hint}"
                         );
                         *block = ContentBlock::Text {
                             text: placeholder,
@@ -719,6 +736,29 @@ mod tests {
         assert!(!content.has_images());
         let text = content.text_content();
         assert!(text.contains("[Image (image/jpeg) — already received and analyzed"));
+        // The on-disk path of an ImageFile survives stripping so a later turn
+        // can still act on the raw file.
+        assert!(
+            text.contains("/tmp/x.jpg"),
+            "stripped ImageFile placeholder must keep the on-disk path: {text}"
+        );
+    }
+
+    #[test]
+    fn test_strip_images_base64_has_no_path_hint() {
+        // The inline base64 `Image` variant carries no path, so its stripped
+        // placeholder must NOT fabricate a "remains on disk at" hint.
+        let mut content = MessageContent::Blocks(vec![ContentBlock::Image {
+            media_type: "image/png".to_string(),
+            data: "abc123".to_string(),
+        }]);
+        assert!(content.strip_images());
+        let text = content.text_content();
+        assert!(text.contains("[Image (image/png) — already received and analyzed"));
+        assert!(
+            !text.contains("remains on disk"),
+            "base64 Image has no path and must not claim one: {text}"
+        );
     }
 
     #[test]
