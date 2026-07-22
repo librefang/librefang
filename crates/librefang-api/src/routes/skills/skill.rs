@@ -238,10 +238,10 @@ pub async fn uninstall_skill(
     }
 }
 
-/// POST /api/skills/reload — Rescan `~/.librefang/skills/` and refresh the
-/// in-memory registry. Use this after dropping a skill directory into the
-/// skills folder manually (install/uninstall via API already reload
-/// automatically). Returns the new installed skill count.
+/// POST /api/skills/reload — Rescan `~/.librefang/skills/` and refresh the in-memory registry.
+/// Use this after dropping a skill directory into the skills folder manually (install/uninstall via API already reload automatically).
+/// Outside Stable mode, returns `{"status":"reloaded","count":N}`.
+/// In Stable mode the registry is frozen: new skill directories are NOT loaded, only the on-disk content of already-loaded skills is refreshed, and the response reports this honestly as `{"frozen":true,"refreshed":[...],"skipped_new":[...],"detail":...}` (#6540).
 #[utoipa::path(
     post,
     path = "/api/skills/reload",
