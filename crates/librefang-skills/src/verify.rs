@@ -318,6 +318,73 @@ fn global_scanner() -> &'static ScannerState {
     })
 }
 
+/// Credential-prefix threat patterns that must be token-anchored and
+/// backed by a plausible key body before they count as a finding.
+///
+/// A real leaked key is a well-known prefix followed by a long, mixed
+/// alphanumeric body (`sk-` + ~40 base62 chars, `ghp_` + 36, `AKIA` + 16, …).
+/// The bare 3–4 char prefix, matched as a free substring, otherwise fires on
+/// ordinary words that merely contain those characters (`task-`, `risk-`,
+/// `disk-`, `ask-`, `desk-`, `mask-`) — see #6541. These entries get the
+/// anchored [`is_plausible_key_match`] check; every other threat pattern
+/// (`api_key`, `-----begin rsa`, prompt-injection phrases, …) is still a plain
+/// substring match. Mirrors the token-anchored prefix check in
+/// `librefang-runtime`'s `tool_runner::taint::check_taint_outbound_text`.
+const KEY_PREFIX_PATTERNS: &[&str] = &[
+    "sk-",
+    "ghp_",
+    "gho_",
+    "github_pat_",
+    "xoxb-",
+    "xoxp-",
+    "akia",
+];
+
+/// Minimum length of the key body (the run of key-ish characters immediately
+/// following a credential prefix) required before the prefix is treated as a
+/// real secret. Below the shortest real key body we care about (AWS `AKIA` +
+/// 16), so genuine keys clear it while short suffixes like `task-001` do not.
+const MIN_KEY_BODY_LEN: usize = 12;
+
+/// Decide whether an Aho-Corasick hit on a [`KEY_PREFIX_PATTERNS`] entry looks
+/// like an actual leaked credential rather than a substring of an ordinary word.
+///
+/// `text` is the (lowercased) scanned content; `start`/`end` are the byte
+/// offsets of the matched prefix within it. Two conditions must both hold:
+///
+/// 1. **Token-anchored** — the character immediately before the prefix is the
+///    start of the text or a non-token separator, so `ta`+`sk-` inside `task-`
+///    is rejected while `=sk-…`, ` sk-…`, `"sk-…` are accepted.
+/// 2. **Plausible key body** — the run of key-ish chars (`[a-z0-9_-]`) right
+///    after the prefix is at least [`MIN_KEY_BODY_LEN`] long AND contains at
+///    least one digit, matching real high-entropy keys while rejecting trailing
+///    English words (`risk-assessment`, `disk-usage`).
+fn is_plausible_key_match(text: &str, start: usize, end: usize) -> bool {
+    let bytes = text.as_bytes();
+    // (1) token boundary before the prefix
+    if start > 0 {
+        let prev = bytes[start - 1];
+        if prev.is_ascii_alphanumeric() || prev == b'_' {
+            return false;
+        }
+    }
+    // (2) plausible key body after the prefix
+    let rest = &text[end..];
+    let mut body_len = 0usize;
+    let mut has_digit = false;
+    for b in rest.bytes() {
+        if b.is_ascii_alphanumeric() || b == b'_' || b == b'-' {
+            if b.is_ascii_digit() {
+                has_digit = true;
+            }
+            body_len += 1;
+        } else {
+            break;
+        }
+    }
+    body_len >= MIN_KEY_BODY_LEN && has_digit
+}
+
 /// Config tampering patterns — checked separately because they need write-context matching.
 const CONFIG_TAMPERING_FILES: &[&str] = &[
     "agents.md",
@@ -553,8 +620,20 @@ impl SkillVerifier {
         let mut scan_variant = |text: &str| {
             for mat in scanner.automaton.find_iter(text) {
                 let idx = mat.pattern().as_usize();
+                let tp = &scanner.patterns[idx];
+                // Credential prefixes (`sk-`, `ghp_`, …) match as free
+                // substrings, so anchor them to a token start and require a
+                // real key body before reporting — otherwise ordinary words
+                // like `task-`/`risk-` false-positive as secrets (#6541). A
+                // mid-word or bodyless hit is skipped without consuming the
+                // per-pattern dedup slot, so a genuine key later in the same
+                // text still reports.
+                if KEY_PREFIX_PATTERNS.contains(&tp.pattern)
+                    && !is_plausible_key_match(text, mat.start(), mat.end())
+                {
+                    continue;
+                }
                 if seen_patterns.insert(idx) {
-                    let tp = &scanner.patterns[idx];
                     warnings.push(SkillWarning {
                         severity: tp.severity,
                         message: format!("{} '{}'", tp.message_prefix, tp.pattern),
@@ -1015,5 +1094,79 @@ mod tests {
             injection_count, 1,
             "Same pattern should only be reported once"
         );
+    }
+
+    fn has_secret_finding(warnings: &[SkillWarning]) -> bool {
+        warnings
+            .iter()
+            .any(|w| w.message.starts_with("Possible hardcoded secret:"))
+    }
+
+    #[test]
+    fn secret_scanner_ignores_ordinary_words_containing_key_prefixes() {
+        // #6541: ordinary words merely *containing* a credential prefix as a
+        // substring must not trip the hardcoded-secret check.
+        for content in [
+            "Created item task-001 for the sprint board.",
+            "risk-assessment complete, see disk-usage report",
+            "please ask-me about the desk-01 booking",
+            "wear a mask-",
+            "the whisk-broom and the brisk-walk",
+        ] {
+            let warnings = SkillVerifier::scan_prompt_content(content);
+            assert!(
+                !has_secret_finding(&warnings),
+                "false-positive secret finding on ordinary text: {content:?} -> {warnings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn secret_scanner_issue_6541_exact_repro() {
+        // The exact repro from #6541.
+        let warnings =
+            SkillVerifier::scan_prompt_content("Created item task-001 for the sprint board.");
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.message.contains("Possible hardcoded secret: 'sk-'")),
+            "task-001 must not be flagged as an 'sk-' secret: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn secret_scanner_still_flags_real_keys() {
+        // Real, token-anchored keys with a high-entropy body must still fire.
+        // The key bodies are assembled at runtime so no full-key literal appears
+        // in source — this keeps the repo's gitleaks pre-commit scan clean while
+        // the scanner still sees a complete, plausible key at test time.
+        let body = "0123456789abcdefghij0123456789";
+        let cases = [
+            format!("OPENAI_API_KEY=sk-proj-{body}"),
+            format!("token: ghp_{body}abcdef"),
+            format!("aws key AKIA{body} in the config"),
+            format!("slack xoxb-1234567890-{body}"),
+            format!("github_pat_11{body}abcdef"),
+        ];
+        for content in &cases {
+            let warnings = SkillVerifier::scan_prompt_content(content);
+            assert!(
+                has_secret_finding(&warnings),
+                "real key not detected: {content:?} -> {warnings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn secret_scanner_non_prefix_patterns_unchanged() {
+        // The non-prefix members of the hardcoded-secret group still match as
+        // plain substrings (only the prefix group was anchored).
+        for content in ["config has api_key set", "-----BEGIN RSA PRIVATE KEY-----"] {
+            let warnings = SkillVerifier::scan_prompt_content(content);
+            assert!(
+                has_secret_finding(&warnings),
+                "substring secret pattern regressed: {content:?} -> {warnings:?}"
+            );
+        }
     }
 }
