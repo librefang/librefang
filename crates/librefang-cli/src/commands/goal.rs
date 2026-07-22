@@ -23,7 +23,12 @@ pub(crate) fn cmd_goal(
         "loop_engineering": loop_engineering,
     });
     if let Some(aid) = agent_id {
-        payload["agent_id"] = serde_json::json!(aid);
+        // `--agent` accepts a name or a UUID (see the command's own
+        // long_about example `--agent my-agent`); resolve it the same way
+        // every other command does, otherwise a name silently fails the
+        // UUID parse in the goals route and the goal falls back to
+        // auto-spawning an unrelated disposable agent.
+        payload["agent_id"] = serde_json::json!(resolve_agent_id(&base, aid));
     }
 
     let create_body = daemon_json(
