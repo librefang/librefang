@@ -15,6 +15,40 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::Semaphore;
 use tracing::info;
 
+/// Record a media-understanding failure so operators can alert on a provider /
+/// model that has silently stopped working — e.g. a hosted model retired by the
+/// provider (`model_decommissioned`), which previously degraded to a raw
+/// image/audio passthrough with only a `warn!` in the channel bridge and no
+/// metric to diff against the hardcoded default (#6538).
+///
+/// Emits the `librefang_media_understanding_failures_total` counter and a
+/// structured `warn!` carrying the same fields, at the point of failure inside
+/// the media engine so it is captured regardless of the caller (channel bridge,
+/// tool path, …), not only in `bridge.rs`.
+///
+/// Cardinality: `kind` is one of {image, audio}; `provider` and `model` are
+/// drawn from the operator-configured or built-in default set (bounded) —
+/// matching the bounded-label discipline of the other LibreFang counters
+/// (`librefang_mcp_reconnect_total`, `librefang_tool_call_total`, …).
+fn record_media_understanding_failure(kind: &str, provider: &str, model: &str, error: &str) {
+    metrics::counter!(
+        "librefang_media_understanding_failures_total",
+        "kind" => kind.to_string(),
+        "provider" => provider.to_string(),
+        "model" => model.to_string(),
+    )
+    .increment(1);
+    tracing::warn!(
+        kind,
+        provider,
+        model,
+        error,
+        "Media understanding failed — the selected provider/model returned an \
+         error; a hosted model may have been retired, check the provider's \
+         current model list against the configured/default model"
+    );
+}
+
 /// Media understanding engine.
 pub struct MediaEngine {
     config: MediaConfig,
@@ -110,19 +144,34 @@ impl MediaEngine {
             "Sending image for description"
         );
 
-        let description = match provider {
-            "anthropic" => anthropic_describe_image(model, &image_bytes, mime_type).await?,
-            "openai" | "groq" => {
-                let (api_url, api_key) = openai_vision_provider_config(provider)?;
-                openai_describe_image(&api_url, &api_key, model, &image_bytes, mime_type).await?
+        // Capture the provider dispatch as a `Result` (rather than `?`-ing each
+        // arm) so any failure is counted with its provider/model before it
+        // propagates — this is the "hosted model silently retired" signal (#6538).
+        let dispatch_result: Result<String, String> = async {
+            match provider {
+                "anthropic" => anthropic_describe_image(model, &image_bytes, mime_type).await,
+                "openai" | "groq" => {
+                    let (api_url, api_key) = openai_vision_provider_config(provider)?;
+                    openai_describe_image(&api_url, &api_key, model, &image_bytes, mime_type).await
+                }
+                "gemini" => gemini_describe_image(model, &image_bytes, mime_type).await,
+                other => Err(format!("Unsupported image description provider: {}", other)),
             }
-            "gemini" => gemini_describe_image(model, &image_bytes, mime_type).await?,
-            other => return Err(format!("Unsupported image description provider: {}", other)),
+        }
+        .await;
+        let description = match dispatch_result {
+            Ok(d) => d,
+            Err(e) => {
+                record_media_understanding_failure("image", provider, model, &e);
+                return Err(e);
+            }
         };
 
         let description = description.trim().to_string();
         if description.is_empty() {
-            return Err("Image description returned empty text".into());
+            let e = "Image description returned empty text".to_string();
+            record_media_understanding_failure("image", provider, model, &e);
+            return Err(e);
         }
 
         info!(
@@ -254,26 +303,43 @@ impl MediaEngine {
 
         info!(provider, model, filename = %filename, size = audio_bytes.len(), "Sending audio for transcription");
 
-        let transcription = match provider {
-            // Whisper-compatible providers (OpenAI multipart protocol)
-            "groq" | "openai" | "minimax" | "fireworks" | "together" | "siliconflow" => {
-                let (api_url, api_key) = whisper_provider_config(provider)?;
-                whisper_transcribe(&api_url, &api_key, model, audio_bytes, &filename, &mime).await?
+        // Capture the provider dispatch as a `Result` so any failure is counted
+        // with its provider/model before propagating — the STT analogue of the
+        // vision "hosted model silently retired" signal (#6538).
+        let dispatch_result: Result<String, String> = async {
+            match provider {
+                // Whisper-compatible providers (OpenAI multipart protocol)
+                "groq" | "openai" | "minimax" | "fireworks" | "together" | "siliconflow" => {
+                    let (api_url, api_key) = whisper_provider_config(provider)?;
+                    whisper_transcribe(&api_url, &api_key, model, audio_bytes, &filename, &mime)
+                        .await
+                }
+                // Gemini — multimodal content generation with audio input
+                "gemini" => gemini_transcribe(model, audio_bytes, &mime).await,
+                // ElevenLabs — Speech-to-Text API
+                "elevenlabs" => elevenlabs_transcribe(model, audio_bytes, &mime).await,
+                // Custom / self-hosted OpenAI-compatible Whisper endpoint
+                _other => {
+                    let (api_url, api_key) = custom_stt_config(provider, &self.config.custom_stt)?;
+                    whisper_transcribe(&api_url, &api_key, model, audio_bytes, &filename, &mime)
+                        .await
+                }
             }
-            // Gemini — multimodal content generation with audio input
-            "gemini" => gemini_transcribe(model, audio_bytes, &mime).await?,
-            // ElevenLabs — Speech-to-Text API
-            "elevenlabs" => elevenlabs_transcribe(model, audio_bytes, &mime).await?,
-            // Custom / self-hosted OpenAI-compatible Whisper endpoint
-            _other => {
-                let (api_url, api_key) = custom_stt_config(provider, &self.config.custom_stt)?;
-                whisper_transcribe(&api_url, &api_key, model, audio_bytes, &filename, &mime).await?
+        }
+        .await;
+        let transcription = match dispatch_result {
+            Ok(t) => t,
+            Err(e) => {
+                record_media_understanding_failure("audio", provider, model, &e);
+                return Err(e);
             }
         };
 
         let transcription = transcription.trim().to_string();
         if transcription.is_empty() {
-            return Err("Transcription returned empty text".into());
+            let e = "Transcription returned empty text".to_string();
+            record_media_understanding_failure("audio", provider, model, &e);
+            return Err(e);
         }
 
         info!(
@@ -1007,6 +1073,15 @@ fn detect_audio_provider() -> Option<&'static str> {
 }
 
 /// Get the default vision model for a provider.
+///
+/// These hardcoded ids rot: a provider can retire a hosted model at any time
+/// (e.g. Groq removed `meta-llama/llama-4-scout-17b-16e-instruct`), after which
+/// every non-explicitly-configured setup silently degrades. There is no safe
+/// way to keep this list evergreen in-tree; the mitigation is observability —
+/// `record_media_understanding_failure` emits
+/// `librefang_media_understanding_failures_total{kind,provider,model}` so the
+/// rot surfaces as an actionable signal instead of a days-later user report
+/// (#6538). Prefer setting `[media] image_model` explicitly in production.
 fn default_vision_model(provider: &str) -> &str {
     match provider {
         "anthropic" => "claude-sonnet-4-20250514",
@@ -1065,6 +1140,46 @@ mod tests {
         let config = MediaConfig::default();
         let engine = MediaEngine::new(config);
         assert_eq!(engine.config.max_concurrency, 2);
+    }
+
+    // #6538: a media-understanding failure must be observable via the
+    // `librefang_media_understanding_failures_total` counter, labeled by
+    // kind/provider/model, so operators can alert on a retired hosted model
+    // instead of finding out days later. Mirrors the `DebuggingRecorder` +
+    // `with_local_recorder` pattern in `librefang-runtime::command_lane`.
+    #[test]
+    fn media_understanding_failure_increments_counter_with_labels() {
+        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        metrics::with_local_recorder(&recorder, || {
+            record_media_understanding_failure(
+                "image",
+                "groq",
+                "meta-llama/llama-4-scout-17b-16e-instruct",
+                "Vision API error (404): model_decommissioned",
+            );
+        });
+
+        let snap = snapshotter.snapshot().into_vec();
+        let hit = snap.iter().find(|(ckey, _, _, _)| {
+            ckey.key().name() == "librefang_media_understanding_failures_total"
+                && ckey
+                    .key()
+                    .labels()
+                    .any(|l| l.key() == "kind" && l.value() == "image")
+                && ckey
+                    .key()
+                    .labels()
+                    .any(|l| l.key() == "provider" && l.value() == "groq")
+                && ckey.key().labels().any(|l| {
+                    l.key() == "model" && l.value() == "meta-llama/llama-4-scout-17b-16e-instruct"
+                })
+        });
+        let (_, _, _, val) = hit.expect("media-understanding failure counter must be recorded");
+        assert_eq!(*val, DebugValue::Counter(1), "counter must increment by 1");
     }
 
     #[test]
