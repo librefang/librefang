@@ -169,6 +169,14 @@ pub fn describe_observability_metrics() {
          schedule-fallback misses, labeled by agent. Alert on any increase: \
          the job has silently stopped firing until re-enabled."
     );
+    metrics::describe_counter!(
+        "librefang_media_understanding_failures_total",
+        "Media understanding (vision describe / STT transcribe) failures, \
+         labeled by kind (image|audio), provider, and model. A rising rate for \
+         a given provider/model flags a hosted model that has been retired or \
+         is otherwise failing — the agent degrades to a raw-media passthrough, \
+         so without this counter the rot is only visible days later (#6538)."
+    );
 }
 
 /// Render an HTTP metrics summary.
