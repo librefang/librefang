@@ -67,6 +67,10 @@
           fileset = pkgs.lib.fileset.unions [
             (craneLib.fileset.commonCargoSources ./.)
             ./crates/librefang-types/locales
+            # librefang-runtime embeds this at compile time via include_str!
+            # (crates/librefang-runtime/src/model_catalog.rs) as the offline
+            # fallback catalog; without it the Nix build fails to read the file.
+            ./crates/librefang-runtime/openrouter-models.snapshot.json
             ./crates/librefang-api/static
             ./crates/librefang-api/src/login_page.html
             ./crates/librefang-cli/templates
