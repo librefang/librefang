@@ -380,8 +380,7 @@ fn test_strip_tool_result_details() {
     let short = "Normal tool output";
     assert_eq!(strip_tool_result_details(short), short);
 
-    // Content ABOVE the spill threshold still gets the last-resort fallback
-    // truncation (use non-base64 chars to avoid blob stripping).
+    // Content ABOVE the spill threshold still gets the last-resort fallback truncation (use non-base64 chars to avoid blob stripping).
     let over = librefang_types::config::DEFAULT_SPILL_THRESHOLD_BYTES as usize + 20_000;
     let long = "Hello, world! ".repeat(over / 14 + 1);
     assert!(long.len() > over);
@@ -390,11 +389,8 @@ fn test_strip_tool_result_details() {
     assert!(stripped.contains("truncated from"));
 }
 
-/// #6545: a result in the old `[10_000, 16_384)` dead band — too small to spill
-/// to a recoverable artifact, previously large enough to be lossily truncated by
-/// this sanitizer — must now survive intact. Size-bounding is the artifact
-/// spill's job; the sanitizer's fallback cut is tied to the spill threshold so
-/// it never fires below it.
+/// #6545: a result in the old `[10_000, 16_384)` dead band — too small to spill to a recoverable artifact, previously large enough to be lossily truncated by this sanitizer — must now survive intact.
+/// Size-bounding is the artifact spill's job; the sanitizer's fallback cut is tied to the spill threshold so it never fires below it.
 #[test]
 fn strip_preserves_dead_band_result_6545() {
     let spill = librefang_types::config::DEFAULT_SPILL_THRESHOLD_BYTES as usize;
@@ -410,8 +406,7 @@ fn strip_preserves_dead_band_result_6545() {
     assert!(!stripped.contains("truncated from"));
 }
 
-/// #6545: base64/injection stripping is size-independent and must still run on
-/// a dead-band-sized result even though the size cut no longer fires.
+/// #6545: base64/injection stripping is size-independent and must still run on a dead-band-sized result even though the size cut no longer fires.
 #[test]
 fn strip_still_scrubs_dead_band_sized_content_6545() {
     let filler = "Hello, world! ".repeat(900); // ~12.6 KB of clean text
