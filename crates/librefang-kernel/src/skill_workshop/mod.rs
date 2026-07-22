@@ -225,8 +225,7 @@ pub async fn run_capture(kernel: Arc<LibreFangKernel>, agent_id: AgentId) {
             }
             Err(_) => {
                 // No tokio runtime (e.g. a synchronous test) — reload inline.
-                // The outcome is only surfaced through the HTTP handler; the
-                // background auto-promote path just needs the side effect.
+                // The outcome is only surfaced through the HTTP handler; the background auto-promote path just needs the side effect.
                 let _ = kernel_for_reload.reload_skills();
             }
         }
