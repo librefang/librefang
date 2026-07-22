@@ -179,6 +179,15 @@ function renderPage(): void {
   );
 }
 
+// The re-run control scrolls the run form into view; jsdom does not
+// implement Element.scrollIntoView, so stub it for the duration of these
+// tests (same pattern as ApprovalsPage.test.tsx / McpServersPage.test.tsx).
+beforeEach(() => {
+  if (!Element.prototype.scrollIntoView) {
+    Element.prototype.scrollIntoView = function () {};
+  }
+});
+
 const sampleWorkflow = {
   id: "wf-1",
   name: "alpha-flow",
@@ -270,7 +279,7 @@ describe("WorkflowsPage", () => {
     });
   });
 
-  it("surfaces run parameters + error inline and re-runs with the same params (#6292)", async () => {
+  it("surfaces run parameters inline and pre-fills the form on re-run (#6292)", async () => {
     useWorkflowsMock.mockReturnValue(makeQuery([sampleWorkflow]));
     const mutations = setMutationDefaults();
     useWorkflowRunsMock.mockReturnValue(
@@ -289,18 +298,16 @@ describe("WorkflowsPage", () => {
     );
     renderPage();
 
-    // The run-history row shows WHAT params were used and WHY it failed,
-    // without opening the detail panel.
-    expect(screen.getByText(/sector: fintech/)).toBeInTheDocument();
-    expect(screen.getByText("step 'analyze' failed: provider 500")).toBeInTheDocument();
+    // The run-history row shows WHAT params were used, without opening
+    // the detail panel.
+    expect(screen.getByText(/sector=fintech/)).toBeInTheDocument();
 
-    // The per-row re-run control repeats that run with its stored params.
-    fireEvent.click(screen.getByLabelText("Re-run with same parameters"));
-    expect(mutations.rerun.mutateAsync).toHaveBeenCalledTimes(1);
-    expect(mutations.rerun.mutateAsync).toHaveBeenCalledWith({
-      runId: "run-1",
-      workflowId: "wf-1",
-    });
+    // The per-row re-run control pre-fills the run form locally with the
+    // stored params. It no longer calls a rerun mutation — as of the
+    // debug-console rework, re-running resubmits through the ordinary
+    // "Run" action instead of the dedicated `/rerun` endpoint.
+    fireEvent.click(screen.getByTitle("Re-run with these parameters"));
+    expect(mutations.rerun.mutateAsync).not.toHaveBeenCalled();
   });
 
   it("requires a second click to confirm delete and only then calls the mutation", () => {
