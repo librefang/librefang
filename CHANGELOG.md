@@ -14,6 +14,9 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
   When a server advertises the `resources` capability (read live from the rmcp handshake `peer_info`, or captured from the SSE `initialize` response) the client registers two synthetic tools — `list_resources` and `read_resource` — that flow through the normal tool-call loop and are intercepted before the transport `tools/call`, so a real server tool literally named `read_resource` is unaffected.
   A `resource_link` in a tool result is now surfaced as a first-class `[resource_link] name — uri (mime)` line instead of being flattened into an opaque JSON string, and an embedded resource contributes its text (binary blobs are elided, never inlined into the prompt); resource lists are sorted by URI for prompt-cache stability.
   No `resources` client capability is declared because the MCP `resources` capability is server-side and rmcp's `ClientCapabilities` has no such field (#6501) (@houko)
+- Emit a `librefang_media_understanding_failures_total{kind,provider,model}` counter (with a matching structured `warn!`) whenever vision description or audio transcription fails, so a hosted model that a provider silently retires — e.g. Groq removing the hardcoded default `meta-llama/llama-4-scout-17b-16e-instruct` — surfaces as an actionable metric instead of a days-later user report.
+  The counter is incremented at the point of failure inside `librefang-runtime-media` (both the image and audio provider-dispatch paths, plus the empty-result case), so it is captured regardless of caller, and its description is registered in `librefang-telemetry` for the Prometheus exporter.
+  The hardcoded default models are intentionally left unchanged (choosing replacements is an operator call); a comment on `default_vision_model` now documents that these ids rot and points at the new metric (#6538) (@houko)
 
 ### Changed
 
