@@ -5021,6 +5021,8 @@ dependencies = [
  "hex",
  "librefang-http",
  "librefang-types",
+ "metrics",
+ "metrics-util",
  "reqwest",
  "serde_json",
  "serial_test",
