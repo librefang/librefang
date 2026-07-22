@@ -1,7 +1,6 @@
 //! `goal` CLI command handler — create and run autonomous long-horizon goals.
 //!
-//! Dispatched from `main.rs`; shared helpers and imports come via
-//! [`crate::commands::prelude`].
+//! Dispatched from `main.rs`; shared helpers and imports come via [`crate::commands::prelude`].
 
 use crate::commands::prelude::*;
 

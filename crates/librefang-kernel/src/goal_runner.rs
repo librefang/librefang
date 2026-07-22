@@ -478,9 +478,8 @@ impl GoalRunner {
     /// row older than `stale_timeout`, demote it to `Stopped` with the same
     /// `"Interrupted by daemon restart"` marker workflow recovery uses, persist
     /// that, and checkpoint the WAL so the transition is durable.
-    /// Returns (goal_id, agent_id) pairs for stale runs that should be
-    /// auto-resumed by the caller. The caller calls start() for each,
-    /// which spawns a fresh loop continuing from the last persisted state.
+    /// Returns (goal_id, agent_id) pairs for stale runs that should be auto-resumed by the caller.
+    /// The caller calls start() for each, which spawns a fresh loop continuing from the last persisted state.
     pub fn recover_stale_runs(&self, stale_timeout: Duration) -> Vec<(GoalId, AgentId)> {
         let Some(store) = self.store.as_ref() else {
             return Vec::new();

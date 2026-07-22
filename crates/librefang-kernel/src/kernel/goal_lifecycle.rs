@@ -262,9 +262,7 @@ impl LibreFangKernel {
 
     /// Recover goal runs interrupted by a prior crash or restart.
     ///
-    /// Boot calls this once, mirroring the workflow stale-recovery sweep:
-    /// persisted runs still in `Running` phase and older than `stale_timeout`
-    /// are deleted from the durable store.
+    /// Boot calls this once, mirroring the workflow stale-recovery sweep: persisted runs still in `Running` phase and older than `stale_timeout` are deleted from the durable store.
     /// Returns (goal_id, agent_id) pairs for stale runs to auto-resume.
     /// Caller must call `goal_run_start` for each returned pair.
     pub fn recover_stale_goal_runs(

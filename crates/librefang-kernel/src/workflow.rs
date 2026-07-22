@@ -1091,8 +1091,7 @@ pub struct WorkflowRun {
     /// Set at the top of each step iteration, cleared on terminal state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_step_index: Option<usize>,
-    /// Total number of steps in the workflow (copied at creation so the
-    /// UI can show "Step 2/4" without loading the definition separately).
+    /// Total number of steps in the workflow (copied at creation so the UI can show "Step 2/4" without loading the definition separately).
     #[serde(default)]
     pub total_steps: usize,
     /// Final output (set when workflow completes).
