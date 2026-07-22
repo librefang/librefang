@@ -7480,8 +7480,16 @@ pub struct ToolResultsConfig {
     pub artifact_max_age_days: u32,
 }
 
+/// Default artifact-spill threshold in bytes (16 KB).
+///
+/// A tool result larger than this is written to the artifact store and replaced
+/// with a small recoverable stub. Exposed as a constant so the tool-result
+/// sanitizer's fallback size cap can be tied to it rather than drifting apart
+/// as an independent literal (issue #6545).
+pub const DEFAULT_SPILL_THRESHOLD_BYTES: u64 = 16_384;
+
 fn default_spill_threshold_bytes() -> u64 {
-    16_384
+    DEFAULT_SPILL_THRESHOLD_BYTES
 }
 
 fn default_max_artifact_bytes() -> u64 {
