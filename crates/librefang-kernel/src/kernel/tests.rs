@@ -2715,9 +2715,40 @@ fn test_stable_mode_freezes_registry_and_skips_review_gate() {
     );
     drop(registry);
 
-    // reload_skills() under freeze is a documented no-op — we don't
-    // assert much here beyond "it didn't panic".
-    kernel.reload_skills();
+    // #6540: reload_skills() under freeze must be HONEST, not a silent
+    // no-op. Drop a brand-new skill dir after boot, then reload: the
+    // outcome must report the registry as frozen, refresh the already-loaded
+    // skill, and surface the new dir as skipped (not silently dropped). The
+    // new skill must NOT actually be loaded (freeze boundary intact).
+    install_test_skill(&home_dir.join("skills"), "added-after-boot", &[]);
+    let outcome = kernel.reload_skills();
+    assert!(outcome.frozen, "reload outcome must report frozen registry");
+    assert!(
+        outcome.refreshed.contains(&"stable-skill".to_string()),
+        "already-loaded skill should be content-refreshed, got {:?}",
+        outcome.refreshed
+    );
+    assert!(
+        outcome
+            .skipped_new
+            .contains(&"added-after-boot".to_string()),
+        "new on-disk skill dir must be reported as skipped, got {:?}",
+        outcome.skipped_new
+    );
+    assert_eq!(
+        outcome.count, 1,
+        "frozen reload must not load the new skill (count stays at the boot set)"
+    );
+    assert!(
+        kernel
+            .skills
+            .skill_registry
+            .read()
+            .unwrap()
+            .get("added-after-boot")
+            .is_none(),
+        "new skill must not be loaded while frozen"
+    );
 
     kernel.shutdown();
 }

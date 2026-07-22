@@ -518,6 +518,51 @@ impl SkillRegistry {
         self.skills.keys().cloned().collect()
     }
 
+    /// Names of on-disk skill directories under `skills_dir` that hold a
+    /// `skill.toml` but are NOT currently loaded (compared by path, so a skill
+    /// whose manifest name differs from its directory name is matched
+    /// correctly).
+    ///
+    /// Used by the frozen (Stable-mode) reload path to report brand-new skill
+    /// directories the registry deliberately will not pick up without a
+    /// restart, instead of silently dropping them (#6540). Sorted for a
+    /// deterministic report.
+    pub fn unloaded_on_disk_dirs(&self) -> Vec<String> {
+        let loaded: std::collections::HashSet<PathBuf> =
+            self.skills.values().map(|s| s.path.clone()).collect();
+        let mut out = Vec::new();
+        let Ok(entries) = std::fs::read_dir(&self.skills_dir) else {
+            return out;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            // Skip staging / hidden dirs (mirrors load_all's `.staging-` /
+            // `.installing-` handling) and anything already loaded.
+            if name.starts_with('.') {
+                continue;
+            }
+            if !path.join("skill.toml").exists() {
+                continue;
+            }
+            // `InstalledSkill.path` is canonicalized at load time (load_skill),
+            // so canonicalize here too — otherwise a symlinked skills_dir
+            // (e.g. macOS `/var` -> `/private/var`) would make every loaded
+            // skill compare as new.
+            let canonical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+            if !loaded.contains(&canonical) {
+                out.push(name.to_string());
+            }
+        }
+        out.sort();
+        out
+    }
+
     /// Find which skill provides a given tool name, respecting the agent's
     /// skill allowlist.
     ///
@@ -1419,6 +1464,85 @@ input_schema = { type = "object" }
         assert!(result.is_err());
         // Still has the original skills
         assert_eq!(registry.count(), 2);
+    }
+
+    #[test]
+    fn unloaded_on_disk_dirs_reports_only_new_skill_dirs() {
+        // #6540: a frozen (Stable-mode) reload must report brand-new skill
+        // dirs it is skipping rather than silently dropping them.
+        let dir = TempDir::new().unwrap();
+        create_test_skill(dir.path(), "loaded-a");
+        create_test_skill(dir.path(), "loaded-b");
+
+        let mut registry = SkillRegistry::new(dir.path().to_path_buf());
+        registry.load_all().unwrap();
+        registry.freeze();
+
+        // Everything on disk is loaded → nothing to report.
+        assert!(registry.unloaded_on_disk_dirs().is_empty());
+
+        // Add a brand-new skill dir after freeze, plus decoys that must be
+        // ignored: a staging dir and a dir with no skill.toml.
+        create_test_skill(dir.path(), "brand-new");
+        std::fs::create_dir_all(dir.path().join(".staging-xyz")).unwrap();
+        std::fs::create_dir_all(dir.path().join("not-a-skill")).unwrap();
+
+        assert_eq!(
+            registry.unloaded_on_disk_dirs(),
+            vec!["brand-new".to_string()],
+            "only the new skill dir should be reported; staging/non-skill dirs ignored"
+        );
+        // Still frozen — count unchanged (the new dir was NOT loaded).
+        assert_eq!(registry.count(), 2);
+    }
+
+    #[test]
+    fn frozen_reload_skill_refreshes_existing_content() {
+        // The freeze-safe single-skill refresh the frozen reload path relies
+        // on must pick up on-disk content edits to an already-loaded skill.
+        let dir = TempDir::new().unwrap();
+        create_test_skill(dir.path(), "editable");
+        let mut registry = SkillRegistry::new(dir.path().to_path_buf());
+        registry.load_all().unwrap();
+        registry.freeze();
+
+        let before = registry
+            .list()
+            .iter()
+            .find(|s| s.manifest.skill.name == "editable")
+            .map(|s| s.manifest.skill.description.clone())
+            .unwrap();
+        assert_eq!(before, "Test skill");
+
+        // Edit the manifest on disk, then refresh via the freeze-safe path.
+        std::fs::write(
+            dir.path().join("editable").join("skill.toml"),
+            r#"
+[skill]
+name = "editable"
+version = "0.2.0"
+description = "Edited description"
+
+[runtime]
+type = "python"
+entry = "main.py"
+
+[[tools.provided]]
+name = "editable_tool"
+description = "A test tool"
+input_schema = { type = "object" }
+"#,
+        )
+        .unwrap();
+        registry.reload_skill("editable").unwrap();
+
+        let after = registry
+            .list()
+            .iter()
+            .find(|s| s.manifest.skill.name == "editable")
+            .map(|s| s.manifest.skill.description.clone())
+            .unwrap();
+        assert_eq!(after, "Edited description");
     }
 
     #[test]
