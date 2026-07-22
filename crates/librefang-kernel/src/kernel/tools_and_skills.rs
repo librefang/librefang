@@ -19,15 +19,10 @@
 use super::*;
 use super::{sanitize_reviewer_block, sanitize_reviewer_line, ReviewError};
 
-/// Outcome of [`LibreFangKernel::reload_skills`], so callers can report an
-/// honest result instead of assuming the reload always fully succeeded (#6540).
+/// Outcome of [`LibreFangKernel::reload_skills`], so callers can report an honest result instead of assuming the reload always fully succeeded (#6540).
 ///
-/// In Stable mode the registry is frozen: `frozen` is `true`, `refreshed`
-/// lists the already-loaded skills whose on-disk content was re-read
-/// (freeze-safe), and `skipped_new` lists brand-new skill directories that
-/// were found on disk but deliberately NOT loaded (they need an operator
-/// restart). Outside Stable mode `frozen` is `false` and `refreshed` is the
-/// full reloaded set.
+/// In Stable mode the registry is frozen: `frozen` is `true`, `refreshed` lists the already-loaded skills whose on-disk content was re-read (freeze-safe), and `skipped_new` lists brand-new skill directories that were found on disk but deliberately NOT loaded (they need an operator restart).
+/// Outside Stable mode `frozen` is `false` and `refreshed` is the full reloaded set.
 #[derive(Debug, Clone, Default)]
 pub struct SkillReloadOutcome {
     /// Whether the registry was frozen (Stable mode) at reload time.
@@ -387,15 +382,9 @@ impl LibreFangKernel {
     /// Called after install/uninstall to make new skills immediately visible
     /// to agents without restarting the kernel.
     ///
-    /// Returns a [`SkillReloadOutcome`] describing what actually happened so
-    /// callers (e.g. the `POST /api/skills/reload` handler) can report an
-    /// honest result instead of claiming success on a no-op. In Stable mode the
-    /// registry is frozen at boot and never gains new skills without an
-    /// operator-initiated restart; rather than silently skipping the whole
-    /// reload, this refreshes the on-disk content of already-loaded skills
-    /// (the freeze-safe `reload_skill` path) and reports any brand-new skill
-    /// directories it is deliberately not loading (#6540). Most callers invoke
-    /// this for its side effect and ignore the return value.
+    /// Returns a [`SkillReloadOutcome`] describing what actually happened so callers (e.g. the `POST /api/skills/reload` handler) can report an honest result instead of claiming success on a no-op.
+    /// In Stable mode the registry is frozen at boot and never gains new skills without an operator-initiated restart; rather than silently skipping the whole reload, this refreshes the on-disk content of already-loaded skills (the freeze-safe `reload_skill` path) and reports any brand-new skill directories it is deliberately not loading (#6540).
+    /// Most callers invoke this for its side effect and ignore the return value.
     pub fn reload_skills(&self) -> SkillReloadOutcome {
         let mut registry = self
             .skills
@@ -403,10 +392,8 @@ impl LibreFangKernel {
             .write()
             .unwrap_or_else(|e| e.into_inner());
         if registry.is_frozen() {
-            // Frozen (Stable mode): do NOT add new skills — that boundary is
-            // intentional. But refresh the content of already-loaded skills
-            // (freeze-safe) and surface any new on-disk dirs we are skipping,
-            // so the reload is honest rather than a silent no-op (#6540).
+            // Frozen (Stable mode): do NOT add new skills — that boundary is intentional.
+            // But refresh the content of already-loaded skills (freeze-safe) and surface any new on-disk dirs we are skipping, so the reload is honest rather than a silent no-op (#6540).
             let mut refreshed = Vec::new();
             for name in registry.skill_names() {
                 match registry.reload_skill(&name) {

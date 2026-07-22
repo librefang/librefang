@@ -518,15 +518,10 @@ impl SkillRegistry {
         self.skills.keys().cloned().collect()
     }
 
-    /// Names of on-disk skill directories under `skills_dir` that hold a
-    /// `skill.toml` but are NOT currently loaded (compared by path, so a skill
-    /// whose manifest name differs from its directory name is matched
-    /// correctly).
+    /// Names of on-disk skill directories under `skills_dir` that hold a `skill.toml` but are NOT currently loaded (compared by path, so a skill whose manifest name differs from its directory name is matched correctly).
     ///
-    /// Used by the frozen (Stable-mode) reload path to report brand-new skill
-    /// directories the registry deliberately will not pick up without a
-    /// restart, instead of silently dropping them (#6540). Sorted for a
-    /// deterministic report.
+    /// Used by the frozen (Stable-mode) reload path to report brand-new skill directories the registry deliberately will not pick up without a restart, instead of silently dropping them (#6540).
+    /// Sorted for a deterministic report.
     pub fn unloaded_on_disk_dirs(&self) -> Vec<String> {
         let loaded: std::collections::HashSet<PathBuf> =
             self.skills.values().map(|s| s.path.clone()).collect();
@@ -542,18 +537,14 @@ impl SkillRegistry {
             let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
-            // Skip staging / hidden dirs (mirrors load_all's `.staging-` /
-            // `.installing-` handling) and anything already loaded.
+            // Skip staging / hidden dirs (mirrors load_all's `.staging-` / `.installing-` handling) and anything already loaded.
             if name.starts_with('.') {
                 continue;
             }
             if !path.join("skill.toml").exists() {
                 continue;
             }
-            // `InstalledSkill.path` is canonicalized at load time (load_skill),
-            // so canonicalize here too — otherwise a symlinked skills_dir
-            // (e.g. macOS `/var` -> `/private/var`) would make every loaded
-            // skill compare as new.
+            // `InstalledSkill.path` is canonicalized at load time (load_skill), so canonicalize here too — otherwise a symlinked skills_dir (e.g. macOS `/var` -> `/private/var`) would make every loaded skill compare as new.
             let canonical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
             if !loaded.contains(&canonical) {
                 out.push(name.to_string());
@@ -1468,8 +1459,7 @@ input_schema = { type = "object" }
 
     #[test]
     fn unloaded_on_disk_dirs_reports_only_new_skill_dirs() {
-        // #6540: a frozen (Stable-mode) reload must report brand-new skill
-        // dirs it is skipping rather than silently dropping them.
+        // #6540: a frozen (Stable-mode) reload must report brand-new skill dirs it is skipping rather than silently dropping them.
         let dir = TempDir::new().unwrap();
         create_test_skill(dir.path(), "loaded-a");
         create_test_skill(dir.path(), "loaded-b");
@@ -1481,8 +1471,7 @@ input_schema = { type = "object" }
         // Everything on disk is loaded → nothing to report.
         assert!(registry.unloaded_on_disk_dirs().is_empty());
 
-        // Add a brand-new skill dir after freeze, plus decoys that must be
-        // ignored: a staging dir and a dir with no skill.toml.
+        // Add a brand-new skill dir after freeze, plus decoys that must be ignored: a staging dir and a dir with no skill.toml.
         create_test_skill(dir.path(), "brand-new");
         std::fs::create_dir_all(dir.path().join(".staging-xyz")).unwrap();
         std::fs::create_dir_all(dir.path().join("not-a-skill")).unwrap();
@@ -1498,8 +1487,7 @@ input_schema = { type = "object" }
 
     #[test]
     fn frozen_reload_skill_refreshes_existing_content() {
-        // The freeze-safe single-skill refresh the frozen reload path relies
-        // on must pick up on-disk content edits to an already-loaded skill.
+        // The freeze-safe single-skill refresh the frozen reload path relies on must pick up on-disk content edits to an already-loaded skill.
         let dir = TempDir::new().unwrap();
         create_test_skill(dir.path(), "editable");
         let mut registry = SkillRegistry::new(dir.path().to_path_buf());

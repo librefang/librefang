@@ -252,11 +252,9 @@ pub async fn uninstall_skill(
 )]
 pub async fn reload_skills(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let outcome = state.kernel.reload_skills();
-    // Honest reporting (#6540): in Stable mode the registry is frozen, so a
-    // full reload cannot add new skills. Rather than claiming "reloaded" on a
-    // no-op, surface that the registry is frozen and list any brand-new skill
-    // directories that were skipped (they need an operator restart). The
-    // already-loaded skills whose content was refreshed are reported too.
+    // Honest reporting (#6540): in Stable mode the registry is frozen, so a full reload cannot add new skills.
+    // Rather than claiming "reloaded" on a no-op, surface that the registry is frozen and list any brand-new skill directories that were skipped (they need an operator restart).
+    // The already-loaded skills whose content was refreshed are reported too.
     let body = if outcome.frozen {
         serde_json::json!({
             "status": if outcome.skipped_new.is_empty() { "refreshed" } else { "partial" },
