@@ -318,18 +318,12 @@ fn global_scanner() -> &'static ScannerState {
     })
 }
 
-/// Credential-prefix threat patterns that must be token-anchored and
-/// backed by a plausible key body before they count as a finding.
+/// Credential-prefix threat patterns that must be token-anchored and backed by a plausible key body before they count as a finding.
 ///
-/// A real leaked key is a well-known prefix followed by a long, mixed
-/// alphanumeric body (`sk-` + ~40 base62 chars, `ghp_` + 36, `AKIA` + 16, …).
-/// The bare 3–4 char prefix, matched as a free substring, otherwise fires on
-/// ordinary words that merely contain those characters (`task-`, `risk-`,
-/// `disk-`, `ask-`, `desk-`, `mask-`) — see #6541. These entries get the
-/// anchored [`is_plausible_key_match`] check; every other threat pattern
-/// (`api_key`, `-----begin rsa`, prompt-injection phrases, …) is still a plain
-/// substring match. Mirrors the token-anchored prefix check in
-/// `librefang-runtime`'s `tool_runner::taint::check_taint_outbound_text`.
+/// A real leaked key is a well-known prefix followed by a long, mixed alphanumeric body (`sk-` + ~40 base62 chars, `ghp_` + 36, `AKIA` + 16, …).
+/// The bare 3–4 char prefix, matched as a free substring, otherwise fires on ordinary words that merely contain those characters (`task-`, `risk-`, `disk-`, `ask-`, `desk-`, `mask-`) — see #6541.
+/// These entries get the anchored [`is_plausible_key_match`] check; every other threat pattern (`api_key`, `-----begin rsa`, prompt-injection phrases, …) is still a plain substring match.
+/// Mirrors the token-anchored prefix check in `librefang-runtime`'s `tool_runner::taint::check_taint_outbound_text`.
 const KEY_PREFIX_PATTERNS: &[&str] = &[
     "sk-",
     "ghp_",
@@ -340,25 +334,17 @@ const KEY_PREFIX_PATTERNS: &[&str] = &[
     "akia",
 ];
 
-/// Minimum length of the key body (the run of key-ish characters immediately
-/// following a credential prefix) required before the prefix is treated as a
-/// real secret. Below the shortest real key body we care about (AWS `AKIA` +
-/// 16), so genuine keys clear it while short suffixes like `task-001` do not.
+/// Minimum length of the key body (the run of key-ish characters immediately following a credential prefix) required before the prefix is treated as a real secret.
+/// Below the shortest real key body we care about (AWS `AKIA` + 16), so genuine keys clear it while short suffixes like `task-001` do not.
 const MIN_KEY_BODY_LEN: usize = 12;
 
-/// Decide whether an Aho-Corasick hit on a [`KEY_PREFIX_PATTERNS`] entry looks
-/// like an actual leaked credential rather than a substring of an ordinary word.
+/// Decide whether an Aho-Corasick hit on a [`KEY_PREFIX_PATTERNS`] entry looks like an actual leaked credential rather than a substring of an ordinary word.
 ///
-/// `text` is the (lowercased) scanned content; `start`/`end` are the byte
-/// offsets of the matched prefix within it. Two conditions must both hold:
+/// `text` is the (lowercased) scanned content; `start`/`end` are the byte offsets of the matched prefix within it.
+/// Two conditions must both hold:
 ///
-/// 1. **Token-anchored** — the character immediately before the prefix is the
-///    start of the text or a non-token separator, so `ta`+`sk-` inside `task-`
-///    is rejected while `=sk-…`, ` sk-…`, `"sk-…` are accepted.
-/// 2. **Plausible key body** — the run of key-ish chars (`[a-z0-9_-]`) right
-///    after the prefix is at least [`MIN_KEY_BODY_LEN`] long AND contains at
-///    least one digit, matching real high-entropy keys while rejecting trailing
-///    English words (`risk-assessment`, `disk-usage`).
+/// 1. **Token-anchored** — the character immediately before the prefix is the start of the text or a non-token separator, so `ta`+`sk-` inside `task-` is rejected while `=sk-…`, ` sk-…`, `"sk-…` are accepted.
+/// 2. **Plausible key body** — the run of key-ish chars (`[a-z0-9_-]`) right after the prefix is at least [`MIN_KEY_BODY_LEN`] long AND contains at least one digit, matching real high-entropy keys while rejecting trailing English words (`risk-assessment`, `disk-usage`).
 fn is_plausible_key_match(text: &str, start: usize, end: usize) -> bool {
     let bytes = text.as_bytes();
     // (1) token boundary before the prefix
@@ -621,13 +607,8 @@ impl SkillVerifier {
             for mat in scanner.automaton.find_iter(text) {
                 let idx = mat.pattern().as_usize();
                 let tp = &scanner.patterns[idx];
-                // Credential prefixes (`sk-`, `ghp_`, …) match as free
-                // substrings, so anchor them to a token start and require a
-                // real key body before reporting — otherwise ordinary words
-                // like `task-`/`risk-` false-positive as secrets (#6541). A
-                // mid-word or bodyless hit is skipped without consuming the
-                // per-pattern dedup slot, so a genuine key later in the same
-                // text still reports.
+                // Credential prefixes (`sk-`, `ghp_`, …) match as free substrings, so anchor them to a token start and require a real key body before reporting — otherwise ordinary words like `task-`/`risk-` false-positive as secrets (#6541).
+                // A mid-word or bodyless hit is skipped without consuming the per-pattern dedup slot, so a genuine key later in the same text still reports.
                 if KEY_PREFIX_PATTERNS.contains(&tp.pattern)
                     && !is_plausible_key_match(text, mat.start(), mat.end())
                 {
