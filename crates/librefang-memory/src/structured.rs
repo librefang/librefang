@@ -479,10 +479,11 @@ impl StructuredStore {
     /// This method does NOT touch `sessions` / `sessions_fts`.
     ///
     /// Tables covered: agents, kv_store, task_queue, memories,
-    /// canonical_sessions, audit_entries, usage_events, entities, relations,
+    /// canonical_sessions, usage_events, entities, relations,
     /// approval_audit, prompt_versions, prompt_experiments (plus their
     /// dependent experiment_variants and experiment_metrics rows), and
-    /// events via source_agent.
+    /// events via source_agent. Deliberately NOT covered: `audit_entries`
+    /// (append-only WORM Merkle trail, #6553).
     pub fn remove_agent(&self, agent_id: AgentId) -> LibreFangResult<()> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let id = agent_id.0.to_string();
