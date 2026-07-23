@@ -11101,7 +11101,7 @@
         "tags": [
           "skills"
         ],
-        "summary": "POST /api/skills/reload — Rescan `~/.librefang/skills/` and refresh the\nin-memory registry. Use this after dropping a skill directory into the\nskills folder manually (install/uninstall via API already reload\nautomatically). Returns the new installed skill count.",
+        "summary": "POST /api/skills/reload — Rescan `~/.librefang/skills/` and refresh the in-memory registry.\nUse this after dropping a skill directory into the skills folder manually (install/uninstall via API already reload automatically).\nOutside Stable mode, returns `{\"status\":\"reloaded\",\"count\":N}`.\nIn Stable mode the registry is frozen: new skill directories are NOT loaded, only the on-disk content of already-loaded skills is refreshed, and the response reports this honestly as `{\"frozen\":true,\"refreshed\":[...],\"skipped_new\":[...],\"detail\":...}` (#6540).",
         "operationId": "reload_skills",
         "responses": {
           "200": {
