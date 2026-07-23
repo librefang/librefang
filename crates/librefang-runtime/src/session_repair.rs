@@ -987,11 +987,17 @@ fn collect_tool_use_ids(messages: &[Message]) -> HashSet<String> {
 /// Strip untrusted details from ToolResult content.
 ///
 /// Prevents feeding potentially-malicious tool output details back to the LLM:
-/// - Truncates to 10K chars maximum
 /// - Strips base64 blobs (sequences >1000 chars of base64-like content)
 /// - Removes potential prompt injection markers
+/// - As a last-resort fallback, lossily truncates content that exceeds the artifact-spill threshold
+///
+/// The base64/injection stripping is size-independent and always runs.
+/// The lossy size cut is a **fallback**, not the primary size bound: full-size results are meant to be preserved by artifact spill (`spill_fresh_result`, `spill_threshold_bytes`), which runs at tool-exec time and replaces an oversized result with a small *recoverable* stub before this sanitizer sees it.
+/// The cap here is therefore tied to `DEFAULT_SPILL_THRESHOLD_BYTES` so it only fires when spill did not run (spill disabled, or the artifact write failed) — never in a dead band *below* the spill threshold, which used to truncate 10–16 KB results irrecoverably even though spill exists to keep them (issue #6545).
 pub fn strip_tool_result_details(content: &str) -> String {
-    let max_len = 10_000;
+    // Fallback cap aligned with the spill threshold so there is no "too small to spill, too big to survive" band.
+    // Only reached when the recoverable spill path did not fire.
+    let max_len = librefang_types::config::DEFAULT_SPILL_THRESHOLD_BYTES as usize;
 
     // First pass: strip base64-like blobs (long sequences of alphanumeric + /+= chars)
     let stripped = strip_base64_blobs(content);
@@ -999,7 +1005,7 @@ pub fn strip_tool_result_details(content: &str) -> String {
     // Second pass: remove prompt injection markers
     let cleaned = strip_injection_markers(&stripped);
 
-    // Final pass: truncate if needed
+    // Final pass: fallback truncation only if the content was never spilled and still exceeds the spill threshold.
     if cleaned.len() <= max_len {
         cleaned
     } else {

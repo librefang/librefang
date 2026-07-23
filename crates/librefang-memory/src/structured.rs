@@ -479,10 +479,11 @@ impl StructuredStore {
     /// This method does NOT touch `sessions` / `sessions_fts`.
     ///
     /// Tables covered: agents, kv_store, task_queue, memories,
-    /// canonical_sessions, audit_entries, usage_events, entities, relations,
+    /// canonical_sessions, usage_events, entities, relations,
     /// approval_audit, prompt_versions, prompt_experiments (plus their
     /// dependent experiment_variants and experiment_metrics rows), and
-    /// events via source_agent.
+    /// events via source_agent. Deliberately NOT covered: `audit_entries`
+    /// (append-only WORM Merkle trail, #6553).
     pub fn remove_agent(&self, agent_id: AgentId) -> LibreFangResult<()> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let id = agent_id.0.to_string();
@@ -730,7 +731,16 @@ pub(crate) fn execute_structured_agent_deletes(
         "DELETE FROM prompt_experiments WHERE agent_id = ?1",
         "DELETE FROM prompt_versions WHERE agent_id = ?1",
         "DELETE FROM approval_audit WHERE agent_id = ?1",
-        "DELETE FROM audit_entries WHERE agent_id = ?1",
+        // NOTE: `audit_entries` is deliberately NOT purged here (#6553). It is
+        // the append-only WORM Merkle trail that `security verify` walks; each
+        // row's `prev_hash` links to the previous row's `hash`, so deleting an
+        // agent's rows opens a gap that breaks the chain downstream —
+        // indistinguishable from tampering. Purging an agent's identity must
+        // never touch the audit trail. The surviving rows keep the now-orphaned
+        // `agent_id`, which is correct: an audit trail records what happened,
+        // including to agents later removed. (`approval_audit` above is a
+        // separate flat table with its own time-based retention, not the Merkle
+        // chain, so it stays in the cascade.)
         "DELETE FROM usage_events WHERE agent_id = ?1",
         "DELETE FROM memories WHERE agent_id = ?1",
         "DELETE FROM canonical_sessions WHERE agent_id = ?1",
@@ -1187,7 +1197,12 @@ mod tests {
         // membership, not agent ownership), so the discovery loop above
         // never adds it to `agent_keyed` and there is nothing to exempt.
         // Removing an agent must not delete a chat's roster.
-        let not_cascaded: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        // `audit_entries` is agent-keyed but is the append-only WORM Merkle
+        // trail — purging an agent must never delete its rows (that opens a
+        // hash-chain gap that trips `security verify`), so it is intentionally
+        // excluded from the cascade (#6553). Its preservation is asserted
+        // separately in `agent_purge_preserves_audit_entries_worm_6553`.
+        let not_cascaded: std::collections::HashSet<&str> = ["audit_entries"].into_iter().collect();
 
         // The agent-scoping column for a given table.
         let id_col = |table: &str| -> &'static str {
@@ -1351,6 +1366,67 @@ mod tests {
                 "cascade over-deleted: control agent's row vanished from '{table}'",
             );
         }
+    }
+
+    /// #6553: purging an agent's identity must NOT delete its `audit_entries`
+    /// rows. That table is the append-only WORM Merkle trail `security verify`
+    /// walks — each row's `prev_hash` links to the prior row's `hash`, so
+    /// deleting an agent's rows opens a gap that breaks the chain downstream,
+    /// indistinguishable from tampering. The row survives with its now-orphaned
+    /// `agent_id`; the rest of the agent-scoped cascade (proved by the
+    /// completeness test above) is unaffected.
+    #[test]
+    fn agent_purge_preserves_audit_entries_worm_6553() {
+        let pool = Pool::builder()
+            .max_size(2)
+            .build(SqliteConnectionManager::memory())
+            .unwrap();
+        run_migrations(&pool.get().unwrap()).unwrap();
+        let conn = pool.get().unwrap();
+
+        let target = AgentId::new();
+        let control = AgentId::new();
+        let target_str = target.to_string();
+        let control_str = control.to_string();
+
+        // Seed one WORM audit row for each agent (schema per migration v8).
+        for (seq, ag, hash) in [(1_i64, &target_str, "hashA"), (2, &control_str, "hashB")] {
+            conn.execute(
+                "INSERT INTO audit_entries \
+                 (seq, timestamp, agent_id, action, detail, outcome, prev_hash, hash) \
+                 VALUES (?1, '2026-07-23T00:00:00Z', ?2, 'AgentKill', \
+                         'purge_identity=true', 'ok', 'prev', ?3)",
+                rusqlite::params![seq, ag, hash],
+            )
+            .unwrap();
+        }
+
+        // Purge the target agent through the full structured cascade.
+        let mut tx_conn = pool.get().unwrap();
+        let tx = tx_conn.transaction().unwrap();
+        execute_structured_agent_deletes(&tx, &target_str).unwrap();
+        tx.commit().unwrap();
+
+        // The purged agent's audit row must survive (WORM), and the control
+        // agent's row is of course untouched — no gap in the Merkle trail.
+        let target_audit: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM audit_entries WHERE agent_id = ?1",
+                rusqlite::params![&target_str],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            target_audit, 1,
+            "agent purge deleted audit_entries rows — breaks the WORM Merkle chain (#6553)",
+        );
+        let total_audit: i64 = conn
+            .query_row("SELECT COUNT(*) FROM audit_entries", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            total_audit, 2,
+            "audit trail lost rows on agent purge (#6553)"
+        );
     }
 
     /// Regression for the audit item `json-text-silent-parse-fallback`.

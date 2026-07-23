@@ -45,6 +45,24 @@ async fn boot() -> Harness {
     }
 }
 
+/// Same as [`boot`] but with the kernel booted in Stable mode, which freezes
+/// the skill registry at boot (`KernelConfig::mode`). Used to exercise the
+/// frozen-reload honesty path (#6540).
+async fn boot_stable() -> Harness {
+    let test = TestAppState::with_builder(MockKernelBuilder::new().with_config(|cfg| {
+        cfg.mode = librefang_types::config::KernelMode::Stable;
+    }));
+    let state = test.state.clone();
+    let app = Router::new()
+        .nest("/api", routes::skills::router())
+        .with_state(state.clone());
+    Harness {
+        app,
+        _state: state,
+        test,
+    }
+}
+
 async fn json_request(
     h: &Harness,
     method: Method,
@@ -365,6 +383,34 @@ async fn skills_reload_picks_up_filesystem_drops() {
     let (_, after) = json_request(&h, Method::GET, "/api/skills", None).await;
     assert_eq!(after["total"], 1);
     assert_eq!(after["items"][0]["name"], "dropped");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn skills_reload_frozen_stable_mode_reports_honest_result() {
+    // #6540: a frozen (Stable-mode) reload must not silently no-op — the HTTP
+    // response must surface `frozen: true` and the skipped new skill dir
+    // instead of pretending a full reload happened, and the freeze boundary
+    // must actually hold (the new skill must not be loaded).
+    let h = boot_stable().await;
+
+    install_skill(h.home(), "added-after-boot", &[]);
+
+    let (status, body) = json_request(&h, Method::POST, "/api/skills/reload", None).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(body["frozen"], true, "{body:?}");
+    assert_eq!(body["status"], "partial", "{body:?}");
+    assert_eq!(
+        body["skipped_new"],
+        serde_json::json!(["added-after-boot"]),
+        "{body:?}"
+    );
+    assert_eq!(body["count"], 0, "{body:?}");
+
+    let (_, after) = json_request(&h, Method::GET, "/api/skills", None).await;
+    assert_eq!(
+        after["total"], 0,
+        "frozen registry must not load the new skill: {after:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
