@@ -79,8 +79,13 @@ pub fn parse_tick(reply: &str) -> ParsedTick {
             out.done = true;
         } else if marker_present(&upper, "GOAL_BLOCKED") {
             out.blocked = true;
-        } else if let Some(rest) = upper.strip_prefix("GOAL_LEARNED:") {
-            let learning = rest.trim();
+        } else if upper.starts_with("GOAL_LEARNED:") {
+            // Match case-insensitively on `upper`, but slice the learning text
+            // out of the original-case `t` — `upper` is all-caps, so taking
+            // `rest` from it (as the other markers do) would permanently
+            // uppercase every captured learning before it is persisted to
+            // memory and turned into a skill body.
+            let learning = t["GOAL_LEARNED:".len()..].trim();
             if !learning.is_empty() {
                 out.learnings.push(learning.to_string());
             }
@@ -929,6 +934,34 @@ mod tests {
         assert!(parse_tick("GOAL_BLOCKED").blocked);
         assert!(parse_tick("GOAL_BLOCKED! waiting on a key").blocked);
         assert!(parse_tick("GOAL_BLOCKED: need a key").blocked);
+    }
+
+    #[test]
+    fn parse_tick_captures_learnings_preserving_original_case() {
+        // The marker match is case-insensitive, but the captured text must
+        // keep its original casing — GOAL_LEARNED text is persisted to
+        // shared memory and turned into a skill body, so silently
+        // upper-casing it would corrupt anything the agent captures.
+        let p =
+            parse_tick("did the thing\nGOAL_LEARNED: Prefer `rg` over `grep` for speed.\nmore");
+        assert_eq!(
+            p.learnings,
+            vec!["Prefer `rg` over `grep` for speed.".to_string()]
+        );
+
+        // Case-insensitive marker match still works.
+        let lower = parse_tick("goal_learned: lowercase marker works too");
+        assert_eq!(
+            lower.learnings,
+            vec!["lowercase marker works too".to_string()]
+        );
+
+        // Multiple learnings across lines are all captured, in order.
+        let multi = parse_tick("GOAL_LEARNED: first\nGOAL_LEARNED: second");
+        assert_eq!(
+            multi.learnings,
+            vec!["first".to_string(), "second".to_string()]
+        );
     }
 
     fn seed_goal(substrate: &MemorySubstrate, goal: &Goal) {
