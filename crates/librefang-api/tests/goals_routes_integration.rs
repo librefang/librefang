@@ -531,17 +531,35 @@ async fn concurrent_goal_creates_lose_no_writes_5138() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
-async fn goal_run_start_requires_assigned_agent() {
+async fn goal_run_start_auto_spawns_agent_when_none_assigned() {
+    // Starting a run for a goal with no assigned agent no longer 400s: the
+    // handler auto-spawns a disposable agent and persists its id onto the
+    // goal (see `routes/goals.rs::start_goal_run`).
     let h = boot().await;
     let goal = create_goal(&h, serde_json::json!({"title": "No agent"})).await;
-    let id = goal["id"].as_str().unwrap();
+    let id = goal["id"].as_str().unwrap().to_string();
+
     let (status, body) =
         json_request(&h, Method::POST, &format!("/api/goals/{id}/start"), None).await;
     assert_eq!(
         status,
-        StatusCode::BAD_REQUEST,
-        "starting a run for a goal with no assigned agent must 400: {body:?}"
+        StatusCode::OK,
+        "start should auto-spawn an agent rather than reject: {body:?}"
     );
+    assert_eq!(body["ok"].as_bool(), Some(true));
+    assert_eq!(body["run"]["phase"].as_str(), Some("running"));
+
+    // The auto-spawned agent id is written back onto the goal record.
+    let (gs, goal_after) =
+        json_request(&h, Method::GET, &format!("/api/goals/{id}"), None).await;
+    assert_eq!(gs, StatusCode::OK);
+    assert!(
+        goal_after["agent_id"].as_str().is_some(),
+        "auto-spawned agent id must be persisted onto the goal: {goal_after:?}"
+    );
+
+    // Stop the run so no background task outlives the test.
+    let _ = json_request(&h, Method::POST, &format!("/api/goals/{id}/stop"), None).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
