@@ -786,17 +786,18 @@ mod tests {
     /// genuinely contend for the SQLite write lock. An in-memory
     /// `:memory:` DB with `max_size(1)` cannot exercise the race the
     /// transactional `modify` fixes.
+    ///
+    /// `busy_timeout` must be set via `with_init`, not on a single connection pulled from the pool after `build()`: r2d2 defaults `min_idle` to `max_size`, so it eagerly opens up to 8 connections in the background, and every subsequent checkout can hand out a fresh one on demand too.
+    /// Configuring only the one connection grabbed here left the other pooled connections with SQLite's default 0ms busy timeout, so concurrent `modify()` calls under contention failed immediately with "database is locked" instead of waiting — flaky, mostly on Windows CI where lock contention is more likely to line up.
     fn setup_file_backed(path: &std::path::Path) -> StructuredStore {
         let pool = Pool::builder()
             .max_size(8)
-            .build(SqliteConnectionManager::file(path))
+            .build(
+                SqliteConnectionManager::file(path)
+                    .with_init(|c| c.busy_timeout(std::time::Duration::from_secs(10))),
+            )
             .unwrap();
-        {
-            let conn = pool.get().unwrap();
-            conn.busy_timeout(std::time::Duration::from_secs(10))
-                .unwrap();
-            run_migrations(&conn).unwrap();
-        }
+        run_migrations(&pool.get().unwrap()).unwrap();
         StructuredStore::new(pool)
     }
 
