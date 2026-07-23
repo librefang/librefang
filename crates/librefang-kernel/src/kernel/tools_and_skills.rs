@@ -19,6 +19,22 @@
 use super::*;
 use super::{sanitize_reviewer_block, sanitize_reviewer_line, ReviewError};
 
+/// Outcome of [`LibreFangKernel::reload_skills`], so callers can report an honest result instead of assuming the reload always fully succeeded (#6540).
+///
+/// In Stable mode the registry is frozen: `frozen` is `true`, `refreshed` lists the already-loaded skills whose on-disk content was re-read (freeze-safe), and `skipped_new` lists brand-new skill directories that were found on disk but deliberately NOT loaded (they need an operator restart).
+/// Outside Stable mode `frozen` is `false` and `refreshed` is the full reloaded set.
+#[derive(Debug, Clone, Default)]
+pub struct SkillReloadOutcome {
+    /// Whether the registry was frozen (Stable mode) at reload time.
+    pub frozen: bool,
+    /// Skill names whose content was (re)loaded from disk.
+    pub refreshed: Vec<String>,
+    /// New on-disk skill directories skipped because the registry is frozen.
+    pub skipped_new: Vec<String>,
+    /// Total number of skills loaded after the reload.
+    pub count: usize,
+}
+
 impl LibreFangKernel {
     /// Get the list of tools available to an agent based on its manifest.
     ///
@@ -365,15 +381,54 @@ impl LibreFangKernel {
     ///
     /// Called after install/uninstall to make new skills immediately visible
     /// to agents without restarting the kernel.
-    pub fn reload_skills(&self) {
+    ///
+    /// Returns a [`SkillReloadOutcome`] describing what actually happened so callers (e.g. the `POST /api/skills/reload` handler) can report an honest result instead of claiming success on a no-op.
+    /// In Stable mode the registry is frozen at boot and never gains new skills without an operator-initiated restart; rather than silently skipping the whole reload, this refreshes the on-disk content of already-loaded skills (the freeze-safe `reload_skill` path) and reports any brand-new skill directories it is deliberately not loading (#6540).
+    /// Most callers invoke this for its side effect and ignore the return value.
+    pub fn reload_skills(&self) -> SkillReloadOutcome {
         let mut registry = self
             .skills
             .skill_registry
             .write()
             .unwrap_or_else(|e| e.into_inner());
         if registry.is_frozen() {
-            warn!("Skill registry is frozen (Stable mode) — reload skipped");
-            return;
+            // Frozen (Stable mode): do NOT add new skills — that boundary is intentional.
+            // But refresh the content of already-loaded skills (freeze-safe) and surface any new on-disk dirs we are skipping, so the reload is honest rather than a silent no-op (#6540).
+            let mut refreshed = Vec::new();
+            for name in registry.skill_names() {
+                match registry.reload_skill(&name) {
+                    Ok(()) => refreshed.push(name),
+                    Err(e) => warn!(skill = %name, error = %e, "Frozen reload_skill failed"),
+                }
+            }
+            refreshed.sort();
+            let skipped_new = registry.unloaded_on_disk_dirs();
+            let count = registry.count();
+            drop(registry);
+
+            // Refreshed content still needs the caches invalidated.
+            self.prompt_metadata_cache.skills.clear();
+            self.skills
+                .skill_generation
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+            if skipped_new.is_empty() {
+                info!(
+                    refreshed = refreshed.len(),
+                    "Skill registry frozen (Stable mode) — refreshed existing skills only"
+                );
+            } else {
+                warn!(
+                    ?skipped_new,
+                    "Skill registry frozen (Stable mode) — new skill directories require a restart to load"
+                );
+            }
+            return SkillReloadOutcome {
+                frozen: true,
+                refreshed,
+                skipped_new,
+                count,
+            };
         }
         let skills_dir = self.home_dir_boot.join("skills");
         let mut fresh = librefang_skills::registry::SkillRegistry::new(skills_dir);
@@ -392,6 +447,9 @@ impl LibreFangKernel {
             0
         };
         info!(user, external, "Skill registry hot-reloaded");
+        let mut refreshed = fresh.skill_names();
+        refreshed.sort();
+        let count = fresh.count();
         *registry = fresh;
 
         // Invalidate cached skill metadata so next message picks up changes
@@ -401,6 +459,13 @@ impl LibreFangKernel {
         self.skills
             .skill_generation
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        SkillReloadOutcome {
+            frozen: false,
+            refreshed,
+            skipped_new: Vec::new(),
+            count,
+        }
     }
 
     /// Approve a pending skill candidate and, for a CREATE, auto-assign the

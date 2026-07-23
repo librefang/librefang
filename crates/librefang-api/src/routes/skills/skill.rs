@@ -238,10 +238,10 @@ pub async fn uninstall_skill(
     }
 }
 
-/// POST /api/skills/reload — Rescan `~/.librefang/skills/` and refresh the
-/// in-memory registry. Use this after dropping a skill directory into the
-/// skills folder manually (install/uninstall via API already reload
-/// automatically). Returns the new installed skill count.
+/// POST /api/skills/reload — Rescan `~/.librefang/skills/` and refresh the in-memory registry.
+/// Use this after dropping a skill directory into the skills folder manually (install/uninstall via API already reload automatically).
+/// Outside Stable mode, returns `{"status":"reloaded","count":N}`.
+/// In Stable mode the registry is frozen: new skill directories are NOT loaded, only the on-disk content of already-loaded skills is refreshed, and the response reports this honestly as `{"frozen":true,"refreshed":[...],"skipped_new":[...],"detail":...}` (#6540).
 #[utoipa::path(
     post,
     path = "/api/skills/reload",
@@ -251,17 +251,27 @@ pub async fn uninstall_skill(
     )
 )]
 pub async fn reload_skills(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    state.kernel.reload_skills();
-    let count = state
-        .kernel
-        .skill_registry_ref()
-        .read()
-        .map(|r| r.count())
-        .unwrap_or(0);
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({"status": "reloaded", "count": count})),
-    )
+    let outcome = state.kernel.reload_skills();
+    // Honest reporting (#6540): in Stable mode the registry is frozen, so a full reload cannot add new skills.
+    // Rather than claiming "reloaded" on a no-op, surface that the registry is frozen and list any brand-new skill directories that were skipped (they need an operator restart).
+    // The already-loaded skills whose content was refreshed are reported too.
+    let body = if outcome.frozen {
+        serde_json::json!({
+            "status": if outcome.skipped_new.is_empty() { "refreshed" } else { "partial" },
+            "frozen": true,
+            "refreshed": outcome.refreshed,
+            "skipped_new": outcome.skipped_new,
+            "count": outcome.count,
+            "detail": if outcome.skipped_new.is_empty() {
+                "registry frozen (Stable mode); refreshed existing skills only"
+            } else {
+                "registry frozen (Stable mode); new skill directories require a daemon restart to load"
+            },
+        })
+    } else {
+        serde_json::json!({"status": "reloaded", "count": outcome.count})
+    };
+    (StatusCode::OK, Json(body))
 }
 
 /// GET /api/skills/pending — list skill-workshop pending candidates,

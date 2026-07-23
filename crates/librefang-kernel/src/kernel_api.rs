@@ -475,7 +475,7 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     // Skills / driver caches / model catalog
     // ====================================================================
 
-    fn reload_skills(&self);
+    fn reload_skills(&self) -> crate::SkillReloadOutcome;
     /// Approve a pending skill candidate and, for a CREATE, auto-assign the
     /// promoted skill to the creating agent's allowlist (#5844). Promotion runs
     /// through `evolution::create_skill` (re-running the prompt-injection scan)
@@ -1307,8 +1307,8 @@ impl KernelApi for LibreFangKernel {
     }
 
     // -- Skills / driver caches / model catalog --
-    fn reload_skills(&self) {
-        Self::reload_skills(self);
+    fn reload_skills(&self) -> crate::SkillReloadOutcome {
+        Self::reload_skills(self)
     }
     fn approve_pending_skill(
         &self,
