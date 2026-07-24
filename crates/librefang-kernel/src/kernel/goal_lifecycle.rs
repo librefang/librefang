@@ -10,7 +10,7 @@
 //! `Arc<dyn KernelApi>`.
 
 use librefang_channels::types::SenderContext;
-use librefang_types::agent::AgentId;
+use librefang_types::agent::{AgentId, AgentManifest, ModelConfig, SessionMode};
 use librefang_types::goal::{GoalId, GoalRunState, DEFAULT_GOAL_MAX_ITERATIONS};
 
 use super::{LibreFangKernel, SYSTEM_CHANNEL_AUTONOMOUS};
@@ -24,7 +24,16 @@ impl LibreFangKernel {
     /// complete, the iteration cap (`max_iterations`, default
     /// [`DEFAULT_GOAL_MAX_ITERATIONS`]) is reached, an operator stops it, or the
     /// kernel shuts down.
-    pub fn goal_run_start(&self, goal_id: GoalId, agent_id: AgentId, max_iterations: Option<u32>) {
+    pub fn goal_run_start(
+        &self,
+        goal_id: GoalId,
+        agent_id: AgentId,
+        max_iterations: Option<u32>,
+        loop_engineering: bool,
+        verify_agent_id: Option<AgentId>,
+        verify_max_retries: Option<u32>,
+        evaluator_model: Option<String>,
+    ) {
         let max = max_iterations.unwrap_or(DEFAULT_GOAL_MAX_ITERATIONS).max(1);
         let substrate = self.substrate_ref().clone();
 
@@ -39,12 +48,10 @@ impl LibreFangKernel {
             }
         };
 
+        let send_kernel = kernel.clone();
         let send = move |aid: AgentId, msg: String| {
-            let k = kernel.clone();
+            let k = send_kernel.clone();
             async move {
-                // Trusted internal system path — reuse the autonomous-channel
-                // sentinel so the RBAC resolver applies the system carve-out
-                // (see background_lifecycle.rs).
                 let sender = SenderContext {
                     channel: SYSTEM_CHANNEL_AUTONOMOUS.to_string(),
                     user_id: aid.to_string(),
@@ -59,9 +66,188 @@ impl LibreFangKernel {
             }
         };
 
-        self.workflows
-            .goal_runner
-            .start(goal_id, agent_id, max, substrate, send);
+        // Sub-agent spawn closure for the loop. Gated on loop_engineering
+        // inside the closure body (not via if/else) so both branches
+        // return the same concrete type.
+        let spawn_kernel = kernel.clone();
+        let spawn_sub = move |task_name: String| {
+            let k = spawn_kernel.clone();
+            async move {
+                if !loop_engineering {
+                    return None;
+                }
+                let manifest = AgentManifest {
+                    name: format!(
+                        "goal-sub-{}",
+                        uuid::Uuid::new_v4()
+                            .to_string()
+                            .split('-')
+                            .next()
+                            .unwrap_or("x")
+                    ),
+                    version: "0.1.0".into(),
+                    description: format!("Auto-spawned sub-agent: {task_name}"),
+                    author: "goal-runner".into(),
+                    module: "builtin:chat".into(),
+                    schedule: librefang_types::agent::ScheduleMode::Reactive,
+                    session_mode: SessionMode::New,
+                    model: ModelConfig {
+                        provider: "deepseek".into(),
+                        model: "deepseek-v4-pro".into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                // spawn_agent is sync (not async).
+                k.spawn_agent(manifest).ok()
+            }
+        };
+
+        use librefang_skills::evolution::create_skill;
+
+        // Clone before kernel is consumed by closures below.
+        let goal_id_for_title = goal_id;
+        let goal_title = {
+            let substrate = self.substrate_ref();
+            let arr = substrate
+                .structured_get(
+                    librefang_types::goal::goals_storage_agent_id(),
+                    librefang_types::goal::GOALS_STORAGE_KEY,
+                )
+                .ok()
+                .flatten()
+                .unwrap_or(serde_json::Value::Array(vec![]));
+            if let serde_json::Value::Array(arr) = arr {
+                let target = goal_id_for_title.to_string();
+                arr.into_iter()
+                    .find(|g| g.get("id").and_then(|v| v.as_str()) == Some(target.as_str()))
+                    .and_then(|g| g.get("title").and_then(|v| v.as_str()).map(String::from))
+                    .unwrap_or_else(|| format!("Goal {goal_id_for_title}"))
+            } else {
+                format!("Goal {goal_id_for_title}")
+            }
+        };
+
+        // Evaluator closure: asks a model (configurable or the agent itself)
+        // whether the goal condition has been met, mirroring Claude Code's
+        // /goal evaluator pattern. Never trust the agent's self-reported
+        // GOAL_DONE alone.
+        let eval_kernel = kernel.clone();
+        let eval_model = evaluator_model.clone();
+        let evaluate = move |goal_desc: String, agent_reply: String| {
+            let k = eval_kernel.clone();
+            let eval_model = eval_model.clone();
+            async move {
+                let model_hint = eval_model.as_deref().unwrap_or("agent-default");
+                let prompt = format!(
+                    "You are a goal evaluator (model: {model_hint}). Read the goal \
+                     and the agent's latest output. Answer ONLY 'YES' if the goal \
+                     is fully achieved, or 'NO' if more work is needed.\n\n\
+                     GOAL: {goal_desc}\n\n\
+                     AGENT OUTPUT:\n{agent_reply}\n\n\
+                     Is the goal achieved? (YES/NO):"
+                );
+                if let Some(ref model_name) = eval_model {
+                    // Use the configured evaluator model via one-shot LLM call.
+                    match k.one_shot_llm_call(model_name, &prompt).await {
+                        Ok(response) => {
+                            let upper = response.to_ascii_uppercase();
+                            Ok(upper.contains("YES") && !upper.contains("NO"))
+                        }
+                        Err(e) => Err(e),
+                    }
+                } else {
+                    // Fallback: send to the agent itself for evaluation.
+                    let sender = SenderContext {
+                        channel: SYSTEM_CHANNEL_AUTONOMOUS.to_string(),
+                        user_id: agent_id.to_string(),
+                        display_name: "goal-evaluator".to_string(),
+                        is_internal_system: true,
+                        ..Default::default()
+                    };
+                    match k
+                        .send_message_with_sender_context(agent_id, &prompt, &sender)
+                        .await
+                    {
+                        Ok(r) => {
+                            let upper = r.response.to_ascii_uppercase();
+                            Ok(upper.contains("YES") && !upper.contains("NO"))
+                        }
+                        Err(e) => Err(e.to_string()),
+                    }
+                }
+            }
+        };
+
+        // Learnings callback: persist captured knowledge as an auto-created
+        // skill so the agent self-evolves. Only when loop_engineering is on.
+        let learnings_agent_id = agent_id;
+        let skills_dir = self.home_dir().join("skills");
+        let on_learnings = move |learnings: Vec<String>| {
+            if !loop_engineering || learnings.is_empty() {
+                return;
+            }
+            let body = format!(
+                "## Learnings from goal run\n\n{}\n\n## Usage\n\
+                 These patterns were discovered during autonomous execution of \
+                 goal `{title}`. Apply them when solving similar tasks.",
+                learnings
+                    .iter()
+                    .enumerate()
+                    .map(|(i, l)| format!("{}. {l}", i + 1))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                title = goal_title,
+            );
+            let skill_name = format!(
+                "goal-learned-{}",
+                goal_title
+                    .to_lowercase()
+                    .replace(|c: char| !c.is_alphanumeric(), "-")
+                    .trim_matches('-')
+            );
+            match create_skill(
+                &skills_dir,
+                &skill_name,
+                &format!("Auto-discovered from goal: {goal_title}"),
+                &body,
+                vec!["goal-learned".into(), "auto-evolved".into()],
+                Some("goal-runner"),
+            ) {
+                Ok(result) => {
+                    tracing::info!(
+                        agent = %learnings_agent_id,
+                        goal_id = %goal_id,
+                        count = learnings.len(),
+                        skill = %result.skill_name,
+                        "Goal runner: auto-created skill from captured learnings"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        agent = %learnings_agent_id,
+                        goal_id = %goal_id,
+                        error = %e,
+                        "Goal runner: failed to auto-create skill from learnings"
+                    );
+                }
+            }
+        };
+
+        self.workflows.goal_runner.start(
+            goal_id,
+            agent_id,
+            max,
+            substrate,
+            send,
+            spawn_sub,
+            on_learnings,
+            evaluate,
+            loop_engineering,
+            verify_agent_id,
+            verify_max_retries,
+            evaluator_model,
+        );
     }
 
     /// Stop an active goal run. Returns whether a run was stopped.
@@ -81,7 +267,12 @@ impl LibreFangKernel {
     /// are demoted to `Stopped` ("Interrupted by daemon restart"). Runs are not
     /// auto-resumed — an in-flight LLM call cannot be replayed. Returns the
     /// recovered goal ids.
-    pub fn recover_stale_goal_runs(&self, stale_timeout: std::time::Duration) -> Vec<GoalId> {
+    /// Returns (goal_id, agent_id) pairs for stale runs to auto-resume.
+    /// Caller must call `goal_run_start` for each returned pair.
+    pub fn recover_stale_goal_runs(
+        &self,
+        stale_timeout: std::time::Duration,
+    ) -> Vec<(GoalId, AgentId)> {
         self.workflows.goal_runner.recover_stale_runs(stale_timeout)
     }
 }

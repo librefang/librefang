@@ -2626,23 +2626,32 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
-        // Recover goal runs left in Running phase by a prior crash or restart
-        // (#5744 follow-up). Reuses `workflow_stale_timeout_minutes`: the
-        // staleness semantic is identical (how long before an interrupted
-        // in-flight run is demoted), so a second config knob would only add
-        // operator surface for no behavioural gain. `recover_stale_runs` is a
-        // synchronous SQLite read + write, matching the workflow sweep above.
+        // Auto-resume goal runs left in Running phase by a prior crash or
+        // restart (#5744). The runner persists state after every iteration,
+        // so resuming is safe: the loop picks up from the last checkpoint.
         {
             let stale_timeout_mins = kernel.config.load().workflow_stale_timeout_minutes;
             if stale_timeout_mins > 0 {
                 let stale_timeout = std::time::Duration::from_secs(stale_timeout_mins * 60);
-                let recovered_goal_ids =
+                let stale_runs =
                     tokio::task::block_in_place(|| kernel.recover_stale_goal_runs(stale_timeout));
-                if !recovered_goal_ids.is_empty() {
+                if !stale_runs.is_empty() {
                     info!(
-                        "Recovered {} stale goal run(s) interrupted by daemon restart",
-                        recovered_goal_ids.len()
+                        count = stale_runs.len(),
+                        "Auto-resuming stale goal runs after daemon restart"
                     );
+                    for (goal_id, agent_id) in stale_runs {
+                        // Use None for max_iterations to get the default.
+                        // The runner will load the goal from the store and
+                        // resume from the last persisted progress.
+                        kernel.goal_run_start(
+                            goal_id, agent_id, None,  // max_iterations
+                            false, // loop_engineering
+                            None,  // verify_agent_id
+                            None,  // verify_max_retries
+                            None,  // evaluator_model
+                        );
+                    }
                 }
             }
         }

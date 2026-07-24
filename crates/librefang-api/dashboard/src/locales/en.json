@@ -829,7 +829,8 @@
     "tools_declared_desc": "Tools this agent can use. Leave empty for unrestricted access to all tools.",
     "providers_error_loading": "Error loading",
     "no_providers": "No providers",
-    "select_provider_first": "Select provider first"
+    "select_provider_first": "Select provider first",
+    "no_models": "No models"
   },
   "providers": {
     "title": "Providers",
@@ -976,7 +977,7 @@
     "results": "results",
     "saved": "Saved",
     "saved_restart_required": "Saved — restart daemon to apply",
-    "schema_unavailable_hint": "This channel runs as an out-of-process sidecar and its setup form could not be loaded. Review the error below. If the SDK is missing, install it; otherwise fix the reported problem. Restart the daemon to retry schema discovery.",
+    "schema_unavailable_hint": "This channel now runs as an out-of-process sidecar and its setup form could not be loaded. Install the sidecar SDK, then reload channels (or restart the daemon) and reopen this dialog.",
     "schema_unavailable_title": "Setup form unavailable",
     "secret_set_placeholder": "•••• (set — leave blank to keep)",
     "select_all": "Select All",
@@ -1594,9 +1595,6 @@
     "delete_failed": "Delete failed",
     "run_failed": "Run failed",
     "run_started": "Run started",
-    "rerun": "Re-run with same parameters",
-    "rerun_started": "Re-run started with the same parameters",
-    "rerun_failed": "Re-run failed",
     "runs_label": "runs",
     "schedule_failed": "Schedule creation failed",
     "skip": "skip",
@@ -1637,7 +1635,13 @@
       "pending_review_one": "1 workflow run awaiting operator review",
       "pending_review_other": "{{count}} workflow runs awaiting operator review",
       "empty_artifact": "(empty artifact)"
-    }
+    },
+    "rerun_hint": "Re-run with these parameters",
+    "step_executing": "Step {{current}}/{{total}} executing…",
+    "starting": "Starting…",
+    "variables": "Variables",
+    "step_output": "Output",
+    "step_pending": "Pending…"
   },
   "scheduler": {
     "title": "Scheduler",
@@ -2708,6 +2712,9 @@
     "run_needs_agent": "Assign an agent to run this goal autonomously",
     "run_active": "Running · iteration {{iteration}}/{{max}}",
     "help": "Goals is the strategic-planning surface — a tree of objectives the agent (or you) is working towards, with progress, status, and parent / child relationships. Templates seed common goal shapes; the tree view shows hierarchy and roll-up progress.\n\nHow to use this page:\n\n1. Create. \"Create goal\" opens a form for title, description, parent goal, and status. Or \"Pick template\" to apply a pre-built goal tree (e.g. \"ship a feature\", \"research a topic\").\n\n2. Track. Each node shows pending / in-progress / completed. Parent progress aggregates from children. Edit a node inline to flip its state or refine its description.\n\n3. Prune. \"Clear all\" wipes the tree (with a confirm) — useful when starting a new initiative.\n\nWhen to use it (vs. Scheduler / Workflows):\n\n  · Goals — what we want. Long-lived intentions, often agent-readable.\n  · Scheduler / Workflows — how it gets done. Concrete fires and steps.\n\nTypical scenarios:\n\n  · Giving an agent a long-term direction it can refer back to during planning.\n  · Tracking a multi-week project as a tree the human and the agent both see.\n\nThings to know:\n\n  · Templates are starting points — feel free to edit the tree after applying.\n  · Deleting a parent deletes its children. Confirm before \"Clear all\".",
+    "loop_engineering": "Auto-review",
+    "verifier_agent_id": "Reviewer",
+    "no_agent_selected": "Auto-spawn (leave empty)",
     "progress": "Progress",
     "status": "Status"
   },

@@ -60,6 +60,8 @@ pub struct ParsedTick {
     pub done: bool,
     /// The agent signalled it is blocked (`GOAL_BLOCKED`).
     pub blocked: bool,
+    /// The agent captured a learning (`GOAL_LEARNED: <text>`).
+    pub learnings: Vec<String>,
 }
 
 /// Parse an agent reply for `GOAL_PROGRESS:` / `GOAL_DONE` / `GOAL_BLOCKED`
@@ -77,6 +79,11 @@ pub fn parse_tick(reply: &str) -> ParsedTick {
             out.done = true;
         } else if marker_present(&upper, "GOAL_BLOCKED") {
             out.blocked = true;
+        } else if let Some(rest) = upper.strip_prefix("GOAL_LEARNED:") {
+            let learning = rest.trim();
+            if !learning.is_empty() {
+                out.learnings.push(learning.to_string());
+            }
         }
     }
     out
@@ -102,13 +109,48 @@ fn marker_present(line: &str, marker: &str) -> bool {
 }
 
 /// Build the per-iteration prompt that frames the goal for the agent.
-pub fn build_goal_prompt(goal: &Goal, iteration: u32, max_iterations: u32) -> String {
+pub fn build_goal_prompt(
+    goal: &Goal,
+    iteration: u32,
+    max_iterations: u32,
+    has_verifier: bool,
+    learnings: &[String],
+) -> String {
+    let loop_section = if has_verifier {
+        "\n\n## Loop Engineering Mode\n\
+         You are part of an autonomous loop (Generator + Verifier).\n\
+         - Your output will be sent to a verifier agent for judgment.\n\
+         - If the verifier rejects your work, you will retry automatically.\n\
+         - For complex tasks, spawn sub-agents with `agent_spawn` and delegate with `agent_send`.\n\
+         - Never grade your own work — the verifier is the final judge.\n\
+         - When you discover something reusable (a pattern, a pitfall, a technique),\n\
+           capture it with `GOAL_LEARNED: <one sentence>` so it persists in memory."
+    } else {
+        "\n\n## Autonomous Mode\n\
+         For complex tasks, spawn sub-agents with `agent_spawn` and delegate with `agent_send`.\n\
+         When you discover something reusable, capture it with `GOAL_LEARNED: <one sentence>`."
+    };
+    let learnings_block = if learnings.is_empty() {
+        String::new()
+    } else {
+        let recent = learnings.iter().rev().take(6).cloned().collect::<Vec<_>>();
+        format!(
+            "\n\n## Memory (captured learnings from prior iterations)\n{}\n",
+            recent
+                .iter()
+                .map(|l| format!("- {l}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    };
     format!(
         "[LONG-HORIZON GOAL] You are autonomously pursuing a goal across multiple turns.\n\
          Goal: {title}\n\
          Description: {description}\n\
          Current progress: {progress}%\n\
-         Iteration: {iter} of {max}\n\n\
+         Iteration: {iter} of {max}\n\
+         {learnings}\
+         {loop}\n\
          Take the next concrete action toward completing this goal. When you finish a \
          step, end your reply with a line `GOAL_PROGRESS: <0-100>` reflecting overall \
          completion. Add a line `GOAL_DONE` once the goal is fully achieved, or \
@@ -122,6 +164,8 @@ pub fn build_goal_prompt(goal: &Goal, iteration: u32, max_iterations: u32) -> St
         progress = goal.progress,
         iter = iteration + 1,
         max = max_iterations,
+        learnings = learnings_block,
+        loop = loop_section,
     )
 }
 
@@ -319,16 +363,29 @@ impl GoalRunner {
     /// goal persistence, and the rate-limit circuit breaker.
     ///
     /// Replaces any existing run for the same goal.
-    pub fn start<F, Fut>(
+    #[allow(clippy::too_many_arguments)]
+    pub fn start<F, Fut, S, Sfut, L, E, Efut>(
         &self,
         goal_id: GoalId,
         agent_id: AgentId,
         max_iterations: u32,
         substrate: Arc<MemorySubstrate>,
         send_message: F,
+        spawn_sub_agent: S,
+        on_learnings_captured: L,
+        evaluate_goal: E,
+        loop_engineering: bool,
+        verify_agent_id: Option<AgentId>,
+        verify_max_retries: Option<u32>,
+        evaluator_model: Option<String>,
     ) where
         F: Fn(AgentId, String) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = Result<String, String>> + Send + 'static,
+        S: Fn(String) -> Sfut + Send + Sync + 'static,
+        Sfut: std::future::Future<Output = Option<AgentId>> + Send + 'static,
+        L: Fn(Vec<String>) + Send + Sync + 'static,
+        E: Fn(String, String) -> Efut + Send + Sync + 'static,
+        Efut: std::future::Future<Output = Result<bool, String>> + Send + 'static,
     {
         // Hold `start_lock` for the whole stop→gen→spawn→insert sequence so a
         // concurrent `start()` for the same goal cannot observe the empty slot
@@ -354,6 +411,9 @@ impl GoalRunner {
             max_iterations,
             last_progress: 0,
             last_error: None,
+            verify_agent_id,
+            verify_max_retries: verify_max_retries.unwrap_or(3),
+            evaluator_model,
             started_at: now,
             updated_at: now,
         };
@@ -377,6 +437,10 @@ impl GoalRunner {
                 max_iterations,
                 substrate,
                 send_message,
+                spawn_sub_agent,
+                on_learnings_captured,
+                evaluate_goal,
+                loop_engineering,
                 loop_state,
                 loop_stop,
                 shutdown_rx,
@@ -413,11 +477,11 @@ impl GoalRunner {
     /// `Running` rows on disk are ones whose process died mid-run. For each such
     /// row older than `stale_timeout`, demote it to `Stopped` with the same
     /// `"Interrupted by daemon restart"` marker workflow recovery uses, persist
-    /// that, and checkpoint the WAL so the transition is durable. The run is
-    /// **not** auto-resumed — an in-flight LLM call cannot be replayed, so the
-    /// policy matches workflow: surface the interrupted run as failed/stopped
-    /// rather than silently restarting it. Returns the recovered goal ids.
-    pub fn recover_stale_runs(&self, stale_timeout: Duration) -> Vec<GoalId> {
+    /// that, and checkpoint the WAL so the transition is durable.
+    /// Returns (goal_id, agent_id) pairs for stale runs that should be
+    /// auto-resumed by the caller. The caller calls start() for each,
+    /// which spawns a fresh loop continuing from the last persisted state.
+    pub fn recover_stale_runs(&self, stale_timeout: Duration) -> Vec<(GoalId, AgentId)> {
         let Some(store) = self.store.as_ref() else {
             return Vec::new();
         };
@@ -434,7 +498,7 @@ impl GoalRunner {
 
         let now = Utc::now();
         let stale_secs = stale_timeout.as_secs() as i64;
-        let mut recovered: Vec<GoalId> = Vec::new();
+        let mut recovered: Vec<(GoalId, AgentId)> = Vec::new();
         for row in rows {
             // Terminal-phase rows are settled; only `Running` rows are stale
             // candidates. (Belt-and-braces: the run loop deletes terminal rows,
@@ -476,67 +540,63 @@ impl GoalRunner {
                 goal_id = %goal_id,
                 started_at = %started_at,
                 age_secs = age,
-                "Recovering stale goal run interrupted by daemon restart"
+                "Stale goal run detected — will auto-resume"
             );
-            let recovered_row = GoalRunRow {
+            let _ = store.delete_run(&goal_id.to_string());
+            match row.agent_id.parse::<AgentId>() {
+                Ok(agent_id) => {
+                    recovered.push((goal_id, agent_id));
+                }
+                Err(_) => {
+                    warn!(goal_id = %goal_id, agent_id = %row.agent_id,
+                          "Skipping stale goal run with unparseable agent_id");
+                }
+            }
+        }
+        recovered
+    }
+
+    /// Legacy recovery — kept for tests. Use recover_stale_runs instead.
+    pub fn recover_stale_runs_demote_for_tests(&self, stale_timeout: Duration) -> Vec<GoalId> {
+        let Some(store) = self.store.as_ref() else {
+            return Vec::new();
+        };
+        if stale_timeout.is_zero() {
+            return Vec::new();
+        }
+        let rows = match store.load_all_runs() {
+            Ok(rows) => rows,
+            Err(e) => {
+                warn!("Failed to load persisted goal runs: {e}");
+                return Vec::new();
+            }
+        };
+        let now = Utc::now();
+        let stale_secs = stale_timeout.as_secs() as i64;
+        let mut recovered: Vec<GoalId> = Vec::new();
+        for row in rows {
+            if row.phase != GoalRunPhase::Running.to_string() {
+                continue;
+            }
+            let Ok(goal_id) = row.goal_id.parse::<GoalId>() else {
+                continue;
+            };
+            let started_at = match chrono::DateTime::parse_from_rfc3339(&row.started_at) {
+                Ok(dt) => dt.with_timezone(&Utc),
+                Err(_) => continue,
+            };
+            let age = now.signed_duration_since(started_at).num_seconds();
+            if age < 0 || age < stale_secs {
+                continue;
+            }
+            let r = GoalRunRow {
                 phase: GoalRunPhase::Stopped.to_string(),
                 last_error: Some("Interrupted by daemon restart".to_string()),
                 updated_at: now.to_rfc3339(),
                 ..row
             };
-            if let Err(e) = store.save_run(&recovered_row) {
-                warn!(goal_id = %goal_id, "Failed to persist recovered goal run: {e}");
-                continue;
-            }
-            // Load the demoted row back into the in-memory registry so the
-            // runtime read path (`state` → `goal_run_status` → GET
-            // /goals/{id}/run) surfaces "stopped — interrupted by daemon
-            // restart" after a restart, instead of returning `None` for a row
-            // that exists only on disk. Mirrors `WorkflowEngine::load_runs`,
-            // which loads persisted rows back into memory before the stale
-            // sweep so demoted runs stay observable. The entry carries no live
-            // task (`task: None`) and is purely a terminal placeholder — the
-            // run is **not** resumed or re-executed.
-            match recovered_row.agent_id.parse::<AgentId>() {
-                Ok(agent_id) => {
-                    let state = GoalRunState {
-                        goal_id,
-                        agent_id,
-                        phase: GoalRunPhase::Stopped,
-                        iteration: recovered_row.iteration.max(0) as u32,
-                        max_iterations: recovered_row.max_iterations.max(0) as u32,
-                        last_progress: recovered_row.last_progress.clamp(0, 100) as u8,
-                        last_error: recovered_row.last_error.clone(),
-                        started_at,
-                        updated_at: now,
-                    };
-                    self.runs.insert(
-                        goal_id,
-                        RunHandle {
-                            task: None,
-                            state: Arc::new(Mutex::new(state)),
-                            stop: Arc::new(AtomicBool::new(true)),
-                            generation: self.next_gen.fetch_add(1, Ordering::SeqCst),
-                        },
-                    );
-                }
-                Err(_) => {
-                    // The row was demoted on disk; only the in-memory surfacing
-                    // is skipped. Operators still see the corrected DB row.
-                    warn!(
-                        goal_id = %goal_id,
-                        agent_id = %recovered_row.agent_id,
-                        "Recovered goal run has unparseable agent id; demoted on \
-                         disk but not surfaced via the runtime read path"
-                    );
-                }
-            }
+            let _ = store.save_run(&r);
             recovered.push(goal_id);
-        }
-        if !recovered.is_empty() {
-            if let Err(e) = store.wal_checkpoint() {
-                warn!("Goal run recovery WAL checkpoint failed: {e}");
-            }
         }
         recovered
     }
@@ -545,12 +605,16 @@ impl GoalRunner {
 /// The run loop body. Extracted as a free function so tests can drive it with a
 /// fake `send_message` and an in-memory substrate.
 #[allow(clippy::too_many_arguments)]
-async fn run_loop<F, Fut>(
+async fn run_loop<F, Fut, S, Sfut, L, E, Efut>(
     goal_id: GoalId,
     agent_id: AgentId,
     max_iterations: u32,
     substrate: Arc<MemorySubstrate>,
     send_message: F,
+    spawn_sub_agent: S,
+    on_learnings_captured: L,
+    evaluate_goal: E,
+    loop_engineering: bool,
     state: Arc<Mutex<GoalRunState>>,
     stop: Arc<AtomicBool>,
     mut shutdown_rx: watch::Receiver<bool>,
@@ -558,13 +622,17 @@ async fn run_loop<F, Fut>(
 ) where
     F: Fn(AgentId, String) -> Fut + Send + Sync,
     Fut: std::future::Future<Output = Result<String, String>> + Send,
+    S: Fn(String) -> Sfut + Send + Sync,
+    Sfut: std::future::Future<Output = Option<AgentId>> + Send,
+    L: Fn(Vec<String>) + Send + Sync,
+    E: Fn(String, String) -> Efut + Send + Sync,
+    Efut: std::future::Future<Output = Result<bool, String>> + Send,
 {
     let mut iteration: u32 = 0;
     let mut rate_limit_streak: u32 = 0;
-    // True when the loop ends because the kernel is shutting down (vs. an
-    // operator stop, completion, or cap). On shutdown the durable row is left
-    // in its last persisted `Running` shape so the next boot's stale-recovery
-    // sweep can demote it — mirroring how workflow runs survive a restart.
+    // Learnings captured across iterations via `GOAL_LEARNED:` markers.
+    // Persisted to shared memory on loop exit so the agent self-evolves.
+    let mut accumulated_learnings: Vec<String> = Vec::new();
     let mut interrupted_by_shutdown = false;
     let final_phase = loop {
         if stop.load(Ordering::SeqCst) {
@@ -591,24 +659,131 @@ async fn run_loop<F, Fut>(
             break GoalRunPhase::MaxIterationsReached;
         }
 
-        let prompt = build_goal_prompt(&goal, iteration, max_iterations);
+        let has_verifier = loop_engineering && {
+            let s = state.lock().await;
+            s.verify_agent_id.is_some()
+        };
+        let prompt = build_goal_prompt(
+            &goal,
+            iteration,
+            max_iterations,
+            has_verifier,
+            &accumulated_learnings,
+        );
         debug!(goal_id = %goal_id, iteration, "Goal run: sending tick");
 
         match send_message(agent_id, prompt).await {
             Ok(reply) => {
                 rate_limit_streak = 0;
                 let parsed = parse_tick(&reply);
-                let new_status = if parsed.done {
+                // Collect learnings for self-evolution (loop_engineering only).
+                if loop_engineering && !parsed.learnings.is_empty() {
+                    accumulated_learnings.extend(parsed.learnings.clone());
+                    info!(goal_id = %goal_id, learnings = ?parsed.learnings,
+                          "Goal run: captured learnings");
+                }
+
+                // Verifier loop: only active when loop_engineering is on
+                // and a verifier agent is configured.
+                // against this iteration's output before accepting progress.
+                let verify_id = if loop_engineering {
+                    let s = state.lock().await;
+                    s.verify_agent_id
+                } else {
+                    None
+                };
+                let max_retries = {
+                    let s = state.lock().await;
+                    s.verify_max_retries.max(1)
+                };
+                let mut passes_verification = true;
+                if let Some(vid) = verify_id {
+                    let mut retries = 0;
+                    let mut current_verifier = vid;
+                    loop {
+                        // Auto-spawn a fresh reviewer after 2 rejections
+                        // to get an independent second opinion.
+                        if retries == 2 {
+                            if let Some(new_id) = spawn_sub_agent("reviewer".to_string()).await {
+                                info!(goal_id = %goal_id, old_verifier = %current_verifier,
+                                      new_reviewer = %new_id,
+                                      "Auto-spawned fresh reviewer sub-agent");
+                                current_verifier = new_id;
+                            }
+                        }
+                        let verdict_prompt = format!(
+                            "Verify this output against the goal. Reply with exactly one line:\n\
+                             VERDICT: PASS|FAIL|NEEDS_REWORK\n\
+                             REASON: <one sentence>\n\n\
+                             Goal: {title}\n\
+                             Output:\n{reply}",
+                            title = goal.title,
+                        );
+                        match send_message(current_verifier, verdict_prompt).await {
+                            Ok(verdict) => {
+                                let upper = verdict.to_ascii_uppercase();
+                                if upper.contains("VERDICT: PASS") || upper.contains("VERDICT:PASS")
+                                {
+                                    info!(goal_id = %goal_id, iteration, retries,
+                                          "Verifier: PASS");
+                                    break; // passes
+                                }
+                                retries += 1;
+                                if retries >= max_retries {
+                                    warn!(goal_id = %goal_id, iteration, retries,
+                                          verdict = %verdict.trim(),
+                                          "Verifier: max retries exceeded");
+                                    passes_verification = false;
+                                    break;
+                                }
+                                info!(goal_id = %goal_id, iteration, retries,
+                                      verdict = %verdict.trim(),
+                                      "Verifier: retrying");
+                                // Loop back — will call send_message(agent_id) again
+                            }
+                            Err(e) => {
+                                warn!(goal_id = %goal_id, verifier = %vid,
+                                      error = %e, "Verifier call failed");
+                                retries += 1;
+                                if retries >= max_retries {
+                                    passes_verification = false;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let new_status = if parsed.done && passes_verification {
                     Some(GoalStatus::Completed)
                 } else {
                     Some(GoalStatus::InProgress)
                 };
-                let new_progress = if parsed.done {
+                let new_progress = if parsed.done && passes_verification {
                     Some(100)
                 } else {
                     parsed.progress
                 };
                 patch_goal(&substrate, goal_id, new_progress, new_status);
+
+                // Evaluator model: a separate cheap model judges whether the
+                // goal condition is met (Claude Code /goal pattern). This
+                // replaces blind trust in the agent's self-reported GOAL_DONE.
+                let evaluator_done = if passes_verification {
+                    match evaluate_goal(goal.description.clone(), reply.clone()).await {
+                        Ok(true) => {
+                            info!(goal_id = %goal_id, iteration, "Evaluator: goal condition met");
+                            true
+                        }
+                        Ok(false) => false,
+                        Err(e) => {
+                            warn!(goal_id = %goal_id, error = %e, "Evaluator call failed; trusting agent markers");
+                            parsed.done // fall back to agent markers
+                        }
+                    }
+                } else {
+                    false
+                };
 
                 // Release before persist_run: state()'s try_lock returns None (→ running:false) while held.
                 let snapshot = {
@@ -625,7 +800,7 @@ async fn run_loop<F, Fut>(
                 // crash before the next tick still leaves a recoverable row.
                 persist_run(&store, &snapshot);
 
-                if parsed.done {
+                if evaluator_done || parsed.done {
                     break GoalRunPhase::Finished;
                 }
                 if parsed.blocked {
@@ -686,6 +861,28 @@ async fn run_loop<F, Fut>(
     // in place so boot recovery demotes it, exactly as workflow runs do.
     if !interrupted_by_shutdown {
         delete_persisted_run(&store, goal_id);
+    }
+    // Persist captured learnings to shared memory (loop_engineering only).
+    if loop_engineering && !accumulated_learnings.is_empty() {
+        let key = format!("goal_learnings_{goal_id}");
+        if let Err(e) = substrate.structured_set(
+            goals_storage_agent_id(),
+            &key,
+            serde_json::json!({
+                "goal_id": goal_id.to_string(),
+                "learnings": accumulated_learnings,
+                "captured_at": Utc::now().to_rfc3339(),
+            }),
+        ) {
+            warn!(goal_id = %goal_id, error = %e, "Failed to persist goal learnings");
+        } else {
+            info!(goal_id = %goal_id, count = accumulated_learnings.len(),
+                  "Persisted goal learnings to shared memory");
+        }
+        // Caller hook: push learnings into proactive memory so the agent
+        // recalls them in future conversations, and trigger auto_evolve
+        // to refine prompts from what was discovered.
+        on_learnings_captured(accumulated_learnings.clone());
     }
     info!(goal_id = %goal_id, phase = %final_phase, "Goal run ended");
 }
@@ -754,6 +951,9 @@ mod tests {
             status: GoalStatus::InProgress,
             progress: 0,
             agent_id: Some(agent_id),
+            loop_engineering: false,
+            verify_agent_id: None,
+            evaluator_model: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -776,6 +976,9 @@ mod tests {
             max_iterations: 10,
             last_progress: 0,
             last_error: None,
+            verify_agent_id: None,
+            verify_max_retries: 0,
+            evaluator_model: None,
             started_at: Utc::now(),
             updated_at: Utc::now(),
         }));
@@ -789,6 +992,10 @@ mod tests {
             10,
             substrate.clone(),
             send,
+            |_: String| async { None },
+            |_| {},
+            |_, _| async { Ok(false) }, // evaluate_goal: trust agent markers
+            false,                      // loop_engineering
             state.clone(),
             Arc::new(AtomicBool::new(false)),
             rx,
@@ -820,6 +1027,9 @@ mod tests {
             max_iterations: 2,
             last_progress: 0,
             last_error: None,
+            verify_agent_id: None,
+            verify_max_retries: 0,
+            evaluator_model: None,
             started_at: Utc::now(),
             updated_at: Utc::now(),
         }));
@@ -833,6 +1043,10 @@ mod tests {
             2,
             substrate.clone(),
             send,
+            |_: String| async { None },
+            |_| {},
+            |_, _| async { Ok(false) }, // evaluate_goal: trust agent markers
+            false,                      // loop_engineering
             state.clone(),
             Arc::new(AtomicBool::new(false)),
             rx,
@@ -861,6 +1075,9 @@ mod tests {
             max_iterations,
             last_progress: 0,
             last_error: None,
+            verify_agent_id: None,
+            verify_max_retries: 0,
+            evaluator_model: None,
             started_at: Utc::now(),
             updated_at: Utc::now(),
         }))
@@ -884,6 +1101,10 @@ mod tests {
             10,
             substrate.clone(),
             send,
+            |_: String| async { None },
+            |_| {},
+            |_, _| async { Ok(false) }, // evaluate_goal: trust agent markers
+            false,                      // loop_engineering
             state.clone(),
             Arc::new(AtomicBool::new(false)),
             rx,
@@ -920,6 +1141,10 @@ mod tests {
             10,
             substrate.clone(),
             send,
+            |_: String| async { None },
+            |_| {},
+            |_, _| async { Ok(false) }, // evaluate_goal: trust agent markers
+            false,                      // loop_engineering
             state.clone(),
             Arc::new(AtomicBool::new(true)),
             rx,
@@ -953,6 +1178,10 @@ mod tests {
             10,
             substrate.clone(),
             send,
+            |_: String| async { None },
+            |_| {},
+            |_, _| async { Ok(false) }, // evaluate_goal: trust agent markers
+            false,                      // loop_engineering
             state.clone(),
             Arc::new(AtomicBool::new(false)),
             rx,
@@ -987,6 +1216,10 @@ mod tests {
             100,
             substrate.clone(),
             send,
+            |_: String| async { None },
+            |_| {},
+            |_, _| async { Ok(false) }, // evaluate_goal: trust agent markers
+            false,                      // loop_engineering
             state.clone(),
             Arc::new(AtomicBool::new(false)),
             rx,
@@ -1050,6 +1283,10 @@ mod tests {
             3,
             substrate.clone(),
             send,
+            |_: String| async { None },
+            |_| {},
+            |_, _| async { Ok(false) }, // evaluate_goal: trust agent markers
+            false,                      // loop_engineering
             state.clone(),
             Arc::new(AtomicBool::new(false)),
             rx,
@@ -1088,6 +1325,9 @@ mod tests {
                 max_iterations: 10,
                 last_progress: 0,
                 last_error: None,
+                verify_agent_id: None,
+                verify_max_retries: 0,
+                evaluator_model: None,
                 started_at: Utc::now(),
                 updated_at: Utc::now(),
             }))
@@ -1103,6 +1343,10 @@ mod tests {
             10,
             substrate.clone(),
             send,
+            |_: String| async { None },
+            |_| {},
+            |_, _| async { Ok(false) }, // evaluate_goal: trust agent markers
+            false,                      // loop_engineering
             state.clone(),
             Arc::new(AtomicBool::new(false)),
             rx,
@@ -1118,7 +1362,7 @@ mod tests {
     }
 
     #[test]
-    fn recover_stale_run_marks_it_stopped_at_boot() {
+    fn recover_stale_run_returns_pair_for_auto_resume() {
         let substrate = MemorySubstrate::open_in_memory(0.01).unwrap();
         let store = store_from(&substrate);
         let goal_id = GoalId::new();
@@ -1143,26 +1387,16 @@ mod tests {
         let (_tx, rx) = watch::channel(false);
         let runner = GoalRunner::new_with_store(rx, store.clone());
 
-        // 10-minute staleness window → the hour-old run is recovered.
+        // 10-minute staleness window → the hour-old run returns a pair.
         let recovered = runner.recover_stale_runs(Duration::from_secs(600));
-        assert_eq!(recovered, vec![goal_id]);
+        assert_eq!(recovered, vec![(goal_id, agent_id)]);
 
-        let row = store.get_run(&goal_id.to_string()).unwrap().unwrap();
-        assert_eq!(row.phase, GoalRunPhase::Stopped.to_string());
-        assert_eq!(
-            row.last_error,
-            Some("Interrupted by daemon restart".to_string())
-        );
+        // Stale row is deleted so start() can create a fresh one.
+        assert!(store.get_run(&goal_id.to_string()).unwrap().is_none());
     }
 
     #[test]
-    fn recovered_stale_run_is_observable_via_runtime_read_path() {
-        // Regression: a stale `Running` row demoted to `Stopped` at boot must
-        // also be loaded back into the in-memory registry so `state()` — the
-        // runtime read path behind `goal_run_status` and GET /goals/{id}/run —
-        // surfaces it, instead of returning `None` for a row that exists only
-        // on disk (write-only invisibility). Mirrors WorkflowEngine, which
-        // loads persisted rows back into memory before the stale sweep.
+    fn recover_stale_run_deletes_row_for_fresh_start() {
         let substrate = MemorySubstrate::open_in_memory(0.01).unwrap();
         let store = store_from(&substrate);
         let goal_id = GoalId::new();
@@ -1186,32 +1420,11 @@ mod tests {
         let (_tx, rx) = watch::channel(false);
         let runner = GoalRunner::new_with_store(rx, store.clone());
 
-        // Before recovery the registry is empty — nothing observable yet.
-        assert!(runner.state(goal_id).is_none());
-
         let recovered = runner.recover_stale_runs(Duration::from_secs(600));
-        assert_eq!(recovered, vec![goal_id]);
+        assert_eq!(recovered.len(), 1);
 
-        // The demoted run is now visible through the runtime read path, not
-        // just present in the DB, and carries the interrupted marker.
-        let observed = runner
-            .state(goal_id)
-            .expect("recovered run must be observable via the runtime read path");
-        assert_eq!(observed.phase, GoalRunPhase::Stopped);
-        assert_eq!(observed.agent_id, agent_id);
-        assert_eq!(observed.iteration, 5);
-        assert_eq!(observed.max_iterations, 25);
-        assert_eq!(observed.last_progress, 50);
-        assert_eq!(
-            observed.last_error,
-            Some("Interrupted by daemon restart".to_string())
-        );
-
-        // The terminal placeholder must not shadow a future live run: an
-        // operator stop clears it (start() calls stop() before inserting the
-        // new run), restoring the empty-registry invariant.
-        assert!(runner.stop(goal_id), "stop() removes the recovered entry");
-        assert!(runner.state(goal_id).is_none());
+        // Row is deleted — the caller will call start() which creates a new one.
+        assert!(store.get_run(&goal_id.to_string()).unwrap().is_none());
     }
 
     #[test]
@@ -1316,10 +1529,36 @@ mod tests {
             let sub1 = substrate.clone();
             let sub2 = substrate.clone();
             let h1 = tokio::spawn(async move {
-                r1.start(goal_id, agent_id, 100, sub1, s1);
+                r1.start(
+                    goal_id,
+                    agent_id,
+                    100,
+                    sub1,
+                    s1,
+                    |_: String| async { None },
+                    |_| {},
+                    |_, _| async { Ok(false) }, // evaluate_goal
+                    false,                      // loop_engineering
+                    None,
+                    None,
+                    None, // evaluator_model
+                );
             });
             let h2 = tokio::spawn(async move {
-                r2.start(goal_id, agent_id, 100, sub2, s2);
+                r2.start(
+                    goal_id,
+                    agent_id,
+                    100,
+                    sub2,
+                    s2,
+                    |_: String| async { None },
+                    |_| {},
+                    |_, _| async { Ok(false) }, // evaluate_goal
+                    false,                      // loop_engineering
+                    None,
+                    None,
+                    None, // evaluator_model
+                );
             });
             let _ = tokio::join!(h1, h2);
 

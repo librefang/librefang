@@ -99,3 +99,4 @@ result
 
 # graphify knowledge-graph output (local-only, regenerable).
 graphify-out/
+.todo_pak

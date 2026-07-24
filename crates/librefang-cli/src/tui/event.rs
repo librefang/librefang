@@ -16,6 +16,7 @@ use super::screens::{
     audit::AuditEntry,
     dashboard::AuditRow,
     extensions::{ExtensionHealthInfo, ExtensionInfo},
+    goals::GoalInfo,
     hands::{HandInfo, HandInstanceInfo},
     logs::LogEntry,
     memory::{AgentEntry, KvPair},
@@ -168,6 +169,16 @@ pub enum AppEvent {
     PeersLoaded(Vec<PeerInfo>),
     /// Log entries loaded.
     LogsLoaded(Vec<LogEntry>),
+    /// Goals loaded.
+    GoalsLoaded(Vec<GoalInfo>),
+    /// Goal created.
+    GoalCreated(String),
+    /// Goal deleted.
+    GoalDeleted(String),
+    /// Goal run started.
+    GoalRunStarted(String),
+    /// Goal run stopped.
+    GoalRunStopped(String),
     /// Hand definitions loaded (marketplace).
     HandsLoaded(Vec<HandInfo>),
     /// Active hand instances loaded.
@@ -2233,6 +2244,200 @@ pub fn spawn_fetch_logs(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
         }
         BackendRef::InProcess(_) => {
             let _ = tx.send(AppEvent::LogsLoaded(Vec::new()));
+        }
+    });
+}
+
+// ── Goals events ────────────────────────────────────────────────────────────
+
+/// Fetch goals list.
+pub fn spawn_fetch_goals(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            if let Ok(resp) = client.get(format!("{base_url}/api/goals")).send() {
+                if let Ok(body) = resp.json::<serde_json::Value>() {
+                    let goals: Vec<GoalInfo> = body
+                        .as_array()
+                        .map(|arr| {
+                            arr.iter()
+                                .map(|g| GoalInfo {
+                                    id: g["id"].as_str().unwrap_or("").to_string(),
+                                    title: g["title"].as_str().unwrap_or("").to_string(),
+                                    description: g["description"]
+                                        .as_str()
+                                        .unwrap_or("")
+                                        .to_string(),
+                                    status: g["status"].as_str().unwrap_or("").to_string(),
+                                    progress: g["progress"].as_u64().unwrap_or(0) as u8,
+                                    agent_id: g["agent_id"].as_str().map(|s| s.to_string()),
+                                    loop_engineering: g["loop_engineering"]
+                                        .as_bool()
+                                        .unwrap_or(false),
+                                    verify_agent_id: g["verify_agent_id"]
+                                        .as_str()
+                                        .map(|s| s.to_string()),
+                                    evaluator_model: g["evaluator_model"]
+                                        .as_str()
+                                        .map(|s| s.to_string()),
+                                    run_phase: g["run_phase"].as_str().map(|s| s.to_string()),
+                                    run_iteration: g["run_iteration"].as_u64().map(|v| v as u32),
+                                    run_max_iterations: g["run_max_iterations"]
+                                        .as_u64()
+                                        .map(|v| v as u32),
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let _ = tx.send(AppEvent::GoalsLoaded(goals));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::GoalsLoaded(Vec::new()));
+        }
+    });
+}
+
+/// Create a goal.
+pub fn spawn_create_goal(
+    backend: BackendRef,
+    title: String,
+    description: String,
+    agent_id: String,
+    loop_engineering: bool,
+    verify_agent_id: String,
+    evaluator_model: String,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            let mut body = serde_json::json!({
+                "title": title,
+                "description": description,
+                "agent_id": agent_id,
+                "loop_engineering": loop_engineering,
+            });
+            if !verify_agent_id.is_empty() {
+                body["verify_agent_id"] = serde_json::json!(verify_agent_id);
+            }
+            if !evaluator_model.is_empty() {
+                body["evaluator_model"] = serde_json::json!(evaluator_model);
+            }
+            match client
+                .post(format!("{base_url}/api/goals"))
+                .json(&body)
+                .send()
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let resp_body: serde_json::Value = resp.json().unwrap_or_default();
+                    let id = resp_body["id"]
+                        .as_str()
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "created".to_string());
+                    let _ = tx.send(AppEvent::GoalCreated(id));
+                }
+                Ok(resp) => {
+                    let err_body: serde_json::Value = resp.json().unwrap_or_default();
+                    let msg = err_body["error"]
+                        .as_str()
+                        .unwrap_or("Failed to create goal")
+                        .to_string();
+                    let _ = tx.send(AppEvent::FetchError(msg));
+                }
+                Err(e) => {
+                    let _ = tx.send(AppEvent::FetchError(format!("Create goal: {e}")));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(
+                "Goal management not available in-process".to_string(),
+            ));
+        }
+    });
+}
+
+/// Delete a goal.
+pub fn spawn_delete_goal(backend: BackendRef, goal_id: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            match client
+                .delete(format!("{base_url}/api/goals/{goal_id}"))
+                .send()
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let _ = tx.send(AppEvent::GoalDeleted(goal_id));
+                }
+                _ => {
+                    let _ = tx.send(AppEvent::FetchError("Failed to delete goal".to_string()));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(
+                "Goal management not available in-process".to_string(),
+            ));
+        }
+    });
+}
+
+/// Start a goal run.
+pub fn spawn_start_goal_run(backend: BackendRef, goal_id: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            match client
+                .post(format!("{base_url}/api/goals/{goal_id}/start"))
+                .send()
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let _ = tx.send(AppEvent::GoalRunStarted(goal_id));
+                }
+                Ok(resp) => {
+                    let err_body: serde_json::Value = resp.json().unwrap_or_default();
+                    let msg = err_body["error"]
+                        .as_str()
+                        .unwrap_or("Failed to start goal run")
+                        .to_string();
+                    let _ = tx.send(AppEvent::FetchError(msg));
+                }
+                Err(e) => {
+                    let _ = tx.send(AppEvent::FetchError(format!("Start goal run: {e}")));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(
+                "Goal management not available in-process".to_string(),
+            ));
+        }
+    });
+}
+
+/// Stop a goal run.
+pub fn spawn_stop_goal_run(backend: BackendRef, goal_id: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            match client
+                .post(format!("{base_url}/api/goals/{goal_id}/stop"))
+                .send()
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let _ = tx.send(AppEvent::GoalRunStopped(goal_id));
+                }
+                _ => {
+                    let _ = tx.send(AppEvent::FetchError("Failed to stop goal run".to_string()));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(
+                "Goal management not available in-process".to_string(),
+            ));
         }
     });
 }

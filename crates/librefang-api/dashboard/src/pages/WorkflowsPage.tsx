@@ -26,7 +26,7 @@ import {
   Layers, Trash2, FilePlus, Play, Search,
   Calendar, FileText, Activity, Bot, Loader2, Clock, ChevronRight,
   ChevronDown, FlaskConical, AlertCircle, CheckCircle2, SkipForward,
-  GitBranch, Eye, SearchX, RotateCcw,
+  GitBranch, Eye, SearchX, XCircle, Zap,
 } from "lucide-react";
 import {
   useWorkflows,
@@ -37,7 +37,6 @@ import {
 } from "../lib/queries/workflows";
 import {
   useRunWorkflow,
-  useRerunWorkflowRun,
   useDryRunWorkflow,
   useDeleteWorkflow,
   useInstantiateTemplate,
@@ -203,12 +202,6 @@ function StepResultContent({ step }: { step: WorkflowStepResult }) {
   const imageRefs = useMemo(() => extractImageRefs(step.output), [step.output]);
   return (
     <div className="px-3 pb-3 space-y-2 border-t border-border-subtle">
-      {step.error && (
-        <div className="flex items-start gap-1.5 p-2 mt-2 rounded-lg bg-error/5 border border-error/20">
-          <AlertCircle className="w-3 h-3 text-error shrink-0 mt-0.5" />
-          <p className="text-[10px] text-error whitespace-pre-wrap">{step.error}</p>
-        </div>
-      )}
       <div>
         <p className="text-[9px] font-bold text-text-dim/50 mt-2">{t("workflows.prompt_sent", { defaultValue: "Prompt sent:" })}</p>
         <pre className="text-[10px] text-text whitespace-pre-wrap max-h-24 overflow-y-auto bg-surface rounded-lg p-2 mt-1">
@@ -239,45 +232,29 @@ function StepAccordion<T>({
   getKey,
   renderHeader,
   renderContent,
+  autoExpandAll = false,
 }: {
   steps: T[];
   getKey: (step: T, index: number) => string | number;
   renderHeader: (step: T, index: number, isExpanded: boolean, toggle: () => void) => React.ReactNode;
   renderContent: (step: T, index: number) => React.ReactNode;
+  autoExpandAll?: boolean;
 }) {
   const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
 
   return (
     <>
-      {steps.map((step, i) => (
+      {steps.map((step, i) => {
+        const isExpanded = autoExpandAll || expandedIdx === i;
+        return (
         <div key={getKey(step, i)} className="rounded-lg border border-border-subtle bg-main overflow-hidden">
-          {renderHeader(step, i, expandedIdx === i, () => setExpandedIdx(expandedIdx === i ? null : i))}
-          {expandedIdx === i && renderContent(step, i)}
+          {renderHeader(step, i, isExpanded, () => setExpandedIdx(expandedIdx === i ? null : i))}
+          {isExpanded && renderContent(step, i)}
         </div>
-      ))}
+      );
+      })}
     </>
   );
-}
-
-/**
- * Render a workflow run's stored `input` as a compact one-line preview for the
- * run-history list. A JSON object becomes `k: v, k: v`; anything else (raw
- * string, array, number) is shown verbatim. The caller truncates via CSS.
- */
-function formatRunParamsPreview(input?: string): string {
-  const trimmed = input?.trim();
-  if (!trimmed) return "";
-  try {
-    const parsed: unknown = JSON.parse(trimmed);
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      return Object.entries(parsed as Record<string, unknown>)
-        .map(([k, v]) => `${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`)
-        .join(", ");
-    }
-  } catch {
-    // Not JSON — fall through and show the raw input string.
-  }
-  return trimmed;
 }
 
 // ---------------------------------------------------------------------------
@@ -385,11 +362,41 @@ export function WorkflowsPage() {
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [dryRunResult, setDryRunResult] = useState<DryRunResult | null>(null);
   const [paramValues, setParamValues] = useState<Record<string, string>>({});
+  // Per-step expansion in timeline (single index, not per-step useState).
+  const [expandedStepIdx, setExpandedStepIdx] = useState<number | null>(null);
+  // Log console auto-scroll ref.
+  const logConsoleRef = useRef<HTMLPreElement>(null);
+  // Track whether the form was manually edited so auto-populate doesn't overwrite.
+  const paramTouchedRef = useRef(false);
 
   const workflowsQuery = useWorkflows();
   const workflowDetailQuery = useWorkflowDetail(selectedWorkflowId);
   const runsQuery = useWorkflowRuns(selectedWorkflowId);
-  const runDetailQuery = useWorkflowRunDetail(selectedRunId ?? "");
+
+  // Poll run detail every 3s while the selected run is executing.
+  // Start polling immediately when a run is selected; disable once we
+  // see a terminal state (completed/failed/cancelled/paused).
+  const [runDetailPollMs, setRunDetailPollMs] = useState<number | false>(false);
+  const runDetailQuery = useWorkflowRunDetail(selectedRunId ?? "", {
+    refetchInterval: runDetailPollMs,
+    enabled: !!selectedRunId && selectedRunId !== "",
+  });
+  // Start polling when a run is selected, stop on terminal state.
+  useEffect(() => {
+    if (!selectedRunId || selectedRunId === "") {
+      setRunDetailPollMs(false);
+      return;
+    }
+    // Begin polling immediately while we wait for the first fetch.
+    setRunDetailPollMs(3000);
+  }, [selectedRunId]);
+  // Once we know the state, stop polling for terminal runs.
+  useEffect(() => {
+    const state = runDetailQuery.data?.state;
+    if (state && state !== "running" && state !== "pending") {
+      setRunDetailPollMs(false);
+    }
+  }, [runDetailQuery.data?.state]);
 
   // Run history is paginated to the most recent 10 in the UI, but the
   // pending-operator-reviews banner can select a paused run from anywhere
@@ -420,7 +427,6 @@ export function WorkflowsPage() {
   }, [runsQuery.data, selectedRunId]);
 
   const runMutation = useRunWorkflow();
-  const rerunMutation = useRerunWorkflowRun();
   const dryRunMutation = useDryRunWorkflow();
   const deleteMutation = useDeleteWorkflow();
   const instantiateMutation = useInstantiateTemplate();
@@ -489,6 +495,7 @@ export function WorkflowsPage() {
     detectedParams,
     workflowDetailQuery.isFetching,
     workflowDetailQuery.isLoading,
+    runsQuery.data,
   ]);
 
   // First-time visitors with no workflows configured land on the
@@ -527,6 +534,60 @@ export function WorkflowsPage() {
       setSelectedWorkflowId(workflows[0]?.id ?? "");
     }
   }, [allWorkflows, workflows, selectedWorkflowId, workflowsQuery.isSuccess]);
+
+  // Auto-scroll log console to bottom when new step results arrive.
+  useEffect(() => {
+    if (logConsoleRef.current) {
+      logConsoleRef.current.scrollTop = logConsoleRef.current.scrollHeight;
+    }
+  }, [runDetailQuery.data?.step_results]);
+
+  // Auto-populate params from the most recent run's input on page load.
+  // Only fills when the form is untouched (paramTouchedRef = false).
+  // Tracks per-workflow so switching workflows re-populates from that workflow's history.
+  const autoPopulatedForRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!selectedWorkflowId) return;
+    if (!runsQuery.data || runsQuery.data.length === 0) return;
+    if (paramTouchedRef.current) return;
+    // Re-populate when switching workflows even if we already populated a different one.
+    if (autoPopulatedForRef.current === selectedWorkflowId) return;
+    // Wait for detail data so detectedParams is available.
+    if (workflowDetailQuery.isFetching || workflowDetailQuery.isLoading) return;
+    // Find the most recent run that has input data.
+    const lastRunWithInput = runsQuery.data.find((r) => r.input && r.input.trim());
+    if (!lastRunWithInput?.input) return;
+    try {
+      const parsed = JSON.parse(lastRunWithInput.input);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        const values: Record<string, string> = {};
+        let hasKnownParam = false;
+        for (const p of detectedParams) {
+          if (parsed[p.name] !== undefined) {
+            values[p.name] = String(parsed[p.name]);
+            hasKnownParam = true;
+          }
+        }
+        if (hasKnownParam) {
+          setParamValues(values);
+          if (typeof parsed.input === "string") setRunInput(parsed.input);
+          autoPopulatedForRef.current = selectedWorkflowId;
+        } else {
+          // JSON object but no recognised param keys — treat input key as free-text if present.
+          if (typeof parsed.input === "string") setRunInput(parsed.input);
+          autoPopulatedForRef.current = selectedWorkflowId;
+        }
+      } else {
+        // Not a JSON object — treat as plain text input.
+        setRunInput(lastRunWithInput.input);
+        autoPopulatedForRef.current = selectedWorkflowId;
+      }
+    } catch {
+      // Not JSON — treat as plain text input.
+      setRunInput(lastRunWithInput.input);
+      autoPopulatedForRef.current = selectedWorkflowId;
+    }
+  }, [selectedWorkflowId, runsQuery.data, detectedParams, workflowDetailQuery.isFetching, workflowDetailQuery.isLoading]);
 
   // Build the effective input for a run.
   //
@@ -567,25 +628,6 @@ export function WorkflowsPage() {
     }
   };
 
-  const handleRerun = async (runId: string) => {
-    try {
-      await rerunMutation.mutateAsync({ runId, workflowId: selectedWorkflowId });
-      addToast(
-        t("workflows.rerun_started", {
-          defaultValue: "Re-run started with the same parameters",
-        }),
-        "success",
-      );
-    } catch (err) {
-      addToast(
-        err instanceof Error
-          ? err.message
-          : t("workflows.rerun_failed", { defaultValue: "Re-run failed" }),
-        "error",
-      );
-    }
-  };
-
   const handleDryRun = async () => {
     if (!selectedWorkflowId) return;
     setDryRunResult(null);
@@ -596,6 +638,29 @@ export function WorkflowsPage() {
     } catch {
       // Error already surfaced via dryRunMutation.error panel at line 465.
     }
+  };
+
+  // Re-run a previous workflow run with its original params pre-filled.
+  const handleRerun = (runInputStr?: string) => {
+    if (!runInputStr) return;
+    paramTouchedRef.current = false; // allow auto-populate to act
+    try {
+      const parsed = JSON.parse(runInputStr);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        const values: Record<string, string> = {};
+        for (const p of detectedParams) {
+          if (parsed[p.name] !== undefined) values[p.name] = String(parsed[p.name]);
+        }
+        setParamValues(values);
+        if (typeof parsed.input === "string") setRunInput(parsed.input);
+      }
+    } catch {
+      // Plain text input.
+      setRunInput(runInputStr);
+      setParamValues({});
+    }
+    // Scroll to the Run button.
+    document.getElementById("workflow-run-section")?.scrollIntoView({ behavior: "smooth" });
   };
 
 
@@ -718,9 +783,7 @@ export function WorkflowsPage() {
     <button
       className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-surface transition-colors"
       onClick={toggle}>
-      {step.error
-        ? <AlertCircle className="w-3 h-3 text-error shrink-0" />
-        : <CheckCircle2 className="w-3 h-3 text-success shrink-0" />}
+      <CheckCircle2 className="w-3 h-3 text-success shrink-0" />
       <span className="text-[10px] font-bold truncate flex-1">{step.step_name}</span>
       <span className="text-[9px] text-text-dim/50 shrink-0">{step.duration_ms}ms</span>
       <ChevronDown className={`w-3 h-3 text-text-dim/30 shrink-0 transition-transform ${isExpanded ? "rotate-180" : ""}`} />
@@ -958,9 +1021,9 @@ export function WorkflowsPage() {
 
       {/* Main Content Area */}
       {hasWorkflows ? (
-        <div className="grid gap-6 lg:grid-cols-[1fr_300px] xl:grid-cols-[1fr_340px]">
+        <div className="grid gap-6 lg:grid-cols-[1fr_300px] xl:grid-cols-[1fr_340px]" style={{ minHeight: 0 }}>
           {/* Workflow List */}
-          <div className="space-y-1.5">
+          <div className="space-y-1.5 max-h-[calc(100vh-12rem)] overflow-y-auto">
             <h2 className="text-[10px] font-bold uppercase tracking-widest text-text-dim/50 mb-1.5 flex items-center gap-2">
               <span>{t("workflows.all_workflows")}</span>
               <span className="font-mono text-text-dim/40">{workflows.length}</span>
@@ -1072,14 +1135,14 @@ export function WorkflowsPage() {
 
           {/* Right Panel: shown when a workflow is selected */}
           {selectedWorkflowId && (
-            <div className="space-y-4">
-              <Card padding="lg" className="sticky top-4 space-y-3">
+            <div className="space-y-4 max-h-[calc(100vh-8rem)] overflow-y-auto pr-1 sticky top-4 self-start">
+              <Card id="workflow-run-section" padding="lg" className="space-y-3">
                 <h3 className="text-xs font-bold uppercase tracking-widest text-text-dim/50">{t("workflows.run_workflow")}</h3>
                 {detectedParams.length > 0 && (
                   <WorkflowParamFields
                     params={detectedParams}
                     values={paramValues}
-                    onChange={setParamValues}
+                    onChange={(v) => { paramTouchedRef.current = true; setParamValues(v); }}
                   />
                 )}
                 <textarea value={runInput} onChange={e => setRunInput(e.target.value)}
@@ -1237,12 +1300,25 @@ export function WorkflowsPage() {
                         selectedRunId === runId &&
                         bannerSelectedRunOutsideFirstPage &&
                         runId === bannerSelectedRunOutsideFirstPage;
-                      const paramsPreview = formatRunParamsPreview(run.input);
+                      // Parse input for display — extract key=value pairs if JSON.
+                      const inputPreview = (() => {
+                        if (!run.input) return null;
+                        try {
+                          const parsed = JSON.parse(run.input);
+                          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+                            const entries = Object.entries(parsed).filter(([k]) => k !== "input");
+                            if (entries.length === 0) return typeof parsed.input === "string" ? parsed.input.slice(0, 60) : null;
+                            return entries.map(([k, v]) => `${k}=${String(v).slice(0, 20)}`).join(", ").slice(0, 60);
+                          }
+                          return typeof run.input === "string" ? run.input.slice(0, 60) : null;
+                        } catch {
+                          return run.input.slice(0, 60);
+                        }
+                      })();
                       return (
                         <div key={runId}>
-                          <div className="flex items-stretch gap-1">
                           <button
-                            className={`flex-1 min-w-0 flex items-center gap-3 p-2.5 rounded-xl border text-left transition-colors ${
+                            className={`w-full flex items-center gap-3 p-2.5 rounded-xl border text-left transition-colors ${
                               isSelected
                                 ? "border-brand bg-brand/5"
                                 : "border-border-subtle bg-main hover:bg-surface"
@@ -1259,19 +1335,10 @@ export function WorkflowsPage() {
                             <div className="flex-1 min-w-0">
                               <p className="text-[10px] font-bold truncate">{run.workflow_name}</p>
                               <p className="text-[9px] text-text-dim/50">{formatDate(run.started_at)}</p>
-                              {/* Parameters the run was launched with, so the
-                                  history shows WHAT was passed without opening
-                                  the detail panel (#6292). */}
-                              {paramsPreview && (
-                                <p className="text-[9px] text-text-dim/70 truncate" title={run.input}>
-                                  <span className="text-text-dim/40">{t("workflows.parameters", { defaultValue: "Parameters" })}: </span>
-                                  {paramsPreview}
+                              {inputPreview && (
+                                <p className="text-[8px] text-text-dim/40 truncate mt-0.5" title={run.input}>
+                                  {inputPreview}
                                 </p>
-                              )}
-                              {/* Failure reason, surfaced inline so the list
-                                  shows WHY a run failed (#6292). */}
-                              {state === "failed" && run.error && (
-                                <p className="text-[9px] text-error/80 truncate" title={run.error}>{run.error}</p>
                               )}
                             </div>
                             {/* "Selected from banner" pill — surfaces that
@@ -1284,6 +1351,17 @@ export function WorkflowsPage() {
                                 {t("workflows.from_review_banner", { defaultValue: "from review banner" })}
                               </span>
                             )}
+                            {/* Re-run button */}
+                            <button
+                              className="p-1 rounded-lg hover:bg-surface text-text-dim/40 hover:text-brand transition-colors shrink-0"
+                              title={t("workflows.rerun_hint", { defaultValue: "Re-run with these parameters" })}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleRerun(run.input);
+                              }}
+                            >
+                              <Play className="w-3 h-3" />
+                            </button>
                             <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded-full shrink-0 ${
                               state === "completed" ? "bg-success/10 text-success" :
                               state === "failed" ? "bg-error/10 text-error" :
@@ -1291,49 +1369,207 @@ export function WorkflowsPage() {
                               "bg-main text-text-dim"
                             }`}>{state ?? "unknown"}</span>
                           </button>
-                          {/* Re-run with the same parameters (#6292). A
-                              sibling of the row button, never nested inside
-                              it, so it stays a valid standalone control. */}
-                          {runId && (
-                            <button
-                              type="button"
-                              title={t("workflows.rerun", { defaultValue: "Re-run with same parameters" })}
-                              aria-label={t("workflows.rerun", { defaultValue: "Re-run with same parameters" })}
-                              disabled={rerunMutation.isPending}
-                              onClick={() => void handleRerun(runId)}
-                              className="shrink-0 px-2.5 flex items-center justify-center rounded-xl border border-border-subtle bg-main text-text-dim hover:bg-surface hover:text-text disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
-                              <RotateCcw className={`w-3.5 h-3.5 ${rerunMutation.isPending && rerunMutation.variables?.runId === runId ? "animate-spin" : ""}`} />
-                            </button>
-                          )}
-                          </div>
-                          {/* Inline run detail */}
-                          {isSelected && runDetailQuery.data && (
-                            <div className="ml-5 mt-1 space-y-1.5">
-                              {runDetailQuery.data.error && (
-                                <div className="flex items-start gap-1.5 p-2 rounded-lg bg-error/5 border border-error/20">
-                                  <AlertCircle className="w-3 h-3 text-error shrink-0 mt-0.5" />
-                                  <p className="text-[10px] text-error">{runDetailQuery.data.error}</p>
+                          {/* Inline run detail — execution timeline */}
+                          {isSelected && runDetailQuery.data && (() => {
+                            const rd = runDetailQuery.data;
+                            const isActive = rd.state === "running" || rd.state === "pending";
+                            const allSteps = rd.step_results;
+                            const totalSteps = rd.total_steps || allSteps.length;
+                            const curIdx = rd.current_step_index;
+                            // Total run duration
+                            const startedMs = rd.started_at ? new Date(rd.started_at).getTime() : 0;
+                            const endedMs = rd.completed_at ? new Date(rd.completed_at).getTime() : Date.now();
+                            const totalDurationMs = startedMs ? endedMs - startedMs : 0;
+                            const fmtDuration = (ms: number) => ms >= 60000 ? `${(ms / 60000).toFixed(1)}m` : ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
+                            const fmtTokens = (n: number) => n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+                            return (
+                            <div className="ml-5 mt-1 space-y-2">
+                              {/* Run timing header */}
+                              <div className="flex items-center gap-3 px-2.5 py-2 rounded-lg bg-surface/50 border border-border-subtle text-[10px]">
+                                <div className="flex items-center gap-1.5 text-text-dim">
+                                  <Clock className="w-3 h-3" />
+                                  <span>{fmtDuration(totalDurationMs)}</span>
+                                </div>
+                                <div className="flex items-center gap-1.5 text-text-dim/60">
+                                  <Zap className="w-3 h-3" />
+                                  <span>{allSteps.reduce((sum, s) => sum + (s.input_tokens || 0) + (s.output_tokens || 0), 0).toLocaleString()} tokens</span>
+                                </div>
+                                <div className="flex-1" />
+                                {rd.started_at && (
+                                  <span className="text-text-dim/40">{new Date(rd.started_at).toLocaleTimeString()}{rd.completed_at ? ` → ${new Date(rd.completed_at).toLocaleTimeString()}` : ""}</span>
+                                )}
+                              </div>
+                              {/* Live progress bar */}
+                              {isActive && (
+                                <div className="flex items-center gap-2 p-2 rounded-lg bg-brand/5 border border-brand/20">
+                                  <Loader2 className="w-3 h-3 text-brand animate-spin shrink-0" />
+                                  <div className="flex-1">
+                                    <p className="text-[10px] text-brand font-semibold">
+                                      {typeof curIdx === "number" && totalSteps > 0
+                                        ? t("workflows.step_executing", { defaultValue: "Step {{current}}/{{total}} executing…", current: curIdx + 1, total: totalSteps })
+                                        : t("workflows.starting", { defaultValue: "Starting…" })}
+                                    </p>
+                                    {totalSteps > 0 && (
+                                      <div className="mt-1 h-1 rounded-full bg-brand/20 overflow-hidden">
+                                        <div className="h-full rounded-full bg-brand transition-all duration-500" style={{ width: `${typeof curIdx === "number" ? ((curIdx) / totalSteps) * 100 : 0}%` }} />
+                                      </div>
+                                    )}
+                                  </div>
                                 </div>
                               )}
-                              {/* HITL operator-step action bar (#4977).
-                                  Mount whenever the run is paused (any
-                                  paused-shape); the bar's own inspect
-                                  query renders null on 404/409 if it's not
-                                  an operator-step pause. Must use
-                                  `isPausedRunState` not `state === "paused"`
-                                  — the Paused variant ships as
-                                  `{paused: {…}}` not a bare string. */}
-                              {runId && isPausedRunState(runDetailQuery.data.state) && (
+                              {/* Run-level error */}
+                              {rd.error && (
+                                <div className="flex items-start gap-1.5 p-2 rounded-lg bg-error/5 border border-error/20">
+                                  <XCircle className="w-3 h-3 text-error shrink-0 mt-0.5" />
+                                  <p className="text-[10px] text-error whitespace-pre-wrap">{rd.error}</p>
+                                </div>
+                              )}
+                              {/* HITL operator-step action bar */}
+                              {runId && isPausedRunState(rd.state) && (
                                 <OperatorActionBar runId={runId} />
                               )}
-                              <StepAccordion
-                                steps={runDetailQuery.data.step_results}
-                                getKey={getStepResultKey}
-                                renderHeader={stepResultHeader}
-                                renderContent={stepResultContent}
-                              />
+                              {/* Execution log console */}
+                              {(() => {
+                                const fmtTime = (ts?: string | null) => ts ? new Date(ts).toLocaleTimeString() : "--:--:--";
+                                const fmtDur = (ms: number) => ms >= 60000 ? `${(ms/60000).toFixed(1)}m` : `${(ms/1000).toFixed(1)}s`;
+                                const fmtN = (n: number) => n >= 1000 ? `${(n/1000).toFixed(1)}k` : String(n);
+                                const logs: Array<{ts: string; level: "info"|"warn"|"error"; msg: string}> = [];
+                                // Run start
+                                logs.push({ts: fmtTime(rd.started_at), level: "info", msg: `Run started — ${totalSteps || "?"} steps defined`});
+                                // Input params
+                                if (rd.input) {
+                                  try { const p = JSON.parse(rd.input); if (p && typeof p === "object" && !Array.isArray(p)) { for (const [k,v] of Object.entries(p).filter(([x]) => x !== "input")) { logs.push({ts: fmtTime(rd.started_at), level: "info", msg: `  {{${k}}} = "${String(v).slice(0,60)}"`}); } } } catch {}
+                                }
+                                // Each step
+                                for (let i = 0; i < allSteps.length; i++) {
+                                  const s = allSteps[i];
+                                  const hasErr = !!s.error;
+                                  logs.push({ts: fmtTime(rd.started_at), level: hasErr ? "error" : "info", msg: `Step ${i+1}/${totalSteps||allSteps.length} "${s.step_name}" → ${s.agent_name||s.agent_id}${hasErr ? " FAILED" : ""}`});
+                                  if (s.variables && Object.keys(s.variables).length > 0) {
+                                    for (const [k,v] of Object.entries(s.variables)) {
+                                      logs.push({ts: fmtTime(rd.started_at), level: "info", msg: `  {{${k}}} = "${String(v).slice(0,60)}"`});
+                                    }
+                                  }
+                                  logs.push({ts: fmtTime(rd.started_at), level: "info", msg: `  Prompt: ${fmtN(s.input_tokens||0)} tokens → Response: ${fmtN(s.output_tokens||0)} tokens in ${fmtDur(s.duration_ms||0)}`});
+                                  if (hasErr && s.error) logs.push({ts: fmtTime(rd.started_at), level: "error", msg: `  Error: ${s.error}`});
+                                }
+                                // Run completion
+                                if (rd.state === "completed") {
+                                  const totalMs = rd.completed_at && rd.started_at ? new Date(rd.completed_at).getTime() - new Date(rd.started_at).getTime() : 0;
+                                  const totalTokens = allSteps.reduce((sum, s) => sum + (s.input_tokens||0) + (s.output_tokens||0), 0);
+                                  logs.push({ts: fmtTime(rd.completed_at), level: "info", msg: `Run completed — ${fmtDur(totalMs)}, ${totalTokens.toLocaleString()} tokens`});
+                                } else if (rd.state === "failed") {
+                                  logs.push({ts: fmtTime(rd.completed_at), level: "error", msg: rd.error ? `Run FAILED: ${rd.error}` : "Run FAILED"});
+                                } else if (rd.state === "running" || rd.state === "pending") {
+                                  logs.push({ts: "--:--:--", level: "info", msg: `… executing (${allSteps.length}/${totalSteps||"?"} steps done)`});
+                                }
+                                // use logConsoleRef from component level
+                                return (
+                                  <div className="rounded-lg border border-border-subtle bg-[#0a0a0f] overflow-hidden">
+                                    <div className="flex items-center gap-1.5 px-2.5 py-1.5 border-b border-border-subtle/50 bg-surface/50">
+                                      <div className="w-2 h-2 rounded-full bg-error/60" />
+                                      <div className="w-2 h-2 rounded-full bg-warning/60" />
+                                      <div className="w-2 h-2 rounded-full bg-success/60" />
+                                      <span className="text-[9px] font-semibold text-text-dim/40 ml-1 uppercase tracking-wider">{t("workflows.console", { defaultValue: "Console" })}</span>
+                                    </div>
+                                    <pre ref={logConsoleRef} className="p-2.5 text-[9px] leading-relaxed font-mono max-h-64 overflow-y-auto">
+                                      {logs.map((l, i) => (
+                                        <div key={i} className={l.level === "error" ? "text-error/90" : l.level === "warn" ? "text-warning/80" : "text-text-dim/70"}>
+                                          <span className="text-text-dim/30 select-none">{l.ts}</span>  {l.msg}
+                                        </div>
+                                      ))}
+                                    </pre>
+                                  </div>
+                                );
+                              })()}
+                              {/* Pending/future steps (not yet executed) */}
+                              {isActive && totalSteps > allSteps.length && (
+                                <div className="space-y-1">
+                                  {Array.from({ length: totalSteps - allSteps.length }).map((_, i) => (
+                                    <div key={`pending-${i}`} className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-surface/30 border border-border-subtle/50 opacity-40">
+                                      <div className="w-5 h-5 rounded-full bg-text-dim/20 flex items-center justify-center text-[8px] text-text-dim/50 font-bold shrink-0">
+                                        {allSteps.length + i + 1}
+                                      </div>
+                                      <span className="text-[10px] text-text-dim/40">{t("workflows.step_pending", { defaultValue: "Pending…" })}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                              {/* Completed/failed step timeline */}
+                              {allSteps.map((step, i) => {
+                                const hasError = !!step.error;
+                                const stepStatus = hasError ? "failed" : "completed";
+                                const expanded = expandedStepIdx === i;
+                                const hasVars = step.variables && Object.keys(step.variables).length > 0;
+                                return (
+                                <div key={step.step_name + i} className="relative">
+                                  {/* Connector line */}
+                                  {i < allSteps.length - 1 && (
+                                    <div className="absolute left-[9px] top-7 bottom-0 w-px bg-border-subtle" />
+                                  )}
+                                  <div className="flex items-start gap-2">
+                                    {/* Step number circle */}
+                                    <div className={`w-5 h-5 rounded-full flex items-center justify-center text-[9px] font-bold shrink-0 mt-0.5 ${
+                                      stepStatus === "completed" ? "bg-success/15 text-success border border-success/30" :
+                                      "bg-error/15 text-error border border-error/30"
+                                    }`}>
+                                      {stepStatus === "completed" ? <CheckCircle2 className="w-3 h-3" /> : <XCircle className="w-3 h-3" />}
+                                    </div>
+                                    {/* Step content */}
+                                    <div className={`flex-1 min-w-0 rounded-lg border p-2 ${
+                                      stepStatus === "completed" ? "bg-surface/50 border-border-subtle" :
+                                      "bg-error/5 border-error/20"
+                                    }`}>
+                                      <button className="w-full text-left" onClick={() => setExpandedStepIdx(expanded ? null : i)}>
+                                        <div className="flex items-center gap-2">
+                                          <span className="text-[10px] font-bold truncate">{step.step_name}</span>
+                                          <span className="text-[9px] text-text-dim/40 truncate">via {step.agent_name || step.agent_id}</span>
+                                          <span className="text-[9px] text-text-dim/30">{fmtDuration(step.duration_ms || 0)}</span>
+                                          <span className="text-[8px] text-text-dim/30">{fmtTokens(step.input_tokens || 0)}→{fmtTokens(step.output_tokens || 0)}</span>
+                                          <ChevronRight className={`w-3 h-3 text-text-dim/30 ml-auto transition-transform ${expanded ? "rotate-90" : ""}`} />
+                                        </div>
+                                      </button>
+                                      {expanded && (
+                                        <div className="mt-2 space-y-1.5 pt-2 border-t border-border-subtle">
+                                          {/* Prompt */}
+                                          <div>
+                                            <p className="text-[8px] font-semibold text-text-dim/40 uppercase tracking-wider mb-0.5">{t("workflows.prompt_sent", { defaultValue: "Prompt sent:" })}</p>
+                                            <pre className="text-[9px] text-text-dim/80 bg-main rounded p-1.5 max-h-32 overflow-y-auto whitespace-pre-wrap">{step.prompt}</pre>
+                                          </div>
+                                          {/* Variables */}
+                                          {hasVars && (
+                                            <div>
+                                              <p className="text-[8px] font-semibold text-text-dim/40 uppercase tracking-wider mb-0.5">{t("workflows.variables", { defaultValue: "Variables" })}</p>
+                                              <div className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 text-[9px] bg-main rounded p-1.5">
+                                                {Object.entries(step.variables!).map(([k, v]) => (
+                                                  <div key={k} className="contents">
+                                                    <span className="text-brand/70 font-mono whitespace-nowrap">{`{{${k}}}`}</span>
+                                                    <span className="text-text-dim/60 truncate" title={v}>{v.length > 60 ? v.slice(0, 60) + "…" : v}</span>
+                                                  </div>
+                                                ))}
+                                              </div>
+                                            </div>
+                                          )}
+                                          {/* Output */}
+                                          <div>
+                                            <p className="text-[8px] font-semibold text-text-dim/40 uppercase tracking-wider mb-0.5">{t("workflows.step_output", { defaultValue: "Output" })}</p>
+                                            <pre className="text-[9px] text-text bg-main rounded p-1.5 max-h-48 overflow-y-auto whitespace-pre-wrap">{step.output || (hasError ? step.error : "(empty)")}</pre>
+                                          </div>
+                                          {/* Error */}
+                                          {hasError && (
+                                            <div className="flex items-start gap-1 p-1.5 rounded bg-error/10">
+                                              <AlertCircle className="w-3 h-3 text-error shrink-0 mt-0.5" />
+                                              <p className="text-[9px] text-error">{step.error}</p>
+                                            </div>
+                                          )}
+                                        </div>
+                                      )}
+                                    </div>
+                                  </div>
+                                </div>
+                              );})}
                             </div>
-                          )}
+                          );})()}
                           {isSelected && runDetailQuery.isLoading && (
                             <div className="ml-5 mt-1 p-2 text-[10px] text-text-dim/50 flex items-center gap-1.5">
                               <Loader2 className="w-3 h-3 animate-spin" /> {t("workflows.loading_details", { defaultValue: "Loading details…" })}

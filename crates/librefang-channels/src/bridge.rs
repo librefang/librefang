@@ -404,6 +404,17 @@ pub trait ChannelBridgeHandle: Send + Sync {
         "Workflows not available.".to_string()
     }
 
+    /// Create an autonomous goal and start driving it with the given agent.
+    /// Returns a user-facing message like "Goal created and started: ... (ID: ...)".
+    async fn create_and_start_goal(
+        &self,
+        _agent_id: AgentId,
+        _description: &str,
+        _loop_engineering: bool,
+    ) -> Result<String, String> {
+        Err("Goals not available.".to_string())
+    }
+
     /// List all registered triggers as formatted text.
     async fn list_triggers_text(&self) -> String {
         "Triggers not available.".to_string()
@@ -6933,6 +6944,31 @@ async fn handle_command(
                 handle.run_workflow_text(wf_name, &input).await
             } else {
                 "Usage: /workflow run <name> [input]".to_string()
+            }
+        }
+        "goal" => {
+            if args.is_empty() {
+                return "Usage: /goal <description> [--loop-engineering]".to_string();
+            }
+            let mut full_text = args.join(" ");
+            let has_loop_engineering = full_text.contains("--loop-engineering");
+            if has_loop_engineering {
+                full_text = full_text
+                    .replace("--loop-engineering", "")
+                    .trim()
+                    .to_string();
+            }
+            let description = full_text;
+            if description.is_empty() {
+                return "Usage: /goal <description> [--loop-engineering]".to_string();
+            }
+            let agent_id = resolve_for_command();
+            match agent_id {
+                Some(aid) => handle
+                    .create_and_start_goal(aid, &description, has_loop_engineering)
+                    .await
+                    .unwrap_or_else(|e| format!("Error: {e}")),
+                None => "No agent selected. Use /agent <name> first.".to_string(),
             }
         }
         "triggers" => handle.list_triggers_text().await,

@@ -596,6 +596,19 @@ fn main() {
             GatewayCommands::Stop => cmd_stop(cli.config),
             GatewayCommands::Status { json } => cmd_status(cli.config, json, false, false, None),
         },
+        Some(Commands::Goal {
+            description,
+            agent,
+            max_iterations,
+            loop_engineering,
+            watch,
+        }) => cmd_goal(
+            &description,
+            agent.as_deref(),
+            max_iterations,
+            loop_engineering,
+            watch,
+        ),
         Some(Commands::Approvals(sub)) => match sub {
             ApprovalsCommands::List { json } => cmd_approvals_list(json),
             ApprovalsCommands::Approve { id } => cmd_approvals_respond(&id, true),

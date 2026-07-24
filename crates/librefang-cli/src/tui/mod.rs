@@ -16,7 +16,7 @@ use librefang_kernel::SkillsSubsystemApi;
 use librefang_runtime::llm_driver::StreamEvent;
 use librefang_types::agent::{AgentId, ResetScope};
 use screens::{
-    agents, audit, chat, comms, dashboard, extensions, hands, logs, memory, peers, security,
+    agents, audit, chat, comms, dashboard, extensions, goals, hands, logs, memory, peers, security,
     sessions, settings, skills, templates, triggers, usage, welcome, wizard, workflows,
 };
 use std::path::PathBuf;
@@ -50,6 +50,7 @@ enum Tab {
     Sessions,
     Workflows,
     Triggers,
+    Goals,
     Memory,
     Skills,
     Hands,
@@ -71,6 +72,7 @@ const TABS: &[Tab] = &[
     Tab::Sessions,
     Tab::Workflows,
     Tab::Triggers,
+    Tab::Goals,
     Tab::Memory,
     Tab::Skills,
     Tab::Hands,
@@ -94,6 +96,7 @@ impl Tab {
             Tab::Sessions => format!("{} {}", "\u{25c7}", crate::i18n::t("tui-tab-sessions")),
             Tab::Workflows => format!("{} {}", "\u{25b7}", crate::i18n::t("tui-tab-workflows")),
             Tab::Triggers => format!("{} {}", "\u{25c9}", crate::i18n::t("tui-tab-triggers")),
+            Tab::Goals => format!("{} {}", "\u{2316}", crate::i18n::t("tui-tab-goals")),
             Tab::Memory => format!("{} {}", "\u{25a1}", crate::i18n::t("tui-tab-memory")),
             Tab::Skills => format!("{} {}", "\u{2605}", crate::i18n::t("tui-tab-skills")),
             Tab::Hands => format!("{} {}", "\u{270b}", crate::i18n::t("tui-tab-hands")),
@@ -173,6 +176,7 @@ struct App {
     dashboard: dashboard::DashboardState,
     workflows: workflows::WorkflowState,
     triggers: triggers::TriggerState,
+    goals: goals::GoalsState,
     sessions: sessions::SessionsState,
     memory: memory::MemoryState,
     skills: skills::SkillsState,
@@ -212,6 +216,7 @@ impl App {
             dashboard: dashboard::DashboardState::new(),
             workflows: workflows::WorkflowState::new(),
             triggers: triggers::TriggerState::new(),
+            goals: goals::GoalsState::new(),
             sessions: sessions::SessionsState::new(),
             memory: memory::MemoryState::new(),
             skills: skills::SkillsState::new(),
@@ -369,6 +374,7 @@ impl App {
                     Tab::Workflows => self.workflows.status_msg = err,
                     Tab::Triggers => self.triggers.status_msg = err,
                     Tab::Sessions => self.sessions.status_msg = err,
+                    Tab::Goals => self.goals.status_msg = err,
                     Tab::Memory => self.memory.status_msg = err,
                     Tab::Skills => self.skills.status_msg = err,
                     Tab::Hands => self.hands.status_msg = err,
@@ -390,6 +396,28 @@ impl App {
                 self.sessions.refilter();
                 self.sessions.status_msg =
                     crate::i18n::t_args("tui-mod-session-deleted", &[("id", &id)]);
+            }
+            AppEvent::GoalsLoaded(list) => {
+                self.goals.goals = list;
+                self.goals.refilter();
+                self.goals.loading = false;
+            }
+            AppEvent::GoalCreated(id) => {
+                self.goals.status_msg = format!("Goal created: {id}");
+                self.refresh_goals();
+            }
+            AppEvent::GoalDeleted(id) => {
+                self.goals.goals.retain(|g| g.id != id);
+                self.goals.refilter();
+                self.goals.status_msg = format!("Goal deleted: {id}");
+            }
+            AppEvent::GoalRunStarted(id) => {
+                self.goals.status_msg = format!("Run started for goal: {id}");
+                self.refresh_goals();
+            }
+            AppEvent::GoalRunStopped(id) => {
+                self.goals.status_msg = format!("Run stopped for goal: {id}");
+                self.refresh_goals();
             }
             AppEvent::MemoryAgentsLoaded(agents) => {
                 self.memory.agents = agents;
@@ -745,9 +773,10 @@ impl App {
                     self.switch_tab(Tab::Memory);
                     return;
                 }
-                // F(8) was the `Channels` tab shortcut; the tab is
-                // retired, so the key now falls through to the
-                // default arm rather than being swallowed.
+                KeyCode::F(8) => {
+                    self.switch_tab(Tab::Goals);
+                    return;
+                }
                 KeyCode::F(9) => {
                     self.switch_tab(Tab::Skills);
                     return;
@@ -834,9 +863,10 @@ impl App {
                         self.switch_tab(Tab::Memory);
                         return;
                     }
-                    // Char('8') was the Alt-8 `Channels` tab shortcut;
-                    // the tab is retired, so the key falls through to
-                    // the default arm rather than being swallowed.
+                    KeyCode::Char('8') => {
+                        self.switch_tab(Tab::Goals);
+                        return;
+                    }
                     KeyCode::Char('9') => {
                         self.switch_tab(Tab::Skills);
                         return;
@@ -893,6 +923,10 @@ impl App {
                 Tab::Triggers => {
                     let action = self.triggers.handle_key(key);
                     self.handle_trigger_action(action);
+                }
+                Tab::Goals => {
+                    let action = self.goals.handle_key(key);
+                    self.handle_goals_action(action);
                 }
                 Tab::Sessions => {
                     let action = self.sessions.handle_key(key);
@@ -961,6 +995,7 @@ impl App {
         self.dashboard.tick();
         self.workflows.tick();
         self.triggers.tick();
+        self.goals.tick();
         self.sessions.tick();
         self.memory.tick();
         self.skills.tick();
@@ -1019,6 +1054,7 @@ impl App {
             Tab::Workflows => self.refresh_workflows(),
             Tab::Triggers => self.refresh_triggers(),
             Tab::Sessions => self.refresh_sessions(),
+            Tab::Goals => self.refresh_goals(),
             Tab::Memory => self.refresh_memory(),
             Tab::Skills => self.refresh_skills(),
             Tab::Hands => self.refresh_hands(),
@@ -1085,6 +1121,13 @@ impl App {
         if let Some(backend) = self.backend.to_ref() {
             self.sessions.loading = true;
             event::spawn_fetch_sessions(backend, self.event_tx.clone());
+        }
+    }
+
+    fn refresh_goals(&mut self) {
+        if let Some(backend) = self.backend.to_ref() {
+            self.goals.loading = true;
+            event::spawn_fetch_goals(backend, self.event_tx.clone());
         }
     }
 
@@ -1527,6 +1570,52 @@ impl App {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_delete_session(backend, id, self.event_tx.clone());
                 }
+            }
+        }
+    }
+
+    fn handle_goals_action(&mut self, action: goals::GoalsAction) {
+        match action {
+            goals::GoalsAction::Continue => {}
+            goals::GoalsAction::Refresh => self.refresh_goals(),
+            goals::GoalsAction::CreateGoal {
+                title,
+                description,
+                agent_id,
+                loop_engineering,
+                verify_agent_id,
+                evaluator_model,
+            } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_create_goal(
+                        backend,
+                        title,
+                        description,
+                        agent_id,
+                        loop_engineering,
+                        verify_agent_id,
+                        evaluator_model,
+                        self.event_tx.clone(),
+                    );
+                }
+            }
+            goals::GoalsAction::DeleteGoal { goal_id } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_delete_goal(backend, goal_id, self.event_tx.clone());
+                }
+            }
+            goals::GoalsAction::StartRun { goal_id } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_start_goal_run(backend, goal_id, self.event_tx.clone());
+                }
+            }
+            goals::GoalsAction::StopRun { goal_id } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_stop_goal_run(backend, goal_id, self.event_tx.clone());
+                }
+            }
+            goals::GoalsAction::ShowDetail { .. } => {
+                // Detail state is already set by handle_key
             }
         }
     }
@@ -2384,6 +2473,7 @@ impl App {
                     Tab::Chat => chat::draw(frame, chunks[1], &mut self.chat),
                     Tab::Workflows => workflows::draw(frame, chunks[1], &mut self.workflows),
                     Tab::Triggers => triggers::draw(frame, chunks[1], &mut self.triggers),
+                    Tab::Goals => goals::draw(frame, chunks[1], &mut self.goals),
                     Tab::Sessions => sessions::draw(frame, chunks[1], &mut self.sessions),
                     Tab::Memory => memory::draw(frame, chunks[1], &mut self.memory),
                     Tab::Skills => skills::draw(frame, chunks[1], &mut self.skills),
