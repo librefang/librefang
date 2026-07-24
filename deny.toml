@@ -89,6 +89,9 @@ allow = [
     # CDLA-Permissive-2.0 is used by webpki-roots; OSI-approved permissive
     # license compatible with our distribution model.
     "CDLA-Permissive-2.0",
+    # Unlicense is used by ksni; OSI-approved public-domain-equivalent permissive
+    # license compatible with our distribution model.
+    "Unlicense",
 ]
 # Per-crate license clarifications go here. Add only when SPDX detection is
 # ambiguous AND the upstream LICENSE file has been read manually.
