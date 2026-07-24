@@ -40,15 +40,9 @@ tauri-plugin-global-shortcut = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-shell = "2"
 
-# Linux desktop: same plugin set as macOS/Windows, but `tray-icon` is held
-# back behind the `linux-tray` Cargo feature. Tauri 2.10's `tray-icon` on
-# Linux hard-pulls `libappindicator-rs 0.9`, which transitively drags 8
-# unmaintained GTK3 crates (RUSTSEC-2024-0411..0420) plus a `glib`
-# unsoundness (RUSTSEC-2024-0429). Headless Linux server / CI builds
-# don't need a system tray, so the default is OFF; opt in with
-# `--features linux-tray` for distros where the tray is desired (and
-# accept the audit advisories until tauri's `tray-icon 0.22+`/ksni
-# migration ships). See #3667.
+# Linux desktop: same plugin set as macOS/Windows. Linux system tray is implemented
+# using `ksni` (pure D-Bus, avoiding GTK and libappindicator unmaintained crate warnings).
+# Windows and macOS continue to use Tauri's native tray-icon feature.
 [target.'cfg(target_os = "linux")'.dependencies]
 tauri = { version = "2", features = ["image-png"] }
 tauri-plugin-single-instance = "2"
