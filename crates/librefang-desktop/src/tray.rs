@@ -306,13 +306,13 @@ mod platform_tray {
 #[cfg(target_os = "linux")]
 mod platform_tray {
     use super::format_uptime;
+    use ksni::{menu::*, MenuItem, Tray, TrayMethods};
     use librefang_kernel::config::librefang_home;
     use librefang_kernel::AgentSubsystemApi;
     use tauri::Manager;
     use tauri_plugin_autostart::ManagerExt;
     use tauri_plugin_notification::NotificationExt;
     use tracing::{info, warn};
-    use ksni::{Tray, MenuItem, TrayMethods, menu::*};
 
     struct LibreFangLinuxTray {
         app_handle: tauri::AppHandle,
@@ -331,6 +331,20 @@ mod platform_tray {
             ksni::ToolTip {
                 title: "LibreFang Agent OS".into(),
                 ..Default::default()
+            }
+        }
+
+        fn activate(&mut self, _x: i32, _y: i32) {
+            if let Some(w) = self.app_handle.get_webview_window("main") {
+                if let Ok(visible) = w.is_visible() {
+                    if visible {
+                        let _ = w.hide();
+                    } else {
+                        let _ = w.show();
+                        let _ = w.unminimize();
+                        let _ = w.set_focus();
+                    }
+                }
             }
         }
 
@@ -407,8 +421,9 @@ mod platform_tray {
                     if let Some(w) = this.app_handle.get_webview_window("main") {
                         let html = crate::connection::connection_html();
                         let escaped = serde_json::to_string(&html).unwrap_or_default();
-                        let js =
-                            format!("document.open(); document.write({escaped}); document.close();");
+                        let js = format!(
+                            "document.open(); document.write({escaped}); document.close();"
+                        );
                         if let Err(e) = w.eval(&js) {
                             warn!("Failed to show connection screen: {e}");
                         }
@@ -422,13 +437,15 @@ mod platform_tray {
             };
 
             // Informational items (disabled)
-            let is_remote = self.app_handle
+            let is_remote = self
+                .app_handle
                 .try_state::<crate::RemoteMode>()
                 .map(|r| *r.0.read().unwrap_or_else(|p| p.into_inner()))
                 .unwrap_or(false);
 
             let status_text = if is_remote {
-                let url = self.app_handle
+                let url = self
+                    .app_handle
                     .try_state::<crate::ServerUrlState>()
                     .map(|s| s.0.read().unwrap_or_else(|p| p.into_inner()).clone())
                     .unwrap_or_else(|| "unknown".to_string());
@@ -585,8 +602,14 @@ mod platform_tray {
             app_handle: app.handle().clone(),
         };
         tauri::async_runtime::spawn(async move {
-            if let Err(e) = tray.spawn().await {
-                warn!("Failed to spawn Linux system tray: {e}");
+            match tray.spawn().await {
+                Ok(handle) => loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    handle.update(|_| {}).await;
+                },
+                Err(e) => {
+                    warn!("Failed to spawn Linux system tray: {e}");
+                }
             }
         });
         Ok(())
