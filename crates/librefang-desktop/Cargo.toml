@@ -56,6 +56,7 @@ tauri-plugin-autostart = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-shell = "2"
+ksni = "0.3.6"
 
 [target.'cfg(any(target_os = "ios", target_os = "android"))'.dependencies]
 # Mobile-only plugins
@@ -68,11 +69,6 @@ default = ["librefang-api/default"]
 custom-protocol = ["tauri/custom-protocol"]
 # Documents the mobile build path (no-op flag, mobile targets are cfg-gated)
 mobile = []
-# Linux-only opt-in: re-enables the system tray on Linux desktop builds at
-# the cost of pulling the deprecated GTK3 stack (see #3667). On macOS /
-# Windows the tray is always on (handled in the per-target dependency
-# blocks above) and this feature is a no-op.
-linux-tray = ["tauri/tray-icon"]
 # `all-channels` / `mini` / `mobile-no-email` removed — every channel
 # adapter is now a sidecar (no Rust feature to gate). CI / packaging
 # flavors that referenced these names need to drop the `-f` flag;

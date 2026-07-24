@@ -13,13 +13,8 @@ mod connection;
 mod server;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod shortcuts;
-// Tray is desktop-only (not iOS/Android), and on Linux it additionally
-// requires the `linux-tray` Cargo feature — see #3667 and `tray.rs` for
-// the GTK3 unmaintained-crate advisories that motivate the gate.
-#[cfg(all(
-    not(any(target_os = "ios", target_os = "android")),
-    any(not(target_os = "linux"), feature = "linux-tray")
-))]
+// Tray is desktop-only (not iOS/Android).
+#[cfg(desktop)]
 mod tray;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod updater;
@@ -490,9 +485,8 @@ pub fn run(server_url: Option<String>, force_local: bool) {
                 }
             }
 
-            // Set up system tray (desktop only). On Linux, gated behind the
-            // `linux-tray` Cargo feature — see #3667 / `tray.rs`.
-            #[cfg(all(desktop, any(not(target_os = "linux"), feature = "linux-tray")))]
+            // Set up system tray (desktop only).
+            #[cfg(desktop)]
             tray::setup_tray(app)?;
 
             // For local direct-boot mode, start event forwarding for notifications
