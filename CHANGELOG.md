@@ -41,6 +41,10 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ### Changed
 
+- Migrate the Linux system tray implementation in `librefang-desktop` from Tauri's default `tray-icon` to a pure D-Bus implementation using `ksni` 0.3.6.
+  This removes the unmaintained GTK3 dependency tree and fixes related security advisories (e.g. RUSTSEC-2024-0411..0420, RUSTSEC-2024-0429), allowing the Linux system tray to be enabled by default.
+  The new implementation features a self-healing reconnection loop to withstand D-Bus daemon restarts, dynamic status property updates every second, and support for toggling window visibility on left-click activation (#6572) (@pavver)
+
 - Upgrade `agent-client-protocol` from 0.11.1 to 1.3.0 in the `librefang-acp` crate, migrating the ACP adapter to the 1.x API (supersedes the version-only dependabot bump that left the crate failing to compile).
   The 1.x SDK moved the wire-schema types under a versioned namespace, so every `agent_client_protocol::schema::X` import is now `agent_client_protocol::schema::v1::X` (with `ProtocolVersion` re-exported at the `schema` root); the connection, router, and JSON-RPC surface (`Agent`, `Client`, `ConnectionTo`, `Builder`, `ByteStreams`, `Responder`, `on_receive_*`, `util`) is unchanged at the crate root.
   The companion `agent-client-protocol-tokio` crate has no 1.x release and was pulling a second, older copy of `agent-client-protocol` (and a stale `rmcp` 1.8) into the tree, so it is dropped entirely: its sole use, `agent_client_protocol_tokio::Stdio`, is replaced by `agent_client_protocol::Stdio`, which 1.x exposes at its own crate root with the same `Stdio::new()` constructor (#6526) (@houko)
