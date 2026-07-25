@@ -314,6 +314,7 @@ mod platform_tray {
     use tauri_plugin_notification::NotificationExt;
     use tracing::{info, warn};
 
+    #[derive(Clone)]
     struct LibreFangLinuxTray {
         app_handle: tauri::AppHandle,
     }
@@ -602,14 +603,23 @@ mod platform_tray {
             app_handle: app.handle().clone(),
         };
         tauri::async_runtime::spawn(async move {
-            match tray.spawn().await {
-                Ok(handle) => loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                    handle.update(|_| {}).await;
-                },
-                Err(e) => {
-                    warn!("Failed to spawn Linux system tray: {e}");
+            loop {
+                match tray.clone().spawn().await {
+                    Ok(handle) => {
+                        info!("Linux system tray successfully spawned.");
+                        loop {
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                            if handle.update(|_| {}).await.is_none() {
+                                warn!("Linux system tray service disconnected; will attempt to reconnect.");
+                                break;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to spawn Linux system tray: {e}. Retrying in 10 seconds...");
+                    }
                 }
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
             }
         });
         Ok(())
