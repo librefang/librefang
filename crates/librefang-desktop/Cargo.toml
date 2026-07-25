@@ -40,8 +40,8 @@ tauri-plugin-global-shortcut = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-shell = "2"
 
-# Linux desktop: same plugin set as macOS/Windows. Linux system tray is implemented
-# using `ksni` (pure D-Bus, avoiding GTK and libappindicator unmaintained crate warnings).
+# Linux desktop: same plugin set as macOS/Windows.
+# Linux system tray is implemented using `ksni` (pure D-Bus, avoiding GTK and libappindicator unmaintained crate warnings).
 # Windows and macOS continue to use Tauri's native tray-icon feature.
 [target.'cfg(target_os = "linux")'.dependencies]
 tauri = { version = "2", features = ["image-png"] }
