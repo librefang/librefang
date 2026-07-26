@@ -28,7 +28,7 @@ import {
   setAgentSkills,
   getAgentTemplateToml,
 } from "../http/client";
-import type { AgentSchedulePatch, PromptExperiment, PromptVersion, SendAgentMessageOptions } from "../../api";
+import type { AgentSchedulePatch, CloneAgentPayload, PromptExperiment, PromptVersion, SendAgentMessageOptions } from "../../api";
 import { clearChatSessionCacheForAgent } from "../chatSessionCache";
 import {
   agentKeys,
@@ -78,7 +78,8 @@ export function useSpawnAgent() {
 export function useCloneAgent() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: cloneAgent,
+    mutationFn: ({ agentId, payload }: { agentId: string; payload: CloneAgentPayload }) =>
+      cloneAgent(agentId, payload),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
       qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
