@@ -65,8 +65,7 @@ fn change_server(app: &tauri::AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let html = crate::connection::connection_html();
         let escaped = serde_json::to_string(&html).unwrap_or_default();
-        let js =
-            format!("document.open(); document.write({escaped}); document.close();");
+        let js = format!("document.open(); document.write({escaped}); document.close();");
         if let Err(e) = w.eval(&js) {
             warn!("Failed to show connection screen: {e}");
         }
@@ -110,9 +109,7 @@ fn check_updates(app: &tauri::AppHandle) {
                     ))
                     .show();
                 // Perform install
-                if let Err(e) =
-                    crate::updater::download_and_install_update(&app_handle).await
-                {
+                if let Err(e) = crate::updater::download_and_install_update(&app_handle).await {
                     warn!("Manual update install failed: {e}");
                     let _ = app_handle
                         .notification()
@@ -380,8 +377,9 @@ mod platform_tray {
         fn icon_pixmap(&self) -> Vec<ksni::Icon> {
             use std::sync::LazyLock;
             static ICON_CACHE: LazyLock<Vec<ksni::Icon>> = LazyLock::new(|| {
-                let tauri_image = tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png"))
-                    .expect("Failed to decode tray icon PNG");
+                let tauri_image =
+                    tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png"))
+                        .expect("Failed to decode tray icon PNG");
                 let width = tauri_image.width();
                 let height = tauri_image.height();
                 let mut rgba_data = tauri_image.rgba().to_vec();
