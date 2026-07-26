@@ -52,10 +52,8 @@ pub(crate) fn resolve_skills_dir(hand: Option<&str>) -> PathBuf {
 
 /// Marketplace config pointed at the synced registry checkout (#6569).
 ///
-/// `~/.librefang/registry` is maintained by `registry_sync` and honours
-/// `registry.registry_host`, so this works against a Codeberg mirror as well as
-/// GitHub. Without it, search and install fall back to the `librefang-skills`
-/// GitHub org, which does not exist.
+/// `~/.librefang/registry` is maintained by `registry_sync` and honours `registry.registry_host`, so this works against a Codeberg mirror as well as GitHub.
+/// Without it, search and install fall back to the `librefang-skills` GitHub org, which does not exist.
 fn marketplace_config_with_registry() -> librefang_skills::marketplace::MarketplaceConfig {
     librefang_skills::marketplace::MarketplaceConfig::default()
         .with_registry_dir(librefang_home().join("registry"))
@@ -72,10 +70,7 @@ pub(crate) fn cmd_skill_install(source: &str, hand: Option<&str>) {
         std::process::exit(1);
     });
 
-    // Git remote install — advertised in `cli.rs`'s `Install` long_about but
-    // previously unimplemented: a URL fell through to the name-based marketplace
-    // install, which pasted it into `{org}/{name}` and requested a nonsense URL
-    // (#6569).
+    // Git remote install — advertised in `cli.rs`'s `Install` long_about but previously unimplemented: a URL fell through to the name-based marketplace install, which pasted it into `{org}/{name}` and requested a nonsense URL (#6569).
     if librefang_skills::marketplace::looks_like_git_url(source) {
         let mut sp = progress::auto(
             &i18n::t_args("skill-install-progress", &[("source", source)]),
@@ -116,10 +111,8 @@ pub(crate) fn cmd_skill_install(source: &str, hand: Option<&str>) {
         // Local directory install
         let manifest_path = source_path.join("skill.toml");
         if !manifest_path.exists() {
-            // SKILL.md (Agent Skills / OpenClaw prompt-only format) — the shape
-            // every skill in `~/.librefang/registry/skills/` uses. The registry
-            // loader already auto-converts it (`registry.rs: load_all`), so
-            // refusing it here made those skills uninstallable by path (#6569).
+            // SKILL.md (Agent Skills / OpenClaw prompt-only format) — the shape every skill in `~/.librefang/registry/skills/` uses.
+            // The registry loader already auto-converts it (`registry.rs: load_all`), so refusing it here made those skills uninstallable by path (#6569).
             if librefang_skills::openclaw_compat::detect_skillmd(&source_path) {
                 match librefang_skills::openclaw_compat::convert_skillmd(&source_path) {
                     Ok(converted) => {
@@ -415,9 +408,7 @@ pub(crate) fn cmd_skill_remove(name: &str, hand: Option<&str>) {
 pub(crate) fn cmd_skill_search(query: &str) {
     let client =
         librefang_skills::marketplace::MarketplaceClient::new(marketplace_config_with_registry());
-    // Reads the synced registry checkout instead of a forge search API (#6569):
-    // the previous GitHub `org:librefang-skills` query 422'd because that org
-    // does not exist, so every search failed.
+    // Reads the synced registry checkout instead of a forge search API (#6569): the previous GitHub `org:librefang-skills` query 422'd because that org does not exist, so every search failed.
     match client.search_registry(query) {
         Ok(results) if results.is_empty() => {
             println!("{}", i18n::t_args("skill-search-none", &[("query", query)]));
@@ -430,8 +421,7 @@ pub(crate) fn cmd_skill_search(query: &str) {
             println!();
             for r in results {
                 match &r.installable_id {
-                    // Registry result — no popularity signal on disk, so show
-                    // the ready-to-run install command instead of "(0)".
+                    // Registry result — no popularity signal on disk, so show the ready-to-run install command instead of "(0)".
                     Some(id) => {
                         println!("  {}", r.name);
                         if !r.description.is_empty() {

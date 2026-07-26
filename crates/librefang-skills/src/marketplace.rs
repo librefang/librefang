@@ -103,20 +103,14 @@ fn urlencoded(s: &str) -> String {
 pub struct MarketplaceConfig {
     /// Base URL for the registry API, used by the GitHub-releases fallback.
     pub registry_url: String,
-    /// GitHub organization holding one repo per skill, each publishing bundles
-    /// as releases. Only the [`MarketplaceClient::install`] fallback uses it —
-    /// the first-class source is the synced registry checkout below.
+    /// GitHub organization holding one repo per skill, each publishing bundles as releases.
+    /// Only the [`MarketplaceClient::install`] fallback uses it — the first-class source is the synced registry checkout below.
     pub github_org: String,
-    /// Local checkout of the LibreFang registry — `~/.librefang/registry`, kept
-    /// current by `librefang_runtime::registry_sync`. Skills live at
-    /// `<dir>/skills/<name>/` as `SKILL.md` (a few as `skill.toml`).
+    /// Local checkout of the LibreFang registry — `~/.librefang/registry`, kept current by `librefang_runtime::registry_sync`.
+    /// Skills live at `<dir>/skills/<name>/` as `SKILL.md` (a few as `skill.toml`).
     ///
-    /// This is the authoritative source for search and install (#6569): it is
-    /// forge-agnostic (it honours `registry.registry_host`, so a Codeberg mirror
-    /// works), needs no network at query time, and holds the same skills the
-    /// dashboard's `GET /api/skills/registry` already lists. `None` means the
-    /// caller has no home directory to read, which limits search to an error and
-    /// install to the remote fallback.
+    /// This is the authoritative source for search and install (#6569): it is forge-agnostic (it honours `registry.registry_host`, so a Codeberg mirror works), needs no network at query time, and holds the same skills the dashboard's `GET /api/skills/registry` already lists.
+    /// `None` means the caller has no home directory to read, which limits search to an error and install to the remote fallback.
     pub registry_dir: Option<PathBuf>,
 }
 
@@ -145,10 +139,8 @@ impl MarketplaceConfig {
 
 /// Copy a skill directory tree, skipping symlinks.
 ///
-/// A symlink inside a registry checkout would otherwise be copied as a link
-/// pointing outside the installed skill directory (or followed into a cycle),
-/// which the supply-chain audit cannot reason about. Skills are plain files;
-/// dropping links is the conservative choice.
+/// A symlink inside a registry checkout would otherwise be copied as a link pointing outside the installed skill directory (or followed into a cycle), which the supply-chain audit cannot reason about.
+/// Skills are plain files; dropping links is the conservative choice.
 fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<(), SkillError> {
     std::fs::create_dir_all(dest)?;
     for entry in std::fs::read_dir(src)? {
@@ -174,10 +166,7 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<(), SkillError> {
 
 /// Whether `source` looks like a git remote rather than a skill name or path.
 ///
-/// The CLI advertises `librefang skill install https://github.com/user/skill.git`
-/// (see `cli.rs`'s `Install` long_about), but nothing implemented it: a URL fell
-/// through to the name-based marketplace install, which pasted it into
-/// `{org}/{name}` and produced a nonsense request URL (#6569).
+/// The CLI advertises `librefang skill install https://github.com/user/skill.git` (see `cli.rs`'s `Install` long_about), but nothing implemented it: a URL fell through to the name-based marketplace install, which pasted it into `{org}/{name}` and produced a nonsense request URL (#6569).
 pub fn looks_like_git_url(source: &str) -> bool {
     let s = source.trim();
     s.starts_with("git@")
@@ -188,8 +177,8 @@ pub fn looks_like_git_url(source: &str) -> bool {
 
 /// Derive a skill directory name from a git remote.
 ///
-/// `https://github.com/user/my-skill.git` → `my-skill`. Returns `None` when the
-/// last path segment is empty or is not a safe single path component.
+/// `https://github.com/user/my-skill.git` → `my-skill`.
+/// Returns `None` when the last path segment is empty or is not a safe single path component.
 pub fn skill_name_from_git_url(url: &str) -> Option<String> {
     let trimmed = url.trim().trim_end_matches('/');
     let without_git = trimmed.strip_suffix(".git").unwrap_or(trimmed);
@@ -207,9 +196,8 @@ pub fn skill_name_from_git_url(url: &str) -> Option<String> {
 
 /// Name + description read from a registry skill directory.
 ///
-/// Accepts both on-disk shapes: `SKILL.md` with YAML frontmatter (what the
-/// registry actually ships — 61 of 61 entries at the time of writing) and the
-/// native `skill.toml`. Returns `None` for a directory holding neither.
+/// Accepts both on-disk shapes: `SKILL.md` with YAML frontmatter (what the registry actually ships — 61 of 61 entries at the time of writing) and the native `skill.toml`.
+/// Returns `None` for a directory holding neither.
 fn read_registry_skill_meta(dir: &Path) -> Option<(String, String)> {
     let dir_name = dir.file_name()?.to_string_lossy().to_string();
 
@@ -289,16 +277,11 @@ impl MarketplaceClient {
 
     /// Search the synced registry checkout for skills matching `query`.
     ///
-    /// An empty query lists everything. Matching is a case-insensitive substring
-    /// test over name and description, mirroring `GET /api/marketplace/search`.
+    /// An empty query lists everything.
+    /// Matching is a case-insensitive substring test over name and description, mirroring `GET /api/marketplace/search`.
     ///
-    /// Reads `~/.librefang/registry/skills/` rather than a forge search API
-    /// (#6569): the previous implementation queried GitHub's
-    /// `/search/repositories?q=…+org:librefang-skills`, and that organization
-    /// does not exist — GitHub answers `422 Unprocessable Entity` for an `org:`
-    /// qualifier naming a missing org, so every search failed. The checkout is
-    /// also what `librefang skill install` and the dashboard read, so all three
-    /// now agree on the same catalog.
+    /// Reads `~/.librefang/registry/skills/` rather than a forge search API (#6569): the previous implementation queried GitHub's `/search/repositories?q=…+org:librefang-skills`, and that organization does not exist — GitHub answers `422 Unprocessable Entity` for an `org:` qualifier naming a missing org, so every search failed.
+    /// The checkout is also what `librefang skill install` and the dashboard read, so all three now agree on the same catalog.
     pub fn search_registry(&self, query: &str) -> Result<Vec<SkillSearchResult>, SkillError> {
         let Some(skills_dir) = self.config.registry_skills_dir() else {
             return Err(SkillError::NotFound(
@@ -338,8 +321,7 @@ impl MarketplaceClient {
             results.push(SkillSearchResult {
                 name,
                 description,
-                // The registry carries no popularity signal; the field stays for
-                // the GitHub-releases shape that does.
+                // The registry carries no popularity signal; the field stays for the GitHub-releases shape that does.
                 stars: 0,
                 url: path.display().to_string(),
                 installable_id: Some(dir_name),
@@ -352,8 +334,8 @@ impl MarketplaceClient {
 
     /// Search a GitHub organization's skill repos (legacy remote shape).
     ///
-    /// Retained for a deployment that actually hosts one repo per skill under
-    /// `github_org`. `search_registry` is the path the CLI takes.
+    /// Retained for a deployment that actually hosts one repo per skill under `github_org`.
+    /// `search_registry` is the path the CLI takes.
     pub async fn search(&self, query: &str) -> Result<Vec<SkillSearchResult>, SkillError> {
         let encoded_query = urlencoded(query);
         let url = format!(
@@ -404,14 +386,10 @@ impl MarketplaceClient {
     ///
     /// Resolution order (#6569):
     ///
-    /// 1. `<registry_dir>/skills/<name>/` — copy the directory and normalize its
-    ///    manifest (`SKILL.md` is converted to `skill.toml`). This is where the
-    ///    registry's skills actually live, and it matches what
-    ///    `POST /api/skills/install` already did.
-    /// 2. GitHub releases under `github_org` — the historical path, kept for a
-    ///    deployment that publishes one repo per skill. Note the default org
-    ///    (`librefang-skills`) does not exist, so this leg 404s on a stock
-    ///    install; the registry checkout is what makes `install` work.
+    /// 1. `<registry_dir>/skills/<name>/` — copy the directory and normalize its manifest (`SKILL.md` is converted to `skill.toml`).
+    ///    This is where the registry's skills actually live, and it matches what `POST /api/skills/install` already did.
+    /// 2. GitHub releases under `github_org` — the historical path, kept for a deployment that publishes one repo per skill.
+    ///    Note the default org (`librefang-skills`) does not exist, so this leg 404s on a stock install; the registry checkout is what makes `install` work.
     pub async fn install(&self, skill_name: &str, target_dir: &Path) -> Result<String, SkillError> {
         if let Some(registry_skills) = self.config.registry_skills_dir() {
             let source = resolve_skill_dir(&registry_skills, skill_name)?;
@@ -503,10 +481,7 @@ impl MarketplaceClient {
 
     /// Copy one skill out of the synced registry checkout into `target_dir`.
     ///
-    /// Normalizes the manifest through `ensure_skill_manifest`, so the registry's
-    /// `SKILL.md` shape becomes a native `skill.toml` on install, and runs the
-    /// same supply-chain audit as the remote path — a registry checkout is still
-    /// third-party content pulled off a forge.
+    /// Normalizes the manifest through `ensure_skill_manifest`, so the registry's `SKILL.md` shape becomes a native `skill.toml` on install, and runs the same supply-chain audit as the remote path — a registry checkout is still third-party content pulled off a forge.
     fn install_from_registry_dir(
         &self,
         source: &Path,
@@ -557,13 +532,9 @@ impl MarketplaceClient {
         Ok(version)
     }
 
-    /// Install a skill by cloning a git remote — the form the CLI advertises
-    /// (`librefang skill install https://github.com/user/skill.git`) but that was
-    /// never implemented (#6569).
+    /// Install a skill by cloning a git remote — the form the CLI advertises (`librefang skill install https://github.com/user/skill.git`) but that was never implemented (#6569).
     ///
-    /// Shallow-clones into a temporary directory next to the target, drops the
-    /// `.git` metadata, normalizes the manifest (so a `SKILL.md`-only repo works),
-    /// then runs the same supply-chain audit as every other install path.
+    /// Shallow-clones into a temporary directory next to the target, drops the `.git` metadata, normalizes the manifest (so a `SKILL.md`-only repo works), then runs the same supply-chain audit as every other install path.
     pub fn install_from_git(&self, url: &str, target_dir: &Path) -> Result<String, SkillError> {
         let skill_name = skill_name_from_git_url(url).ok_or_else(|| {
             SkillError::InvalidManifest(format!(
@@ -864,13 +835,12 @@ impl MarketplaceClient {
 /// A search result from the marketplace.
 #[derive(Debug, Clone)]
 pub struct SkillSearchResult {
-    /// Skill name — the manifest / frontmatter name, which may differ from the
-    /// directory name.
+    /// Skill name — the manifest / frontmatter name, which may differ from the directory name.
     pub name: String,
     /// Description.
     pub description: String,
-    /// Star count. Always 0 for registry-checkout results (no popularity signal
-    /// on disk); populated by the GitHub-org search.
+    /// Star count.
+    /// Always 0 for registry-checkout results (no popularity signal on disk); populated by the GitHub-org search.
     pub stars: u64,
     /// Repository URL, or the on-disk path for a registry-checkout result.
     pub url: String,
@@ -1088,8 +1058,7 @@ mod tests {
     // #6569 — registry-checkout search + install
     // ---------------------------------------------------------------------
 
-    /// Write a SKILL.md-shaped registry entry — the format all 61 registry
-    /// skills actually use.
+    /// Write a SKILL.md-shaped registry entry — the format all 61 registry skills actually use.
     fn write_skillmd_entry(registry_skills: &Path, dir: &str, name: &str, description: &str) {
         let skill_dir = registry_skills.join(dir);
         std::fs::create_dir_all(&skill_dir).unwrap();
@@ -1194,9 +1163,7 @@ mod tests {
         assert!(client.search_registry("x").is_err());
     }
 
-    /// The reported failure: `librefang skill install web-search` 404'd because
-    /// install went to the nonexistent `librefang-skills` GitHub org, while the
-    /// skill sat in the synced registry checkout the whole time.
+    /// The reported failure: `librefang skill install web-search` 404'd because install went to the nonexistent `librefang-skills` GitHub org, while the skill sat in the synced registry checkout the whole time.
     #[tokio::test]
     async fn install_prefers_the_registry_checkout_and_converts_skillmd() {
         let tmp = TempDir::new().unwrap();

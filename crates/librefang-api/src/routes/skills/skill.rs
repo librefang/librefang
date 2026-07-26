@@ -749,10 +749,8 @@ pub async fn marketplace_search(
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string();
-            // Accept SKILL.md as well as skill.toml (#6569). Every skill in the
-            // registry ships as SKILL.md, so the skill.toml-only check made this
-            // endpoint return an empty list on every install — the same gap
-            // `GET /api/skills/registry` had already solved.
+            // Accept SKILL.md as well as skill.toml (#6569).
+            // Every skill in the registry ships as SKILL.md, so the skill.toml-only check made this endpoint return an empty list on every install — the same gap `GET /api/skills/registry` had already solved.
             let (name, desc) = if let Some(meta) = read_registry_skill_entry(&path, &dir_name) {
                 meta
             } else {
@@ -767,9 +765,7 @@ pub async fn marketplace_search(
                     "description": desc,
                     "stars": 0,
                     "url": "",
-                    // The directory name is what `POST /api/skills/install` and
-                    // `librefang skill install` take; it can differ from the
-                    // frontmatter name.
+                    // The directory name is what `POST /api/skills/install` and `librefang skill install` take; it can differ from the frontmatter name.
                     "install_id": dir_name,
                 }));
             }
@@ -789,10 +785,8 @@ pub async fn marketplace_search(
 
 /// Read `(name, description)` for one registry skill directory.
 ///
-/// Handles both on-disk shapes — `SKILL.md` with YAML frontmatter (what the
-/// registry ships) and the native `skill.toml` — and falls back to the directory
-/// name when the metadata is present but unparsable. Returns `None` for a
-/// directory holding neither, so unrelated directories are skipped.
+/// Handles both on-disk shapes — `SKILL.md` with YAML frontmatter (what the registry ships) and the native `skill.toml` — and falls back to the directory name when the metadata is present but unparsable.
+/// Returns `None` for a directory holding neither, so unrelated directories are skipped.
 fn read_registry_skill_entry(dir: &std::path::Path, dir_name: &str) -> Option<(String, String)> {
     let skill_md = dir.join("SKILL.md");
     if skill_md.exists() {

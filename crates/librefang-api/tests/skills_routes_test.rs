@@ -367,9 +367,7 @@ async fn skills_registry_lists_cached_entries_and_install_state() {
 // GET /api/marketplace/search (#6569)
 // ---------------------------------------------------------------------------
 
-/// The registry ships `SKILL.md`, but this endpoint only looked for
-/// `skill.toml`, so it returned an empty result set on every install — the same
-/// gap `/api/skills/registry` had already solved.
+/// The registry ships `SKILL.md`, but this endpoint only looked for `skill.toml`, so it returned an empty result set on every install — the same gap `/api/skills/registry` had already solved.
 #[tokio::test(flavor = "multi_thread")]
 async fn marketplace_search_finds_skillmd_registry_entries_6569() {
     let h = boot().await;
@@ -389,8 +387,7 @@ async fn marketplace_search_finds_skillmd_registry_entries_6569() {
         .find(|r| r["name"] == "web-search")
         .unwrap_or_else(|| panic!("web-search missing in {body}"));
     assert_eq!(row["description"], "Search the web for answers");
-    // The directory name is what the install endpoints take; it can differ from
-    // the frontmatter name.
+    // The directory name is what the install endpoints take; it can differ from the frontmatter name.
     assert_eq!(row["install_id"], "web-search");
     assert_eq!(
         body["total"].as_u64().unwrap() as usize,
