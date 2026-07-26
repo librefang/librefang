@@ -418,7 +418,7 @@ pub async fn update_goal_by_id(
 
     if let Some(parent_id) = req.get("parent_id") {
         if let Some(pid) = parent_id.as_str() {
-            if pid == id {
+            if pid.trim() == id {
                 return ApiErrorResponse::bad_request("A goal cannot be its own parent")
                     .into_json_tuple();
             }
@@ -457,6 +457,14 @@ pub async fn update_goal_by_id(
             if let Some(parent_id) = req.get("parent_id") {
                 if !parent_clear {
                     if let Some(pid) = parent_id.as_str() {
+                        // Trim before comparing (#6562): the mutation below
+                        // persists `pid.trim()`, so validating against the
+                        // untrimmed string would either false-404 a
+                        // whitespace-padded but otherwise valid parent id, or
+                        // let a whitespace-padded self-reference slip past
+                        // the cycle check and land trimmed (i.e. equal to
+                        // `id`) once persisted.
+                        let pid = pid.trim();
                         if !goals.iter().any(|g| g["id"].as_str() == Some(pid)) {
                             return Err(LibreFangError::InvalidInput(format!(
                                 "{PARENT_MISSING}{pid}"

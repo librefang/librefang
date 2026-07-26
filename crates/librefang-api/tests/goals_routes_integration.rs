@@ -327,6 +327,50 @@ async fn goals_update_blank_agent_id_clears_assignment_6562() {
     assert!(body.get("agent_id").is_none(), "got: {body:?}");
 }
 
+/// #6562 follow-up: a real parent id with incidental whitespace (e.g. pasted
+/// from a form) must resolve, not 404, since the stored value is trimmed
+/// before persisting. Validating against the untrimmed string while
+/// persisting the trimmed one would let this legitimately-linked id fail
+/// existence-checking.
+#[tokio::test(flavor = "multi_thread")]
+async fn goals_update_with_whitespace_padded_parent_id_still_links_6562() {
+    let h = boot().await;
+    let parent = create_goal(&h, serde_json::json!({"title": "parent"})).await;
+    let parent_id = parent["id"].as_str().unwrap().to_string();
+    let child = create_goal(&h, serde_json::json!({"title": "child"})).await;
+    let child_id = child["id"].as_str().unwrap().to_string();
+
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/goals/{child_id}"),
+        Some(serde_json::json!({"parent_id": format!("  {parent_id}  ")})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got: {body:?}");
+    assert_eq!(body["parent_id"], parent_id);
+}
+
+/// #6562 follow-up: a whitespace-padded self-reference must still be
+/// rejected as "cannot be its own parent" — comparing the untrimmed
+/// candidate against `id` would miss it, and it would land trimmed (i.e.
+/// exactly equal to `id`) once persisted.
+#[tokio::test(flavor = "multi_thread")]
+async fn goals_update_rejects_whitespace_padded_self_parent_6562() {
+    let h = boot().await;
+    let goal = create_goal(&h, serde_json::json!({"title": "self"})).await;
+    let id = goal["id"].as_str().unwrap().to_string();
+
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/goals/{id}"),
+        Some(serde_json::json!({"parent_id": format!("  {id}  ")})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body:?}");
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/goals/{id} + GET /api/goals/{id}/children
 // ---------------------------------------------------------------------------
