@@ -744,32 +744,82 @@ pub async fn marketplace_search(
             if !path.is_dir() {
                 continue;
             }
-            let manifest_path = path.join("skill.toml");
-            if !manifest_path.exists() {
+            let dir_name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            // Accept SKILL.md as well as skill.toml (#6569). Every skill in the
+            // registry ships as SKILL.md, so the skill.toml-only check made this
+            // endpoint return an empty list on every install — the same gap
+            // `GET /api/skills/registry` had already solved.
+            let (name, desc) = if let Some(meta) = read_registry_skill_entry(&path, &dir_name) {
+                meta
+            } else {
                 continue;
-            }
-            if let Ok(content) = std::fs::read_to_string(&manifest_path) {
-                if let Ok(manifest) = toml::from_str::<librefang_skills::SkillManifest>(&content) {
-                    let name = &manifest.skill.name;
-                    let desc = &manifest.skill.description;
-                    if query.is_empty()
-                        || name.to_lowercase().contains(&query)
-                        || desc.to_lowercase().contains(&query)
-                    {
-                        results.push(serde_json::json!({
-                            "name": name,
-                            "description": desc,
-                            "stars": 0,
-                            "url": "",
-                        }));
-                    }
-                }
+            };
+            if query.is_empty()
+                || name.to_lowercase().contains(&query)
+                || desc.to_lowercase().contains(&query)
+            {
+                results.push(serde_json::json!({
+                    "name": name,
+                    "description": desc,
+                    "stars": 0,
+                    "url": "",
+                    // The directory name is what `POST /api/skills/install` and
+                    // `librefang skill install` take; it can differ from the
+                    // frontmatter name.
+                    "install_id": dir_name,
+                }));
             }
         }
     }
 
+    // Deterministic ordering — `read_dir` order is filesystem-dependent.
+    results.sort_by(|a, b| {
+        a["name"]
+            .as_str()
+            .unwrap_or_default()
+            .cmp(b["name"].as_str().unwrap_or_default())
+    });
     let total = results.len();
     Json(serde_json::json!({"results": results, "total": total}))
+}
+
+/// Read `(name, description)` for one registry skill directory.
+///
+/// Handles both on-disk shapes — `SKILL.md` with YAML frontmatter (what the
+/// registry ships) and the native `skill.toml` — and falls back to the directory
+/// name when the metadata is present but unparsable. Returns `None` for a
+/// directory holding neither, so unrelated directories are skipped.
+fn read_registry_skill_entry(dir: &std::path::Path, dir_name: &str) -> Option<(String, String)> {
+    let skill_md = dir.join("SKILL.md");
+    if skill_md.exists() {
+        if let Ok(content) = std::fs::read_to_string(&skill_md) {
+            if let Some(fm) = parse_skill_md_frontmatter(&content) {
+                let name = if fm.name.trim().is_empty() {
+                    dir_name.to_string()
+                } else {
+                    fm.name.trim().to_string()
+                };
+                return Some((name, fm.description));
+            }
+        }
+        return Some((dir_name.to_string(), String::new()));
+    }
+
+    let manifest_path = dir.join("skill.toml");
+    if manifest_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&manifest_path) {
+            if let Ok(manifest) = toml::from_str::<librefang_skills::SkillManifest>(&content) {
+                return Some((manifest.skill.name, manifest.skill.description));
+            }
+        }
+        return Some((dir_name.to_string(), String::new()));
+    }
+
+    None
 }
 
 #[utoipa::path(

@@ -50,6 +50,17 @@ pub(crate) fn resolve_skills_dir(hand: Option<&str>) -> PathBuf {
     }
 }
 
+/// Marketplace config pointed at the synced registry checkout (#6569).
+///
+/// `~/.librefang/registry` is maintained by `registry_sync` and honours
+/// `registry.registry_host`, so this works against a Codeberg mirror as well as
+/// GitHub. Without it, search and install fall back to the `librefang-skills`
+/// GitHub org, which does not exist.
+fn marketplace_config_with_registry() -> librefang_skills::marketplace::MarketplaceConfig {
+    librefang_skills::marketplace::MarketplaceConfig::default()
+        .with_registry_dir(librefang_home().join("registry"))
+}
+
 pub(crate) fn cmd_skill_install(source: &str, hand: Option<&str>) {
     let skills_dir = resolve_skills_dir(hand);
     std::fs::create_dir_all(&skills_dir).unwrap_or_else(|e| {
@@ -61,11 +72,119 @@ pub(crate) fn cmd_skill_install(source: &str, hand: Option<&str>) {
         std::process::exit(1);
     });
 
+    // Git remote install — advertised in `cli.rs`'s `Install` long_about but
+    // previously unimplemented: a URL fell through to the name-based marketplace
+    // install, which pasted it into `{org}/{name}` and requested a nonsense URL
+    // (#6569).
+    if librefang_skills::marketplace::looks_like_git_url(source) {
+        let mut sp = progress::auto(
+            &i18n::t_args("skill-install-progress", &[("source", source)]),
+            None,
+        );
+        sp.tick(1);
+        let client = librefang_skills::marketplace::MarketplaceClient::new(
+            marketplace_config_with_registry(),
+        );
+        match client.install_from_git(source, &skills_dir) {
+            Ok(version) => {
+                if let Some(h) = hand {
+                    sp.finish(&i18n::t_args(
+                        "skill-installed-hub-to-hand",
+                        &[("source", source), ("version", &version), ("hand", h)],
+                    ));
+                } else {
+                    sp.finish(&i18n::t_args(
+                        "skill-installed-hub",
+                        &[("source", source), ("version", &version)],
+                    ));
+                }
+            }
+            Err(e) => {
+                let err_msg = e.to_string();
+                sp.finish_with_failure(&i18n::t_args(
+                    "skill-install-failed",
+                    &[("error", &err_msg)],
+                ));
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     let source_path = PathBuf::from(source);
     if source_path.exists() && source_path.is_dir() {
         // Local directory install
         let manifest_path = source_path.join("skill.toml");
         if !manifest_path.exists() {
+            // SKILL.md (Agent Skills / OpenClaw prompt-only format) — the shape
+            // every skill in `~/.librefang/registry/skills/` uses. The registry
+            // loader already auto-converts it (`registry.rs: load_all`), so
+            // refusing it here made those skills uninstallable by path (#6569).
+            if librefang_skills::openclaw_compat::detect_skillmd(&source_path) {
+                match librefang_skills::openclaw_compat::convert_skillmd(&source_path) {
+                    Ok(converted) => {
+                        let name = converted.manifest.skill.name.clone();
+                        if let Err(e) = validate_skill_name(&name) {
+                            eprintln!(
+                                "{}",
+                                i18n::t_args("skill-install-refused", &[("error", &e)])
+                            );
+                            std::process::exit(1);
+                        }
+                        let dest = skills_dir.join(&name);
+                        copy_dir_recursive(&source_path, &dest);
+                        if let Err(e) = librefang_skills::openclaw_compat::write_librefang_manifest(
+                            &dest,
+                            &converted.manifest,
+                        ) {
+                            let err_msg = e.to_string();
+                            eprintln!(
+                                "{}",
+                                i18n::t_args("skill-write-manifest-failed", &[("error", &err_msg)])
+                            );
+                            std::process::exit(1);
+                        }
+                        if let Err(e) = librefang_skills::openclaw_compat::write_prompt_context(
+                            &dest,
+                            &converted.prompt_context,
+                        ) {
+                            let err_msg = e.to_string();
+                            eprintln!(
+                                "{}",
+                                i18n::t_args("skill-write-manifest-failed", &[("error", &err_msg)])
+                            );
+                            std::process::exit(1);
+                        }
+                        let version = converted.manifest.skill.version.clone();
+                        if let Some(h) = hand {
+                            println!(
+                                "{}",
+                                i18n::t_args(
+                                    "skill-installed-to-hand",
+                                    &[("name", &name), ("version", &version), ("hand", h)]
+                                )
+                            );
+                        } else {
+                            println!(
+                                "{}",
+                                i18n::t_args(
+                                    "skill-installed",
+                                    &[("name", &name), ("version", &version)]
+                                )
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        let err_msg = e.to_string();
+                        eprintln!(
+                            "{}",
+                            i18n::t_args("skill-openclaw-convert-failed", &[("error", &err_msg)])
+                        );
+                        std::process::exit(1);
+                    }
+                }
+                return;
+            }
             // Check if it's an OpenClaw skill
             if librefang_skills::openclaw_compat::detect_openclaw_skill(&source_path) {
                 println!("{}", i18n::t("skill-openclaw-detected"));
@@ -184,8 +303,9 @@ pub(crate) fn cmd_skill_install(source: &str, hand: Option<&str>) {
         );
         sp.tick(1);
         let rt = tokio::runtime::Runtime::new().unwrap();
+        // Registry checkout first, GitHub-releases org as the fallback (#6569).
         let client = librefang_skills::marketplace::MarketplaceClient::new(
-            librefang_skills::marketplace::MarketplaceConfig::default(),
+            marketplace_config_with_registry(),
         );
         match rt.block_on(client.install(source, &skills_dir)) {
             Ok(version) => {
@@ -293,11 +413,12 @@ pub(crate) fn cmd_skill_remove(name: &str, hand: Option<&str>) {
 }
 
 pub(crate) fn cmd_skill_search(query: &str) {
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let client = librefang_skills::marketplace::MarketplaceClient::new(
-        librefang_skills::marketplace::MarketplaceConfig::default(),
-    );
-    match rt.block_on(client.search(query)) {
+    let client =
+        librefang_skills::marketplace::MarketplaceClient::new(marketplace_config_with_registry());
+    // Reads the synced registry checkout instead of a forge search API (#6569):
+    // the previous GitHub `org:librefang-skills` query 422'd because that org
+    // does not exist, so every search failed.
+    match client.search_registry(query) {
         Ok(results) if results.is_empty() => {
             println!("{}", i18n::t_args("skill-search-none", &[("query", query)]));
         }
@@ -308,11 +429,24 @@ pub(crate) fn cmd_skill_search(query: &str) {
             );
             println!();
             for r in results {
-                println!("  {} ({})", r.name, r.stars);
-                if !r.description.is_empty() {
-                    println!("    {}", r.description);
+                match &r.installable_id {
+                    // Registry result — no popularity signal on disk, so show
+                    // the ready-to-run install command instead of "(0)".
+                    Some(id) => {
+                        println!("  {}", r.name);
+                        if !r.description.is_empty() {
+                            println!("    {}", r.description);
+                        }
+                        println!("    librefang skill install {id}");
+                    }
+                    None => {
+                        println!("  {} ({})", r.name, r.stars);
+                        if !r.description.is_empty() {
+                            println!("    {}", r.description);
+                        }
+                        println!("    {}", r.url);
+                    }
                 }
-                println!("    {}", r.url);
                 println!();
             }
         }
