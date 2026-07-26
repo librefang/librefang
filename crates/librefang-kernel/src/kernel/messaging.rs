@@ -648,14 +648,14 @@ impl LibreFangKernel {
 
         let driver = self.resolve_driver_for_owner(&manifest, owner)?;
 
-        let ctx_window = Some(self.llm.model_catalog.load()).and_then(|cat| {
-            // #6423: provider-aware, prefix-reconciling lookup so a bare
-            // OpenRouter manifest model resolves the prefixed catalog id
-            // instead of falling back to the 8192 unknown-model window.
-            cat.find_model_for_manifest(&manifest.model.provider, &manifest.model.model)
-                .map(|m| m.context_window as usize)
-                .filter(|w| *w > 0)
-        });
+        // Resolve the context window: agent.toml override > catalog (#6568).
+        // The ephemeral `/btw` session is created empty below, so it carries no
+        // persisted hint to fall back to.
+        let ctx_window = super::manifest_helpers::resolve_context_window(
+            &self.llm.model_catalog.load(),
+            &manifest.model,
+            None,
+        );
 
         // Inject model_supports_tools for auto web search augmentation.
         // Refs #4745: honour user-configured per-model capability overrides
@@ -2427,16 +2427,6 @@ impl LibreFangKernel {
         let effective_owner = if loop_opts.is_fork { None } else { owner };
         let driver = self.resolve_driver_for_owner(&entry.manifest, effective_owner)?;
 
-        // Look up model's actual context window from the catalog. Filter out
-        // 0 so image/audio entries (no context window) fall through to the
-        // caller's default rather than poisoning compaction math.
-        let ctx_window = Some(self.llm.model_catalog.load()).and_then(|cat| {
-            // #6423: provider-aware, prefix-reconciling lookup (streaming path).
-            cat.find_model_for_manifest(&entry.manifest.model.provider, &entry.manifest.model.model)
-                .map(|m| m.context_window as usize)
-                .filter(|w| *w > 0)
-        });
-
         let (tx, rx) = crate::session_stream_hub::install_stream_fanout(
             &self.events.session_stream_hub,
             effective_session_id,
@@ -2461,6 +2451,16 @@ impl LibreFangKernel {
                 );
             });
         }
+
+        // Resolve the context window: agent.toml override > catalog > session
+        // (#6568). Computed *after* the session model override is applied — the
+        // pre-#6568 code read `entry.manifest`, so a `/model` switch sized the
+        // budget from the manifest's original model.
+        let ctx_window = super::manifest_helpers::resolve_context_window(
+            &self.llm.model_catalog.load(),
+            &manifest.model,
+            Some(session.context_window_tokens),
+        );
 
         // Inject model_supports_tools for auto web search augmentation.
         // Refs #4745: honour user capability overrides via effective_capabilities.
