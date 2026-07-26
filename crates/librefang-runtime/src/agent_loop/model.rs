@@ -66,6 +66,11 @@ pub fn strip_provider_prefix(model: &str, provider: &str) -> String {
 /// Exposed as `pub` so `kernel::agent_execution::execute_llm_agent` can
 /// call it at the dispatch site (before billing/router) without duplicating
 /// the logic.
+///
+/// A successful override also clears `model.context_window`: that field
+/// annotates the window of the *manifest's* model, so carrying it onto a
+/// different model would size the context budget from the wrong model. Clearing
+/// it hands the decision back to the catalog lookup (#6568).
 pub fn apply_session_model_override_to_manifest(
     manifest: &mut AgentManifest,
     override_str: &str,
@@ -76,6 +81,8 @@ pub fn apply_session_model_override_to_manifest(
             "model_override must not be empty".to_string(),
         ));
     }
+    let original_model = manifest.model.model.clone();
+    let original_provider = manifest.model.provider.clone();
     // Use splitn(2, '/') so qualified model IDs like
     // `meta-llama/Llama-3.3-70B` don't get mis-split on the second `/`.
     let mut parts = override_str.splitn(2, '/');
@@ -100,6 +107,9 @@ pub fn apply_session_model_override_to_manifest(
             // model-only form — provider stays as manifest default
             manifest.model.model = first.to_string();
         }
+    }
+    if manifest.model.model != original_model || manifest.model.provider != original_provider {
+        manifest.model.context_window = None;
     }
     Ok(())
 }
@@ -295,5 +305,44 @@ mod session_model_override_tests {
         // "groq/" → empty model — invalid
         let mut m = manifest_with("anthropic", "claude-sonnet-4-6");
         assert!(apply_session_model_override_to_manifest(&mut m, "groq/").is_err());
+    }
+
+    /// #6568: `model.context_window` annotates the *manifest's* model. Once the
+    /// override points at a different model, carrying that number over would
+    /// size the context budget from the wrong model, so it is cleared and the
+    /// catalog lookup decides.
+    #[test]
+    fn switching_model_clears_the_manifest_context_window() {
+        let mut m = manifest_with("anthropic", "claude-sonnet-4-6");
+        m.model.context_window = Some(200_000);
+        apply_session_model_override_to_manifest(&mut m, "groq/llama-3.3-70b").unwrap();
+        assert_eq!(m.model.context_window, None);
+    }
+
+    #[test]
+    fn switching_only_the_model_name_clears_the_context_window() {
+        let mut m = manifest_with("anthropic", "claude-sonnet-4-6");
+        m.model.context_window = Some(200_000);
+        apply_session_model_override_to_manifest(&mut m, "claude-haiku-4-5").unwrap();
+        assert_eq!(m.model.provider, "anthropic");
+        assert_eq!(m.model.context_window, None);
+    }
+
+    #[test]
+    fn a_no_op_override_keeps_the_context_window() {
+        // Re-selecting the model already in the manifest must not discard the
+        // operator's explicit window.
+        let mut m = manifest_with("anthropic", "claude-sonnet-4-6");
+        m.model.context_window = Some(150_000);
+        apply_session_model_override_to_manifest(&mut m, "anthropic/claude-sonnet-4-6").unwrap();
+        assert_eq!(m.model.context_window, Some(150_000));
+    }
+
+    #[test]
+    fn a_rejected_override_keeps_the_context_window() {
+        let mut m = manifest_with("anthropic", "claude-sonnet-4-6");
+        m.model.context_window = Some(150_000);
+        assert!(apply_session_model_override_to_manifest(&mut m, "").is_err());
+        assert_eq!(m.model.context_window, Some(150_000));
     }
 }
