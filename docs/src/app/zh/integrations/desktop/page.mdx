@@ -123,7 +123,7 @@ let server = axum::serve(listener, app.into_make_service_with_connect_info::<Soc
 
 托盘提示文本为 **"LibreFang Agent OS"**。
 
-**左键单击托盘图标**会显示主窗口（与 "Show Window" 菜单项效果相同）。此功能通过 `on_tray_icon_event` 监听 `MouseButton::Left` 配合 `MouseButtonState::Up` 实现。
+**左键单击托盘图标**在 macOS 和 Windows 上会显示主窗口，在 Linux 上会切换其显示状态（显示或隐藏）。
 
 ### 单实例强制
 
@@ -301,7 +301,7 @@ script-src 'self' 'unsafe-inline'
 - **平台特定依赖**：
   - **Windows**: WebView2（Windows 10/11 已内置）、Visual Studio Build Tools
   - **macOS**: Xcode Command Line Tools
-  - **Linux**: `libwebkit2gtk-4.1-dev`、`libappindicator3-dev`、`librsvg2-dev`、`libssl-dev`、`build-essential`
+  - **Linux**: `libwebkit2gtk-4.1-dev`、`librsvg2-dev`、`libssl-dev`、`build-essential`
 
 ### React Dashboard
 

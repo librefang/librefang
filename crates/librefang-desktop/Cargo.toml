@@ -50,7 +50,7 @@ tauri-plugin-autostart = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-shell = "2"
-ksni = "0.3.6"
+ksni = { version = "0.3.6", default-features = false, features = ["async-io"] }
 
 [target.'cfg(any(target_os = "ios", target_os = "android"))'.dependencies]
 # Mobile-only plugins

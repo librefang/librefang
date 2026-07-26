@@ -123,7 +123,7 @@ The system tray (defined in `src/tray.rs`) provides quick access without bringin
 
 The tray tooltip reads **"LibreFang Agent OS"**.
 
-**Left-click on tray icon** shows the main window (same as "Show Window" menu item). This is implemented via `on_tray_icon_event` listening for `MouseButton::Left` with `MouseButtonState::Up`.
+**Left-click on tray icon** shows the main window on macOS and Windows, or toggles its visibility (shows or hides) on Linux.
 
 ### Single-Instance Enforcement
 
@@ -301,7 +301,7 @@ This permits the WebView to load content from the localhost API server while blo
 - **Platform-specific dependencies**:
   - **Windows**: WebView2 (included in Windows 10/11), Visual Studio Build Tools
   - **macOS**: Xcode Command Line Tools
-  - **Linux**: `libwebkit2gtk-4.1-dev`, `libappindicator3-dev`, `librsvg2-dev`, `libssl-dev`, `build-essential`
+  - **Linux**: `libwebkit2gtk-4.1-dev`, `librsvg2-dev`, `libssl-dev`, `build-essential`
 
 ### React Dashboard
 

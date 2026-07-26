@@ -56,11 +56,6 @@
           cairo
           gdk-pixbuf
           pango
-          # tray-icon dlopens libayatana-appindicator3.so.1 at runtime, not
-          # a link dep. wrapGAppsHook3 + gappsWrapperArgs in the desktop
-          # derivation below puts this lib dir on LD_LIBRARY_PATH so the
-          # dlopen resolves (#3052, #3192).
-          libayatana-appindicator
         ]);
 
         # Filter source to include Rust files plus non-Rust assets needed at compile time
@@ -164,19 +159,7 @@
               pkgs.wrapGAppsHook3
             ];
           desktopItems = pkgs.lib.optionals pkgs.stdenv.isLinux [ librefangDesktopItem ];
-          # tray-icon → libappindicator-sys dlopens
-          # `libayatana-appindicator3.so.1` at runtime with no DT_NEEDED
-          # entry. patchelf --add-rpath writes DT_RUNPATH, which ld.so only
-          # consults for DT_NEEDED deps — never for dlopen string lookups —
-          # so the previous RPATH fix (#3052) never actually worked, the
-          # tray icon silently failed to appear on NixOS (#3192). Wrapping
-          # with gappsWrapperArgs prepends the appindicator lib dir to
-          # LD_LIBRARY_PATH so the dlopen call resolves.
-          preFixup = pkgs.lib.optionalString pkgs.stdenv.isLinux ''
-            gappsWrapperArgs+=(
-              --prefix LD_LIBRARY_PATH : "${pkgs.libayatana-appindicator}/lib"
-            )
-          '';
+
           postInstall =
             let
               # `128x128@2x.png` contains an `@`, which is not a legal
