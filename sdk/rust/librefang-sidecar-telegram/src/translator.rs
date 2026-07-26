@@ -515,13 +515,15 @@ pub fn callback_event(cq: &CallbackQuery) -> Option<Value> {
         .as_ref()
         .map(|m| matches!(m.chat.chat_type.as_str(), "group" | "supergroup"))
         .unwrap_or(false);
+    // Same string contract as `build_metadata` (#6564). Read once and reused
+    // below for the top-level slot, rather than matching on `cq.message` twice.
+    let message_id = cq.message.as_ref().map(|m| m.message_id.to_string());
     let mut metadata = serde_json::Map::new();
     metadata.insert("chat_id".into(), json!(chat_id.clone()));
     metadata.insert("platform".into(), json!("telegram"));
     metadata.insert("callback_query_id".into(), json!(cq.id.clone()));
-    // Same string contract as `build_metadata` (#6564).
-    if let Some(m) = &cq.message {
-        metadata.insert("message_id".into(), json!(m.message_id.to_string()));
+    if let Some(id) = &message_id {
+        metadata.insert("message_id".into(), json!(id));
     }
     metadata.insert("sender_user_id".into(), json!(sender.user_id.clone()));
     if let Some(uname) = &sender.username {
@@ -536,8 +538,8 @@ pub fn callback_event(cq: &CallbackQuery) -> Option<Value> {
     // Populate the canonical top-level id too, matching `message_event` and the
     // Python adapter's callback path. Without it the daemon synthesises a random
     // UUID for `platform_message_id`, which cannot address a Telegram message.
-    if let Some(m) = &cq.message {
-        builder = builder.message_id(m.message_id.to_string());
+    if let Some(id) = message_id {
+        builder = builder.message_id(id);
     }
     if let Some(uname) = sender.username {
         builder = builder.username(uname);
