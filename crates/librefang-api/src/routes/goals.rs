@@ -180,15 +180,22 @@ pub async fn start_goal_run(
             return ApiErrorResponse::not_found(format!("Goal '{id}' not found")).into_json_tuple();
         }
     };
-    let agent_id = match goal["agent_id"]
-        .as_str()
-        .and_then(|s| s.parse::<uuid::Uuid>().ok())
-    {
-        Some(u) => AgentId(u),
-        None => {
+    // Distinguish "never assigned" from "assigned, but the stored id is not a
+    // UUID" (#6562).
+    // Create and update now reject a non-UUID `agent_id` at the boundary, but goals written before that fix still carry `""` or other junk, and reporting them as unassigned sends the operator to a field that already looks filled in.
+    let stored_agent_id = goal["agent_id"].as_str().map(str::trim).unwrap_or("");
+    let agent_id = match stored_agent_id.parse::<uuid::Uuid>() {
+        Ok(u) => AgentId(u),
+        Err(_) if stored_agent_id.is_empty() => {
             return ApiErrorResponse::bad_request(
                 "Assign an agent to this goal before starting a run",
             )
+            .into_json_tuple();
+        }
+        Err(_) => {
+            return ApiErrorResponse::bad_request(format!(
+                "This goal's agent_id ('{stored_agent_id}') is not a valid agent UUID — reassign the agent to repair it"
+            ))
             .into_json_tuple();
         }
     };

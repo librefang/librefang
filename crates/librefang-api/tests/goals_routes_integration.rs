@@ -727,6 +727,50 @@ async fn goal_run_start_requires_assigned_agent() {
         StatusCode::BAD_REQUEST,
         "starting a run for a goal with no assigned agent must 400: {body:?}"
     );
+    let msg = body["message"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("Assign an agent"),
+        "an unassigned goal keeps the assign-an-agent wording: {body:?}"
+    );
+}
+
+/// #6562: create / update now reject a non-UUID `agent_id`, but goals written
+/// before that fix still carry junk.
+/// Reporting those as unassigned points the operator at a field that already looks filled in, so the two cases get distinct messages.
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_run_start_distinguishes_a_corrupt_agent_id_from_an_unassigned_one_6562() {
+    let h = boot().await;
+    let goal = create_goal(&h, serde_json::json!({"title": "Legacy junk"})).await;
+    let id = goal["id"].as_str().unwrap().to_string();
+
+    // Write the pre-fix shape directly, bypassing the route's validation the
+    // way an older daemon version would have.
+    let stored = h._state.kernel.memory_substrate().structured_modify(
+        librefang_types::goal::goals_storage_agent_id(),
+        librefang_types::goal::GOALS_STORAGE_KEY,
+        |cur| {
+            let mut goals = match cur {
+                Some(serde_json::Value::Array(a)) => a,
+                _ => Vec::new(),
+            };
+            for g in goals.iter_mut() {
+                if g["id"].as_str() == Some(id.as_str()) {
+                    g["agent_id"] = serde_json::Value::String("not-a-uuid".to_string());
+                }
+            }
+            Ok((serde_json::Value::Array(goals), ()))
+        },
+    );
+    assert!(stored.is_ok(), "seeding the legacy shape must succeed");
+
+    let (status, body) =
+        json_request(&h, Method::POST, &format!("/api/goals/{id}/start"), None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+    let msg = body["message"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("not-a-uuid") && msg.contains("reassign"),
+        "a corrupt stored id must be named and the fix suggested, not reported as unassigned: {body:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
