@@ -361,6 +361,41 @@ async fn goals_update_rejects_whitespace_padded_self_parent_6562() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body:?}");
 }
 
+/// A non-blank but unparsable `agent_id` must be rejected up front with
+/// `400 Invalid agent_id`, not silently stored: storing it would let
+/// `POST /api/goals/{id}/start` later report the misleading "Assign an
+/// agent to this goal before starting a run" on a goal that *was* assigned.
+#[tokio::test(flavor = "multi_thread")]
+async fn goals_create_rejects_non_uuid_agent_id() {
+    let h = boot().await;
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/goals",
+        Some(serde_json::json!({"title": "bad agent", "agent_id": "not-a-uuid"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body:?}");
+}
+
+/// Same contract for `agent_id` on update: a non-blank, unparsable id is
+/// rejected rather than persisted.
+#[tokio::test(flavor = "multi_thread")]
+async fn goals_update_rejects_non_uuid_agent_id() {
+    let h = boot().await;
+    let goal = create_goal(&h, serde_json::json!({"title": "bad agent update"})).await;
+    let id = goal["id"].as_str().unwrap().to_string();
+
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/goals/{id}"),
+        Some(serde_json::json!({"agent_id": "not-a-uuid"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body:?}");
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/goals/{id} + GET /api/goals/{id}/children
 // ---------------------------------------------------------------------------
