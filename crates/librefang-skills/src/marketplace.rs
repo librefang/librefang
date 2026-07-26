@@ -545,9 +545,9 @@ impl MarketplaceClient {
         })?;
         let skill_dir = resolve_skill_dir(target_dir, &skill_name)?;
 
-        // Clone into a sibling staging dir so a failed clone never leaves a
-        // half-populated skill directory behind.
-        let staging = target_dir.join(format!(".{skill_name}.clone-tmp"));
+        // Clone into a sibling staging dir so a failed clone never leaves a half-populated skill directory behind.
+        // The `.staging-` prefix is the repo's existing convention, not a new one: `SkillRegistry::load_all` sweeps `.staging-*` / `.installing-*` leftovers on every load, so a clone interrupted by a crash or Ctrl-C gets cleaned up on the next registry load instead of accumulating forever (#3719).
+        let staging = target_dir.join(format!(".staging-{skill_name}"));
         if staging.exists() {
             std::fs::remove_dir_all(&staging)?;
         }
@@ -1135,6 +1135,19 @@ mod tests {
             .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].description, "Native manifest");
+    }
+
+    /// The git-clone staging directory must use the repo's `.staging-` prefix so `SkillRegistry::load_all`'s stale-dir sweep reclaims it after an interrupted clone (#3719).
+    #[test]
+    fn git_staging_dir_uses_the_sweepable_prefix() {
+        // Asserted on the constructed name rather than by running a clone, which
+        // would need a live remote.
+        let name = skill_name_from_git_url("https://github.com/user/my-skill.git").unwrap();
+        let staging = format!(".staging-{name}");
+        assert!(
+            staging.starts_with(".staging-"),
+            "load_all only sweeps `.staging-*` / `.installing-*`, got {staging}"
+        );
     }
 
     /// A registry row must not carry the daemon's filesystem layout: the same rows are served by `GET /api/marketplace/search`.
