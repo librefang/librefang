@@ -323,7 +323,9 @@ impl MarketplaceClient {
                 description,
                 // The registry carries no popularity signal; the field stays for the GitHub-releases shape that does.
                 stars: 0,
-                url: path.display().to_string(),
+                // Deliberately empty rather than the on-disk path.
+                // A caller that serves these rows over HTTP (the dashboard's `GET /api/marketplace/search`) would otherwise leak the daemon's home directory layout to every client, and no caller needs it — `installable_id` is what you act on.
+                url: String::new(),
                 installable_id: Some(dir_name),
             });
         }
@@ -1133,6 +1135,18 @@ mod tests {
             .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].description, "Native manifest");
+    }
+
+    /// A registry row must not carry the daemon's filesystem layout: the same rows are served by `GET /api/marketplace/search`.
+    #[test]
+    fn search_registry_does_not_leak_on_disk_paths() {
+        let tmp = TempDir::new().unwrap();
+        let registry = tmp.path().join("registry");
+        write_skillmd_entry(&registry.join("skills"), "web-search", "web-search", "");
+
+        let results = client_with_registry(&registry).search_registry("").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].url, "", "got {:?}", results[0].url);
     }
 
     #[test]
