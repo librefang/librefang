@@ -4127,7 +4127,8 @@ async fn dispatch_message(
         {
             let Some(message_id) = resolve_callback_message_id(message) else {
                 warn!(
-                    adapter = %message.sender.platform_id,
+                    channel = ct_str,
+                    user_id = %message.sender.platform_id,
                     action = %action,
                     metadata_message_id = ?message.metadata.get("message_id"),
                     platform_message_id = %message.platform_message_id,
