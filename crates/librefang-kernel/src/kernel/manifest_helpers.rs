@@ -752,6 +752,25 @@ mod context_window_tests {
         );
         assert_eq!(resolved, None);
     }
+
+    /// Guards the `session_hint: None` choice at the compaction gate.
+    ///
+    /// `session.context_window_tokens` holds whatever the previous turn
+    /// resolved, which for an agent hit by #6568 is the stale 8192 fallback.
+    /// The gate's miss-default is a 200K *global default window*, not the agent
+    /// loop's conservative unknown-model fallback, so passing the session value
+    /// in would rank a stale 8192 above 200K and make compaction fire much
+    /// earlier than before this change. Passing `None` keeps the old default.
+    #[test]
+    fn a_stale_session_hint_would_beat_the_compaction_gate_default() {
+        let unknown = model("deepseek", "deepseek-v4-flash", None);
+        // What the gate must NOT do: rank the stale value above its default.
+        let with_stale_hint = resolve_context_window(&catalog(), &unknown, Some(8192));
+        assert_eq!(with_stale_hint, Some(8192));
+        // What the gate does: no hint, so its own `unwrap_or(200_000)` applies.
+        let without_hint = resolve_context_window(&catalog(), &unknown, None);
+        assert_eq!(without_hint, None);
+    }
 }
 
 #[cfg(test)]
