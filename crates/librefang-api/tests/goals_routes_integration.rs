@@ -211,6 +211,122 @@ async fn goals_create_with_unknown_parent_returns_404() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+/// #6562: the dashboard's create form seeds `parent_id` / `agent_id` as empty
+/// strings, so a plain "title + description" create posted `parent_id: ""` and
+/// got `404 Parent goal '' not found`. A blank id means "not set".
+#[tokio::test(flavor = "multi_thread")]
+async fn goals_create_treats_blank_parent_and_agent_ids_as_absent_6562() {
+    let h = boot().await;
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/goals",
+        Some(serde_json::json!({
+            "title": "Buy milk",
+            "description": "from the shop",
+            "status": "pending",
+            "progress": 0,
+            "parent_id": "",
+            "agent_id": "",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "got: {body:?}");
+    // Absent, not stored as an empty string: an empty `agent_id` would later
+    // fail UUID parsing in `POST /api/goals/{id}/start`.
+    assert!(
+        body.get("parent_id").is_none(),
+        "blank parent_id must not be persisted: {body:?}"
+    );
+    assert!(
+        body.get("agent_id").is_none(),
+        "blank agent_id must not be persisted: {body:?}"
+    );
+}
+
+/// Whitespace-only ids are blank too — a form control can submit `" "`.
+#[tokio::test(flavor = "multi_thread")]
+async fn goals_create_treats_whitespace_parent_id_as_absent_6562() {
+    let h = boot().await;
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/goals",
+        Some(serde_json::json!({"title": "Whitespace", "parent_id": "   "})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "got: {body:?}");
+    assert!(body.get("parent_id").is_none(), "got: {body:?}");
+}
+
+/// A real parent id still resolves normally — the blank-handling must not
+/// weaken the existence check.
+#[tokio::test(flavor = "multi_thread")]
+async fn goals_create_with_real_parent_still_links_6562() {
+    let h = boot().await;
+    let parent = create_goal(&h, serde_json::json!({"title": "parent"})).await;
+    let parent_id = parent["id"].as_str().unwrap().to_string();
+
+    let child = create_goal(
+        &h,
+        serde_json::json!({"title": "child", "parent_id": parent_id.clone()}),
+    )
+    .await;
+    assert_eq!(child["parent_id"], parent_id);
+}
+
+/// #6562: `PUT` with a blank `parent_id` clears the link, exactly as `null`
+/// does, instead of 404-ing on a lookup for the goal literally named `""`.
+#[tokio::test(flavor = "multi_thread")]
+async fn goals_update_blank_parent_id_clears_link_6562() {
+    let h = boot().await;
+    let parent = create_goal(&h, serde_json::json!({"title": "parent"})).await;
+    let parent_id = parent["id"].as_str().unwrap().to_string();
+    let child = create_goal(
+        &h,
+        serde_json::json!({"title": "child", "parent_id": parent_id}),
+    )
+    .await;
+    let child_id = child["id"].as_str().unwrap().to_string();
+
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/goals/{child_id}"),
+        Some(serde_json::json!({"parent_id": ""})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got: {body:?}");
+    assert!(
+        body.get("parent_id").is_none(),
+        "blank parent_id must clear the link: {body:?}"
+    );
+}
+
+/// Same contract for `agent_id` on update.
+#[tokio::test(flavor = "multi_thread")]
+async fn goals_update_blank_agent_id_clears_assignment_6562() {
+    let h = boot().await;
+    let agent = uuid::Uuid::new_v4().to_string();
+    let created = create_goal(
+        &h,
+        serde_json::json!({"title": "assigned", "agent_id": agent.clone()}),
+    )
+    .await;
+    assert_eq!(created["agent_id"], agent);
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/goals/{id}"),
+        Some(serde_json::json!({"agent_id": "   "})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got: {body:?}");
+    assert!(body.get("agent_id").is_none(), "got: {body:?}");
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/goals/{id} + GET /api/goals/{id}/children
 // ---------------------------------------------------------------------------
