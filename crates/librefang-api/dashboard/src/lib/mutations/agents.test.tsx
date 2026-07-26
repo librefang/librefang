@@ -274,8 +274,7 @@ describe("useCloneAgent", () => {
       payload: { new_name: "agent-1-copy", include_skills: true, include_tools: false },
     });
 
-    // `CloneAgentRequest.new_name` has no serde default and the struct is
-    // `deny_unknown_fields`, so the payload must be exactly these keys.
+    // `CloneAgentRequest.new_name` has no serde default and the struct is `deny_unknown_fields`, so the payload must be exactly these keys.
     expect(http.cloneAgent).toHaveBeenCalledWith("agent-1", {
       new_name: "agent-1-copy",
       include_skills: true,

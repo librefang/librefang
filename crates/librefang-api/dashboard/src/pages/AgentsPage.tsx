@@ -327,9 +327,7 @@ export function AgentsPage() {
     onConfirm: () => void;
     tone?: "default" | "destructive";
   } | null>(null);
-  // Clone dialog state (#6566). `POST /api/agents/{id}/clone` requires
-  // `new_name` with no serde default, so the button has to collect a name
-  // before firing — it previously posted `{}` and 422'd on every click.
+  // Clone dialog state (#6566). `POST /api/agents/{id}/clone` requires `new_name` with no serde default, so the button has to collect a name before firing — it previously posted `{}` and 422'd on every click.
   const [cloneDialog, setCloneDialog] = useState<{
     agentId: string;
     sourceName: string;
@@ -1745,8 +1743,7 @@ export function AgentsPage() {
     const isLoading = toolsListQuery.isLoading || tabAgentToolsQuery.isLoading;
 
     const grouped = new Map<string, ToolDefinition[]>();
-    // Server name per MCP group, kept alongside the display label so the grant
-    // check compares against the real server rather than re-parsing the label.
+    // Server name per MCP group, kept alongside the display label so the grant check compares against the real server rather than re-parsing the label.
     const mcpServerByGroup = new Map<string, string>();
     const mcpServerOf = (tool: ToolDefinition): string | null => {
       if (tool.source === "builtin" || (!tool.source && !tool.name.startsWith("mcp_"))) {
@@ -1778,11 +1775,8 @@ export function AgentsPage() {
     const isDirty = toolsDraft !== null &&
       (draft.length !== declared.length || draft.some((n) => !declared.includes(n)));
 
-    // #6565: MCP tools are granted by the agent's `mcp_servers` allowlist, not
-    // by `capabilities_tools` — the kernel explicitly skips the declared-tools
-    // filter for them (`tools_and_skills.rs`, Step 3). Reading MCP group state
-    // off `capabilities_tools` reported a whole-server grant as "AVAILABLE /
-    // click to assign" while the agent was actively calling those tools.
+    // #6565: MCP tools are granted by the agent's `mcp_servers` allowlist, not by `capabilities_tools` — the kernel explicitly skips the declared-tools filter for them (`tools_and_skills.rs`, Step 3).
+    // Reading MCP group state off `capabilities_tools` reported a whole-server grant as "AVAILABLE / click to assign" while the agent was actively calling those tools.
     const blocklist = agentToolCfg?.tool_blocklist ?? [];
     const mcpMode = agent.tools_disabled
       ? "none"
@@ -1814,9 +1808,7 @@ export function AgentsPage() {
     };
 
     const handleCustomize = () => {
-      // Seed the allowlist with builtin tools only. `capabilities_tools`
-      // governs builtin tools; the kernel ignores `mcp_*` entries there, so
-      // seeding them just wrote misleading names into agent.toml (#6565).
+      // Seed the allowlist with builtin tools only. `capabilities_tools` governs builtin tools; the kernel ignores `mcp_*` entries there, so seeding them just wrote misleading names into agent.toml (#6565).
       setToolsDraft(
         allTools.filter((tool) => !isMcpGroup(groupNameOf(tool))).map((tool) => tool.name),
       );
@@ -1827,12 +1819,8 @@ export function AgentsPage() {
     };
 
     const handleToggleGroup = (groupName: string) => {
-      // MCP grants live in `agent.toml: mcp_servers`, which this tab's save
-      // endpoint (`PUT /api/agents/{id}/tools`) cannot write — it only carries
-      // capabilities_tools / tool_allowlist / tool_blocklist. Writing MCP tool
-      // names into capabilities_tools would look like it worked and change
-      // nothing, so the MCP groups are read-only here and point at the MCP
-      // servers tab instead (#6565).
+      // MCP grants live in `agent.toml: mcp_servers`, which this tab's save endpoint (`PUT /api/agents/{id}/tools`) cannot write — it only carries capabilities_tools / tool_allowlist / tool_blocklist.
+      // Writing MCP tool names into capabilities_tools would look like it worked and change nothing, so the MCP groups are read-only here and point at the MCP servers tab instead (#6565).
       if (isMcpGroup(groupName)) return;
       const groupTools = grouped.get(groupName) ?? [];
       const names = groupTools.map((t) => t.name);
@@ -1850,8 +1838,7 @@ export function AgentsPage() {
     };
 
     const handleToggleTool = (groupName: string, toolName: string) => {
-      // Same reasoning as `handleToggleGroup`: a per-tool toggle inside an MCP
-      // group has nowhere valid to write (#6565).
+      // Same reasoning as `handleToggleGroup`: a per-tool toggle inside an MCP group has nowhere valid to write (#6565).
       if (isMcpGroup(groupName)) return;
       setToolsDraft((prev) => {
         const s = new Set(prev ?? []);
@@ -1918,10 +1905,7 @@ export function AgentsPage() {
             <>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                 {sortedGroups.map(([groupName, groupTools]) => {
-                  // An empty `capabilities_tools` means "all builtin tools",
-                  // but it says nothing about MCP: an MCP server is only
-                  // reachable when `mcp_servers` grants it (#6565), so label
-                  // MCP groups by their actual grant instead of "included".
+                  // An empty `capabilities_tools` means "all builtin tools", but it says nothing about MCP: an MCP server is only reachable when `mcp_servers` grants it (#6565), so label MCP groups by their actual grant instead of "included".
                   const mcpGroup = isMcpGroup(groupName);
                   const granted = !mcpGroup || isMcpGroupGranted(groupName);
                   return (
@@ -2103,9 +2087,7 @@ export function AgentsPage() {
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                   {availableGroups.map(([groupName, groupTools]) => {
-                    // An ungranted MCP server cannot be assigned from this tab
-                    // — `PUT /api/agents/{id}/tools` has no `mcp_servers` field
-                    // (#6565), so it renders as a non-interactive hint.
+                    // An ungranted MCP server cannot be assigned from this tab — `PUT /api/agents/{id}/tools` has no `mcp_servers` field (#6565), so it renders as a non-interactive hint.
                     const mcpGroup = isMcpGroup(groupName);
                     return (
                       <div

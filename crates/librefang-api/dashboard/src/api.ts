@@ -1263,13 +1263,11 @@ export interface AgentDetail {
   /** MCP servers granted to this agent (`agent.toml: mcp_servers`).
    *  Emitted by `GET /api/agents/{id}` — see `lifecycle.rs: get_agent`. */
   mcp_servers?: string[];
-  /** MCP grant mode derived by the backend, mirroring the kernel semantics in
-   *  `available_tools` (#5855):
+  /** MCP grant mode derived by the backend, mirroring the kernel semantics in `available_tools` (#5855):
    *  - 'none' — empty list, no MCP server is granted.
    *  - 'all' — the list contains `"*"`, every connected server is granted.
    *  - 'allowlist' — only the named servers are granted.
-   *  Load-bearing for the Tools tab: MCP tools are granted through this field,
-   *  NOT through `capabilities_tools` (#6565). */
+   *  Load-bearing for the Tools tab: MCP tools are granted through this field, NOT through `capabilities_tools` (#6565). */
   mcp_servers_mode?: "all" | "allowlist" | "none";
   /** `agent.toml: tools_disabled` — hard off switch for every tool. */
   tools_disabled?: boolean;
@@ -1557,9 +1555,7 @@ export async function deleteAgent(agentId: string): Promise<ApiActionResponse> {
 
 /** Body of `POST /api/agents/{id}/clone`.
  *
- *  `new_name` is required by the backend (`CloneAgentRequest` has no serde
- *  default), and the struct is `#[serde(deny_unknown_fields)]` — so this shape
- *  must stay exactly these three keys or the request 422s (#6566).
+ *  `new_name` is required by the backend (`CloneAgentRequest` has no serde default), and the struct is `#[serde(deny_unknown_fields)]` — so this shape must stay exactly these three keys or the request 422s (#6566).
  */
 export interface CloneAgentPayload {
   new_name: string;

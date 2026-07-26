@@ -1,23 +1,13 @@
 /** Tool-grant semantics mirrored from the kernel, for read-only display.
  *
- * The kernel grants an agent's tools through two independent paths
- * (`LibreFangKernel::available_tools`, `tools_and_skills.rs`):
+ * The kernel grants an agent's tools through two independent paths (`LibreFangKernel::available_tools`, `tools_and_skills.rs`):
  *
- * - **Builtin tools** are filtered by `capabilities.tools` (the dashboard's
- *   `capabilities_tools`). An empty list — or one containing `"*"` — means
- *   unrestricted.
- * - **MCP tools** are granted by the agent's `mcp_servers` allowlist and are
- *   explicitly NOT filtered by `capabilities.tools`: "MCP tool names are
- *   dynamic and unknown at agent-definition time. Use tool_blocklist to
- *   restrict specific MCP tools if needed." An empty `mcp_servers` grants no
- *   server; `["*"]` grants every connected server (#5855).
+ * - **Builtin tools** are filtered by `capabilities.tools` (the dashboard's `capabilities_tools`). An empty list — or one containing `"*"` — means unrestricted.
+ * - **MCP tools** are granted by the agent's `mcp_servers` allowlist and are explicitly NOT filtered by `capabilities.tools`: "MCP tool names are dynamic and unknown at agent-definition time. Use tool_blocklist to restrict specific MCP tools if needed." An empty `mcp_servers` grants no server; `["*"]` grants every connected server (#5855).
  *
- * `tool_blocklist` then filters whatever survived, on both paths, with glob
- * patterns (#6495).
+ * `tool_blocklist` then filters whatever survived, on both paths, with glob patterns (#6495).
  *
- * Deriving MCP group state from `capabilities_tools` (as the Tools tab did
- * before #6565) therefore always reported a whole-server grant as unassigned,
- * even while the agent was actively calling those tools.
+ * Deriving MCP group state from `capabilities_tools` (as the Tools tab did before #6565) therefore always reported a whole-server grant as unassigned, even while the agent was actively calling those tools.
  */
 
 /** MCP grant classification emitted by `GET /api/agents/{id}`. */
@@ -30,10 +20,7 @@ export function normalizeMcpName(name: string): string {
 
 /** Mirror of `librefang_types::capability::glob_matches` for tool names.
  *
- * Tool names carry no `/`, `\` or `.`, so only the separator-free branch
- * (`glob_matches_simple`) is reachable for them: `*` matches any run of
- * characters, a bare `*` matches everything, and a pattern with no wildcard
- * must match exactly.
+ * Tool names carry no `/`, `\` or `.`, so only the separator-free branch (`glob_matches_simple`) is reachable for them: `*` matches any run of characters, a bare `*` matches everything, and a pattern with no wildcard must match exactly.
  */
 export function toolPatternMatches(pattern: string, value: string): boolean {
   if (pattern === "*") return true;
@@ -47,8 +34,7 @@ export function toolPatternMatches(pattern: string, value: string): boolean {
   // Trailing literal must be a suffix.
   const last = parts[parts.length - 1];
   if (last && !value.endsWith(last)) return false;
-  // Interior literals must appear in order, and the prefix/suffix must not
-  // overlap — `a*b` should not match `ab` twice over the same characters.
+  // Interior literals must appear in order, and the prefix/suffix must not overlap — `a*b` should not match `ab` twice over the same characters.
   let cursor = first.length;
   for (const segment of parts.slice(1, -1)) {
     if (!segment) continue;
@@ -64,8 +50,7 @@ export function isToolBlocked(toolName: string, blocklist: readonly string[]): b
   return blocklist.some((pattern) => toolPatternMatches(pattern, toolName));
 }
 
-/** Resolve the MCP grant mode from the raw allowlist when the backend field is
- *  absent (older daemon), mirroring `routes::agents::mcp_servers_mode`. */
+/** Resolve the MCP grant mode from the raw allowlist when the backend field is absent (older daemon), mirroring `routes::agents::mcp_servers_mode`. */
 export function resolveMcpGrantMode(
   mcpServers: readonly string[] | undefined,
   mode: McpGrantMode | undefined,
