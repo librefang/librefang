@@ -1035,16 +1035,14 @@ impl LibreFangKernel {
 
         let driver = self.resolve_driver_for_owner(&manifest, owner)?;
 
-        // Look up model's actual context window from the catalog. Filter out
-        // 0 so image/audio entries (no context window) fall through to the
-        // caller's default rather than poisoning compaction math.
-        let ctx_window = Some(self.llm.model_catalog.load()).and_then(|cat| {
-            // #6423: provider-aware, prefix-reconciling lookup (see
-            // `ModelCatalog::find_model_for_manifest`).
-            cat.find_model_for_manifest(&manifest.model.provider, &manifest.model.model)
-                .map(|m| m.context_window as usize)
-                .filter(|w| *w > 0)
-        });
+        // Resolve the context window: agent.toml override > catalog > session
+        // (#6568). See `manifest_helpers::resolve_context_window` for why the
+        // manifest override has to come first.
+        let ctx_window = super::manifest_helpers::resolve_context_window(
+            &self.llm.model_catalog.load(),
+            &manifest.model,
+            Some(session.context_window_tokens),
+        );
 
         // Inject model_supports_tools for auto web search augmentation.
         // Refs #4745: honour user capability overrides via effective_capabilities.
