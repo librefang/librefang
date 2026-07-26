@@ -357,14 +357,22 @@ impl LibreFangKernel {
         // 128K GPT-4o, 1M Gemini) instead of the global 200K default that
         // `CompactionConfig::from_toml_…` would otherwise hand us.
         //
-        // Same precedence as every other consumer (#6568): agent.toml override,
-        // then the catalog, then the persisted session value. `resolve_context_window`
-        // filters 0 out so image/audio entries (no context window) fall back to
-        // the 200K default instead of feeding 0 into compaction math.
+        // Honours the agent.toml override, then the catalog (#6568).
+        // `resolve_context_window` filters 0 out so image/audio entries (no
+        // context window) fall back to the 200K default instead of feeding 0
+        // into compaction math.
+        //
+        // `session_hint` is deliberately `None` here, unlike the execution paths
+        // and the context report. This gate's miss-default is a *global default
+        // window* (200K), not the agent loop's conservative unknown-model
+        // fallback — and `session.context_window_tokens` is whatever the last
+        // turn resolved, which for an agent affected by #6568 is 8192. Feeding
+        // that in would rank a stale 8192 above the 200K default and make the
+        // compaction trigger fire far earlier than before this change.
         let agent_ctx_window = super::manifest_helpers::resolve_context_window(
             &self.llm.model_catalog.load(),
             &entry.manifest.model,
-            Some(session.context_window_tokens),
+            None,
         )
         .unwrap_or(200_000);
         config.context_window_tokens = agent_ctx_window;
