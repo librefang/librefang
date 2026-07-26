@@ -1068,6 +1068,9 @@ pub async fn get_agent(
             "tools_disabled": entry.manifest.tools_disabled,
             "mcp_servers": entry.manifest.mcp_servers,
             "mcp_servers_mode": mcp_servers_mode(&entry.manifest.mcp_servers),
+            // The kernel gates MCP on `!mcp_disabled && !mcp_servers.is_empty()` (`available_tools`, Step 3), so a consumer deciding whether a server is reachable needs both halves.
+            // Without this the dashboard showed `mcp_servers = ["*"]` on an `mcp_disabled` agent as a live grant (#6565).
+            "mcp_disabled": entry.manifest.mcp_disabled,
             "fallback_models": entry.manifest.fallback_models,
             "auto_evolve": entry.manifest.auto_evolve,
             "web_search_augmentation": entry.manifest.web_search_augmentation,

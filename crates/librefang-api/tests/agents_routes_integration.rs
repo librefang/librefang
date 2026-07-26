@@ -234,6 +234,57 @@ async fn test_get_agent_happy_path() {
     assert!(body["capabilities"].is_object());
 }
 
+/// #6565: a consumer deciding whether an MCP server is reachable needs both halves of the kernel's gate (`!mcp_disabled && !mcp_servers.is_empty()`).
+/// `mcp_servers` / `mcp_servers_mode` were already emitted; `mcp_disabled` was not, so `mcp_servers = ["*"]` on a disabled agent looked like a live grant.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_get_agent_exposes_the_full_mcp_grant_state_6565() {
+    let h = boot(TEST_TOKEN).await;
+    let manifest = AgentManifest {
+        name: "mcp-granted".to_string(),
+        mcp_servers: vec!["server-x".to_string()],
+        ..AgentManifest::default()
+    };
+    let id = h
+        .state
+        .kernel
+        .spawn_agent_typed(manifest)
+        .expect("spawn_agent");
+
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{}", id))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["mcp_servers"], serde_json::json!(["server-x"]));
+    assert_eq!(body["mcp_servers_mode"], "allowlist");
+    assert_eq!(
+        body["mcp_disabled"], false,
+        "mcp_disabled must be present, not absent: {body}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_get_agent_reports_mcp_disabled_even_with_a_wildcard_grant_6565() {
+    let h = boot(TEST_TOKEN).await;
+    let manifest = AgentManifest {
+        name: "mcp-off".to_string(),
+        // The combination that used to read as "all servers granted".
+        mcp_servers: vec!["*".to_string()],
+        mcp_disabled: true,
+        ..AgentManifest::default()
+    };
+    let id = h
+        .state
+        .kernel
+        .spawn_agent_typed(manifest)
+        .expect("spawn_agent");
+
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{}", id))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["mcp_servers_mode"], "all");
+    assert_eq!(
+        body["mcp_disabled"], true,
+        "the hard off switch must be visible alongside the wildcard: {body}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_get_agent_invalid_id_returns_400() {
     let h = boot(TEST_TOKEN).await;

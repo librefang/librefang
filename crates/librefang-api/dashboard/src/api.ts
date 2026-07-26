@@ -1269,6 +1269,9 @@ export interface AgentDetail {
    *  - 'allowlist' — only the named servers are granted.
    *  Load-bearing for the Tools tab: MCP tools are granted through this field, NOT through `capabilities_tools` (#6565). */
   mcp_servers_mode?: "all" | "allowlist" | "none";
+  /** `agent.toml: mcp_disabled` — hard off switch for every MCP server.
+   *  The kernel gates MCP on `!mcp_disabled && !mcp_servers.is_empty()`, so this is load-bearing alongside `mcp_servers` when deciding reachability (#6565). */
+  mcp_disabled?: boolean;
   /** `agent.toml: tools_disabled` — hard off switch for every tool. */
   tools_disabled?: boolean;
   /** `agent.toml: skills_disabled` — hard off switch for every skill. */

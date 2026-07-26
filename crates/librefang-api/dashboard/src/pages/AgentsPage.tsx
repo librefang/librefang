@@ -1778,9 +1778,12 @@ export function AgentsPage() {
     // #6565: MCP tools are granted by the agent's `mcp_servers` allowlist, not by `capabilities_tools` — the kernel explicitly skips the declared-tools filter for them (`tools_and_skills.rs`, Step 3).
     // Reading MCP group state off `capabilities_tools` reported a whole-server grant as "AVAILABLE / click to assign" while the agent was actively calling those tools.
     const blocklist = agentToolCfg?.tool_blocklist ?? [];
-    const mcpMode = agent.tools_disabled
-      ? "none"
-      : resolveMcpGrantMode(agent.mcp_servers, agent.mcp_servers_mode);
+    // The kernel gates MCP on `!mcp_disabled && !mcp_servers.is_empty()`, and `tools_disabled` short-circuits every tool before that.
+    // Both hard switches have to fold into "none", or an `mcp_disabled` agent with `mcp_servers = ["*"]` renders as a live grant.
+    const mcpMode =
+      agent.tools_disabled || agent.mcp_disabled
+        ? "none"
+        : resolveMcpGrantMode(agent.mcp_servers, agent.mcp_servers_mode);
     const isMcpGroup = (groupName: string) => mcpServerByGroup.has(groupName);
     const isMcpGroupGranted = (groupName: string) => {
       const server = mcpServerByGroup.get(groupName);
