@@ -302,7 +302,12 @@ fn build_metadata(msg: &Message, sender: &Sender, edited: bool) -> serde_json::M
     let mut m = serde_json::Map::new();
     m.insert("chat_id".into(), json!(msg.chat.id.to_string()));
     m.insert("platform".into(), json!("telegram"));
-    m.insert("message_id".into(), json!(msg.message_id));
+    // String, not the raw i64: the wire contract for a message id is a string
+    // everywhere else in this file (`.message_id(...)` below), in the daemon
+    // (`SidecarMessageParams.message_id: Option<String>`), and in the Python
+    // adapter (`message_id=str(msg_id)`). A JSON number here never matches a
+    // consumer's `as_str()` (#6564).
+    m.insert("message_id".into(), json!(msg.message_id.to_string()));
     if let Some(t) = msg.message_thread_id {
         m.insert("thread_id".into(), json!(t.to_string()));
     }
@@ -510,12 +515,15 @@ pub fn callback_event(cq: &CallbackQuery) -> Option<Value> {
         .as_ref()
         .map(|m| matches!(m.chat.chat_type.as_str(), "group" | "supergroup"))
         .unwrap_or(false);
+    // Same string contract as `build_metadata` (#6564). Read once and reused
+    // below for the top-level slot, rather than matching on `cq.message` twice.
+    let message_id = cq.message.as_ref().map(|m| m.message_id.to_string());
     let mut metadata = serde_json::Map::new();
     metadata.insert("chat_id".into(), json!(chat_id.clone()));
     metadata.insert("platform".into(), json!("telegram"));
     metadata.insert("callback_query_id".into(), json!(cq.id.clone()));
-    if let Some(m) = &cq.message {
-        metadata.insert("message_id".into(), json!(m.message_id));
+    if let Some(id) = &message_id {
+        metadata.insert("message_id".into(), json!(id));
     }
     metadata.insert("sender_user_id".into(), json!(sender.user_id.clone()));
     if let Some(uname) = &sender.username {
@@ -527,6 +535,12 @@ pub fn callback_event(cq: &CallbackQuery) -> Option<Value> {
         .platform("telegram")
         .is_group(is_group)
         .metadata(metadata);
+    // Populate the canonical top-level id too, matching `message_event` and the
+    // Python adapter's callback path. Without it the daemon synthesises a random
+    // UUID for `platform_message_id`, which cannot address a Telegram message.
+    if let Some(id) = message_id {
+        builder = builder.message_id(id);
+    }
     if let Some(uname) = sender.username {
         builder = builder.username(uname);
     }
@@ -695,6 +709,71 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(parse_command(&msg), None);
+    }
+
+    /// #6564: the daemon's interactive-menu interceptor reads a message id as a
+    /// string. Emitting the raw `i64` produced a JSON number that never matched
+    /// the consumer's `as_str()`, and omitting the top-level `message_id` made
+    /// the daemon synthesise a random UUID for `platform_message_id`, so a
+    /// `/models` button press had nothing to edit and was dropped silently.
+    #[test]
+    fn callback_event_emits_message_id_as_a_string_in_both_slots() {
+        let cq = CallbackQuery {
+            id: "cbq-1".into(),
+            from: Some(User {
+                id: 42,
+                is_bot: false,
+                first_name: "Ada".into(),
+                last_name: None,
+                username: Some("ada".into()),
+            }),
+            message: Some(Message {
+                message_id: 7819,
+                text: Some("Select a provider:".into()),
+                chat: Chat {
+                    id: 42,
+                    chat_type: "private".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            chat_instance: "ci".into(),
+            data: Some("prov:deepseek".into()),
+        };
+
+        let event = callback_event(&cq).expect("callback event");
+        let params = &event["params"];
+        assert_eq!(
+            params["message_id"], "7819",
+            "the canonical id slot must be populated, as in message_event and the Python adapter — \
+             otherwise the daemon synthesises a UUID for platform_message_id"
+        );
+        assert_eq!(
+            params["metadata"]["message_id"], "7819",
+            "metadata must carry a string, not a JSON number"
+        );
+        assert!(
+            params["metadata"]["message_id"].is_string(),
+            "got {:?}",
+            params["metadata"]["message_id"]
+        );
+    }
+
+    #[test]
+    fn message_event_metadata_message_id_is_a_string() {
+        let msg = Message {
+            message_id: 55,
+            chat: Chat {
+                id: 42,
+                chat_type: "private".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let sender = extract_sender(&msg);
+        let metadata = build_metadata(&msg, &sender, false);
+        assert_eq!(metadata["message_id"], "55");
+        assert!(metadata["message_id"].is_string());
     }
 
     fn assert_text(c: TgContent, expected: &str) {
