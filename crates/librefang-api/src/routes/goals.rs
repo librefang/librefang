@@ -251,14 +251,9 @@ pub async fn stop_goal_run(
 
 /// Read an optional id-like string field, treating blank as absent (#6562).
 ///
-/// HTML form controls submit `""` for an unselected `<select>` / untouched
-/// `<input>`, so a create payload routinely carries `parent_id: ""` /
-/// `agent_id: ""` meaning "no parent" / "no agent". Reading those with a bare
-/// `as_str()` yielded `Some("")`, which then failed the parent-existence check
-/// with `404 Parent goal '' not found` and persisted an unparsable empty
-/// `agent_id` that later made `POST /api/goals/{id}/start` claim the goal had
-/// no agent assigned. Normalising at the boundary is the right layer: the
-/// stored document only ever carries a real id or omits the key entirely.
+/// HTML form controls submit `""` for an unselected `<select>` / untouched `<input>`, so a create payload routinely carries `parent_id: ""` / `agent_id: ""` meaning "no parent" / "no agent".
+/// Reading those with a bare `as_str()` yielded `Some("")`, which then failed the parent-existence check with `404 Parent goal '' not found` and persisted an unparsable empty `agent_id` that later made `POST /api/goals/{id}/start` claim the goal had no agent assigned.
+/// Normalising at the boundary is the right layer: the stored document only ever carries a real id or omits the key entirely.
 fn optional_id_field(req: &serde_json::Value, key: &str) -> Option<String> {
     req[key]
         .as_str()
@@ -269,8 +264,7 @@ fn optional_id_field(req: &serde_json::Value, key: &str) -> Option<String> {
 
 /// Whether an update payload's `parent_id` / `agent_id` means "clear it".
 ///
-/// `null` is the explicit clear signal; a blank string is the same intent
-/// arriving from a form control that was reset rather than omitted (#6562).
+/// `null` is the explicit clear signal; a blank string is the same intent arriving from a form control that was reset rather than omitted (#6562).
 fn is_clear_signal(value: &serde_json::Value) -> bool {
     value.is_null() || value.as_str().is_some_and(|s| s.trim().is_empty())
 }
@@ -425,9 +419,8 @@ pub async fn update_goal_by_id(
         }
     }
 
-    // `""` is treated exactly like `null` — "clear this link" (#6562). Resolved
-    // once here so the validation below and the mutation inside the transaction
-    // cannot drift apart on what a blank string means.
+    // `""` is treated exactly like `null` — "clear this link" (#6562).
+    // Resolved once here so the validation below and the mutation inside the transaction cannot drift apart on what a blank string means.
     let parent_clear = req.get("parent_id").is_some_and(is_clear_signal);
     let agent_clear = req.get("agent_id").is_some_and(is_clear_signal);
 
@@ -457,13 +450,7 @@ pub async fn update_goal_by_id(
             if let Some(parent_id) = req.get("parent_id") {
                 if !parent_clear {
                     if let Some(pid) = parent_id.as_str() {
-                        // Trim before comparing (#6562): the mutation below
-                        // persists `pid.trim()`, so validating against the
-                        // untrimmed string would either false-404 a
-                        // whitespace-padded but otherwise valid parent id, or
-                        // let a whitespace-padded self-reference slip past
-                        // the cycle check and land trimmed (i.e. equal to
-                        // `id`) once persisted.
+                        // Trim before comparing (#6562): the mutation below persists `pid.trim()`, so validating against the untrimmed string would either false-404 a whitespace-padded but otherwise valid parent id, or let a whitespace-padded self-reference slip past the cycle check and land trimmed (i.e. equal to `id`) once persisted.
                         let pid = pid.trim();
                         if !goals.iter().any(|g| g["id"].as_str() == Some(pid)) {
                             return Err(LibreFangError::InvalidInput(format!(

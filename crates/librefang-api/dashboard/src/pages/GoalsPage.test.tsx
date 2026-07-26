@@ -254,9 +254,7 @@ describe("GoalsPage", () => {
 
     expect(create).toHaveBeenCalledTimes(1);
     const payload = create.mock.calls[0][0] as Record<string, unknown>;
-    // `parent_id: ""` used to reach the backend and fail its parent-existence
-    // check with "Parent goal '' not found"; `agent_id: ""` persisted an
-    // unparsable assignment that broke the goal runner's start route.
+    // `parent_id: ""` used to reach the backend and fail its parent-existence check with "Parent goal '' not found"; `agent_id: ""` persisted an unparsable assignment that broke the goal runner's start route.
     expect(payload).not.toHaveProperty("parent_id");
     expect(payload).not.toHaveProperty("agent_id");
   });

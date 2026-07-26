@@ -211,9 +211,8 @@ async fn goals_create_with_unknown_parent_returns_404() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
-/// #6562: the dashboard's create form seeds `parent_id` / `agent_id` as empty
-/// strings, so a plain "title + description" create posted `parent_id: ""` and
-/// got `404 Parent goal '' not found`. A blank id means "not set".
+/// #6562: the dashboard's create form seeds `parent_id` / `agent_id` as empty strings, so a plain "title + description" create posted `parent_id: ""` and got `404 Parent goal '' not found`.
+/// A blank id means "not set".
 #[tokio::test(flavor = "multi_thread")]
 async fn goals_create_treats_blank_parent_and_agent_ids_as_absent_6562() {
     let h = boot().await;
@@ -232,8 +231,7 @@ async fn goals_create_treats_blank_parent_and_agent_ids_as_absent_6562() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "got: {body:?}");
-    // Absent, not stored as an empty string: an empty `agent_id` would later
-    // fail UUID parsing in `POST /api/goals/{id}/start`.
+    // Absent, not stored as an empty string: an empty `agent_id` would later fail UUID parsing in `POST /api/goals/{id}/start`.
     assert!(
         body.get("parent_id").is_none(),
         "blank parent_id must not be persisted: {body:?}"
@@ -259,8 +257,7 @@ async fn goals_create_treats_whitespace_parent_id_as_absent_6562() {
     assert!(body.get("parent_id").is_none(), "got: {body:?}");
 }
 
-/// A real parent id still resolves normally — the blank-handling must not
-/// weaken the existence check.
+/// A real parent id still resolves normally — the blank-handling must not weaken the existence check.
 #[tokio::test(flavor = "multi_thread")]
 async fn goals_create_with_real_parent_still_links_6562() {
     let h = boot().await;
@@ -275,8 +272,7 @@ async fn goals_create_with_real_parent_still_links_6562() {
     assert_eq!(child["parent_id"], parent_id);
 }
 
-/// #6562: `PUT` with a blank `parent_id` clears the link, exactly as `null`
-/// does, instead of 404-ing on a lookup for the goal literally named `""`.
+/// #6562: `PUT` with a blank `parent_id` clears the link, exactly as `null` does, instead of 404-ing on a lookup for the goal literally named `""`.
 #[tokio::test(flavor = "multi_thread")]
 async fn goals_update_blank_parent_id_clears_link_6562() {
     let h = boot().await;
@@ -327,11 +323,8 @@ async fn goals_update_blank_agent_id_clears_assignment_6562() {
     assert!(body.get("agent_id").is_none(), "got: {body:?}");
 }
 
-/// #6562 follow-up: a real parent id with incidental whitespace (e.g. pasted
-/// from a form) must resolve, not 404, since the stored value is trimmed
-/// before persisting. Validating against the untrimmed string while
-/// persisting the trimmed one would let this legitimately-linked id fail
-/// existence-checking.
+/// #6562 follow-up: a real parent id with incidental whitespace (e.g. pasted from a form) must resolve, not 404, since the stored value is trimmed before persisting.
+/// Validating against the untrimmed string while persisting the trimmed one would let this legitimately-linked id fail existence-checking.
 #[tokio::test(flavor = "multi_thread")]
 async fn goals_update_with_whitespace_padded_parent_id_still_links_6562() {
     let h = boot().await;
@@ -351,10 +344,7 @@ async fn goals_update_with_whitespace_padded_parent_id_still_links_6562() {
     assert_eq!(body["parent_id"], parent_id);
 }
 
-/// #6562 follow-up: a whitespace-padded self-reference must still be
-/// rejected as "cannot be its own parent" — comparing the untrimmed
-/// candidate against `id` would miss it, and it would land trimmed (i.e.
-/// exactly equal to `id`) once persisted.
+/// #6562 follow-up: a whitespace-padded self-reference must still be rejected as "cannot be its own parent" — comparing the untrimmed candidate against `id` would miss it, and it would land trimmed (i.e. exactly equal to `id`) once persisted.
 #[tokio::test(flavor = "multi_thread")]
 async fn goals_update_rejects_whitespace_padded_self_parent_6562() {
     let h = boot().await;

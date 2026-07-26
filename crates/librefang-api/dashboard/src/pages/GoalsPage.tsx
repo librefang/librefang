@@ -155,9 +155,7 @@ export function GoalsPage() {
     e.preventDefault();
     if (!createDraft.title.trim()) return;
     try {
-      // Drop blank parent_id / agent_id instead of posting `""` (#6562): the
-      // form seeds both as empty strings, and an empty parent_id used to fail
-      // the backend's parent-existence check with "Parent goal '' not found".
+      // Drop blank parent_id / agent_id instead of posting `""` (#6562): the form seeds both as empty strings, and an empty parent_id used to fail the backend's parent-existence check with "Parent goal '' not found".
       const { parent_id, agent_id, ...rest } = createDraft;
       await createMutation.mutateAsync({
         ...rest,
