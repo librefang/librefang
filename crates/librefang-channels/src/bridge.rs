@@ -3096,6 +3096,47 @@ fn lifecycle_reaction_emoji(phase: &AgentPhase, clear_done: bool) -> String {
     }
 }
 
+/// Resolve the platform message id of the menu a `ButtonCallback` was pressed
+/// on, so the interactive-menu interceptor can edit that keyboard in place.
+///
+/// Two sources, in order, because the sidecar adapters populate different ones
+/// (#6564):
+///
+/// 1. `metadata["message_id"]` — accepted as either a JSON string or a JSON
+///    number. The wire contract is a string (`SidecarMessageParams.message_id`
+///    is `Option<String>`, and `ChannelContent::EditInteractive.message_id` is
+///    a `String` that the Telegram sidecar parses back to `i64`), but the Rust
+///    Telegram sidecar wrote a raw number here, and a `Value::Number` never
+///    matches `as_str()`. Accepting both keeps this working whichever shape an
+///    adapter sends.
+/// 2. `ChannelMessage.platform_message_id` — the canonical slot for a native
+///    message id. The Python Telegram adapter sets only this one on a callback
+///    event (its callback metadata carries just `callback_query_id`), so
+///    reading metadata alone dropped every menu press there too.
+///
+/// Returns `None` only when neither source carries anything usable, which
+/// leaves the caller nothing to edit.
+fn resolve_callback_message_id(message: &ChannelMessage) -> Option<String> {
+    if let Some(value) = message.metadata.get("message_id") {
+        if let Some(s) = value.as_str() {
+            let trimmed = s.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        } else if let Some(n) = value.as_i64() {
+            return Some(n.to_string());
+        } else if let Some(n) = value.as_u64() {
+            return Some(n.to_string());
+        }
+    }
+    let native = message.platform_message_id.trim();
+    if native.is_empty() {
+        None
+    } else {
+        Some(native.to_string())
+    }
+}
+
 async fn send_lifecycle_reaction(
     adapter: &dyn ChannelAdapter,
     user: &ChannelUser,
@@ -4084,13 +4125,16 @@ async fn dispatch_message(
     if let ChannelContent::ButtonCallback { ref action, .. } = message.content {
         if action.starts_with("prov:") || action.starts_with("model:") || action == "back:providers"
         {
-            let mid = message
-                .metadata
-                .get("message_id")
-                .and_then(|v| v.as_str())
-                .map(str::to_owned);
-            let Some(message_id) = mid else {
-                debug!("ButtonCallback menu: missing message_id in metadata, ignoring");
+            let Some(message_id) = resolve_callback_message_id(message) else {
+                warn!(
+                    channel = ct_str,
+                    user_id = %message.sender.platform_id,
+                    action = %action,
+                    metadata_message_id = ?message.metadata.get("message_id"),
+                    platform_message_id = %message.platform_message_id,
+                    "ButtonCallback menu: could not resolve the menu's message_id — \
+                     cannot edit the keyboard, dropping the callback"
+                );
                 return;
             };
             if action.starts_with("prov:") {
@@ -9221,6 +9265,103 @@ mod tests {
             text.contains("42") || text.contains("delete") || text.contains("Delete"),
             "DeleteMessage should mention message_id or action, got: {text}"
         );
+    }
+
+    /// #6564: the interactive-menu interceptor read `metadata["message_id"]`
+    /// with `as_str()` only, so a producer that wrote a JSON number (the Rust
+    /// Telegram sidecar) or nothing at all (the Python adapter, which sets only
+    /// the top-level id) had every button press silently dropped.
+    mod callback_message_id {
+        use super::*;
+        use std::collections::HashMap;
+
+        fn callback_message(
+            platform_message_id: &str,
+            metadata: HashMap<String, serde_json::Value>,
+        ) -> ChannelMessage {
+            ChannelMessage {
+                channel: ChannelType::Telegram,
+                platform_message_id: platform_message_id.to_string(),
+                sender: ChannelUser {
+                    platform_id: "user123".to_string(),
+                    display_name: "TestUser".to_string(),
+                    librefang_user: None,
+                },
+                content: ChannelContent::ButtonCallback {
+                    action: "prov:groq".to_string(),
+                    message_text: None,
+                },
+                target_agent: None,
+                timestamp: chrono::Utc::now(),
+                is_group: false,
+                thread_id: None,
+                metadata,
+            }
+        }
+
+        #[test]
+        fn accepts_a_string_metadata_value() {
+            let mut meta = HashMap::new();
+            meta.insert("message_id".to_string(), serde_json::json!("7819"));
+            let msg = callback_message("", meta);
+            assert_eq!(
+                resolve_callback_message_id(&msg),
+                Some("7819".to_string()),
+                "the documented wire shape is a string"
+            );
+        }
+
+        #[test]
+        fn accepts_a_numeric_metadata_value() {
+            let mut meta = HashMap::new();
+            meta.insert("message_id".to_string(), serde_json::json!(7819));
+            let msg = callback_message("", meta);
+            assert_eq!(
+                resolve_callback_message_id(&msg),
+                Some("7819".to_string()),
+                "a JSON number must not be dropped — this was the reported bug"
+            );
+        }
+
+        #[test]
+        fn falls_back_to_the_native_platform_message_id() {
+            // The Python Telegram adapter's callback metadata carries only
+            // `callback_query_id`; the message id arrives at the top level.
+            let mut meta = HashMap::new();
+            meta.insert("callback_query_id".to_string(), serde_json::json!("cbq-1"));
+            let msg = callback_message("88", meta);
+            assert_eq!(resolve_callback_message_id(&msg), Some("88".to_string()));
+        }
+
+        #[test]
+        fn metadata_wins_over_the_native_id() {
+            let mut meta = HashMap::new();
+            meta.insert("message_id".to_string(), serde_json::json!(7819));
+            let msg = callback_message("99", meta);
+            assert_eq!(resolve_callback_message_id(&msg), Some("7819".to_string()));
+        }
+
+        #[test]
+        fn blank_metadata_value_falls_through_to_the_native_id() {
+            let mut meta = HashMap::new();
+            meta.insert("message_id".to_string(), serde_json::json!("   "));
+            let msg = callback_message("88", meta);
+            assert_eq!(resolve_callback_message_id(&msg), Some("88".to_string()));
+        }
+
+        #[test]
+        fn returns_none_when_no_source_carries_an_id() {
+            let msg = callback_message("", HashMap::new());
+            assert_eq!(resolve_callback_message_id(&msg), None);
+        }
+
+        #[test]
+        fn ignores_an_unusable_metadata_shape() {
+            let mut meta = HashMap::new();
+            meta.insert("message_id".to_string(), serde_json::json!({"nested": 1}));
+            let msg = callback_message("", meta);
+            assert_eq!(resolve_callback_message_id(&msg), None);
+        }
     }
 
     mod message_debouncer {
