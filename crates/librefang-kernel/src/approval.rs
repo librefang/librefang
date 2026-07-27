@@ -7,14 +7,6 @@ use librefang_types::approval::{
     ApprovalResponse, RiskLevel, SecondFactor, TimeoutFallback,
 };
 use librefang_types::capability::glob_matches;
-
-/// Namespace prefix every MCP tool name carries.
-///
-/// Mirrors `format_mcp_tool_name` / `is_mcp_tool` in `librefang-runtime-mcp`.
-/// Duplicated as a literal rather than imported because `classify_risk` is a
-/// pure string classifier and pulling the MCP crate into this module's
-/// dependency path for one prefix is not worth the coupling.
-const MCP_TOOL_PREFIX: &str = "mcp_";
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use sha2::{Digest, Sha256};
@@ -25,6 +17,14 @@ use tokio::sync::broadcast;
 use totp_rs::{Algorithm, Secret, TOTP};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
+
+/// Namespace prefix every MCP tool name carries.
+///
+/// Mirrors `format_mcp_tool_name` / `is_mcp_tool` in `librefang-runtime-mcp`.
+/// Duplicated as a literal rather than imported because `classify_risk` is a
+/// pure string classifier and pulling the MCP crate into this module's
+/// dependency path for one prefix is not worth the coupling.
+const MCP_TOOL_PREFIX: &str = "mcp_";
 
 /// Max pending requests per agent.
 const MAX_PENDING_PER_AGENT: usize = 5;
