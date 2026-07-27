@@ -21,9 +21,7 @@ use uuid::Uuid;
 /// Namespace prefix every MCP tool name carries.
 ///
 /// Mirrors `format_mcp_tool_name` / `is_mcp_tool` in `librefang-runtime-mcp`.
-/// Duplicated as a literal rather than imported because `classify_risk` is a
-/// pure string classifier and pulling the MCP crate into this module's
-/// dependency path for one prefix is not worth the coupling.
+/// Duplicated as a literal rather than imported because `classify_risk` is a pure string classifier and pulling the MCP crate into this module's dependency path for one prefix is not worth the coupling.
 const MCP_TOOL_PREFIX: &str = "mcp_";
 
 /// Max pending requests per agent.
@@ -1419,16 +1417,10 @@ impl ApprovalManager {
             }
             "file_write" | "file_delete" | "apply_patch" => RiskLevel::High,
             "web_fetch" | "browser_navigate" => RiskLevel::Medium,
-            // Tools from an MCP server are third-party code whose effects this
-            // table cannot enumerate. The arms above are a closed list of
-            // built-ins, so before this arm existed every `mcp_*` tool fell
-            // into the `Low` default and the `trusted_senders` bypass waived
-            // approval on all of them — including ones that move money or
-            // upload a plaintext credential. The operator's `require_approval`
-            // globs were never consulted, because the bypass returns before
-            // that check. Grading them High keeps the bypass to the built-ins
-            // it was written for; an operator who genuinely wants an MCP tool
-            // unattended can still allow it per-channel or per-user.
+            // Tools from an MCP server are third-party code whose effects this table cannot enumerate.
+            // The arms above are a closed list of built-ins, so before this arm existed every `mcp_*` tool fell into the `Low` default and the `trusted_senders` bypass waived approval on all of them — including ones that move money or upload a plaintext credential.
+            // The operator's `require_approval` globs were never consulted, because the bypass returns before that check.
+            // Grading them High keeps the bypass to the built-ins it was written for; an operator who genuinely wants an MCP tool unattended can still allow it per-channel or per-user.
             name if name.starts_with(MCP_TOOL_PREFIX) => RiskLevel::High,
             _ => RiskLevel::Low,
         }
@@ -2646,15 +2638,10 @@ mod tests {
     // requires_approval_with_context
     // -----------------------------------------------------------------------
 
-    /// A trusted sender must not be able to waive approval on a tool that
-    /// came from an MCP server.
+    /// A trusted sender must not be able to waive approval on a tool that came from an MCP server.
     ///
-    /// `classify_risk` matches a closed list of built-in names, so every
-    /// `mcp_*` tool used to fall into the `Low` default and the trust bypass
-    /// returned before `require_approval` was consulted — the operator's
-    /// globs were dead config. Real MCP servers ship tools that move money
-    /// or take a plaintext credential as an argument, so the bypass has to
-    /// stop at the built-ins it was written for.
+    /// `classify_risk` matches a closed list of built-in names, so every `mcp_*` tool used to fall into the `Low` default and the trust bypass returned before `require_approval` was consulted — the operator's globs were dead config.
+    /// Real MCP servers ship tools that move money or take a plaintext credential as an argument, so the bypass has to stop at the built-ins it was written for.
     #[test]
     fn test_trusted_sender_cannot_bypass_an_mcp_tool() {
         let policy = ApprovalPolicy {
