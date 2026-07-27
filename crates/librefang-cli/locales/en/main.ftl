@@ -1366,7 +1366,6 @@ tui-event-comms-send-not-supported-in-process = Send not supported in-process
 tui-event-comms-task-posted = Task posted
 tui-event-comms-post-failed = Post failed
 tui-event-comms-post-not-supported-in-process = Task post not supported in-process
-tui-event-stream-runtime-error = Runtime error: { $error }
 tui-event-stream-connection-failed = Connection failed: { $error }
 tui-event-agent-spawn-failed-fallback = Failed to spawn agent
 

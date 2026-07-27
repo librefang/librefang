@@ -1366,7 +1366,6 @@ tui-event-comms-send-not-supported-in-process = 인프로세스에서는 전송�
 tui-event-comms-task-posted = 작업을 게시했습니다
 tui-event-comms-post-failed = 게시 실패
 tui-event-comms-post-not-supported-in-process = 인프로세스에서는 작업 게시를 지원하지 않습니다
-tui-event-stream-runtime-error = 런타임 오류: { $error }
 tui-event-stream-connection-failed = 연결 실패: { $error }
 tui-event-agent-spawn-failed-fallback = 에이전트 생성에 실패했습니다
 

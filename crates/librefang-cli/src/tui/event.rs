@@ -324,7 +324,7 @@ fn tui_runtime() -> &'static tokio::runtime::Runtime {
             .enable_all()
             .thread_name("librefang-tui-bg")
             .build()
-            .expect("failed to build TUI background runtime")
+            .expect("Failed to create Tokio runtime")
     })
 }
 

@@ -1380,7 +1380,6 @@ tui-event-comms-send-not-supported-in-process = Надсилання не під
 tui-event-comms-task-posted = Завдання опубліковано
 tui-event-comms-post-failed = Не вдалося опублікувати
 tui-event-comms-post-not-supported-in-process = Публікація завдань не підтримується в інпроцес-режимі
-tui-event-stream-runtime-error = Помилка виконання: { $error }
 tui-event-stream-connection-failed = З'єднання не вдалося: { $error }
 tui-event-agent-spawn-failed-fallback = Не вдалося запустити агента
 

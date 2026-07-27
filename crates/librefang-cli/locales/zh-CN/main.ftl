@@ -527,7 +527,6 @@ tui-event-comms-send-not-supported-in-process = 进程内模式下不支持发�
 tui-event-comms-task-posted = 任务已发布
 tui-event-comms-post-failed = 发布失败
 tui-event-comms-post-not-supported-in-process = 进程内模式下不支持任务发布
-tui-event-stream-runtime-error = 运行时错误: { $error }
 tui-event-stream-connection-failed = 连接失败: { $error }
 tui-event-agent-spawn-failed-fallback = 生成智能体失败
 
