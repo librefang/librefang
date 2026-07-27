@@ -55,6 +55,7 @@ function rehypeShiki() {
 					"ini",
 					"powershell",
 					"docker",
+					"nix",
 				],
 			}));
 

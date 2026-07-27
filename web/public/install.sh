@@ -5,8 +5,11 @@
 # Environment variables:
 #   LIBREFANG_INSTALL_DIR         custom install directory (default: ~/.librefang/bin)
 #   LIBREFANG_VERSION             install a specific version tag (default: latest)
+#   LIBREFANG_PREFERRED_VERSION   prefer a version tag, falling back when it ships no package
 #   LIBREFANG_AUTO_START          auto-start daemon after install (default: 1)
 #                                 accepts: 1/true/yes/on (others disable)
+#   LIBREFANG_OS_RELEASE          test hook; os-release file to parse (default: /etc/os-release)
+#   LIBREFANG_NIXOS_MARKER        test hook; NixOS marker path (default: /etc/NIXOS)
 #   LIBREFANG_INSTALLER_SOURCE_ONLY
 #                                 test hook; do not auto-run install()
 
@@ -14,6 +17,11 @@ set -eu
 
 REPO="librefang/librefang"
 INSTALL_DIR="${LIBREFANG_INSTALL_DIR:-$HOME/.librefang/bin}"
+
+# Distro-detection inputs, indirected through variables so the test suite can point them at fixtures.
+# The real paths are absolute, which no PATH mock can reach.
+OS_RELEASE_FILE="${LIBREFANG_OS_RELEASE:-/etc/os-release}"
+NIXOS_MARKER_FILE="${LIBREFANG_NIXOS_MARKER:-/etc/NIXOS}"
 
 # Terminal colors — disabled when stdout is not a tty or NO_COLOR is set.
 # https://no-color.org/
@@ -36,6 +44,40 @@ is_enabled() {
         1|true|TRUE|yes|YES|on|ON) return 0 ;;
         *) return 1 ;;
     esac
+}
+
+# --- Distro detection -----------------------------------------------------
+
+# Print the unquoted, lowercased value of the $1 field of the os-release file, or nothing when the file or the field is absent.
+# Parsed rather than sourced: os-release is shell-syntax but sourcing it would execute a root-owned file inside the installer and would trip `set -u` on any field the caller does not read.
+os_release_field() {
+    [ -r "$OS_RELEASE_FILE" ] || return 0
+    grep -E "^$1=" "$OS_RELEASE_FILE" 2>/dev/null \
+        | head -n 1 \
+        | cut -d '=' -f 2- \
+        | tr -d "\"'" \
+        | tr '[:upper:]' '[:lower:]'
+}
+
+# Set DISTRO to the lowercased os-release ID (or "unknown") and DISTRO_LIKE to its ID_LIKE family list.
+# A host with no os-release file at all — macOS, minimal containers — degrades to "unknown" and installs exactly as before; distro detection must never be able to fail the install.
+detect_distro() {
+    DISTRO_LIKE=$(os_release_field ID_LIKE)
+    DISTRO=$(os_release_field ID)
+    [ -n "$DISTRO" ] || DISTRO="unknown"
+
+    # /etc/NIXOS is the authoritative marker: every NixOS system has it and nothing else does, so it outranks an ID inherited from a container base layer.
+    if [ -e "$NIXOS_MARKER_FILE" ]; then
+        DISTRO="nixos"
+    fi
+}
+
+# Return 0 when the host is in the Debian family, by its own ID or by the ID_LIKE list a derivative inherits.
+is_debian_family() {
+    case " ${DISTRO:-} ${DISTRO_LIKE:-} " in
+        *" debian "*|*" ubuntu "*|*" deepin "*) return 0 ;;
+    esac
+    return 1
 }
 
 detect_platform() {
@@ -78,6 +120,151 @@ detect_platform() {
     PLATFORM_PRIMARY="$PLATFORM"
 }
 
+# --- Distro-specific install policy ---------------------------------------
+
+# Print the platform variant to fall back to when the primary ships no package, or nothing when this host has none it could execute.
+# Single source of truth for the fallback decision, consulted at each point of use rather than applied by mutating PLATFORM_FALLBACK: the detected distro comes from detect_distro, which does not depend on detect_platform, so the outcome cannot change with the order those two run in.
+effective_platform_fallback() {
+    [ -n "${PLATFORM_FALLBACK:-}" ] || return 0
+
+    # NixOS ships no ELF interpreter at the FHS path a distro-generic build hardcodes — /lib64/ld-linux-x86-64.so.2 on x86_64, /lib/ld-linux-aarch64.so.1 on aarch64 — so the dynamically linked gnu build can never exec there on either architecture.
+    # Offered as a fallback it downloads ~60 MB, fails its post-install `--version` check, gets rolled back, and reports only "The new binary failed to run" — which tells a NixOS user nothing.
+    # The musl build is fully static and runs on NixOS unmodified, so that variant and only that one is considered there.
+    [ "${DISTRO:-unknown}" != "nixos" ] || return 0
+
+    printf "%s\n" "$PLATFORM_FALLBACK"
+}
+
+# Return 0 when a failed download of PLATFORM should be retried against the fallback variant.
+# Three states: no fallback this host could execute (nothing to retry), a fallback that PLATFORM already holds, and a fallback still worth trying.
+should_try_platform_fallback() {
+    _stpf=$(effective_platform_fallback)
+    [ -n "$_stpf" ] || return 1
+
+    # resolve_platform_for_tag may already have switched PLATFORM to the fallback during probing; retrying then re-fetches the identical URL and reports the musl build as missing when musl was never the target.
+    [ "${PLATFORM:-}" != "$_stpf" ] || return 1
+
+    return 0
+}
+
+# Tell the user which platform variants the detected distro rules out, before any of them is downloaded.
+# Reports only: the decision itself lives in effective_platform_fallback, so nothing here is load-bearing and skipping this call would cost the explanation, not the behaviour.
+apply_distro_platform_policy() {
+    [ "${DISTRO:-unknown}" = "nixos" ] || return 0
+    [ -n "${PLATFORM_FALLBACK:-}" ] || return 0
+
+    echo "  NixOS detected — the glibc build will not be offered as a fallback."
+    echo "  NixOS ships no /lib64/ld-linux-x86-64.so.2, so a dynamically linked binary cannot start there."
+    echo "  The fully static musl build is used instead; it runs on NixOS unmodified."
+}
+
+# Print the fallback install instructions for the detected distro.
+# On NixOS the flake is the working route, so pointing at `cargo install` there would send the user down the same dynamic-linking dead end.
+print_source_install_hint() {
+    if [ "${DISTRO:-unknown}" = "nixos" ]; then
+        echo "  On NixOS, install from this repository's flake instead:"
+        echo "    nix profile install github:$REPO#librefang-cli"
+        echo "  Or run it without installing anything:"
+        echo "    nix run github:$REPO"
+        echo "  For a daemon that survives reboots, import the flake's nixosModule and set:"
+        echo "    services.librefang.enable = true;"
+        return 0
+    fi
+
+    echo "  Install from source instead:"
+    echo "    cargo install --git https://github.com/$REPO librefang-cli"
+}
+
+# Print the WebKitGTK API series pkg-config reports on this host ("4.1" or "4.0"), or nothing when pkg-config is absent or reports neither.
+probe_webkit2gtk_pkgconfig() {
+    command_exists pkg-config || return 0
+    for _wk_api in 4.1 4.0; do
+        if pkg-config --exists "webkit2gtk-$_wk_api" 2>/dev/null; then
+            printf "%s\n" "$_wk_api"
+            return 0
+        fi
+    done
+    return 0
+}
+
+# Print the first WebKitGTK dev package this host's apt repositories offer an installable candidate for, or nothing.
+# Which webkit2gtk series a Debian derivative carries differs per release, so the repositories are asked instead of a name being asserted from here.
+webkit2gtk_apt_candidate() {
+    command_exists apt-cache || return 0
+    for _wk_pkg in libwebkit2gtk-4.1-dev libwebkit2gtk-4.0-dev; do
+        # LC_ALL=C because apt-cache translates its field labels and this parse matches the English "Candidate:"; a known package with no installable version reports "(none)" and must not count.
+        if LC_ALL=C apt-cache policy "$_wk_pkg" 2>/dev/null \
+            | grep -qE '^[[:space:]]*Candidate:[[:space:]]+[^([:space:]]'; then
+            printf "%s\n" "$_wk_pkg"
+            return 0
+        fi
+    done
+    return 0
+}
+
+# Return 0 when this looks like a graphical session, i.e. someone who may want the desktop app rather than only the CLI and the web dashboard.
+# Deliberately not keyed on stdin being a tty: `curl … | sh` is the primary install path and never has one.
+likely_wants_desktop_app() {
+    if [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then
+        return 0
+    fi
+    case "${XDG_SESSION_TYPE:-}" in
+        x11|wayland) return 0 ;;
+    esac
+    return 1
+}
+
+# Debian-family hint about the desktop app's GTK / WebKit dependencies.
+# Every WebKitGTK claim below is the result of a probe of this host, never a hardcoded assumption about what a distro ships.
+print_debian_desktop_hint() {
+    is_debian_family || return 0
+    likely_wants_desktop_app || return 0
+
+    echo ""
+    if [ "${DISTRO:-}" = "deepin" ]; then
+        # Which variant was actually installed is read off PLATFORM rather than assumed: resolve_platform_for_tag switches it to the gnu fallback whenever a release ships no musl package, and only NixOS suppresses that fallback.
+        case "${PLATFORM:-}" in
+            *-musl)
+                echo "  deepin note: the CLI installed above is the static musl build, so the host's glibc version is irrelevant to it."
+                ;;
+            *)
+                echo "  deepin note: this release shipped no static musl package, so the CLI installed above is the glibc build and does depend on the host's glibc."
+                ;;
+        esac
+        echo "  The separate desktop app is the part that needs a GTK / WebKit stack from deepin's own repositories."
+    else
+        echo "  The separate desktop app additionally needs a GTK / WebKit stack from your distribution."
+    fi
+
+    # The desktop app is Tauri 2 and links the webkit2gtk-4.1 series: see the webkitgtk_4_1 input in flake.nix and libwebkit2gtk-4.1-dev on this project's own Debian-family CI runners.
+    _dh_api=$(probe_webkit2gtk_pkgconfig)
+    case "$_dh_api" in
+        4.1)
+            echo "  pkg-config reports webkit2gtk-4.1 here, which is the series the desktop app links."
+            ;;
+        4.0)
+            echo "  pkg-config reports webkit2gtk-4.0 here but not webkit2gtk-4.1, and the desktop app links 4.1."
+            echo "  Ask this machine what its release actually carries before installing the desktop app:"
+            echo "    apt-cache search libwebkit2gtk"
+            ;;
+        *)
+            echo "  pkg-config reports neither webkit2gtk-4.1 nor webkit2gtk-4.0 here; note the runtime library can be installed without the -dev package that ships the .pc file."
+            _dh_pkg=$(webkit2gtk_apt_candidate)
+            if [ -n "$_dh_pkg" ]; then
+                echo "  Your repositories do offer an installable $_dh_pkg:"
+                echo "    sudo apt-get install -y $_dh_pkg"
+            else
+                echo "  Which webkit2gtk series your repositories carry could not be determined here, so no package name is guessed."
+                echo "  Ask this machine directly:"
+                echo "    apt-cache search libwebkit2gtk"
+                echo "    pkg-config --list-all | grep -i webkit"
+            fi
+            ;;
+    esac
+    echo "  For the full environment audit, including the rest of the desktop dependencies, run:"
+    echo "    librefang doctor"
+}
+
 # --- Release resolution ---------------------------------------------------
 
 # Newest-first list of release tags. Isolated so tests can mock `curl`.
@@ -96,7 +283,7 @@ asset_available() {
 
 # Set PLATFORM to the first variant (primary, then fallback) that ships a package for $1=tag; returns 0 on success.
 resolve_platform_for_tag() {
-    for _pf in "${PLATFORM_PRIMARY:-$PLATFORM}" "${PLATFORM_FALLBACK:-}"; do
+    for _pf in "${PLATFORM_PRIMARY:-$PLATFORM}" "$(effective_platform_fallback)"; do
         [ -n "$_pf" ] || continue
         if asset_available "$1" "$_pf"; then
             PLATFORM="$_pf"
@@ -285,6 +472,7 @@ start_daemon_if_needed() {
 }
 
 install() {
+    detect_distro
     detect_platform
 
     echo ""
@@ -292,11 +480,16 @@ install() {
     echo "  ==================="
     echo ""
 
+    apply_distro_platform_policy
+
     if ! resolve_installable_version; then
         echo "  ${C_RED}No installable release with a $PLATFORM package was found.${C_RESET}"
         echo "  The latest release may still be building its assets, or none is"
-        echo "  published for $REPO yet. Install from source instead:"
-        echo "    cargo install --git https://github.com/$REPO librefang-cli"
+        echo "  published for $REPO yet."
+        if [ "$DISTRO" = "nixos" ]; then
+            echo "  Only the static musl build is usable on NixOS, so the glibc build was not considered."
+        fi
+        print_source_install_hint
         exit 1
     fi
 
@@ -328,23 +521,21 @@ install() {
     fi
 
     if ! curl -fL $CURL_PROGRESS "$URL" -o "$ARCHIVE"; then
-        if [ -n "${PLATFORM_FALLBACK:-}" ]; then
+        if should_try_platform_fallback; then
             echo "  ${C_YELLOW}Static (musl) binary not available, trying glibc build...${C_RESET}"
-            PLATFORM="$PLATFORM_FALLBACK"
+            PLATFORM=$(effective_platform_fallback)
             URL="https://github.com/$REPO/releases/download/$VERSION/librefang-$PLATFORM.tar.gz"
             CHECKSUM_URL="$URL.sha256"
             if ! curl -fL $CURL_PROGRESS "$URL" -o "$ARCHIVE"; then
                 echo "  ${C_RED}Download failed.${C_RESET}"
                 echo "    URL: $URL"
-                echo "  Install from source instead:"
-                echo "    cargo install --git https://github.com/$REPO librefang-cli"
+                print_source_install_hint
                 exit 1
             fi
         else
             echo "  ${C_RED}Download failed.${C_RESET}"
             echo "    URL: $URL"
-            echo "  Install from source instead:"
-            echo "    cargo install --git https://github.com/$REPO librefang-cli"
+            print_source_install_hint
             exit 1
         fi
     fi
@@ -417,8 +608,7 @@ install() {
 
     # Atomic replace with rollback: a failing new binary restores the backup rather than leaving nothing installed.
     if ! install_binary_with_rollback "$NEW_BIN" "$INSTALL_DIR/librefang"; then
-        echo "  Install from source instead:"
-        echo "    cargo install --git https://github.com/$REPO librefang-cli"
+        print_source_install_hint
         exit 1
     fi
 
@@ -509,6 +699,11 @@ install() {
         # Suppress verbose output (systemd hints, ✔ lines) — only show
         # errors so the installer output stays clean.
         echo "  Registering boot service..."
+        if [ "$DISTRO" = "nixos" ]; then
+            # The user-level unit works on NixOS — systemd honours ~/.config/systemd/user — but it is imperative state outside the system configuration.
+            echo "  On NixOS this writes a user-level systemd unit, which works but lives outside your system configuration."
+            echo "  The declarative route is preferred: import the flake's nixosModule and set services.librefang.enable = true."
+        fi
         SVC_OUTPUT=$("$INSTALL_DIR/librefang" service install 2>&1) || {
             echo "  ${C_YELLOW}Warning: boot service registration failed.${C_RESET}"
             if [ -n "$SVC_OUTPUT" ]; then
@@ -524,6 +719,8 @@ install() {
             echo "    $INSTALL_DIR/librefang start"
         }
     fi
+
+    print_debian_desktop_hint
 
     # -- Post-install: activate PATH in current session ------------------------
     #

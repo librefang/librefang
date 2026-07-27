@@ -1868,6 +1868,19 @@ doctor-audit-config-read-fail = 读取 { $path } 失败：{ $error }
 doctor-audit-config-ok = { $path } 可解析为 TOML。
 doctor-audit-config-syntax-error = { $path } 存在 TOML 语法错误：{ $error }
 doctor-audit-config-syntax-error-hint = 编辑 { $path }，或从备份恢复。
+
+doctor-audit-desktop-deps-no-pkg-config = 未找到 pkg-config — 无法检查桌面应用所需的 GTK/WebKit 组件。仅安装 CLI 时并不需要它们。
+doctor-audit-desktop-deps-ok = 桌面 GTK/WebKit 组件齐备 — pkg-config 可解析 { $module } 与 { $tray }。
+doctor-audit-desktop-deps-tray-missing = pkg-config 可解析 { $module }，但找不到 { $tray }；桌面应用将在没有系统托盘图标的情况下运行。
+doctor-audit-desktop-deps-webkit-missing = pkg-config 可解析 { $gtk }，但没有 WebKitGTK（{ $webkit }）；桌面应用无法渲染窗口。
+doctor-audit-desktop-deps-stack-missing = 未找到桌面所需的 GTK/WebKit 组件 — 桌面应用需要 { $modules }，CLI 本身不需要。
+doctor-audit-desktop-deps-distro-unknown = 此 Linux 发行版
+doctor-audit-desktop-deps-hint-apt = 在 { $distro } 上，用 `apt-cache search webkit2gtk` 和 `apt-cache search appindicator` 找出提供 { $modules } 的软件包，然后用 `sudo apt install <package>` 安装。软件包名称在不同版本之间存在差异，请搜索确认而不要凭猜测。
+doctor-audit-desktop-deps-hint-pacman = 在 { $distro } 上，用 `pacman -Ss webkit2gtk` 和 `pacman -Ss appindicator` 找出提供 { $modules } 的软件包，然后用 `sudo pacman -S <package>` 安装。软件包名称在不同版本之间存在差异，请搜索确认而不要凭猜测。
+doctor-audit-desktop-deps-hint-dnf = 在 { $distro } 上，用 `dnf search webkit2gtk` 和 `dnf search appindicator` 找出提供 { $modules } 的软件包，然后用 `sudo dnf install <package>` 安装。软件包名称在不同版本之间存在差异，请搜索确认而不要凭猜测。
+doctor-audit-desktop-deps-hint-nix = 在 { $distro } 上，以命令式方式安装开发库并不可行 — 请使用 flake 的 devShell 或 librefang-desktop 包，而不要手动安装 { $modules }。
+doctor-audit-desktop-deps-hint-generic = 在 { $distro } 上，请安装你的包管理器提供的 GTK 3、WebKitGTK 与 Ayatana AppIndicator 开发包，直到 pkg-config 能够解析 { $modules }。
+
 # launcher menu items
 launcher-menu-get-started = 开始使用
 launcher-menu-get-started-hint = 提供商、API 密钥、模型、迁移

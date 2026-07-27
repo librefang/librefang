@@ -113,6 +113,64 @@ sudo pacman -Syu librefang-bin
 
 此命令安装 CLI、守护进程、HTTP API 和 Web Dashboard，不会安装 Desktop 应用。
 
+**NixOS（Nix flakes）**
+
+```bash
+# 一次性运行 CLI，不安装任何东西
+nix run github:librefang/librefang
+
+# 将 CLI 安装到用户 profile
+nix profile install github:librefang/librefang#librefang-cli
+```
+
+`librefang-cli` 是刻意收窄范围的软件包：它只构建 `--package librefang-cli`，因此仅 `librefang-desktop` 才会链接的 Tauri / GTK webview 依赖栈不会进入 CLI 的构建。
+[`flake.nix`](https://github.com/librefang/librefang/blob/main/flake.nix) 中 `cliArgs` 处的注释说明了为什么要这样拆分——如果不拆分，在没有安装图形依赖栈的原生 NixOS 机器上，`nix build .#librefang-cli` 会构建失败。
+
+如果希望以声明式方式安装，请将该 flake 添加为系统 flake 的输入，并导入其 NixOS 模块：
+
+```nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    librefang.url = "github:librefang/librefang";
+  };
+
+  outputs = { nixpkgs, librefang, ... }: {
+    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        librefang.nixosModules.default
+        ./configuration.nix
+      ];
+    };
+  };
+}
+```
+
+然后在 `configuration.nix` 中启用该服务：
+
+```nix
+{
+  services.librefang.enable = true;
+}
+```
+
+**Debian / Ubuntu / deepin**
+
+```bash
+curl -fsSL https://librefang.ai/install.sh | sh
+```
+
+Linux 版 CLI 以完全静态的 musl 构建发布，`x86_64-unknown-linux-musl` 和 `aarch64-unknown-linux-musl` 两个目标都是如此；如果 `file` 没有报告产物是静态链接的，发布 CI 会直接让该任务失败。
+安装脚本优先使用这份静态产物，只有当你的架构缺少静态产物时才回退到 glibc 构建。
+正因如此，在较老的发行版上宿主机 glibc 的版本高低无关紧要：若某个发行版版本自带的 glibc 早于通用 glibc 构建的编译目标版本，它会直接拒绝那个二进制，而静态构建根本不从宿主机链接 libc。
+如果你的架构缺少静态产物、只能用 glibc 构建，可以先用 `ldd --version` 查一下本机的版本。
+
+<Note>
+LibreFang 不发布 apt 仓库——`packaging/` 只提供 Arch 仓库和 AUR 配方。
+请用上面的脚本安装 CLI，桌面应用则从 [Releases](https://github.com/librefang/librefang/releases) 获取。
+</Note>
+
 **npm**
 
 ```bash
@@ -225,6 +283,44 @@ sudo pacman -Syu librefang-desktop-bin
 Desktop 软件包可独立运行，不需要安装 `librefang-bin`。
 桌面软件包仅支持 x86_64。
 在 aarch64 上，请使用 `librefang-bin` 运行原生服务，或使用 `librefang-docker` 运行基于 Docker 的 systemd 服务，然后通过 `http://127.0.0.1:4545/` 使用 Web Dashboard。
+
+**NixOS（Nix flakes）**
+
+```bash
+nix profile install github:librefang/librefang#librefang-desktop
+```
+
+在 NixOS 上，桌面应用是更粗糙的一条路。
+它会链接完整的 GTK / webview 闭包（`gtk3`、`libsoup_3`、`webkitgtk_4_1`，以及运行时 `dlopen` 的 `libayatana-appindicator3`），因此构建耗时远高于 CLI，而且会走到 CLI 软件包根本不会触及的代码路径。
+如果它在你的机器上构建不出来或启动不了，请改为安装 `librefang-cli`，并通过 `http://127.0.0.1:4545/` 使用 Web Dashboard。
+
+**Debian / Ubuntu / deepin**
+
+`.deb` 安装包声明的依赖列表是空的（见 `crates/librefang-desktop/tauri.conf.json` 中的 `bundle.linux.deb.depends`），所以 `apt` 不会替你把 webview 依赖栈装上。
+请先自己安装这些依赖——下面这一组正是本项目在自己的 Debian 系 CI runner 上安装的依赖集合：
+
+```bash
+sudo apt-get install -y \
+  libwebkit2gtk-4.1-dev \
+  libgtk-3-dev \
+  libayatana-appindicator3-dev \
+  librsvg2-dev \
+  libdbus-1-dev
+```
+
+<Note>
+deepin 自己的软件源里究竟提供的是 `libwebkit2gtk-4.1` 还是更旧的 `4.0` 系列，本项目并未验证。
+请把上面这条命令当作需要你去核实的对象，而不是一个保证，并且直接向你要安装的那台机器求证。
+</Note>
+
+```bash
+apt-cache search libwebkit2gtk        # 列出你所用发行版实际提供的 webkit2gtk 软件包
+pkg-config --list-all | grep -i webkit
+librefang doctor                      # 针对本机的环境体检
+```
+
+如果你的发行版只提供 `4.0` 系列，上面的依赖就无法被满足。
+这种情况下请安装 CLI，并通过 `http://127.0.0.1:4545/` 使用 Web Dashboard。
 
 **直接下载**
 

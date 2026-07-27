@@ -930,6 +930,18 @@ doctor-audit-config-ok = { $path } parses as TOML.
 doctor-audit-config-syntax-error = { $path } has TOML syntax errors: { $error }
 doctor-audit-config-syntax-error-hint = Edit { $path } or restore from a backup.
 
+doctor-audit-desktop-deps-no-pkg-config = pkg-config not found — cannot verify the GTK/WebKit stack the desktop app needs. A CLI-only install does not need it.
+doctor-audit-desktop-deps-ok = Desktop GTK/WebKit stack present — pkg-config resolves { $module } and { $tray }.
+doctor-audit-desktop-deps-tray-missing = pkg-config resolves { $module } but not { $tray }; the desktop app runs without a system tray icon.
+doctor-audit-desktop-deps-webkit-missing = pkg-config resolves { $gtk } but no WebKitGTK ({ $webkit }); the desktop app cannot render its window.
+doctor-audit-desktop-deps-stack-missing = No GTK/WebKit desktop stack found — the desktop app needs { $modules }, the CLI itself does not.
+doctor-audit-desktop-deps-distro-unknown = this Linux distribution
+doctor-audit-desktop-deps-hint-apt = On { $distro }, find the packages that provide { $modules } with `apt-cache search webkit2gtk` and `apt-cache search appindicator`, then install them with `sudo apt install <package>`. Package names differ between releases, so search rather than assume.
+doctor-audit-desktop-deps-hint-pacman = On { $distro }, find the packages that provide { $modules } with `pacman -Ss webkit2gtk` and `pacman -Ss appindicator`, then install them with `sudo pacman -S <package>`. Package names differ between releases, so search rather than assume.
+doctor-audit-desktop-deps-hint-dnf = On { $distro }, find the packages that provide { $modules } with `dnf search webkit2gtk` and `dnf search appindicator`, then install them with `sudo dnf install <package>`. Package names differ between releases, so search rather than assume.
+doctor-audit-desktop-deps-hint-nix = On { $distro }, installing development libraries imperatively does not work — use the flake's devShell or the librefang-desktop package instead of installing { $modules } by hand.
+doctor-audit-desktop-deps-hint-generic = On { $distro }, install the GTK 3, WebKitGTK, and Ayatana AppIndicator development packages your package manager provides, until pkg-config resolves { $modules }.
+
 # launcher menu items
 launcher-menu-get-started = Get started
 launcher-menu-get-started-hint = Providers, API keys, models, migration

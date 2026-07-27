@@ -930,6 +930,18 @@ doctor-audit-config-ok = { $path }이(가) TOML로 파싱됩니다.
 doctor-audit-config-syntax-error = { $path }에 TOML 구문 오류가 있습니다: { $error }
 doctor-audit-config-syntax-error-hint = { $path }을(를) 편집하거나 백업에서 복원하십시오.
 
+doctor-audit-desktop-deps-no-pkg-config = pkg-config를 찾을 수 없음 — 데스크톱 앱에 필요한 GTK/WebKit 스택을 확인할 수 없습니다. CLI만 설치한 경우에는 필요하지 않습니다.
+doctor-audit-desktop-deps-ok = 데스크톱 GTK/WebKit 스택이 준비됨 — pkg-config가 { $module }와(과) { $tray }을(를) 확인했습니다.
+doctor-audit-desktop-deps-tray-missing = pkg-config가 { $module }은(는) 확인했지만 { $tray }은(는) 찾지 못했습니다. 데스크톱 앱은 시스템 트레이 아이콘 없이 실행됩니다.
+doctor-audit-desktop-deps-webkit-missing = pkg-config가 { $gtk }은(는) 확인했지만 WebKitGTK({ $webkit })는 찾지 못했습니다. 데스크톱 앱이 창을 렌더링할 수 없습니다.
+doctor-audit-desktop-deps-stack-missing = 데스크톱용 GTK/WebKit 스택을 찾을 수 없습니다 — 데스크톱 앱에는 { $modules }이(가) 필요하지만 CLI 자체에는 필요하지 않습니다.
+doctor-audit-desktop-deps-distro-unknown = 이 Linux 배포판
+doctor-audit-desktop-deps-hint-apt = { $distro }에서는 `apt-cache search webkit2gtk`와 `apt-cache search appindicator`로 { $modules }을(를) 제공하는 패키지를 찾은 뒤 `sudo apt install <package>`로 설치하십시오. 패키지 이름은 릴리스마다 다르므로 추측하지 말고 검색하십시오.
+doctor-audit-desktop-deps-hint-pacman = { $distro }에서는 `pacman -Ss webkit2gtk`와 `pacman -Ss appindicator`로 { $modules }을(를) 제공하는 패키지를 찾은 뒤 `sudo pacman -S <package>`로 설치하십시오. 패키지 이름은 릴리스마다 다르므로 추측하지 말고 검색하십시오.
+doctor-audit-desktop-deps-hint-dnf = { $distro }에서는 `dnf search webkit2gtk`와 `dnf search appindicator`로 { $modules }을(를) 제공하는 패키지를 찾은 뒤 `sudo dnf install <package>`로 설치하십시오. 패키지 이름은 릴리스마다 다르므로 추측하지 말고 검색하십시오.
+doctor-audit-desktop-deps-hint-nix = { $distro }에서는 개발 라이브러리를 명령형으로 설치하는 방식이 동작하지 않습니다 — { $modules }을(를) 직접 설치하는 대신 flake의 devShell 또는 librefang-desktop 패키지를 사용하십시오.
+doctor-audit-desktop-deps-hint-generic = { $distro }에서는 패키지 관리자가 제공하는 GTK 3, WebKitGTK, Ayatana AppIndicator 개발 패키지를 pkg-config가 { $modules }을(를) 확인할 수 있을 때까지 설치하십시오.
+
 # launcher menu items
 launcher-menu-get-started = 시작하기
 launcher-menu-get-started-hint = 공급자, API 키, 모델, 마이그레이션
