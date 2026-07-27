@@ -62,8 +62,8 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 ### Fixed
 
 - Stop `[approval] trusted_senders` from waiving human approval on every tool a connected MCP server exposes.
-`classify_risk` matched a closed list of built-in names, so any `mcp_*` tool fell into the `Low` default and the trusted-sender branch of `requires_approval_with_context` returned before the operator's `require_approval` globs were consulted — the globs were dead config for exactly the tools least able to be audited, since server-side tool code is third-party and its effects are not enumerable from a name.
-Real MCP servers ship tools that move money or take a plaintext credential as an argument, so `mcp_*` now grades as high risk and the bypass stays scoped to the built-ins it was written for; an operator who wants an MCP tool unattended can still allow it per-channel or per-user (#6592) (@houko)
+  `classify_risk` matched a closed list of built-in names, so any `mcp_*` tool fell into the `Low` default and the trusted-sender branch of `requires_approval_with_context` returned before the operator's `require_approval` globs were consulted — the globs were dead config for exactly the tools least able to be audited, since server-side tool code is third-party and its effects are not enumerable from a name.
+  Real MCP servers ship tools that move money or take a plaintext credential as an argument, so `mcp_*` now grades as high risk and the bypass stays scoped to the built-ins it was written for; an operator who wants an MCP tool unattended can still allow it per-channel or per-user (#6592) (@houko)
 - Refuse to replace a populated EveryAPI provider entry when the gateway's model list cannot be fetched.
   Both persistence paths rewrite `providers/everyapi.toml` wholesale, so a transient outage on a re-run downgraded a working catalog to zero models and still reported success.
   A first run, which has nothing to lose, still proceeds and fills the models in later (#6583) (@houko)
