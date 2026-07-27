@@ -251,9 +251,11 @@ This is the same trade-off `deploy/librefang.service:24` already makes.
 
 ### Desktop tray icon: no longer needs libayatana-appindicator
 
-Historically, the system tray icon relied on Tauri's default `tray-icon` crate, which dlopened `libayatana-appindicator3.so.1` at runtime. This required complex Nix packaging workarounds such as wrapping the binary to prepend `libayatana-appindicator` to `LD_LIBRARY_PATH` (landed in #3197).
+Historically, the system tray icon relied on Tauri's default `tray-icon` crate, which dlopened `libayatana-appindicator3.so.1` at runtime.
+This required complex Nix packaging workarounds such as wrapping the binary to prepend `libayatana-appindicator` to `LD_LIBRARY_PATH` (landed in #3197).
 
-The Linux system tray has been migrated to a pure D-Bus implementation via `ksni`. Consequently, the desktop application no longer needs `libayatana-appindicator` at compile time or runtime, and the `LD_LIBRARY_PATH` wrapping workaround has been removed from `flake.nix`.
+The Linux system tray has been migrated to a pure D-Bus implementation via `ksni`.
+Consequently, the desktop application no longer needs `libayatana-appindicator` at compile time or runtime, and the `LD_LIBRARY_PATH` wrapping workaround has been removed from `flake.nix`.
 
 ### Past Nix-path breakages worth knowing about
 

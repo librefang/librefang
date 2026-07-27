@@ -510,6 +510,9 @@ mod platform_tray {
                 match tray.clone().assume_sni_available(true).spawn().await {
                     Ok(handle) => {
                         info!("Linux system tray successfully spawned.");
+                        // Periodically call handle.update() to diff properties and emit D-Bus update signals (e.g. NewTitle / NewTooltip).
+                        // Without this heartbeat loop, properties like Uptime and Agents count (which are rendered inside menu())
+                        // will never update dynamically, remaining stale until a manual user activation query.
                         loop {
                             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                             if handle.update(|_| {}).await.is_none() {
