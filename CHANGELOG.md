@@ -26,12 +26,12 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 ### Fixed
 
 - Classify an OpenAI-compatible `insufficient_quota` response as a billing error rather than a malformed request.
-OpenAI signals an exhausted account with that code on a 403, so every OpenAI-compatible endpoint does too, but it was not in `BILLING_PATTERNS` and fell through to the generic 4xx arm.
-The operator was told to check their request format while the real cause was an empty account, and because `is_billing` stayed false the long billing cooldown never applied, so a provider with no funds left kept being retried.
-Affects every OpenAI-compatible provider, not just gateways (#6583) (@houko)
+  OpenAI signals an exhausted account with that code on a 403, so every OpenAI-compatible endpoint does too, but it was not in `BILLING_PATTERNS` and fell through to the generic 4xx arm.
+  The operator was told to check their request format while the real cause was an empty account, and because `is_billing` stayed false the long billing cooldown never applied, so a provider with no funds left kept being retried.
+  Affects every OpenAI-compatible provider, not just gateways (#6583) (@houko)
 - Stop `librefang doctor` reporting a healthy EveryAPI wiring when the relay key is gone.
-The check returned `Pass` as soon as the provider file existed, so `credentials_usable` was never consulted — after `everyapi logout`, a key rotation, or a revocation it stayed green while every request through the gateway failed authentication.
-It now warns and names the remediation, since a provider entry is a file that persists while the credential behind it is not (#6583) (@houko)
+  The check returned `Pass` as soon as the provider file existed, so `credentials_usable` was never consulted — after `everyapi logout`, a key rotation, or a revocation it stayed green while every request through the gateway failed authentication.
+  It now warns and names the remediation, since a provider entry is a file that persists while the credential behind it is not (#6583) (@houko)
 
 - Add `librefang service install --system` on macOS, which registers a boot-time LaunchDaemon instead of the login-time LaunchAgent the command has always written.
   The existing behaviour was that every platform got a *per-user* service, so a Mac that rebooted and stopped at the login window — or at the FileVault unlock screen — never started the daemon at all, which makes an always-on install impossible without hand-writing a plist.
