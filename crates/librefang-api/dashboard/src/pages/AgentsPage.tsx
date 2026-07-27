@@ -15,6 +15,12 @@ import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { DrawerPanel } from "../components/ui/DrawerPanel";
+import { Modal } from "../components/ui/Modal";
+import {
+  isMcpServerGranted,
+  isToolBlocked,
+  resolveMcpGrantMode,
+} from "../lib/toolGrants";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
 import { MultiSelectCmdk } from "../components/ui/MultiSelectCmdk";
 import { Card } from "../components/ui/Card";
@@ -321,6 +327,14 @@ export function AgentsPage() {
     onConfirm: () => void;
     tone?: "default" | "destructive";
   } | null>(null);
+  // Clone dialog state (#6566). `POST /api/agents/{id}/clone` requires `new_name` with no serde default, so the button has to collect a name before firing — it previously posted `{}` and 422'd on every click.
+  const [cloneDialog, setCloneDialog] = useState<{
+    agentId: string;
+    sourceName: string;
+  } | null>(null);
+  const [cloneNameDraft, setCloneNameDraft] = useState("");
+  const [cloneIncludeSkills, setCloneIncludeSkills] = useState(true);
+  const [cloneIncludeTools, setCloneIncludeTools] = useState(true);
   const [showHandAgents, setShowHandAgents] = useState(false);
   const [showToolsEditor, setShowToolsEditor] = useState(false);
   const [toolsEditorAgentId, setToolsEditorAgentId] = useState<string | null>(null);
@@ -1729,15 +1743,22 @@ export function AgentsPage() {
     const isLoading = toolsListQuery.isLoading || tabAgentToolsQuery.isLoading;
 
     const grouped = new Map<string, ToolDefinition[]>();
-    for (const tool of allTools) {
-      let group: string;
+    // Server name per MCP group, kept alongside the display label so the grant check compares against the real server rather than re-parsing the label.
+    const mcpServerByGroup = new Map<string, string>();
+    const mcpServerOf = (tool: ToolDefinition): string | null => {
       if (tool.source === "builtin" || (!tool.source && !tool.name.startsWith("mcp_"))) {
-        group = "Builtin";
-      } else {
-        const server = tool.mcp_server
-          ?? tool.name.replace(/^mcp_/, "").split("_")[0];
-        group = `MCP: ${server}`;
+        return null;
       }
+      return tool.mcp_server ?? tool.name.replace(/^mcp_/, "").split("_")[0];
+    };
+    const groupNameOf = (tool: ToolDefinition): string => {
+      const server = mcpServerOf(tool);
+      return server === null ? "Builtin" : `MCP: ${server}`;
+    };
+    for (const tool of allTools) {
+      const group = groupNameOf(tool);
+      const server = mcpServerOf(tool);
+      if (server !== null) mcpServerByGroup.set(group, server);
       if (!grouped.has(group)) grouped.set(group, []);
       grouped.get(group)!.push(tool);
     }
@@ -1754,15 +1775,46 @@ export function AgentsPage() {
     const isDirty = toolsDraft !== null &&
       (draft.length !== declared.length || draft.some((n) => !declared.includes(n)));
 
-    const getGroupStatus = (groupTools: ToolDefinition[]): "full" | "partial" | "none" => {
-      const count = groupTools.filter((t) => draftSet.has(t.name)).length;
+    // #6565: MCP tools are granted by the agent's `mcp_servers` allowlist, not by `capabilities_tools` — the kernel explicitly skips the declared-tools filter for them (`tools_and_skills.rs`, Step 3).
+    // Reading MCP group state off `capabilities_tools` reported a whole-server grant as "AVAILABLE / click to assign" while the agent was actively calling those tools.
+    const blocklist = agentToolCfg?.tool_blocklist ?? [];
+    // The kernel gates MCP on `!mcp_disabled && !mcp_servers.is_empty()`, and `tools_disabled` short-circuits every tool before that.
+    // Both hard switches have to fold into "none", or an `mcp_disabled` agent with `mcp_servers = ["*"]` renders as a live grant.
+    const mcpMode =
+      agent.tools_disabled || agent.mcp_disabled
+        ? "none"
+        : resolveMcpGrantMode(agent.mcp_servers, agent.mcp_servers_mode);
+    const isMcpGroup = (groupName: string) => mcpServerByGroup.has(groupName);
+    const isMcpGroupGranted = (groupName: string) => {
+      const server = mcpServerByGroup.get(groupName);
+      if (server === undefined) return false;
+      return isMcpServerGranted(server, agent.mcp_servers, mcpMode);
+    };
+    // Whether one tool inside a group counts as active for display purposes.
+    const isToolActive = (groupName: string, tool: ToolDefinition): boolean => {
+      if (isMcpGroup(groupName)) {
+        return isMcpGroupGranted(groupName) && !isToolBlocked(tool.name, blocklist);
+      }
+      return draftSet.has(tool.name);
+    };
+    const activeCountIn = (groupName: string, groupTools: ToolDefinition[]) =>
+      groupTools.filter((tool) => isToolActive(groupName, tool)).length;
+
+    const getGroupStatus = (
+      groupName: string,
+      groupTools: ToolDefinition[],
+    ): "full" | "partial" | "none" => {
+      const count = activeCountIn(groupName, groupTools);
       if (count === groupTools.length) return "full";
       if (count > 0) return "partial";
       return "none";
     };
 
     const handleCustomize = () => {
-      setToolsDraft(allTools.map((t) => t.name));
+      // Seed the allowlist with builtin tools only. `capabilities_tools` governs builtin tools; the kernel ignores `mcp_*` entries there, so seeding them just wrote misleading names into agent.toml (#6565).
+      setToolsDraft(
+        allTools.filter((tool) => !isMcpGroup(groupNameOf(tool))).map((tool) => tool.name),
+      );
     };
 
     const handleUseAll = () => {
@@ -1770,9 +1822,12 @@ export function AgentsPage() {
     };
 
     const handleToggleGroup = (groupName: string) => {
+      // MCP grants live in `agent.toml: mcp_servers`, which this tab's save endpoint (`PUT /api/agents/{id}/tools`) cannot write — it only carries capabilities_tools / tool_allowlist / tool_blocklist.
+      // Writing MCP tool names into capabilities_tools would look like it worked and change nothing, so the MCP groups are read-only here and point at the MCP servers tab instead (#6565).
+      if (isMcpGroup(groupName)) return;
       const groupTools = grouped.get(groupName) ?? [];
       const names = groupTools.map((t) => t.name);
-      const status = getGroupStatus(groupTools);
+      const status = getGroupStatus(groupName, groupTools);
       if (status !== "none") {
         setToolsDraft((prev) => (prev ?? []).filter((n) => !names.includes(n)));
         if (expandedToolGroup === groupName) setExpandedToolGroup(null);
@@ -1785,7 +1840,9 @@ export function AgentsPage() {
       }
     };
 
-    const handleToggleTool = (toolName: string) => {
+    const handleToggleTool = (groupName: string, toolName: string) => {
+      // Same reasoning as `handleToggleGroup`: a per-tool toggle inside an MCP group has nowhere valid to write (#6565).
+      if (isMcpGroup(groupName)) return;
       setToolsDraft((prev) => {
         const s = new Set(prev ?? []);
         if (s.has(toolName)) s.delete(toolName);
@@ -1821,8 +1878,12 @@ export function AgentsPage() {
       );
     };
 
-    const assignedGroups = sortedGroups.filter(([, tools]) => getGroupStatus(tools) !== "none");
-    const availableGroups = sortedGroups.filter(([, tools]) => getGroupStatus(tools) === "none");
+    const assignedGroups = sortedGroups.filter(
+      ([name, tools]) => getGroupStatus(name, tools) !== "none",
+    );
+    const availableGroups = sortedGroups.filter(
+      ([name, tools]) => getGroupStatus(name, tools) === "none",
+    );
 
     return (
       <div className="flex flex-col gap-3">
@@ -1846,27 +1907,43 @@ export function AgentsPage() {
           sortedGroups.length > 0 ? (
             <>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                {sortedGroups.map(([groupName, groupTools]) => (
-                  <div
-                    key={groupName}
-                    className="px-3 py-2.5 rounded-md border border-border-subtle bg-main/40 flex items-start justify-between gap-2"
-                  >
-                    <div className="min-w-0 flex-1">
-                      <div className="font-mono text-[12.5px] font-medium text-text-main truncate flex items-center gap-1.5">
-                        {groupName.startsWith("MCP:") ? (
-                          <Cpu className="w-3.5 h-3.5 text-brand/70 shrink-0" />
-                        ) : (
-                          <Wrench className="w-3.5 h-3.5 text-text-dim/70 shrink-0" />
-                        )}
-                        {groupName}
-                      </div>
-                      <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
-                        {groupTools.length} tool{groupTools.length !== 1 ? "s" : ""}
-                        {" · "}{t("agents.detail.tools_included", { defaultValue: "included" })}
+                {sortedGroups.map(([groupName, groupTools]) => {
+                  // An empty `capabilities_tools` means "all builtin tools", but it says nothing about MCP: an MCP server is only reachable when `mcp_servers` grants it (#6565), so label MCP groups by their actual grant instead of "included".
+                  const mcpGroup = isMcpGroup(groupName);
+                  const granted = !mcpGroup || isMcpGroupGranted(groupName);
+                  return (
+                    <div
+                      key={groupName}
+                      className={`px-3 py-2.5 rounded-md border bg-main/40 flex items-start justify-between gap-2 ${
+                        granted ? "border-border-subtle" : "border-border-subtle opacity-60"
+                      }`}
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="font-mono text-[12.5px] font-medium text-text-main truncate flex items-center gap-1.5">
+                          {mcpGroup ? (
+                            <Cpu className="w-3.5 h-3.5 text-brand/70 shrink-0" />
+                          ) : (
+                            <Wrench className="w-3.5 h-3.5 text-text-dim/70 shrink-0" />
+                          )}
+                          {groupName}
+                        </div>
+                        <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
+                          {groupTools.length} tool{groupTools.length !== 1 ? "s" : ""}
+                          {" · "}
+                          {!mcpGroup
+                            ? t("agents.detail.tools_included", { defaultValue: "included" })
+                            : granted
+                              ? t("agents.detail.tools_mcp_granted", {
+                                  defaultValue: "granted via mcp_servers",
+                                })
+                              : t("agents.detail.tools_mcp_not_granted", {
+                                  defaultValue: "grant on the MCP servers tab",
+                                })}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
               <button
                 onClick={handleCustomize}
@@ -1893,9 +1970,10 @@ export function AgentsPage() {
             {assignedGroups.length > 0 && (
               <div className="flex flex-col gap-2.5">
                 {assignedGroups.map(([groupName, groupTools]) => {
-                  const status = getGroupStatus(groupTools);
-                  const activeCount = groupTools.filter((t) => draftSet.has(t.name)).length;
+                  const status = getGroupStatus(groupName, groupTools);
+                  const activeCount = activeCountIn(groupName, groupTools);
                   const isExpanded = expandedToolGroup === groupName;
+                  const mcpGroup = isMcpGroup(groupName);
                   return (
                     <div key={groupName} className="flex flex-col">
                       <div
@@ -1918,6 +1996,14 @@ export function AgentsPage() {
                             {status === "full"
                               ? `${groupTools.length} tool${groupTools.length !== 1 ? "s" : ""}`
                               : `${activeCount}/${groupTools.length} tools`}
+                            {mcpGroup && (
+                              <>
+                                {" · "}
+                                {t("agents.detail.tools_mcp_granted", {
+                                  defaultValue: "granted via mcp_servers",
+                                })}
+                              </>
+                            )}
                           </div>
                         </div>
                         <div className="flex items-center gap-1 shrink-0 mt-0.5">
@@ -1930,27 +2016,40 @@ export function AgentsPage() {
                               className={`w-3.5 h-3.5 transition-transform ${isExpanded ? "" : "-rotate-90"}`}
                             />
                           </button>
-                          <button
-                            onClick={() => handleToggleGroup(groupName)}
-                            className="text-text-dim hover:text-red-400 transition-colors p-0.5"
-                            title={t("agents.detail.tools_remove_group", { defaultValue: "Remove entire group" })}
-                          >
-                            <X className="w-3.5 h-3.5" />
-                          </button>
+                          {!mcpGroup && (
+                            <button
+                              onClick={() => handleToggleGroup(groupName)}
+                              className="text-text-dim hover:text-red-400 transition-colors p-0.5"
+                              title={t("agents.detail.tools_remove_group", { defaultValue: "Remove entire group" })}
+                            >
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          )}
                         </div>
                       </div>
                       {isExpanded && (
                         <div className="ml-4 mt-1.5 flex flex-col gap-1">
+                          {mcpGroup && (
+                            <p className="px-2.5 py-1.5 text-[10.5px] text-text-dim/70">
+                              {t("agents.detail.tools_mcp_readonly", {
+                                defaultValue:
+                                  "This server is granted through mcp_servers in agent.toml. Change the grant on the MCP servers tab; individual tools are filtered by tool_blocklist.",
+                              })}
+                            </p>
+                          )}
                           {groupTools.map((tool) => {
-                            const isActive = draftSet.has(tool.name);
+                            const isActive = isToolActive(groupName, tool);
+                            const blocked = mcpGroup && isToolBlocked(tool.name, blocklist);
                             return (
                               <div
                                 key={tool.name}
-                                onClick={() => handleToggleTool(tool.name)}
-                                className={`flex items-center gap-2 px-2.5 py-1.5 rounded border cursor-pointer transition-colors ${
+                                onClick={() => handleToggleTool(groupName, tool.name)}
+                                className={`flex items-center gap-2 px-2.5 py-1.5 rounded border transition-colors ${
+                                  mcpGroup ? "cursor-default" : "cursor-pointer"
+                                } ${
                                   isActive
-                                    ? "border-brand/20 bg-main/40 hover:border-red-400/30"
-                                    : "border-border-subtle bg-main/20 opacity-60 hover:border-brand/30 hover:opacity-100"
+                                    ? `border-brand/20 bg-main/40${mcpGroup ? "" : " hover:border-red-400/30"}`
+                                    : `border-border-subtle bg-main/20 opacity-60${mcpGroup ? "" : " hover:border-brand/30 hover:opacity-100"}`
                                 }`}
                               >
                                 <div
@@ -1963,6 +2062,11 @@ export function AgentsPage() {
                                 <span className="font-mono text-[11px] text-text-main truncate flex-1 min-w-0">
                                   {tool.name}
                                 </span>
+                                {blocked && (
+                                  <span className="font-mono text-[9.5px] text-amber-500/80 shrink-0">
+                                    {t("agents.detail.tools_blocked", { defaultValue: "blocklisted" })}
+                                  </span>
+                                )}
                                 {tool.description && (
                                   <span className="font-mono text-[9.5px] text-text-dim/60 truncate max-w-[50%] hidden sm:inline">
                                     {tool.description}
@@ -1985,29 +2089,40 @@ export function AgentsPage() {
                   {t("agents.detail.tools_available", { defaultValue: "Available" })}
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                  {availableGroups.map(([groupName, groupTools]) => (
-                    <div
-                      key={groupName}
-                      onClick={() => handleToggleGroup(groupName)}
-                      className="px-3 py-2.5 rounded-md border border-border-subtle bg-main/40 cursor-pointer hover:border-brand/40 transition-colors flex items-start justify-between gap-2"
-                    >
-                      <div className="min-w-0 flex-1">
-                        <div className="font-mono text-[12.5px] font-medium text-text-main truncate flex items-center gap-1.5">
-                          {groupName.startsWith("MCP:") ? (
-                            <Cpu className="w-3.5 h-3.5 text-brand/70 shrink-0" />
-                          ) : (
-                            <Wrench className="w-3.5 h-3.5 text-text-dim/70 shrink-0" />
-                          )}
-                          {groupName}
+                  {availableGroups.map(([groupName, groupTools]) => {
+                    // An ungranted MCP server cannot be assigned from this tab — `PUT /api/agents/{id}/tools` has no `mcp_servers` field (#6565), so it renders as a non-interactive hint.
+                    const mcpGroup = isMcpGroup(groupName);
+                    return (
+                      <div
+                        key={groupName}
+                        onClick={mcpGroup ? undefined : () => handleToggleGroup(groupName)}
+                        className={`px-3 py-2.5 rounded-md border border-border-subtle bg-main/40 transition-colors flex items-start justify-between gap-2 ${
+                          mcpGroup ? "cursor-default" : "cursor-pointer hover:border-brand/40"
+                        }`}
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="font-mono text-[12.5px] font-medium text-text-main truncate flex items-center gap-1.5">
+                            {mcpGroup ? (
+                              <Cpu className="w-3.5 h-3.5 text-brand/70 shrink-0" />
+                            ) : (
+                              <Wrench className="w-3.5 h-3.5 text-text-dim/70 shrink-0" />
+                            )}
+                            {groupName}
+                          </div>
+                          <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
+                            {groupTools.length} tool{groupTools.length !== 1 ? "s" : ""}
+                            {" · "}
+                            {mcpGroup
+                              ? t("agents.detail.tools_mcp_not_granted", {
+                                  defaultValue: "grant on the MCP servers tab",
+                                })
+                              : t("agents.detail.tools_click_assign", { defaultValue: "click to assign" })}
+                          </div>
                         </div>
-                        <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
-                          {groupTools.length} tool{groupTools.length !== 1 ? "s" : ""}
-                          {" · "}{t("agents.detail.tools_click_assign", { defaultValue: "click to assign" })}
-                        </div>
+                        {!mcpGroup && <Plus className="w-3.5 h-3.5 text-brand/70 shrink-0 mt-0.5" />}
                       </div>
-                      <Plus className="w-3.5 h-3.5 text-brand/70 shrink-0 mt-0.5" />
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </>
             )}
@@ -2735,12 +2850,11 @@ export function AgentsPage() {
                   variant="secondary"
                   size="sm"
                   className="flex-1 min-w-[88px]"
-                  onClick={async () => {
-                    try {
-                      await cloneMutation.mutateAsync(detailAgent.id);
-                    } catch (err) {
-                      addToast(toastErr(err, t("agents.clone_failed", { defaultValue: "Failed to clone agent" })), "error");
-                    }
+                  onClick={() => {
+                    setCloneNameDraft(`${detailAgent.name}-copy`);
+                    setCloneIncludeSkills(true);
+                    setCloneIncludeTools(true);
+                    setCloneDialog({ agentId: detailAgent.id, sourceName: detailAgent.name });
                   }}
                 >
                   <Copy className="w-3.5 h-3.5 mr-1.5" />
@@ -3233,6 +3347,93 @@ export function AgentsPage() {
         onConfirm={() => confirmDialog?.onConfirm()}
         onClose={() => setConfirmDialog(null)}
       />
+
+      {/* Clone Agent Modal (#6566) — collects the required `new_name`. */}
+      <Modal
+        isOpen={cloneDialog !== null}
+        onClose={() => setCloneDialog(null)}
+        title={t("agents.clone_title", { defaultValue: "Clone agent" })}
+        size="sm"
+      >
+        <form
+          className="p-6 space-y-4"
+          onSubmit={async (e) => {
+            e.preventDefault();
+            if (!cloneDialog) return;
+            const newName = cloneNameDraft.trim();
+            if (!newName) return;
+            try {
+              await cloneMutation.mutateAsync({
+                agentId: cloneDialog.agentId,
+                payload: {
+                  new_name: newName,
+                  include_skills: cloneIncludeSkills,
+                  include_tools: cloneIncludeTools,
+                },
+              });
+              addToast(t("agents.clone_succeeded", { defaultValue: "Agent cloned" }), "success");
+              setCloneDialog(null);
+            } catch (err) {
+              addToast(toastErr(err, t("agents.clone_failed", { defaultValue: "Failed to clone agent" })), "error");
+            }
+          }}
+        >
+          <p className="text-[11px] text-text-dim/70">
+            {t("agents.clone_desc", {
+              defaultValue: "Copies {{name}}'s manifest into a new agent. The name must be unique.",
+              name: cloneDialog?.sourceName ?? "",
+            })}
+          </p>
+          <div className="space-y-1.5">
+            <label
+              htmlFor="clone-agent-name"
+              className="block text-[10px] font-black text-text-dim uppercase tracking-widest"
+            >
+              {t("agents.clone_name_label", { defaultValue: "New agent name" })}
+            </label>
+            <Input
+              id="clone-agent-name"
+              value={cloneNameDraft}
+              onChange={(e) => setCloneNameDraft(e.target.value)}
+              placeholder={t("agents.clone_name_placeholder", { defaultValue: "my-agent-copy" })}
+              maxLength={256}
+              autoFocus
+            />
+          </div>
+          <div className="space-y-2">
+            <label className="flex items-center gap-2 text-[11px] text-text-dim">
+              <input
+                type="checkbox"
+                checked={cloneIncludeSkills}
+                onChange={(e) => setCloneIncludeSkills(e.target.checked)}
+              />
+              {t("agents.clone_include_skills", { defaultValue: "Copy skill assignments" })}
+            </label>
+            <label className="flex items-center gap-2 text-[11px] text-text-dim">
+              <input
+                type="checkbox"
+                checked={cloneIncludeTools}
+                onChange={(e) => setCloneIncludeTools(e.target.checked)}
+              />
+              {t("agents.clone_include_tools", { defaultValue: "Copy tool assignments" })}
+            </label>
+          </div>
+          <div className="flex justify-end gap-2 pt-2">
+            <Button type="button" variant="secondary" onClick={() => setCloneDialog(null)}>
+              {t("common.cancel")}
+            </Button>
+            <Button
+              type="submit"
+              variant="primary"
+              disabled={!cloneNameDraft.trim() || cloneMutation.isPending}
+            >
+              {cloneMutation.isPending
+                ? t("common.saving", { defaultValue: "Saving..." })
+                : t("agents.clone")}
+            </Button>
+          </div>
+        </form>
+      </Modal>
     </div>
   );
 }

@@ -262,9 +262,31 @@ describe("useClearHandAgentRuntimeConfig", () => {
   });
 });
 
+describe("useCloneAgent", () => {
+  it("forwards the required new_name and invalidates lists + overview (#6566)", async () => {
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+
+    const { result } = renderHook(() => useCloneAgent(), { wrapper });
+
+    await result.current.mutateAsync({
+      agentId: "agent-1",
+      payload: { new_name: "agent-1-copy", include_skills: true, include_tools: false },
+    });
+
+    // `CloneAgentRequest.new_name` has no serde default and the struct is `deny_unknown_fields`, so the payload must be exactly these keys.
+    expect(http.cloneAgent).toHaveBeenCalledWith("agent-1", {
+      new_name: "agent-1-copy",
+      include_skills: true,
+      include_tools: false,
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: agentKeys.lists() });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: overviewKeys.snapshot() });
+  });
+});
+
 describe.each([
   { name: "useSpawnAgent", hook: useSpawnAgent, arg: "agent-1" },
-  { name: "useCloneAgent", hook: useCloneAgent, arg: "agent-1" },
   { name: "useSuspendAgent", hook: useSuspendAgent, arg: "agent-1" },
   { name: "useDeleteAgent", hook: useDeleteAgent, arg: "agent-1" },
   { name: "useResumeAgent", hook: useResumeAgent, arg: "agent-1" },
