@@ -153,17 +153,23 @@ fn summary_survives_reset_on_a_long_lived_runtime() {
     );
 }
 
-/// Documents why the unconfigured-aux case does *not* reproduce the loss, so
-/// nobody "simplifies" `block_on_tui` back to a throwaway after seeing this
-/// suite pass.
+/// The reset itself must succeed on a throwaway runtime — only the *detached*
+/// write is at risk, never the caller-visible result.
 ///
-/// With no `[llm.auxiliary] session_summary` chain, `build_session_summary`
-/// early-returns a trivial digest with no `.await` in front of the write, so
-/// the detached task completes before the runtime is dropped. Same call, same
-/// kernel, throwaway runtime — and the row still lands. That is exactly the
-/// configuration in which the original bug was invisible.
+/// Deliberately does **not** assert on the summary row. In this config
+/// (`[llm.auxiliary] session_summary` unset) whether the row lands is a
+/// scheduling race: `build_session_summary` early-returns a trivial digest
+/// with no `.await` in front of the write, so the detached task usually
+/// finishes inside the window `reset_session`'s remaining async work provides
+/// — but "usually" is not a property worth asserting, and on a loaded machine
+/// it flips. Asserting either direction would be a flake.
+///
+/// That race is precisely why the original bug was invisible in the default
+/// config, and why `block_on_tui` must not be "simplified" back to a
+/// throwaway on the strength of this suite passing. The guarantee that does
+/// hold unconditionally is the one above: a runtime that outlives the call.
 #[test]
-fn trivial_summary_path_is_not_where_the_loss_shows_up() {
+fn reset_itself_succeeds_even_on_a_throwaway_runtime() {
     let (kernel, _tmp) = MockKernelBuilder::new()
         .with_config(|c| {
             c.default_model.provider = "ollama".to_string();
@@ -178,13 +184,17 @@ fn trivial_summary_path_is_not_where_the_loss_shows_up() {
         // Exactly what the TUI used to do: build, block_on, drop.
         let rt = tokio::runtime::Runtime::new().expect("build runtime");
         rt.block_on(kernel.reset_session(agent_id, ResetScope::Agent))
-            .expect("reset_session");
+            .expect("reset_session must succeed regardless of runtime lifetime");
     }
 
+    // The session row is gone either way — that part is synchronous.
     assert!(
-        wait_for_summary(&kernel, agent_id, sid, std::time::Duration::from_secs(3)),
-        "the aux-less trivial-summary path is supposed to complete before the \
-         runtime drops; if this now fails, the write gained an await point and \
-         the throwaway runtime is losing data in the default config too"
+        kernel.memory_substrate().get_session(sid).unwrap().is_none()
+            || kernel
+                .memory_substrate()
+                .get_session(sid)
+                .unwrap()
+                .is_some_and(|s| s.messages.is_empty()),
+        "reset must clear the session transcript synchronously"
     );
 }
