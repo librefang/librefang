@@ -1868,6 +1868,45 @@ doctor-audit-config-read-fail = 读取 { $path } 失败：{ $error }
 doctor-audit-config-ok = { $path } 可解析为 TOML。
 doctor-audit-config-syntax-error = { $path } 存在 TOML 语法错误：{ $error }
 doctor-audit-config-syntax-error-hint = 编辑 { $path }，或从备份恢复。
+
+doctor-everyapi-absent = 未检测到 EveryAPI 网关（PATH 中没有 CLI，也没有凭据文件），无需接入。
+doctor-everyapi-cli-not-logged-in = PATH 中存在 EveryAPI CLI，但未找到凭据文件；若要让 LibreFang 走该网关，请先执行 `everyapi login`。
+doctor-everyapi-credentials-incomplete = EveryAPI 凭据文件存在，但其中没有可用的 relay_key；请重新执行 `everyapi login` 刷新凭据。
+doctor-everyapi-not-connected = 已找到 EveryAPI 凭据，但 LibreFang 中没有 everyapi provider 条目 —— 执行 `librefang models connect everyapi` 即可把该网关注册为 LLM provider。
+doctor-everyapi-provider-only = EveryAPI provider 条目已在 { $path } 生效；API driver 会经由该网关。
+doctor-everyapi-env-route-only = 环境变量 { $var } 把 CLI 子进程 driver（claude-code、codex-cli）指向了 { $host }；LibreFang 没有对应的 provider 条目，因此 API driver 仍使用各自配置的 provider。
+doctor-everyapi-both-routes = 当前同时存在两条互相独立的网关路由：{ $var } 把 CLI 子进程 driver（claude-code、codex-cli）指向 { $host }，而 { $path } 处的 provider 条目单独为 API driver 提供路由。某个 agent 实际走哪一条，取决于它使用的 driver，而不是这两处配置本身。
+doctor-everyapi-both-routes-hint = 如果你确实想分别覆盖 CLI driver 和 API driver，可保留两者；否则请取消设置 { $var } 或删除 { $path }，只保留一条路由。
+
+# `librefang models connect everyapi`
+everyapi-connect-title = 正在接入 EveryAPI 网关
+everyapi-connect-unknown-target = 未知网关 '{ $target }'。
+everyapi-connect-unknown-target-fix = 目前唯一支持的目标是 `librefang models connect everyapi`。
+everyapi-connect-credentials-missing = 无法确定 EveryAPI 的凭据文件位置。
+everyapi-connect-credentials-missing-fix = 请先执行 `everyapi login`，然后重新运行本命令。
+everyapi-connect-credentials-unreadable = 无法读取位于 { $path } 的 EveryAPI 凭据文件。
+everyapi-connect-credentials-malformed = 位于 { $path } 的 EveryAPI 凭据文件不是合法 JSON。
+everyapi-connect-credentials-no-api-base = 位于 { $path } 的 EveryAPI 凭据文件中没有 api_base。
+everyapi-connect-credentials-no-relay-key = 位于 { $path } 的 EveryAPI 凭据文件中没有 relay_key。
+everyapi-connect-models-fetch-failed = 无法获取网关的模型列表；将只注册 provider，不写入任何模型。
+everyapi-connect-models-fetch-failed-fix = 请确认网关可访问，然后重新运行本命令以补全模型列表。
+everyapi-connect-serialize-failed = 构建 provider 目录失败：{ $error }
+everyapi-connect-key-saved = relay key 已以 { $env_var } 的名义写入 LibreFang 的 .env 文件。
+everyapi-connect-key-save-failed = 保存 relay key 失败：{ $error }
+everyapi-connect-provider-written-daemon = 已通过运行中的守护进程在 { $path } 注册 provider，无需重启。
+everyapi-connect-provider-written-file = provider 已写入 { $path }。
+everyapi-connect-provider-write-failed = 写入 provider 文件失败：{ $error }
+everyapi-connect-restart-required = 请重启守护进程以加载新的 provider。
+everyapi-connect-models-registered = 已注册 { $count } 个模型。
+everyapi-connect-models-skipped = 已跳过 { $count } 个模型。
+everyapi-connect-skip-no-metadata = { $model }：该模型的上下文窗口和输出上限均未知，而文本模型缺少其中任一项都会在目录加载时被丢弃。
+everyapi-connect-streaming-only = 以下模型只接受流式请求，任何非流式调用（上下文压缩、主动记忆、技能工坊、网页增强）都会失败：{ $models }
+everyapi-connect-default-hint = 加上 --set-default 重新运行，即可把 { $model } 设为守护进程的默认模型。
+everyapi-connect-default-set = 默认模型已设为 { $model }。
+everyapi-connect-default-failed = 将 { $model } 设为默认模型失败（HTTP { $status }）。
+everyapi-connect-default-needs-daemon = 守护进程未运行，默认模型未做改动。请启动守护进程后执行 `librefang models set { $model }`。
+everyapi-connect-default-no-candidate = 没有注册任何文本模型，因此无法设置默认模型。
+
 # launcher menu items
 launcher-menu-get-started = 开始使用
 launcher-menu-get-started-hint = 提供商、API 密钥、模型、迁移

@@ -930,6 +930,44 @@ doctor-audit-config-ok = { $path }이(가) TOML로 파싱됩니다.
 doctor-audit-config-syntax-error = { $path }에 TOML 구문 오류가 있습니다: { $error }
 doctor-audit-config-syntax-error-hint = { $path }을(를) 편집하거나 백업에서 복원하십시오.
 
+doctor-everyapi-absent = EveryAPI 게이트웨이가 감지되지 않았습니다(PATH에 CLI 없음, 자격 증명 파일 없음) — 연결할 대상이 없습니다.
+doctor-everyapi-cli-not-logged-in = EveryAPI CLI는 PATH에 있지만 자격 증명 파일을 찾을 수 없습니다. LibreFang을 이 게이트웨이로 라우팅하려면 먼저 `everyapi login`을 실행하십시오.
+doctor-everyapi-credentials-incomplete = EveryAPI 자격 증명 파일은 있으나 사용 가능한 relay_key가 없습니다. `everyapi login`을 다시 실행하여 갱신하십시오.
+doctor-everyapi-not-connected = EveryAPI 자격 증명을 찾았지만 LibreFang에 everyapi 프로바이더 항목이 없습니다 — `librefang models connect everyapi`를 실행하면 게이트웨이를 LLM 프로바이더로 등록할 수 있습니다.
+doctor-everyapi-provider-only = EveryAPI 프로바이더 항목이 { $path }에서 활성화되어 있습니다. API 드라이버는 이 게이트웨이를 경유합니다.
+doctor-everyapi-env-route-only = 환경 변수 { $var }가 CLI 하위 프로세스 드라이버(claude-code, codex-cli)를 { $host }로 보냅니다. LibreFang에 대응하는 프로바이더 항목이 없으므로 API 드라이버는 기존에 설정된 프로바이더를 계속 사용합니다.
+doctor-everyapi-both-routes = 서로 독립적인 두 개의 게이트웨이 경로가 동시에 활성화되어 있습니다. { $var }는 CLI 하위 프로세스 드라이버(claude-code, codex-cli)를 { $host }로 보내고, { $path }의 프로바이더 항목은 API 드라이버를 별도로 라우팅합니다. 특정 에이전트에 어느 쪽이 적용되는지는 두 설정이 아니라 해당 에이전트의 드라이버에 따라 결정됩니다.
+doctor-everyapi-both-routes-hint = CLI 드라이버와 API 드라이버를 의도적으로 따로 처리하는 경우에만 둘 다 유지하십시오. 그렇지 않다면 { $var }를 해제하거나 { $path }를 삭제하여 하나의 경로만 적용되도록 하십시오.
+
+# `librefang models connect everyapi`
+everyapi-connect-title = EveryAPI 게이트웨이 연결 중
+everyapi-connect-unknown-target = 알 수 없는 게이트웨이 '{ $target }'입니다.
+everyapi-connect-unknown-target-fix = 현재 지원되는 유일한 대상은 `librefang models connect everyapi`입니다.
+everyapi-connect-credentials-missing = EveryAPI가 자격 증명을 저장하는 위치를 확인할 수 없습니다.
+everyapi-connect-credentials-missing-fix = 먼저 `everyapi login`을 실행한 뒤 이 명령을 다시 실행하십시오.
+everyapi-connect-credentials-unreadable = { $path }에 있는 EveryAPI 자격 증명 파일을 읽을 수 없습니다.
+everyapi-connect-credentials-malformed = { $path }에 있는 EveryAPI 자격 증명 파일이 올바른 JSON이 아닙니다.
+everyapi-connect-credentials-no-api-base = { $path }에 있는 EveryAPI 자격 증명 파일에 api_base가 없습니다.
+everyapi-connect-credentials-no-relay-key = { $path }에 있는 EveryAPI 자격 증명 파일에 relay_key가 없습니다.
+everyapi-connect-models-fetch-failed = 게이트웨이의 모델 목록을 가져오지 못했습니다. 모델 없이 프로바이더만 등록합니다.
+everyapi-connect-models-fetch-failed-fix = 게이트웨이에 접근할 수 있는지 확인한 뒤 이 명령을 다시 실행하여 모델 목록을 채우십시오.
+everyapi-connect-serialize-failed = 프로바이더 카탈로그를 만들지 못했습니다: { $error }
+everyapi-connect-key-saved = relay key를 LibreFang .env 파일에 { $env_var }(으)로 저장했습니다.
+everyapi-connect-key-save-failed = relay key 저장에 실패했습니다: { $error }
+everyapi-connect-provider-written-daemon = 실행 중인 데몬을 통해 { $path }에 프로바이더를 등록했습니다. 재시작이 필요 없습니다.
+everyapi-connect-provider-written-file = 프로바이더를 { $path }에 기록했습니다.
+everyapi-connect-provider-write-failed = 프로바이더 파일 기록에 실패했습니다: { $error }
+everyapi-connect-restart-required = 새 프로바이더를 반영하려면 데몬을 재시작하십시오.
+everyapi-connect-models-registered = 모델 { $count }개를 등록했습니다.
+everyapi-connect-models-skipped = 모델 { $count }개를 건너뛰었습니다.
+everyapi-connect-skip-no-metadata = { $model }: 이 모델의 컨텍스트 윈도우와 출력 한도를 모두 알 수 없으며, 둘 중 하나라도 없는 텍스트 모델은 카탈로그 로드 시 폐기됩니다.
+everyapi-connect-streaming-only = 다음 모델은 스트리밍 요청만 허용하므로 비스트리밍 호출(컨텍스트 압축, 프로액티브 메모리, 스킬 워크숍, 웹 보강)은 모두 실패합니다: { $models }
+everyapi-connect-default-hint = --set-default를 붙여 다시 실행하면 { $model }을(를) 데몬 기본 모델로 지정합니다.
+everyapi-connect-default-set = 기본 모델을 { $model }(으)로 설정했습니다.
+everyapi-connect-default-failed = { $model }을(를) 기본 모델로 설정하지 못했습니다(HTTP { $status }).
+everyapi-connect-default-needs-daemon = 데몬이 실행 중이 아니므로 기본 모델을 변경하지 않았습니다. 데몬을 시작한 뒤 `librefang models set { $model }`을 실행하십시오.
+everyapi-connect-default-no-candidate = 등록된 텍스트 모델이 없으므로 기본 모델로 지정할 대상이 없습니다.
+
 # launcher menu items
 launcher-menu-get-started = 시작하기
 launcher-menu-get-started-hint = 공급자, API 키, 모델, 마이그레이션

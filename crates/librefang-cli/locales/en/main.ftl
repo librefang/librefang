@@ -930,6 +930,44 @@ doctor-audit-config-ok = { $path } parses as TOML.
 doctor-audit-config-syntax-error = { $path } has TOML syntax errors: { $error }
 doctor-audit-config-syntax-error-hint = Edit { $path } or restore from a backup.
 
+doctor-everyapi-absent = No EveryAPI gateway detected (no CLI on PATH, no credentials) — nothing to wire.
+doctor-everyapi-cli-not-logged-in = EveryAPI CLI is on PATH but no credentials file was found; run `everyapi login` first if you want to route LibreFang through it.
+doctor-everyapi-credentials-incomplete = EveryAPI credentials file exists but carries no usable relay_key; re-run `everyapi login` to refresh it.
+doctor-everyapi-not-connected = EveryAPI credentials found, but LibreFang has no everyapi provider entry — run `librefang models connect everyapi` to register the gateway as an LLM provider.
+doctor-everyapi-provider-only = EveryAPI provider entry active at { $path }; API drivers route through the gateway.
+doctor-everyapi-env-route-only = Environment variable { $var } redirects CLI-subprocess drivers (claude-code, codex-cli) to { $host }; LibreFang has no matching provider entry, so API drivers still use their configured providers.
+doctor-everyapi-both-routes = Two independent gateway routes are active at once: { $var } sends CLI-subprocess drivers (claude-code, codex-cli) to { $host }, while the provider entry at { $path } routes API drivers separately. Which one applies to a given agent depends on its driver, not on either setting.
+doctor-everyapi-both-routes-hint = Keep both only if you meant to cover CLI and API drivers separately; otherwise unset { $var } or remove { $path } so a single route is in effect.
+
+# `librefang models connect everyapi`
+everyapi-connect-title = Connecting the EveryAPI gateway
+everyapi-connect-unknown-target = Unknown gateway '{ $target }'.
+everyapi-connect-unknown-target-fix = The only supported target today is `librefang models connect everyapi`.
+everyapi-connect-credentials-missing = Could not determine where EveryAPI stores its credentials.
+everyapi-connect-credentials-missing-fix = Run `everyapi login` first, then re-run this command.
+everyapi-connect-credentials-unreadable = Could not read the EveryAPI credentials file at { $path }.
+everyapi-connect-credentials-malformed = The EveryAPI credentials file at { $path } is not valid JSON.
+everyapi-connect-credentials-no-api-base = The EveryAPI credentials file at { $path } carries no api_base.
+everyapi-connect-credentials-no-relay-key = The EveryAPI credentials file at { $path } carries no relay_key.
+everyapi-connect-models-fetch-failed = Could not fetch the gateway's model list; registering the provider with no models.
+everyapi-connect-models-fetch-failed-fix = Check that the gateway is reachable, then re-run this command to fill in the model list.
+everyapi-connect-serialize-failed = Failed to build the provider catalog: { $error }
+everyapi-connect-key-saved = Relay key saved to the LibreFang .env file as { $env_var }.
+everyapi-connect-key-save-failed = Failed to save the relay key: { $error }
+everyapi-connect-provider-written-daemon = Provider registered through the running daemon at { $path }; no restart needed.
+everyapi-connect-provider-written-file = Provider written to { $path }.
+everyapi-connect-provider-write-failed = Failed to write the provider file: { $error }
+everyapi-connect-restart-required = Restart the daemon to pick up the new provider.
+everyapi-connect-models-registered = { $count } models registered.
+everyapi-connect-models-skipped = { $count } models skipped.
+everyapi-connect-skip-no-metadata = { $model }: no context window or output limit is known for this model, and a text model without both is discarded when the catalog loads.
+everyapi-connect-streaming-only = These models only accept streaming requests and will fail any non-streaming call (compaction, proactive memory, skill workshop, web augmentation): { $models }
+everyapi-connect-default-hint = Re-run with --set-default to make { $model } the daemon default.
+everyapi-connect-default-set = Default model set to { $model }.
+everyapi-connect-default-failed = Failed to set { $model } as the default model (HTTP { $status }).
+everyapi-connect-default-needs-daemon = The daemon is not running, so the default model was left unchanged. Start it and run `librefang models set { $model }`.
+everyapi-connect-default-no-candidate = No text model was registered, so there is nothing to set as the default.
+
 # launcher menu items
 launcher-menu-get-started = Get started
 launcher-menu-get-started-hint = Providers, API keys, models, migration

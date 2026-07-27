@@ -585,6 +585,10 @@ fn main() {
             ModelsCommands::Aliases { json } => cmd_models_aliases(json),
             ModelsCommands::Providers { json } => cmd_models_providers(json),
             ModelsCommands::Set { model } => cmd_models_set(model),
+            ModelsCommands::Connect {
+                target,
+                set_default,
+            } => cmd_models_connect(&target, set_default),
         },
         Some(Commands::Gateway(sub)) => match sub {
             GatewayCommands::Start { tail, foreground } => {

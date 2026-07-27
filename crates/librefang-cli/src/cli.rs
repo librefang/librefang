@@ -288,7 +288,7 @@ pub(crate) enum Commands {
     /// Browse models, aliases, and providers [*].
     #[command(
         subcommand,
-        long_about = "Browse and manage LLM models, aliases, and providers.\n\nExamples:\n  librefang models list                  # List all models\n  librefang models list --provider groq  # Filter by provider\n  librefang models aliases               # Show model aliases\n  librefang models providers             # List providers and auth status\n  librefang models set gpt-4o            # Set default model"
+        long_about = "Browse and manage LLM models, aliases, and providers.\n\nExamples:\n  librefang models list                  # List all models\n  librefang models list --provider groq  # Filter by provider\n  librefang models aliases               # Show model aliases\n  librefang models providers             # List providers and auth status\n  librefang models set gpt-4o            # Set default model\n  librefang models connect everyapi      # Register the EveryAPI gateway"
     )]
     Models(ModelsCommands),
     /// Daemon control (start, stop, status) [*].
@@ -1366,6 +1366,17 @@ pub(crate) enum ModelsCommands {
     Set {
         /// Model ID or alias (e.g. "gpt-4o", "claude-sonnet"). Interactive picker if omitted.
         model: Option<String>,
+    },
+    /// Register an external AI gateway as an LLM provider.
+    #[command(
+        long_about = "Register an external AI gateway as a custom LLM provider.\n\nReads the gateway's own credentials file, fetches its live model list, and writes a provider entry plus the API key into the LibreFang home directory.\n\nSupported targets:\n  everyapi  # reads ~/.config/everyapi/credentials.json\n\nExamples:\n  librefang models connect everyapi\n  librefang models connect everyapi --set-default"
+    )]
+    Connect {
+        /// Gateway to connect (currently only "everyapi").
+        target: String,
+        /// Also make this gateway's best model the daemon default.
+        #[arg(long)]
+        set_default: bool,
     },
 }
 

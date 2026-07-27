@@ -943,6 +943,44 @@ doctor-audit-config-ok = { $path } успішно розбирається як 
 doctor-audit-config-syntax-error = { $path } містить синтаксичні помилки TOML: { $error }
 doctor-audit-config-syntax-error-hint = Відредагуйте { $path } або відновіть її з бекапу.
 
+doctor-everyapi-absent = Шлюз EveryAPI не виявлено (немає CLI у PATH, немає файлу облікових даних) — підключати нічого.
+doctor-everyapi-cli-not-logged-in = EveryAPI CLI є у PATH, але файл облікових даних не знайдено; спершу виконайте `everyapi login`, якщо хочете спрямувати LibreFang через цей шлюз.
+doctor-everyapi-credentials-incomplete = Файл облікових даних EveryAPI існує, але не містить придатного relay_key; виконайте `everyapi login` ще раз, щоб оновити його.
+doctor-everyapi-not-connected = Облікові дані EveryAPI знайдено, але LibreFang не має запису провайдера everyapi — виконайте `librefang models connect everyapi`, щоб зареєструвати шлюз як LLM-провайдера.
+doctor-everyapi-provider-only = Запис провайдера EveryAPI активний у { $path }; API-драйвери йдуть через шлюз.
+doctor-everyapi-env-route-only = Змінна середовища { $var } спрямовує драйвери-підпроцеси CLI (claude-code, codex-cli) на { $host }; у LibreFang немає відповідного запису провайдера, тож API-драйвери й далі використовують налаштованих провайдерів.
+doctor-everyapi-both-routes = Одночасно активні два незалежні маршрути до шлюзу: { $var } спрямовує драйвери-підпроцеси CLI (claude-code, codex-cli) на { $host }, а запис провайдера у { $path } окремо маршрутизує API-драйвери. Який саме маршрут діє для конкретного агента, залежить від його драйвера, а не від жодного з цих налаштувань.
+doctor-everyapi-both-routes-hint = Залиште обидва лише якщо ви свідомо покриваєте CLI- та API-драйвери окремо; інакше приберіть { $var } або видаліть { $path }, щоб діяв один маршрут.
+
+# `librefang models connect everyapi`
+everyapi-connect-title = Підключення шлюзу EveryAPI
+everyapi-connect-unknown-target = Невідомий шлюз '{ $target }'.
+everyapi-connect-unknown-target-fix = Наразі підтримується єдина ціль: `librefang models connect everyapi`.
+everyapi-connect-credentials-missing = Не вдалося визначити, де EveryAPI зберігає облікові дані.
+everyapi-connect-credentials-missing-fix = Спершу виконайте `everyapi login`, потім запустіть цю команду ще раз.
+everyapi-connect-credentials-unreadable = Не вдалося прочитати файл облікових даних EveryAPI за шляхом { $path }.
+everyapi-connect-credentials-malformed = Файл облікових даних EveryAPI за шляхом { $path } не є коректним JSON.
+everyapi-connect-credentials-no-api-base = Файл облікових даних EveryAPI за шляхом { $path } не містить api_base.
+everyapi-connect-credentials-no-relay-key = Файл облікових даних EveryAPI за шляхом { $path } не містить relay_key.
+everyapi-connect-models-fetch-failed = Не вдалося отримати список моделей шлюзу; провайдер буде зареєстровано без моделей.
+everyapi-connect-models-fetch-failed-fix = Переконайтеся, що шлюз доступний, і запустіть команду ще раз, щоб заповнити список моделей.
+everyapi-connect-serialize-failed = Не вдалося побудувати каталог провайдера: { $error }
+everyapi-connect-key-saved = Relay-ключ збережено у файлі .env LibreFang під іменем { $env_var }.
+everyapi-connect-key-save-failed = Не вдалося зберегти relay-ключ: { $error }
+everyapi-connect-provider-written-daemon = Провайдера зареєстровано через запущений демон у { $path }; перезапуск не потрібен.
+everyapi-connect-provider-written-file = Провайдера записано до { $path }.
+everyapi-connect-provider-write-failed = Не вдалося записати файл провайдера: { $error }
+everyapi-connect-restart-required = Перезапустіть демон, щоб він підхопив нового провайдера.
+everyapi-connect-models-registered = Зареєстровано моделей: { $count }.
+everyapi-connect-models-skipped = Пропущено моделей: { $count }.
+everyapi-connect-skip-no-metadata = { $model }: для цієї моделі невідомі ані контекстне вікно, ані ліміт виводу, а текстова модель без обох цих значень відкидається під час завантаження каталогу.
+everyapi-connect-streaming-only = Ці моделі приймають лише потокові запити й завершаться помилкою на будь-якому непотоковому виклику (ущільнення контексту, проактивна пам'ять, майстерня навичок, веб-доповнення): { $models }
+everyapi-connect-default-hint = Запустіть ще раз із --set-default, щоб зробити { $model } типовою моделлю демона.
+everyapi-connect-default-set = Типову модель встановлено на { $model }.
+everyapi-connect-default-failed = Не вдалося зробити { $model } типовою моделлю (HTTP { $status }).
+everyapi-connect-default-needs-daemon = Демон не запущено, тому типову модель не змінено. Запустіть його та виконайте `librefang models set { $model }`.
+everyapi-connect-default-no-candidate = Жодної текстової моделі не зареєстровано, тому немає що робити типовою моделлю.
+
 # launcher menu items
 launcher-menu-get-started = Налаштувати та запустити
 launcher-menu-get-started-hint = Провайдери, API-ключі, моделі, міграція
