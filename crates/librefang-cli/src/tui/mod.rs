@@ -1290,9 +1290,8 @@ impl App {
 
     fn handle_kernel_ready(&mut self, kernel: Arc<LibreFangKernel>) {
         self.kernel_booting = false;
-        // Spawn approval expiry sweep task. Goes through `event::` because the
-        // TUI event loop is sync — the sweep needs a runtime context to be
-        // spawned from, and one that outlives this call.
+        // Spawn approval expiry sweep task.
+        // Goes through `event::` because the TUI event loop is sync — the sweep needs a runtime context to be spawned from, and one that outlives this call.
         event::spawn_kernel_background_tasks(kernel.clone());
         self.backend = Backend::InProcess { kernel };
         self.agents.reset();
@@ -2188,9 +2187,7 @@ impl App {
                     }
                     (Backend::InProcess { kernel }, Some(target)) => {
                         match target.agent_id_inprocess {
-                            // Shared runtime, not a throwaway: reset_session
-                            // detaches the session-summary write, which a
-                            // per-call runtime would abort on drop.
+                            // Shared runtime, not a throwaway: reset_session detaches the session-summary write, which a per-call runtime would abort on drop.
                             Some(id) => {
                                 event::block_on_tui(kernel.reset_session(id, ResetScope::Agent))
                                     .is_ok()

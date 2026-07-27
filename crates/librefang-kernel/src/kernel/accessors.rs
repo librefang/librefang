@@ -479,6 +479,11 @@ impl LibreFangKernel {
     ///
     /// Called at daemon boot and whenever a new key is set via the dashboard.
     /// Results (ValidatedKey / InvalidKey) are written back into the catalog.
+    ///
+    /// # Panics
+    ///
+    /// Same runtime contract as [`Self::spawn_approval_sweep_task`]: must be called from a runtime context, and that runtime must outlive the spawned validation tasks.
+    /// Currently daemon/desktop-only (`librefang-api`, `librefang-desktop`), so every caller is already inside that server's runtime.
     pub fn spawn_key_validation(self: Arc<Self>) {
         use librefang_types::model_catalog::AuthStatus;
 
@@ -630,11 +635,8 @@ impl LibreFangKernel {
     /// # Panics
     ///
     /// Must be called from a tokio runtime context (`Handle::current()`).
-    /// The runtime also has to **outlive the loop** — spawning from a
-    /// short-lived `Runtime::new()` that drops right after leaves the sweep
-    /// silently aborted. Sync callers (the TUI event loop) need a
-    /// process-lifetime runtime and a narrowly-scoped `EnterGuard`; see
-    /// `librefang-cli`'s `tui::event::spawn_kernel_background_tasks`.
+    /// The runtime also has to **outlive the loop** — spawning from a short-lived `Runtime::new()` that drops right after leaves the sweep silently aborted.
+    /// Sync callers (the TUI event loop) need a process-lifetime runtime and a narrowly-scoped `EnterGuard`; see `librefang-cli`'s `tui::event::spawn_kernel_background_tasks`.
     pub fn spawn_approval_sweep_task(self: Arc<Self>) {
         let handle = tokio::runtime::Handle::current();
         if self
@@ -697,10 +699,8 @@ impl LibreFangKernel {
     ///
     /// # Panics
     ///
-    /// Same runtime contract as [`Self::spawn_approval_sweep_task`]: must be
-    /// called from a runtime context, and that runtime must outlive the loop.
-    /// Currently daemon-only (`librefang-api::server`), so every caller is
-    /// already inside the server's runtime.
+    /// Same runtime contract as [`Self::spawn_approval_sweep_task`]: must be called from a runtime context, and that runtime must outlive the loop.
+    /// Currently daemon-only (`librefang-api::server`), so every caller is already inside the server's runtime.
     pub fn spawn_task_board_sweep_task(self: Arc<Self>) {
         let handle = tokio::runtime::Handle::current();
         if self
@@ -784,10 +784,8 @@ impl LibreFangKernel {
     ///
     /// # Panics
     ///
-    /// Same runtime contract as [`Self::spawn_approval_sweep_task`]: must be
-    /// called from a runtime context, and that runtime must outlive the loop.
-    /// Currently daemon-only (`librefang-api::server`), so every caller is
-    /// already inside the server's runtime.
+    /// Same runtime contract as [`Self::spawn_approval_sweep_task`]: must be called from a runtime context, and that runtime must outlive the loop.
+    /// Currently daemon-only (`librefang-api::server`), so every caller is already inside the server's runtime.
     pub fn spawn_session_stream_hub_gc_task(self: Arc<Self>) {
         let handle = tokio::runtime::Handle::current();
         if self
