@@ -345,7 +345,7 @@
             pname = "librefang";
           };
         }
-        # The desktop derivation — Tauri link step, `wrapGAppsHook3`, `copyDesktopItems`, the hicolor icon installs and the `libayatana-appindicator` `LD_LIBRARY_PATH` fix above — used to be reachable only through `packages`, so a regression in the packaging logic passed `nix flake check` and only the CI matrix leg caught it.
+        # The desktop derivation — Tauri link step, `wrapGAppsHook3`, `copyDesktopItems` and the hicolor icon installs — used to be reachable only through `packages`, so a regression in the packaging logic passed `nix flake check` and only the CI matrix leg caught it.
         # Gated on Linux: `checks` is evaluated for every system `eachDefaultSystem` covers, and darwin has no GTK / webview stack (`desktopBuildInputs` is empty there).
         // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
           inherit librefang-desktop;

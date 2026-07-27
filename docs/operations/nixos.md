@@ -249,13 +249,11 @@ The hardened unit cannot see `/home`, which forecloses the credential discovery 
 Supply those providers' keys through `environmentFile` instead.
 This is the same trade-off `deploy/librefang.service:24` already makes.
 
-### Desktop tray icon: a dlopen the linker cannot see
+### Desktop tray icon: no longer needs libayatana-appindicator
 
-`tray-icon` reaches `libayatana-appindicator3.so.1` through `dlopen` with no `DT_NEEDED` entry.
-The first attempt to fix this used `patchelf --add-rpath`, which writes `DT_RUNPATH` — and `ld.so` consults `DT_RUNPATH` only for `DT_NEEDED` dependencies, never for `dlopen` string lookups.
-So the RPATH fix (#3052) never actually worked and the tray icon silently failed to appear on NixOS (#3192).
-The working fix wraps the binary with `wrapGAppsHook3` and prepends the appindicator library directory to `LD_LIBRARY_PATH` through `gappsWrapperArgs` (`flake.nix:167-179`, landed as #3197).
-If you build the desktop package outside this flake, reproduce the `LD_LIBRARY_PATH` prefix or the tray icon will be missing with no error message.
+Historically, the system tray icon relied on Tauri's default `tray-icon` crate, which dlopened `libayatana-appindicator3.so.1` at runtime. This required complex Nix packaging workarounds such as wrapping the binary to prepend `libayatana-appindicator` to `LD_LIBRARY_PATH` (landed in #3197).
+
+The Linux system tray has been migrated to a pure D-Bus implementation via `ksni`. Consequently, the desktop application no longer needs `libayatana-appindicator` at compile time or runtime, and the `LD_LIBRARY_PATH` wrapping workaround has been removed from `flake.nix`.
 
 ### Past Nix-path breakages worth knowing about
 
@@ -297,9 +295,9 @@ Whether GitHub's hosted runners can nest KVM for a NixOS guest is not establishe
 ## Packaging the desktop app outside nixpkgs
 
 Nothing in this flake asserts which shared libraries a given distribution ships, and neither should a downstream package.
-Nix sidesteps the question entirely: `desktopBuildInputs` names nixpkgs attributes (`glib`, `gtk3`, `libsoup_3`, `webkitgtk_4_1`, `atkmm`, `cairo`, `gdk-pixbuf`, `pango`, `libayatana-appindicator`) whose existence the evaluator checks for you (`flake.nix:50-64`).
+Nix sidesteps the question entirely: `desktopBuildInputs` names nixpkgs attributes (`glib`, `gtk3`, `libsoup_3`, `webkitgtk_4_1`, `atkmm`, `cairo`, `gdk-pixbuf`, `pango`) whose existence the evaluator checks for you (`flake.nix:50-64`).
 Outside Nix there is no such guarantee, so probe at build or install time rather than hardcoding a distribution's package name.
 
-The soname the binary actually needs — `libayatana-appindicator3.so.1`, and the webkit2gtk series the Tauri webview links — is a stable property of the code.
+The webkit2gtk series the Tauri webview links is a stable property of the code.
 Which distribution package provides it is not, and it varies between Debian, Fedora, Arch and the downstream derivatives.
-`librefang doctor` implements exactly this probe (see `WEBKIT_PKG_MODULES` and `TRAY_PKG_MODULE` in `crates/librefang-cli/src/doctor.rs`) and reports what the host has rather than what a package list claims it should have; reuse those module names instead of inventing your own.
+`librefang doctor` implements exactly this probe (see `WEBKIT_PKG_MODULES` in `crates/librefang-cli/src/doctor.rs`) and reports what the host has rather than what a package list claims it should have; reuse those module names instead of inventing your own.

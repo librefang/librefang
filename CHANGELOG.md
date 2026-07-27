@@ -42,8 +42,9 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 ### Changed
 
 - Migrate the Linux system tray implementation in `librefang-desktop` from Tauri's default `tray-icon` to a pure D-Bus implementation using `ksni` 0.3.6.
-  This removes the unmaintained GTK3 dependency tree and fixes related security advisories (e.g. RUSTSEC-2024-0411..0420, RUSTSEC-2024-0429), allowing the Linux system tray to be enabled by default.
-  The new implementation features a self-healing reconnection loop to withstand D-Bus daemon restarts, dynamic status property updates every second, and support for toggling window visibility on left-click activation (#6572) (@pavver)
+  This removes `libappindicator` / `libappindicator-sys` from the Linux build graph, eliminating the runtime `dlopen` of `libayatana-appindicator3` and the corresponding CI/Docker package install.
+  It does not remove the GTK3 dependency tree (`gtk`, `gdk`, `atk`, …) or resolve the advisories tracked in `deny.toml`'s `ignore` list (RUSTSEC-2024-0411..0420) — those stay transitive via `tauri-runtime-wry` on Linux regardless of the tray implementation, and RUSTSEC-2024-0429 was never in that list to begin with.
+  The new implementation re-registers with the `StatusNotifierWatcher` via `ksni` on D-Bus reconnect, updates status properties every second, and supports toggling window visibility on left-click activation (#6572) (@pavver)
 
 - Upgrade `agent-client-protocol` from 0.11.1 to 1.3.0 in the `librefang-acp` crate, migrating the ACP adapter to the 1.x API (supersedes the version-only dependabot bump that left the crate failing to compile).
   The 1.x SDK moved the wire-schema types under a versioned namespace, so every `agent_client_protocol::schema::X` import is now `agent_client_protocol::schema::v1::X` (with `ProtocolVersion` re-exported at the `schema` root); the connection, router, and JSON-RPC surface (`Agent`, `Client`, `ConnectionTo`, `Builder`, `ByteStreams`, `Responder`, `on_receive_*`, `util`) is unchanged at the crate root.

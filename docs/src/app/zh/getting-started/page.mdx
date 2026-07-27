@@ -291,7 +291,7 @@ nix profile install github:librefang/librefang#librefang-desktop
 ```
 
 在 NixOS 上，桌面应用是更粗糙的一条路。
-它会链接完整的 GTK / webview 闭包（`gtk3`、`libsoup_3`、`webkitgtk_4_1`，以及运行时 `dlopen` 的 `libayatana-appindicator3`），因此构建耗时远高于 CLI，而且会走到 CLI 软件包根本不会触及的代码路径。
+它会链接完整的 GTK / webview 闭包（`gtk3`、`libsoup_3`、`webkitgtk_4_1`），因此构建耗时远高于 CLI，而且会走到 CLI 软件包根本不会触及的代码路径。
 如果它在你的机器上构建不出来或启动不了，请改为安装 `librefang-cli`，并通过 `http://127.0.0.1:4545/` 使用 Web Dashboard。
 
 **Debian / Ubuntu / deepin**
@@ -303,7 +303,6 @@ nix profile install github:librefang/librefang#librefang-desktop
 sudo apt-get install -y \
   libwebkit2gtk-4.1-dev \
   libgtk-3-dev \
-  libayatana-appindicator3-dev \
   librsvg2-dev \
   libdbus-1-dev
 ```
