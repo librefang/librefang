@@ -43,10 +43,8 @@ pub(crate) fn cmd_service_install(system: bool) {
     // The two modes have opposite privilege requirements, so the root check has to branch before anything else runs.
     // A per-user LaunchAgent / systemd user unit installed while root would be registered for the root account and never start for the invoking user, which is the mistake the original guard was written to catch.
     // A LaunchDaemon writes to /Library/LaunchDaemons, which only root can do.
-    // Each arm terminates on its own — the macOS arm returns, the others exit — rather than falling
-    // through to a shared `return`. A trailing `return` after the non-macOS `process::exit` would be
-    // unreachable code, which `-D warnings` turns into a build failure on exactly the platforms a
-    // macOS developer never compiles.
+    // Each arm terminates on its own — the macOS arm returns, the others exit — rather than falling through to a shared `return`.
+    // A trailing `return` after the non-macOS `process::exit` would be unreachable code, which `-D warnings` turns into a build failure on exactly the platforms a macOS developer never compiles.
     if system {
         #[cfg(target_os = "macos")]
         {
@@ -292,9 +290,7 @@ pub(crate) const MACOS_SYSTEM_PLIST_PATH: &str = "/Library/LaunchDaemons/ai.libr
 
 /// The account a LaunchDaemon should drop to, resolved from the invoking `sudo` session.
 ///
-/// Unlike `macos_system_plist` below this is not compiled into test builds on other platforms: the
-/// tests exercise the rendered plist, and both the constructor and the consumer here are macOS-only,
-/// so widening the gate would only produce dead code off macOS.
+/// Unlike `macos_system_plist` below this is not compiled into test builds on other platforms: the tests exercise the rendered plist, and both the constructor and the consumer here are macOS-only, so widening the gate would only produce dead code off macOS.
 #[cfg(target_os = "macos")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SystemServiceTarget {
@@ -306,8 +302,7 @@ pub(crate) struct SystemServiceTarget {
 
 /// Look up a user's home directory, uid and gid in the passwd database.
 ///
-/// `dirs::home_dir()` is not usable here: under `sudo` it resolves root's home, and a LaunchDaemon
-/// pointed at `/var/root/.librefang` would run against a state directory the real user cannot read.
+/// `dirs::home_dir()` is not usable here: under `sudo` it resolves root's home, and a LaunchDaemon pointed at `/var/root/.librefang` would run against a state directory the real user cannot read.
 #[cfg(target_os = "macos")]
 fn passwd_entry_for(user: &str) -> Option<(std::path::PathBuf, u32, u32)> {
     use std::ffi::{CStr, CString};
@@ -331,18 +326,26 @@ fn passwd_entry_for(user: &str) -> Option<(std::path::PathBuf, u32, u32)> {
     Some((std::path::PathBuf::from(dir.to_str().ok()?), uid, gid))
 }
 
+/// Whether a resolved `SUDO_USER` target is root and must be rejected.
+///
+/// The literal username `"root"` is not the only way to be root: some systems carry a second passwd entry with uid 0 under a different name, and accepting one would silently defeat the entire point of `--system` — the LaunchDaemon would still run as root, just under an alias.
+/// Checking `uid == 0` alongside the name closes that gap.
+#[cfg_attr(not(test), cfg(target_os = "macos"))]
+fn is_root_account(user: &str, uid: u32) -> bool {
+    user == "root" || uid == 0
+}
+
 /// Resolve who the LaunchDaemon should run as.
 ///
-/// `SUDO_USER` is the only signal that identifies the human behind a root process. Its absence means
-/// the command was run from a real root login rather than through `sudo`, and there is no way to guess
-/// which account's `~/.librefang` the daemon should serve — so that is an error rather than a default.
+/// `SUDO_USER` is the only signal that identifies the human behind a root process.
+/// Its absence means the command was run from a real root login rather than through `sudo`, and there is no way to guess which account's `~/.librefang` the daemon should serve — so that is an error rather than a default.
 #[cfg(target_os = "macos")]
 fn resolve_system_service_target() -> Option<SystemServiceTarget> {
     let user = std::env::var("SUDO_USER").ok().filter(|u| !u.is_empty())?;
-    if user == "root" {
+    let (home, uid, gid) = passwd_entry_for(&user)?;
+    if is_root_account(&user, uid) {
         return None;
     }
-    let (home, uid, gid) = passwd_entry_for(&user)?;
     Some(SystemServiceTarget {
         user,
         home,
@@ -351,15 +354,25 @@ fn resolve_system_service_target() -> Option<SystemServiceTarget> {
     })
 }
 
+/// Escape the handful of characters that are meaningful in XML text content.
+///
+/// `user` (`SUDO_USER`) and `librefang_home` (`LIBREFANG_HOME`) below are both attacker-reachable through a `sudo -E` invocation before this ever runs as root, and the plist they get interpolated into is loaded unconditionally at boot as a root LaunchDaemon.
+/// Without escaping, a value containing `</string><key>ProgramArguments</key>...` could inject arbitrary additional keys or array entries into that job.
+#[cfg_attr(not(test), cfg(target_os = "macos"))]
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
 /// Render the LaunchDaemon plist.
 ///
-/// Kept as a pure function so the parts that are easy to get wrong — `--foreground`, `UserName`, and
-/// the `HOME` / `LIBREFANG_HOME` pair — are asserted by unit tests on every platform rather than only
-/// being exercised by a privileged macOS run nobody repeats.
+/// Kept as a pure function so the parts that are easy to get wrong — `--foreground`, `UserName`, and the `HOME` / `LIBREFANG_HOME` pair — are asserted by unit tests on every platform rather than only being exercised by a privileged macOS run nobody repeats.
 /// `account_home` and `librefang_home` are passed separately on purpose.
-/// Deriving one from the other looks safe while the state dir is the default `~/.librefang`, but a
-/// `sudo -E` invocation carrying `LIBREFANG_HOME=/opt/librefang` would make the parent directory
-/// `/opt` — and `HOME=/opt` sends `dirs::home_dir()` at a directory the account does not own.
+/// Deriving one from the other looks safe while the state dir is the default `~/.librefang`, but a `sudo -E` invocation carrying `LIBREFANG_HOME=/opt/librefang` would make the parent directory `/opt` — and `HOME=/opt` sends `dirs::home_dir()` at a directory the account does not own.
 #[cfg_attr(not(test), cfg(target_os = "macos"))]
 pub(crate) fn macos_system_plist(
     binary: &std::path::Path,
@@ -367,6 +380,12 @@ pub(crate) fn macos_system_plist(
     librefang_home: &std::path::Path,
     user: &str,
 ) -> String {
+    let binary = xml_escape(&binary.display().to_string());
+    let user = xml_escape(user);
+    // `HOME` is the account's real home, not the state dir: `dirs::home_dir()` reads it, and the
+    // first-start `librefang init` path exits when it resolves to nothing.
+    let home = xml_escape(&account_home.display().to_string());
+    let librefang_home = xml_escape(&librefang_home.display().to_string());
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -403,30 +422,28 @@ pub(crate) fn macos_system_plist(
 </dict>
 </plist>
 "#,
-        binary = binary.display(),
-        user = user,
-        // `HOME` is the account's real home, not the state dir: `dirs::home_dir()` reads it, and the
-        // first-start `librefang init` path exits when it resolves to nothing.
-        home = account_home.display(),
-        librefang_home = librefang_home.display(),
     )
 }
 
 /// Every path an ownership handover has to cover: `root` itself plus everything beneath it.
 ///
-/// Symlinks are returned but never descended. `DirEntry::file_type` describes the entry itself rather
-/// than its target, so a link inside the state directory pointing somewhere else cannot redirect the
-/// caller's `lchown` onto an unrelated tree — the same reason the skills bundle scanner uses
-/// `entry.file_type().is_dir()` instead of `path.is_dir()`.
+/// Symlink entries encountered while walking are returned but never descended.
+/// `DirEntry::file_type` describes the entry itself rather than its target, so a link inside the state directory pointing somewhere else cannot redirect the caller's `lchown` onto an unrelated tree — the same reason the skills bundle scanner uses `entry.file_type().is_dir()` instead of `path.is_dir()`.
+/// `root` itself gets the same treatment even though it arrives with no such guarantee from the caller: it re-checks with `symlink_metadata` before every `read_dir`, so a `root` that is itself a symlink (`~/.librefang` sits fully inside the target account's own home directory, which that account fully controls) cannot make this function enumerate — and then `lchown` — whatever it points at instead.
+/// `lchown` only refuses to follow a symlink at the *final* path component, and every path this function would otherwise return under a symlinked `root` has `root` as an intermediate component, so without this guard the walk would still resolve through it.
 ///
-/// Unreadable directories are skipped rather than aborting the walk: a subtree this process cannot
-/// enumerate is one it also cannot chown, and failing the whole install over it would be worse than
-/// handing over everything reachable.
+/// Unreadable directories are skipped rather than aborting the walk: a subtree this process cannot enumerate is one it also cannot chown, and failing the whole install over it would be worse than handing over everything reachable.
 #[cfg_attr(not(test), cfg(target_os = "macos"))]
 fn collect_ownership_handover_paths(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut out = vec![root.to_path_buf()];
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
+        let is_real_dir = std::fs::symlink_metadata(&dir)
+            .map(|m| m.file_type().is_dir())
+            .unwrap_or(false);
+        if !is_real_dir {
+            continue;
+        }
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
@@ -1998,6 +2015,83 @@ mod tests {
                 "the walk must not descend through a symlink out of the tree: {paths:?}"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ownership_handover_refuses_to_walk_through_a_symlinked_root() {
+        // `root` here plays the role of `~/.librefang`: a path fully inside the target account's
+        // own home directory, so nothing stops that account from having pre-created it as a
+        // symlink before an administrator ever runs `--system`. `read_dir` follows symlinks to
+        // open whatever they point at, and `lchown` only refuses to follow one at the *final*
+        // path component — so without a guard, every path under a symlinked root resolves
+        // straight through to the target tree and would be handed to the unprivileged uid/gid.
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("passwd"), b"root:x:0:0").unwrap();
+        std::fs::create_dir_all(outside.path().join("ssh")).unwrap();
+        std::fs::write(outside.path().join("ssh/sshd_config"), b"").unwrap();
+
+        let parent = tempfile::tempdir().unwrap();
+        let symlinked_root = parent.path().join(".librefang");
+        std::os::unix::fs::symlink(outside.path(), &symlinked_root).unwrap();
+
+        let paths = collect_ownership_handover_paths(&symlinked_root);
+
+        // Only the symlink node itself may be handed over — `lchown` on it touches the link, not
+        // its target — never anything reachable by following it.
+        assert_eq!(
+            paths,
+            vec![symlinked_root.clone()],
+            "a symlinked root must not be walked into: {paths:?}"
+        );
+        assert!(
+            !paths.contains(&outside.path().join("passwd")),
+            "must not reach the symlink target's contents: {paths:?}"
+        );
+        assert!(
+            !paths.contains(&outside.path().join("ssh/sshd_config")),
+            "must not recurse into the symlink target's subdirectories: {paths:?}"
+        );
+    }
+
+    #[test]
+    fn is_root_account_rejects_uid_zero_even_under_an_alias() {
+        // The literal name "root" is not the only way to be root: a duplicate passwd entry with
+        // uid 0 under another name is still root, and must be rejected the same way — otherwise
+        // the LaunchDaemon keeps running as root, just under an alias that the name-only check
+        // does not recognize.
+        assert!(is_root_account("root", 0));
+        assert!(
+            is_root_account("toor", 0),
+            "uid 0 is root regardless of the account name"
+        );
+        assert!(!is_root_account("alice", 501));
+    }
+
+    #[test]
+    fn macos_system_plist_escapes_xml_metacharacters_in_untrusted_fields() {
+        // `user` (SUDO_USER) and the state-dir components of `librefang_home` (LIBREFANG_HOME)
+        // are both attacker-reachable via `sudo -E` before this ever runs as root. Unescaped,
+        // a value containing `</string><key>ProgramArguments</key>...` could inject additional
+        // keys or array entries into a plist that launchd loads unconditionally as root at boot.
+        let plist = macos_system_plist(
+            std::path::Path::new("/usr/local/bin/librefang"),
+            std::path::Path::new("/Users/mallory"),
+            std::path::Path::new("/Users/mallory/.librefang</string><key>Injected</key><true/>"),
+            "mallory</string><key>UserName</key><string>root",
+        );
+        assert!(
+            !plist.contains("<key>Injected</key>"),
+            "unescaped LIBREFANG_HOME must not inject plist keys:\n{plist}"
+        );
+        assert!(
+            !plist.contains("<string>root</string>"),
+            "unescaped SUDO_USER must not inject a second UserName value:\n{plist}"
+        );
+        assert!(
+            plist.contains("&lt;/string&gt;&lt;key&gt;Injected&lt;/key&gt;&lt;true/&gt;"),
+            "the metacharacters must survive escaped, not vanish:\n{plist}"
+        );
     }
 
     #[test]
