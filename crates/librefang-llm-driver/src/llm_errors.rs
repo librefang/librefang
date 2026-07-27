@@ -90,6 +90,16 @@ const BILLING_PATTERNS: &[&str] = &[
     "billing",
     "insufficient balance",
     "usage limit",
+    // OpenAI's own out-of-funds code, and therefore the one every
+    // OpenAI-compatible endpoint returns. Without it a 403 carrying
+    // `insufficient_quota` fell through to the 4xx fallback and was reported
+    // as a malformed request, which is both wrong to the operator and costs
+    // the long billing cooldown — so a provider with no money left kept
+    // getting retried. Both spellings appear in the wild: the machine-readable
+    // `code` uses an underscore, the human `message` a space.
+    "insufficient_quota",
+    "insufficient quota",
+    "exceeded your current quota",
 ];
 
 /// Auth patterns.
@@ -954,6 +964,30 @@ mod tests {
 
         let e = classify_error("Your credit balance is too low", None);
         assert_eq!(e.category, LlmErrorCategory::Billing);
+    }
+
+    /// OpenAI signals an exhausted account with `insufficient_quota` on a 403,
+    /// so every OpenAI-compatible endpoint does too. Before this was a billing
+    /// pattern it fell through to the 4xx fallback and came back as
+    /// `Format` — reported to the operator as a malformed request, and missing
+    /// the long billing cooldown, so an account with no funds left kept being
+    /// retried.
+    #[test]
+    fn test_classify_insufficient_quota_is_billing_not_format() {
+        for raw in [
+            "You exceeded your current quota, please check your plan and billing details",
+            "insufficient_quota",
+            "Insufficient quota for this request",
+        ] {
+            let e = classify_error(raw, Some(403));
+            assert_eq!(
+                e.category,
+                LlmErrorCategory::Billing,
+                "{raw:?} must classify as Billing"
+            );
+            assert!(e.is_billing, "{raw:?} must set is_billing for the cooldown");
+            assert!(!e.is_retryable, "{raw:?} must not be retried");
+        }
     }
 
     #[test]
