@@ -276,6 +276,24 @@ Any new compile-time-embedded asset must be added to the `fileset` union at `fla
 A `pull_request` job runs evaluation only — no compilation — so a broken flake or module is caught before merge in minutes rather than after merge in an hour and a half.
 The expensive `nix build` matrix still runs on push-to-main only; the rationale is recorded at `.github/workflows/nix-build.yml:7-14`.
 
+### Proving the service actually starts
+
+`nixos-module-eval` proves the unit has the right shape; it cannot prove the daemon survives being started by systemd.
+That is what the `nixos-vm-test` check is for — it boots a real NixOS guest with `services.librefang.enable = true`, waits for the unit, waits for port 4545, and requests `/api/health`.
+
+Run it on a Linux host with a working `/nix` and KVM:
+
+```bash
+nix build .#checks.x86_64-linux.nixos-vm-test -L
+```
+
+**CI does not run this check, and the check being green is not something CI can tell you.**
+The pull-request lane runs `nix flake check --no-build`, which instantiates every check and builds none, so it verifies the test expression still evaluates — a rename in the module that broke the test would be caught — while compiling nothing.
+The push-to-main matrix builds `.#librefang-cli` and `.#librefang-desktop` and never touches `checks` at all.
+
+Building it for real compiles `librefang-cli` and boots a VM, which is why it is opt-in.
+Whether GitHub's hosted runners can nest KVM for a NixOS guest is not established anywhere in this repository, so nothing here claims they can; giving this check a CI lane is an open question for the maintainers rather than a settled design.
+
 ## Packaging the desktop app outside nixpkgs
 
 Nothing in this flake asserts which shared libraries a given distribution ships, and neither should a downstream package.

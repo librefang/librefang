@@ -307,6 +307,46 @@
           pkgs.runCommand "librefang-nixos-module-eval" { } ''
             printf '%s\n' "librefang nixosModule: ${toString (pkgs.lib.length expectations)} expectations passed" > "$out"
           '';
+
+        # Boots a real NixOS guest with `services.librefang.enable = true` and asserts the daemon actually comes up.
+        # This is the one thing `nixosModuleEval` above cannot do: evaluation proves the unit has the right shape, not that the process survives being started by systemd.
+        #
+        # Cost, and why it is safe to have in `checks`: building this derivation compiles `librefang-cli` and boots a VM, so it is expensive.
+        # CI never pays that. The PR lane runs `nix flake check --no-build`, which instantiates every check and builds none, so it verifies this expression still evaluates without compiling anything — measured at 43s for the whole lane.
+        # The push-to-main matrix runs `nix build .#librefang-cli` / `.#librefang-desktop` and never touches `checks`, so it is unaffected too.
+        # Running it for real is a deliberate act on a Linux host with a working /nix and KVM: `nix build .#checks.x86_64-linux.nixos-vm-test -L`.
+        # Whether GitHub's hosted runners can nest KVM for a NixOS guest is deliberately not asserted here, because nothing in this repo has established it — see docs/operations/nixos.md.
+        nixosVmTest = pkgs.testers.runNixOSTest {
+          name = "librefang-nixos-module";
+
+          nodes.machine = { ... }: {
+            imports = [ self.nixosModules.default ];
+
+            services.librefang = {
+              enable = true;
+              # Set explicitly rather than relying on the `mkDefault` the flake's nixosModules wrapper applies, so this test pins "the package this flake builds boots" independently of how the default is resolved.
+              package = librefang-cli;
+              # The guest has no outbound network. Without this the first boot tries to sync the agent/hand registry and the unit's startup is at the mercy of a network call — the same reason the macOS CI lane sets it (.github/workflows/ci.yml).
+              extraEnvironment.LIBREFANG_REGISTRY_OFFLINE = "1";
+            };
+
+            environment.systemPackages = [ pkgs.curl ];
+            # The daemon boots a Rust kernel and an axum server; the 1024 MB default leaves it thrashing.
+            virtualisation.memorySize = 2048;
+          };
+
+          # Deliberately narrow: this asserts the module's contract (the unit starts, stays up, and the daemon binds its port) and not the API surface.
+          # `/api/health` is the one route the project treats as a stable operator-facing contract (it is the smoke check in CLAUDE.md's live-verification recipe), so one request against it separates "systemd reports active" from "the server is really serving".
+          testScript = ''
+            machine.wait_for_unit("librefang.service")
+            machine.wait_for_open_port(4545)
+            machine.succeed("curl -sf http://127.0.0.1:4545/api/health")
+
+            # StateDirectory= created the state dir, and LIBREFANG_HOME pointed the daemon at it rather than at the service user's home.
+            machine.succeed("test -d /var/lib/librefang")
+            machine.succeed("systemctl show -p MainPID --value librefang.service | grep -qv '^0$'")
+          '';
+        };
       in
       {
         checks = {
@@ -330,6 +370,7 @@
         # `lib.nixosSystem` only evaluates for Linux hosts, and only the two architectures NixOS actually targets.
         // pkgs.lib.optionalAttrs (system == "x86_64-linux" || system == "aarch64-linux") {
           nixos-module-eval = nixosModuleEval;
+          nixos-vm-test = nixosVmTest;
         };
 
         packages = {
