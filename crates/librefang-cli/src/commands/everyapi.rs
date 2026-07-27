@@ -980,7 +980,15 @@ pub(crate) fn cmd_models_connect(target: &str, set_default: bool) {
     }
 
     report_models(&synthesis);
-    handle_default_model(&synthesis, daemon.as_deref(), set_default);
+    // Only attempt the live `POST .../default` call when the provider write
+    // actually went through the daemon. When `via_daemon` is false (no daemon
+    // detected, or the write failed and fell back to the direct file write),
+    // the daemon's in-process catalog was never updated — the file path
+    // above already told the operator a restart is required, so this must
+    // fall into the same "needs daemon" branch as the no-daemon case rather
+    // than attempt (and fail) a live call against a stale catalog.
+    let default_daemon = via_daemon.then_some(daemon.as_deref()).flatten();
+    handle_default_model(&synthesis, default_daemon, set_default);
 }
 
 /// Flat JSON body for `POST /api/registry/content/provider`.
