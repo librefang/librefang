@@ -195,11 +195,13 @@ A matched call suspends the turn and raises an approval request; a human then ap
 For an unattended cron agent that means a write tool stalls rather than being refused, and the outcome on timeout is whatever `approval.timeout_fallback` says (`deny` by default, but `skip` and `escalate` are also available).
 If you want a hard block rather than a pause, use a channel deny rule or leave the write tools' server off that agent's `mcp_servers` list entirely.
 
-**`trusted_senders` bypasses it for every MCP tool.**
-The approval manager waives the gate for a trusted sender whenever the tool is not high-risk, and the risk classifier only knows built-in tool names — `shell_exec`, `file_write`, `agent_spawn`, and friends.
-Every MCP tool falls through to `Low`, so a `trusted_senders` entry silently waives approval on `mcp_everyapi_everyapi_seller_withdraw` and `mcp_everyapi_everyapi_seller_add_key` alike.
-The same hole applies to channel deny rules, and a channel *allow* rule is a bypass in its own right: an `allowed_tools` entry that matches the tool returns "no approval needed" before the `require_approval` list is ever consulted.
-Do not combine either with an EveryAPI-enabled agent and assume the globs still hold.
+**`trusted_senders` does not bypass an MCP tool.**
+The approval manager waives the gate for a trusted sender only when the tool is not high-risk, and `classify_risk` grades every `mcp_*` name as high risk precisely because it cannot enumerate what third-party server code does.
+So `mcp_everyapi_everyapi_seller_withdraw` stays gated even for a trusted sender.
+Note this was not always true: the classifier matched a closed list of built-in names, so MCP tools fell through to `Low` and the bypass returned before `require_approval` was read at all.
+
+**A channel `allowed_tools` rule still is a bypass.**
+An `allowed_tools` entry that matches the tool returns "no approval needed" before the `require_approval` list is consulted, so a channel allow-list is not a safe place to name an EveryAPI write tool.
 
 **A hand-tagged agent auto-approves everything.**
 Agents spawned through `activate_hand()` carry a `hand:` tag and are treated as curated trusted packages: their approval submissions return `AutoApproved` without ever reaching a human, and execution proceeds straight through.

@@ -912,7 +912,7 @@ model    = "llama-3.3-70b-versatile"
 # 启动时加载的静态 MCP server
 [[mcp_servers]]
 name = "github"
-url  = "https://api.example.com/mcp"
+transport = { type = "http", url = "https://api.example.com/mcp" }
 
 # Webhook 触发 —— 外部系统把事件推进 LibreFang
 [webhook_triggers]

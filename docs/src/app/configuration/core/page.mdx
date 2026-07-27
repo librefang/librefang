@@ -914,7 +914,7 @@ model    = "llama-3.3-70b-versatile"
 # Static MCP servers loaded at boot
 [[mcp_servers]]
 name = "github"
-url  = "https://api.example.com/mcp"
+transport = { type = "http", url = "https://api.example.com/mcp" }
 
 # Webhook triggers — external systems pushing events into LibreFang
 [webhook_triggers]

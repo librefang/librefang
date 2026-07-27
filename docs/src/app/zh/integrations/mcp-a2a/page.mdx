@@ -195,11 +195,13 @@ require_approval = [
 对无人值守的 cron agent 而言，这意味着写工具是卡住而不是被拒绝，超时后的结果取决于 `approval.timeout_fallback`（默认 `deny`，也可选 `skip` 与 `escalate`）。
 如果你要的是硬阻断而非暂停，请改用 channel deny 规则，或干脆不把带写工具的服务器放进该 agent 的 `mcp_servers` 列表。
 
-**`trusted_senders` 会对所有 MCP 工具绕过它。**
-只要工具不属于高风险类别，审批管理器就会为可信发送者放行，而风险分类器只认识内置工具名 —— `shell_exec`、`file_write`、`agent_spawn` 之类。
-所有 MCP 工具都落进 `Low`，因此一个 `trusted_senders` 条目会同时静默豁免 `mcp_everyapi_everyapi_seller_withdraw` 和 `mcp_everyapi_everyapi_seller_add_key`。
-channel deny 规则存在同样的漏洞；而 channel *allow* 规则本身就是另一条绕过路径 —— 命中的 `allowed_tools` 条目会在 `require_approval` 列表被查阅之前直接返回"无需审批"。
-不要在启用了 EveryAPI 的 agent 上配置这两者中的任何一个，还指望上面的 glob 仍然生效。
+**`trusted_senders` 不会对 MCP 工具绕过它。**
+只有当工具不属于高风险类别时，审批管理器才为可信发送者放行，而 `classify_risk` 把每个 `mcp_*` 名字都判为高风险 —— 正因为它无法枚举第三方服务器代码会做什么。
+所以即便是可信发送者，`mcp_everyapi_everyapi_seller_withdraw` 依然受门禁约束。
+需要说明的是此前并非如此：分类器只匹配一份内置名字的封闭列表，MCP 工具因此落进 `Low`，绕过分支在 `require_approval` 被读到之前就返回了。
+
+**channel `allowed_tools` 规则仍然是一条绕过路径。**
+命中的 `allowed_tools` 条目会在 `require_approval` 列表被查阅之前直接返回"无需审批"，所以 channel 白名单不是安放 EveryAPI 写工具的安全位置。
 
 **带 hand 标签的 agent 会自动批准一切。**
 经由 `activate_hand()` 拉起的 agent 带有 `hand:` 标签，被视为经过策展的可信包：它们提交的审批直接返回 `AutoApproved`，从不抵达人类，执行照常继续。
