@@ -1907,6 +1907,10 @@ everyapi-connect-credentials-no-api-base = 位于 { $path } 的 EveryAPI 凭据�
 everyapi-connect-credentials-no-relay-key = 位于 { $path } 的 EveryAPI 凭据文件中没有 relay_key。
 everyapi-connect-models-fetch-failed = 无法获取网关的模型列表；将只注册 provider，不写入任何模型。
 everyapi-connect-models-fetch-failed-fix = 请确认网关可访问，然后重新运行本命令以补全模型列表。
+everyapi-connect-models-fetch-unauthorized = 网关拒绝了 relay key，未写入任何内容。
+everyapi-connect-models-fetch-unauthorized-fix = 运行 `everyapi login` 刷新密钥，然后重新执行本命令。
+everyapi-connect-models-fetch-failed-would-clobber = 无法获取网关模型列表，而现有 provider 条目已包含模型；拒绝用空条目覆盖它。
+everyapi-connect-provider-rejected = 守护进程拒绝了该 provider 定义：{ $error }
 everyapi-connect-pricing-fetch-failed = 无法获取网关的计费信息；注册的模型将不带任何按 token 计费的价格。
 everyapi-connect-pricing-fetch-failed-fix = 请确认网关可访问，然后重新运行本命令以补全价格。在此之前，这些模型的花费不会计入任何预算。
 everyapi-connect-serialize-failed = 构建 provider 目录失败：{ $error }
@@ -1927,7 +1931,8 @@ everyapi-connect-streaming-only = 以下模型只接受流式请求，任何非�
 everyapi-connect-default-hint = 加上 --set-default 重新运行，即可把 { $model } 设为守护进程的默认模型。
 everyapi-connect-default-set = 默认模型已设为 { $model }。
 everyapi-connect-default-failed = 将 { $model } 设为默认模型失败（HTTP { $status }）。
-everyapi-connect-default-needs-daemon = 守护进程未运行，默认模型未做改动。请启动守护进程后执行 `librefang models set { $model }`。
+everyapi-connect-default-needs-daemon = 守护进程未运行，默认模型未更改。启动它后重新执行 `librefang models connect everyapi --set-default`。
+everyapi-connect-default-url-pin-failed = 未能将网关地址写入 config.toml；默认模型已设置，但守护进程重启后可能无法解析它。
 everyapi-connect-default-no-candidate = 没有注册任何文本模型，因此无法设置默认模型。
 
 

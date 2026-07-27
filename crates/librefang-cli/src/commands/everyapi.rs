@@ -38,29 +38,18 @@ const PROVIDER_ID: &str = "everyapi";
 const PROVIDER_DISPLAY_NAME: &str = "EveryAPI";
 /// Env var the OpenAI-compatible driver reads the gateway bearer from.
 ///
-/// Deliberately NOT `EVERYAPI_RELAY_KEY` — that is EveryAPI's own
-/// script-facing variable name, and conflating the two would make
-/// `librefang models providers` disagree with `provider_to_env_var`
-/// (`commands/common.rs`), whose `other => "{OTHER}_API_KEY"` fallback
-/// already produces exactly this value for the id `everyapi`.
+/// Deliberately NOT `EVERYAPI_RELAY_KEY` — that is EveryAPI's own script-facing variable name, and conflating the two would make `librefang models providers` disagree with `provider_to_env_var` (`commands/common.rs`), whose `other => "{OTHER}_API_KEY"` fallback already produces exactly this value for the id `everyapi`.
 const API_KEY_ENV: &str = "EVERYAPI_API_KEY";
-/// How long to wait for the gateway's model list before giving up and
-/// writing the provider entry with no `[[models]]`. The same budget applies
-/// to the pricing feed, which is fetched from the same host.
+/// How long to wait for the gateway's model list before giving up and writing the provider entry with no `[[models]]`.
+/// The same budget applies to the pricing feed, which is fetched from the same host.
 const MODELS_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 /// Ratio → USD conversion factor for the gateway's billing ratios.
 ///
-/// EveryAPI's backend meters in "quota" units with `QuotaPerUnit = 500_000`
-/// quota per USD, and charges `tokens * model_ratio` quota — so a ratio of 1
-/// is `1_000_000 / 500_000` = $2.00 per million input tokens. The gateway's
-/// own docs state the same rule ("upstream price per 1M = model_ratio x $2"),
-/// so the two independent sources agree.
+/// EveryAPI's backend meters in "quota" units with `QuotaPerUnit = 500_000` quota per USD, and charges `tokens * model_ratio` quota — so a ratio of 1 is `1_000_000 / 500_000` = $2.00 per million input tokens.
+/// The gateway's own docs state the same rule ("upstream price per 1M = model_ratio x $2"), so the two independent sources agree.
 ///
-/// The daemon-side TTL refresh in `librefang-api/src/everyapi_catalog.rs`
-/// carries an identical constant and conversion, because the two crates do not
-/// depend on each other in a direction that would let one reuse the other.
-/// Both sides assert the same `claude-sonnet-5` => 2.00 / 10.00 value, so
-/// editing this rule on one side alone fails the other side's tests.
+/// The daemon-side TTL refresh in `librefang-api/src/everyapi_catalog.rs` carries an identical constant and conversion, because the two crates do not depend on each other in a direction that would let one reuse the other.
+/// Both sides assert the same `claude-sonnet-5` => 2.00 / 10.00 value, so editing this rule on one side alone fails the other side's tests.
 const RATIO_USD_PER_MILLION: f64 = 2.0;
 
 // ---------------------------------------------------------------------------
@@ -69,26 +58,24 @@ const RATIO_USD_PER_MILLION: f64 = 2.0;
 
 /// The two fields this command needs out of EveryAPI's credentials file.
 ///
-/// The on-disk file also carries `access_token`, `role`, `user_id` and
-/// `username`; none of them are read here. `relay_key` is the gateway bearer
-/// and is treated as a secret throughout — it is never rendered.
+/// The on-disk file also carries `access_token`, `role`, `user_id` and `username`; none of them are read here.
+/// `relay_key` is the gateway bearer and is treated as a secret throughout — it is never rendered.
 pub(crate) struct EveryApiCredentials {
-    /// Gateway root, e.g. `https://api.everyapi.ai` (no `/v1` suffix).
+    /// Gateway root, e.g.
+    /// `https://api.everyapi.ai` (no `/v1` suffix).
     pub(crate) api_base: String,
-    /// Gateway bearer credential. Never printed.
+    /// Gateway bearer credential.
+    /// Never printed.
     pub(crate) relay_key: String,
 }
 
 /// Parse the credentials JSON.
 ///
-/// `serde_json::Value` accessors only: `librefang-cli` has no `serde`
-/// dependency, so a `#[derive(Deserialize)]` struct is not available here.
-/// Unknown extra fields are ignored by construction, which keeps this
-/// forward-compatible with whatever EveryAPI adds to the file next.
+/// `serde_json::Value` accessors only: `librefang-cli` has no `serde` dependency, so a `#[derive(Deserialize)]` struct is not available here.
+/// Unknown extra fields are ignored by construction, which keeps this forward-compatible with whatever EveryAPI adds to the file next.
 ///
-/// The `Err` string is an i18n *key*, not user-facing prose — the caller
-/// renders it. Returning a key rather than a message keeps this function
-/// pure and unit-testable without a loaded locale bundle.
+/// The `Err` string is an i18n *key*, not user-facing prose — the caller renders it.
+/// Returning a key rather than a message keeps this function pure and unit-testable without a loaded locale bundle.
 pub(crate) fn parse_credentials(raw: &str) -> Result<EveryApiCredentials, &'static str> {
     let value: serde_json::Value =
         serde_json::from_str(raw).map_err(|_| "everyapi-connect-credentials-malformed")?;
@@ -107,12 +94,9 @@ pub(crate) fn parse_credentials(raw: &str) -> Result<EveryApiCredentials, &'stat
     })
 }
 
-/// `$XDG_CONFIG_HOME/everyapi/credentials.json`, falling back to
-/// `~/.config/everyapi/credentials.json`.
+/// `$XDG_CONFIG_HOME/everyapi/credentials.json`, falling back to `~/.config/everyapi/credentials.json`.
 ///
-/// Mirrors `doctor::everyapi_credentials_path`, which is private to that
-/// module (the doctor check and this command must agree on the location, so
-/// any change here needs the same change there).
+/// Mirrors `doctor::everyapi_credentials_path`, which is private to that module (the doctor check and this command must agree on the location, so any change here needs the same change there).
 fn credentials_path() -> Option<PathBuf> {
     let root = match std::env::var("XDG_CONFIG_HOME") {
         Ok(dir) if !dir.trim().is_empty() => PathBuf::from(dir),
@@ -123,12 +107,9 @@ fn credentials_path() -> Option<PathBuf> {
 
 /// Derive the provider `base_url` from the credentials' `api_base`.
 ///
-/// The OpenAI driver builds request URLs as `"{base_url}/chat/completions"`
-/// (`openai.rs`), so the `/v1` segment must live in `base_url` itself. It
-/// also strips one trailing slash from `base_url`, because
-/// `"https://x/v1/" + "/chat/completions"` yields a doubled separator that
-/// several gateways answer with a 504. Trimming here means the stored value
-/// is already canonical instead of relying on that downstream repair.
+/// The OpenAI driver builds request URLs as `"{base_url}/chat/completions"` (`openai.rs`), so the `/v1` segment must live in `base_url` itself.
+/// It also strips one trailing slash from `base_url`, because `"https://x/v1/" + "/chat/completions"` yields a doubled separator that several gateways answer with a 504.
+/// Trimming here means the stored value is already canonical instead of relying on that downstream repair.
 pub(crate) fn derive_base_url(api_base: &str) -> String {
     format!("{}/v1", api_base.trim().trim_end_matches('/'))
 }
@@ -137,38 +118,29 @@ pub(crate) fn derive_base_url(api_base: &str) -> String {
 // Gateway model list
 // ---------------------------------------------------------------------------
 
-/// One entry of the gateway's `GET /v1/models` response, reduced to the
-/// fields that affect catalog synthesis.
+/// One entry of the gateway's `GET /v1/models` response, reduced to the fields that affect catalog synthesis.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GatewayModel {
     pub(crate) id: String,
-    /// Vendor label — the token-limit snapshot lookup's namespace
-    /// (`anthropic`, `openai`, `google`, `minimax`, …). Empty when the
-    /// gateway omits it.
+    /// Vendor label — the token-limit snapshot lookup's namespace (`anthropic`, `openai`, `google`, `minimax`, …).
+    /// Empty when the gateway omits it.
     pub(crate) owned_by: String,
-    /// `supported_endpoint_types`, verbatim. Drives modality inference and
-    /// the streaming-only warning.
+    /// `supported_endpoint_types`, verbatim.
+    /// Drives modality inference and the streaming-only warning.
     pub(crate) supported_endpoint_types: Vec<String>,
     /// `context_window` when the gateway published one on this endpoint.
-    /// The most specific statement available: this is the model's own row in
-    /// the gateway's model listing, so it outranks both the pricing feed's
-    /// figure and the snapshot's.
+    /// The most specific statement available: this is the model's own row in the gateway's model listing, so it outranks both the pricing feed's figure and the snapshot's.
     pub(crate) context_window: Option<u64>,
     /// `max_output` when the gateway published one.
     ///
-    /// The gateway's `dto.OpenAIModels` struct carries a `max_output` field
-    /// (json tag `max_output,omitempty`), but no observed account populates
-    /// it — every live row omits it. Read anyway: the field is part of the
-    /// gateway's published contract, and honouring it the day it starts
-    /// arriving costs one line, whereas the alternative is silently
-    /// preferring the snapshot's number over the gateway's own.
+    /// The gateway's `dto.OpenAIModels` struct carries a `max_output` field (json tag `max_output,omitempty`), but no observed account populates it — every live row omits it.
+    /// Read anyway: the field is part of the gateway's published contract, and honouring it the day it starts arriving costs one line, whereas the alternative is silently preferring the snapshot's number over the gateway's own.
     pub(crate) max_output_tokens: Option<u64>,
 }
 
 /// Extract the model array from a `/v1/models` body.
 ///
-/// Entries without a usable `id` are dropped rather than failing the whole
-/// response — one malformed row should not cost the user the other 17.
+/// Entries without a usable `id` are dropped rather than failing the whole response — one malformed row should not cost the user the other 17.
 pub(crate) fn parse_gateway_models(body: &serde_json::Value) -> Vec<GatewayModel> {
     let Some(items) = body.get("data").and_then(|d| d.as_array()) else {
         return Vec::new();
@@ -218,36 +190,29 @@ pub(crate) fn parse_gateway_models(body: &serde_json::Value) -> Vec<GatewayModel
 
 /// One row of the gateway's `GET /api/pricing` feed.
 ///
-/// This is the gateway's *own* billing book — what EveryAPI will actually
-/// charge — as opposed to the upstream vendor's list price. It is served
-/// under optional auth, so it reads with or without the relay key.
+/// This is the gateway's *own* billing book — what EveryAPI will actually charge — as opposed to the upstream vendor's list price.
+/// It is served under optional auth, so it reads with or without the relay key.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PricingRow {
     /// `model_name`, matching `/v1/models`' `id` verbatim.
     pub(crate) model_name: String,
-    /// `false` for `quota_type == 1` / `billing_mode == "per_call"`, where
-    /// the charge is a flat `model_price` per request and no per-token
-    /// figure exists at all.
+    /// `false` for `quota_type == 1` / `billing_mode == "per_call"`, where the charge is a flat `model_price` per request and no per-token figure exists at all.
     pub(crate) per_token: bool,
-    /// Input-side billing multiplier. Meaningless when `per_token` is false.
+    /// Input-side billing multiplier.
+    /// Meaningless when `per_token` is false.
     pub(crate) model_ratio: f64,
     /// Output-side multiplier applied on top of `model_ratio`.
     pub(crate) completion_ratio: f64,
-    /// `context_window` when the feed published a non-zero one. Zero in the
-    /// feed means "unknown", not "no context".
+    /// `context_window` when the feed published a non-zero one.
+    /// Zero in the feed means "unknown", not "no context".
     pub(crate) context_window: Option<u64>,
 }
 
 impl PricingRow {
     /// Input price per million tokens, in USD.
     ///
-    /// The gateway additionally scales every charge by the account's
-    /// `group_ratio` (observed values 0.25 / 0.35 / 0.55, i.e. all below 1),
-    /// which is a per-account discount rather than a property of the model.
-    /// It is deliberately NOT applied: the discount can change under the
-    /// operator without the catalog being regenerated, and the undiscounted
-    /// figure is an upper bound — over-reporting cost is the safe direction
-    /// for budget and metering math.
+    /// The gateway additionally scales every charge by the account's `group_ratio` (observed values 0.25 / 0.35 / 0.55, i.e. all below 1), which is a per-account discount rather than a property of the model.
+    /// It is deliberately NOT applied: the discount can change under the operator without the catalog being regenerated, and the undiscounted figure is an upper bound — over-reporting cost is the safe direction for budget and metering math.
     pub(crate) fn input_cost_per_m(&self) -> f64 {
         if !self.per_token {
             return 0.0;
@@ -266,13 +231,9 @@ impl PricingRow {
 
 /// Index the `GET /api/pricing` body by `model_name`.
 ///
-/// A `BTreeMap` rather than a `HashMap` so any future iteration over the
-/// index is ordered (repo invariant #3298); lookups here are by exact key,
-/// but the type keeps the determinism guarantee from depending on nobody
-/// adding an iteration later.
+/// A `BTreeMap` rather than a `HashMap` so any future iteration over the index is ordered (repo invariant #3298); lookups here are by exact key, but the type keeps the determinism guarantee from depending on nobody adding an iteration later.
 ///
-/// Rows without a usable `model_name` are dropped rather than failing the
-/// whole feed — the same posture `parse_gateway_models` takes.
+/// Rows without a usable `model_name` are dropped rather than failing the whole feed — the same posture `parse_gateway_models` takes.
 pub(crate) fn parse_pricing_rows(
     body: &serde_json::Value,
 ) -> std::collections::BTreeMap<String, PricingRow> {
@@ -336,12 +297,21 @@ pub(crate) fn parse_pricing_rows(
 
 /// Infer a model's modality from `supported_endpoint_types`.
 ///
-/// The gateway does not publish a modality field, so the endpoint-type list
-/// is the only signal. An EMPTY list means video: the `doubao-seedance-*`
-/// family publishes `[]` and is video-generation only. That case must be
-/// checked before the text default, otherwise those entries would be graded
-/// as text models and then dropped for missing a context window.
-pub(crate) fn infer_modality(supported_endpoint_types: &[String]) -> Modality {
+/// The gateway does not publish a modality field, so the endpoint-type list is the only signal.
+/// An EMPTY list means video: the `doubao-seedance-*` family publishes `[]` and is video-generation only.
+/// That case must be checked before the text default, otherwise those entries would be graded as text models and then dropped for missing a context window.
+/// Modality inference with the model's own context window as a tiebreaker.
+///
+/// The empty-`supported_endpoint_types` case is genuinely ambiguous.
+/// Every observed empty row is a `doubao-seedance-*` video model, which is why it defaults to video — but the field is optional, so a gateway that stops publishing it would have its chat models registered as video: exempt from the context-window validation, and unusable for chat while looking present in the catalog.
+///
+/// A published `context_window` settles it.
+/// Video generation has no context window and none of the observed video rows carry one, so its presence is positive evidence of a text model regardless of what the endpoint list omits.
+/// Without that evidence the video default stands, since that is what every empty row has actually been.
+pub(crate) fn infer_modality_with_context(
+    supported_endpoint_types: &[String],
+    context_window: Option<u64>,
+) -> Modality {
     if supported_endpoint_types
         .iter()
         .any(|t| t == "image-generation")
@@ -352,19 +322,18 @@ pub(crate) fn infer_modality(supported_endpoint_types: &[String]) -> Modality {
         return Modality::Audio;
     }
     if supported_endpoint_types.is_empty() {
-        return Modality::Video;
+        return match context_window {
+            Some(w) if w > 0 => Modality::Text,
+            _ => Modality::Video,
+        };
     }
     Modality::Text
 }
 
 /// Whether a model only speaks the `openai-response` endpoint shape.
 ///
-/// Such models (the `gpt-5.6-*` family) reject non-streaming requests with
-/// HTTP 400 `"Stream must be set to true"`. Everything in LibreFang that
-/// calls `driver.complete()` rather than the streaming entry point — the
-/// compactor, proactive memory, the skill workshop, web augmentation — would
-/// fail against one, so they are excluded from automatic default selection
-/// and called out in the command's report.
+/// Such models (the `gpt-5.6-*` family) reject non-streaming requests with HTTP 400 `"Stream must be set to true"`.
+/// Everything in LibreFang that calls `driver.complete()` rather than the streaming entry point — the compactor, proactive memory, the skill workshop, web augmentation — would fail against one, so they are excluded from automatic default selection and called out in the command's report.
 pub(crate) fn is_openai_response_only(supported_endpoint_types: &[String]) -> bool {
     !supported_endpoint_types.is_empty()
         && supported_endpoint_types
@@ -387,20 +356,15 @@ pub(crate) struct ModelMetadata {
     pub(crate) supports_tools: bool,
     pub(crate) supports_vision: bool,
     pub(crate) supports_thinking: bool,
-    /// True when either token limit had to come from the OpenRouter
-    /// snapshot because neither gateway endpoint published one. Surfaced in
-    /// the command's report so the operator knows which numbers are the
-    /// gateway's own and which are borrowed.
+    /// True when either token limit had to come from the OpenRouter snapshot because neither gateway endpoint published one.
+    /// Surfaced in the command's report so the operator knows which numbers are the gateway's own and which are borrowed.
     pub(crate) token_limits_borrowed: bool,
 }
 
 /// Rewrite a `-`-separated version tail into the `.`-separated spelling.
 ///
-/// The gateway and the OpenRouter snapshot disagree on one character:
-/// gateway `claude-haiku-4-5` is snapshot `anthropic/claude-haiku-4.5`.
-/// Only a hyphen sitting between two ASCII digits is rewritten, so
-/// `gpt-5.6-luna` and `doubao-seedance-1-0-pro-250528` keep every other
-/// hyphen intact.
+/// The gateway and the OpenRouter snapshot disagree on one character: gateway `claude-haiku-4-5` is snapshot `anthropic/claude-haiku-4.5`.
+/// Only a hyphen sitting between two ASCII digits is rewritten, so `gpt-5.6-luna` and `doubao-seedance-1-0-pro-250528` keep every other hyphen intact.
 pub(crate) fn normalize_version_separators(id: &str) -> String {
     let bytes = id.as_bytes();
     id.char_indices()
@@ -421,14 +385,9 @@ pub(crate) fn normalize_version_separators(id: &str) -> String {
 /// Candidate snapshot ids for one gateway model, most specific first.
 ///
 /// The compiled-in snapshot keys entries as `openrouter/{vendor}/{model}`.
-/// `ModelCatalog::find_model` already lowercases both sides, which covers
-/// the gateway's `MiniMax-M3` vs the snapshot's `minimax/minimax-m3`; the
-/// only remaining mismatch is the version-tail separator, handled by
-/// [`normalize_version_separators`].
+/// `ModelCatalog::find_model` already lowercases both sides, which covers the gateway's `MiniMax-M3` vs the snapshot's `minimax/minimax-m3`; the only remaining mismatch is the version-tail separator, handled by [`normalize_version_separators`].
 ///
-/// Used **only** for the token-limit fallback described on
-/// [`resolve_metadata`] — never for pricing, which now comes from the
-/// gateway's own feed.
+/// Used **only** for the token-limit fallback described on [`resolve_metadata`] — never for pricing, which now comes from the gateway's own feed.
 pub(crate) fn snapshot_lookup_ids(owned_by: &str, model_id: &str) -> Vec<String> {
     if owned_by.is_empty() {
         return Vec::new();
@@ -524,10 +483,8 @@ pub(crate) fn resolve_metadata(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SkippedModel {
     pub(crate) id: String,
-    /// i18n key for the reason. A key rather than rendered prose so the
-    /// synthesis stays pure and the locale files stay grep-able (each key
-    /// appears verbatim in this file, which `test_no_dead_locale_keys`
-    /// requires).
+    /// i18n key for the reason.
+    /// A key rather than rendered prose so the synthesis stays pure and the locale files stay grep-able (each key appears verbatim in this file, which `test_no_dead_locale_keys` requires).
     pub(crate) reason_key: &'static str,
 }
 
@@ -537,35 +494,24 @@ pub(crate) struct SynthesisResult {
     pub(crate) skipped: Vec<SkippedModel>,
     /// Registered ids that reject non-streaming requests.
     pub(crate) streaming_only: Vec<String>,
-    /// Registered ids whose context window and/or output limit had to be
-    /// borrowed from the OpenRouter snapshot because the gateway published
-    /// neither. Reported so a borrowed number is never mistaken for the
-    /// gateway's own.
+    /// Registered ids whose context window and/or output limit had to be borrowed from the OpenRouter snapshot because the gateway published neither.
+    /// Reported so a borrowed number is never mistaken for the gateway's own.
     pub(crate) borrowed_token_limits: Vec<String>,
-    /// Registered ids carrying no per-token price: absent from the pricing
-    /// feed, or billed per call. Their `pricing_known` is false, so budget
-    /// math treats them as unknown rather than free.
+    /// Registered ids carrying no per-token price: absent from the pricing feed, or billed per call.
+    /// Their `pricing_known` is false, so budget math treats them as unknown rather than free.
     pub(crate) unpriced: Vec<String>,
 }
 
 /// Build the `providers/everyapi.toml` contents.
 ///
-/// The skip rule is the load-bearing part. `ModelCatalogEntry::validate()`
-/// rejects a `Modality::Text` entry whose `context_window` OR
-/// `max_output_tokens` is 0, and `merge_catalog_file` then drops it with only
-/// a `warn!`. Emitting such an entry anyway would make the command look
-/// successful while the model silently vanished at the next daemon boot, so
-/// a text model whose limits cannot be resolved from any source — gateway
-/// listing, pricing feed, or the snapshot fallback described on
-/// [`resolve_metadata`] — is skipped and reported by name instead.
-/// Inventing a plausible-looking number would be worse: a wrong context
-/// window feeds straight into compaction thresholds and budget math.
+/// The skip rule is the load-bearing part.
+/// `ModelCatalogEntry::validate()` rejects a `Modality::Text` entry whose `context_window` OR `max_output_tokens` is 0, and `merge_catalog_file` then drops it with only a `warn!`.
+/// Emitting such an entry anyway would make the command look successful while the model silently vanished at the next daemon boot, so a text model whose limits cannot be resolved from any source — gateway listing, pricing feed, or the snapshot fallback described on [`resolve_metadata`] — is skipped and reported by name instead.
+/// Inventing a plausible-looking number would be worse: a wrong context window feeds straight into compaction thresholds and budget math.
 ///
-/// Non-text models are exempt from `validate()`'s token checks and are
-/// registered with whatever the gateway published.
+/// Non-text models are exempt from `validate()`'s token checks and are registered with whatever the gateway published.
 ///
-/// Output is sorted by id (repo invariant #3298) so re-running the command
-/// against an unchanged gateway rewrites a byte-identical file.
+/// Output is sorted by id (repo invariant #3298) so re-running the command against an unchanged gateway rewrites a byte-identical file.
 pub(crate) fn synthesize_catalog(
     catalog: &librefang_runtime::model_catalog::ModelCatalog,
     base_url: &str,
@@ -579,7 +525,8 @@ pub(crate) fn synthesize_catalog(
     let mut unpriced: Vec<String> = Vec::new();
 
     for model in models {
-        let modality = infer_modality(&model.supported_endpoint_types);
+        let modality =
+            infer_modality_with_context(&model.supported_endpoint_types, model.context_window);
         let metadata = resolve_metadata(catalog, model, pricing.get(&model.id));
 
         // `validate()` rejects a text entry missing EITHER limit, so the
@@ -668,7 +615,12 @@ pub(crate) fn synthesize_catalog(
                 key_required: true,
                 signup_url: None,
                 regions: std::collections::HashMap::new(),
-                media_capabilities: Vec::new(),
+                // Derived from what actually got registered rather than left
+                // empty: the media driver cache gates on the provider's
+                // declared capabilities, so hardcoding none made every
+                // registered image / audio / video model unreachable through
+                // the media paths while still appearing in the catalog.
+                media_capabilities: media_capabilities_for(&entries),
             }),
             models: entries,
         },
@@ -698,10 +650,35 @@ pub(crate) fn choose_default_model(
     streaming_only: &[String],
 ) -> Option<String> {
     let text_models = || entries.iter().filter(|m| m.modality == Modality::Text);
+    // Rank rather than take-the-first. Entries are id-sorted for output
+    // determinism, and ASCII puts uppercase ahead of lowercase, so the first
+    // text model was whichever id happened to sort earliest — `MiniMax-M3`
+    // on the live listing, over `claude-sonnet-5`. The CLI help promises
+    // "this gateway's best model", so pick by capability.
+    //
+    // Price is the proxy for capability, because it is the one figure the
+    // gateway publishes for every model and it tracks the vendor's own
+    // tiering. Ties break on context window, then on id so the result stays
+    // deterministic for a gateway that prices two models identically.
+    let rank = |m: &ModelCatalogEntry| {
+        (
+            ordered_float(m.input_cost_per_m),
+            m.context_window,
+            std::cmp::Reverse(m.id.clone()),
+        )
+    };
     text_models()
-        .find(|m| !streaming_only.contains(&m.id))
-        .or_else(|| text_models().next())
+        .filter(|m| !streaming_only.contains(&m.id))
+        .max_by(|a, b| rank(a).cmp(&rank(b)))
+        .or_else(|| text_models().max_by(|a, b| rank(a).cmp(&rank(b))))
         .map(|m| m.id.clone())
+}
+
+/// Total-order key for a price so it can participate in a tuple comparison.
+///
+/// Prices are non-negative and finite in every catalog entry we synthesise (`pricing_known = false` carries 0.0 rather than NaN), so scaling to an integer is exact enough for ranking and avoids `f64: Ord` not existing.
+fn ordered_float(v: f64) -> u64 {
+    (v.max(0.0) * 1_000.0) as u64
 }
 
 // ---------------------------------------------------------------------------
@@ -710,47 +687,62 @@ pub(crate) fn choose_default_model(
 
 /// Fetch `GET {base_url}/models` from the gateway.
 ///
-/// `base_url` already ends in `/v1`, so this hits `/v1/models`. Returns
-/// `None` on any transport error or non-2xx status: an unreachable model
-/// list is not fatal, because the `[provider]` section alone already makes
-/// the gateway usable with a hand-specified model id.
+/// `base_url` already ends in `/v1`, so this hits `/v1/models`.
+/// Returns `None` on any transport error or non-2xx status: an unreachable model list is not fatal, because the `[provider]` section alone already makes the gateway usable with a hand-specified model id.
 ///
-/// `key` is the relay credential. It is named to match
-/// `daemon_client_with_api_key` in `commands/common.rs` so the header
-/// construction reads identically at both call sites; it is only ever
-/// written into the outbound header, never into output or a log.
-fn fetch_gateway_models(base_url: &str, key: &str) -> Option<Vec<GatewayModel>> {
+/// `key` is the relay credential.
+/// It is named to match `daemon_client_with_api_key` in `commands/common.rs` so the header construction reads identically at both call sites; it is only ever written into the outbound header, never into output or a log.
+/// Why a model-list fetch did not produce a listing.
+///
+/// Collapsing these into one `None` conflated two states that need opposite handling: an unreachable host is transient and the stored credential is probably still good, while a 401 means the relay key is dead and saving it would register a provider that fails every request.
+/// The remediation text differs too — "check the gateway is reachable" is actively misleading when the real answer is `everyapi login`.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ModelFetchError {
+    /// The gateway rejected the relay key (401/403).
+    Unauthorized,
+    /// Transport failure, or any other non-2xx status.
+    Unreachable,
+}
+
+fn fetch_gateway_models(base_url: &str, key: &str) -> Result<Vec<GatewayModel>, ModelFetchError> {
     let client = crate::http_client::client_builder()
         .timeout(MODELS_FETCH_TIMEOUT)
         .build()
-        .ok()?;
+        .map_err(|_| ModelFetchError::Unreachable)?;
     let response = client
         .get(format!("{base_url}/models"))
         .header(reqwest::header::AUTHORIZATION, format!("Bearer {key}"))
         .send()
-        .ok()?;
-    if !response.status().is_success() {
-        return None;
+        .map_err(|_| ModelFetchError::Unreachable)?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(classify_fetch_status(status.as_u16()));
     }
-    let body = response.json::<serde_json::Value>().ok()?;
-    Some(parse_gateway_models(&body))
+    let body = response
+        .json::<serde_json::Value>()
+        .map_err(|_| ModelFetchError::Unreachable)?;
+    Ok(parse_gateway_models(&body))
+}
+
+/// Map an HTTP status to a fetch outcome.
+///
+/// Split out so the 401-vs-everything-else rule is unit-testable without a live gateway. 403 counts as unauthorized alongside 401: the gateway promotes `x-api-key` into a bearer before validating, and a revoked key can surface either way depending on which shim ran.
+pub(crate) fn classify_fetch_status(status: u16) -> ModelFetchError {
+    match status {
+        401 | 403 => ModelFetchError::Unauthorized,
+        _ => ModelFetchError::Unreachable,
+    }
 }
 
 /// Fetch `GET {api_base}/api/pricing` — the gateway's own billing book.
 ///
-/// Note the base: this endpoint sits at the gateway *root*, not under the
-/// OpenAI-compatible `/v1` prefix, so it is built from `api_base` rather
-/// than the derived `base_url`.
+/// Note the base: this endpoint sits at the gateway *root*, not under the OpenAI-compatible `/v1` prefix, so it is built from `api_base` rather than the derived `base_url`.
 ///
-/// The bearer is sent even though the route is registered with optional auth
-/// and answers anonymously. One code path for both gateway fetches is worth
-/// more than saving a header, and an authenticated read is the shape that
-/// keeps working if EveryAPI ever tightens the route or starts varying rows
-/// per account.
+/// The bearer is sent even though the route is registered with optional auth and answers anonymously.
+/// One code path for both gateway fetches is worth more than saving a header, and an authenticated read is the shape that keeps working if EveryAPI ever tightens the route or starts varying rows per account.
 ///
-/// Returns `None` on any transport error or non-2xx status. A missing
-/// pricing feed is not fatal: models still register, they just carry
-/// `pricing_known = false` instead of a fabricated price.
+/// Returns `None` on any transport error or non-2xx status.
+/// A missing pricing feed is not fatal: models still register, they just carry `pricing_known = false` instead of a fabricated price.
 fn fetch_pricing_rows(
     api_base: &str,
     key: &str,
@@ -807,40 +799,73 @@ fn load_credentials() -> EveryApiCredentials {
 
 /// Try to write the provider through the running daemon.
 ///
-/// Returns `true` when the daemon accepted the write. The endpoint converts
-/// the flat JSON body into the `[provider] … [[models]]` layout itself, then
-/// reloads the in-process catalog — so on this path there is nothing for the
-/// operator to restart. No `api_key` field is sent: the relay key is already
-/// in `~/.librefang/.env`, and including it would additionally copy the
-/// secret into `secrets.env`.
+/// Returns `true` when the daemon accepted the write.
+/// The endpoint converts the flat JSON body into the `[provider] … [[models]]` layout itself, then reloads the in-process catalog — so on this path there is nothing for the operator to restart.
+/// No `api_key` field is sent: the relay key is already in `~/.librefang/.env`, and including it would additionally copy the secret into `secrets.env`.
 ///
-/// `daemon_json_checked` rather than `daemon_json`, because the latter exits
-/// the process on a transport error and returns an empty body (not an error)
-/// on 4xx — either way the caller could never fall back to the direct write.
-fn write_provider_via_daemon(base: &str, body: &serde_json::Value) -> bool {
+/// `daemon_json_checked` rather than `daemon_json`, because the latter exits the process on a transport error and returns an empty body (not an error) on 4xx — either way the caller could never fall back to the direct write.
+/// Outcome of the daemon-side provider write.
+///
+/// Three states rather than a bool because they need different handling.
+/// A transport failure means the daemon went away and the file fallback is the right answer.
+/// A *rejection* means the daemon parsed our payload and refused it — falling back would write the very definition it just deleted (the registry route removes the file it rejected), leaving a catalog file that fails to parse on every subsequent boot.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum DaemonWrite {
+    Accepted,
+    /// The daemon is unreachable; the caller should write the file itself.
+    Unreachable,
+    /// The daemon understood the request and refused it.
+    /// Do not fall back.
+    Rejected(String),
+}
+
+/// Classify the daemon's response to the registry write.
+///
+/// Pure so the fallback rule is testable without a daemon.
+/// A 5xx counts as unreachable — the daemon is up but broken, and a local file is still better than nothing.
+pub(crate) fn classify_daemon_write(status: u16, body: &serde_json::Value) -> DaemonWrite {
+    if (200..300).contains(&status) && body.get("error").is_none() {
+        return DaemonWrite::Accepted;
+    }
+    if (400..500).contains(&status) {
+        let detail = body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        return DaemonWrite::Rejected(detail);
+    }
+    DaemonWrite::Unreachable
+}
+
+/// POST the provider definition to a running daemon.
+///
+/// Deliberately does NOT use `daemon_json_checked`: its transport-error arm ends in `std::process::exit(1)`, which would kill the process before the caller could fall back to the direct file write — i.e. it would abort on exactly the failure the fallback exists for.
+fn write_provider_via_daemon(base: &str, body: &serde_json::Value) -> DaemonWrite {
     let client = daemon_client();
-    let (status, response) = daemon_json_checked(
-        client
-            .post(format!(
-                "{base}/api/registry/content/provider?allow_overwrite=true"
-            ))
-            .json(body)
-            .send(),
-    );
-    status.is_success() && response.get("error").is_none()
+    let response = client
+        .post(format!(
+            "{base}/api/registry/content/provider?allow_overwrite=true"
+        ))
+        .json(body)
+        .send();
+    match response {
+        Ok(r) => {
+            let status = r.status().as_u16();
+            let parsed = r.json::<serde_json::Value>().unwrap_or_default();
+            classify_daemon_write(status, &parsed)
+        }
+        Err(_) => DaemonWrite::Unreachable,
+    }
 }
 
 /// Make the relay key live in the running daemon's own environment.
 ///
-/// The daemon reads `~/.librefang/.env` once at boot — `load_dotenv` is a
-/// `call_once` and no path re-reads it afterwards — so a key written during
-/// this command is invisible to a daemon that is already running. This posts
-/// it to `POST /api/providers/{id}/key`, which writes `secrets.env` and calls
-/// `set_env_var_guarded`, so the key resolves for the very next turn.
+/// The daemon reads `~/.librefang/.env` once at boot — `load_dotenv` is a `call_once` and no path re-reads it afterwards — so a key written during this command is invisible to a daemon that is already running.
+/// This posts it to `POST /api/providers/{id}/key`, which writes `secrets.env` and calls `set_env_var_guarded`, so the key resolves for the very next turn.
 ///
-/// Returns `false` when no daemon is reachable or the call failed, so the
-/// caller can fall back to telling the operator to restart. The key value is
-/// never logged or echoed — only the outcome is reported.
+/// Returns `false` when no daemon is reachable or the call failed, so the caller can fall back to telling the operator to restart.
+/// The key value is never logged or echoed — only the outcome is reported.
 fn push_key_to_daemon(base: Option<&str>, relay_key: &str) -> bool {
     let Some(base) = base else {
         return false;
@@ -857,15 +882,66 @@ fn push_key_to_daemon(base: Option<&str>, relay_key: &str) -> bool {
 
 /// Write `{librefang_home}/providers/everyapi.toml` directly.
 ///
-/// The path is fixed by agreement with `doctor::EveryApiWiringCheck`, which
-/// looks for exactly this file to decide whether LibreFang is wired to the
-/// gateway.
+/// The path is fixed by agreement with `doctor::EveryApiWiringCheck`, which looks for exactly this file to decide whether LibreFang is wired to the gateway.
 fn write_provider_file(toml_body: &str) -> Result<PathBuf, String> {
-    let dir = cli_librefang_home().join("providers");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let path = dir.join("everyapi.toml");
+    let path = provider_file_path();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
     std::fs::write(&path, toml_body).map_err(|e| e.to_string())?;
     Ok(path)
+}
+
+/// Media capability strings implied by the registered models' modalities.
+///
+/// The names match what the registry's own provider files carry and what `librefang-runtime-media` looks for — `image_generation`, `text_to_speech`, `video_generation`.
+/// Sorted and deduplicated so the generated TOML stays byte-stable across runs (#3298).
+/// Music has no corresponding capability string in the media crate, so a music entry contributes nothing rather than inventing a name nothing reads.
+fn media_capabilities_for(entries: &[ModelCatalogEntry]) -> Vec<String> {
+    let mut caps: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for entry in entries {
+        match entry.modality {
+            Modality::Image => {
+                caps.insert("image_generation".to_string());
+            }
+            Modality::Audio => {
+                caps.insert("text_to_speech".to_string());
+            }
+            Modality::Video => {
+                caps.insert("video_generation".to_string());
+            }
+            // Text declares no media capability, and Music has no
+            // corresponding string in `librefang-runtime-media`. `Modality`
+            // is non-exhaustive, so a future variant contributes nothing
+            // rather than guessing a capability name nothing reads.
+            _ => {}
+        }
+    }
+    caps.into_iter().collect()
+}
+
+/// Where the provider entry lives for this CLI invocation.
+///
+/// Single source of truth so the write path, the clobber guard, and the report all name the same file.
+/// Note this resolves through the *CLI's* home: when the daemon runs with a different `LIBREFANG_HOME` than the shell invoking the CLI, the daemon-write path targets the daemon's home while this one does not.
+/// `warn_on_home_divergence` surfaces that rather than silently writing where nothing reads.
+fn provider_file_path() -> PathBuf {
+    cli_librefang_home()
+        .join("providers")
+        .join(format!("{PROVIDER_ID}.toml"))
+}
+
+/// Whether a provider entry already exists AND carries at least one model.
+///
+/// Gates the overwrite on a failed fetch.
+/// An entry with zero models is not worth protecting — that is the state a previous degraded run left behind, and replacing it is an improvement rather than a regression.
+fn existing_provider_has_models() -> bool {
+    let Ok(raw) = std::fs::read_to_string(provider_file_path()) else {
+        return false;
+    };
+    toml::from_str::<librefang_types::model_catalog::ModelCatalogFile>(&raw)
+        .map(|f| !f.models.is_empty())
+        .unwrap_or(false)
 }
 
 /// `librefang models connect <target> [--set-default]`.
@@ -886,8 +962,33 @@ pub(crate) fn cmd_models_connect(target: &str, set_default: bool) {
 
     let fetched = fetch_gateway_models(&base_url, &credentials.relay_key);
     let models = match &fetched {
-        Some(models) => models.as_slice(),
-        None => {
+        Ok(models) => models.as_slice(),
+        Err(ModelFetchError::Unauthorized) => {
+            // A dead key is not a partial success. Registering the provider
+            // now would store a credential that fails every request, and
+            // `--set-default` would migrate agents onto it. Stop before
+            // anything is written.
+            ui::error_with_fix(
+                &i18n::t("everyapi-connect-models-fetch-unauthorized"),
+                &i18n::t("everyapi-connect-models-fetch-unauthorized-fix"),
+            );
+            std::process::exit(1);
+        }
+        Err(ModelFetchError::Unreachable) => {
+            // Refuse to overwrite a provider entry that already carries
+            // models. Both persistence paths replace the file wholesale, so
+            // continuing with an empty listing would downgrade a working
+            // catalog to zero entries and still report success — a transient
+            // network blip would silently unregister every gateway model.
+            // A first run has nothing to lose, so it may proceed and produce
+            // the provider entry with models filled in on a later run.
+            if existing_provider_has_models() {
+                ui::error_with_fix(
+                    &i18n::t("everyapi-connect-models-fetch-failed-would-clobber"),
+                    &i18n::t("everyapi-connect-models-fetch-failed-fix"),
+                );
+                std::process::exit(1);
+            }
             ui::warn_with_fix(
                 &i18n::t("everyapi-connect-models-fetch-failed"),
                 &i18n::t("everyapi-connect-models-fetch-failed-fix"),
@@ -939,9 +1040,21 @@ pub(crate) fn cmd_models_connect(target: &str, set_default: bool) {
     // restart; the direct file write is the fallback and also the only path
     // when no daemon is up.
     let daemon = find_daemon();
-    let via_daemon = daemon.as_deref().is_some_and(|base| {
+    let daemon_write = daemon.as_deref().map_or(DaemonWrite::Unreachable, |base| {
         write_provider_via_daemon(base, &provider_request_body(&synthesis.file))
     });
+    // A rejection is terminal. The registry route deletes the file it could
+    // not parse, so falling back to the direct write would restore exactly
+    // the definition the daemon just refused — and it would fail to parse on
+    // every subsequent boot, with only a log line to say so.
+    if let DaemonWrite::Rejected(detail) = &daemon_write {
+        ui::error(&i18n::t_args(
+            "everyapi-connect-provider-rejected",
+            &[("error", detail)],
+        ));
+        std::process::exit(1);
+    }
+    let via_daemon = daemon_write == DaemonWrite::Accepted;
     if via_daemon {
         ui::success(&i18n::t_args(
             "everyapi-connect-provider-written-daemon",
@@ -993,8 +1106,7 @@ pub(crate) fn cmd_models_connect(target: &str, set_default: bool) {
 
 /// Flat JSON body for `POST /api/registry/content/provider`.
 ///
-/// The endpoint's `normalize_provider_body` nests every non-`models` key
-/// under `provider` itself, so the body is sent flat with `models` alongside.
+/// The endpoint's `normalize_provider_body` nests every non-`models` key under `provider` itself, so the body is sent flat with `models` alongside.
 fn provider_request_body(file: &ModelCatalogFile) -> serde_json::Value {
     let provider = file.provider.as_ref();
     serde_json::json!({
@@ -1009,12 +1121,8 @@ fn provider_request_body(file: &ModelCatalogFile) -> serde_json::Value {
 
 /// One `[[models]]` entry as JSON for the daemon route.
 ///
-/// Written by hand rather than via `serde_json::to_value` because the CLI has
-/// no `serde` dependency to reach `Serialize` through — and because the
-/// endpoint's `json_to_toml_value` drops empty strings/arrays anyway, so only
-/// the fields that must survive are sent. `pricing_known` is always included:
-/// it defaults to `true` on deserialize, so omitting it on an unpriced model
-/// would silently claim the model is free.
+/// Written by hand rather than via `serde_json::to_value` because the CLI has no `serde` dependency to reach `Serialize` through — and because the endpoint's `json_to_toml_value` drops empty strings/arrays anyway, so only the fields that must survive are sent.
+/// `pricing_known` is always included: it defaults to `true` on deserialize, so omitting it on an unpriced model would silently claim the model is free.
 fn model_request_value(model: &ModelCatalogEntry) -> serde_json::Value {
     serde_json::json!({
         "id": model.id,
@@ -1112,6 +1220,33 @@ fn handle_default_model(synthesis: &SynthesisResult, daemon: Option<&str>, set_d
     };
 
     let client = daemon_client();
+    // Pin the gateway URL into `[provider_urls]` BEFORE switching the
+    // default. `persist_default_model` on the default route writes only
+    // provider / model / api_key_env — never a `base_url` — and the daemon's
+    // boot path resolves the primary driver from
+    // `default_model.base_url.or(provider_urls.get(provider))` several
+    // hundred lines before the model catalog that holds the gateway URL is
+    // constructed. Without this the next boot builds the default driver with
+    // no base URL and every turn on it fails, even though the catalog file on
+    // disk has the address. Ordered first so a failure here surfaces before
+    // agents are migrated onto a provider that could not resolve.
+    let base_url = synthesis
+        .file
+        .provider
+        .as_ref()
+        .map(|p| p.base_url.clone())
+        .unwrap_or_default();
+    if !base_url.is_empty() {
+        let (url_status, url_body) = daemon_json_checked(
+            client
+                .put(format!("{base}/api/providers/{PROVIDER_ID}/url"))
+                .json(&serde_json::json!({ "url": base_url }))
+                .send(),
+        );
+        if !url_status.is_success() || url_body.get("error").is_some() {
+            ui::check_warn(&i18n::t("everyapi-connect-default-url-pin-failed"));
+        }
+    }
     let (status, body) = daemon_json_checked(
         client
             .post(format!("{base}/api/providers/{PROVIDER_ID}/default"))
@@ -1136,10 +1271,11 @@ fn handle_default_model(synthesis: &SynthesisResult, daemon: Option<&str>, set_d
 #[cfg(test)]
 mod tests {
     use super::{
-        choose_default_model, derive_base_url, infer_modality, is_openai_response_only,
-        model_request_value, normalize_version_separators, parse_credentials, parse_gateway_models,
-        parse_pricing_rows, provider_request_body, push_key_to_daemon, resolve_metadata,
-        snapshot_lookup_ids, synthesize_catalog, GatewayModel, PricingRow,
+        choose_default_model, classify_daemon_write, classify_fetch_status, derive_base_url,
+        infer_modality_with_context, is_openai_response_only, model_request_value,
+        normalize_version_separators, parse_credentials, parse_gateway_models, parse_pricing_rows,
+        provider_request_body, push_key_to_daemon, resolve_metadata, snapshot_lookup_ids,
+        synthesize_catalog, DaemonWrite, GatewayModel, ModelFetchError, PricingRow,
     };
     use crate::cli::{Cli, Commands, ModelsCommands};
     use clap::Parser;
@@ -1150,10 +1286,8 @@ mod tests {
     use serde_json::json;
     use std::collections::BTreeMap;
 
-    /// A catalog built over an empty directory. The OpenRouter snapshot is
-    /// `include_str!`-ed into `librefang-runtime` and merged unconditionally
-    /// by every constructor, so this is a hermetic handle on the snapshot
-    /// with no user providers mixed in.
+    /// A catalog built over an empty directory.
+    /// The OpenRouter snapshot is `include_str!`-ed into `librefang-runtime` and merged unconditionally by every constructor, so this is a hermetic handle on the snapshot with no user providers mixed in.
     fn snapshot_catalog() -> ModelCatalog {
         let dir = tempfile::tempdir().expect("tempdir");
         ModelCatalog::new(dir.path())
@@ -1186,9 +1320,8 @@ mod tests {
             .collect()
     }
 
-    /// The real 19-row `/api/pricing` listing, live-captured. Note it carries
-    /// `claude-fable-5`, which the model listing does not — the two feeds
-    /// genuinely differ in both directions.
+    /// The real 19-row `/api/pricing` listing, live-captured.
+    /// Note it carries `claude-fable-5`, which the model listing does not — the two feeds genuinely differ in both directions.
     fn live_pricing_rows() -> BTreeMap<String, PricingRow> {
         let per_call = |model_name: &str| PricingRow {
             model_name: model_name.to_string(),
@@ -1321,7 +1454,10 @@ mod tests {
     #[test]
     fn modality_is_inferred_from_supported_endpoint_types() {
         let m = |types: &[&str]| {
-            infer_modality(&types.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+            infer_modality_with_context(
+                &types.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                None,
+            )
         };
         assert_eq!(m(&["image-generation", "openai"]), Modality::Image);
         assert_eq!(m(&["audio-speech"]), Modality::Audio);
@@ -2068,6 +2204,71 @@ mod tests {
         assert_eq!(a.unpriced, b.unpriced);
     }
 
+    /// A 401 must not be treated as a transient outage: the remediation is `everyapi login`, not "check the gateway is reachable", and the caller stops rather than persisting a credential that fails every request.
+    #[test]
+    fn an_unauthorized_status_is_distinguished_from_an_outage() {
+        assert_eq!(classify_fetch_status(401), ModelFetchError::Unauthorized);
+        assert_eq!(classify_fetch_status(403), ModelFetchError::Unauthorized);
+        assert_eq!(classify_fetch_status(500), ModelFetchError::Unreachable);
+        assert_eq!(classify_fetch_status(503), ModelFetchError::Unreachable);
+    }
+
+    /// A daemon that *understood* the payload and refused it must not be followed by the direct file write — the registry route deletes the file it rejected, so falling back would restore the very definition that fails to parse on every subsequent boot.
+    #[test]
+    fn a_daemon_rejection_is_not_a_fallback_signal() {
+        assert_eq!(
+            classify_daemon_write(200, &json!({"path": "providers/everyapi.toml"})),
+            DaemonWrite::Accepted
+        );
+        assert_eq!(
+            classify_daemon_write(400, &json!({"error": "rejected and not saved"})),
+            DaemonWrite::Rejected("rejected and not saved".to_string())
+        );
+        // 5xx means the daemon is up but broken; a local file still beats
+        // nothing, so that one does fall back.
+        assert_eq!(
+            classify_daemon_write(502, &json!({})),
+            DaemonWrite::Unreachable
+        );
+    }
+
+    /// A published context window is positive evidence of a text model, so a gateway that stops sending `supported_endpoint_types` does not get its chat models silently registered as video (exempt from the token-limit validation, and unusable for chat while looking present).
+    #[test]
+    fn an_empty_endpoint_list_defers_to_the_context_window() {
+        assert_eq!(infer_modality_with_context(&[], None), Modality::Video);
+        assert_eq!(infer_modality_with_context(&[], Some(0)), Modality::Video);
+        assert_eq!(
+            infer_modality_with_context(&[], Some(200_000)),
+            Modality::Text
+        );
+    }
+
+    /// The provider must declare the capabilities its own entries imply, or the media driver cache treats every registered image / audio / video model as unreachable.
+    #[test]
+    fn media_capabilities_follow_the_registered_modalities() {
+        let catalog = snapshot_catalog();
+        let result = synthesize_catalog(
+            &catalog,
+            "https://api.everyapi.ai/v1",
+            &live_gateway_listing(),
+            &live_pricing_rows(),
+        );
+        let caps = &result
+            .file
+            .provider
+            .as_ref()
+            .expect("provider")
+            .media_capabilities;
+        assert!(caps.contains(&"image_generation".to_string()));
+        assert!(caps.contains(&"text_to_speech".to_string()));
+        assert!(caps.contains(&"video_generation".to_string()));
+        // Sorted and deduplicated so the generated TOML is byte-stable.
+        let mut sorted = caps.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(caps, &sorted);
+    }
+
     #[test]
     fn default_choice_avoids_the_streaming_only_family() {
         let catalog = snapshot_catalog();
@@ -2081,11 +2282,13 @@ mod tests {
             result.streaming_only,
             vec!["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"]
         );
-        // Entries are id-sorted and ASCII puts uppercase ahead of lowercase,
-        // so `MiniMax-M3` is the first non-streaming-only text model.
+        // Ranked by capability, not by id order. `claude-opus-5` is the
+        // priciest non-streaming-only text model on the live listing
+        // ($5.00/M input), so it wins over the id-first `MiniMax-M3`
+        // ($0.30/M) that a take-the-first rule would have picked.
         let chosen =
             choose_default_model(&result.file.models, &result.streaming_only).expect("a default");
-        assert_eq!(chosen, "MiniMax-M3");
+        assert_eq!(chosen, "claude-opus-5");
         assert!(!result.streaming_only.contains(&chosen));
     }
 
@@ -2103,10 +2306,12 @@ mod tests {
             &live_pricing_rows(),
         );
         // Still returns something rather than silently doing nothing, but the
-        // caller has already warned about the streaming requirement.
+        // caller has already warned about the streaming requirement. The
+        // same capability ranking applies within the fallback set, so the
+        // pricier `gpt-5.6-sol` ($5.00/M) beats `gpt-5.6-luna` ($1.00/M).
         assert_eq!(
             choose_default_model(&result.file.models, &result.streaming_only).as_deref(),
-            Some("gpt-5.6-luna")
+            Some("gpt-5.6-sol")
         );
     }
 
@@ -2223,12 +2428,8 @@ mod tests {
 
     // ── daemon request body ───────────────────────────────────────────────
 
-    /// Without a daemon there is nothing to push the key into, so the caller
-    /// must be told to restart. The bug this guards: the daemon parses
-    /// `~/.librefang/.env` exactly once at boot, so a key written by this
-    /// command is invisible to an already-running daemon — the provider gets
-    /// registered and is immediately unusable while the output claims no
-    /// restart is needed.
+    /// Without a daemon there is nothing to push the key into, so the caller must be told to restart.
+    /// The bug this guards: the daemon parses `~/.librefang/.env` exactly once at boot, so a key written by this command is invisible to an already-running daemon — the provider gets registered and is immediately unusable while the output claims no restart is needed.
     #[test]
     fn no_daemon_means_the_key_was_not_pushed() {
         assert!(!push_key_to_daemon(None, "rk-never-sent"));
