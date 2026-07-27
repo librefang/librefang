@@ -128,7 +128,7 @@ rustls-native-certs = "0.8"
 async-trait = "0.1"
 
 # Base64
-base64 = "0.22"
+base64 = "0.23"
 
 # Bitflags
 bitflags = "2"

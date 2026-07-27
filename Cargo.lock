@@ -635,6 +635,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "base64"
+version = "0.23.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b25655df2c3cdd83c5e5b293b88acd880332b2ddadd7c30ac43144fdc0033da9"
+
+[[package]]
 name = "base64ct"
 version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4409,7 +4415,7 @@ dependencies = [
  "argon2 0.5.3",
  "async-trait",
  "axum",
- "base64 0.22.1",
+ "base64 0.23.0",
  "chrono",
  "chrono-tz",
  "dashmap",
@@ -4491,7 +4497,7 @@ version = "2026.7.27"
 dependencies = [
  "async-trait",
  "axum",
- "base64 0.22.1",
+ "base64 0.23.0",
  "bitflags 2.13.1",
  "bytes",
  "chrono",
@@ -4528,7 +4534,7 @@ name = "librefang-cli"
 version = "2026.7.27"
 dependencies = [
  "arc-swap",
- "base64 0.22.1",
+ "base64 0.23.0",
  "chrono",
  "clap",
  "clap_complete",
@@ -4607,7 +4613,7 @@ dependencies = [
  "aes-gcm",
  "argon2 0.5.3",
  "axum",
- "base64 0.22.1",
+ "base64 0.23.0",
  "chrono",
  "dashmap",
  "dirs 6.0.0",
@@ -4695,7 +4701,7 @@ version = "2026.7.27"
 dependencies = [
  "arc-swap",
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.0",
  "bytes",
  "chrono",
  "chrono-tz",
@@ -4809,7 +4815,7 @@ name = "librefang-llm-drivers"
 version = "2026.7.27"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.0",
  "chrono",
  "dashmap",
  "dirs 6.0.0",
@@ -4881,7 +4887,7 @@ dependencies = [
 name = "librefang-rl-export"
 version = "2026.7.27"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.0",
  "chrono",
  "librefang-http",
  "regex",
@@ -4901,7 +4907,7 @@ name = "librefang-runtime"
 version = "2026.7.27"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.0",
  "bytes",
  "chrono",
  "dashmap",
@@ -4988,7 +4994,7 @@ version = "2026.7.27"
 dependencies = [
  "arc-swap",
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.0",
  "http",
  "librefang-http",
  "librefang-types",
@@ -5016,7 +5022,7 @@ name = "librefang-runtime-media"
 version = "2026.7.27"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.0",
  "dashmap",
  "hex",
  "librefang-http",
@@ -5047,7 +5053,7 @@ name = "librefang-skills"
 version = "2026.7.27"
 dependencies = [
  "aho-corasick",
- "base64 0.22.1",
+ "base64 0.23.0",
  "chrono",
  "fs2",
  "hex",
@@ -5144,7 +5150,7 @@ name = "librefang-wire"
 version = "2026.7.27"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.0",
  "chrono",
  "dashmap",
  "ed25519-dalek 2.2.0",
@@ -12620,7 +12626,7 @@ checksum = "b9cc00251562a284751c9973bace760d86c0276c471b4be569fe6b068ee97a56"
 name = "xtask"
 version = "2026.7.27"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.0",
  "chrono",
  "clap",
  "librefang-import",
