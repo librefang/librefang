@@ -377,11 +377,12 @@ impl StandaloneChat {
                         None => false,
                     },
                     Backend::InProcess { kernel } => match self.agent_id_inprocess {
-                        // Not on a tokio runtime here; async paths spawn their own, so `block_on` is safe.
-                        Some(id) => tokio::runtime::Runtime::new().is_ok_and(|rt| {
-                            rt.block_on(kernel.reset_session(id, ResetScope::Agent))
-                                .is_ok()
-                        }),
+                        // Shared runtime, not a throwaway: reset_session detaches
+                        // the session-summary write, which a per-call runtime
+                        // would abort on drop.
+                        Some(id) => {
+                            event::block_on_tui(kernel.reset_session(id, ResetScope::Agent)).is_ok()
+                        }
                         None => false,
                     },
                     Backend::None => false,

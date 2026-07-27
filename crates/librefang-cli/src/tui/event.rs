@@ -333,13 +333,32 @@ fn tui_runtime() -> &'static tokio::runtime::Runtime {
     })
 }
 
+/// Run `fut` to completion on the shared TUI runtime.
+///
+/// The replacement for the per-operation `Runtime::new()` the TUI used to
+/// build. Besides the obvious cost of standing up a thread pool per click,
+/// a throwaway runtime **aborts every task detached during the call** the
+/// moment it drops — `reset_session` spawns the session-summary write that
+/// way, so `/new` was silently dropping summaries. Running on a runtime that
+/// outlives the call lets those tasks finish.
+///
+/// # Panics
+///
+/// `block_on` panics when called from a thread that is already driving tokio
+/// tasks ("Cannot start a runtime from within a runtime"). Every TUI caller
+/// is either the main thread or a `std::thread::spawn`'d worker, neither of
+/// which is a runtime worker thread, so this is safe here — but do not call
+/// it from inside an async task.
+pub(crate) fn block_on_tui<F: std::future::Future>(fut: F) -> F::Output {
+    tui_runtime().block_on(fut)
+}
+
 /// Spawn the kernel's long-lived background sweep loops onto the TUI runtime.
 ///
 /// Call this from the sync TUI event loop once the kernel is ready. The
-/// `EnterGuard` is deliberately scoped to this function only — the TUI main
-/// thread must stay runtime-free so the slash-command handlers that build
-/// throwaway `Runtime::new()` instances (`/new`) don't hit
-/// "Cannot start a runtime from within a runtime".
+/// `EnterGuard` is scoped to this function because that is all that needs a
+/// runtime context — the sweep loop itself runs on the runtime's own worker
+/// threads once spawned.
 pub fn spawn_kernel_background_tasks(kernel: Arc<LibreFangKernel>) {
     let _guard = tui_runtime().enter();
     kernel.spawn_approval_sweep_task();
@@ -380,24 +399,11 @@ pub fn spawn_inprocess_stream(
     let token = StreamCancelToken::new();
     let cancel = token.clone();
     std::thread::spawn(move || {
-        let rt = match tokio::runtime::Runtime::new() {
-            Ok(rt) => rt,
-            Err(e) => {
-                let _ = tx.send(AppEvent::StreamDone(Err(crate::i18n::t_args(
-                    "tui-event-stream-runtime-error",
-                    &[("error", &e.to_string())],
-                ))));
-                return;
-            }
-        };
-
-        // Enter the runtime context so tokio::spawn inside
-        // send_message_streaming() finds the reactor.
-        let _guard = rt.enter();
-
-        match rt.block_on(kernel.send_message_streaming_with_routing(agent_id, &message, None)) {
+        // The shared runtime, not a throwaway: the agent loop detaches tasks
+        // (tool executions, memory writes) that must outlive this turn.
+        match block_on_tui(kernel.send_message_streaming_with_routing(agent_id, &message, None)) {
             Ok((mut rx, handle)) => {
-                rt.block_on(async {
+                block_on_tui(async {
                     while let Some(ev) = rx.recv().await {
                         if cancel.is_cancelled() {
                             break;
@@ -782,13 +788,9 @@ pub fn spawn_fetch_dashboard(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
             // Pull auto-dream status directly off the kernel. Without this
             // the DREAMS strip never receives data in standalone TUI mode
             // (no daemon), even though the local kernel's dream flow is
-            // fully active. `current_status` is async so we spin up a
-            // throwaway runtime on this worker thread.
-            let rt = match tokio::runtime::Runtime::new() {
-                Ok(rt) => rt,
-                Err(_) => return,
-            };
-            let status = rt.block_on(librefang_kernel::auto_dream::current_status(&kernel));
+            // fully active. `current_status` is async, so drive it on the
+            // shared TUI runtime.
+            let status = block_on_tui(librefang_kernel::auto_dream::current_status(&kernel));
             let rows: Vec<crate::tui::screens::dashboard::DreamRow> = status
                 .agents
                 .iter()
@@ -3113,25 +3115,34 @@ mod tests {
         );
     }
 
-    /// The runtime guard must not leak into the TUI main loop.
+    /// Tasks detached *during* a `block_on_tui` call must survive its return.
     ///
-    /// `handle_slash_command` (`/new`) builds a throwaway `Runtime::new()` on
-    /// the main thread. If a guard were held across the event loop that call
-    /// would fail with "Cannot start a runtime from within a runtime", so the
-    /// guard has to stay scoped to the spawn helper.
+    /// This is the `/new` data-loss bug in miniature. `reset_session` is async
+    /// and internally does `Handle::try_current()` + `handle.spawn(...)` to
+    /// write the session summary off the return path. When the TUI drove it
+    /// with a throwaway `Runtime::new()`, that runtime dropped as soon as
+    /// `block_on` returned and took the not-yet-finished summary write with
+    /// it — no panic, no warning, just a missing summary.
     #[test]
-    fn tui_runtime_guard_does_not_leak_to_the_caller() {
-        {
-            let _guard = tui_runtime().enter();
-            assert!(tokio::runtime::Handle::try_current().is_ok());
+    fn block_on_tui_detached_tasks_survive_the_call() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_task = Arc::clone(&flag);
+
+        block_on_tui(async move {
+            // Same shape as save_session_summary: detach and return immediately.
+            tokio::runtime::Handle::current().spawn(async move {
+                tokio::time::sleep(Duration::from_millis(80)).await;
+                flag_task.store(true, Ordering::SeqCst);
+            });
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !flag.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
         }
         assert!(
-            tokio::runtime::Handle::try_current().is_err(),
-            "runtime context leaked past the guard scope"
-        );
-        assert!(
-            tokio::runtime::Runtime::new().is_ok(),
-            "a throwaway runtime (as built by /new) can no longer be created on this thread"
+            flag.load(Ordering::SeqCst),
+            "task detached during block_on_tui was aborted when the call returned"
         );
     }
 }
