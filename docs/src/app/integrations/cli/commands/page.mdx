@@ -1058,6 +1058,31 @@ For headless Linux servers (no graphical login session), also enable lingering s
 loginctl enable-linger
 ```
 
+#### `--system` (macOS): start at boot instead of at login
+
+All three defaults above register a *per-user* service, which starts once that user logs in.
+A Mac that reboots and stops at the login window — or at the FileVault unlock screen — therefore does not start the daemon, which matters for an always-on install.
+
+`--system` writes a LaunchDaemon to `/Library/LaunchDaemons/ai.librefang.daemon.plist` instead.
+launchd loads that directory at boot, before any login.
+
+```bash
+sudo librefang service install --system
+```
+
+It requires root, and it requires being invoked through `sudo` rather than from a root login: the daemon has to run as a real account, and `SUDO_USER` is the only thing that identifies which one.
+The generated job therefore sets `UserName` to your account, points `HOME` at your home directory and `LIBREFANG_HOME` at `~/.librefang`, and the install chowns that state directory and its `daemon.log` to you — launchd opens the log before dropping privileges, so without that step the daemon could not write to its own log.
+
+Remove it with the same flag:
+
+```bash
+sudo librefang service uninstall --system
+```
+
+`librefang service status` reports both the per-user LaunchAgent and the boot-time LaunchDaemon, with no flag needed.
+
+`--system` is macOS-only. On NixOS use the `services.librefang` module; on other Linux distributions either write a system unit to `/etc/systemd/system/` or keep the user service plus `loginctl enable-linger`.
+
 ---
 
 ### librefang service uninstall

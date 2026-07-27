@@ -8,12 +8,28 @@ name: Nix Build
 # minutes on builds gated by flake.lock / Cargo.lock churn that isn't
 # authoritative until merge. Trigger manually with workflow_dispatch
 # when a PR explicitly needs a pre-merge nix check.
+#
+# That decision still governs the `nix-build` matrix below, which is the expensive half: it stays gated behind `github.event_name != 'pull_request'`.
+# The `nix-eval` job added alongside it does run on pull_request, but it only *evaluates* the flake — it instantiates derivations and never compiles one — so it costs minutes rather than the 80-95 of a cold build (see the timeout-minutes comment below), and it closes the gap where a broken flake.nix or a broken NixOS module could only be discovered after merge.
+# It is deliberately NOT registered as a required status check: the recorded decision above is about spending build minutes on unmerged lockfile churn, and an eval-only job does not spend them.
 on:
   push:
     branches: [main]
     paths:
       - 'flake.nix'
       - 'flake.lock'
+      # `nix/**` holds the NixOS module and anything else the flake imports by path.
+      # Without this entry a module-only edit triggered nothing at all — not on a PR, and not even on main.
+      - 'nix/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/**/Cargo.toml'
+      - '.github/workflows/nix-build.yml'
+  pull_request:
+    paths:
+      - 'flake.nix'
+      - 'flake.lock'
+      - 'nix/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'crates/**/Cargo.toml'
@@ -25,11 +41,52 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
+  # Load-bearing now that `pull_request` is a trigger: successive pushes to the same PR branch cancel the earlier eval run.
+  # Pushes to main are never cancelled, so post-merge breakage detection still sees every commit.
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
+  # Fast pre-merge gate.
+  # Evaluation only — `nix flake check --no-build` instantiates every check derivation, so a type error, a missing NixOS option, a malformed `nix/*.nix`, or a nixosModule that stopped generating a unit fails here without running a single builder.
+  # No /nix/store cache on purpose: sharing the cache-nix-action key namespace with the build matrix below would let an eval-only store evict the multi-gigabyte build cache that matrix depends on.
+  nix-eval:
+    name: nix eval (flake + nixosModule)
+    runs-on: ubuntu-latest
+    # Evaluation fetches the flake inputs and instantiates derivations; it never links or compiles, so this is minutes of work, not the matrix leg's 80-95.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+
+      - name: Evaluate the flake (no builds)
+        run: nix flake check --no-build
+
+      # A nixosModule nested inside `flake-utils.lib.eachDefaultSystem` lands at `nixosModules.<system>.default`, which `nixos-rebuild` and `lib.nixosSystem` never read — the flake evaluates fine and the module is silently unusable.
+      # Assert the attribute names are module names rather than system names.
+      - name: Assert nixosModules / overlays sit at the flake top level
+        run: |
+          set -o pipefail
+          nix eval --json '.#nixosModules' --apply builtins.attrNames | tee /dev/stderr | grep -qx '\["default","librefang"\]'
+          nix eval --json '.#overlays' --apply builtins.attrNames | tee /dev/stderr | grep -qx '\["default"\]'
+
+      # Instantiating this check forces the whole throwaway `lib.nixosSystem` evaluation and every expectation asserted inside it (ExecStart carries `--foreground`, LIBREFANG_HOME points at the state dir, git is on the unit PATH, …).
+      # Kept as its own step so a module regression is legible in the job log instead of buried in the `flake check` output.
+      # The system is spelled out rather than derived, because `runs-on: ubuntu-latest` above pins this job to x86_64 and the check is only defined for x86_64-linux / aarch64-linux.
+      # Moving the job to an arm runner therefore has to update this line too; the attribute would be missing and the step would fail loudly rather than silently skip, which is the behaviour we want from the coupling.
+      - name: Instantiate the NixOS module eval check
+        run: nix eval --raw .#checks.x86_64-linux.nixos-module-eval.drvPath
+
   nix-build:
     name: nix build (${{ matrix.package }})
+    # Post-merge and manual dispatch only.
+    # The nix-eval job above is what gates a PR; this leg is the expensive compile the header comment reserves for push-to-main.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     # Cold builds are the norm here: the Rust CI lanes churn through the repo's 10 GB Actions cache quota daily, so the /nix/store cache below is usually evicted before the next run and each leg rebuilds the full crane deps + workspace closure from scratch.
     # A cold librefang-cli leg takes ~80-95 minutes (it was still compiling workspace crates when a 60-minute limit cancelled it), so 120 covers a cold build with margin while still catching a genuinely hung one.

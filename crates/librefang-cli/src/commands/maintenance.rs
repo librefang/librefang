@@ -39,7 +39,35 @@ pub(crate) fn resolve_binary_path() -> std::path::PathBuf {
         .unwrap_or_else(|_| std::env::current_exe().unwrap_or_else(|_| "librefang".into()))
 }
 
-pub(crate) fn cmd_service_install() {
+pub(crate) fn cmd_service_install(system: bool) {
+    // The two modes have opposite privilege requirements, so the root check has to branch before anything else runs.
+    // A per-user LaunchAgent / systemd user unit installed while root would be registered for the root account and never start for the invoking user, which is the mistake the original guard was written to catch.
+    // A LaunchDaemon writes to /Library/LaunchDaemons, which only root can do.
+    // Each arm terminates on its own — the macOS arm returns, the others exit — rather than falling
+    // through to a shared `return`. A trailing `return` after the non-macOS `process::exit` would be
+    // unreachable code, which `-D warnings` turns into a build failure on exactly the platforms a
+    // macOS developer never compiles.
+    if system {
+        #[cfg(target_os = "macos")]
+        {
+            // SAFETY: geteuid() reads the calling process's effective uid and cannot fail.
+            if unsafe { libc::geteuid() } != 0 {
+                ui::error(&i18n::t("maintenance-service-system-needs-root"));
+                ui::hint(&i18n::t("maintenance-service-system-sudo-hint"));
+                std::process::exit(1);
+            }
+            service_install_macos_system(&resolve_binary_path());
+            return;
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            ui::error(&i18n::t("maintenance-service-system-macos-only"));
+            #[cfg(target_os = "linux")]
+            ui::hint(&i18n::t("maintenance-service-system-linux-hint"));
+            std::process::exit(1);
+        }
+    }
+
     // Warn if running as root — the service would be installed for root, not
     // the actual user. This catches `sudo librefang service install` mistakes.
     #[cfg(unix)]
@@ -47,6 +75,8 @@ pub(crate) fn cmd_service_install() {
         // SAFETY: geteuid() is always safe to call.
         if unsafe { libc::geteuid() } == 0 {
             ui::error(&i18n::t("maintenance-service-install-root-error"));
+            #[cfg(target_os = "macos")]
+            ui::hint(&i18n::t("maintenance-service-install-system-hint"));
             std::process::exit(1);
         }
     }
@@ -255,6 +285,323 @@ pub(crate) fn service_install_macos(binary: &std::path::Path, librefang_home: &s
     }
 }
 
+/// Absolute path of the boot-time LaunchDaemon, as opposed to the per-user LaunchAgent under `~/Library/LaunchAgents`.
+/// launchd loads everything in this directory at boot, before any user logs in, which is the whole reason the `--system` mode exists.
+#[cfg_attr(not(test), cfg(target_os = "macos"))]
+pub(crate) const MACOS_SYSTEM_PLIST_PATH: &str = "/Library/LaunchDaemons/ai.librefang.daemon.plist";
+
+/// The account a LaunchDaemon should drop to, resolved from the invoking `sudo` session.
+///
+/// Unlike `macos_system_plist` below this is not compiled into test builds on other platforms: the
+/// tests exercise the rendered plist, and both the constructor and the consumer here are macOS-only,
+/// so widening the gate would only produce dead code off macOS.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SystemServiceTarget {
+    pub(crate) user: String,
+    pub(crate) home: std::path::PathBuf,
+    pub(crate) uid: u32,
+    pub(crate) gid: u32,
+}
+
+/// Look up a user's home directory, uid and gid in the passwd database.
+///
+/// `dirs::home_dir()` is not usable here: under `sudo` it resolves root's home, and a LaunchDaemon
+/// pointed at `/var/root/.librefang` would run against a state directory the real user cannot read.
+#[cfg(target_os = "macos")]
+fn passwd_entry_for(user: &str) -> Option<(std::path::PathBuf, u32, u32)> {
+    use std::ffi::{CStr, CString};
+
+    let c_user = CString::new(user).ok()?;
+    // SAFETY: `getpwnam` takes a NUL-terminated string and returns either NULL or a pointer to a
+    // static record owned by libc. This runs on the CLI's single thread before any daemon spawn, so
+    // nothing else can overwrite that static buffer between this call and the copies below.
+    let pw = unsafe { libc::getpwnam(c_user.as_ptr()) };
+    if pw.is_null() {
+        return None;
+    }
+    // SAFETY: `pw` is non-null, so libc guarantees `pw_dir` points at a NUL-terminated string and
+    // that `pw_uid` / `pw_gid` are initialised.
+    let (dir_ptr, uid, gid) = unsafe { ((*pw).pw_dir, (*pw).pw_uid, (*pw).pw_gid) };
+    if dir_ptr.is_null() {
+        return None;
+    }
+    // SAFETY: non-null and NUL-terminated per the guarantee above.
+    let dir = unsafe { CStr::from_ptr(dir_ptr) };
+    Some((std::path::PathBuf::from(dir.to_str().ok()?), uid, gid))
+}
+
+/// Resolve who the LaunchDaemon should run as.
+///
+/// `SUDO_USER` is the only signal that identifies the human behind a root process. Its absence means
+/// the command was run from a real root login rather than through `sudo`, and there is no way to guess
+/// which account's `~/.librefang` the daemon should serve — so that is an error rather than a default.
+#[cfg(target_os = "macos")]
+fn resolve_system_service_target() -> Option<SystemServiceTarget> {
+    let user = std::env::var("SUDO_USER").ok().filter(|u| !u.is_empty())?;
+    if user == "root" {
+        return None;
+    }
+    let (home, uid, gid) = passwd_entry_for(&user)?;
+    Some(SystemServiceTarget {
+        user,
+        home,
+        uid,
+        gid,
+    })
+}
+
+/// Render the LaunchDaemon plist.
+///
+/// Kept as a pure function so the parts that are easy to get wrong — `--foreground`, `UserName`, and
+/// the `HOME` / `LIBREFANG_HOME` pair — are asserted by unit tests on every platform rather than only
+/// being exercised by a privileged macOS run nobody repeats.
+/// `account_home` and `librefang_home` are passed separately on purpose.
+/// Deriving one from the other looks safe while the state dir is the default `~/.librefang`, but a
+/// `sudo -E` invocation carrying `LIBREFANG_HOME=/opt/librefang` would make the parent directory
+/// `/opt` — and `HOME=/opt` sends `dirs::home_dir()` at a directory the account does not own.
+#[cfg_attr(not(test), cfg(target_os = "macos"))]
+pub(crate) fn macos_system_plist(
+    binary: &std::path::Path,
+    account_home: &std::path::Path,
+    librefang_home: &std::path::Path,
+    user: &str,
+) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>ai.librefang.daemon</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{binary}</string>
+        <string>start</string>
+        <string>--foreground</string>
+    </array>
+    <key>UserName</key>
+    <string>{user}</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>{home}</string>
+        <key>LIBREFANG_HOME</key>
+        <string>{librefang_home}</string>
+    </dict>
+    <key>WorkingDirectory</key>
+    <string>{librefang_home}</string>
+    <key>StandardOutPath</key>
+    <string>{librefang_home}/daemon.log</string>
+    <key>StandardErrorPath</key>
+    <string>{librefang_home}/daemon.log</string>
+</dict>
+</plist>
+"#,
+        binary = binary.display(),
+        user = user,
+        // `HOME` is the account's real home, not the state dir: `dirs::home_dir()` reads it, and the
+        // first-start `librefang init` path exits when it resolves to nothing.
+        home = account_home.display(),
+        librefang_home = librefang_home.display(),
+    )
+}
+
+/// Every path an ownership handover has to cover: `root` itself plus everything beneath it.
+///
+/// Symlinks are returned but never descended. `DirEntry::file_type` describes the entry itself rather
+/// than its target, so a link inside the state directory pointing somewhere else cannot redirect the
+/// caller's `lchown` onto an unrelated tree — the same reason the skills bundle scanner uses
+/// `entry.file_type().is_dir()` instead of `path.is_dir()`.
+///
+/// Unreadable directories are skipped rather than aborting the walk: a subtree this process cannot
+/// enumerate is one it also cannot chown, and failing the whole install over it would be worse than
+/// handing over everything reachable.
+#[cfg_attr(not(test), cfg(target_os = "macos"))]
+fn collect_ownership_handover_paths(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = vec![root.to_path_buf()];
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let descend = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            out.push(path.clone());
+            if descend {
+                stack.push(path);
+            }
+        }
+    }
+    out
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn service_install_macos_system(binary: &std::path::Path) {
+    let target = match resolve_system_service_target() {
+        Some(t) => t,
+        None => {
+            ui::error(&i18n::t("maintenance-service-system-no-sudo-user"));
+            ui::hint(&i18n::t("maintenance-service-system-sudo-hint"));
+            std::process::exit(1);
+        }
+    };
+
+    // Honour an explicitly forwarded LIBREFANG_HOME (`sudo -E`), otherwise derive it from the target
+    // account rather than from root's home, which is what `cli_librefang_home()` would return here.
+    let librefang_home = match std::env::var("LIBREFANG_HOME") {
+        Ok(h) if !h.is_empty() => std::path::PathBuf::from(h),
+        _ => target.home.join(".librefang"),
+    };
+
+    // launchd opens StandardOutPath *before* dropping to UserName, so the log file and its parent are
+    // created as root and the daemon would then be unable to write to them. Create both now and hand
+    // them to the target account.
+    if let Err(e) = std::fs::create_dir_all(&librefang_home) {
+        ui::error(&i18n::t_args(
+            "maintenance-failed-create-dir",
+            &[
+                ("path", &librefang_home.display().to_string()),
+                ("error", &e.to_string()),
+            ],
+        ));
+        return;
+    }
+    let log_path = librefang_home.join("daemon.log");
+    if !log_path.exists() {
+        if let Err(e) = std::fs::write(&log_path, b"") {
+            ui::error(&i18n::t_args(
+                "maintenance-failed-write-file",
+                &[
+                    ("path", &log_path.display().to_string()),
+                    ("error", &e.to_string()),
+                ],
+            ));
+            return;
+        }
+    }
+    // Hand over the whole tree, not just the directory and its log.
+    // `~/.librefang` almost always exists by the time anyone reaches for `--system` — the user has run
+    // `librefang init` or the LaunchAgent first — so `create_dir_all` above was a no-op and chowning
+    // only the directory node would leave its contents on whatever uid created them. That is harmless
+    // when the invoking user created them, and a latent failure when a `sudo librefang start` did: the
+    // LaunchDaemon runs as `UserName` and hits EACCES at some arbitrary depth long after
+    // `service status` has reported everything registered.
+    for path in collect_ownership_handover_paths(&librefang_home) {
+        if let Err(e) = std::os::unix::fs::lchown(&path, Some(target.uid), Some(target.gid)) {
+            ui::error(&i18n::t_args(
+                "maintenance-service-system-chown-failed",
+                &[
+                    ("path", &path.display().to_string()),
+                    ("user", &target.user),
+                    ("error", &e.to_string()),
+                ],
+            ));
+            return;
+        }
+    }
+
+    let plist = macos_system_plist(binary, &target.home, &librefang_home, &target.user);
+    let plist_path = std::path::Path::new(MACOS_SYSTEM_PLIST_PATH);
+
+    if plist_path.exists() {
+        let _ = std::process::Command::new("launchctl")
+            .args(["unload", MACOS_SYSTEM_PLIST_PATH])
+            .output();
+    }
+
+    if let Some(parent) = plist_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            ui::error(&i18n::t_args(
+                "maintenance-failed-create-dir",
+                &[
+                    ("path", &parent.display().to_string()),
+                    ("error", &e.to_string()),
+                ],
+            ));
+            return;
+        }
+    }
+
+    if let Err(e) = std::fs::write(plist_path, &plist) {
+        ui::error(&i18n::t_args(
+            "maintenance-failed-write-file",
+            &[
+                ("path", &plist_path.display().to_string()),
+                ("error", &e.to_string()),
+            ],
+        ));
+        return;
+    }
+
+    // launchd refuses to load a LaunchDaemon whose plist is writable by anyone but its owner, and it
+    // must be owned by root. The file was just written by a root process, so only the mode needs fixing.
+    use std::os::unix::fs::PermissionsExt;
+    if let Err(e) = std::fs::set_permissions(plist_path, std::fs::Permissions::from_mode(0o644)) {
+        ui::error(&i18n::t_args(
+            "maintenance-service-system-chmod-failed",
+            &[
+                ("path", &plist_path.display().to_string()),
+                ("error", &e.to_string()),
+            ],
+        ));
+        return;
+    }
+
+    ui::success(&i18n::t_args(
+        "maintenance-wrote-file",
+        &[("path", &plist_path.display().to_string())],
+    ));
+
+    match std::process::Command::new("launchctl")
+        .args(["load", MACOS_SYSTEM_PLIST_PATH])
+        .output()
+    {
+        Ok(o) if o.status.success() => {
+            ui::success(&i18n::t_args(
+                "maintenance-launchdaemon-loaded",
+                &[("user", &target.user)],
+            ));
+        }
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            ui::error(&i18n::t_args(
+                "maintenance-launchctl-load-failed",
+                &[("error", stderr.as_ref())],
+            ));
+        }
+        Err(e) => ui::error(&i18n::t_args(
+            "maintenance-launchctl-run-failed",
+            &[("error", &e.to_string())],
+        )),
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn service_uninstall_macos_system() {
+    let plist_path = std::path::Path::new(MACOS_SYSTEM_PLIST_PATH);
+    if !plist_path.exists() {
+        ui::hint(&i18n::t("maintenance-launchdaemon-not-found"));
+        return;
+    }
+    let _ = std::process::Command::new("launchctl")
+        .args(["unload", MACOS_SYSTEM_PLIST_PATH])
+        .output();
+    match std::fs::remove_file(plist_path) {
+        Ok(()) => ui::success(&i18n::t("maintenance-launchdaemon-removed")),
+        Err(e) => ui::error(&i18n::t_args(
+            "maintenance-launchdaemon-remove-failed",
+            &[("error", &e.to_string())],
+        )),
+    }
+}
+
 #[cfg(windows)]
 pub(crate) fn service_install_windows(binary: &std::path::Path) {
     let value = format!("\"{}\" start", binary.display());
@@ -289,7 +636,28 @@ pub(crate) fn service_install_windows(binary: &std::path::Path) {
     }
 }
 
-pub(crate) fn cmd_service_uninstall() {
+pub(crate) fn cmd_service_uninstall(system: bool) {
+    // Mirrors the install branch: removing /Library/LaunchDaemons/… needs root, removing a per-user
+    // agent does not, and the two must not be silently confused for one another.
+    if system {
+        #[cfg(target_os = "macos")]
+        {
+            // SAFETY: geteuid() reads the calling process's effective uid and cannot fail.
+            if unsafe { libc::geteuid() } != 0 {
+                ui::error(&i18n::t("maintenance-service-system-needs-root"));
+                ui::hint(&i18n::t("maintenance-service-system-sudo-hint"));
+                std::process::exit(1);
+            }
+            service_uninstall_macos_system();
+            return;
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            ui::error(&i18n::t("maintenance-service-system-macos-only"));
+            std::process::exit(1);
+        }
+    }
+
     #[cfg(target_os = "linux")]
     {
         let home = dirs::home_dir().unwrap_or_default();
@@ -407,6 +775,32 @@ pub(crate) fn cmd_service_status() {
         } else {
             ui::hint(&i18n::t("maintenance-launchagent-status-not-registered"));
             ui::hint(&i18n::t("maintenance-service-install-hint"));
+        }
+
+        // Report the boot-time LaunchDaemon too, unconditionally and without a flag.
+        // Reading /Library/LaunchDaemons needs no privileges, and a status command that only looked at
+        // the per-user agent would report "not registered" on a machine where the daemon is installed
+        // and running — the exact situation an operator runs `service status` to rule out.
+        let system_plist = std::path::Path::new(MACOS_SYSTEM_PLIST_PATH);
+        if system_plist.exists() {
+            ui::success(&i18n::t("maintenance-launchdaemon-status-registered"));
+            if let Ok(output) = std::process::Command::new("launchctl")
+                .args(["print", "system/ai.librefang.daemon"])
+                .output()
+            {
+                // i18n::t() in an if-arm is a temporary dropped before the call site (E0716).
+                let loaded_status = if output.status.success() {
+                    i18n::t("label-yes")
+                } else {
+                    i18n::t("label-not-loaded")
+                };
+                ui::kv(
+                    &i18n::t("maintenance-status-label-daemon-loaded"),
+                    &loaded_status,
+                );
+            }
+        } else {
+            ui::hint(&i18n::t("maintenance-launchdaemon-status-not-registered"));
         }
     }
     #[cfg(windows)]
@@ -1471,5 +1865,148 @@ mod tests {
         // No version → no env var; installer resolves the newest installable release.
         assert_eq!(installer_version_env(None, true), None);
         assert_eq!(installer_version_env(None, false), None);
+    }
+
+    #[test]
+    fn macos_system_plist_runs_in_foreground_as_the_sudo_user() {
+        let plist = macos_system_plist(
+            std::path::Path::new("/usr/local/bin/librefang"),
+            std::path::Path::new("/Users/alice"),
+            std::path::Path::new("/Users/alice/.librefang"),
+            "alice",
+        );
+
+        // `--foreground` is the difference between a service launchd can supervise and one it tears
+        // down immediately: plain `librefang start` forks a setsid'd child and the parent returns.
+        assert!(
+            plist.contains("<string>--foreground</string>"),
+            "plist must pass --foreground:\n{plist}"
+        );
+        // Without UserName the daemon would run as root against a user's state directory.
+        assert!(
+            plist.contains("<key>UserName</key>\n    <string>alice</string>"),
+            "plist must drop to the sudo user:\n{plist}"
+        );
+        // HOME is the account home, so `dirs::home_dir()` resolves and the first-start init path does
+        // not abort; LIBREFANG_HOME is the state dir the kernel actually uses.
+        assert!(
+            plist.contains("<key>HOME</key>\n        <string>/Users/alice</string>"),
+            "HOME must be the account home:\n{plist}"
+        );
+        assert!(
+            plist.contains(
+                "<key>LIBREFANG_HOME</key>\n        <string>/Users/alice/.librefang</string>"
+            ),
+            "LIBREFANG_HOME must be the state dir:\n{plist}"
+        );
+        assert!(plist.contains("<key>RunAtLoad</key>"), "{plist}");
+        assert!(plist.contains("<key>KeepAlive</key>"), "{plist}");
+        assert!(
+            plist.contains("<string>/Users/alice/.librefang/daemon.log</string>"),
+            "logs belong under the state dir the install chowns to the target user:\n{plist}"
+        );
+    }
+
+    #[test]
+    fn macos_system_plist_never_points_at_root_home() {
+        // The bug this whole mode has to avoid: resolving the state dir through `dirs::home_dir()`
+        // while running under sudo yields root's home, and the daemon then serves a state directory
+        // the real user cannot read.
+        let plist = macos_system_plist(
+            std::path::Path::new("/usr/local/bin/librefang"),
+            std::path::Path::new("/Users/bob"),
+            std::path::Path::new("/Users/bob/.librefang"),
+            "bob",
+        );
+        assert!(
+            !plist.contains("/var/root"),
+            "plist must not reference root's home:\n{plist}"
+        );
+    }
+
+    #[test]
+    fn macos_system_plist_keeps_home_and_state_dir_independent() {
+        // A `sudo -E` invocation can carry LIBREFANG_HOME to somewhere outside the account home.
+        // HOME must still be the account home: deriving it from the state dir's parent would yield
+        // /opt here, and `dirs::home_dir()` would then resolve a directory the account does not own.
+        let plist = macos_system_plist(
+            std::path::Path::new("/usr/local/bin/librefang"),
+            std::path::Path::new("/Users/carol"),
+            std::path::Path::new("/opt/librefang"),
+            "carol",
+        );
+        assert!(
+            plist.contains("<key>HOME</key>\n        <string>/Users/carol</string>"),
+            "HOME must stay the account home even when the state dir lives elsewhere:\n{plist}"
+        );
+        assert!(
+            plist.contains("<key>LIBREFANG_HOME</key>\n        <string>/opt/librefang</string>"),
+            "{plist}"
+        );
+        assert!(
+            !plist.contains("<string>/opt</string>"),
+            "HOME must never be the state dir's parent:\n{plist}"
+        );
+        assert!(
+            plist.contains("<string>/opt/librefang/daemon.log</string>"),
+            "{plist}"
+        );
+    }
+
+    #[test]
+    fn ownership_handover_covers_nested_contents_without_following_symlinks() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+
+        // A state dir shaped like a real one: nested directories plus files at depth.
+        std::fs::create_dir_all(root.path().join("workspaces/agents/assistant")).unwrap();
+        std::fs::write(root.path().join("config.toml"), b"").unwrap();
+        std::fs::write(
+            root.path().join("workspaces/agents/assistant/agent.toml"),
+            b"",
+        )
+        .unwrap();
+
+        // A file the walk must not reach by following a link out of the tree.
+        std::fs::write(outside.path().join("unrelated.txt"), b"").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.path(), root.path().join("escape")).unwrap();
+
+        let paths = collect_ownership_handover_paths(root.path());
+
+        // The root itself has to be in the set — chowning only the contents would leave the directory
+        // node on the installing uid.
+        assert!(paths.contains(&root.path().to_path_buf()), "{paths:?}");
+        assert!(
+            paths.contains(&root.path().join("config.toml")),
+            "top-level files must be covered: {paths:?}"
+        );
+        assert!(
+            paths.contains(&root.path().join("workspaces/agents/assistant/agent.toml")),
+            "nested files must be covered — this is the case chowning only the root misses: {paths:?}"
+        );
+
+        // The link itself is handed over; what it points at is not.
+        #[cfg(unix)]
+        {
+            assert!(
+                paths.contains(&root.path().join("escape")),
+                "the symlink entry itself should be chowned: {paths:?}"
+            );
+            assert!(
+                !paths.contains(&outside.path().join("unrelated.txt")),
+                "the walk must not descend through a symlink out of the tree: {paths:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn macos_system_plist_target_is_the_boot_time_directory() {
+        // ~/Library/LaunchAgents only starts a job once its user logs in, which is exactly the
+        // limitation `--system` exists to lift. /Library/LaunchDaemons is loaded at boot.
+        assert!(
+            MACOS_SYSTEM_PLIST_PATH.starts_with("/Library/LaunchDaemons/"),
+            "unexpected plist path: {MACOS_SYSTEM_PLIST_PATH}"
+        );
     }
 }

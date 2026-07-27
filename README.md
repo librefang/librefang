@@ -122,6 +122,110 @@ See the [Arch repository documentation](packaging/arch-repo/README.md) for packa
 </details>
 
 <details open>
+<summary><strong>NixOS (Nix flakes)</strong></summary>
+
+```bash
+# Run the CLI once without installing anything
+nix run github:librefang/librefang
+
+# Install the CLI into your user profile
+nix profile install github:librefang/librefang#librefang-cli
+```
+
+`librefang-cli` is a deliberately scoped package: it builds `--package librefang-cli` only, so the Tauri / GTK webview stack that just `librefang-desktop` links against never enters the CLI build.
+The `cliArgs` comment in [`flake.nix`](flake.nix) records why that split exists — without it, `nix build .#librefang-cli` fails on a stock NixOS machine that has no graphics stack installed.
+
+#### CLI, daemon, and web dashboard (declarative)
+
+Add the flake as an input to your system flake and import the NixOS module:
+
+```nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    librefang.url = "github:librefang/librefang";
+  };
+
+  outputs = { nixpkgs, librefang, ... }: {
+    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        librefang.nixosModules.default
+        ./configuration.nix
+      ];
+    };
+  };
+}
+```
+
+Then enable the service from `configuration.nix`:
+
+```nix
+{
+  services.librefang.enable = true;
+}
+```
+
+#### Desktop app
+
+```bash
+nix profile install github:librefang/librefang#librefang-desktop
+```
+
+The desktop app is the rougher path on NixOS.
+It links the full GTK / webview closure (`gtk3`, `libsoup_3`, `webkitgtk_4_1`, plus a runtime `dlopen` of `libayatana-appindicator3`), so it takes far longer to build than the CLI and it exercises code paths that the CLI package never touches.
+If it does not build or launch on your machine, install `librefang-cli` instead and use the web dashboard at `http://127.0.0.1:4545/`.
+
+Every `services.librefang` option, the `environmentFile` pattern for provider keys, and the known sharp edges are documented in [`docs/operations/nixos.md`](docs/operations/nixos.md).
+
+</details>
+
+<details open>
+<summary><strong>Debian / Ubuntu / deepin</strong></summary>
+
+> LibreFang does not publish an apt repository — `packaging/` ships an Arch repository and AUR recipes only.
+> Install the CLI with the script below and take the desktop app from [Releases](https://github.com/librefang/librefang/releases).
+
+#### CLI, daemon, and web dashboard
+
+```bash
+curl -fsSL https://librefang.ai/install.sh | sh
+```
+
+The Linux CLI is released as a fully static musl build for both `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`, and release CI hard-fails the job if `file` does not report the produced binary as statically linked.
+The install script prefers that static artifact and only falls back to the glibc build when the static one is missing for your architecture.
+That is what makes the host's glibc age irrelevant on an older distribution: a release whose glibc predates the one a distro-generic build was compiled against would reject that binary outright, while the static build links no libc from the host at all.
+Check your own with `ldd --version` if you need the glibc build for an architecture the static one does not cover.
+
+#### Desktop app
+
+The `.deb` bundle declares an empty dependency list (`bundle.linux.deb.depends` in [`crates/librefang-desktop/tauri.conf.json`](crates/librefang-desktop/tauri.conf.json)), so `apt` will not pull the webview stack in for you.
+Install it yourself first — this is the same dependency set the project installs on its own Debian-family runners:
+
+```bash
+sudo apt-get install -y \
+  libwebkit2gtk-4.1-dev \
+  libgtk-3-dev \
+  libayatana-appindicator3-dev \
+  librsvg2-dev \
+  libdbus-1-dev
+```
+
+Whether deepin's own repositories carry `libwebkit2gtk-4.1` rather than the older `4.0` series is **not verified by this project**, so treat the command above as the thing to check rather than a guarantee.
+Ask the machine you are installing on:
+
+```bash
+apt-cache search libwebkit2gtk        # lists whatever webkit2gtk packages your release actually carries
+pkg-config --list-all | grep -i webkit
+librefang doctor                      # environment audit for the local machine
+```
+
+If your release carries only the `4.0` series, the dependency above cannot be satisfied.
+Install the CLI and use the web dashboard at `http://127.0.0.1:4545/` in that case.
+
+</details>
+
+<details open>
 <summary><strong>Docker</strong></summary>
 
 ```bash
