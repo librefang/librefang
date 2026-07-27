@@ -297,18 +297,32 @@ pub(crate) fn parse_pricing_rows(
                 .and_then(serde_json::Value::as_u64)
                 .is_some_and(|q| q != 0)
                 || item.get("billing_mode").and_then(|v| v.as_str()) == Some("per_call");
+            // `.filter(is_finite && >= 0.0)` mirrors the daemon-side parser
+            // (`librefang-api/src/everyapi_catalog.rs::parse_pricing_entries`).
+            // Without it a malformed or compromised feed carrying a negative
+            // `model_ratio` would flow straight into
+            // `input_cost_per_m`/`output_cost_per_m` as a *negative*,
+            // confidently-known price — worse than the 0.0 case this file's
+            // docs already guard against, because a negative figure actively
+            // corrupts downstream budget math rather than merely looking
+            // free. A row whose `model_ratio` fails the filter (missing,
+            // non-finite, or negative) must also not claim `per_token`,
+            // otherwise it falls back to `0.0` marked as a *known* price —
+            // i.e. asserted free — rather than unknown.
+            let model_ratio = item
+                .get("model_ratio")
+                .and_then(serde_json::Value::as_f64)
+                .filter(|r| r.is_finite() && *r >= 0.0);
             Some((
                 model_name.to_string(),
                 PricingRow {
                     model_name: model_name.to_string(),
-                    per_token: !per_call,
-                    model_ratio: item
-                        .get("model_ratio")
-                        .and_then(serde_json::Value::as_f64)
-                        .unwrap_or(0.0),
+                    per_token: !per_call && model_ratio.is_some(),
+                    model_ratio: model_ratio.unwrap_or(0.0),
                     completion_ratio: item
                         .get("completion_ratio")
                         .and_then(serde_json::Value::as_f64)
+                        .filter(|r| r.is_finite() && *r >= 0.0)
                         .unwrap_or(0.0),
                     context_window: item
                         .get("context_window")
@@ -1411,6 +1425,37 @@ mod tests {
         assert!(!seedream.per_token);
         // Zero in the feed means "unknown", not "no context".
         assert_eq!(seedream.context_window, None);
+    }
+
+    #[test]
+    fn a_negative_or_non_finite_model_ratio_is_never_priced() {
+        // A malformed or compromised `/api/pricing` response carrying a
+        // negative `model_ratio` must not flow into `input_cost_per_m()` /
+        // `output_cost_per_m()` as a negative, confidently-known price — that
+        // would actively corrupt downstream budget math rather than merely
+        // look free. NaN/infinity get the same treatment.
+        let body = json!({ "data": [
+            { "model_name": "negative-ratio", "quota_type": 0, "model_ratio": -5.0, "completion_ratio": 5.0 },
+            { "model_name": "nan-ratio", "quota_type": 0, "model_ratio": f64::NAN, "completion_ratio": 5.0 },
+            { "model_name": "infinite-ratio", "quota_type": 0, "model_ratio": f64::INFINITY, "completion_ratio": 5.0 },
+            { "model_name": "negative-completion-ratio", "quota_type": 0, "model_ratio": 1.0, "completion_ratio": -5.0 },
+        ]});
+        let rows = parse_pricing_rows(&body);
+        // These three have a bad `model_ratio`, so both cost fields must
+        // stay at zero AND `per_token` must be false — otherwise the 0.0
+        // fallback would be asserted as a *known* free price instead of an
+        // unknown one.
+        for id in ["negative-ratio", "nan-ratio", "infinite-ratio"] {
+            let row = &rows[id];
+            assert_eq!(row.input_cost_per_m(), 0.0, "{id} input");
+            assert_eq!(row.output_cost_per_m(), 0.0, "{id} output");
+            assert!(!row.per_token, "{id} per_token");
+        }
+        // Only `model_ratio` gates `per_token`; a bad `completion_ratio`
+        // alone still means "known input price, zero output" — matching how
+        // the tts family (completion_ratio 0.0) is treated elsewhere.
+        assert!(rows["negative-completion-ratio"].per_token);
+        assert_eq!(rows["negative-completion-ratio"].input_cost_per_m(), 2.0);
     }
 
     #[test]
