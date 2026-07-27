@@ -2015,6 +2015,7 @@ skill-removed = 已移除技能：{ $name }
 skill-remove-failed = 移除技能失败：{ $error }
 skill-search-none = 未找到匹配 “{ $query }” 的技能。
 skill-search-results-header = 匹配 “{ $query }” 的技能：
+skill-search-install-hint = 安装命令：librefang skill install { $id }
 skill-search-failed = 搜索失败：{ $error }
 skill-validation-failed = 技能验证失败：{ $error }
 skill-execution-failed = 技能执行失败：{ $error }

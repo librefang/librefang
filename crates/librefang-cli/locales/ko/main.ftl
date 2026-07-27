@@ -1090,6 +1090,7 @@ skill-removed = 제거된 스킬: { $name }
 skill-remove-failed = 스킬 제거 실패: { $error }
 skill-search-none = "{ $query }"에 대한 스킬을 찾을 수 없습니다.
 skill-search-results-header = "{ $query }"와(과) 일치하는 스킬:
+skill-search-install-hint = 설치 명령: librefang skill install { $id }
 skill-search-failed = 검색 실패: { $error }
 skill-validation-failed = 스킬 검증 실패: { $error }
 skill-execution-failed = 스킬 실행 실패: { $error }

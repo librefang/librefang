@@ -427,7 +427,10 @@ pub(crate) fn cmd_skill_search(query: &str) {
                         if !r.description.is_empty() {
                             println!("    {}", r.description);
                         }
-                        println!("    librefang skill install {id}");
+                        println!(
+                            "    {}",
+                            i18n::t_args("skill-search-install-hint", &[("id", id)])
+                        );
                     }
                     None => {
                         println!("  {} ({})", r.name, r.stars);

@@ -1104,6 +1104,7 @@ skill-removed = Видалено скіл: { $name }
 skill-remove-failed = Не вдалося видалити скіл: { $error }
 skill-search-none = Не знайдено скілів за запитом "{ $query }".
 skill-search-results-header = Знайдено скіли за запитом "{ $query }":
+skill-search-install-hint = встановити: librefang skill install { $id }
 skill-search-failed = Помилка пошуку: { $error }
 skill-validation-failed = Помилка валідації скіла: { $error }
 skill-execution-failed = Помилка виконання скіла: { $error }

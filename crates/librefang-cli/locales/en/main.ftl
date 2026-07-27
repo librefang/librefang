@@ -1090,6 +1090,7 @@ skill-removed = Removed skill: { $name }
 skill-remove-failed = Failed to remove skill: { $error }
 skill-search-none = No skills found for "{ $query }".
 skill-search-results-header = Skills matching "{ $query }":
+skill-search-install-hint = install with: librefang skill install { $id }
 skill-search-failed = Search failed: { $error }
 skill-validation-failed = Skill validation failed: { $error }
 skill-execution-failed = Skill execution failed: { $error }
