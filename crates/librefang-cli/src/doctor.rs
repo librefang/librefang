@@ -526,14 +526,35 @@ fn detect_cli_driver_env_route() -> Option<(String, String)> {
         let Ok(raw) = std::env::var(var) else {
             continue;
         };
-        let normalized = raw.trim().trim_end_matches('/').to_lowercase();
-        if normalized.is_empty() || normalized.contains(official_host) {
-            continue;
+        if let Some(host) = non_official_host(&raw, official_host) {
+            return Some((var.to_string(), host));
         }
-        let host = url_host(&normalized).unwrap_or(normalized);
-        return Some((var.to_string(), host));
     }
     None
+}
+
+/// Whether `raw` (one `CLI_DRIVER_BASE_URL_VARS` env var's value) points
+/// somewhere other than `official_host`, and if so, the host it resolves to.
+/// `None` when `raw` is blank/whitespace, or when it resolves to the
+/// official host itself.
+///
+/// Compares the *parsed host* (via [`url_host`]), not a substring of the raw
+/// value: a substring check (`raw.contains(official_host)`) is bypassable by
+/// any host that merely contains the official hostname as a substring, e.g.
+/// `https://api.anthropic.com.attacker.example/v1` — that string contains
+/// `"api.anthropic.com"`, so a substring check would treat it as the official
+/// host and this function would wrongly return `None`, silencing the whole
+/// point of this audit check for exactly the redirection it exists to catch.
+/// Extracted as a pure helper (rather than inlined in
+/// `detect_cli_driver_env_route`) so the bypass has a direct unit test
+/// without mutating process env.
+fn non_official_host(raw: &str, official_host: &str) -> Option<String> {
+    let normalized = raw.trim().trim_end_matches('/').to_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+    let host = url_host(&normalized).unwrap_or(normalized);
+    (host != official_host).then_some(host)
 }
 
 /// Extract the host (authority minus userinfo and port) from a URL-ish string.
@@ -876,6 +897,53 @@ mod tests {
         // the raw value rather than printing nothing.
         assert_eq!(url_host("api.everyapi.ai"), None);
         assert_eq!(url_host("https:///v1"), None);
+    }
+
+    // ── non_official_host ────────────────────────────────────────────────
+
+    #[test]
+    fn non_official_host_is_none_for_the_real_official_host() {
+        assert_eq!(
+            non_official_host("https://api.anthropic.com", "api.anthropic.com"),
+            None
+        );
+        assert_eq!(
+            non_official_host("https://api.anthropic.com/", "api.anthropic.com"),
+            None
+        );
+    }
+
+    #[test]
+    fn non_official_host_is_none_for_a_blank_value() {
+        assert_eq!(non_official_host("", "api.anthropic.com"), None);
+        assert_eq!(non_official_host("   ", "api.anthropic.com"), None);
+    }
+
+    #[test]
+    fn non_official_host_names_a_genuinely_different_host() {
+        assert_eq!(
+            non_official_host("https://gateway.internal/v1", "api.anthropic.com"),
+            Some("gateway.internal".to_string())
+        );
+    }
+
+    /// The bug this function exists to fix: a host that merely contains the
+    /// official hostname as a substring must NOT be treated as official. A
+    /// substring check (`raw.contains(official_host)`) would wrongly return
+    /// `None` here, silently defeating the whole audit check.
+    #[test]
+    fn non_official_host_is_not_fooled_by_a_substring_of_the_official_host() {
+        assert_eq!(
+            non_official_host(
+                "https://api.anthropic.com.attacker.example/v1",
+                "api.anthropic.com"
+            ),
+            Some("api.anthropic.com.attacker.example".to_string())
+        );
+        assert_eq!(
+            non_official_host("https://evil-api.anthropic.com/v1", "api.anthropic.com"),
+            Some("evil-api.anthropic.com".to_string())
+        );
     }
 
     #[test]
