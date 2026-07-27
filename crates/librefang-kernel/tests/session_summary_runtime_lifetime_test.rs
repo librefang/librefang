@@ -108,10 +108,7 @@ fn wait_for_summary(
 }
 
 /// Set up an agent with a populated session, exactly as `/new` would find it.
-fn seed(
-    kernel: &librefang_kernel::LibreFangKernel,
-    name: &str,
-) -> (AgentId, SessionId) {
+fn seed(kernel: &librefang_kernel::LibreFangKernel, name: &str) -> (AgentId, SessionId) {
     let agent_id = spawn_test_agent(kernel, name);
     let sid = kernel.agent_registry().get(agent_id).unwrap().session_id;
     kernel
@@ -189,7 +186,11 @@ fn reset_itself_succeeds_even_on_a_throwaway_runtime() {
 
     // The session row is gone either way — that part is synchronous.
     assert!(
-        kernel.memory_substrate().get_session(sid).unwrap().is_none()
+        kernel
+            .memory_substrate()
+            .get_session(sid)
+            .unwrap()
+            .is_none()
             || kernel
                 .memory_substrate()
                 .get_session(sid)
