@@ -127,6 +127,72 @@ export function useSetDefaultProvider() {
   });
 }
 
+/**
+ * EveryAPI's provider identity, mirroring the constants the CLI writes.
+ *
+ * These are a cross-language contract, not dashboard-local choices: `librefang models connect
+ * everyapi` writes the same values into `providers/everyapi.toml`, and the daemon keys its
+ * catalog refresh off the provider id. Changing any of them here without changing
+ * `PROVIDER_ID` / `PROVIDER_DISPLAY_NAME` / `API_KEY_ENV` in
+ * `crates/librefang-cli/src/commands/everyapi.rs` would make the dashboard register a provider
+ * the daemon never refreshes.
+ */
+export const EVERYAPI_PROVIDER = {
+  id: "everyapi",
+  displayName: "EveryAPI",
+  apiKeyEnv: "EVERYAPI_API_KEY",
+  /** Gateway root, with no `/v1` suffix — the drivers append the path themselves. */
+  defaultBaseUrl: "https://api.everyapi.ai",
+} as const;
+
+/**
+ * Register the EveryAPI gateway as a provider and store its relay key.
+ *
+ * EveryAPI is not a built-in provider, so it never appears in the Add picker's catalog until an
+ * entry exists — which is why the dashboard needs an explicit connect action rather than the
+ * usual "pick from the list, then fill in a key" flow.
+ *
+ * The entry is registered with an empty `models` array on purpose. The daemon fills the catalog
+ * itself: `catalog_needs_initial_refresh` in
+ * `crates/librefang-api/src/everyapi_catalog.rs` is true exactly when the provider is
+ * configured but has no live models, and `refresh_if_missing_in_background` then fetches
+ * `/v1/models` and `/api/pricing` and synthesises the entries. Duplicating that synthesis in
+ * the browser would mean a second implementation of the pricing rules to keep in sync, and the
+ * gateway is not CORS-open to the dashboard anyway.
+ *
+ * Ordering matters: the provider entry is written first, because the key endpoint addresses a
+ * provider by id and there is nothing to attach a key to until the entry exists.
+ */
+export function useConnectEveryApi() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      relayKey,
+      baseUrl,
+    }: {
+      relayKey: string;
+      baseUrl?: string;
+    }) => {
+      const trimmedKey = relayKey.trim();
+      if (!trimmedKey) throw new Error("empty_relay_key");
+      const trimmedBase = (baseUrl ?? "").trim();
+      await createRegistryContent("provider", {
+        id: EVERYAPI_PROVIDER.id,
+        display_name: EVERYAPI_PROVIDER.displayName,
+        api_key_env: EVERYAPI_PROVIDER.apiKeyEnv,
+        base_url: trimmedBase || EVERYAPI_PROVIDER.defaultBaseUrl,
+        key_required: true,
+        models: [],
+      });
+      await setProviderKey(EVERYAPI_PROVIDER.id, trimmedKey);
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: providerKeys.all });
+      qc.invalidateQueries({ queryKey: modelKeys.lists() });
+    },
+  });
+}
+
 const TEST_SUCCESS_STATUSES = new Set(["ok", "success"]);
 
 export function useValidateProviderKey() {

@@ -957,7 +957,16 @@
     "tier_fast": "Швидкий",
     "tier_balanced": "Збалансований",
     "tier_smart": "Розумний",
-    "tier_frontier": "Frontier"
+    "tier_frontier": "Frontier",
+    "everyapi_connect_cta": "Підключити шлюз EveryAPI",
+    "everyapi_connect_title": "Підключення EveryAPI",
+    "everyapi_connect_help": "Реєструє шлюз EveryAPI як провайдера та зберігає його relay key. Каталог моделей і ціни заповнює демон після створення запису.",
+    "everyapi_relay_key": "Relay key",
+    "everyapi_relay_key_required": "Потрібен relay key.",
+    "everyapi_base_url": "URL шлюзу (необов’язково)",
+    "everyapi_connecting": "Підключення…",
+    "everyapi_connect_action": "Підключити",
+    "everyapi_connected": "EveryAPI підключено"
   },
   "channels": {
     "add": "Додати",

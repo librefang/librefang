@@ -957,7 +957,16 @@
     "tier_fast": "빠른",
     "tier_balanced": "균형 잡힌",
     "tier_smart": "똑똑한",
-    "tier_frontier": "프론티어"
+    "tier_frontier": "프론티어",
+    "everyapi_connect_cta": "EveryAPI 게이트웨이 연결",
+    "everyapi_connect_title": "EveryAPI 연결",
+    "everyapi_connect_help": "EveryAPI 게이트웨이를 provider로 등록하고 relay key를 저장합니다. 모델 카탈로그와 가격 정보는 항목이 생성된 뒤 데몬이 채웁니다.",
+    "everyapi_relay_key": "Relay key",
+    "everyapi_relay_key_required": "relay key를 입력해야 합니다.",
+    "everyapi_base_url": "게이트웨이 URL (선택)",
+    "everyapi_connecting": "연결 중…",
+    "everyapi_connect_action": "연결",
+    "everyapi_connected": "EveryAPI 연결됨"
   },
   "channels": {
     "add": "추가",

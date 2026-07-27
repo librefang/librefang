@@ -957,7 +957,16 @@
     "tier_fast": "Fast",
     "tier_balanced": "Balanced",
     "tier_smart": "Smart",
-    "tier_frontier": "Frontier"
+    "tier_frontier": "Frontier",
+    "everyapi_connect_cta": "Connect EveryAPI gateway",
+    "everyapi_connect_title": "Connect EveryAPI",
+    "everyapi_connect_help": "Registers the EveryAPI gateway as a provider and stores its relay key. The model catalog and pricing are filled in by the daemon after the entry is created.",
+    "everyapi_relay_key": "Relay key",
+    "everyapi_relay_key_required": "A relay key is required.",
+    "everyapi_base_url": "Gateway URL (optional)",
+    "everyapi_connecting": "Connecting…",
+    "everyapi_connect_action": "Connect",
+    "everyapi_connected": "EveryAPI connected"
   },
   "channels": {
     "add": "Add",

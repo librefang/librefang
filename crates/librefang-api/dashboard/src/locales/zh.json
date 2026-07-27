@@ -957,7 +957,16 @@
     "tier_fast": "快速",
     "tier_balanced": "均衡",
     "tier_smart": "智能",
-    "tier_frontier": "前沿"
+    "tier_frontier": "前沿",
+    "everyapi_connect_cta": "连接 EveryAPI 网关",
+    "everyapi_connect_title": "连接 EveryAPI",
+    "everyapi_connect_help": "将 EveryAPI 网关注册为 provider 并保存其 relay key。模型目录与定价会在条目创建后由守护进程自动填充。",
+    "everyapi_relay_key": "Relay key",
+    "everyapi_relay_key_required": "必须填写 relay key。",
+    "everyapi_base_url": "网关地址（可选）",
+    "everyapi_connecting": "连接中…",
+    "everyapi_connect_action": "连接",
+    "everyapi_connected": "EveryAPI 已连接"
   },
   "channels": {
     "add": "添加",
