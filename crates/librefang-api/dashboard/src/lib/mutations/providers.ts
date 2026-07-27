@@ -148,20 +148,17 @@ export const EVERYAPI_PROVIDER = {
 /**
  * Register the EveryAPI gateway as a provider and store its relay key.
  *
- * EveryAPI is not a built-in provider, so it never appears in the Add picker's catalog until an
- * entry exists — which is why the dashboard needs an explicit connect action rather than the
- * usual "pick from the list, then fill in a key" flow.
+ * EveryAPI is not a built-in provider, so it never appears in the Add picker's catalog until an entry exists — which is why the dashboard needs an explicit connect action rather than the usual "pick from the list, then fill in a key" flow.
  *
- * The entry is registered with an empty `models` array on purpose. The daemon fills the catalog
- * itself: `catalog_needs_initial_refresh` in
- * `crates/librefang-api/src/everyapi_catalog.rs` is true exactly when the provider is
- * configured but has no live models, and `refresh_if_missing_in_background` then fetches
- * `/v1/models` and `/api/pricing` and synthesises the entries. Duplicating that synthesis in
- * the browser would mean a second implementation of the pricing rules to keep in sync, and the
- * gateway is not CORS-open to the dashboard anyway.
+ * The entry is registered with an empty `models` array on purpose.
+ * The daemon fills the catalog itself: `catalog_needs_initial_refresh` in `crates/librefang-api/src/everyapi_catalog.rs` is true exactly when the provider is configured but has no live models, and `refresh_if_missing_in_background` then fetches `/v1/models` and `/api/pricing` and synthesises the entries.
+ * Duplicating that synthesis in the browser would mean a second implementation of the pricing rules to keep in sync, and the gateway is not CORS-open to the dashboard anyway.
  *
- * Ordering matters: the provider entry is written first, because the key endpoint addresses a
- * provider by id and there is nothing to attach a key to until the entry exists.
+ * Ordering matters: the provider entry is written first, because the key endpoint addresses a provider by id and there is nothing to attach a key to until the entry exists.
+ *
+ * Invalidation is on `onSettled`, not `onSuccess`, because the two writes are not atomic.
+ * When `createRegistryContent` succeeds and `setProviderKey` then throws, the mutation reports failure while the daemon already holds a keyless `everyapi` entry.
+ * Invalidating only on success would leave the Providers page rendering its cached "not present" state, so it would keep offering "Connect EveryAPI gateway" and a retry would re-`POST` an id that already exists.
  */
 export function useConnectEveryApi() {
   const qc = useQueryClient();
@@ -186,7 +183,7 @@ export function useConnectEveryApi() {
       });
       await setProviderKey(EVERYAPI_PROVIDER.id, trimmedKey);
     },
-    onSuccess: () => {
+    onSettled: () => {
       qc.invalidateQueries({ queryKey: providerKeys.all });
       qc.invalidateQueries({ queryKey: modelKeys.lists() });
     },

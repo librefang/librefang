@@ -895,13 +895,10 @@ interface ModelEntry {
 /**
  * Connect drawer for the EveryAPI gateway.
  *
- * EveryAPI needs its own entry point rather than a row in the Add picker: it is not a built-in
- * provider, so nothing represents it in `GET /api/providers` until an entry has been written,
- * and the picker only lists what that endpoint already returns.
+ * EveryAPI needs its own entry point rather than a row in the Add picker: it is not a built-in provider, so nothing represents it in `GET /api/providers` until an entry has been written, and the picker only lists what that endpoint already returns.
  *
- * The drawer collects the relay key and an optional gateway root. It does not fetch the model
- * catalog — the daemon does that on its own once the provider is configured, so this stays a
- * two-field form rather than a wizard.
+ * The drawer collects the relay key and an optional gateway root.
+ * It does not fetch the model catalog — the daemon does that on its own once the provider is configured, so this stays a two-field form rather than a wizard.
  */
 function EveryApiConnectDrawer({ isOpen, onClose, addToast }: {
   isOpen: boolean;
@@ -914,11 +911,9 @@ function EveryApiConnectDrawer({ isOpen, onClose, addToast }: {
   const [touched, setTouched] = useState(false);
   const connectMutation = useConnectEveryApi();
 
-  // Held in a ref rather than named as a dependency. The object `useMutation` returns is a fresh
-  // reference on every render, so depending on it re-runs this effect on every render, and the
-  // `setState` calls below then trigger the next render — an unbounded loop React aborts with
-  // "Maximum update depth exceeded". Depending on `connectMutation.reset` alone is no safer, since
-  // its stability is an implementation detail of the query library rather than a guarantee.
+  // Held in a ref rather than named as a dependency.
+  // The object `useMutation` returns is a fresh reference on every render, so depending on it re-runs this effect on every render, and the `setState` calls below then trigger the next render — an unbounded loop React aborts with "Maximum update depth exceeded".
+  // Depending on `connectMutation.reset` alone is no safer, since its stability is an implementation detail of the query library rather than a guarantee.
   const resetRef = useRef(connectMutation.reset);
   resetRef.current = connectMutation.reset;
 
@@ -1601,9 +1596,8 @@ export function ProvidersPage() {
     [providers, pickerSearch],
   );
 
-  // EveryAPI is not a built-in provider, so it is absent from `providers` entirely until a
-  // registry entry exists — not merely unconfigured. That is why the picker cannot surface it and
-  // the footer offers an explicit connect action instead, hidden once an entry is present.
+  // EveryAPI is not a built-in provider, so it is absent from `providers` entirely until a registry entry exists — not merely unconfigured.
+  // That is why the picker cannot surface it and the footer offers an explicit connect action instead, hidden once an entry is present.
   const everyApiPresent = useMemo(
     () => providers.some(p => p.id === EVERYAPI_PROVIDER.id),
     [providers],
