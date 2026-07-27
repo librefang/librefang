@@ -296,6 +296,69 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 - Document installation from the signed project-maintained Arch Linux pacman repository while AUR account registration is unavailable (#6386) (@pavver)
 
+## [2026.7.27] - 2026-07-27
+
+_33 PRs from 2 contributors since v2026.7.21._
+
+### Highlights
+
+- **EveryAPI integration** — connect EveryAPI as a model provider via `librefang models connect everyapi` from the CLI or the new Providers page connect action, with a built-in wiring doctor check
+- **macOS boot-time service** — `service install --system` installs a LaunchDaemon so LibreFang starts automatically at login without a running user session
+- **NixOS & additional Linux distros** — first-class NixOS deployment support with deepin/Debian distro awareness out of the box
+- **Audit log integrity** — audit entries are now preserved (WORM-protected) when an agent is purged, preventing accidental evidence loss
+- **Tool result and context fidelity fixes** — stops lossily truncating tool results in the spill dead band, and correctly honors `context_window` from `agent.toml` on all turn-execution paths
+
+### Added
+
+- Emit a failure metric for media-understanding (vision/STT) (#6538) (#6551) (@houko)
+- First-class NixOS deployment and deepin/Debian distro awareness (#6582) (@houko)
+- Add `librefang models connect everyapi` and an EveryAPI wiring doctor check (#6583) (@houko)
+- Add `service install --system` for a boot-time LaunchDaemon on macOS (#6584) (@houko)
+- Add an EveryAPI connect action to the Providers page (#6586) (@houko)
+
+### Fixed
+
+- Override sharp to >=0.35.0 to clear the libvips high advisory (#6546) (@houko)
+- Include openrouter-models.snapshot.json in the flake source (#6547) (@houko)
+- Anchor credential-prefix secret patterns to stop false positives (#6541) (#6548) (@houko)
+- Make skills/reload honest in frozen Stable mode (#6540) (#6549) (@houko)
+- Stop lossily truncating tool results in the spill dead band (#6545) (#6550) (@houko)
+- Bump next to 16.2.11 to clear the App Router security advisories (#6557) (@houko)
+- Don't delete audit_entries when purging an agent (WORM integrity) (#6553) (#6558) (@houko)
+- Apply busy_timeout to every pooled connection in modify() test helper (#6561) (@houko)
+- Treat blank parent_id / agent_id as absent instead of 404 (#6577) (@houko)
+- Collect new_name on clone, reflect mcp_servers grants in Tools tab (#6578) (@houko)
+- Resolve callback message_id from either metadata shape or the native id (#6579) (@houko)
+- Honour agent.toml context_window on the paths that run a turn (#6580) (@houko)
+- Install and search from the synced registry checkout (#6581) (@houko)
+- Give the TUI a process-lifetime runtime (startup panic + silent session-summary loss) (#6585) (@houko)
+
+<details>
+<summary>Documentation, maintenance, and other internal changes</summary>
+
+### Documentation
+
+- Move the misplaced `### Fixed` block out of the `### Added` list (#6587) (@houko)
+
+### Maintenance
+
+- Update model snapshot (#6539) (@houko)
+- Bump the actions-minor-patch group across 1 directory with 4 updates (#6542) (@app/dependabot)
+- Bump actions/labeler from 6.2.0 to 7.0.0 (#6543) (@app/dependabot)
+- Bump actions/setup-python from 6 to 7 (#6544) (@app/dependabot)
+- Update model snapshot (#6552) (@houko)
+- Bump the web-minor-patch group in /web with 10 updates (#6554) (@app/dependabot)
+- Bump the dashboard-minor-patch group across 1 directory with 12 updates (#6555) (@app/dependabot)
+- Bump @testing-library/jest-dom from 6.9.1 to 7.0.0 in /crates/librefang-api/dashboard (#6556) (@app/dependabot)
+- Update model snapshot (#6563) (@houko)
+- Bump the docs-minor-patch group in /docs with 6 updates (#6567) (@app/dependabot)
+- Update model snapshot (#6571) (@houko)
+- Update model snapshot (#6574) (@houko)
+- Update model snapshot (#6576) (@houko)
+
+</details>
+
+
 ## [2026.7.21] - 2026-07-21
 
 _61 PRs from 4 contributors since v2026.7.11._
